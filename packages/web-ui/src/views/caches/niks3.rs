@@ -7,6 +7,7 @@
 use super::*;
 use crate::api::models::{Niks3DiscoverRequest, Niks3Discovery, Niks3ProbeScope};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use std::{cell::Cell, rc::Rc};
 
 const CSS: &str = r#"
 .n3-cred{border:1px solid var(--cf-divider);border-radius:9px;padding:9px 12px;background:var(--cf-subtle-bg)}
@@ -33,6 +34,66 @@ enum Choice {
     Current,
     Draft,
     None,
+}
+
+#[derive(Clone, Copy, Default)]
+struct CredentialFocusOwner {
+    open_plane: Option<bool>,
+    generation: u32,
+}
+
+impl CredentialFocusOwner {
+    // Each modal transition invalidates the preceding frame. Closing returns
+    // the plane whose trigger must be resolved after the replacement renders.
+    fn transition(&mut self, open_plane: Option<bool>) -> Option<bool> {
+        self.generation = self.generation.wrapping_add(1);
+        let restore = if open_plane.is_none() {
+            self.open_plane
+        } else {
+            None
+        };
+        self.open_plane = open_plane;
+        restore
+    }
+}
+
+fn restore_credential_focus(plane: Option<bool>, generation: u32) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let trigger = match plane {
+            Some(true) => "niks3-write-credential-trigger",
+            Some(false) => "niks3-read-credential-trigger",
+            None => "",
+        };
+        // CONCURRENCY: Unmount-time focus can run before the parent loses inert,
+        // and confirming a draft can replace the opener node. One frame after
+        // the parent's committed transition resolves the current trigger. The
+        // DOM owner and generation prevent a reopen or remount stealing focus.
+        let _ = js_sys::eval(&format!(
+            r#"(() => {{
+                const parent = document.getElementById('cache-destination-dialog');
+                if (!parent) return;
+                cancelAnimationFrame(parent.__cfCredentialFocusFrame || 0);
+                parent.__cfCredentialFocusGeneration = {generation};
+                parent.__cfCredentialFocusFrame = 0;
+                if (!'{trigger}') return;
+                parent.__cfCredentialFocusFrame = requestAnimationFrame(() => {{
+                    if (!parent.isConnected ||
+                        document.getElementById('cache-destination-dialog') !== parent ||
+                        parent.__cfCredentialFocusGeneration !== {generation}) return;
+                    parent.__cfCredentialFocusFrame = 0;
+                    if (document.getElementById('niks3-credential-dialog')) return;
+                    const target = parent.querySelector('button[data-testid="{trigger}"]');
+                    if (!target || target.matches(':disabled') ||
+                        target.closest('[inert], [hidden], [aria-hidden="true"]') ||
+                        !target.getClientRects().length) return;
+                    target.focus();
+                }});
+            }})()"#
+        ));
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (plane, generation);
 }
 
 /// Checks the same wire-format constraints as the shared protocol validator.
@@ -136,7 +197,7 @@ fn configured(write: bool, form: &Niks3FormState, original: Option<&CacheDestina
     })
 }
 
-fn pair(cert: &str, key: &str, ca: &str, require: bool) -> Result<(), String> {
+fn pair(cert: &str, key: &str, _ca: &str, require: bool) -> Result<(), String> {
     let entered = !cert.trim().is_empty() || !key.trim().is_empty();
     if require || entered {
         if cert.trim().is_empty() || key.trim().is_empty() {
@@ -146,9 +207,8 @@ fn pair(cert: &str, key: &str, ca: &str, require: bool) -> Result<(), String> {
             return Err("Client identity must contain a PEM certificate and private key.".into());
         }
     }
-    if !ca.trim().is_empty() && !ca.contains("-----BEGIN CERTIFICATE-----") {
-        return Err("Server CA bundle requires certificate-only PEM.".into());
-    }
+    // COMPATIBILITY: The server owns CA framing, X.509 and trust-annotation
+    // validation. Do not duplicate its ordinary/TRUSTED bundle parser here.
     Ok(())
 }
 
@@ -363,6 +423,13 @@ pub(super) fn Niks3DestinationForm(
 ) -> Element {
     let mut section = use_signal(|| "dest");
     let mut modal = use_signal(|| None::<bool>);
+    let focus_owner = use_hook(|| Rc::new(Cell::new(CredentialFocusOwner::default())));
+    use_effect(move || {
+        let mut owner = focus_owner.get();
+        let restore = owner.transition(modal());
+        focus_owner.set(owner);
+        restore_credential_focus(restore, owner.generation);
+    });
     let mut write_choice = use_signal(|| {
         if destination.is_some() {
             Choice::Current
@@ -444,8 +511,17 @@ pub(super) fn Niks3DestinationForm(
                 client::test_cache_destination_credentials(&create).await
             };
             match response {
-                Ok(value) => { if scope == Niks3ProbeScope::Write { write_result.set(Some(value)); } else { read_result.set(Some(value)); } }
-                Err(_) => error.set(Some("Test failed. Review the selected endpoint, identity, server trust and permitted target policy.".into())),
+                Ok(value) => {
+                    if !value.ok {
+                        error.set(Some(value.failure_message().into()));
+                    }
+                    if scope == Niks3ProbeScope::Write {
+                        write_result.set(Some(value));
+                    } else {
+                        read_result.set(Some(value));
+                    }
+                }
+                Err(failure) => error.set(Some(client::cache_probe_error_message(&failure).into())),
             }
             busy.set(None);
         });
@@ -484,23 +560,44 @@ pub(super) fn Niks3DestinationForm(
             };
             match response {
                 Ok(value) => {
-                    if !https(&value.substituter_url) || value.public_keys.is_empty() || value.public_keys.iter().any(|key| !valid_signing_key(key)) {
+                    if !https(&value.substituter_url)
+                        || value.public_keys.is_empty()
+                        || value.public_keys.iter().any(|key| !valid_signing_key(key))
+                    {
                         error.set(Some("Discovery returned invalid public metadata. Review the API URL and proxy configuration.".into()));
                     } else {
                         let mut state = form.write();
-                        let conflict = (!state.read_url.trim().is_empty() && state.read_url.trim() != value.substituter_url)
-                            || (!state.request().niks3_public_keys.is_empty() && state.request().niks3_public_keys != value.public_keys);
-                        if state.read_url.trim().is_empty() { state.read_url = value.substituter_url.clone(); }
+                        let conflict = (!state.read_url.trim().is_empty()
+                            && state.read_url.trim() != value.substituter_url)
+                            || (!state.request().niks3_public_keys.is_empty()
+                                && state.request().niks3_public_keys != value.public_keys);
+                        if state.read_url.trim().is_empty() {
+                            state.read_url = value.substituter_url.clone();
+                        }
                         if state.request().niks3_public_keys.is_empty() {
                             state.keys = value.public_keys.join("\n");
-                            key_rows.set(value.public_keys.iter().enumerate().map(|(i, key)| (i as u64 + 1, key.clone())).collect());
+                            key_rows.set(
+                                value
+                                    .public_keys
+                                    .iter()
+                                    .enumerate()
+                                    .map(|(i, key)| (i as u64 + 1, key.clone()))
+                                    .collect(),
+                            );
                         }
                         drop(state);
-                        if conflict { pending.set(Some(value)); discovery_note.set(Some("Discovery successful. Existing read URL or keys differ; review the public values below before applying. Nothing has been saved.".into())); }
-                        else { discovery_note.set(Some("Discovery successful. Empty read URL and signing-key fields were populated. Review before saving; no write permission was tested.".into())); }
+                        if conflict {
+                            pending.set(Some(value));
+                            discovery_note.set(Some("Discovery successful. Existing read URL or keys differ; review the public values below before applying. Nothing has been saved.".into()));
+                        } else {
+                            discovery_note.set(Some("Discovery successful. Empty read URL and signing-key fields were populated. Review before saving; no write permission was tested.".into()));
+                        }
                     }
                 }
-                Err(_) => error.set(Some("Discovery failed. Check the write URL, selected mTLS identity, server CA bundle and permitted target policy.".into())),
+                Err(failure) => error.set(Some(format!(
+                    "Discovery failed. {}",
+                    client::cache_probe_error_message(&failure)
+                ))),
             }
             busy.set(None);
         });
@@ -697,7 +794,7 @@ fn CredentialRow(
             if mode != "none" { div { style: "display:flex;gap:6px;flex-wrap:wrap;",
                 if can_retain && choice() != Choice::Current { button { class: "btn btn-ghost focus-ring xs", onclick: move |_| { clear_identity(&mut form.write(), write); choice.set(Choice::Current); }, "Use current credential" } }
                 if choice() == Choice::Draft { button { class: "btn btn-ghost focus-ring xs", onclick: move |_| { clear_identity(&mut form.write(), write); choice.set(if can_retain { Choice::Current } else { Choice::None }); }, "Discard" } }
-                button { class: "btn btn-ghost focus-ring xs", onclick: move |_| on_open.call(()), if choice() == Choice::Draft { "Edit replacement" } else if has_current { "Replace" } else { "Add credential" } }
+                button { class: "btn btn-ghost focus-ring xs", "data-testid": if write { "niks3-write-credential-trigger" } else { "niks3-read-credential-trigger" }, onclick: move |_| on_open.call(()), if choice() == Choice::Draft { "Edit replacement" } else if has_current { "Replace" } else { "Add credential" } }
             } }
         }
         if old_mode.as_deref().is_some_and(|old| old != mode) { p { class: "n3-cred-warn", "Saving this authentication mode clears the previous stored identity. Inactive credentials are never borrowed." } }
@@ -769,7 +866,9 @@ fn CredentialModal(
     };
     rsx! { div { class: "modal-backdrop modal-backdrop-above-drawer", style: CACHE_CREDENTIAL_BACKDROP_STYLE, onclick: move |e| { e.stop_propagation(); on_close.call(None); },
         div { id: "niks3-credential-dialog", class: "modal", style: "width:min(560px,calc(100vw - 16px));max-height:92vh;overflow-y:auto;", role: "dialog", aria_modal: "true", aria_label: "{plane} credential", tabindex: "-1", onclick: move |e| e.stop_propagation(), onkeydown: move |e| { e.stop_propagation(); if e.key() == Key::Escape { e.prevent_default(); on_close.call(None); } },
-            DialogFocusRestore {} DialogInitialFocus { dialog_id: "niks3-credential-dialog".to_string() }
+            // The parent restores the current trigger after its inert state and
+            // credential selection commit. Do not capture the old opener node.
+            DialogInitialFocus { dialog_id: "niks3-credential-dialog".to_string() }
             DialogFocusSentinel { dialog_id: "niks3-credential-dialog".to_string(), boundary: DialogFocusBoundary::Last }
             div { class: "modal-head", h2 { Icon { name: IconName::Key, size: 14 } if has_current { " Replace" } else { " Add" } " {plane} credential · {mode}" } p { "Stored secrets are never shown. This local draft is not persisted until the cache Save action." } }
             div { class: "modal-body",
@@ -842,6 +941,144 @@ pub(super) fn details(destination: &CacheDestination) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn credential_focus_owner_restores_only_the_closed_plane_and_invalidates_reopens() {
+        let mut owner = CredentialFocusOwner::default();
+        assert_eq!(owner.transition(None), None);
+        for plane in [true, false] {
+            assert_eq!(owner.transition(Some(plane)), None);
+            assert_eq!(owner.transition(None), Some(plane));
+            let pending_generation = owner.generation;
+            assert_eq!(owner.transition(Some(!plane)), None);
+            assert_ne!(owner.generation, pending_generation);
+            assert_eq!(owner.transition(None), Some(!plane));
+            assert_eq!(owner.transition(None), None);
+        }
+    }
+
+    #[test]
+    fn ca_payloads_preserve_delimiter_columns_and_line_endings_in_every_projection() {
+        for raw in [
+            " -----BEGIN CERTIFICATE-----\r\nAQ==\r\n-----END CERTIFICATE-----\r\n",
+            "\t-----BEGIN CERTIFICATE-----\nAQ==\n-----END CERTIFICATE-----\n ",
+            "\r\n-----BEGIN CERTIFICATE-----\r\nAQ==\r\n-----END CERTIFICATE-----\r\n\t",
+        ] {
+            let mut form = Niks3FormState::from_destination(None);
+            form.write_mode = "mtls".into();
+            form.read_mode = "mtls".into();
+            form.write_ca = raw.into();
+            form.read_ca = raw.into();
+            form.server_url = " https://write.example.com/ ".into();
+            form.read_url = " https://read.example.com/ ".into();
+            form.write_cert = " certificate ".into();
+            form.write_key = " key ".into();
+            let create = form.request();
+            assert_eq!(create.niks3_write_ca_cert.as_deref(), Some(raw));
+            assert_eq!(create.niks3_read_ca_cert.as_deref(), Some(raw));
+            assert_eq!(
+                create.niks3_server_url.as_deref(),
+                Some("https://write.example.com/")
+            );
+            assert_eq!(
+                create.niks3_write_client_cert.as_deref(),
+                Some("certificate")
+            );
+            assert_eq!(create.niks3_write_client_key.as_deref(), Some("key"));
+            let save = cache_update_patch(
+                "niks3",
+                &form,
+                &CacheTypeDrafts::default(),
+                false,
+                None,
+                vec![],
+            );
+            for wire in [
+                serde_json::to_value(&create).unwrap(),
+                serde_json::to_value(&save).unwrap(),
+            ] {
+                assert_eq!(wire["niks3_write_ca_cert"], raw);
+                assert_eq!(wire["niks3_read_ca_cert"], raw);
+            }
+            for scope in [Niks3ProbeScope::Write, Niks3ProbeScope::Read] {
+                let field = if scope == Niks3ProbeScope::Write {
+                    "niks3_write_ca_cert"
+                } else {
+                    "niks3_read_ca_cert"
+                };
+                for wire in [
+                    serde_json::to_value(project_create(form.request(), scope)).unwrap(),
+                    serde_json::to_value(project_update(save.clone(), scope)).unwrap(),
+                ] {
+                    assert_eq!(wire[field], raw);
+                }
+            }
+            let discovery = serde_json::to_value(discovery_request(&form)).unwrap();
+            assert_eq!(discovery["niks3_write_ca_cert"], raw);
+            let stored_discovery =
+                serde_json::to_value(project_update(save, Niks3ProbeScope::Write)).unwrap();
+            assert_eq!(stored_discovery["niks3_write_ca_cert"], raw);
+        }
+    }
+
+    #[test]
+    fn blank_inactive_and_retained_ca_drafts_are_omitted_without_implicit_clear() {
+        let original: CacheDestination = serde_json::from_value(serde_json::json!({
+            "id": 1, "name": "fixture", "cache_type": "Niks3", "enabled": true,
+            "created_at": "2026-10-02T00:00:00Z", "updated_at": "2026-10-02T00:00:00Z",
+            "niks3_write_auth_mode": "mtls", "niks3_read_auth_mode": "mtls",
+            "niks3_write_ca_cert": "stored-write-ca", "niks3_read_ca_cert": "stored-read-ca"
+        }))
+        .unwrap();
+        let mut form = Niks3FormState::from_destination(Some(&original));
+        assert!(form.write_ca.is_empty());
+        assert!(form.read_ca.is_empty());
+        for blank in ["", " \t\r\n"] {
+            form.write_ca = blank.into();
+            form.read_ca = blank.into();
+            let patch = form.update_request();
+            assert!(patch.niks3_write_ca_cert.is_none());
+            assert!(patch.niks3_read_ca_cert.is_none());
+            assert!(!patch.clear_niks3_write_ca_cert);
+            assert!(!patch.clear_niks3_read_ca_cert);
+        }
+        form.write_ca = " raw inactive write CA ".into();
+        form.read_ca = " raw inactive read CA ".into();
+        form.write_mode = "token".into();
+        form.read_mode = "none".into();
+        let create = form.request();
+        assert!(create.niks3_write_ca_cert.is_none());
+        assert!(create.niks3_read_ca_cert.is_none());
+    }
+
+    #[test]
+    fn ca_drafts_use_server_validation_without_weakening_client_pair_markers() {
+        for ca in [
+            "-----BEGIN CERTIFICATE-----\nordinary\n-----END CERTIFICATE-----\n-----BEGIN TRUSTED CERTIFICATE-----\ntrusted\n-----END TRUSTED CERTIFICATE-----",
+            "untrusted malformed CA draft",
+        ] {
+            assert!(pair("", "", ca, false).is_ok());
+        }
+        assert!(
+            pair(
+                "-----BEGIN CERTIFICATE-----",
+                "-----BEGIN PRIVATE KEY-----",
+                "",
+                true
+            )
+            .is_ok()
+        );
+        assert!(
+            pair(
+                "-----BEGIN TRUSTED CERTIFICATE-----",
+                "-----BEGIN PRIVATE KEY-----",
+                "",
+                true
+            )
+            .is_err()
+        );
+        assert!(pair("-----BEGIN CERTIFICATE-----", "", "", true).is_err());
+    }
 
     #[test]
     fn advanced_drafts_reject_empty_fractional_and_overflowing_values() {

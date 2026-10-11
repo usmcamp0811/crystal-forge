@@ -20,6 +20,7 @@ tags:
 | `checks/integration/README.md` | retained in place; see [integration section](../../testing/flake-checks.md#integration) | retained | complete |
 | `checks/builder-evaluator-packaging/README.md` | retained in place; see [builder-evaluator-packaging section](../../testing/flake-checks.md#builder-evaluator-packaging) | retained | complete |
 | `checks/niks3-cache/README.md` | retained in place; see [niks3-cache section](../../testing/flake-checks.md#niks3-cache) | retained | complete |
+| `checks/niks3-ca-bundle/README.md` | retained in place; see [CA compatibility operator contract](../../caches/niks3-ca-bundle-compatibility.md) | retained | complete |
 | `checks/nixos-options-metadata/README.md` | retained in place; see [nixos-options-metadata section](../../testing/flake-checks.md#nixos-options-metadata) | retained | complete |
 | `checks/oidc-auth/README.md` | retained in place; see [oidc-auth section](../../testing/flake-checks.md#oidc-auth) | retained | complete |
 | `checks/oscal-export/README.md` | retained in place; see [oscal-export section](../../testing/flake-checks.md#oscal-export) | retained | complete |
@@ -185,6 +186,14 @@ OKF knowledge bundle. Neither README existed at the original migration base
 - `checks/builder-evaluator-packaging/README.md`: Title "Builder and server runtime packaging". Action: retained. Destination: [builder-evaluator-packaging](../../testing/flake-checks.md#builder-evaluator-packaging).
 - `checks/niks3-cache/README.md`: Title "Niks3 cache integration". Action: retained. Destination: [niks3-cache](../../testing/flake-checks.md#niks3-cache).
 - Unmapped content: none. Both READMEs remain authoritative in place; the catalog summarizes scope, commands, limits, and CI membership.
+
+### `checks/niks3-ca-bundle/README.md` (new TASK-470 runbook)
+
+- Title: Niks3 onboarding CA bundle regression
+- Purpose: Operational runbook for the sandbox CA bundle fixture and compatibility check, including commands, public provenance, measured structure, and verification history.
+- Action: retained. The newly authored README remains authoritative beside the check; it was not present at the original migration base `3b23d36f` and has no historical baseline blob.
+- Destination: [CA compatibility operator contract](../../caches/niks3-ca-bundle-compatibility.md).
+- Unmapped content: none. The runbook retains all operational sections in place and links to the canonical compatibility contract.
 
 ### `packages/cf-test-suite/README.md`
 

@@ -1071,6 +1071,20 @@ mod niks3_tests {
     use cf_protocol::cache::CacheReadAuth;
     use std::os::unix::fs::PermissionsExt;
 
+    // Frozen public X.509 fixture from cf-server/security/cache_secrets.rs.
+    // Canonical certificate-only PEM lets ownership tests reach the fake child.
+    // No private key is retained for this CA fixture.
+    const TEST_CERTIFICATE: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBYzCCARWgAwIBAgIUUiT5rFbIc6C8wVUsrDv3mmB3PDkwBQYDK2VwMCYxJDAi\n\
+BgNVBAMMG3Rhc2s0NzAtY2VydGlmaWNhdGUtZml4dHVyZTAgFw0yNjEwMDMwMDQ1\n\
+MTJaGA8yMTI2MDkwOTAwNDUxMlowJjEkMCIGA1UEAwwbdGFzazQ3MC1jZXJ0aWZp\n\
+Y2F0ZS1maXh0dXJlMCowBQYDK2VwAyEArmgxjwzB+VI7yxPnKKkVj9uulx0wtyrf\n\
+HC/p+1wXxpOjUzBRMB0GA1UdDgQWBBS5G+8DC/fImjFHjQtXKwSe/LTS7TAfBgNV\n\
+HSMEGDAWgBS5G+8DC/fImjFHjQtXKwSe/LTS7TAPBgNVHRMBAf8EBTADAQH/MAUG\n\
+AytlcANBANv0+9Ic9w11sJMah7/3hykwUUhs+iQqGZWTnWwQumZ7bkfKPl4Illm2\n\
+Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=\n\
+-----END CERTIFICATE-----\n";
+
     struct Fixture(PathBuf);
     impl Fixture {
         fn new(script: &str) -> Self {
@@ -1079,7 +1093,13 @@ mod niks3_tests {
             std::fs::create_dir(&path).unwrap();
             std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
             let program = path.join("nix");
-            std::fs::write(&program, script.replace("FIXTURE", path.to_str().unwrap())).unwrap();
+            std::fs::write(
+                &program,
+                script
+                    .replace("FIXTURE", path.to_str().unwrap())
+                    .replace("TEST_CA_CERTIFICATE", TEST_CERTIFICATE.trim_end()),
+            )
+            .unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
             Self(path)
         }
@@ -1103,7 +1123,7 @@ mod niks3_tests {
                 CacheReadAuth::Mtls {
                     client_certificate: "read-cert".into(),
                     client_private_key: "read-key".into(),
-                    ca_certificate: Some("read-ca".into()),
+                    ca_certificate: Some(TEST_CERTIFICATE.into()),
                 }
             } else {
                 CacheReadAuth::None
@@ -1120,7 +1140,7 @@ case "$3" in https://read.example/*tls-certificate=*tls-private-key=*) ;; *) exi
 directory=${NIX_SSL_CERT_FILE%/*}
 test "$(cat "$directory/client-cert.pem")" = read-cert
 test "$(cat "$directory/client-key.pem")" = read-key
-test "$(cat "$NIX_SSL_CERT_FILE")" = read-ca
+test "$(cat "$NIX_SSL_CERT_FILE")" = 'TEST_CA_CERTIFICATE'
 test "$(stat -c %a "$directory")" = 700
 test "$(stat -c %a "$directory/client-key.pem")" = 600
 test -z "${AWS_SECRET_ACCESS_KEY:-}"

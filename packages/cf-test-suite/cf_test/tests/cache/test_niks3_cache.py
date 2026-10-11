@@ -698,9 +698,9 @@ def run_production_transport_fixture(production, probe, target, credentials):
     print("Niks3 split PKI fixture: A-only and B-only fail; A+B native API/direct signed HTTPS S3 upload succeeds; no client Basic/Bearer header or S3 client certificate")
 
 
-def production_cli_projection(machine, expected_bundle):
+def production_cli_projection(machine, expected_bundle=None, expected_digest=None):
     """Checks live CF-launched CLI flags, protected files and isolated env privately."""
-    digest = hashlib.sha256(Path(expected_bundle).read_bytes()).hexdigest()
+    digest = expected_digest or hashlib.sha256(Path(expected_bundle).read_bytes()).hexdigest()
     source = f"""
 import hashlib,json,os,pathlib,stat,time
 deadline = time.monotonic() + 6
@@ -724,17 +724,20 @@ while time.monotonic() < deadline:
             env = {{item.split('=',1)[0] for item in environment.split('\\0') if '=' in item}}
             read_secrets = [(pathlib.Path('/etc/niks3-production-pki') / name).read_text() for name in ('basic-username','basic-password')]
             projection = {{'pid':int(proc.name),'mtls_flags':True,
+                'write_url_matches':args[args.index('--server-url')+1] == 'https://push-cache.test:5754/',
                 'token_flags_absent':not any(arg.startswith('--auth-token') for arg in args),
                 'aws_environment_absent':not any(key.startswith('AWS_') for key in env),
                 'token_environment_absent':'NIKS3_AUTH_TOKEN_FILE' not in env,
                 'basic_read_absent':not any(secret in '\\0'.join(args)+environment for secret in read_secrets) and not any('netrc' in arg for arg in args),
                 'bundle_matches':hashlib.sha256(files[2].read_bytes()).hexdigest() == {digest!r},
+                'client_pair_matches':all(hashlib.sha256(path.read_bytes()).digest() == hashlib.sha256((pathlib.Path('/etc/niks3-production-pki') / name).read_bytes()).digest()
+                    for path,name in zip(files[:2],('write-client-1.crt','write-client-1.key'))),
                 'protected_files':all(stat.S_IMODE(path.stat().st_mode) == 0o600 for path in files),
                 'protected_directory':all(stat.S_IMODE(path.parent.stat().st_mode) == 0o700 for path in files)}}
             after = (proc / 'stat').read_text().rsplit(')',1)[1].split()[19]
             if before == after and projection['bundle_matches']:
-                assert all(value for key,value in projection.items() if key != 'pid')
                 print(json.dumps(projection))
+                assert all(value for key,value in projection.items() if key != 'pid')
                 raise SystemExit(0)
         except (FileNotFoundError,ProcessLookupError):
             pass
@@ -744,6 +747,289 @@ raise SystemExit(1)
     # Sampling has a real command/scan deadline and never persists argument or
     # environment bytes. A missing observation is a failed proof, not a skip.
     return json.loads(machine.succeed("timeout 8 python3 -c " + shlex.quote(source), timeout=8))
+
+
+def fresh_split_target(server, template):
+    """Preflights a VM-only random-content derivation, then removes its output.
+
+    A server sandbox build supplies the actual NAR hash, never a publication.
+    The exact fresh output is deleted before dispatch to require a remote build.
+    Fresh payload bytes defeat Niks3's content-addressed NAR deduplication even
+    when an earlier fixture already uploaded the same activation script.
+    """
+    return json.loads(server.succeed("python3 -c " + shlex.quote(f"""
+import json,pathlib,secrets,subprocess,tempfile
+def run(args):
+    result = subprocess.run(args,capture_output=True,timeout=30)
+    assert result.returncode == 0, 'fresh fixture derivation preparation failed'
+    return result.stdout.decode().strip()
+shown = json.loads(run(['nix','derivation','show',{template['drv']!r}]))
+# The pinned evaluator uses version 4 and basename-keyed derivation records.
+assert shown['version'] == 4 and set(shown['derivations']) == {{pathlib.Path({template['drv']!r}).name}}
+template = shown['derivations'][pathlib.Path({template['drv']!r}).name]
+assert template['version'] == 4
+busybox = str(pathlib.Path(template['builder']).parent)
+package = str(pathlib.Path(busybox).parent)
+assert template['builder'].startswith('/nix/store/') and template['builder'].endswith('/bin/sh')
+with tempfile.TemporaryDirectory(prefix='niks3-fresh-output-') as directory:
+    directory = pathlib.Path(directory)
+    payload = directory/'payload'
+    payload.write_bytes(secrets.token_bytes(16 * 1024 * 1024))
+    payload.chmod(0o600)
+    source = run(['nix-store','--add',str(payload)])
+    script = (busybox+'/mkdir -p "$out/bin" "$out/sw"\\n'
+              +busybox+'/printf '+json.dumps('#!'+template['builder']+'\\nexit 0\\n')+' > "$out/bin/switch-to-configuration"\\n'
+              +busybox+'/chmod +x "$out/bin/switch-to-configuration"\\n'
+              +busybox+'/cp "$fixturePayload" "$out/split-pki-workload"\\n')
+    expression = ('builtins.derivation {{ name = "niks3-mtls-split-fresh"; system = "x86_64-linux"; '
+                  # JSON paths have no Nix context. Restore the packaged shell
+                  # dependency explicitly so the sandbox mounts its full closure.
+                  +'builder = (builtins.storePath '+json.dumps(package)+') + "/bin/sh"; args = [ "-c" '+json.dumps(script)+' ]; '
+                  +'fixturePayload = builtins.storePath '+json.dumps(source)+'; }}')
+    drv = run(['nix-instantiate','--expr',expression])
+    out = run(['nix-store','--query','--outputs',drv])
+    assert not pathlib.Path(out).exists(), 'fresh output already realized'
+    assert run(['nix-store','--realise',drv,'--option','sandbox','true']) == out
+    assert (pathlib.Path(out)/'split-pki-workload').read_bytes() == payload.read_bytes()
+    nar_hash = run(['nix','hash','path','--type','sha256','--base32',out])
+    assert len(nar_hash) == 52 and all(c in '0123456789abcdfghijklmnpqrsvwxyz' for c in nar_hash)
+    run(['nix-store','--delete',out])
+    assert not pathlib.Path(out).exists(), 'fresh server preflight output remains'
+    print(json.dumps({{'drv':drv,'out':out,'nar_key':'nar/'+nar_hash+'.nar.zst'}}))
+""")))
+
+
+def onboarding_ca_expectation(raw):
+    """Selects ordinary DER identities from the known synthetic-plus-NSS fixture.
+
+    This independent fixture oracle does not implement the production annotation
+    grammar. The separate Go/Rust gate validates that parser. Trusted PEM blocks
+    never become expected roots; ordinary DER order and duplicates are retained.
+    """
+    import re
+    from cryptography import x509
+
+    assert b"PRIVATE KEY" not in raw, "fixture CA input contains key material"
+    bodies = re.findall(rb"(?m)^-----BEGIN CERTIFICATE-----\r?\n([A-Za-z0-9+/=\r\n]+)^-----END CERTIFICATE-----\r?$", raw)
+    assert len(bodies) == raw.count(b"-----BEGIN CERTIFICATE-----") == 124, "ordinary fixture root count changed"
+    assert raw.count(b"-----BEGIN TRUSTED CERTIFICATE-----") == 172, "NSS trusted fixture count changed"
+    outside_pem = re.sub(rb"(?m)^-----BEGIN (?:TRUSTED )?CERTIFICATE-----\r?\n[A-Za-z0-9+/=\r\n]+^-----END (?:TRUSTED )?CERTIFICATE-----\r?$", b"", raw)
+    assert sum(bool(line) and not line.startswith(b"#") for line in outside_pem.splitlines()) == 605, "NSS annotation fixture count changed"
+    roots, canonical = [], []
+    for body in bodies:
+        der = base64.b64decode(b"".join(body.splitlines()), validate=True)
+        x509.load_der_x509_certificate(der)
+        encoded = base64.b64encode(der).decode("ascii")
+        roots.append(hashlib.sha256(der).hexdigest())
+        canonical.append("-----BEGIN CERTIFICATE-----\n" + "\n".join(
+            encoded[offset:offset + 64] for offset in range(0, len(encoded), 64))
+            + "\n-----END CERTIFICATE-----\n")
+    assert len(set(roots)) == 124, "fixture ordinary roots are not distinct"
+    return "".join(canonical), roots
+
+
+def save_split_ca(server, cache_id, expected_ca_digest, expected_raw_digest):
+    """Saves raw synthetic A+B+C plus NSS write trust through the real admin API.
+
+    Retained client identity and Basic read credentials are omitted. Response
+    bytes and session cookies stay in the guest; only safe evidence is emitted.
+    """
+    source = f"""
+import hashlib,http.client,json,pathlib,secrets,ssl,subprocess
+from http.cookies import SimpleCookie
+stage,http_status = 'registration',None
+replacement_projection = None
+try:
+    connection = http.client.HTTPSConnection('server',context=ssl.create_default_context(),timeout=12)
+    cookies = {{}}
+    def request(method,path,body,expected=(200,201)):
+        global http_status
+        headers = {{'Content-Type':'application/json','Cookie':'; '.join(k+'='+v for k,v in cookies.items())}}
+        csrf = [value for key,value in cookies.items() if 'csrf' in key]
+        if csrf:
+            headers['X-CSRF-Token'] = csrf[0]
+        connection.request(method,path,json.dumps(body) if body is not None else None,headers)
+        response = connection.getresponse()
+        http_status = response.status
+        for name,value in response.getheaders():
+            if name.lower() == 'set-cookie':
+                parsed = SimpleCookie()
+                parsed.load(value)
+                cookies.update({{k:v.value for k,v in parsed.items()}})
+        data = response.read(1024 * 1024)
+        assert response.status in expected, 'synthetic admin API request failed'
+        result = json.loads(data)
+        assert b'PRIVATE KEY' not in data, 'API exposed private key'
+        return result
+    password = secrets.token_hex(24)
+    request('POST','/api/auth/local/register',{{'username':'niks3-fixture-admin','email':'niks3-fixture@example.invalid','password':password}})
+    stage = 'login'
+    request('POST','/api/auth/local/login',{{'username':'niks3-fixture-admin','password':password}})
+    pki = pathlib.Path('/etc/niks3-production-pki')
+    bundle = (pki/'write-ca-bundle-onboarding.pem').read_text()
+    assert hashlib.sha256(bundle.encode()).hexdigest() == {expected_raw_digest!r}
+    assert bundle.count('-----BEGIN CERTIFICATE-----') == 124 and 'PRIVATE KEY' not in bundle
+    assert bundle.count('-----BEGIN TRUSTED CERTIFICATE-----') == 172
+    path = '/api/v1/caches/{cache_id}'
+    stage = 'save'
+    result = request('PUT',path,{{'niks3_write_ca_cert':bundle}})
+    stage = 'get'
+    result = request('GET',path,None)
+    assert result['id'] == {cache_id} and result['niks3_server_url'] == 'https://push-cache.test:5754'
+    assert result['niks3_write_mtls_configured'] and result['niks3_read_basic_configured']
+    assert not result['niks3_write_token_configured']
+    assert not any(result.get(field) for field in ('niks3_write_client_key','niks3_read_client_key','niks3_read_basic_password','niks3_auth_token','s3_secret_access_key'))
+    canonical = result['niks3_write_ca_cert']
+    assert canonical.count('-----BEGIN CERTIFICATE-----') == 124
+    assert 'TRUSTED CERTIFICATE' not in canonical and 'PRIVATE KEY' not in canonical
+    assert hashlib.sha256(canonical.encode()).hexdigest() == {expected_ca_digest!r}
+    def raw_state():
+        query = "SELECT jsonb_build_object('destination',to_jsonb(c),'scope',(SELECT jsonb_agg(to_jsonb(e) ORDER BY environment_id) FROM cache_destination_environments e WHERE cache_destination_id=c.id)) FROM cache_destinations c WHERE id={cache_id}"
+        result = subprocess.run(['runuser','-u','postgres','--','psql','-XAt','-d','crystal_forge','-c',query],capture_output=True,timeout=8)
+        assert result.returncode == 0, 'private probe state unavailable'
+        return result.stdout
+    baseline = raw_state()
+    stage = 'invalid_ca'
+    # Only generated VM fixture material enters these deliberately invalid CA
+    # requests. Input and response bytes stay private; failures cannot persist.
+    fixture_key = (pki/'write-client-1.key').read_text()
+    for invalid in (bundle+fixture_key, bundle+'\\n-----BEGIN CERTIFICATE-----\\ninvalid\\n'):
+        request('POST',path+'/test-credentials',{{'probe_scope':'write','niks3_write_ca_cert':invalid}},expected=(400,))
+        request('PUT',path,{{'niks3_write_ca_cert':invalid}},expected=(400,))
+        assert raw_state() == baseline, 'invalid CA request mutated raw destination or scope'
+    stage = 'mismatched_identity'
+    request('POST',path+'/test-credentials',{{'probe_scope':'write','niks3_write_client_key':(pki/'write-client-2.key').read_text()}},expected=(400,))
+    assert raw_state() == baseline, 'mismatched client identity Test mutated raw destination or scope'
+    stage = 'ambient_trust'
+    ambient = request('POST',path+'/test-credentials',{{'probe_scope':'write','clear_niks3_write_ca_cert':True}})
+    assert ambient['ok'] and ambient['write_api_reachable'] is True and ambient['discovery_valid'] is True
+    assert ambient['write_auth_valid'] is None and ambient['write_authn_valid'] is None and ambient['write_authorization_valid'] is None
+    assert raw_state() == baseline, 'ambient trust Test mutated raw destination or scope'
+    stage = 'custom_trust_replacement'
+    replacement = request('POST',path+'/test-credentials',{{'probe_scope':'write','niks3_write_ca_cert':(pki/'server-ca-b.crt').read_text()}})
+    # Keep finite response fields for the one success or failure JSON record.
+    # Provider prose, URLs, PEM, request bodies and exceptions stay private.
+    allowed_codes = ('ca_bundle_framing_invalid','ca_certificate_invalid','ca_bundle_content_unsupported',
+        'ca_bundle_trust_ambiguous','ca_bundle_empty','ca_bundle_too_large','client_identity_invalid',
+        'client_certificate_invalid','client_private_key_invalid','client_identity_mismatch',
+        'tls_verification_failed','dns_or_connection_failed','http_response_failed',
+        'invalid_niks3_metadata','target_policy_rejected','probe_timeout','probe_failed')
+    code = replacement.get('diagnostic_code')
+    reachable = replacement.get('write_api_reachable')
+    replacement_projection = {{'ok':replacement.get('ok') if type(replacement.get('ok')) is bool else False,
+        'write_api_reachable':reachable if type(reachable) is bool else None,
+        'diagnostic_code':code if type(code) is str and code in allowed_codes else 'unrecognized',
+        'returned_http_status':http_status if type(http_status) is int and 100 <= http_status <= 599 else None}}
+    assert replacement['ok'] is False and replacement['diagnostic_code'] == 'tls_verification_failed'
+    assert replacement['write_auth_valid'] is None and replacement['write_authn_valid'] is None and replacement['write_authorization_valid'] is None
+    assert raw_state() == baseline, 'explicit B-only Test mutated raw destination or scope'
+    stage = 'write_metadata'
+    probe = request('POST',path+'/test-credentials',{{'probe_scope':'write'}})
+    assert probe['ok'] and probe['write_api_reachable'] is True and probe['discovery_valid'] is True
+    assert probe['write_auth_valid'] is None and probe['write_authorization_valid'] is None
+    assert probe['write_authn_valid'] is None, 'public metadata cannot prove write authentication'
+    assert raw_state() == baseline, 'metadata Test mutated raw destination or scope'
+    print(json.dumps({{'saved_ca_sha256':hashlib.sha256(canonical.encode()).hexdigest(),
+                      'raw_ordinary_roots':124,'raw_trusted_blocks':172,'saved_ordinary_roots':124,
+                      'raw_annotation_lines':605,'trusted_blocks_ignored':172,'trusted_roots_promoted':0,
+                      'ambient_metadata_valid':True,'b_only_replaces_ambient':True,
+                      'replacement_diagnostic':'tls_verification_failed','saved_metadata_valid':True,
+                      'invalid_ca_rejected':True,'mismatched_identity_rejected':True,
+                      'retained_flags':True,'redacted':True,'metadata_only':True,
+                      'trust_negative':replacement_projection}}))
+except Exception as error:
+    # Never let an HTTP/TLS error or response-body traceback export private data.
+    print(json.dumps({{'saved_ca_api_proof_failed':True,'stage':stage,'http_status':http_status,
+        'tls_verification_failed':isinstance(error,ssl.SSLCertVerificationError),
+        'trust_negative':replacement_projection}}))
+    raise SystemExit(1)
+"""
+    return json.loads(server.succeed("timeout 60 python3 -c " + shlex.quote(source), timeout=65))
+
+
+def split_object_boundary(production, target, before):
+    """Attests exact NAR/narinfo absence and new PUTs privately in the cache VM.
+
+    Signed HEAD uses backend-only fixture credentials and never mutates Garage.
+    Private object paths exclude queries. Only hashes, counts and booleans leave
+    the guest. The pre-dispatch baseline excludes earlier variants and inputs.
+    """
+    keys = [target['nar_key'], Path(target['out']).name.split('-', 1)[0] + '.narinfo']
+    source = f"""
+import hashlib,hmac,http.client,json,pathlib,stat
+from datetime import datetime,timezone
+try:
+    directory = pathlib.Path('/run/niks3-publication-observer')
+    observer = directory/'objects.json'
+    state_path = directory/'boundary.json'
+    assert stat.S_IMODE(directory.stat().st_mode) == 0o700 and stat.S_IMODE(observer.stat().st_mode) == 0o600
+    records = [json.loads(line) for line in observer.read_text().splitlines()]
+    keys = {keys!r}
+    def head(key):
+        secrets = pathlib.Path('/run/niks3-production-secrets')
+        access = (secrets/'access-key').read_text().strip()
+        secret = (secrets/'secret-key').read_text().strip()
+        now = datetime.now(timezone.utc)
+        stamp,day = now.strftime('%Y%m%dT%H%M%SZ'),now.strftime('%Y%m%d')
+        path = '/production-niks3/'+key
+        payload = hashlib.sha256(b'').hexdigest()
+        canonical = 'HEAD\\n'+path+'\\n\\nhost:127.0.0.1:3900\\nx-amz-content-sha256:'+payload+'\\nx-amz-date:'+stamp+'\\n\\nhost;x-amz-content-sha256;x-amz-date\\n'+payload
+        scope = day+'/garage/s3/aws4_request'
+        signing = ('AWS4'+secret).encode()
+        for part in (day,'garage','s3','aws4_request'):
+            signing = hmac.new(signing,part.encode(),hashlib.sha256).digest()
+        signature = hmac.new(signing,('AWS4-HMAC-SHA256\\n'+stamp+'\\n'+scope+'\\n'+hashlib.sha256(canonical.encode()).hexdigest()).encode(),hashlib.sha256).hexdigest()
+        connection = http.client.HTTPConnection('127.0.0.1',3900,timeout=8)
+        connection.request('HEAD',path,headers={{'X-Amz-Date':stamp,'X-Amz-Content-Sha256':payload,
+            'Authorization':'AWS4-HMAC-SHA256 Credential='+access+'/'+scope+', SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature='+signature}})
+        response = connection.getresponse()
+        status = response.status
+        response.read()
+        connection.close()
+        return status
+    if {before!r}:
+        assert all(head(key) == 404 for key in keys), 'fresh NAR or narinfo already exists'
+        state_path.write_text(json.dumps({{'keys':keys,'baseline':len(records),
+            'puts':sum(record['put'] for record in records)}}))
+        state_path.chmod(0o600)
+        print(json.dumps({{'absent_nar':True,'absent_narinfo':True,'put_baseline':sum(record['put'] for record in records)}}))
+    else:
+        state = json.loads(state_path.read_text())
+        assert state['keys'] == keys and len(records) >= state['baseline']
+        delta = records[state['baseline']:]
+        counts = []
+        for key in keys:
+            matching = [record for record in delta if record['path'] == '/production-niks3/'+key and record['put'] and not record['backend'] and 200 <= record['status'] < 300]
+            assert matching and head(key) == 200, 'fresh object missing matching successful direct PUT'
+            counts.append(len(matching))
+        print(json.dumps({{'nar_puts':counts[0],'narinfo_puts':counts[1],
+            'new_puts':sum(record['put'] for record in delta),
+            'object_path_sha256':[hashlib.sha256(key.encode()).hexdigest() for key in keys]}}))
+except Exception:
+    print(json.dumps({{'object_boundary_failed':True}}))
+    raise SystemExit(1)
+"""
+    return json.loads(production.succeed("timeout 30 python3 -c " + shlex.quote(source), timeout=35))
+
+
+def negative_tls_hint(builder, cursor):
+    """Requires the recognized static hint without exporting child diagnostics."""
+    source = f"""
+import json,subprocess
+try:
+    result = subprocess.run(['journalctl','-u','crystal-forge-builder','--after-cursor={cursor}','--no-pager','-o','json'],capture_output=True,timeout=8)
+    assert result.returncode == 0
+    messages = [record.get('MESSAGE') for record in map(json.loads,result.stdout.splitlines())]
+    messages = [message if isinstance(message,str) else bytes(message).decode('utf-8',errors='replace') if isinstance(message,list) else '' for message in messages]
+    hint = 'Niks3 diagnostic hint: check certificate trust, validity, and hostname coverage for both the API and S3 endpoints.'
+    assert any(hint in message for message in messages), 'recognized TLS hint absent'
+    assert not any(marker in message for marker in ('X-Amz-Signature','X-Amz-Credential','-----BEGIN PRIVATE KEY-----') for message in messages), 'unsafe child diagnostics escaped'
+    print(json.dumps({{'tls_hint':True,'private_diagnostics_suppressed':True}}))
+except Exception:
+    print(json.dumps({{'tls_hint_proof_failed':True}}))
+    raise SystemExit(1)
+"""
+    return json.loads(builder.succeed("timeout 12 python3 -c " + shlex.quote(source), timeout=15))
 
 
 def basic_read_narinfo(machine, target):
@@ -905,7 +1191,7 @@ print(json.dumps({{'native_guard':True,'negative_cases':8,'signed_complete_closu
     print("Niks3 Basic native guard: " + json.dumps(proof, sort_keys=True) + "; guarded target requests=0; ordinary target requests=1; target authorization=false")
 
 
-def run_matrix(machines, targets, builder_public_key, credentials, negative_targets=None):
+def run_matrix(machines, targets, builder_public_key, credentials, negative_targets=None, onboarding_bundle=None):
     """Runs the original five plus the opt-in split-PKI variant and negatives."""
     server, builder, agent, cache = (machines[k] for k in ("server", "builder", "agent", "cache"))
     credentials = Path(credentials)
@@ -1181,6 +1467,7 @@ assert (pki / 'client-ca-c.crt').read_bytes().strip() not in system
             (commit_id,derivation_type,derivation_name,derivation_target,derivation_path,store_path,status_id,
              cf_agent_enabled,policy_requirements_met,scheduled_at)
             VALUES (%s,'nixos','agent','agent',%s,%s,5,true,true,NOW()) RETURNING id""", (commit_id, target["drv"], target["out"]))[0][0]
+        cursor = builder.succeed("journalctl -u crystal-forge-builder -n 0 --show-cursor --no-pager").strip().split("-- cursor: ")[-1]
         job_id = sql("INSERT INTO build_jobs(derivation_id,environment_id,status,queue_position,max_retries) VALUES (%s,%s,'queued',1000,0) RETURNING id", (derivation_id, environment_id))[0][0]
         fixture_jobs.append(str(job_id))
         fixture_derivations.append(derivation_id)
@@ -1192,6 +1479,8 @@ assert (pki / 'client-ca-c.crt').read_bytes().strip() not in system
         wait_row("SELECT status FROM build_jobs WHERE id=%s", (job_id,), lambda rows: rows and rows[0][0] in ("success", "failed"), variant + " CF job terminal", timeout=180)
         assert sql("SELECT dispatched_cache_destination_id FROM build_jobs WHERE id=%s", (job_id,))[0][0] == cache_id
         assert not sql("SELECT id FROM cache_push_jobs WHERE derivation_id=%s AND status='completed'", (derivation_id,)), variant + ": one-root trust fabricated publication"
+        hint = negative_tls_hint(builder, cursor)
+        print(f"Niks3 {variant}: safe TLS diagnostic " + json.dumps(hint, sort_keys=True))
         scans = sql("SELECT id::text,status FROM cve_scans WHERE derivation_id=%s", (derivation_id,))
         for scan_id, _ in scans:
             wait_row("SELECT status FROM cve_scans WHERE id=%s", (scan_id,), lambda rows: rows and rows[0][0] in ("completed", "failed", "cancelled"), variant + " scan terminal", timeout=120)
@@ -1201,6 +1490,9 @@ assert (pki / 'client-ca-c.crt').read_bytes().strip() not in system
 
     for variant, target in targets.items():
         split = variant == "mtls-split"
+        if split:
+            target = fresh_split_target(server, target)
+            targets[variant] = target
         signing_keys = [(pki / f"signing-{index}.pub").read_text().strip() for index in range(2)] if split else legacy_signing_keys
         published_name = f"z-published-{variant}"
         commit_id = sql("INSERT INTO commits(flake_id,git_commit_hash,commit_timestamp,evaluation_status) VALUES (%s,%s,NOW(),'complete') RETURNING id", (flake_id, hashlib.sha1(variant.encode()).hexdigest()))[0][0]
@@ -1214,7 +1506,9 @@ assert (pki / 'client-ca-c.crt').read_bytes().strip() not in system
         write_url = "https://push-cache.test:5754" if split else "https://cache:5751"
         write_cert = (pki / "write-client-1.crt").read_text() if split else pem("write.crt")
         write_key = (pki / "write-client-1.key").read_text() if split else pem("write.key")
-        write_ca = (pki / "server-roots-ab.pem").read_text() if split else pem("ca.crt")
+        # Seed incomplete server trust, then correct the SAME ID via Save before
+        # dispatch. This must not reuse an in-process pre-Save configuration.
+        write_ca = (pki / "server-ca-a.crt").read_text() if split else pem("ca.crt")
         cache_id = sql("""INSERT INTO cache_destinations
             (name,cache_type,enabled,push_to,niks3_server_url,niks3_public_keys,
              niks3_write_auth_mode,niks3_auth_token,niks3_write_client_cert,
@@ -1230,6 +1524,37 @@ assert (pki / 'client-ca-c.crt').read_bytes().strip() not in system
                  (pki / "basic-username").read_text() if split else None,
                  encrypt((pki / "basic-password").read_text()) if split else None))[0][0]
         sql("INSERT INTO cache_destination_environments(cache_destination_id,environment_id) VALUES (%s,%s)", (cache_id, environment_id))
+        if split:
+            baseline = sql("SELECT to_jsonb(c) FROM cache_destinations c WHERE id=%s", (cache_id,))[0][0]
+            scope_before = sql("SELECT * FROM cache_destination_environments WHERE cache_destination_id=%s ORDER BY environment_id", (cache_id,))
+            api_baseline = len(production_observations(production, "api"))
+            s3_baseline = len(production_observations(production, "s3"))
+            assert onboarding_bundle is not None, "onboarding CA fixture missing"
+            raw_onboarding = Path(onboarding_bundle).read_bytes()
+            expected_ca, expected_der_hashes = onboarding_ca_expectation(raw_onboarding)
+            expected_ca_digest = hashlib.sha256(expected_ca.encode()).hexdigest()
+            saved = save_split_ca(server, cache_id, expected_ca_digest, hashlib.sha256(raw_onboarding).hexdigest())
+            persisted = sql("SELECT to_jsonb(c) FROM cache_destinations c WHERE id=%s", (cache_id,))[0][0]
+            assert persisted["niks3_write_ca_cert"] == expected_ca
+            # Exact canonical equality covers every ordinary DER identity and
+            # its order. The Go/Rust gate separately proves raw AUX/label policy.
+            from cryptography import x509
+            from cryptography.hazmat.primitives.serialization import Encoding
+            assert [hashlib.sha256(cert.public_bytes(Encoding.DER)).hexdigest() for cert in
+                    x509.load_pem_x509_certificates(persisted["niks3_write_ca_cert"].encode())] == expected_der_hashes
+            assert hashlib.sha256(expected_ca.encode()).hexdigest() == saved["saved_ca_sha256"]
+            assert persisted["niks3_write_client_key"] == baseline["niks3_write_client_key"]
+            assert persisted["niks3_write_client_key"].startswith("enc:v1:")
+            assert {k: v for k, v in persisted.items() if k not in ("niks3_write_ca_cert", "updated_at")} == {
+                k: v for k, v in baseline.items() if k not in ("niks3_write_ca_cert", "updated_at")}
+            assert sql("SELECT * FROM cache_destination_environments WHERE cache_destination_id=%s ORDER BY environment_id", (cache_id,)) == scope_before
+            # The scoped Test adds only metadata GETs, never a write operation.
+            api_delta = production_observations(production, "api")[api_baseline:]
+            assert len(api_delta) == 2 and all(record["status"] == 200 for record in api_delta), "unexpected provider contact or metadata Test missing"
+            assert not any(record["post"] or record["put"] for record in api_delta)
+            assert not any(record["put"] or record["post"] for record in
+                           production_observations(production, "s3")[s3_baseline:])
+            print("Niks3 mtls-split: saved synthetic CA-only correction " + json.dumps(saved, sort_keys=True))
         derivation_id = sql("""INSERT INTO derivations
             (commit_id,derivation_type,derivation_name,derivation_target,derivation_path,
              store_path,status_id,cf_agent_enabled,policy_requirements_met,scheduled_at)
@@ -1241,6 +1566,11 @@ assert (pki / 'client-ca-c.crt').read_bytes().strip() not in system
         server.succeed(f"if test -e {shlex.quote(target['out'])}; then nix-store --delete {shlex.quote(target['out'])}; fi")
         server.fail(f"test -e {shlex.quote(target['out'])}")
         builder.fail(f"test -e {shlex.quote(target['out'])}")
+        if split:
+            object_before = split_object_boundary(production, target, before=True)
+            api_baseline = len(production_observations(production, "api"))
+            s3_baseline = len(production_observations(production, "s3"))
+            print("Niks3 mtls-split: pre-dispatch fresh object absence " + json.dumps(object_before, sort_keys=True))
         job_id = sql("INSERT INTO build_jobs(derivation_id,environment_id,status,queue_position,max_retries) VALUES (%s,%s,'queued',1000,0) RETURNING id", (derivation_id, environment_id))[0][0]
         fixture_jobs.append(str(job_id))
         fixture_derivations.append(derivation_id)
@@ -1250,7 +1580,7 @@ assert (pki / 'client-ca-c.crt').read_bytes().strip() not in system
             assert sql("SELECT niks3_read_basic_password LIKE 'enc:v1:%%' FROM cache_destinations WHERE id=%s", (cache_id,))[0][0]
             wait_row("SELECT cache_dispatch_recorded_at IS NOT NULL FROM build_jobs WHERE id=%s", (job_id,),
                      lambda rows: rows and rows[0][0], "split-PKI dispatch before bounded CLI observation")
-            projection = production_cli_projection(builder, pki / "server-roots-ab.pem")
+            projection = production_cli_projection(builder, expected_digest=saved["saved_ca_sha256"])
             print("Niks3 mtls-split: remote builder CLI protected mTLS/no-token/no-AWS proof " + json.dumps(projection, sort_keys=True))
         wait_row("SELECT status,builder_id FROM build_jobs WHERE id=%s", (job_id,),
                  lambda rows: rows and rows[0][0] in ("success", "failed"), f"{variant} remote completion")
@@ -1263,13 +1593,14 @@ assert (pki / 'client-ca-c.crt').read_bytes().strip() not in system
         if split:
             stored = sql("SELECT niks3_auth_token,niks3_write_client_key,s3_access_key_id,s3_secret_access_key,s3_session_token FROM cache_destinations WHERE id=%s", (cache_id,))[0]
             assert stored[0] is None and stored[1].startswith("enc:v1:") and all(value is None for value in stored[2:])
-            api_records = production_observations(production, "api")
+            object_after = split_object_boundary(production, target, before=False)
+            api_records = production_observations(production, "api")[api_baseline:]
             assert any(record["post"] and record["write_subject"] and record["client_certificate"] and 200 <= record["status"] < 300 for record in api_records)
             assert all(not record["authorization"] for record in api_records)
-            s3_records = production_observations(production, "s3")
+            s3_records = production_observations(production, "s3")[s3_baseline:]
             puts = [record for record in s3_records if record["put"] and not record["backend"] and 200 <= record["status"] < 300]
             assert puts and all(record["signature_validated"] and not record["authorization"] and not record["client_certificate"] for record in puts)
-            print("Niks3 mtls-split: exact CF publication; encrypted client key; no static S3 keys; API mTLS-only; direct HTTPS presigned S3 PUTs validated without auth header/client certificate")
+            print("Niks3 mtls-split: fresh exact-output CF publication " + json.dumps(object_after, sort_keys=True))
         print(f"Niks3 {variant}: remote completion, dispatch binding, and selected publication verified")
         snapshot(f"{variant}: publication completed", {"server": server})
         builder.succeed(f"test -e {shlex.quote(target['out'])}")
@@ -1280,6 +1611,10 @@ assert (pki / 'client-ca-c.crt').read_bytes().strip() not in system
         cert_args = "--cert /etc/niks3-fixtures/read.crt --key /etc/niks3-fixtures/read.key" if private else ""
         narinfo = basic_read_narinfo(agent, target) if split else agent.succeed(f"curl --fail --silent {cert_args} {read_url}/{nar_hash}.narinfo")
         if split:
+            # Correlate actual provider metadata with the pre-dispatch hash
+            # preflight. Do not emit NAR URLs, including unexpected signed URLs.
+            assert [line for line in narinfo.splitlines() if line.startswith("StorePath:")] == ["StorePath: " + target["out"]]
+            assert [line for line in narinfo.splitlines() if line.startswith("URL:")] == ["URL: " + target["nar_key"]]
             run_basic_read_guard(production, builder, target, signing_keys, narinfo)
         for public_key in signing_keys:
             assert f"Sig: {public_key.split(':')[0]}:" in narinfo

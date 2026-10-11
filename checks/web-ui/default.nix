@@ -198,8 +198,10 @@ let
       ensureUsers = [{name = "niks3-metrics"; ensureDBOwnership = true;}];
     };
     systemd.services.niks3-web-ui-db-owners = {
-      after = ["postgresql.service"];
-      requires = ["postgresql.service"];
+      # The server accepts connections before NixOS creates ensureDatabases and
+      # ensureUsers. Ownership changes require completed setup, including niks3.
+      after = ["postgresql.service" "postgresql-setup.service"];
+      requires = ["postgresql.service" "postgresql-setup.service"];
       serviceConfig = {Type = "oneshot"; RemainAfterExit = true; User = "postgres";};
       script = ''
         ${pkgs.postgresql}/bin/psql -v ON_ERROR_STOP=1 -d postgres -c 'ALTER DATABASE "niks3-web-ui-discovery" OWNER TO niks3'

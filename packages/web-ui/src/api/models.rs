@@ -6543,6 +6543,7 @@ pub struct CreateCacheDestination {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_write_client_key: Option<String>,
     /// Optional PEM write server trust anchor.
+    /// Preserves raw delimiter columns until server validation and normalization.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_write_ca_cert: Option<String>,
     /// Required Niks3 read mode: `none`, `basic` or `mtls`.
@@ -6554,6 +6555,7 @@ pub struct CreateCacheDestination {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_read_client_key: Option<String>,
     /// Optional PEM read server trust anchor.
+    /// Preserves raw delimiter columns until server validation and normalization.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_read_ca_cert: Option<String>,
     /// Supplies a replacement Basic read username only with its password.
@@ -6619,6 +6621,7 @@ pub struct UpdateCacheDestination {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_write_client_key: Option<String>,
     /// Replaces the write trust anchor; omission preserves it.
+    /// Must preserve raw text because trimming can change the Go root set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_write_ca_cert: Option<String>,
     /// Selects read mode; `none` clears the read identity atomically.
@@ -6630,6 +6633,7 @@ pub struct UpdateCacheDestination {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_read_client_key: Option<String>,
     /// Replaces the read trust anchor; omission preserves it.
+    /// Must preserve raw text because trimming can change the Go root set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_read_ca_cert: Option<String>,
     /// Explicitly clears the token; incompatible with a simultaneous replacement.
@@ -6685,7 +6689,8 @@ pub struct Niks3DiscoverRequest {
     /// Contains the draft private key for mTLS; GET never supplies it.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_write_client_key: Option<String>,
-    /// Contains an optional certificate-only server trust bundle.
+    /// Contains an optional raw server trust bundle for server-side validation.
+    /// Must preserve delimiter columns because trimming can change the root set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub niks3_write_ca_cert: Option<String>,
 }
@@ -6746,9 +6751,13 @@ pub struct CacheCredentialTestResult {
     pub ok: bool,
     /// Optional HTTP response code from the probe.
     pub status_code: Option<u16>,
-    /// Untrusted legacy prose; Attic presentation must use stage constants.
+    /// Untrusted legacy prose; presentation must use local diagnostic constants.
     pub message: String,
-    /// Legacy endpoint metadata; Attic presentation must not display this URL.
+    /// Optional diagnostic classification; unknown values have no display authority.
+    /// Missing codes preserve compatibility with older servers.
+    #[serde(default)]
+    pub diagnostic_code: Option<String>,
+    /// Untrusted endpoint metadata; probe presentation must not display this URL.
     pub tested_url: Option<String>,
     /// Identifies the typed probe; omission preserves older server compatibility.
     #[serde(default)]
@@ -6794,6 +6803,82 @@ pub struct CacheCredentialTestResult {
     /// Reports signing-key metadata validity, not artifact signature verification.
     #[serde(default)]
     pub signing_keys_valid: Option<bool>,
+}
+
+/// Returns local guidance for an exact allowlisted cache diagnostic code.
+///
+/// Codes are hints, not authentication or write-authorization evidence. Unknown,
+/// decorated, or differently cased codes return `None`. Server prose and URLs
+/// must never be used as a fallback.
+pub fn cache_diagnostic_message(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "ca_bundle_framing_invalid" => {
+            "Server CA bundle framing is invalid. Check the PEM begin and end markers."
+        }
+        "ca_certificate_invalid" => {
+            "Server CA bundle contains an invalid certificate. Check the certificate encoding."
+        }
+        "ca_bundle_content_unsupported" => {
+            "Server CA bundle contains unsupported content. Use supported certificate PEM blocks."
+        }
+        "ca_bundle_trust_ambiguous" => {
+            "Server CA bundle trust is ambiguous. Use an unambiguous certificate trust bundle."
+        }
+        "ca_bundle_empty" => {
+            "Server CA bundle contains no certificates. Supply a certificate bundle or select system trust."
+        }
+        "ca_bundle_too_large" => {
+            "Server CA bundle exceeds the supported size limit. Use a smaller certificate bundle."
+        }
+        "client_identity_invalid" => {
+            "Client identity is invalid. Check the client certificate and matching private key."
+        }
+        "client_certificate_invalid" => {
+            "Client certificate is invalid. Use a certificate-only chain with the leaf certificate first."
+        }
+        "client_private_key_invalid" => {
+            "Client private key is invalid. Use exactly one supported unencrypted PEM private key."
+        }
+        "client_identity_mismatch" => {
+            "Client identity does not match. The private key must match the first certificate in the client chain."
+        }
+        "tls_verification_failed" => {
+            "TLS verification failed. Check server certificate trust and the selected client identity."
+        }
+        "dns_or_connection_failed" => {
+            "DNS resolution or connection failed. Check the endpoint, DNS and connectivity."
+        }
+        "http_response_failed" => {
+            "The endpoint returned an unsuccessful HTTP response. Check endpoint access and proxy configuration."
+        }
+        "invalid_niks3_metadata" => {
+            "Niks3 metadata is invalid. Check the API endpoint and published cache configuration."
+        }
+        "target_policy_rejected" => {
+            "Target policy rejected the endpoint. Ask an administrator to review the permitted target policy."
+        }
+        "probe_timeout" => {
+            "The cache probe timed out. Check endpoint availability and connectivity, then retry."
+        }
+        "probe_failed" => CACHE_PROBE_FAILURE_MESSAGE,
+        _ => return None,
+    })
+}
+
+/// Contains generic local guidance when a cache probe has no recognized code.
+pub const CACHE_PROBE_FAILURE_MESSAGE: &str = "Test failed. Review the selected endpoint, identity, server trust and permitted target policy.";
+
+impl CacheCredentialTestResult {
+    /// Returns static failure guidance without displaying untrusted response prose.
+    ///
+    /// The caller must use the individual evidence fields for probe outcomes.
+    /// This message never establishes authentication or write authorization.
+    pub fn failure_message(&self) -> &'static str {
+        self.diagnostic_code
+            .as_deref()
+            .and_then(cache_diagnostic_message)
+            .unwrap_or(CACHE_PROBE_FAILURE_MESSAGE)
+    }
 }
 
 /// Contains public Niks3 discovery metadata; discovery does not save a cache.

@@ -10,6 +10,8 @@
   componentBuilder = packages.cf-builder-drv;
   publicBuilder = packages.builder;
   niks3 = packages.niks3;
+  # Keep the onboarding-format trust-set regression in this blocking CI gate.
+  caBundleCompatibility = inputs.self.checks.${system}.niks3-ca-bundle;
   moduleSystem = inputs.nixpkgs.lib.nixosSystem {
     inherit system;
     modules = [
@@ -250,12 +252,13 @@ in
   assert lib.elem niks3 moduleConfig.systemd.services.crystal-forge-server.path;
     pkgs.runCommand "crystal-forge-builder-evaluator-packaging" {
       nativeBuildInputs = [pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.jq pkgs.bash];
-      passthru = {inherit moduleValidation;};
+      passthru = {inherit moduleValidation caBundleCompatibility;};
     } ''
       export HOME="$TMPDIR/home"
       export XDG_CACHE_HOME="$TMPDIR/cache"
       mkdir -p "$HOME" "$XDG_CACHE_HOME"
       test -f ${moduleValidation}/assertions.json
+      test -s ${caBundleCompatibility}/cf-report.json
 
       component_wrapper=${componentBuilder}/bin/builder
       public_wrapper=${publicBuilder}/bin/builder

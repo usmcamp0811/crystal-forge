@@ -56,6 +56,9 @@ pub async fn get_cache_destination_by_name(
 }
 
 fn decrypt_destination_secrets(mut destination: CacheDestination) -> Result<CacheDestination> {
+    // COMPATIBILITY: Recognized legacy CA annotations are projected in memory.
+    // Never rewrite stored roots, ciphertext, or timestamps during GET/probes.
+    destination.normalize_ca_fields()?;
     // SECURITY: Legacy or directly written certificate fields can contain private
     // PEM material. Fail closed before returning plaintext fields to API callers.
     destination
@@ -167,6 +170,8 @@ pub async fn create_cache_destination(
     pool: &PgPool,
     create: &CreateCacheDestination,
 ) -> Result<CacheDestination> {
+    let mut create = create.clone();
+    create.normalize_ca_fields()?;
     // Validate before inserting
     create.validate().map_err(|e| anyhow::anyhow!(e))?;
 
@@ -268,6 +273,8 @@ pub async fn create_cache_destination(
 /// validation. Concurrent updates serialize on the destination row lock.
 /// URL writes use [`effective_update`], preserving same-type sanitized round
 /// trips and removing inherited URI authentication on type conversions.
+/// Unchanged Niks3 secrets retain their exact stored bytes, including when CA
+/// settings change or a replacement supplies the same plaintext value.
 ///
 /// # Errors
 /// Returns an error for invalid resulting settings, encryption, or DB failure.
@@ -285,12 +292,16 @@ pub async fn update_cache_destination(
     .bind(id)
     .fetch_optional(&mut *tx)
     .await?;
-    let stored_basic_password = current
-        .as_ref()
-        .and_then(|row| row.niks3_read_basic_password.clone());
-    let Some(current) = current.map(decrypt_destination_secrets).transpose()? else {
+    let Some(current) = current else {
         return Ok(None);
     };
+    let (stored_token, stored_write_key, stored_read_key, stored_basic_password) = (
+        current.niks3_auth_token.clone(),
+        current.niks3_write_client_key.clone(),
+        current.niks3_read_client_key.clone(),
+        current.niks3_read_basic_password.clone(),
+    );
+    let current = decrypt_destination_secrets(current)?;
 
     let niks3 = effective_update(&current, update)
         .map_err(|_| anyhow::anyhow!("Invalid effective cache configuration"))?;
@@ -566,17 +577,23 @@ pub async fn update_cache_destination(
                 .bind(&niks3.niks3_server_url)
                 .bind(&niks3.niks3_public_keys)
                 .bind(&niks3.niks3_write_auth_mode)
-                .bind(cache_secrets::encrypt_optional(
+                .bind(retain_or_encrypt_niks3_secret(
+                    stored_token,
+                    current.niks3_auth_token.as_deref(),
                     niks3.niks3_auth_token.as_deref(),
                 )?)
                 .bind(&niks3.niks3_write_client_cert)
-                .bind(cache_secrets::encrypt_optional(
+                .bind(retain_or_encrypt_niks3_secret(
+                    stored_write_key,
+                    current.niks3_write_client_key.as_deref(),
                     niks3.niks3_write_client_key.as_deref(),
                 )?)
                 .bind(&niks3.niks3_write_ca_cert)
                 .bind(&niks3.niks3_read_auth_mode)
                 .bind(&niks3.niks3_read_client_cert)
-                .bind(cache_secrets::encrypt_optional(
+                .bind(retain_or_encrypt_niks3_secret(
+                    stored_read_key,
+                    current.niks3_read_client_key.as_deref(),
                     niks3.niks3_read_client_key.as_deref(),
                 )?)
                 .bind(&niks3.niks3_read_ca_cert)
@@ -619,6 +636,23 @@ pub async fn update_cache_destination(
     }
 
     Ok(destination)
+}
+
+// CONCURRENCY: The caller holds the destination row lock across decryption,
+// merge, and persistence. CA-only writes must retain unchanged credential bytes,
+// including legacy plaintext, rather than rotate their authenticated envelopes.
+// Compare plaintext only; the original stored value remains opaque. Effective
+// mode/type clears still become NULL, and changed secrets use normal encryption.
+fn retain_or_encrypt_niks3_secret(
+    stored: Option<String>,
+    current: Option<&str>,
+    effective: Option<&str>,
+) -> Result<Option<String>> {
+    if effective == current {
+        Ok(stored)
+    } else {
+        cache_secrets::encrypt_optional(effective)
+    }
 }
 
 #[cfg(test)]
@@ -708,7 +742,7 @@ pub(crate) fn effective_update_unvalidated(
     }
     let current = &source;
     let niks3 = current.merge_niks3_update(update)?;
-    let merged = CreateCacheDestination {
+    let mut merged = CreateCacheDestination {
         name: update.name.clone().unwrap_or_else(|| current.name.clone()),
         cache_type: update
             .cache_type
@@ -791,6 +825,9 @@ pub(crate) fn effective_update_unvalidated(
         niks3_read_basic_password: niks3.niks3_read_basic_password,
     };
 
+    merged
+        .normalize_ca_fields()
+        .map_err(|error| error.to_string())?;
     Ok(merged)
 }
 
@@ -1078,6 +1115,112 @@ mod tests {
     use super::*;
     use crate::security::cache_secrets::TEST_CERTIFICATE;
     use chrono::Utc;
+
+    #[test]
+    fn retained_niks3_secrets_preserve_exact_opaque_storage() {
+        for stored in [
+            "enc:v1:AAAAAAAAAAAAAAAA.AQIDBA==",
+            "legacy plaintext with surrounding spaces ",
+            "enc:v1:legacy-plaintext-not-an-envelope",
+        ] {
+            assert_eq!(
+                retain_or_encrypt_niks3_secret(
+                    Some(stored.into()),
+                    Some("unchanged-effective-secret"),
+                    Some("unchanged-effective-secret"),
+                )
+                .unwrap()
+                .as_deref(),
+                Some(stored),
+            );
+        }
+        assert_eq!(
+            retain_or_encrypt_niks3_secret(None, None, None).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn effective_niks3_secret_clears_discard_original_storage() {
+        assert_eq!(
+            retain_or_encrypt_niks3_secret(
+                Some("enc:v1:AAAAAAAAAAAAAAAA.AQIDBA==".into()),
+                Some("old-secret"),
+                None,
+            )
+            .unwrap(),
+            None,
+        );
+    }
+
+    #[test]
+    fn ca_updates_retain_all_niks3_secret_storage_and_inactive_fields() {
+        for current in [
+            niks3_destination(),
+            CacheDestination {
+                niks3_write_auth_mode: Some("mtls".into()),
+                niks3_auth_token: None,
+                niks3_write_client_cert: Some(TEST_CERTIFICATE.into()),
+                niks3_write_client_key: Some("write-key".into()),
+                niks3_write_ca_cert: Some(TEST_CERTIFICATE.into()),
+                ..niks3_destination()
+            },
+        ] {
+            for update in [
+                UpdateCacheDestination {
+                    niks3_read_ca_cert: Some(format!("{TEST_CERTIFICATE}{TEST_CERTIFICATE}")),
+                    ..empty_update()
+                },
+                UpdateCacheDestination {
+                    clear_niks3_write_ca_cert: true,
+                    clear_niks3_read_ca_cert: true,
+                    ..empty_update()
+                },
+                UpdateCacheDestination {
+                    niks3_auth_token: current.niks3_auth_token.clone(),
+                    niks3_write_client_key: current.niks3_write_client_key.clone(),
+                    niks3_read_client_key: current.niks3_read_client_key.clone(),
+                    ..empty_update()
+                },
+            ] {
+                let effective = effective_update(&current, &update).unwrap();
+                assert_eq!(
+                    effective.niks3_read_client_cert,
+                    current.niks3_read_client_cert
+                );
+                assert_eq!(effective.niks3_read_auth_mode, current.niks3_read_auth_mode);
+                assert_eq!(effective.s3_access_key_id, current.s3_access_key_id);
+                assert_eq!(effective.s3_secret_access_key, current.s3_secret_access_key);
+                assert_eq!(
+                    effective.niks3_write_client_cert,
+                    current.niks3_write_client_cert
+                );
+                for (prior, merged, stored) in [
+                    (
+                        current.niks3_auth_token.as_deref(),
+                        effective.niks3_auth_token.as_deref(),
+                        "enc:v1:AAAAAAAAAAAAAAAA.AQIDBA==",
+                    ),
+                    (
+                        current.niks3_write_client_key.as_deref(),
+                        effective.niks3_write_client_key.as_deref(),
+                        "enc:v1:AQEBAQEBAQEBAQEB.BQYHCA==",
+                    ),
+                    (
+                        current.niks3_read_client_key.as_deref(),
+                        effective.niks3_read_client_key.as_deref(),
+                        "legacy-read-key-bytes",
+                    ),
+                ] {
+                    let stored = prior.map(|_| stored.to_owned());
+                    assert_eq!(
+                        retain_or_encrypt_niks3_secret(stored.clone(), prior, merged).unwrap(),
+                        stored,
+                    );
+                }
+            }
+        }
+    }
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires isolated test database creation privileges"]

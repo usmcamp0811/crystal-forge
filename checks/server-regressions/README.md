@@ -51,6 +51,14 @@ is meant to be consumed as a package.
   delivery, retryable history and bridge requests, and configuration/assignment/
   deletion races before claim locks. Assigned gates cannot downgrade to an
   evidenced global source.
+- Niks3 CA loading projects recognized legacy bundles to ordinary certificate
+  roots in memory. Create and CA-only Save persist canonical roots without
+  changing retained private-key ciphertext. GET, Test, and Cancel preserve the
+  raw row and assignments. Client chains remain certificate-only, and a
+  mismatched write identity fails before DNS. Static field-scoped diagnostics
+  never include submitted material or upstream response text. Custom write-root
+  policy skips built-in and ambient CA files; the native Niks3 VM check remains
+  the authoritative end-to-end TLS and publication proof.
 
 ## Why it is a separate check
 
@@ -65,7 +73,7 @@ environment-specific ignored tests that do not belong in this gate.
 
 ## TASK-470 selected library tests
 
-The following 50 ignored PostgreSQL tests run with
+The following 51 ignored PostgreSQL tests run with
 `--ignored --exact --test-threads=1`. Each invocation must report exactly one
 passed test and zero ignored tests. The tests include completed CVE publication
 provenance and malformed signing-key rejection across all Niks3 auth modes.
@@ -83,6 +91,7 @@ handlers::api::caches::basic_read_tests::niks3_basic_get_save_test_cancel_modes_
 queries::cache_publication_reads::tests::niks3_basic_publication_withholds_old_capabilities_and_insecure_delivery
 handlers::api::caches::discovery_tests::niks3_stored_discovery_retains_replaces_clears_modes_without_persistence
 handlers::api::caches::discovery_tests::niks3_stored_discovery_auth_invalid_json_type_tls_and_csrf_fail_without_mutation
+handlers::api::caches::niks3_ca_tests::canonical_ca_get_test_cancel_and_ca_only_save_preserve_ciphertext
 handlers::api::caches::retained_probe_tests::attic_named_cache_retained_replacement_results_and_policy_preserve_raw_state
 handlers::api::caches::retained_probe_tests::legacy_attic_plaintext_and_historical_ciphertext_retain_on_test_and_save
 handlers::api::caches::retained_probe_tests::legacy_attic_null_and_empty_token_refuse_before_probe_without_mutation
@@ -277,7 +286,7 @@ overall deadline, configured-authority requests without authorization headers,
 explicit null fields, and `Cache-Control: no-store`. These unit tests do not prove
 native-provider acceptance or represent real account/storage measurements.
 
-These 36 non-ignored tests run with `--exact --test-threads=1`:
+These 44 non-ignored tests run with `--exact --test-threads=1`:
 
 ```text
 queries::commits::partial_resource_failure_tests::partial_failure_diagnostic_uses_proven_counts_not_checkpoint_guesses
@@ -302,6 +311,14 @@ handlers::api::caches::discovery_tests::niks3_discovery_projects_only_write_mtls
 handlers::api::caches::discovery_tests::niks3_discovery_rejects_invalid_bundles_and_queries_before_network
 handlers::api::caches::discovery_tests::niks3_discovery_admin_first_and_public_response_redact_tls_material
 security::cache_secrets::tests::certificate_bundle_regressions_reject_interleaved_comments_and_noncert_blocks
+handlers::api::caches::niks3_ca_tests::ca_normalization_keeps_roots_separate_from_strict_client_chains
+handlers::api::caches::niks3_ca_tests::ca_diagnostics_are_typed_static_and_field_scoped
+handlers::api::caches::niks3_ca_tests::mismatched_write_identity_fails_before_dns_and_never_proves_auth
+handlers::api::caches::niks3_ca_tests::custom_write_roots_skip_ambient_trust_and_validate_every_root
+handlers::api::caches::niks3_ca_tests::transport_diagnostics_use_local_causes_not_url_or_body_text
+queries::cache_destinations::tests::retained_niks3_secrets_preserve_exact_opaque_storage
+queries::cache_destinations::tests::effective_niks3_secret_clears_discard_original_storage
+queries::cache_destinations::tests::ca_updates_retain_all_niks3_secret_storage_and_inactive_fields
 handlers::api::builders::tests::attic_requisite_env_uses_shared_server_base
 handlers::api::caches::retained_probe_tests::attic_canonical_api_and_model_read_roots_share_named_cache
 handlers::api::caches::retained_probe_tests::attic_native_metadata_and_status_matrix_never_claims_root_or_write_success
@@ -342,7 +359,7 @@ its matching `END` identifies the active target and whether Cargo was compiling
 or executing. The library also has an explicit compilation boundary before its
 selected tests execute. Cargo's normal output reports executed test names.
 
-Each of the 50 ignored and 36 non-ignored TASK-470 tests emits its qualified name,
+Each of the 51 ignored and 44 non-ignored TASK-470 tests emits its qualified name,
 mode, start time, exit status, and elapsed time. Cargo stdout and stderr still
 pass through `tee` to the exact-test guard. `pipefail` preserves failures from
 Cargo or `tee`; success still requires the named `... ok` line and the existing

@@ -109,7 +109,8 @@ impl PreparedNiks3Push {
     /// # Errors
     /// Returns a credential-free error for an invalid URL, empty credential,
     /// non-canonical store path, or failure to create protected temporary files.
-    /// PEM validity and remote authorization are checked by the consuming CLI.
+    /// CA bundles are validated and normalized before writing. Client identity
+    /// validity and remote authorization are checked by the consuming CLI.
     ///
     /// # Examples
     /// ```no_run
@@ -162,7 +163,8 @@ impl PreparedNiks3Push {
                     path_string(&key)?,
                 ]);
                 if let Some(ca) = ca_certificate {
-                    let path = protected_file(&credentials, "ca.pem", ca)?;
+                    let ca = crate::ca_bundle::normalize_ca_bundle(ca)?;
+                    let path = protected_file(&credentials, "ca.pem", &ca)?;
                     args.extend(["--ca-cert".into(), path_string(&path)?]);
                 }
             }
@@ -221,7 +223,8 @@ impl PreparedCacheRead {
     /// Returns a credential-free error for invalid URLs, insecure authenticated
     /// transport, invalid key entries, empty credentials, or temporary-file I/O.
     /// Basic fails closed before creating files; use [`Self::new_with_nix_features`]
-    /// after probing the runtime. PEM and signing-key validity are checked by Nix.
+    /// after probing the runtime. CA bundles are validated and normalized here;
+    /// client identity and signing-key validity are checked by Nix.
     ///
     /// # Examples
     /// ```
@@ -250,7 +253,8 @@ impl PreparedCacheRead {
     /// # Errors
     /// Returns static errors for unavailable native protection, invalid URL or
     /// keys, empty credentials, control characters, a colon in the login name,
-    /// or protected temporary-file I/O failure. No credentials are written when
+    /// invalid CA bundles, or protected temporary-file I/O failure.
+    /// No credentials are written when
     /// runtime protection is absent or Basic input validation fails.
     ///
     /// # Examples
@@ -336,7 +340,8 @@ impl PreparedCacheRead {
                     .append_pair("tls-certificate", &path_string(&cert)?)
                     .append_pair("tls-private-key", &path_string(&key)?);
                 if let Some(ca) = ca_certificate {
-                    ca_certificate_path = Some(protected_file(&directory, "ca.pem", ca)?);
+                    let ca = crate::ca_bundle::normalize_ca_bundle(ca)?;
+                    ca_certificate_path = Some(protected_file(&directory, "ca.pem", &ca)?);
                 }
                 Some(directory)
             }
@@ -488,7 +493,10 @@ mod tests {
 
     const CERT: &str = "unique-client-certificate";
     const KEY: &str = "unique-private-key";
-    const CA: &str = "unique-ca-certificate";
+    fn ca() -> &'static str {
+        static CA: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+        CA.get_or_init(crate::ca_bundle::test_certificate)
+    }
     const TOKEN: &str = "unique-secret-token";
     const STORE: &str = "/nix/store/abc-output";
 
@@ -715,7 +723,7 @@ mod tests {
         Niks3WriteAuth::Mtls {
             client_certificate: CERT.into(),
             client_private_key: KEY.into(),
-            ca_certificate: ca.then(|| CA.into()),
+            ca_certificate: ca.then(|| self::ca().into()),
         }
     }
 
@@ -723,7 +731,7 @@ mod tests {
         CacheReadAuth::Mtls {
             client_certificate: CERT.into(),
             client_private_key: KEY.into(),
-            ca_certificate: ca.then(|| CA.into()),
+            ca_certificate: ca.then(|| self::ca().into()),
         }
     }
 
@@ -799,10 +807,10 @@ mod tests {
             assert_eq!(push.args[3..5], ["--max-concurrent-uploads", "1"]);
             assert_eq!(push.args.iter().any(|arg| arg == "--ca-cert"), with_ca);
             if with_ca {
-                assert_protected(&flag_path(&push, "--ca-cert"), CA);
+                assert_protected(&flag_path(&push, "--ca-cert"), ca());
             }
             let diagnostics = format!("{push:?} {:?}", push.args);
-            for secret in [CERT, KEY, CA] {
+            for secret in [CERT, KEY, ca()] {
                 assert!(!diagnostics.contains(secret));
             }
             let directory = cert.parent().unwrap().to_owned();
@@ -831,10 +839,10 @@ mod tests {
             assert!(read.url.contains("tls-private-key=%2F"));
             assert_eq!(read.ca_certificate_path.is_some(), with_ca);
             if let Some(ca) = &read.ca_certificate_path {
-                assert_protected(ca, CA);
+                assert_protected(ca, self::ca());
                 assert!(!read.url.contains("ca.pem"));
             }
-            for secret in [CERT, KEY, CA] {
+            for secret in [CERT, KEY, ca()] {
                 assert!(!read.url.contains(secret));
                 assert!(!format!("{read:?}").contains(secret));
             }
@@ -947,5 +955,44 @@ mod tests {
         let root = directory.path().to_owned();
         drop(directory);
         assert!(!root.exists());
+    }
+
+    #[test]
+    fn push_and_read_ca_files_preserve_all_explicit_roots_and_reject_unknown_bytes() {
+        let other = crate::ca_bundle::test_certificate();
+        let expected = format!("{}{other}", ca());
+        let input =
+            format!("# explicit private API and public S3 roots\n{expected}").replace('\n', "\r\n");
+        let write = Niks3WriteAuth::Mtls {
+            client_certificate: CERT.into(),
+            client_private_key: KEY.into(),
+            ca_certificate: Some(input.clone()),
+        };
+        let push = PreparedNiks3Push::new("https://write.example", &write, 1, STORE).unwrap();
+        assert_protected(&flag_path(&push, "--ca-cert"), &expected);
+        let read = CacheReadAuth::Mtls {
+            client_certificate: CERT.into(),
+            client_private_key: KEY.into(),
+            ca_certificate: Some(input),
+        };
+        let prepared = PreparedCacheRead::new("https://read.example", &[], &read).unwrap();
+        assert_protected(prepared.ca_certificate_path.as_ref().unwrap(), &expected);
+        for invalid in ["".to_owned(), format!("{}unexplained private data", ca())] {
+            let write = Niks3WriteAuth::Mtls {
+                client_certificate: CERT.into(),
+                client_private_key: KEY.into(),
+                ca_certificate: Some(invalid.clone()),
+            };
+            let error =
+                PreparedNiks3Push::new("https://write.example", &write, 1, STORE).unwrap_err();
+            assert!(error.to_string().starts_with("ca_"));
+            assert!(!format!("{error:?}").contains("unexplained private data"));
+            let read = CacheReadAuth::Mtls {
+                client_certificate: CERT.into(),
+                client_private_key: KEY.into(),
+                ca_certificate: Some(invalid),
+            };
+            assert!(PreparedCacheRead::new("https://read.example", &[], &read).is_err());
+        }
     }
 }

@@ -18,7 +18,8 @@ pub struct CacheDestinationEnvironment {
 /// Debug omits all credentials. Attic/S3 configured flags describe only the active
 /// cache type and must be refreshed from decrypted fields before redaction.
 /// Niks3 requires HTTPS URLs, nonempty signing keys, and complete selected auth.
-/// Client certificates and CA bundles contain only X.509 certificate PEM blocks.
+/// Client chains contain only X.509 certificate PEM blocks. CA fields are
+/// normalized to ordinary certificate-only server trust before API delivery.
 /// Custom CA bundles are supported only for mTLS modes, not token/public modes.
 /// Niks3 URLs follow the prepared read helper's credential-query policy. Tokens
 /// and TLS credentials must use dedicated fields, not URL query parameters.
@@ -298,6 +299,16 @@ pub struct UpdateCacheDestination {
 }
 
 impl CreateCacheDestination {
+    /// Normalizes supplied CA fields without changing identity or auth modes.
+    ///
+    /// Callers persist this canonical form on Save. Probe callers keep the
+    /// result in memory; normalization does not prove remote access.
+    ///
+    /// # Errors
+    /// Returns a typed CA error with a static field context.
+    pub(crate) fn normalize_ca_fields(&mut self) -> anyhow::Result<()> {
+        normalize_ca_fields(&mut self.niks3_write_ca_cert, &mut self.niks3_read_ca_cert)
+    }
     /// Validates only the selected Niks3 probe plane without admitting a Save.
     ///
     /// Write metadata needs no read URL or signing keys and cannot prove token
@@ -719,11 +730,51 @@ pub(crate) const LEGACY_QUERY_CREDENTIALS_TEST_ERROR: &str = "Credential-query c
 fn validate_certificate_fields(fields: &[(&str, Option<&str>)]) -> Result<(), String> {
     for (field, value) in fields {
         if let Some(value) = value {
-            crate::security::cache_secrets::validate_certificate_bundle(value)
-                .map_err(|_| format!("{field} requires a certificate-only PEM bundle"))?;
+            if matches!(*field, "niks3_write_ca_cert" | "niks3_read_ca_cert") {
+                crate::security::cache_secrets::normalize_ca_bundle(value)
+                    .map_err(|error| format!("{field}: {error}"))?;
+            } else {
+                crate::security::cache_secrets::validate_certificate_bundle(value)
+                    .map_err(|_| format!("{field} requires a certificate-only PEM bundle"))?;
+            }
         }
     }
     Ok(())
+}
+
+// SECURITY: Normalize every supplied CA, including inactive fields. Unsupported
+// records must not survive plaintext persistence or API serialization. Compute
+// both replacements before mutating the model so a failure leaves it unchanged.
+// Preserve the original CA text until parsing; trimming the first delimiter can
+// promote an indented certificate that Go's PEM decoder would ignore.
+fn normalize_ca_fields(
+    write: &mut Option<String>,
+    read: &mut Option<String>,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let canonical_write = write
+        .as_deref()
+        .map(crate::security::cache_secrets::normalize_ca_bundle)
+        .transpose()
+        .context("niks3_write_ca_cert")?;
+    let canonical_read = read
+        .as_deref()
+        .map(crate::security::cache_secrets::normalize_ca_bundle)
+        .transpose()
+        .context("niks3_read_ca_cert")?;
+    *write = canonical_write;
+    *read = canonical_read;
+    Ok(())
+}
+
+impl UpdateCacheDestination {
+    /// Normalizes explicit CA replacements while preserving omissions and clears.
+    ///
+    /// # Errors
+    /// Returns a typed CA error with a static field context.
+    pub(crate) fn normalize_ca_fields(&mut self) -> anyhow::Result<()> {
+        normalize_ca_fields(&mut self.niks3_write_ca_cert, &mut self.niks3_read_ca_cert)
+    }
 }
 
 fn validate_write_auth(
@@ -801,6 +852,16 @@ fn validate_read_auth(
 }
 
 impl CacheDestination {
+    /// Normalizes stored CA fields in memory before validation or API delivery.
+    ///
+    /// This compatibility projection MUST NOT rewrite the database on reads.
+    /// Client certificate chains retain their strict certificate-only contract.
+    ///
+    /// # Errors
+    /// Returns a typed CA error with a static field context.
+    pub(crate) fn normalize_ca_fields(&mut self) -> anyhow::Result<()> {
+        normalize_ca_fields(&mut self.niks3_write_ca_cert, &mut self.niks3_read_ca_cert)
+    }
     /// Rejects unsafe certificate fields before a stored model reaches an API.
     ///
     /// # Errors
@@ -978,6 +1039,8 @@ impl CacheDestination {
     }
 
     /// Returns decrypted write authentication for a Niks3 destination.
+    /// CA output is canonical ordinary-certificate trust. Normalization does
+    /// not add trusted-only records or validate client-key pairing.
     ///
     /// # Errors
     /// Returns an error for a different cache type or invalid write credentials.
@@ -1019,12 +1082,19 @@ impl CacheDestination {
                     .niks3_write_client_key
                     .clone()
                     .ok_or("Missing write key")?,
-                ca_certificate: self.niks3_write_ca_cert.clone(),
+                ca_certificate: self
+                    .niks3_write_ca_cert
+                    .as_deref()
+                    .map(crate::security::cache_secrets::normalize_ca_bundle)
+                    .transpose()
+                    .map_err(|error| error.to_string())?,
             }),
         }
     }
 
     /// Returns the read URL, trusted signing keys, and decrypted read auth.
+    /// Niks3 CA output is canonical ordinary-certificate trust. Client identity
+    /// and remote authorization remain transport checks.
     ///
     /// Supports Niks3 and existing public cache types. Niks3's write token is
     /// never included. Callers must enforce confidential credential transport.
@@ -1128,7 +1198,12 @@ impl CacheDestination {
                     .niks3_read_client_key
                     .clone()
                     .ok_or("Missing read key")?,
-                ca_certificate: self.niks3_read_ca_cert.clone(),
+                ca_certificate: self
+                    .niks3_read_ca_cert
+                    .as_deref()
+                    .map(crate::security::cache_secrets::normalize_ca_bundle)
+                    .transpose()
+                    .map_err(|error| error.to_string())?,
             }
         } else {
             cf_protocol::cache::CacheReadAuth::None

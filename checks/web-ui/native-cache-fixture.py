@@ -982,9 +982,13 @@ def checkpoints():
             row = json.loads(result.stdout)
             assert row["name"].startswith("task470-native-basic-ui-") and row["cache_type"] == "Niks3"
             assert row["niks3_read_auth_mode"] == "basic" and row["niks3_write_auth_mode"] == "mtls"
-            assert row["push_to"] == "https://read-cache.test:5757" and "@" not in row["push_to"]
-            assert all(row[field].startswith("enc:v1:") for field in ("niks3_read_basic_username", "niks3_read_basic_password", "niks3_write_client_key")), \
-                "UI Save must encrypt both Basic fields and the write private key"
+            # Discovery supplies Rust's canonical root URL. Keep exact authority,
+            # path and userinfo checks when validating the UI-created row.
+            assert row["push_to"] == "https://read-cache.test:5757/" and "@" not in row["push_to"]
+            assert row["niks3_read_basic_username"] == fixture["production_basic"]["username"], \
+                "UI Save must preserve the complete server-only Basic username"
+            assert all(row[field].startswith("enc:v1:") for field in ("niks3_read_basic_password", "niks3_write_client_key")), \
+                "UI Save must encrypt the Basic password and the write private key"
             basic_baseline = snapshot(basic_id)
             fixture["production_basic"]["id"] = basic_id
             protected_replace(FIXTURE, fixture)

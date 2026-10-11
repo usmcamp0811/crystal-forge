@@ -22,7 +22,7 @@ async fn json(response: axum::response::Response) -> serde_json::Value {
     serde_json::from_slice(&body).unwrap()
 }
 
-fn identity() -> (String, String) {
+pub(super) fn identity() -> (String, String) {
     // Runtime-only synthetic private keys are never committed, printed, or sent
     // to a provider. Existing OpenSSL tooling generates an actual matching pair.
     let directory = tempfile::tempdir().unwrap();
@@ -115,7 +115,6 @@ async fn niks3_discovery_rejects_invalid_bundles_and_queries_before_network() {
     for bad in [
         "".to_owned(),
         "arbitrary text".into(),
-        format!("{cert}\n# comment\n{TEST_CERTIFICATE}"),
         format!("{cert}\n{key}"),
         "-----BEGIN CERTIFICATE-----\nAQID\n-----END CERTIFICATE-----".into(),
     ] {
@@ -131,11 +130,35 @@ async fn niks3_discovery_rejects_invalid_bundles_and_queries_before_network() {
                 niks3_write_ca_cert: ca.map(str::to_string),
             };
             let error = discover_niks3(&request, false).await.unwrap_err();
-            assert!(error.contains("certificate-only PEM"));
+            assert!(matches!(
+                error.as_str(),
+                "client_certificate_invalid"
+                    | "ca_bundle_empty"
+                    | "ca_bundle_content_unsupported"
+                    | "ca_certificate_invalid"
+            ));
             assert!(!error.contains(&bad) || bad.is_empty());
             assert!(!error.contains("BEGIN"));
         }
     }
+    assert!(
+        niks3_write_transport(
+            Some("mtls"),
+            Some(&cert),
+            Some(&key),
+            Some(&format!("# CA comment\n{TEST_CERTIFICATE}"))
+        )
+        .is_ok()
+    );
+    assert!(
+        niks3_write_transport(
+            Some("mtls"),
+            Some(&format!("{cert}\n# client comment")),
+            Some(&key),
+            None
+        )
+        .is_err()
+    );
     for (mode, client_cert, client_key, ca) in [
         (Some("mtls"), Some(cert.as_str()), None, None),
         (Some("mtls"), None, Some(key.as_str()), None),

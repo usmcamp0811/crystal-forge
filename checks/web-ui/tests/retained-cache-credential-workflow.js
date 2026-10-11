@@ -1,4 +1,5 @@
-/** TASK-470 native stored-ID tests. All cache API requests remain unmocked.
+/** TASK-470 native stored-ID tests. Native credential proofs use real cache APIs.
+ * Explicit diagnostic-spoof responses test display suppression only.
  * CF_CACHE_CREDENTIAL_FIXTURE is the owner-managed mode-0600 runtime JSON.
  * Request native rows at entry to this workflow, then wait for seed_complete.
  * Runtime credentials are used only in password-masked replacement dialogs and
@@ -221,11 +222,11 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
         assert(patch[field] == null, "retained Discovery resolves stored write identity on the server");
     } else if (replacement) {
       assert(patch.niks3_write_client_key === source.replacement_write_client_key.trim(), "replacement Discovery uses only the confirmed write key");
-      assert.equal(patch.niks3_write_ca_cert, source.server_ca_bundle.trim());
+      assert(patch.niks3_write_ca_cert === source.server_ca_bundle, "replacement Discovery preserves raw CA text");
     } else if (id == null) {
       assert.equal(patch.server_url, source.server_url);
       assert.equal(patch.niks3_write_auth_mode, "mtls", "unsaved Discovery explicitly selects write mTLS");
-      assert.equal(patch.niks3_write_ca_cert, source.server_ca_bundle.trim(), "unsaved Discovery includes server roots A+B");
+      assert(patch.niks3_write_ca_cert === source.server_ca_bundle, "unsaved Discovery preserves raw server roots A+B");
       assert(patch.niks3_write_client_key === (reject ? source.wrong_client_key : source.write_client_key).trim(), "unsaved Discovery includes only its explicit write draft");
     }
     if (reject) {
@@ -234,13 +235,13 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
     } else {
       assert.equal(response.status(), 200, "real native Discovery HTTP status");
       const reply = await response.json();
-      assert.equal(new URL(reply.server_url).href.replace(/\/$/, ""), new URL(source.server_url).href.replace(/\/$/, ""));
-      assert.equal(reply.substituter_url, source.substituter_url);
+      assert.equal(reply.server_url, new URL(source.server_url).href);
+      assert.equal(reply.substituter_url, new URL(source.substituter_url).href);
       assert.deepEqual(reply.public_keys, source.public_keys);
       assert(reply.write_auth_valid == null, "Discovery cannot prove write authorization");
       await expect(outer).toContainText("Discovery successful");
       await outer.getByRole("button", { name: "Read / Pull", exact: true }).click();
-      await expect(outer.getByLabel("Read / substituter URL", { exact: true })).toHaveValue(source.substituter_url);
+      await expect.poll(async () => new URL(await outer.getByLabel("Read / substituter URL", { exact: true }).inputValue()).href).toBe(new URL(source.substituter_url).href);
       await outer.getByRole("button", { name: "Trust", exact: true }).click();
       assert.deepEqual(await outer.getByRole("textbox", { name: /^Signing public key / }).evaluateAll(nodes => nodes.map(node => node.value)), source.public_keys);
       await outer.getByRole("button", { name: "Write / API", exact: true }).click();
@@ -257,6 +258,126 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       await expect(outer).toBeHidden();
     }
     await checkpoint("discovery-cancel", discoveryRows());
+  };
+  const diagnosticWorkflow = async () => {
+    const source = fixture.production_write_mtls;
+    const before = await read(source.id);
+    const generic = "Test failed. Review the selected endpoint, identity, server trust and permitted target policy.";
+    const framing = "Server CA bundle framing is invalid. Check the PEM begin and end markers.";
+    const certificate = "Client certificate is invalid. Use a certificate-only chain with the leaf certificate first.";
+    const mismatch = "Client identity does not match. The private key must match the first certificate in the client chain.";
+    const privateKey = "Client private key is invalid. Use exactly one supported unencrypted PEM private key.";
+    const unsupported = "Server CA bundle contains unsupported content. Use supported certificate PEM blocks.";
+    const unsafe = "DIAGNOSTIC_BODY_SENTINEL";
+    const unsafeBody = `${unsafe} https://fixture-user:fixture-password@invalid.example/?signed-token=fixture-token -----BEGIN PRIVATE KEY----- <img src=x onerror=window.__diagnosticSpoofExecuted=true>`;
+    const draft = async (cert, key, ca) => {
+      await outer.getByRole("button", { name: "Write / API", exact: true }).click();
+      const mode = outer.getByRole("group", { name: "Write authentication", exact: true }).getByRole("button", { name: "mTLS", exact: true });
+      if ((await mode.getAttribute("aria-pressed")) !== "true") await mode.click();
+      await outer.getByRole("button", { name: /^(Add credential|Replace|Edit replacement)$/ }).click();
+      const nested = page.getByRole("dialog", { name: "Write credential", exact: true });
+      await nested.getByLabel("Client certificate", { exact: true }).fill(cert);
+      await nested.getByLabel("Private key", { exact: true }).fill(key);
+      await serverCaField(nested).fill(ca);
+      await nested.getByRole("button", { name: "Use for this cache", exact: true }).click();
+      await expect(nested).toBeHidden();
+      await expect(outer.getByLabel("Private key", { exact: true })).toHaveCount(0);
+    };
+    const test = async (id, expected, code, status, rawCa) => {
+      const url = `${apiBaseUrl}/api/v1/caches/${id == null ? "test-credentials" : `${id}/test-credentials`}`;
+      const waited = page.waitForResponse(r => r.url() === url && r.request().method() === "POST");
+      await outer.getByRole("button", { name: "Test write API", exact: true }).click();
+      const response = await waited;
+      assert.equal(response.status(), status, "diagnostic probe response status");
+      if (rawCa !== undefined) assert(response.request().postDataJSON().niks3_write_ca_cert === rawCa, "Test preserves raw CA delimiter columns");
+      const result = await response.json();
+      assert.equal(result.diagnostic_code, code, "real backend diagnostic classification");
+      if (status === 200) {
+        assert.equal(result.ok, false);
+        assert.equal(result.write_authn_valid, null);
+        assert.equal(result.write_authorization_valid, null);
+      }
+      await expect(outer.getByRole("alert")).toHaveText(expected);
+      await expect(outer).not.toContainText(unsafe);
+      await expect(outer.getByText("Write authorization", { exact: true }).locator("..")).toContainText("Untested");
+      if (captureState) await captureState(`niks3-${id == null ? "draft" : "stored"}-safe-${code}`);
+    };
+    // Add and Edit both exercise actual server validation. The nested identity
+    // dialog is closed before any screenshot; invalid drafts are never saved.
+    await page.goto(`${baseUrl}/caches`);
+    await page.getByRole("button", { name: "Add cache", exact: true }).click();
+    await outer.getByRole("button", { name: "Niks3", exact: true }).click();
+    await outer.getByLabel("Name", { exact: true }).fill("Unsaved native diagnostic test");
+    await outer.getByRole("button", { name: "Write / API", exact: true }).click();
+    await outer.getByLabel("Write / API URL", { exact: true }).fill(source.server_url);
+    await checkpoint("discovery-before", discoveryRows());
+    await draft(source.write_client_cert, source.write_client_key, "-----BEGIN CERTIFICATE-----\nAQ==");
+    await test(null, framing, "ca_bundle_framing_invalid", 400);
+    await cancelDiscoveryAfterProbe(false);
+    for (const failure of [
+      { cert: source.write_client_cert, key: source.write_client_key, ca: " " + source.server_ca_bundle, code: "ca_bundle_framing_invalid", message: framing, status: 400 },
+      { cert: source.write_client_cert, key: source.write_client_key, ca: "-----BEGIN CERTIFICATE-----\nAQ==", code: "ca_bundle_framing_invalid", message: framing, status: 400 },
+      { cert: source.write_client_cert, key: source.write_client_key, ca: source.server_ca_bundle + "\n" + source.write_client_key, code: "ca_bundle_content_unsupported", message: unsupported, status: 400 },
+      { cert: "-----BEGIN CERTIFICATE-----\nAQ==\n-----END CERTIFICATE-----", key: source.write_client_key, ca: source.server_ca_bundle, code: "client_certificate_invalid", message: certificate, status: 400 },
+      { cert: source.write_client_cert, key: "-----BEGIN PRIVATE KEY-----\nAQ==\n-----END PRIVATE KEY-----", ca: source.server_ca_bundle, code: "client_private_key_invalid", message: privateKey, status: 400 },
+      { cert: source.write_client_cert, key: source.wrong_client_key, ca: source.server_ca_bundle, code: "client_identity_mismatch", message: mismatch, status: 400 },
+    ]) {
+      await open(before);
+      await checkpoint("discovery-before", discoveryRows());
+      await draft(failure.cert, failure.key, failure.ca);
+      await test(source.id, failure.message, failure.code, failure.status, failure.ca);
+      await cancelDiscoveryAfterProbe(true);
+      unchanged(before, await read(source.id), "invalid identity Test/Cancel");
+    }
+    async function cancelDiscoveryAfterProbe(existing) {
+      if (existing) await close();
+      else {
+        await outer.getByRole("button", { name: "Cancel", exact: true }).click();
+        await expect(outer).toBeHidden();
+      }
+      // Local certificate rejection must preserve raw rows and contact no native
+      // endpoint. Reuse the existing no-network whole-row checkpoint contract.
+      await checkpoint("discovery-cancel", discoveryRows());
+    }
+    // These responses are deliberately fake and establish no TLS/auth proof.
+    // They prove the actual rendered boundary ignores arbitrary prose and codes.
+    for (const injected of [
+      { status: 400, code: "ca_bundle_framing_invalid", expected: framing },
+      { status: 200, code: "client_identity_mismatch", expected: mismatch },
+      { status: 200, plane: "read", code: "tls_verification_failed", expected: "TLS verification failed. Check server certificate trust and the selected client identity." },
+      { status: 400, code: unsafeBody, expected: generic },
+      { status: 200, code: unsafeBody, expected: generic },
+      { status: 403, code: "ca_bundle_framing_invalid", expected: generic },
+    ]) {
+      await open(before);
+      await checkpoint("discovery-before", discoveryRows());
+      const url = `${apiBaseUrl}/api/v1/caches/${source.id}/test-credentials`;
+      const spoof = route => route.request().method() !== "POST" ? route.continue() : route.fulfill({
+        status: injected.status, contentType: "application/json", body: JSON.stringify({
+          ok: false, diagnostic_code: injected.code, message: unsafeBody, tested_url: unsafeBody,
+          probe_scope: injected.plane || "write", write_api_reachable: injected.plane === "read" ? null : false,
+          read_access_valid: injected.plane === "read" ? false : null, write_authn_valid: null, write_authorization_valid: null,
+        }),
+      });
+      await page.route(url, spoof);
+      try {
+        if (injected.plane === "read") await outer.getByRole("button", { name: "Read / Pull", exact: true }).click();
+        await outer.getByRole("button", { name: injected.plane === "read" ? "Test read endpoint" : "Test write API", exact: true }).click();
+        await expect(outer.getByRole("alert")).toHaveText(injected.expected);
+        await expect(outer).not.toContainText(unsafe);
+        await expect(outer).not.toContainText("signed-token");
+        await expect(outer).not.toContainText("BEGIN PRIVATE KEY");
+        assert.equal(await page.evaluate(() => window.__diagnosticSpoofExecuted === true), false, "diagnostic spoof must not execute");
+        if (injected.plane === "read") {
+          await expect(outer.getByText("Read access", { exact: true }).locator("..")).toContainText("Failed");
+          await outer.getByRole("button", { name: "Write / API", exact: true }).click();
+        }
+        await expect(outer.getByText("Authentication", { exact: true }).locator("..")).toContainText("Untested");
+        await expect(outer.getByText("Write authorization", { exact: true }).locator("..")).toContainText("Untested");
+        await cancelDiscoveryAfterProbe(true);
+      } finally { await page.unroute(url, spoof); }
+      unchanged(before, await read(source.id), "defensive diagnostic spoof Test/Cancel");
+    }
   };
   const discoveryWorkflow = async () => {
     const source = fixture.production_write_mtls;
@@ -279,7 +400,7 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
     const missingIdentity = { ...submitted };
     delete missingIdentity.niks3_write_client_cert;
     delete missingIdentity.niks3_write_client_key;
-    for (const body of [missingIdentity, { ...submitted, niks3_write_ca_cert: fixture.niks3.ca_cert.trim() }]) {
+    for (const body of [missingIdentity, { ...submitted, niks3_write_ca_cert: fixture.niks3.ca_cert }]) {
       await checkpoint("discovery-before", discoveryRows());
       const status = await page.evaluate(async ({ url, body, csrf }) => (await fetch(url, {
         method: "POST", credentials: "include", headers: { "Content-Type": "application/json", ...(csrf ? { "X-CSRF-Token": csrf } : {}) }, body: JSON.stringify(body),
@@ -340,7 +461,8 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       substituter_url: fixture.niks3.substituter_url, public_keys: fixture.niks3.public_keys }, { retained: true, token: true });
     await cancelDiscovery(true);
     unchanged(legacy, await read(legacy.id), "token-mode anonymous Discovery");
-    assert.equal(mutationRequests.length, count, "unsaved/retained/replacement Discovery and Cancel never save");
+    await diagnosticWorkflow();
+    assert.equal(mutationRequests.length, count, "Discovery and diagnostic Test/Cancel never save");
     await checkpoint("discovery-complete", discoveryRows());
     console.log("TASK-470 native Discovery passed: write ingress mTLS/custom server bundle, retained/unknown/replacement identity, no Bearer/read secrets/uploads, exact raw immutability");
   };
@@ -390,7 +512,7 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       const response = await waited;
       assert.equal(response.status(), 200);
       const result = await response.json();
-      assert.equal(result.substituter_url, source.substituter_url);
+      assert.equal(result.substituter_url, new URL(source.substituter_url).href);
       assert.deepEqual(result.public_keys, source.public_keys);
       const patch = response.request().postDataJSON();
       for (const field of ["niks3_auth_token", "niks3_read_basic_username", "niks3_read_basic_password", "niks3_read_client_key", "s3_secret_access_key"])
@@ -457,7 +579,7 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
     await nativeDiscover();
     await shots("write-discovered");
     await rail("Read / Pull");
-    await expect(outer.getByLabel("Read / substituter URL", { exact: true })).toHaveValue(source.substituter_url);
+    await expect.poll(async () => new URL(await outer.getByLabel("Read / substituter URL", { exact: true }).inputValue()).href).toBe(new URL(source.substituter_url).href);
     await outer.getByLabel("Read / substituter URL", { exact: true }).fill(fixture.nix.url.replace(/\/nix-cache-info$/, ""));
     await rail("Trust");
     const reversed = [...source.public_keys].reverse();

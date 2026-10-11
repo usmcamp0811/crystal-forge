@@ -52,6 +52,34 @@ pub(crate) fn validate_certificate_bundle(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Normalizes server trust without accepting private material or widening trust.
+///
+/// The shared normalizer validates supported annotations and trusted records,
+/// but emits only ordinary certificates selected by the native Niks3 client.
+/// Client certificate chains MUST use [`validate_certificate_bundle`] instead.
+/// Callers MUST pass the original CA text without trimming. Delimiter column
+/// positions determine which roots Go accepts; trimming can widen server trust.
+///
+/// # Errors
+/// Returns the shared typed CA error with credential-free formatting.
+pub(crate) fn normalize_ca_bundle(value: &str) -> Result<String> {
+    cf_config::ca_bundle::normalize_ca_bundle(value).map_err(anyhow::Error::new)
+}
+
+/// Validates a strict client chain and its matching usable private key.
+///
+/// This check runs before write-probe DNS. The CA bundle is independent server
+/// trust; it neither supplies a client certificate nor proves authorization.
+///
+/// # Errors
+/// Returns the shared typed client-identity error, including strict chain framing.
+pub(crate) fn validate_client_identity(cert: &str, key: &str) -> Result<()> {
+    validate_certificate_bundle(cert).map_err(|_| {
+        anyhow::Error::new(cf_config::ca_bundle::ClientIdentityError::InvalidCertificate)
+    })?;
+    cf_config::ca_bundle::validate_client_identity(cert, key).map_err(anyhow::Error::new)
+}
+
 // Frozen self-signed Ed25519 certificate. Tests parse structure, not validity
 // dates or trust. No private key is retained in this fixture.
 #[cfg(test)]

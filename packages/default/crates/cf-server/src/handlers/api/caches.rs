@@ -33,6 +33,8 @@ mod basic_read_tests;
 #[cfg(test)]
 mod discovery_tests;
 #[cfg(test)]
+mod niks3_ca_tests;
+#[cfg(test)]
 mod retained_probe_tests;
 
 fn probe_error(status: StatusCode, code: &str, message: &str) -> axum::response::Response {
@@ -45,6 +47,314 @@ fn probe_error(status: StatusCode, code: &str, message: &str) -> axum::response:
         }),
     )
         .into_response()
+}
+
+// SECURITY: Only this allowlist produces diagnostic prose. Neither submitted
+// values nor provider/transport error formatting enters the response envelope.
+#[derive(Clone, Copy)]
+struct ProbeDiagnostic {
+    code: &'static str,
+    message: &'static str,
+    field: Option<&'static str>,
+}
+
+fn diagnostic(code: &str) -> ProbeDiagnostic {
+    let (code, message) = match code {
+        "ca_bundle_framing_invalid" => (
+            "ca_bundle_framing_invalid",
+            "Check CA PEM block framing and encoding.",
+        ),
+        "ca_certificate_invalid" => (
+            "ca_certificate_invalid",
+            "The CA bundle contains an invalid X.509 certificate.",
+        ),
+        "ca_bundle_content_unsupported" => (
+            "ca_bundle_content_unsupported",
+            "The CA bundle contains unsupported content. Private keys are prohibited.",
+        ),
+        "ca_bundle_trust_ambiguous" => (
+            "ca_bundle_trust_ambiguous",
+            "The CA bundle contains unsupported or ambiguous trust annotations.",
+        ),
+        "ca_bundle_empty" => (
+            "ca_bundle_empty",
+            "The CA bundle must contain ordinary CERTIFICATE roots.",
+        ),
+        "ca_bundle_too_large" => (
+            "ca_bundle_too_large",
+            "The CA bundle exceeds the supported size limit.",
+        ),
+        "client_identity_invalid" => (
+            "client_identity_invalid",
+            "Check the certificate-only client chain and matching supported private key.",
+        ),
+        "client_certificate_invalid" => (
+            "client_certificate_invalid",
+            "Use a valid certificate-only client chain with the leaf certificate first.",
+        ),
+        "client_private_key_invalid" => (
+            "client_private_key_invalid",
+            "Use exactly one supported unencrypted PEM private key.",
+        ),
+        "client_identity_mismatch" => (
+            "client_identity_mismatch",
+            "The private key must match the first certificate in the client chain.",
+        ),
+        "tls_verification_failed" => (
+            "tls_verification_failed",
+            "Check server certificate trust, validity and hostname coverage.",
+        ),
+        "dns_or_connection_failed" => (
+            "dns_or_connection_failed",
+            "Check DNS, routing and endpoint availability.",
+        ),
+        "http_response_failed" => (
+            "http_response_failed",
+            "The endpoint returned an unsuccessful HTTP response or redirect.",
+        ),
+        "invalid_niks3_metadata" => (
+            "invalid_niks3_metadata",
+            "The endpoint returned invalid or inconsistent Niks3 metadata.",
+        ),
+        "target_policy_rejected" => (
+            "target_policy_rejected",
+            "The target is not permitted by the cache probe policy.",
+        ),
+        "probe_timeout" => ("probe_timeout", "The cache probe exceeded its deadline."),
+        _ => (
+            "probe_failed",
+            "The cache probe failed. Check configuration and endpoint availability.",
+        ),
+    };
+    ProbeDiagnostic {
+        code,
+        message,
+        field: None,
+    }
+}
+
+fn ca_diagnostic(error: &anyhow::Error) -> ProbeDiagnostic {
+    let mut result = error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<cf_config::ca_bundle::CaBundleError>())
+        .map(|error| diagnostic(error.code()))
+        .unwrap_or_else(|| diagnostic("probe_failed"));
+    result.field = error
+        .chain()
+        .find_map(|cause| match cause.to_string().as_str() {
+            "niks3_write_ca_cert" => Some("niks3_write_ca_cert"),
+            "niks3_read_ca_cert" => Some("niks3_read_ca_cert"),
+            _ => None,
+        });
+    result
+}
+
+fn client_identity_diagnostic(error: &anyhow::Error) -> ProbeDiagnostic {
+    error
+        .chain()
+        .find_map(|cause| cause.downcast_ref::<cf_config::ca_bundle::ClientIdentityError>())
+        .map(|error| diagnostic(error.code()))
+        .unwrap_or_else(|| diagnostic("client_identity_invalid"))
+}
+
+fn diagnostic_error(
+    status: StatusCode,
+    base_code: &str,
+    hint: ProbeDiagnostic,
+) -> axum::response::Response {
+    (
+        status,
+        Json(serde_json::json!({
+            "error": base_code, "message": hint.message, "details": null,
+            "diagnostic_code": hint.code, "field": hint.field,
+        })),
+    )
+        .into_response()
+}
+
+// Compatibility adapters accept only exact static strings emitted by our own
+// validators. They never classify arbitrary upstream bodies or URL-bearing text.
+fn static_probe_diagnostic(message: &str) -> ProbeDiagnostic {
+    let code = match message {
+        "Cache test DNS lookup timed out" | "Cache endpoint request timed out" => "probe_timeout",
+        "Failed to resolve cache test host"
+        | "Cache test host did not resolve to any addresses" => "dns_or_connection_failed",
+        "Cache endpoint redirects are not allowed" => "http_response_failed",
+        "Invalid cache mTLS certificate or private key"
+        | "Cache mTLS requires both certificate and private key" => "client_identity_invalid",
+        "Invalid Niks3 cache-config JSON"
+        | "Niks3 discovery returned no signing keys"
+        | "Cache metadata exceeds 64 KiB"
+        | "Invalid nix-cache-info response"
+        | "Invalid nix-cache-info response: expected StoreDir: /nix/store"
+        | "Advertised signing keys do not match configured trust"
+        | "Discovered substituter URL does not match the configured read URL" => {
+            "invalid_niks3_metadata"
+        }
+        other => other,
+    };
+    diagnostic(code)
+}
+
+fn client_chain_diagnostic(write: Option<&str>, read: Option<&str>) -> Result<(), ProbeDiagnostic> {
+    for (field, cert) in [
+        ("niks3_write_client_cert", write),
+        ("niks3_read_client_cert", read),
+    ] {
+        if cert.is_some_and(|cert| {
+            crate::security::cache_secrets::validate_certificate_bundle(cert).is_err()
+        }) {
+            let mut hint = diagnostic("client_certificate_invalid");
+            hint.field = Some(field);
+            return Err(hint);
+        }
+    }
+    Ok(())
+}
+
+fn request_failure(error: &reqwest::Error) -> String {
+    use std::error::Error;
+    if error.is_timeout() {
+        return "probe_timeout".into();
+    }
+    if let Some(code) = tls_verification_cause(error.source()) {
+        return code.into();
+    }
+    if error.is_connect() {
+        "dns_or_connection_failed".into()
+    } else {
+        "probe_failed".into()
+    }
+}
+
+fn tls_verification_cause(
+    mut source: Option<&(dyn std::error::Error + 'static)>,
+) -> Option<&'static str> {
+    // Reqwest, Hyper and TLS adapters compose several local wrappers. Sixteen
+    // nodes cover that chain while bounding cycles or unusual error sources.
+    const MAX_CAUSE_DEPTH: usize = 16;
+    let mut local_io_cause = false;
+    for _ in 0..MAX_CAUSE_DEPTH {
+        let cause = source?;
+        // SECURITY: Inspect only descendants of an io::Error's stored cause.
+        // Never format the URL-bearing reqwest/Hyper outer error or HTTP bodies.
+        // Rustls 0.21 verification failures have these fixed display prefixes;
+        // the adapter may use either Other or InvalidData for the I/O wrapper.
+        if local_io_cause {
+            let message = cause.to_string();
+            if message.starts_with("invalid peer certificate:")
+                || message.starts_with("invalid certificate:")
+            {
+                return Some("tls_verification_failed");
+            }
+            // A peer rejecting our identity is distinct from our server-trust
+            // verifier rejecting the peer. Other fatal alerts prove neither.
+            if message.starts_with("received fatal alert:") {
+                return Some(match message.as_str() {
+                    "received fatal alert: BadCertificate"
+                    | "received fatal alert: CertificateRequired"
+                    | "received fatal alert: CertificateUnknown"
+                    | "received fatal alert: UnknownCA" => "client_identity_invalid",
+                    _ => "probe_failed",
+                });
+            }
+        }
+        if let Some(io) = cause.downcast_ref::<std::io::Error>() {
+            if let Some(inner) = io.get_ref() {
+                // io::Error::source can skip the stored error itself. Visit
+                // get_ref first so the actual TLS cause is not lost.
+                source = Some(inner);
+                local_io_cause = true;
+                continue;
+            }
+        }
+        source = cause.source();
+    }
+    None
+}
+
+fn static_target_failure(message: &str) -> String {
+    match message {
+        "Refusing to test localhost or internal cache endpoint"
+        | "Refusing to test private, loopback, or non-routable IP"
+        | "Cache test URLs must not contain credentials or fragments"
+        | "Unsupported cache test URL scheme. Only https is allowed" => {
+            "target_policy_rejected".into()
+        }
+        _ => static_probe_diagnostic(message).code.into(),
+    }
+}
+
+fn discovery_diagnostic(message: &str) -> ProbeDiagnostic {
+    let mut hint = static_probe_diagnostic(message);
+    if matches!(
+        hint.code,
+        "ca_bundle_framing_invalid"
+            | "ca_certificate_invalid"
+            | "ca_bundle_content_unsupported"
+            | "ca_bundle_trust_ambiguous"
+            | "ca_bundle_empty"
+            | "ca_bundle_too_large"
+    ) {
+        hint.field = Some("niks3_write_ca_cert");
+    }
+    if hint.code == "client_certificate_invalid" {
+        hint.field = Some("niks3_write_client_cert");
+    } else if hint.code == "client_private_key_invalid" {
+        hint.field = Some("niks3_write_client_key");
+    }
+    hint
+}
+
+fn niks3_config_diagnostic(
+    create: &CreateCacheDestination,
+    scope: Niks3ProbeScope,
+) -> ProbeDiagnostic {
+    // This is an input-only policy check. No DNS or requests occur here. Private
+    // address policy remains in the runtime check with the configured opt-in.
+    if scope != Niks3ProbeScope::Read {
+        if create
+            .niks3_server_url
+            .as_deref()
+            .is_some_and(|url| niks3_base_url(url, true).is_err())
+        {
+            return diagnostic("target_policy_rejected");
+        }
+        if create.niks3_write_auth_mode.as_deref() == Some("mtls")
+            && (create
+                .niks3_write_client_cert
+                .as_deref()
+                .is_none_or(|s| s.trim().is_empty())
+                || create
+                    .niks3_write_client_key
+                    .as_deref()
+                    .is_none_or(|s| s.trim().is_empty()))
+        {
+            return diagnostic("client_identity_invalid");
+        }
+    }
+    if scope != Niks3ProbeScope::Write {
+        if create
+            .push_to
+            .as_deref()
+            .is_some_and(|url| niks3_read_base_url(url, true).is_err())
+        {
+            return diagnostic("target_policy_rejected");
+        }
+        if create.niks3_read_auth_mode.as_deref() == Some("mtls")
+            && (create
+                .niks3_read_client_cert
+                .as_deref()
+                .is_none_or(|s| s.trim().is_empty())
+                || create
+                    .niks3_read_client_key
+                    .as_deref()
+                    .is_none_or(|s| s.trim().is_empty()))
+        {
+            return diagnostic("client_identity_invalid");
+        }
+    }
+    diagnostic("probe_failed")
 }
 
 fn optional_probe_csrf(headers: &HeaderMap) -> Result<(), axum::response::Response> {
@@ -191,6 +501,17 @@ where
                 "Cache destination not found",
             );
         }
+        Err(error)
+            if error
+                .downcast_ref::<cf_config::ca_bundle::CaBundleError>()
+                .is_some() =>
+        {
+            return diagnostic_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                ca_diagnostic(&error),
+            );
+        }
         Err(_) => {
             return probe_error(
                 StatusCode::INTERNAL_SERVER_ERROR,
@@ -204,7 +525,20 @@ where
         Err(response) => return response,
     };
     let scope = request.probe_scope;
-    let update = request.settings;
+    let mut update = request.settings;
+    if let Err(error) = update.normalize_ca_fields() {
+        return diagnostic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_cache_test_config",
+            ca_diagnostic(&error),
+        );
+    }
+    if let Err(hint) = client_chain_diagnostic(
+        update.niks3_write_client_cert.as_deref(),
+        update.niks3_read_client_cert.as_deref(),
+    ) {
+        return diagnostic_error(StatusCode::BAD_REQUEST, "invalid_cache_test_config", hint);
+    }
     let same_type = update
         .cache_type
         .as_deref()
@@ -242,11 +576,7 @@ where
             message,
         );
     }
-    let effective = match cache_destinations::effective_update_unvalidated(&current, &update)
-        .and_then(|candidate| {
-            candidate.validate_probe(scope)?;
-            Ok(candidate)
-        }) {
+    let effective = match cache_destinations::effective_update_unvalidated(&current, &update) {
         Ok(effective) => effective,
         Err(_) => {
             return probe_error(
@@ -256,7 +586,22 @@ where
             );
         }
     };
+    if effective.validate_probe(scope).is_err() {
+        if effective.cache_type == "Niks3" {
+            return diagnostic_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_cache_test_config",
+                niks3_config_diagnostic(&effective, scope),
+            );
+        }
+        return probe_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_cache_test_config",
+            "Invalid effective cache configuration",
+        );
+    }
     let is_attic = effective.cache_type == "Attic";
+    let is_niks3 = effective.cache_type == "Niks3";
     match probe(effective, scope).await {
         Ok(mut result) => {
             // Stored-ID results describe stages, not the private snapshot.
@@ -264,6 +609,11 @@ where
             (StatusCode::OK, Json(result)).into_response()
         }
         Err(message) if is_attic => attic_probe::policy_error_response(&message),
+        Err(message) if is_niks3 => diagnostic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_cache_test_config",
+            static_probe_diagnostic(&message),
+        ),
         Err(message) => probe_error(
             StatusCode::BAD_REQUEST,
             "invalid_cache_test_config",
@@ -314,6 +664,8 @@ enum CacheProbeDetails {
 // public cache-config endpoint cannot establish write authorization.
 #[derive(Debug, Default, serde::Serialize)]
 struct Niks3ConnectionTestResult {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    diagnostic_code: Option<&'static str>,
     server_reachable: bool,
     discovery_valid: bool,
     write_auth_valid: Option<bool>,
@@ -331,7 +683,7 @@ struct Niks3ConnectionTestResult {
 ///
 /// An omitted mode selects the existing public, token-mode metadata request.
 /// No Bearer token is selected or sent. mTLS requires a certificate/key pair;
-/// its optional CA bundle adds trust to the server HTTP client's system roots.
+/// its optional CA bundle replaces built-in and ambient roots, matching Niks3.
 /// The response contains only public metadata, never supplied TLS material.
 ///
 /// # Examples
@@ -353,7 +705,8 @@ pub struct Niks3DiscoverRequest {
     pub niks3_write_client_cert: Option<String>,
     /// PEM private key for the client chain, required for `mtls`.
     pub niks3_write_client_key: Option<String>,
-    /// Optional certificate-only PEM trust bundle for `mtls`.
+    /// Optional supported CA bundle, normalized to ordinary server-trust roots.
+    /// Trusted-only records are validated but never promoted into roots.
     pub niks3_write_ca_cert: Option<String>,
 }
 
@@ -371,28 +724,35 @@ fn niks3_write_transport<'a>(
     key: Option<&'a str>,
     ca: Option<&'a str>,
 ) -> Result<Niks3WriteTransport<'a>, String> {
-    // Strict framing is checked before identity parsing or DNS. PEM parsers can
-    // otherwise silently skip private keys, comments, and trailing text in CA
-    // or certificate fields. Valid multi-certificate bundles stay supported.
-    for value in [cert, ca].into_iter().flatten() {
-        crate::security::cache_secrets::validate_certificate_bundle(value)
-            .map_err(|_| "Niks3 discovery requires certificate-only PEM bundles")?;
+    // SECURITY: Client chains stay certificate-only. CA annotations use the
+    // separate shared grammar and cannot silently hide keys or widen root trust.
+    // Validate both inputs and the matching identity before any DNS work.
+    if let Some(cert) = cert {
+        crate::security::cache_secrets::validate_certificate_bundle(cert)
+            .map_err(|_| "client_certificate_invalid")?;
+    }
+    if let Some(ca) = ca {
+        crate::security::cache_secrets::normalize_ca_bundle(ca)
+            .map_err(|error| ca_diagnostic(&error).code.to_owned())?;
     }
     match mode.unwrap_or("token") {
         "token" if cert.is_none() && key.is_none() && ca.is_none() => {
             Ok(Niks3WriteTransport { cert: None, key: None, ca: None })
         }
         "mtls" if cert.is_some() && key.is_some_and(|value| !value.trim().is_empty()) => {
+            crate::security::cache_secrets::validate_client_identity(
+                cert.unwrap_or_default(), key.unwrap_or_default(),
+            ).map_err(|error| client_identity_diagnostic(&error).code.to_owned())?;
             let pem = format!("{}\n{}", cert.unwrap_or_default(), key.unwrap_or_default());
             let identity = reqwest::Identity::from_pem(pem.as_bytes())
-                .map_err(|_| "Invalid Niks3 mTLS certificate or private key")?;
-            // Parse the signing key before DNS too. TLS checks compatibility
-            // when the peer requests client authentication. Public metadata
-            // success alone cannot prove client or write authorization.
+                .map_err(|_| "client_private_key_invalid")?;
+            // The shared validator proves pairing. The actual probe TLS backend
+            // also needs to support the key algorithm before any DNS work.
             reqwest::Client::builder().use_rustls_tls().no_proxy().identity(identity)
-                .build().map_err(|_| "Invalid Niks3 mTLS certificate or private key")?;
+                .build().map_err(|_| "client_private_key_invalid")?;
             Ok(Niks3WriteTransport { cert, key, ca })
         }
+        "mtls" => Err("client_identity_invalid".into()),
         _ => Err("Niks3 discovery requires token mode without TLS fields, or mtls with certificate and private key".into()),
     }
 }
@@ -478,6 +838,65 @@ async fn cache_test_client_pinned(
     key: Option<&str>,
     ca: Option<&str>,
 ) -> Result<reqwest::Client, String> {
+    cache_test_client_pinned_policy(url, addrs, cert, key, ca, RootPolicy::ExtendSystem).await
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum RootPolicy {
+    ExtendSystem,
+    ReplaceCustom,
+}
+
+fn system_ca_source(policy: RootPolicy) -> Option<(std::path::PathBuf, bool)> {
+    if policy == RootPolicy::ReplaceCustom {
+        return None;
+    }
+    let configured =
+        std::env::var_os("SSL_CERT_FILE").or_else(|| std::env::var_os("NIX_SSL_CERT_FILE"));
+    let explicit = configured.is_some();
+    Some((
+        configured
+            .unwrap_or_else(|| "/etc/ssl/certs/ca-certificates.crt".into())
+            .into(),
+        explicit,
+    ))
+}
+
+// SECURITY: Niks3's custom write roots replace the entire trust pool, including
+// presigned S3 trust in the consuming CLI. A probe must not succeed by borrowing
+// public or process roots that the corresponding upload cannot use.
+async fn niks3_write_test_client(
+    url: &Url,
+    allow_private_targets: bool,
+    transport: &Niks3WriteTransport<'_>,
+) -> Result<reqwest::Client, String> {
+    let addrs = cache_test_addresses(url, allow_private_targets)
+        .await
+        .map_err(|error| static_target_failure(&error))?;
+    let policy = if transport.ca.is_some() {
+        RootPolicy::ReplaceCustom
+    } else {
+        RootPolicy::ExtendSystem
+    };
+    cache_test_client_pinned_policy(
+        url,
+        &addrs,
+        transport.cert,
+        transport.key,
+        transport.ca,
+        policy,
+    )
+    .await
+}
+
+async fn cache_test_client_pinned_policy(
+    url: &Url,
+    addrs: &[SocketAddr],
+    cert: Option<&str>,
+    key: Option<&str>,
+    ca: Option<&str>,
+    policy: RootPolicy,
+) -> Result<reqwest::Client, String> {
     // SECURITY: Connect only to the addresses checked above, retaining the URL
     // host for TLS verification. Proxies and redirects would bypass this pin.
     let mut builder = reqwest::Client::builder()
@@ -486,26 +905,29 @@ async fn cache_test_client_pinned(
         .timeout(Duration::from_secs(8))
         .redirect(reqwest::redirect::Policy::none())
         .resolve_to_addrs(url.host_str().ok_or("Missing cache host")?, addrs);
+    if policy == RootPolicy::ReplaceCustom {
+        if ca.is_none() {
+            return Err("ca_bundle_empty".into());
+        }
+        builder = builder.tls_built_in_root_certs(false);
+    }
     // Rustls's bundled public roots do not include an operator's system CA.
     // Honor standard process CA configuration without a test-only TLS bypass.
     // VM fixtures install their CA before starting the server process.
-    let configured_roots =
-        std::env::var_os("SSL_CERT_FILE").or_else(|| std::env::var_os("NIX_SSL_CERT_FILE"));
-    let root_path = configured_roots
-        .clone()
-        .unwrap_or_else(|| "/etc/ssl/certs/ca-certificates.crt".into());
-    match tokio::fs::read(root_path).await {
-        Ok(pem) => {
-            let certificates = reqwest::Certificate::from_pem_bundle(&pem)
-                .map_err(|_| "Invalid system CA certificate bundle")?;
-            for certificate in certificates {
-                builder = builder.add_root_certificate(certificate);
+    if let Some((root_path, explicitly_configured)) = system_ca_source(policy) {
+        match tokio::fs::read(root_path).await {
+            Ok(pem) => {
+                let certificates = reqwest::Certificate::from_pem_bundle(&pem)
+                    .map_err(|_| "Invalid system CA certificate bundle")?;
+                for certificate in certificates {
+                    builder = builder.add_root_certificate(certificate);
+                }
             }
+            Err(_) if explicitly_configured => {
+                return Err("Failed to read configured system CA bundle".into());
+            }
+            Err(_) => {}
         }
-        Err(_) if configured_roots.is_some() => {
-            return Err("Failed to read configured system CA bundle".into());
-        }
-        Err(_) => {}
     }
     match (cert, key) {
         (Some(cert), Some(key)) => {
@@ -518,10 +940,14 @@ async fn cache_test_client_pinned(
         _ => return Err("Cache mTLS requires both certificate and private key".into()),
     }
     if let Some(ca) = ca {
-        let certificates = reqwest::Certificate::from_pem_bundle(ca.as_bytes())
-            .map_err(|_| "Invalid cache CA certificate")?;
+        let canonical = crate::security::cache_secrets::normalize_ca_bundle(ca)
+            .map_err(|error| ca_diagnostic(&error).code.to_owned())?;
+        crate::security::cache_secrets::validate_certificate_bundle(&canonical)
+            .map_err(|_| "ca_certificate_invalid")?;
+        let certificates = reqwest::Certificate::from_pem_bundle(canonical.as_bytes())
+            .map_err(|_| "ca_certificate_invalid")?;
         if certificates.is_empty() {
-            return Err("Cache CA bundle contains no certificates".into());
+            return Err("ca_bundle_empty".into());
         }
         for certificate in certificates {
             builder = builder.add_root_certificate(certificate);
@@ -536,10 +962,7 @@ fn require_probe_success(status: reqwest::StatusCode) -> Result<(), String> {
     if status.is_redirection() {
         Err("Cache endpoint redirects are not allowed".into())
     } else if !status.is_success() {
-        Err(format!(
-            "Cache endpoint responded with status {}",
-            status.as_u16()
-        ))
+        Err("http_response_failed".into())
     } else {
         Ok(())
     }
@@ -554,7 +977,7 @@ async fn probe_body(mut response: reqwest::Response) -> Result<Vec<u8>, String> 
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|_| "Failed to read cache metadata")?
+        .map_err(|error| request_failure(&error))?
     {
         if body.len() + chunk.len() > MAX_METADATA_BYTES {
             return Err("Cache metadata exceeds 64 KiB".into());
@@ -584,10 +1007,13 @@ async fn validate_niks3_discovery(
     stages: &mut Niks3ConnectionTestResult,
 ) -> Result<(Niks3CacheConfig, Url), String> {
     let config = parse_niks3_config(body)?;
-    validate_niks3_keys(&config)?;
+    validate_niks3_keys(&config).map_err(|_| "invalid_niks3_metadata")?;
     stages.signing_keys_found = true;
-    let read = niks3_base_url(&config.substituter_url, allow_private_targets)?;
-    cache_test_addresses(&read, allow_private_targets).await?;
+    let read = niks3_base_url(&config.substituter_url, allow_private_targets)
+        .map_err(|_| "target_policy_rejected")?;
+    cache_test_addresses(&read, allow_private_targets)
+        .await
+        .map_err(|error| static_target_failure(&error))?;
     Ok((config, read))
 }
 
@@ -595,26 +1021,21 @@ async fn discover_niks3(
     request: &Niks3DiscoverRequest,
     allow_private_targets: bool,
 ) -> Result<Niks3Discovery, String> {
-    reject_probe_query_credentials([Some(request.server_url.as_str())])?;
-    let server = niks3_base_url(&request.server_url, allow_private_targets)?;
+    reject_probe_query_credentials([Some(request.server_url.as_str())])
+        .map_err(|_| "target_policy_rejected")?;
+    let server = niks3_base_url(&request.server_url, allow_private_targets)
+        .map_err(|_| "target_policy_rejected")?;
     let transport = niks3_write_transport(
         request.niks3_write_auth_mode.as_deref(),
         request.niks3_write_client_cert.as_deref(),
         request.niks3_write_client_key.as_deref(),
         request.niks3_write_ca_cert.as_deref(),
     )?;
-    let client = cache_test_client(
-        &server,
-        allow_private_targets,
-        transport.cert,
-        transport.key,
-        transport.ca,
-    )
-    .await?;
+    let client = niks3_write_test_client(&server, allow_private_targets, &transport).await?;
     let response = niks3_metadata_request(&client, &server)?
         .send()
         .await
-        .map_err(|_| "Niks3 server connection failed")?;
+        .map_err(|error| request_failure(&error))?;
     let (config, read) = validate_niks3_discovery(
         &probe_body(response).await?,
         allow_private_targets,
@@ -668,21 +1089,15 @@ async fn run_niks3_test_scope(
             .as_deref()
             .ok_or("Missing Niks3 server URL")?,
         allow_private_targets,
-    )?;
+    )
+    .map_err(|_| "target_policy_rejected")?;
     let write = niks3_write_transport(
         create.niks3_write_auth_mode.as_deref(),
         create.niks3_write_client_cert.as_deref(),
         create.niks3_write_client_key.as_deref(),
         create.niks3_write_ca_cert.as_deref(),
     )?;
-    let client = cache_test_client(
-        &server,
-        allow_private_targets,
-        write.cert,
-        write.key,
-        write.ca,
-    )
-    .await?;
+    let client = niks3_write_test_client(&server, allow_private_targets, &write).await?;
     let mut stages = Niks3ConnectionTestResult::default();
     stages.probe_scope = Some(scope);
     stages.write_api_reachable = Some(false);
@@ -693,7 +1108,7 @@ async fn run_niks3_test_scope(
         let response = niks3_metadata_request(&client, &server)?
             .send()
             .await
-            .map_err(|_| "Niks3 server connection failed")?;
+            .map_err(|error| request_failure(&error))?;
         stages.server_reachable = true;
         stages.write_api_reachable = Some(true);
         status_code = Some(response.status().as_u16());
@@ -730,10 +1145,15 @@ async fn run_niks3_test_scope(
     if result.is_ok() && scope == Niks3ProbeScope::All {
         return run_niks3_read_test(create, allow_private_targets, scope, stages).await;
     }
+    let hint = result
+        .as_ref()
+        .err()
+        .map(|error| static_probe_diagnostic(error));
+    stages.diagnostic_code = hint.map(|hint| hint.code);
     Ok(CacheCredentialTestResult {
         ok: result.is_ok(),
         status_code,
-        message: result.err().unwrap_or_else(|| {
+        message: hint.map(|hint| hint.message.into()).unwrap_or_else(|| {
             "Public write API metadata verified. Write authentication and authorization: Untested. Read plane: Untested.".into()
         }),
         tested_url: None,
@@ -788,7 +1208,8 @@ async fn run_niks3_read_test(
     let read = niks3_read_base_url(
         create.push_to.as_deref().ok_or("Missing Niks3 read URL")?,
         allow_private_targets,
-    )?;
+    )
+    .map_err(|_| "target_policy_rejected")?;
     let (cert, key, ca) = if create.niks3_read_auth_mode.as_deref() == Some("mtls") {
         (
             create.niks3_read_client_cert.as_deref(),
@@ -798,7 +1219,9 @@ async fn run_niks3_read_test(
     } else {
         (None, None, None)
     };
-    let client = cache_test_client(&read, allow_private_targets, cert, key, ca).await?;
+    let client = cache_test_client(&read, allow_private_targets, cert, key, ca)
+        .await
+        .map_err(|error| static_target_failure(&error))?;
     stages.probe_scope = Some(scope);
     stages.read_access_valid = Some(false);
     let mut status_code = None;
@@ -812,7 +1235,7 @@ async fn run_niks3_read_test(
         let response = niks3_read_request(&client, endpoint, create)?
             .send()
             .await
-            .map_err(|_| "Niks3 read endpoint connection failed")?;
+            .map_err(|error| request_failure(&error))?;
         status_code = Some(response.status().as_u16());
         let body = probe_body(response).await?;
         let text = std::str::from_utf8(&body).map_err(|_| "Invalid nix-cache-info response")?;
@@ -828,8 +1251,13 @@ async fn run_niks3_read_test(
         Ok(())
     }
     .await;
+    let hint = result
+        .as_ref()
+        .err()
+        .map(|error| static_probe_diagnostic(error));
+    stages.diagnostic_code = hint.map(|hint| hint.code);
     Ok(CacheCredentialTestResult { ok: result.is_ok(), status_code,
-        message: result.err().unwrap_or_else(|| if create.niks3_public_keys.is_empty() {
+        message: hint.map(|hint| hint.message.into()).unwrap_or_else(|| if create.niks3_public_keys.is_empty() {
             "Read access and /nix/store metadata verified. Signing keys: Unattempted. Artifact signatures and write authorization: Untested.".into()
         } else {
             "Read access and /nix/store metadata verified. Configured signing key format checked; artifact signatures and write authorization: Untested.".into()
@@ -1196,11 +1624,29 @@ pub async fn get_cache_destination(
     }
 }
 
-/// POST /api/caches - Create a new cache destination (admin only)
+/// Creates a cache destination and assignments atomically for an administrator.
+///
+/// `POST /api/caches` normalizes supplied CA fields before persistence and
+/// returns public canonical certificate roots with private credentials redacted.
+/// Client chains remain certificate-only. Save does not check client-key pairing
+/// or remote authorization; write Discovery/Test performs local pairing checks.
+///
+/// # Errors
+/// Returns HTTP 403 without admin access, 400 for invalid input, or 500 for
+/// persistence/encryption failure. CA errors add an allowlisted diagnostic code
+/// and static field name; error responses never contain the supplied bundle.
+///
+/// # Examples
+/// ```text
+/// POST /api/caches
+/// Content-Type: application/json
+///
+/// {"name":"public-read","cache_type":"Http","push_to":"https://cache.example/"}
+/// ```
 pub async fn create_cache_destination(
     State(pool): State<PgPool>,
     headers: HeaderMap,
-    Json(create): Json<CreateCacheDestination>,
+    Json(mut create): Json<CreateCacheDestination>,
 ) -> impl IntoResponse {
     // Require admin role
     if require_admin_user(&pool, &headers).await.is_none() {
@@ -1215,6 +1661,19 @@ pub async fn create_cache_destination(
             .into_response();
     }
 
+    if let Err(error) = create.normalize_ca_fields() {
+        return diagnostic_error(
+            StatusCode::BAD_REQUEST,
+            "validation_error",
+            ca_diagnostic(&error),
+        );
+    }
+    if let Err(hint) = client_chain_diagnostic(
+        create.niks3_write_client_cert.as_deref(),
+        create.niks3_read_client_cert.as_deref(),
+    ) {
+        return diagnostic_error(StatusCode::BAD_REQUEST, "validation_error", hint);
+    }
     // Validate the request
     if let Err(e) = create.validate() {
         return (
@@ -1291,6 +1750,8 @@ pub async fn create_cache_destination(
 /// unproven. Read signing-key evidence checks configured format (and metadata
 /// overlap for `all`), not an artifact signature. Basic auth uses system CA
 /// trust and a sensitive header pinned to the configured HTTPS authority.
+/// Niks3 failures add an allowlisted `diagnostic_code`. Local certificate errors
+/// can add a static `field`; no submitted material or upstream prose is returned.
 pub async fn test_cache_destination_credentials(
     State(pool): State<PgPool>,
     State(server_config): State<ServerConfig>,
@@ -1317,7 +1778,20 @@ pub async fn test_cache_destination_credentials(
         Err(response) => return response,
     };
     let scope = request.probe_scope;
-    let create = request.settings;
+    let mut create = request.settings;
+    if let Err(error) = create.normalize_ca_fields() {
+        return diagnostic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_cache_test_config",
+            ca_diagnostic(&error),
+        );
+    }
+    if let Err(hint) = client_chain_diagnostic(
+        create.niks3_write_client_cert.as_deref(),
+        create.niks3_read_client_cert.as_deref(),
+    ) {
+        return diagnostic_error(StatusCode::BAD_REQUEST, "invalid_cache_test_config", hint);
+    }
     let urls = if create.cache_type == "Niks3" && scope != Niks3ProbeScope::All {
         if scope == Niks3ProbeScope::Write {
             [create.niks3_server_url.as_deref(), None, None]
@@ -1342,6 +1816,13 @@ pub async fn test_cache_destination_credentials(
         );
     }
     if create.validate_probe(scope).is_err() {
+        if create.cache_type == "Niks3" {
+            return diagnostic_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_cache_test_config",
+                niks3_config_diagnostic(&create, scope),
+            );
+        }
         return probe_error(
             StatusCode::BAD_REQUEST,
             "invalid_cache_test_config",
@@ -1359,15 +1840,16 @@ pub async fn test_cache_destination_credentials(
         Err(message) if create.cache_type == "Attic" => {
             attic_probe::policy_error_response(&message)
         }
-        Err(message) => (
+        Err(message) if create.cache_type == "Niks3" => diagnostic_error(
             StatusCode::BAD_REQUEST,
-            Json(ApiError {
-                error: "invalid_cache_test_config".to_string(),
-                message,
-                details: None,
-            }),
-        )
-            .into_response(),
+            "invalid_cache_test_config",
+            static_probe_diagnostic(&message),
+        ),
+        Err(message) => probe_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_cache_test_config",
+            &message,
+        ),
     }
 }
 
@@ -1406,15 +1888,11 @@ pub async fn discover_niks3_cache(
     };
     match discover_niks3(&request, server_config.allow_private_cache_test_targets).await {
         Ok(discovery) => (StatusCode::OK, Json(discovery)).into_response(),
-        Err(message) => (
+        Err(message) => diagnostic_error(
             StatusCode::BAD_REQUEST,
-            Json(ApiError {
-                error: "invalid_niks3_discovery".into(),
-                message,
-                details: None,
-            }),
-        )
-            .into_response(),
+            "invalid_niks3_discovery",
+            discovery_diagnostic(&message),
+        ),
     }
 }
 
@@ -1487,10 +1965,17 @@ where
             );
         }
     };
-    let update: UpdateCacheDestination = match probe_json(request).await {
+    let mut update: UpdateCacheDestination = match probe_json(request).await {
         Ok(update) => update,
         Err(response) => return response,
     };
+    if let Err(error) = update.normalize_ca_fields() {
+        return diagnostic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_niks3_discovery",
+            ca_diagnostic(&error),
+        );
+    }
     if current.cache_type != "Niks3" || update.cache_type.as_deref().is_some_and(|ty| ty != "Niks3")
     {
         return probe_error(
@@ -1535,11 +2020,19 @@ where
         request.niks3_write_client_key.as_deref(),
         request.niks3_write_ca_cert.as_deref(),
     ) {
-        return probe_error(StatusCode::BAD_REQUEST, "invalid_niks3_discovery", &message);
+        return diagnostic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_niks3_discovery",
+            discovery_diagnostic(&message),
+        );
     }
     match discover(request).await {
         Ok(discovery) => (StatusCode::OK, Json(discovery)).into_response(),
-        Err(message) => probe_error(StatusCode::BAD_REQUEST, "invalid_niks3_discovery", &message),
+        Err(message) => diagnostic_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_niks3_discovery",
+            discovery_diagnostic(&message),
+        ),
     }
 }
 
@@ -1748,17 +2241,17 @@ mod tests {
             (
                 r#"{"substituter_url":"https://127.0.0.1","public_keys":[]}"#.into(),
                 false,
-                "no signing keys",
+                "invalid_niks3_metadata",
             ),
             (
                 format!(r#"{{"substituter_url":"invalid","public_keys":["{key}"]}}"#),
                 true,
-                "URL",
+                "target_policy_rejected",
             ),
             (
                 format!(r#"{{"substituter_url":"https://127.0.0.1","public_keys":["{key}"]}}"#),
                 true,
-                "private",
+                "target_policy_rejected",
             ),
         ] {
             let mut stages = Niks3ConnectionTestResult {
@@ -1882,11 +2375,11 @@ mod tests {
             niks3_read_auth_mode: Some("none".into()),
             ..Default::default()
         };
-        assert!(
+        assert_eq!(
             run_cache_destination_test(&create, false)
                 .await
-                .unwrap_err()
-                .contains("private")
+                .unwrap_err(),
+            "target_policy_rejected"
         );
         let url = niks3_base_url("https://[::1]", true).unwrap();
         assert_eq!(
@@ -2168,12 +2661,31 @@ mod tests {
     }
 }
 
-/// PUT /api/caches/:id - Update a cache destination (admin only)
+/// Updates a destination and optional assignments atomically for an administrator.
+///
+/// `PUT /api/caches/:id` normalizes explicit CA replacements and validates the
+/// merged settings under the destination row lock. Omitted same-mode credentials
+/// retain their stored bytes. Mode/type changes and explicit clears keep the
+/// existing credential-clearing rules. Reads and probes never persist normalized
+/// CA projections; this Save operation can persist canonical CA fields.
+///
+/// # Errors
+/// Returns HTTP 403 without admin access, 404 for an absent destination, 400 for
+/// invalid effective input, or 500 for storage/encryption failure. CA errors use
+/// static diagnostic codes and field names without submitted certificate text.
+///
+/// # Examples
+/// ```text
+/// PUT /api/caches/42
+/// Content-Type: application/json
+///
+/// {"clear_niks3_write_ca_cert":true}
+/// ```
 pub async fn update_cache_destination(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(id): Path<i32>,
-    Json(update): Json<UpdateCacheDestination>,
+    Json(mut update): Json<UpdateCacheDestination>,
 ) -> impl IntoResponse {
     // Require admin role
     if require_admin_user(&pool, &headers).await.is_none() {
@@ -2188,6 +2700,19 @@ pub async fn update_cache_destination(
             .into_response();
     }
 
+    if let Err(error) = update.normalize_ca_fields() {
+        return diagnostic_error(
+            StatusCode::BAD_REQUEST,
+            "validation_error",
+            ca_diagnostic(&error),
+        );
+    }
+    if let Err(hint) = client_chain_diagnostic(
+        update.niks3_write_client_cert.as_deref(),
+        update.niks3_read_client_cert.as_deref(),
+    ) {
+        return diagnostic_error(StatusCode::BAD_REQUEST, "validation_error", hint);
+    }
     match cache_destinations::update_cache_destination(&pool, id, &update).await {
         Ok(Some(destination)) => {
             (StatusCode::OK, Json(redact_cache_secrets(destination))).into_response()

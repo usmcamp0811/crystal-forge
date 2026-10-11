@@ -155,6 +155,13 @@ struct Niks3FormState {
     require_sigs: bool,
 }
 
+// INVARIANT: CA delimiter columns affect Go's root set. Only the server may
+// normalize nonblank CA text after validating the original bytes. Whitespace-
+// only drafts remain omitted; explicit removal uses the separate clear flag.
+fn nonempty_ca_bundle(value: &str) -> Option<String> {
+    (!value.trim().is_empty()).then(|| value.to_owned())
+}
+
 impl Niks3FormState {
     fn from_destination(destination: Option<&CacheDestination>) -> Self {
         Self {
@@ -225,7 +232,7 @@ impl Niks3FormState {
                 None
             },
             niks3_write_ca_cert: if write_mtls && !self.clear_write_ca {
-                value(&self.write_ca)
+                nonempty_ca_bundle(&self.write_ca)
             } else {
                 None
             },
@@ -240,7 +247,7 @@ impl Niks3FormState {
                 None
             },
             niks3_read_ca_cert: if read_mtls && !self.clear_read_ca {
-                value(&self.read_ca)
+                nonempty_ca_bundle(&self.read_ca)
             } else {
                 None
             },

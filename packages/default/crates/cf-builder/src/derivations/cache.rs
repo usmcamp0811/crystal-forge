@@ -124,8 +124,9 @@ impl Derivation {
     /// Pushes a store path, resolving a derivation to its output when necessary.
     ///
     /// Niks3 uses one CLI process with file-based write credentials and
-    /// `parallel_uploads` concurrency. Its output is suppressed because it can
-    /// contain presigned URLs. Attic retries authorization once after login.
+    /// `parallel_uploads` concurrency. Both output streams are drained into
+    /// bounded private tails; only static diagnostic hints can leave the owner.
+    /// Attic retries authorization once after login.
     /// Disabled or filtered pushes return success without running a command.
     ///
     /// Attic login preserves ambient endpoint and token precedence. The chosen
@@ -398,8 +399,8 @@ async fn run_prepared_niks3_push(prepared: PreparedNiks3Push, deadline: Duration
         command
             .args(&prepared.args)
             .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
             .kill_on_drop(true);
         // The shared helper owns all auth files in one protected directory.
         let credential_directory = prepared
@@ -410,13 +411,9 @@ async fn run_prepared_niks3_push(prepared: PreparedNiks3Push, deadline: Duration
             .context("Niks3 preparation did not supply a credential directory")?;
         apply_niks3_env_to_command(&mut command, credential_directory);
         let mut child = command.spawn().context("Failed to spawn Niks3 push")?;
+        let expires = tokio::time::Instant::now() + deadline;
         let result = tokio::select! {
-            result = tokio::time::timeout(deadline, child.wait()) => match result {
-                Ok(Ok(status)) if status.success() => Ok(()),
-                Ok(Ok(status)) => Err(anyhow::anyhow!("Niks3 push failed with {status}; output suppressed")),
-                Ok(Err(error)) => Err(anyhow::Error::new(error).context("Failed to wait for Niks3 push")),
-                Err(_) => Err(anyhow::anyhow!("Niks3 push timed out after {}s", deadline.as_secs())),
-            },
+            result = wait_niks3_diagnostics(&mut child, expires) => result,
             _ = cancelled => Err(anyhow::anyhow!("Niks3 push cancelled")),
         };
         if child.id().is_some() {
@@ -432,6 +429,72 @@ async fn run_prepared_niks3_push(prepared: PreparedNiks3Push, deadline: Duration
     let result = owner.await.context("Niks3 push owner failed")?;
     drop(cancel);
     result
+}
+
+// CONCURRENCY: Inline reader futures are dropped on cancellation or deadline,
+// including when descendants retain pipe descriptors after the CLI exits. The
+// caller remains responsible for direct-child kill/reap and credential lifetime.
+async fn wait_niks3_diagnostics(
+    child: &mut tokio::process::Child,
+    expires: tokio::time::Instant,
+) -> Result<()> {
+    use cf_config::niks3_diagnostics::{Niks3PushDiagnostic, capture_niks3_output};
+
+    let stdout = child
+        .stdout
+        .take()
+        .context("Niks3 stdout pipe unavailable")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("Niks3 stderr pipe unavailable")?;
+    let mut stdout_output = None;
+    let mut stderr_output = None;
+    let (status, drained) = {
+        let drain = async {
+            tokio::join!(
+                async { stdout_output = capture_niks3_output(stdout).await.ok() },
+                async { stderr_output = capture_niks3_output(stderr).await.ok() },
+            );
+        };
+        tokio::pin!(drain);
+        let mut drained = false;
+        let status = tokio::time::timeout_at(expires, async {
+            tokio::select! {
+                status = child.wait() => status,
+                _ = &mut drain => {
+                    drained = true;
+                    child.wait().await
+                }
+            }
+        })
+        .await
+        .map_err(|error| {
+            anyhow::Error::new(error).context("Niks3 push timed out; diagnostic_hint=Timeout")
+        })?
+        .map_err(|_| anyhow::anyhow!("Failed to wait for Niks3 push"))?;
+        if status.success() {
+            return Ok(());
+        }
+        // The same deadline bounds collection after a failed CLI exit. Dropping
+        // this scope cancels pending readers without detached tasks or raw logs.
+        if !drained {
+            drained = tokio::time::timeout_at(expires, &mut drain).await.is_ok();
+        }
+        (status, drained)
+    };
+    let capture_incomplete = !drained || stdout_output.is_none() || stderr_output.is_none();
+    let diagnostic = Niks3PushDiagnostic::from_outputs(
+        status,
+        &stderr_output.unwrap_or_default(),
+        &stdout_output.unwrap_or_default(),
+    );
+    anyhow::bail!(
+        "Niks3 push failed with {status}; diagnostic_hint={:?}; capture_incomplete={capture_incomplete}; truncated={}; output_read_failed={}; output suppressed; {diagnostic}",
+        diagnostic.category,
+        diagnostic.truncated,
+        diagnostic.output_read_failed,
+    )
 }
 
 #[cfg(test)]
@@ -560,6 +623,119 @@ exit 23
     }
 
     #[tokio::test]
+    async fn niks3_drains_both_oversized_streams_without_exposing_bytes() {
+        let (_directory, prepared, credential) = fake_niks3(
+            r#"
+emit() {
+    i=0
+    while test "$i" -lt 4096; do
+        printf '%s' 'https://object.invalid/?signature=synthetic-private-token&certificate=TLS'
+        i=$((i + 1))
+    done
+}
+emit &
+emit >&2
+wait
+printf '\n%s\n' 'unrecognized terminal failure' >&2
+exit 1
+"#,
+        );
+        let error = run_prepared_niks3_push(prepared, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("exit status: 1"));
+        assert!(!message.contains("synthetic"));
+        assert!(!message.contains("https://"));
+        assert!(!message.contains("signature="));
+        assert!(message.contains("diagnostic_hint=Unknown"));
+        assert!(message.contains("truncated=true"));
+        assert!(!credential.exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_terminal_fatal_record_yields_only_a_static_hint() {
+        let (_directory, prepared, credential) = fake_niks3(
+            r#"
+i=0
+while test "$i" -lt 4096; do
+    printf '%s' 'synthetic-private-token progress' >&2
+    i=$((i + 1))
+done
+printf '\n%s\n' 'time=2026-10-10T01:00:00Z level=ERROR msg="Fatal error" error="setting up client TLS: loading CA certificate: synthetic-private-token"' >&2
+exit 1
+"#,
+        );
+        let error = run_prepared_niks3_push(prepared, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("diagnostic_hint=TlsTrust"));
+        assert!(message.contains("truncated=true"));
+        assert!(!message.contains("synthetic"));
+        assert!(!credential.exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_response_body_keywords_do_not_establish_a_failure_hint() {
+        let (_directory, prepared, credential) = fake_niks3(
+            r#"
+printf '%s\n' 'time=2026-10-10T01:00:00Z level=ERROR msg="Fatal error" error="pushing paths: creating pending closures: creating pending closure: server returned 500: <Error><Message>Unauthorized x509: certificate signed by unknown authority https://object.invalid/?signature=private</Message></Error>"' >&2
+exit 1
+"#,
+        );
+        let error = run_prepared_niks3_push(prepared, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("diagnostic_hint=Unknown"));
+        assert!(!message.contains("https://"));
+        assert!(!message.contains("<Error>"));
+        assert!(!message.contains("signature="));
+        assert!(!credential.exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_success_ignores_diagnostic_words_from_earlier_output() {
+        let (_directory, prepared, credential) = fake_niks3(
+            "printf '%s\\n' 'certificate verify failed; presigned upload failed' >&2\nexit 0",
+        );
+        run_prepared_niks3_push(prepared, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(!credential.exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_inherited_pipes_do_not_replace_failed_cli_status() {
+        let (_directory, prepared, credential) =
+            fake_niks3("sleep 1 &\nprintf '%s\\n' 'unknown failure' >&2\nexit 1");
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_prepared_niks3_push(prepared, Duration::from_millis(100)),
+        )
+        .await
+        .expect("inherited pipes exceeded the collection deadline")
+        .unwrap_err();
+        assert!(error.to_string().contains("exit status: 1"));
+        assert!(!error.to_string().contains("timed out"));
+        assert!(!credential.exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_success_does_not_wait_for_inherited_pipe_eof() {
+        let (_directory, prepared, credential) = fake_niks3("sleep 1 &\nexit 0");
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            run_prepared_niks3_push(prepared, Duration::from_secs(5)),
+        )
+        .await
+        .expect("successful CLI waited for descendant pipe EOF")
+        .unwrap();
+        assert!(!credential.exists());
+    }
+
+    #[tokio::test]
     async fn niks3_timeout_reaps_child_before_credential_cleanup() {
         let (directory, prepared, credential) =
             fake_niks3("printf '%s' \"$$\" > \"${0%/*}/pid\"\nexec sleep 30");
@@ -574,8 +750,9 @@ exit 23
 
     #[tokio::test]
     async fn niks3_cancellation_keeps_owner_until_child_cleanup() {
-        let (directory, prepared, credential) =
-            fake_niks3("printf '%s' \"$$\" > \"${0%/*}/pid\"\nexec sleep 30");
+        let (directory, prepared, credential) = fake_niks3(
+            "printf '%s' \"$$\" > \"${0%/*}/pid\"\nwhile :; do printf '%s' 'synthetic-private-token'; printf '%s' 'https://object.invalid/?signature=private' >&2; done",
+        );
         let task = tokio::spawn(run_prepared_niks3_push(prepared, Duration::from_secs(30)));
         // Wait until the owner has started, then cancel only the caller.
         tokio::time::timeout(Duration::from_secs(5), async {

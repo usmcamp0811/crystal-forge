@@ -1,5 +1,8 @@
 # Bundle Update Log
 
+## 2026-10-10
+* **Niks3 CA compatibility**: Added a focused operator contract for supported full NSS/OpenSSL bundles and root-preserving normalization. Corrected the main Niks3 guide's certificate-only CA restriction and augmenting-write-probe claim. Documented separate client identity checks, canonical Save and legacy in-memory projection, 17 static probe codes, bounded CLI hints, and synthetic-versus-deployed proof limits. Runtime and browser gate evidence remains distinct from source implementation status.
+
 ## 2026-10-09
 * **Adaptive bulk recovery**: Added a focused recovery operator guide and linked the sizing, configuration, evaluator-contract, workflow, and packaging references. Updated the working boundary to include independently detected visible-ancestor `memory.high` and `memory.max`. Recorded bounded pressure sampling, idle assessment, one invocation deadline, cleanup quarantine, and exact-attempt partial-failure semantics. Source-reviewed the shared interrupted-acknowledgement proof and terminal handoff; implementation status remains distinct from pending final gate results.
 * **Bulk evaluator resource contract**: Added a focused operator guide for the adaptive memory plan and independent deadlines. Wired the evaluation index, NixOS and TOML operator references, verified-source contract, CLI reference, queue workflow, and packaging runbook. The guide distinguishes current resource planning from the pinned v2.34.3 upstream behavior and version-dependent deployment reports. Implementation status describes source behavior, not a passing validation result.

@@ -12,9 +12,11 @@
 //! - Foundational crate; may not depend on `cf-server`, `cf-builder`, or `cf-agent`.
 
 pub mod attic_urls;
+pub mod ca_bundle;
 pub mod cache_credentials;
 pub mod config;
 pub mod evaluator_resources;
+pub mod niks3_diagnostics;
 
 // Re-export everything from config module at the crate root for convenience.
 pub use attic_urls::{AtticUrlError, AtticUrls, resolve_attic_urls};

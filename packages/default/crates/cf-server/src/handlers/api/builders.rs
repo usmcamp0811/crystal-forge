@@ -913,8 +913,8 @@ async fn run_niks3_input_owner(
         command
             .args(&prepared.args)
             .kill_on_drop(true)
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
             .spawn()
     });
     let child_pid = spawned
@@ -935,24 +935,33 @@ async fn run_niks3_input_owner(
     tokio::spawn(async move {
         let (result, child_reaped, outcome) = match spawned {
             Some(Ok(mut child)) => {
-                let completion = match tokio::time::timeout_at(expires, child.wait()).await {
-                    Ok(Ok(status)) if status.success() => (Ok(true), true, "success"),
-                    Ok(Ok(_)) => (Err(StatusCode::INTERNAL_SERVER_ERROR), true, "exit_failure"),
-                    Ok(Err(_)) => {
-                        let _ = child.kill().await;
-                        let reaped = child.wait().await.is_ok();
-                        (
-                            Err(StatusCode::INTERNAL_SERVER_ERROR),
-                            reaped,
-                            "wait_failure",
-                        )
-                    }
-                    Err(_) => {
-                        let _ = child.kill().await;
-                        let reaped = child.wait().await.is_ok();
-                        (Err(StatusCode::CONFLICT), reaped, "timeout")
-                    }
-                };
+                let completion =
+                    match crate::derivations::cache::wait_niks3_diagnostics(&mut child, expires)
+                        .await
+                    {
+                        Ok(()) => (Ok(true), true, "success"),
+                        Err(error) => {
+                            // SECURITY: The runner returns only exit status and static
+                            // diagnostics. Never attach a command or raw output here.
+                            tracing::warn!(error = %error, "Niks3 input push failed");
+                            let timed_out = error.is::<tokio::time::error::Elapsed>();
+                            if child.id().is_none() {
+                                (Err(StatusCode::INTERNAL_SERVER_ERROR), true, "exit_failure")
+                            } else {
+                                let _ = child.kill().await;
+                                let reaped = child.wait().await.is_ok();
+                                if timed_out {
+                                    (Err(StatusCode::CONFLICT), reaped, "timeout")
+                                } else {
+                                    (
+                                        Err(StatusCode::INTERNAL_SERVER_ERROR),
+                                        reaped,
+                                        "wait_failure",
+                                    )
+                                }
+                            }
+                        }
+                    };
                 drop(child);
                 completion
             }
@@ -1145,7 +1154,7 @@ mod niks3_input_owner_tests {
             let mut release = handshake_fifo(&release_path).unwrap();
             let program = fixture.path().join("niks3");
             std::fs::write(&program, format!(
-                "#!/bin/sh\nset -eu\ntest -f \"$HOME/token\"\nprintf '%s\\n' \"$$\" > '{}'\nIFS= read -r code < '{}'\ntest -f \"$HOME/token\"\nexit \"$code\"\n",
+                "#!/bin/sh\nset -eu\ntest -f \"$HOME/token\"\nprintf '%s\\n' \"$$\" > '{}'\nIFS= read -r code < '{}'\ntest -f \"$HOME/token\"\ni=0\nwhile test \"$i\" -lt 4096; do printf '%s' 'synthetic-input-fixture'; printf '%s' 'https://object.invalid/?signature=private&certificate=TLS' >&2; i=$((i + 1)); done\nexit \"$code\"\n",
                 ready_path.display(), release_path.display(),
             )).unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();

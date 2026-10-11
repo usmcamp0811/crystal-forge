@@ -93,7 +93,7 @@ flowchart LR
   Native -->|two independent Ed25519 narinfo signing keys| Garage
 ```
 
-The A+B bundle verifies server certificates. It excludes client issuer C.
+The helper's A+B bundle verifies server certificates. It excludes client issuer C.
 Nginx uses C separately to verify client identities. Only B is installed as an
 additional system root on CF server/builder roles; A remains private. The Basic
 read proxy also uses B, which the standalone agent trusts as a system root.
@@ -127,13 +127,113 @@ The authoritative gate includes real CF jobs with A-only and B-only configured
 write roots. Neither may produce a completed cache-publication row. The Go CLI
 replaces system roots when `--ca-cert` is present: A-only can reach the API but
 cannot verify B's S3 server, even though B is installed in system trust. B-only
-cannot verify the private-A API. A+B must complete a real remote build and exact
+cannot verify the private-A API. The negatives require the recognized static TLS
+diagnostic hint and reject escaped presigned-query or private-key diagnostics.
+The saved complete bundle must complete a real remote build and exact
 destination-ID publication, followed by CVE materialization, signature-required
 agent pull, provenance regressions, and the existing cleanup barriers.
 Client private keys are encrypted in CF rows. The mTLS dispatch has no token or
 static S3 keys. Live CLI inspection projects only booleans for protected
 `--client-cert`, `--client-key`, and `--ca-cert` files, absent token flags, absent
 AWS/token environment, and the expected root bundle.
+
+### Saved CA correction and fresh publication
+
+The full `mtls-split` regression seeds a destination with incomplete A-only write
+trust. Before queueing, a VM-local admin updates that same destination ID through
+`PUT /api/v1/caches/:id`. The patch contains only `niks3_write_ca_cert`: synthetic
+A+B+C certificates followed by the complete unmodified
+`${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt`. The runtime input is
+`/etc/niks3-production-pki/write-ca-bundle-onboarding.pem`.
+The repository's NSS 3.126 bundle contains 121 ordinary certificates, 172 trusted
+certificate blocks and 605 annotation lines. With A+B+C, the raw fixture has 124
+ordinary certificates. The Save normalizes to exactly those 124 ordinary roots;
+it must not promote trusted-only certificates into additional roots. A and B
+remain required server roots. C is also preserved; nginx verifies the client against its
+separate issuer-C configuration. The client certificate and private key are
+omitted from the patch. The fixture compares the full saved CA, unchanged client
+key ciphertext, every other raw field except `updated_at`, and exact assignment
+rows. GET must expose safe configured flags and redact private credentials.
+The server fixture explicitly selects `AUTH_MODE=local` for its real admin
+session. Proxy trust remains loaded from generated TOML. Synthetic legacy TLS
+credentials use the helper's existing strict profile so the native Python
+verifier can validate key usage and issuer identity without disabling checks.
+
+The same selected-ID `POST /api/v1/caches/:id/test-credentials` uses
+`probe_scope: "write"`. It requires successful public metadata discovery and
+**Untested** write authentication and authorization. The Test must leave the
+complete raw destination and assignments unchanged and cause no API/S3 writes.
+Metadata success does not satisfy publication. The later CF-launched builder
+CLI's protected CA file must hash to the entire saved canonical 124-root bundle.
+The independent Python fixture oracle strictly decodes Base64 and validates each
+ordinary X.509 DER identity. It preserves input order and compares exact
+canonical LF/64-column PEM bytes and the complete DER-identity sequence with GET
+and the raw database row. The separate
+[`niks3-ca-bundle`](../niks3-ca-bundle/README.md) Go/Rust gate validates the NSS
+annotation/AUX parser and Go root-set equivalence. The native gate emits only
+safe counts and hashes: 124 ordinary input roots, 172 ignored trusted blocks,
+605 annotation lines, 124 saved roots and zero promoted roots. The original
+A-only/B-only negatives still use their original one-root input.
+Appended generated fixture private-key material and incomplete certificate
+framing must return HTTP 400 from both Test and Save without raw database changes
+or provider contact.
+Replacing only the client key with the other generated fixture identity must
+also return HTTP 400 before provider contact and preserve the raw snapshot.
+The native replacement-trust proof uses a server-only `SSL_CERT_FILE` union of
+the public NSS bundle, original fixture CA, and A+B+C. This preserves other
+variants and server Nix reads while deliberately making A available as ambient
+trust. Three stored-ID write Tests retain the same client identity: clearing the
+custom CA succeeds through ambient A, explicitly selecting B-only fails with
+`diagnostic_code: tls_verification_failed`, and using the saved canonical bundle
+succeeds again. All three preserve the complete raw destination and assignment
+snapshot. Both successful metadata Tests keep authentication/authorization
+**Untested** and cause exactly two API GETs in total, with no S3 or upload writes.
+The B-only failure must not borrow A from process trust.
+The guest helper emits exactly one JSON record. Its `trust_negative` field
+contains only boolean `ok`, boolean-or-null `write_api_reachable`, one of the
+17 allowlisted diagnostic codes (otherwise `unrecognized`), and a bounded HTTP
+status or null. The same finite field is included in a failure summary when
+available. The helper does not emit a separate stdout or stderr projection.
+
+The guest creates a fresh input-addressed derivation with 16 MiB of runtime
+random payload bytes in the output. A bounded server-VM sandbox build provides
+the actual NAR hash, then deletes only that exact new output before dispatch. The
+runtime expression restores the original packaged BusyBox shell's Nix context
+with `builtins.storePath`; a plain JSON builder path would omit that sandbox
+dependency. The preflight does not publish the output. A
+different derivation ID or output name alone would not defeat content-addressed
+NAR deduplication. The fixture queues the exact new output through the normal
+CF remote-builder path, with no manual CLI publication of that output.
+
+Before dispatch, backend-authenticated read-only HEAD requests require HTTP 404
+for both the expected NAR object and exact output narinfo. After server-confirmed
+publication, both must return 200 and have new matching successful direct PUTs
+after the recorded observer baseline. The actual signed narinfo must name that
+same NAR object. Pinned Niks3 1.6.0 uses `nar/<NarHash>.nar.zst` and uploads
+zstd-encoded metadata at `<store-hash>.narinfo`; correlation uses those actual
+backend keys, including multipart NAR PUTs. Counts exclude earlier variants and
+do not substitute cumulative writes for new publication evidence.
+
+Exact object paths remain in a private nginx-owned guest observer under
+`/run/niks3-publication-observer` (directory 0700, files 0600). The observer records
+`$uri`, which excludes signed query parameters, method booleans and status. It
+never records headers, bodies or full URLs. Exported attestations contain only
+booleans, counts and SHA-256 object-path hashes. The existing independent server
+verification, selected destination identity, signature-required agent pull, CVE
+materialization and cleanup matrix remain required.
+The required `niks3-publication-observer` oneshot unit lets systemd create the
+runtime directory before nginx's unprivileged pre-start config test opens the
+log. Nginx and the root guest verifier can access the observer; other guest users
+cannot access it. Observer setup does not use polling or sleeps.
+
+This fixture reproduces the public onboarding recipe with synthetic private
+roots and the repository's actual public NSS package. It does not read a deployed
+certificate or private key. The Go/Rust gate establishes the supported public
+bundle format; this native gate must separately prove normalized Save and fresh
+publication. Neither proves an inaccessible deployed private root is valid. The
+previous certificate-only six-variant gate passed in 124 seconds. The expanded
+mixed-bundle gate requires a new run after the task owner confirms the sibling
+normalizer is ready; source parsing and evaluation do not establish that pass.
 
 The infrastructure-only proof is available without a server-package rebuild:
 
@@ -355,7 +455,7 @@ logging is disabled. These fixtures must never be used on deployed systems.
 
 - Legacy Attic and S3 coverage here proves authenticated cache-backed claims and
   accepted `/start` before execution. It does not prove native Attic/S3 uploads
-  or a pass of their separate upload suites. The five Niks3 variants still run
+  or a pass of their separate upload suites. All six Niks3 variants still run
   complete builds, publication verification and agent pulls.
 - The target has a no-op activation script. Agent pull is tested; a complete
   NixOS generation switch and reboot are not tested.

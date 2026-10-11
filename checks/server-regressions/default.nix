@@ -758,6 +758,7 @@ SQL
       queries::cache_publication_reads::tests::niks3_basic_publication_withholds_old_capabilities_and_insecure_delivery \
       handlers::api::caches::discovery_tests::niks3_stored_discovery_retains_replaces_clears_modes_without_persistence \
       handlers::api::caches::discovery_tests::niks3_stored_discovery_auth_invalid_json_type_tls_and_csrf_fail_without_mutation \
+      handlers::api::caches::niks3_ca_tests::canonical_ca_get_test_cancel_and_ca_only_save_preserve_ciphertext \
       handlers::api::caches::retained_probe_tests::attic_named_cache_retained_replacement_results_and_policy_preserve_raw_state \
       handlers::api::caches::retained_probe_tests::legacy_attic_plaintext_and_historical_ciphertext_retain_on_test_and_save \
       handlers::api::caches::retained_probe_tests::legacy_attic_null_and_empty_token_refuse_before_probe_without_mutation \
@@ -822,6 +823,14 @@ SQL
       handlers::api::caches::discovery_tests::niks3_discovery_rejects_invalid_bundles_and_queries_before_network \
       handlers::api::caches::discovery_tests::niks3_discovery_admin_first_and_public_response_redact_tls_material \
       security::cache_secrets::tests::certificate_bundle_regressions_reject_interleaved_comments_and_noncert_blocks \
+      handlers::api::caches::niks3_ca_tests::ca_normalization_keeps_roots_separate_from_strict_client_chains \
+      handlers::api::caches::niks3_ca_tests::ca_diagnostics_are_typed_static_and_field_scoped \
+      handlers::api::caches::niks3_ca_tests::mismatched_write_identity_fails_before_dns_and_never_proves_auth \
+      handlers::api::caches::niks3_ca_tests::custom_write_roots_skip_ambient_trust_and_validate_every_root \
+      handlers::api::caches::niks3_ca_tests::transport_diagnostics_use_local_causes_not_url_or_body_text \
+      queries::cache_destinations::tests::retained_niks3_secrets_preserve_exact_opaque_storage \
+      queries::cache_destinations::tests::effective_niks3_secret_clears_discard_original_storage \
+      queries::cache_destinations::tests::ca_updates_retain_all_niks3_secret_storage_and_inactive_fields \
       handlers::api::builders::tests::attic_requisite_env_uses_shared_server_base \
       handlers::api::caches::retained_probe_tests::attic_canonical_api_and_model_read_roots_share_named_cache \
       handlers::api::caches::retained_probe_tests::attic_native_metadata_and_status_matrix_never_claims_root_or_write_success \

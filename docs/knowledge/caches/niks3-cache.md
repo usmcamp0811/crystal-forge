@@ -30,11 +30,11 @@ Create or edit a destination as an administrator in **Caches**, or through
 | `niks3_write_auth_mode` | `token` or `mtls`, selected explicitly. |
 | `niks3_auth_token` | Required for static-token writes. No write certificate, key, or custom CA is allowed in this mode. |
 | `niks3_write_client_cert`, `niks3_write_client_key` | PEM contents required for mTLS writes. No write token is allowed in this mode. |
-| `niks3_write_ca_cert` | Optional certificate-only PEM trust bundle for mTLS writes. |
+| `niks3_write_ca_cert` | Optional supported server-trust CA bundle for mTLS writes; normalized to ordinary PEM without promoting trusted-only certificates. |
 | `niks3_read_auth_mode` | `none` (Public), `basic`, or `mtls`, selected independently of writes. |
 | `niks3_read_basic_username`, `niks3_read_basic_password` | Complete Basic pair; management responses omit both. Passwords are encrypted at rest. |
 | `niks3_read_client_cert`, `niks3_read_client_key` | PEM contents required for mTLS reads. Public mode rejects read credentials. |
-| `niks3_read_ca_cert` | Optional certificate-only PEM trust bundle for mTLS reads. |
+| `niks3_read_ca_cert` | Optional supported server-trust CA bundle for mTLS reads; normalized separately from client identity. |
 | `parallel_uploads` | Per-job upload cap, passed once as `--max-concurrent-uploads`; minimum one. Not `attic_jobs`. |
 | `environment_ids` | Destination assignments. Empty assignments mean global availability. |
 | `max_retries`, `push_timeout_seconds` | Defaults are 3 retries and 3600 seconds; retries may be zero. Parallel uploads default to 1. |
@@ -61,11 +61,22 @@ empty list makes the destination global.
 Static-token writes and public reads use the runtime's normal TLS trust store;
 there is no CA-only destination mode.
 
-Certificate and CA fields remain plaintext and can appear in API responses.
-Every supplied certificate field must contain only valid X.509 `CERTIFICATE`
-PEM blocks and ASCII whitespace. Combined certificate/private-key PEM, other
-PEM labels, comments, and arbitrary text are rejected. This checks certificate
-structure, not remote authorization or certificate/key pairing.
+Certificate and CA fields remain plaintext and can appear in API responses;
+private keys do not. Client certificate chains accept only valid X.509
+`CERTIFICATE` blocks and whitespace, with the leaf first. CA fields use the
+shared root-preserving normalizer, which supports complete validated
+buildcatrust OpenSSL/NSS records as well as ordinary PEM. Trusted-only blocks
+are validated but never promoted into roots. Unknown text, private material,
+unsupported AUX metadata, and contradictory trust fail closed. See
+[CA bundle compatibility and trust selection](niks3-ca-bundle-compatibility.md)
+for the exact grammar and diagnostics.
+
+General Save validation checks certificate structure without establishing
+client key pairing or remote authorization. Write Test and discovery also
+validate the selected private key against the first client certificate and
+the actual probe TLS backend before DNS. A CA-only Save writes canonical CA
+PEM while preserving omitted encrypted secrets. Legacy GET/Test normalize in
+memory without rewriting the stored row.
 
 Niks3 owns its backend storage credentials and signing configuration. Builders
 receive write configuration; agents receive read configuration only. Niks3
@@ -345,6 +356,34 @@ Upstream Niks3 1.6.0 WARN logs can expose a prefix/suffix of a rejected token;
 backend access logs can expose presigned URLs. Crystal Forge's output suppression
 does not redact those independently operated services.
 
+Crystal Forge drains both CLI output streams concurrently and retains at most
+64 KiB per stream in private process memory. Failed pushes expose only a fixed
+diagnostic hint, child status, and capture-completeness metadata. Recognized hints
+cover server trust, client identity, API authorization, write permission,
+presigned uploads, network access, local store access, and owner-enforced timeout.
+The ten finite categories are `TlsTrust`, `ClientCertificate`, `Unauthorized`,
+`Forbidden`, `WritePermission`, `PresignedUpload`, `Network`, `LocalStore`,
+`Timeout`, and `Unknown`. Only stderr's last complete fatal record, at most
+4 KiB, can supply an output-derived hint; stdout is progress-only. A stderr read
+failure or unsupported terminal grammar produces `Unknown`. Safe summaries report
+`diagnostic_hint`, child status, `capture_incomplete`, `truncated`, and
+`output_read_failed`. The original operation deadline bounds tail collection;
+pending collectors are dropped without detached diagnostic tasks. Credential
+ownership still lasts through the existing kill/reap path.
+
+The classifier's grammar comes from upstream Niks3 v1.6.0 and v1.14.2 source.
+It does not identify the deployed version. Unknown CLI output remains
+suppressed. Hints do not establish a root cause or prove authorization. Raw
+output is never streamed or persisted, and retained memory is not guaranteed
+to be locked or securely erased. An old exit-code-1 report alone cannot
+identify the original cause; production diagnosis still needs that operation's
+safe evidence.
+
+A CA-only Save preserves unchanged encrypted Niks3 credentials byte-for-byte.
+Explicit secret replacement and mode/type clearing still use the effective
+credential merge. Builders already dispatched keep their original snapshot; a
+newly dispatched job receives the current saved write credentials.
+
 Server-owned Niks3 derivation-input uploads emit fixed-field `started` and
 `completed` lifecycle events with an opaque operation UUID, child PID, reap
 status, cleanup-attempt status, and a static outcome. Events contain no request
@@ -439,6 +478,12 @@ read endpoint with its selected Public, Basic, or mTLS identity; all scope also
 checks discovery consistency. Optional stage fields distinguish untested work.
 Neither TLS acceptance nor metadata success proves write authorization on pinned
 Niks3 1.6.0. Errors never echo provider bodies, credentials, or PEM.
+The browser maps only the 17 exact codes in the
+[CA diagnostic contract](niks3-ca-bundle-compatibility.md#exact-probe-diagnostic-codes)
+to static local guidance. Unknown provider prose and URLs never become error
+text. `write_authn_valid` and `write_authorization_valid` remain null when
+unproved, alongside the legacy `write_auth_valid`; metadata success is not
+write-readiness evidence.
 
 ### Basic read transport and CA trust
 
@@ -457,9 +502,14 @@ token and mTLS write modes.
 Write CA bundles establish server trust for both the Niks3 API and presigned
 HTTPS storage targets, not trust in the issuer of the client certificate. A
 two-root deployment must include API root A and storage root B even when client
-identity comes from root C. Niks3's Go custom root pool replaces system roots;
-include public roots when required. The server discovery client instead adds
-custom roots to system trust. Certificate-only PEM validation remains strict.
+identity comes from root C. Niks3's Go custom root pool replaces system roots.
+The public onboarding union of a private issuing CA and the full NSS bundle
+therefore preserves public S3 trust intentionally. Write Test and discovery
+also replace ambient/system roots when a custom CA is selected; they must not
+succeed by borrowing a root unavailable to the CLI. Without a custom CA, the
+probe retains its normal process/system trust path. The shared normalizer
+preserves the ordinary Go root set throughout Save, GET/Test, dispatch, SDK,
+and protected CLI-file preparation. Client chains remain strict and separate.
 Garage credentials remain server-side; read access never establishes signature
 validity or write permission.
 

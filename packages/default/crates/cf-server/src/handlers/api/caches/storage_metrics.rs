@@ -245,15 +245,7 @@ async fn probe(snapshot: &CacheDestination, allow_private_targets: bool) -> Metr
     let Ok(transport) = transport else {
         return Metrics::absent(Status::Error, "invalid_configuration");
     };
-    let client = match cache_test_client(
-        &server,
-        allow_private_targets,
-        transport.cert,
-        transport.key,
-        transport.ca,
-    )
-    .await
-    {
+    let client = match niks3_write_test_client(&server, allow_private_targets, &transport).await {
         Ok(client) => client,
         Err(_) => return Metrics::absent(Status::Unavailable, "transport_unavailable"),
     };

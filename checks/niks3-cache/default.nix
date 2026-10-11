@@ -1,6 +1,27 @@
 {inputs, lib, pkgs, ...}: let
-  credentials = lib.crystal-forge.makeNiks3TestCredentials {inherit pkgs; productionPki = true;};
+  credentials = lib.crystal-forge.makeNiks3TestCredentials {inherit pkgs; productionPki = true; strictTls = true;};
   productionWritePki = credentials.productionWritePki;
+  onboardingWritePki = pkgs.runCommand "niks3-onboarding-write-pki" {} ''
+    mkdir -p "$out"
+    # Keep all synthetic identities unchanged. Only the new CA input combines
+    # A+B+C with the complete unmodified public NSS onboarding bundle.
+    cp -rs ${credentials}/production/. "$out"
+    cat ${credentials}/production/server-ca-a.crt \
+      ${credentials}/production/server-ca-b.crt \
+      ${credentials}/production/client-ca-c.crt \
+      ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt \
+      > "$out/write-ca-bundle-onboarding.pem"
+  '';
+  serverAmbientCa = pkgs.runCommand "niks3-server-ambient-ca.pem" {} ''
+    # Preserve public and original fixture trust for the other five variants.
+    # A is deliberately ambient here: an explicit B-only write probe must still
+    # reject A's API certificate instead of borrowing process trust.
+    cat ${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt \
+      ${credentials}/ca.crt \
+      ${credentials}/production/server-ca-a.crt \
+      ${credentials}/production/server-ca-b.crt \
+      ${credentials}/production/client-ca-c.crt > "$out"
+  '';
   evaluatorNix = pkgs.nix-eval-jobs.nix;
   variants = ["token-public" "mtls-public" "token-private" "mtls-private" "token-public-proxy" "mtls-split"];
   makeTarget = name: builtins.derivation {
@@ -33,7 +54,7 @@
     nix.settings = {experimental-features = ["nix-command" "flakes"]; substituters = lib.mkForce [];};
     security.pki.certificateFiles = ["${credentials}/ca.crt"];
     environment.etc."niks3-fixtures".source = credentials;
-    environment.etc."niks3-production-pki".source = "${credentials}/production";
+    environment.etc."niks3-production-pki".source = onboardingWritePki;
     networking.hosts.${nodes.production.networking.primaryIPAddress} = ["push-cache.test" "s3-cache.test" "read-cache.test" "read-foreign.test"];
     environment.etc."agent.key".source = key;
     # Inspect protected responses and generated TOML inside the isolated guests.
@@ -60,6 +81,31 @@ in pkgs.testers.runNixOSTest {
     production = {
       imports = [(lib.crystal-forge.makeNiks3CacheNode {inherit pkgs credentials; productionPki = true; basicRead = true;})];
       networking.hosts."127.0.0.1" = ["push-cache.test" "s3-cache.test" "read-cache.test" "read-foreign.test"];
+      # Exact object correlation stays inside this guest. $uri excludes signed
+      # queries; the private observer never records headers or response bodies.
+      services.nginx.commonHttpConfig = lib.mkAfter ''
+        log_format publication_object escape=json '{"path":"$uri","put":$production_put,"backend":$production_backend,"status":$status}';
+      '';
+      services.nginx.virtualHosts.production-s3.extraConfig = lib.mkAfter ''
+        access_log /run/niks3-publication-observer/objects.json publication_object;
+      '';
+      # nginx runs unprivileged and nginx -t opens its logs in preStart. A
+      # required unit lets systemd create the private directory before that test.
+      systemd.services.niks3-publication-observer = {
+        requiredBy = ["nginx.service"];
+        before = ["nginx.service"];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          User = "nginx";
+          Group = "nginx";
+          RuntimeDirectory = "niks3-publication-observer";
+          RuntimeDirectoryMode = "0700";
+        };
+        script = ''
+          install -m 0600 /dev/null /run/niks3-publication-observer/objects.json
+        '';
+      };
     };
     server = {lib, ...}: {
       imports = [common];
@@ -78,6 +124,8 @@ in pkgs.testers.runNixOSTest {
           trust_forwarded_builder_https = true;
           trustedProxyCidrs = ["127.0.0.1/32"];
           allow_private_cache_test_targets = true;
+          # The saved-CA regression uses real VM-local admin sessions.
+          auth_mode = "local";
         };
         build.remote_execution_strategy = "server_derivation";
         vulnix = {poll_interval = "2s"; timeout = "15s"; max_retries = 0;};
@@ -90,6 +138,11 @@ in pkgs.testers.runNixOSTest {
         systems = [{hostname = "agent"; public_key = pub; environment = "niks3";}];
       };
       environment.etc."cache-encryption-key".text = "niks3-vm-only-cache-encryption-key-470";
+      # The module emits AUTH_MODE only for OIDC. Select real local admin routes
+      # explicitly in this guest; proxy trust still comes from generated TOML.
+      systemd.services.crystal-forge-server.environment.AUTH_MODE = "local";
+      environment.etc."niks3-server-ambient-ca.pem".source = serverAmbientCa;
+      systemd.services.crystal-forge-server.environment.SSL_CERT_FILE = "/etc/niks3-server-ambient-ca.pem";
       services.postgresql.authentication = lib.mkForce ''
         local all postgres trust
         local all all peer
@@ -186,6 +239,7 @@ in pkgs.testers.runNixOSTest {
       "${pub}",
       "${credentials}",
       ${builtins.toJSON (lib.mapAttrs (_: target: {drv = target.drvPath; out = builtins.unsafeDiscardStringContext target.outPath;}) negativeTargets)},
+      "${onboardingWritePki}/write-ca-bundle-onboarding.pem",
     )
   '';
 } // {

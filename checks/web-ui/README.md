@@ -142,6 +142,10 @@ The ingress allows GET only. Missing and wrong client certificates must fail.
 The default, public-discovery and Basic-discovery native processes each have
 their own PostgreSQL database. Each process owns its Goose migrations; parallel
 startup cannot race initial sequence creation in another process's database.
+The `niks3-web-ui-db-owners` oneshot requires and runs after
+`postgresql-setup.service`. PostgreSQL accepting connections does not establish
+that NixOS has created the fixture databases and the `niks3` role. Both discovery
+services require the completed ownership changes before they start.
 Correct write mTLS with roots A+B must succeed. Root A alone can also complete
 this API GET; that observation does not establish S3 trust. The native pins API
 is absent. The check does not add a pins response or a GC authorization shortcut.
