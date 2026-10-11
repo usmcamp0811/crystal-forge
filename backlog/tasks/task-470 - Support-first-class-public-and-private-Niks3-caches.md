@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-11 21:57'
+updated_date: '2026-10-11 22:29'
 labels: []
 dependencies: []
 references:
@@ -220,6 +220,8 @@ Native completion coverage delegation: own only checks/niks3-cache/default.nix a
 Owner-requested log-only improvement at f284dda3. Add an optional default-absent cache_destination_name to BuilderCachePushConfig; propagate the configured destination name for display only, never into completion authority/cache selection. Read it directly in the builder job logger rather than expanding local CacheConfig. Use a small shared bounded display-name helper at server and builder log boundaries; reject controls/newlines, URL/credential-shaped input and unsafe punctuation, with a generic cache fallback for legacy payloads. Emit human-readable publishing and exact-output availability start/success/failure messages with readable elapsed time. Keep static machine telemetry in tracing separately and preserve persisted/live routing. Add focused formatter/name-sanitization/legacy DTO tests, run scoped Nix/Rust checks, separately commit/push and inspect exact-head CI. Do not alter verification, authentication, publication or completion semantics; no merge.
 
 Focused display delegation at f284dda3: edit only cf-protocol/src/{builder,cache}.rs and cf-builder/src/bin/builder.rs. Add default-absent display-only destination name, bounded shared log sanitizer and focused compatibility/security tests. Read metadata directly before payload moves; use existing publication log transport with small start/success formatter and tests. Parent owns server constructors, persisted human logs, task lock, preview and lifecycle. Run focused protocol/builder tests and formatting through Nix; no services, commits or pushes.
+
+Queued after the current log-only slice: user-authorized Attic cache metrics enhancement for MR !331. Inspect installed Attic version/upstream API and data model first. Prefer a supported native metrics API; otherwise investigate an optional read-only provider-side adapter with bounded aggregate queries against Attic's own database, not unrestricted CF database access. Report per-named-cache cached Nix path count and uncompressed logical NAR bytes; physical usage only with separate reliable scope/basis. Preserve Niks3 metrics, admin-only collection/per-cache authorization, explicit refresh/loading/error/unsupported behavior, timeouts and disabled-cache behavior. Update metrics API and Cards/Table labels/tooltips. Test populated/empty, isolation, deduplicated NARs, malformed/missing/auth-failed observations and presentation consistency. No publication/signing/completion changes. Run backend/UI/integration gates, commit/push normally and inspect exact-head CI; no merge.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -787,6 +789,8 @@ Verified locally through the Nix environment: server probe/guard tests (74 passe
 Final native niks3-cache gate passed in 135.32 seconds after correcting fixture-only nginx invocation and multipart accounting. It proved exact 202/cache_rate_limited pending receipt, packaged-builder same-job/session reporting recovery, and 200 confirmed receipt; one build-engine start; one logical multipart upload with one unique upload ID and two successful part PUTs; one narinfo PUT. Completion-window traffic was only exact-root/cache-info metadata GET/HEAD, with zero NAR downloads and zero reference-path queries. All six variants, unchanged Basic guard/signature-copy checks, agent pulls, CVE materialization and cleanup audits passed. Raw final log: /home/mcamp/.local/share/opencode/tool-output/tool_12c3de03f001F4N6bN55JQCFJf. CVE materialization does not establish successful vulnerability analysis.
 
 Six affected operator/API/test contracts were updated to advertised-availability semantics, pending publication and bounded reporting. No artifact-cryptographic-verification claim is made for path-info. Safe build logs identify cache ID/type, availability stage, success/failure and elapsed time without read URLs, private output, credentials or signed parameters. No schema/migration, flake pin, evaluator recovery, CA-bundle policy or netrc-patch changes. Preview remains waived; this slice has no frontend edits. Reckless/blue-ridge deployment replay and final exact-head CI completion remain unverified. Existing work already stranded under an older builder may require authorized completion-callback replay rather than Retry Build.
+
+Log-only slice implemented locally with optional display-only cache_destination_name, bounded safe labels and human-readable publishing/availability messages; IDs/stage/outcome remain structured tracing. Focused server tests: 73 passed, 1 ignored; protocol: 41 tests + 3 doctests passed; builder formatter: 1 passed; native fixture helper: 2 tests passed. Native gate command `sh packages/ci/public-cache-build.sh --no-link -L --max-jobs 1 --cores 2 .#checks.x86_64-linux.niks3-cache` exceeded 1200000 ms during VM startup after package rebuilding. Interrupted, no authoritative verdict. Raw tool output retained in tool_12d068e5c001BBhUlyhPw0Kgch. Investigate before rerun; no assertion weakening. Changes remain uncommitted.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
