@@ -73,7 +73,7 @@ environment-specific ignored tests that do not belong in this gate.
 
 ## TASK-470 selected library tests
 
-The following 51 ignored PostgreSQL tests run with
+The following 52 ignored PostgreSQL tests run with
 `--ignored --exact --test-threads=1`. Each invocation must report exactly one
 passed test and zero ignored tests. The tests include completed CVE publication
 provenance and malformed signing-key rejection across all Niks3 auth modes.
@@ -115,6 +115,7 @@ handlers::api::builders::proxy_dispatch_tests::proxy_credential_dispatch_signed_
 queries::builders::tests::niks3_exact_candidate_claim_never_substitutes_after_queue_races
 queries::builders::tests::niks3_dispatch_identity_and_completion_transaction_rechecks
 queries::builders::tests::niks3_missing_push_queues_exact_id_and_requires_authoritative_output
+queries::builders::tests::niks3_pending_publication_guards_rollback_and_later_promotion
 queries::cache_push::niks3_tests::niks3_recorded_no_cache_dispatch_differs_from_unrecorded_enqueue
 queries::cache_push::niks3_tests::niks3_queue_persists_provenance_pins_legacy_and_retains_deleted_identity
 queries::cache_publication_reads::tests::niks3_publication_exact_identity_rename_and_secondary_source
@@ -286,7 +287,7 @@ overall deadline, configured-authority requests without authorization headers,
 explicit null fields, and `Cache-Control: no-store`. These unit tests do not prove
 native-provider acceptance or represent real account/storage measurements.
 
-These 44 non-ignored tests run with `--exact --test-threads=1`:
+These 51 non-ignored tests run with `--exact --test-threads=1`:
 
 ```text
 queries::commits::partial_resource_failure_tests::partial_failure_diagnostic_uses_proven_counts_not_checkpoint_guesses
@@ -331,9 +332,66 @@ handlers::api::caches::s3_probe::tests::sigv4_signs_exact_bucket_host_path_query
 handlers::agent_request::tests::niks3_capability_requires_authenticated_body_and_ignores_unsigned_headers
 handlers::agent::heartbeat::tests::niks3_selected_cache_never_drops_private_or_unsupported_first_for_fallback
 handlers::api::builders::tests::niks3_preclaim_capability_gate_preserves_legacy_cache_dispatch
+handlers::api::builders::tests::cache_probe_failure_codes_and_wire_contract_are_static
+handlers::api::builders::tests::cache_probe_exact_root_refresh_attic_and_private_capture_bounds
+handlers::api::builders::tests::niks3_basic_probe_applies_guard_to_path_info_only
+handlers::api::builders::tests::niks3_completion_probe_uses_independent_read_plane
+handlers::api::builders::tests::niks3_probe_failure_never_polls_success_transition
+handlers::api::builders::tests::niks3_probe_timeout_and_cancellation_reap_before_cleanup
+handlers::api::builders::tests::niks3_pinned_nix_accepts_remote_metadata_and_refresh_flags
 handlers::api::builders::niks3_input_owner_tests::niks3_input_owner_acknowledges_reap_and_cleanup_after_detach
 handlers::api::builders::niks3_input_owner_tests::fifo_deadlines_cover_missing_readiness_and_absent_release_reader
 ```
+
+### Completion publication contract
+
+Niks3 and Attic completion run `nix path-info --refresh --store <read-store>
+<exact-output>` for one authoritative root. The probe does not traverse the
+closure, import NARs, or create a local logical store. Niks3 uses protected
+read-only credentials and isolated HOME/config/cache directories with mode 0700.
+The exact runtime must support the native Basic authority guard before credential
+files are created. Configured signing keys and `require-sigs=true` remain settings;
+path-info is availability evidence, not NAR integrity or signature proof.
+Deployment and CVE materialization retain their existing copy-time checks.
+The metadata deadline is 60 seconds, allowing bounded reporting retries.
+Private stdout and stderr are each bounded to 64 KiB; only static failure codes
+leave classification. Quoted URLs and response bodies cannot supply retry hints.
+
+Successful build completion with a failed probe returns HTTP 202:
+
+```json
+{"build_status":"success","publication_status":"pending","verification_code":"cache_path_missing","retryable":true,"retry_after_secs":2}
+```
+
+The verification codes are exactly `cache_path_missing`,
+`cache_authentication_failed`, `cache_rate_limited`, `cache_network_error`,
+`cache_probe_timeout`, `cache_read_configuration_invalid`, and `cache_probe_failed`.
+Missing paths can reflect publication visibility races. Missing paths, rate
+limits, network failures, and timeouts are retryable with `retry_after_secs: 2`.
+Authentication and configuration failures require operator correction; they and
+unknown process failures are non-retryable and omit `retry_after_secs`.
+Classification does not authorize completion. Invalid output, dispatch ID,
+session, status, eligibility, or fingerprint retains the existing hard 403/409
+behavior and cannot become pending success.
+
+The atomic pending helper stores exact output and build success plus the captured
+destination's durable queue identity. It does not record completed publication.
+The GC root and log channel remain owned until a later successful probe returns
+HTTP 200 `{"build_status":"success","publication_status":"confirmed"}`.
+Completion without a reported push returns HTTP 200 with publication `none`.
+Older clients that accept any 2xx can ignore the additive body. Same-claim retries
+promote the existing publication row without another build attempt. A failed
+current probe never demotes historical completed evidence. The queue remains
+operator-visible after reporting retries end; automatic worker recovery is not
+guaranteed.
+
+The pending PostgreSQL member proves session/builder/output/dispatch/fingerprint
+rollback, exact pending identity/output, later promotion, historical-proof
+retention, one build attempt, and bounded server-owned terminal diagnostics.
+Builder terminal-log authorization remains closed. The process members prove
+exact-root refresh, no copy execution, independent read mTLS/CA and Basic
+credentials, private stream bounds, static wire hints, cancellation cleanup,
+and the pinned Nix metadata flags.
 
 The input-publication owner regression uses FIFO handshakes to cover success,
 child failure, timeout, caller detach, spawn failure, and configuration failure.
@@ -359,7 +417,7 @@ its matching `END` identifies the active target and whether Cargo was compiling
 or executing. The library also has an explicit compilation boundary before its
 selected tests execute. Cargo's normal output reports executed test names.
 
-Each of the 51 ignored and 44 non-ignored TASK-470 tests emits its qualified name,
+Each of the 52 ignored and 51 non-ignored TASK-470 tests emits its qualified name,
 mode, start time, exit status, and elapsed time. Cargo stdout and stderr still
 pass through `tee` to the exact-test guard. `pipefail` preserves failures from
 Cargo or `tee`; success still requires the named `... ok` line and the existing

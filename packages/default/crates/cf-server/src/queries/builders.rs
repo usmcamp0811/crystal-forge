@@ -1473,6 +1473,8 @@ pub async fn complete_job_atomic_with_policy(
         store_path,
         None,
         false,
+        true,
+        None,
         policy,
     )
     .await
@@ -1710,6 +1712,9 @@ fn publication_configuration_fingerprint(
 /// before passing the evidence to [`complete_preverified_job_atomic`]. Usage
 /// timestamp changes do not invalidate the evidence. Credentials and digests
 /// must not be logged or persisted. This function performs no network probe.
+/// Failed probes can pass the same captured settings to
+/// [`complete_pending_publication_atomic_with_policy`] without confirming
+/// publication. Both completion paths recheck the captured fingerprint.
 ///
 /// # Errors
 /// Returns an error for database/decryption failures, ineligible destinations,
@@ -1749,13 +1754,16 @@ pub async fn capture_cache_publication_configuration(
     })
 }
 
-/// Describes publication verified against canonical destination configuration.
+/// Binds a publication attempt to captured canonical destination configuration.
 ///
-/// The caller must finish the authenticated read/signature probe before passing
-/// this evidence to [`complete_preverified_job_atomic`]. This type does not
-/// perform network verification itself.
+/// Despite the historical type name, capture performs no remote verification.
+/// The caller must finish the authenticated exact-root availability probe before
+/// passing this snapshot to [`complete_preverified_job_atomic`]. Path-info does
+/// not prove NAR signatures or integrity. Failed probes use
+/// [`complete_pending_publication_atomic_with_policy`] instead. Neither this
+/// type nor the completion transaction performs a network probe.
 pub struct VerifiedCachePublication {
-    /// Identifies the independently probed destination.
+    /// Identifies the destination whose settings were captured for the probe.
     pub destination_id: i32,
     /// Binds read/write/auth/signing settings and assignments, excluding usage.
     pub configuration: CachePublicationFingerprint,
@@ -1910,6 +1918,71 @@ pub async fn complete_preverified_job_atomic_with_policy(
         store_path,
         publication,
         true,
+        true,
+        None,
+        policy,
+    )
+    .await
+}
+
+/// Commits build success with unconfirmed publication to the captured destination.
+///
+/// Uses the same ownership, authoritative output, dispatch, eligibility and
+/// configuration checks as verified completion. Existing completed publication
+/// evidence is never demoted. A later verified callback can promote the same
+/// queue row without creating another build attempt.
+///
+/// # Errors
+/// Returns an error for changed ownership, session, output, destination or
+/// configuration, a non-static reason, or a failed transaction. No partial
+/// success is committed on error.
+///
+/// # Examples
+/// ```no_run
+/// # async fn pending(pool: &sqlx::PgPool, job: &crystal_forge::models::builders::BuildJob,
+/// # captured: &crystal_forge::queries::builders::VerifiedCachePublication,
+/// # builder: &uuid::Uuid) -> anyhow::Result<()> {
+/// use crystal_forge::queries::builders::{
+///     complete_pending_publication_atomic_with_policy, BuildCompletionPolicy,
+/// };
+/// complete_pending_publication_atomic_with_policy(pool, &job.id, builder,
+///     job.builder_session_id.as_ref(), "/nix/store/evaluated-output", captured,
+///     "cache_path_missing", BuildCompletionPolicy::default()).await?;
+/// # Ok(()) }
+/// ```
+pub async fn complete_pending_publication_atomic_with_policy(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
+    store_path: &str,
+    captured_cfg: &VerifiedCachePublication,
+    reason: &str,
+    policy: BuildCompletionPolicy,
+) -> Result<(BuildJob, bool)> {
+    anyhow::ensure!(
+        matches!(
+            reason,
+            "cache_path_missing"
+                | "cache_authentication_failed"
+                | "cache_rate_limited"
+                | "cache_network_error"
+                | "cache_probe_timeout"
+                | "cache_read_configuration_invalid"
+                | "cache_probe_failed"
+        ),
+        "Invalid pending publication reason"
+    );
+    complete_job_atomic_inner(
+        pool,
+        job_id,
+        builder_id,
+        builder_session_id,
+        Some(store_path),
+        Some(captured_cfg),
+        true,
+        false,
+        Some(reason),
         policy,
     )
     .await
@@ -1923,6 +1996,8 @@ async fn complete_job_atomic_inner(
     store_path: Option<&str>,
     publication: Option<&VerifiedCachePublication>,
     enforce_output: bool,
+    record_verified: bool,
+    pending_reason: Option<&str>,
     policy: BuildCompletionPolicy,
 ) -> Result<(BuildJob, bool)> {
     let mut tx = pool
@@ -2033,8 +2108,14 @@ async fn complete_job_atomic_inner(
             &destination.name,
         )
         .await?;
-        sqlx::query("UPDATE cache_push_jobs SET status = 'completed', completed_at = NOW(), error_message = NULL, retry_after = NULL WHERE id = $1")
-            .bind(cache_job_id).execute(&mut *tx).await?;
+        if record_verified {
+            sqlx::query("UPDATE cache_push_jobs SET status = 'completed', completed_at = NOW(), error_message = NULL, retry_after = NULL WHERE id = $1")
+                .bind(cache_job_id).execute(&mut *tx).await?;
+        } else {
+            // INVARIANT: A current failed probe cannot erase historical proof.
+            sqlx::query("UPDATE cache_push_jobs SET error_message = $2 WHERE id = $1 AND status <> 'completed'")
+                .bind(cache_job_id).bind(pending_reason).execute(&mut *tx).await?;
+        }
     } else if enforce_output && let (Some(destination_id), Some(path)) = (dispatched_id, store_path)
     {
         // CONCURRENCY: Missing remote publication queues the exact dispatched
@@ -2180,11 +2261,16 @@ pub async fn append_job_logs(pool: &PgPool, job_id: &Uuid, new_logs: &str) -> Re
     append_job_logs_with_limits(pool, job_id, new_logs, 10 * 1024 * 1024).await
 }
 
-/// Append logs to a job with safety limits.
+/// Appends server-owned logs to a live or successfully completed job.
 ///
-/// Enforces:
-/// - job must be in queued/building/cancelling status
-/// - total log bytes must not exceed max_total_log_bytes
+/// Allows `queued`, `building`, `cancelling`, and `success`. Server publication
+/// diagnostics can follow atomic build success. Authenticated builder writes use
+/// [`append_job_logs_with_limits_for_builder`] and cannot append after success.
+/// Total persisted bytes cannot exceed `max_total_log_bytes`.
+///
+/// # Errors
+/// Returns an error for missing jobs, prohibited status, exceeded byte limit,
+/// or a failed database operation.
 pub async fn append_job_logs_with_limits(
     pool: &PgPool,
     job_id: &Uuid,
@@ -2195,6 +2281,15 @@ pub async fn append_job_logs_with_limits(
         .await
 }
 
+/// Appends bounded builder logs only while the exact claim remains live.
+///
+/// Requires builder ownership and the stored session where one exists. Only
+/// `queued`, `building`, and `cancelling` accept writes; successful completion
+/// cannot reopen builder log authorization.
+///
+/// # Errors
+/// Returns an error for missing jobs, ownership/session mismatch, terminal
+/// status, exceeded byte limit, or a failed database operation.
 pub async fn append_job_logs_with_limits_for_builder(
     pool: &PgPool,
     job_id: &Uuid,
@@ -2228,9 +2323,9 @@ async fn append_job_logs_with_limits_guarded(
         SET logs = COALESCE(logs, '') || $2,
             updated_at = now()
         WHERE id = $1
-          AND status IN ('queued', 'building', 'cancelling')
+          AND (status IN ('queued', 'building', 'cancelling') OR ($4::uuid IS NULL AND status = 'success'))
           AND ($4::uuid IS NULL OR builder_id = $4)
-          AND (builder_session_id IS NULL OR builder_session_id = $5)
+          AND ($4::uuid IS NULL OR builder_session_id IS NULL OR builder_session_id = $5)
           AND OCTET_LENGTH(COALESCE(logs, '')) + OCTET_LENGTH($2) <= $3
         RETURNING id
         "#,
@@ -2264,7 +2359,11 @@ async fn append_job_logs_with_limits_guarded(
     match diagnostics {
         None => bail!("job_not_found"),
         Some((status, current_len_opt)) => {
-            if status != "queued" && status != "building" && status != "cancelling" {
+            if status != "queued"
+                && status != "building"
+                && status != "cancelling"
+                && !(builder_id.is_none() && status == "success")
+            {
                 bail!("invalid_job_status:{status}");
             }
 
@@ -4557,6 +4656,280 @@ mod tests {
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cache_push_jobs WHERE derivation_id = $1 AND status = 'completed' AND cache_destination = 'selected'")
             .bind(job.derivation_id).fetch_one(&pool).await.unwrap();
         assert_eq!(count, 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn niks3_pending_publication_guards_rollback_and_later_promotion(pool: PgPool) {
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.invalid/pending.git",
+            "pending",
+            &"a".repeat(40),
+            now,
+            "pending",
+            1.0,
+            now,
+        )
+        .await;
+        let builder = create_active_test_builder(&pool, "pending-builder").await;
+        let session = Uuid::new_v4();
+        establish_builder_session(&pool, &builder.id, &session, 60, "test session")
+            .await
+            .unwrap();
+        let job = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            4,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            Some(&session),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(job.id, job_id);
+        let output = "/nix/store/pending-output";
+        sqlx::query(
+            "UPDATE derivations SET expected_store_path = $2, store_path = NULL WHERE id = $1",
+        )
+        .bind(job.derivation_id)
+        .bind(output)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let destination =
+            create_public_niks3_test_cache(&pool, "pending-cache", "https://read.example").await;
+        record_job_cache_dispatch(
+            &pool,
+            &job_id,
+            &builder.id,
+            Some(&session),
+            Some(destination.id),
+        )
+        .await
+        .unwrap();
+        let captured =
+            capture_cache_publication_configuration(&pool, job.derivation_id, &destination)
+                .await
+                .unwrap();
+        let wrong_session = Uuid::new_v4();
+        let wrong_builder = Uuid::new_v4();
+        for (sql, reason) in [
+            (
+                "UPDATE build_jobs SET status = 'failed' WHERE id = $1",
+                "cache_path_missing",
+            ),
+            (
+                "UPDATE build_jobs SET status = 'building' WHERE id = $1",
+                "nonstatic-secret-reason",
+            ),
+        ] {
+            sqlx::query(sql).bind(job_id).execute(&pool).await.unwrap();
+            assert!(
+                complete_pending_publication_atomic_with_policy(
+                    &pool,
+                    &job_id,
+                    &builder.id,
+                    Some(&session),
+                    output,
+                    &captured,
+                    reason,
+                    BuildCompletionPolicy::default()
+                )
+                .await
+                .is_err()
+            );
+        }
+        for (owner, lease, path) in [
+            (&builder.id, &wrong_session, output),
+            (&wrong_builder, &session, output),
+            (&builder.id, &session, "/nix/store/wrong-output"),
+        ] {
+            assert!(
+                complete_pending_publication_atomic_with_policy(
+                    &pool,
+                    &job_id,
+                    owner,
+                    Some(lease),
+                    path,
+                    &captured,
+                    "cache_rate_limited",
+                    BuildCompletionPolicy::default()
+                )
+                .await
+                .is_err()
+            );
+        }
+        sqlx::query(
+            "UPDATE cache_destinations SET push_to = 'https://changed.example' WHERE id = $1",
+        )
+        .bind(destination.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            complete_pending_publication_atomic_with_policy(
+                &pool,
+                &job_id,
+                &builder.id,
+                Some(&session),
+                output,
+                &captured,
+                "cache_rate_limited",
+                BuildCompletionPolicy::default()
+            )
+            .await
+            .is_err()
+        );
+        sqlx::query("UPDATE cache_destinations SET push_to = $2 WHERE id = $1")
+            .bind(destination.id)
+            .bind(&destination.push_to)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let other =
+            create_public_niks3_test_cache(&pool, "other-cache", "https://other.example").await;
+        let other_cfg = capture_cache_publication_configuration(&pool, job.derivation_id, &other)
+            .await
+            .unwrap();
+        assert!(
+            complete_pending_publication_atomic_with_policy(
+                &pool,
+                &job_id,
+                &builder.id,
+                Some(&session),
+                output,
+                &other_cfg,
+                "cache_path_missing",
+                BuildCompletionPolicy::default()
+            )
+            .await
+            .is_err()
+        );
+        let before: (String, Option<String>, Option<DateTime<Utc>>, i64) = sqlx::query_as(
+            "SELECT j.status, d.store_path, d.completed_at, (SELECT COUNT(*) FROM cache_push_jobs c WHERE c.derivation_id = d.id) FROM build_jobs j JOIN derivations d ON d.id = j.derivation_id WHERE j.id = $1")
+            .bind(job_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(before, ("building".into(), None, None, 0));
+        let (_, is_new) = complete_pending_publication_atomic_with_policy(
+            &pool,
+            &job_id,
+            &builder.id,
+            Some(&session),
+            output,
+            &captured,
+            "cache_rate_limited",
+            BuildCompletionPolicy::default(),
+        )
+        .await
+        .unwrap();
+        assert!(is_new);
+        let pending: (i32, i32, String, String, Option<String>, String) = sqlx::query_as(
+            "SELECT id, cache_destination_id, cache_destination_source, status, error_message, store_path FROM cache_push_jobs WHERE derivation_id = $1")
+            .bind(job.derivation_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            (
+                pending.1,
+                pending.2.as_str(),
+                pending.3.as_str(),
+                pending.4.as_deref(),
+                pending.5.as_str()
+            ),
+            (
+                destination.id,
+                "database",
+                "pending",
+                Some("cache_rate_limited"),
+                output
+            )
+        );
+        assert_eq!(
+            get_build_job_by_id(&pool, &job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "success"
+        );
+        let persisted: String =
+            sqlx::query_scalar("SELECT store_path FROM derivations WHERE id = $1")
+                .bind(job.derivation_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(persisted, output);
+        let completed_evidence: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cache_push_jobs WHERE derivation_id = $1 AND status = 'completed'")
+            .bind(job.derivation_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(completed_evidence, 0);
+        // Server-owned diagnostics may append after success; builders still cannot.
+        append_job_logs_with_limits(&pool, &job_id, "static publication pending\n", 1024)
+            .await
+            .unwrap();
+        assert!(
+            append_job_logs_with_limits_for_builder(
+                &pool,
+                &job_id,
+                &builder.id,
+                Some(&session),
+                "builder terminal append",
+                1024
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            append_job_logs_with_limits(&pool, &job_id, &"x".repeat(1024), 1024)
+                .await
+                .is_err()
+        );
+        let (_, is_new) = complete_preverified_job_atomic_with_policy(
+            &pool,
+            &job_id,
+            &builder.id,
+            Some(&session),
+            Some(output),
+            Some(&captured),
+            BuildCompletionPolicy::default(),
+        )
+        .await
+        .unwrap();
+        assert!(!is_new);
+        let confirmed: (i32, String, Option<String>) = sqlx::query_as(
+            "SELECT id, status, error_message FROM cache_push_jobs WHERE derivation_id = $1",
+        )
+        .bind(job.derivation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(confirmed, (pending.0, "completed".into(), None));
+        complete_pending_publication_atomic_with_policy(
+            &pool,
+            &job_id,
+            &builder.id,
+            Some(&session),
+            output,
+            &captured,
+            "cache_rate_limited",
+            BuildCompletionPolicy::default(),
+        )
+        .await
+        .unwrap();
+        let retained: (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_message FROM cache_push_jobs WHERE id = $1")
+                .bind(pending.0)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(retained, ("completed".into(), None));
+        let attempts: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM build_jobs WHERE derivation_id = $1")
+                .bind(job.derivation_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(attempts, 1);
     }
 
     #[sqlx::test(migrations = "./migrations")]

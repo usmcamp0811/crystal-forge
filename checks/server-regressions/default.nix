@@ -782,6 +782,7 @@ SQL
       queries::builders::tests::niks3_exact_candidate_claim_never_substitutes_after_queue_races \
       queries::builders::tests::niks3_dispatch_identity_and_completion_transaction_rechecks \
       queries::builders::tests::niks3_missing_push_queues_exact_id_and_requires_authoritative_output \
+      queries::builders::tests::niks3_pending_publication_guards_rollback_and_later_promotion \
       queries::cache_push::niks3_tests::niks3_recorded_no_cache_dispatch_differs_from_unrecorded_enqueue \
       queries::cache_push::niks3_tests::niks3_queue_persists_provenance_pins_legacy_and_retains_deleted_identity \
       queries::cache_publication_reads::tests::niks3_publication_exact_identity_rename_and_secondary_source \
@@ -843,6 +844,13 @@ SQL
       handlers::agent_request::tests::niks3_capability_requires_authenticated_body_and_ignores_unsigned_headers \
       handlers::agent::heartbeat::tests::niks3_selected_cache_never_drops_private_or_unsupported_first_for_fallback \
       handlers::api::builders::tests::niks3_preclaim_capability_gate_preserves_legacy_cache_dispatch \
+      handlers::api::builders::tests::cache_probe_failure_codes_and_wire_contract_are_static \
+      handlers::api::builders::tests::cache_probe_exact_root_refresh_attic_and_private_capture_bounds \
+      handlers::api::builders::tests::niks3_basic_probe_applies_guard_to_path_info_only \
+      handlers::api::builders::tests::niks3_completion_probe_uses_independent_read_plane \
+      handlers::api::builders::tests::niks3_probe_failure_never_polls_success_transition \
+      handlers::api::builders::tests::niks3_probe_timeout_and_cancellation_reap_before_cleanup \
+      handlers::api::builders::tests::niks3_pinned_nix_accepts_remote_metadata_and_refresh_flags \
       handlers::api::builders::niks3_input_owner_tests::niks3_input_owner_acknowledges_reap_and_cleanup_after_detach \
       handlers::api::builders::niks3_input_owner_tests::fifo_deadlines_cover_missing_readiness_and_absent_release_reader
     do

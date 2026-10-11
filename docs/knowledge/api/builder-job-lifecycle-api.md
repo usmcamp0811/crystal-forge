@@ -218,11 +218,81 @@ side buffers the full closure in RAM.
 
 ### POST /api/v1/builders/:id/jobs/:job_id/complete
 
-Mark job as successfully completed.
+Report successful build execution and any builder-side publication.
 
-**Request Body**: `{}`
+**Request Body** (after a successful push):
+```json
+{
+  "output_path": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz-output",
+  "cache_pushed": true,
+  "cache_reference": "https://cache.example/read",
+  "cache_destination_id": 470
+}
+```
 
-**Response**: `200 OK`
+Niks3 requires the exact destination ID persisted at dispatch and an exact
+server-authoritative output. A name or URL cannot replace the ID. Eligible legacy
+non-Niks3 reference-only reports remain compatible. An empty body or `{}` remains
+a legacy no-push report; updated clients supply the output and omit publication
+identity when no push occurred.
+
+Authentication and claim guards run before the read probe. The server performs
+`nix path-info --refresh --store <read-store> <exact-output>` before its completion
+transaction, with a 60-second metadata deadline. This is exact-root metadata
+availability, not a closure copy, NAR-integrity check, or full signature proof.
+Niks3 retains protected read credentials, native Basic HTTPS-authority confinement,
+configured keys, and `require-sigs` settings. Deployment and CVE materialization
+retain their separate artifact-copy checks.
+
+**Response**: `200 OK` (metadata confirmed and publication committed atomically)
+```json
+{"build_status":"success","publication_status":"confirmed"}
+```
+
+**Response**: `200 OK` (no reported cache push)
+```json
+{"build_status":"success","publication_status":"none"}
+```
+
+**Response**: `202 Accepted` (build committed successfully, publication pending)
+```json
+{
+  "build_status": "success",
+  "publication_status": "pending",
+  "verification_code": "cache_path_missing",
+  "retryable": true,
+  "retry_after_secs": 2
+}
+```
+
+The pending transaction rechecks the same builder/session, output, exact selected
+destination, eligibility, and mandatory configuration fingerprint as confirmed
+completion. It records the existing queue's exact-destination pending publication,
+not a completed publication. It retains the recovery GC root and build-log channel.
+Invalid ownership remains 403; bad output/dispatch identity, stale configuration,
+lease/state mismatch, and cancellation remain hard 403/409 failures as applicable.
+These failures never become pending success.
+
+Retryable codes are exactly `cache_path_missing`, `cache_rate_limited`,
+`cache_network_error`, and `cache_probe_timeout`. Non-retryable codes are
+`cache_authentication_failed`, `cache_read_configuration_invalid`, and
+`cache_probe_failed`; their responses omit `retry_after_secs`. Raw Nix stdout,
+stderr, URLs, and provider bodies are never response messages. Classification is
+a static hint, not authorization or a proven root cause.
+
+The updated builder retries only this POST, at most five requests within ten
+minutes, with a 90-second attempt deadline and at least two seconds between
+requests. Every attempt signs the same payload/session with a fresh timestamp
+and signature. Pending retry requires both an allowlisted transient code and
+`retryable: true`. Reporting does not rebuild, re-sign artifacts, or reupload.
+An acknowledged pending receipt remains durable build success if a later request
+fails. Without any acknowledgement, network failure leaves server state unknown.
+The builder does not persist callback recovery across restart, and pending queue
+insertion does not guarantee worker startup. After correction, operator-arranged
+same-claim callback replay can promote publication idempotently while the job is
+`success`; it cannot bypass fingerprint/claim guards or create another build or
+scan admission. Recover `cache_pending` publication rather than Retry Build.
+See [publication recovery](../caches/niks3-cache.md#publication-failure-and-recovery).
 
 **Side Effects**:
 - Status → "success"

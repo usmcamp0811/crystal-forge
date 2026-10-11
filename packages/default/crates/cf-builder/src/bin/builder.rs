@@ -563,11 +563,8 @@ where
 async fn remote_job_cancellation_requested(client: &BuilderApiClient, job_id: uuid::Uuid) -> bool {
     match client.get_job_status(job_id).await {
         Ok(status) => job_status_requests_cancellation(status.as_deref()),
-        Err(err) => {
-            warn!(
-                "⚠️ Failed to poll cancellation status for job #{}: {}",
-                job_id, err
-            );
+        Err(_) => {
+            warn!("⚠️ Failed to poll cancellation status for job #{}", job_id);
             false
         }
     }
@@ -589,8 +586,8 @@ async fn abort_cancelled_remote_job(
 ) {
     info!("🛑 Job #{} cancelled by operator — finalizing", job_id);
     send_log_with_fallback(client, job_id, ws_shared, message).await;
-    if let Err(e) = client.finalize_cancelled_job(job_id).await {
-        error!("❌ Failed to finalize cancelled job #{}: {}", job_id, e);
+    if client.finalize_cancelled_job(job_id).await.is_err() {
+        error!("❌ Failed to finalize cancelled job #{}", job_id);
     }
 }
 
@@ -2209,7 +2206,10 @@ async fn execute_build_job(
                 return;
             }
 
-            if let Err(e) = client
+            // Cancellation is checked before reporting starts. Once the server
+            // acknowledges durable success (including HTTP 202), publication
+            // reporting must not finalize cancellation or report build failure.
+            let receipt = match client
                 .complete_job(
                     job_id,
                     &store_path,
@@ -2222,8 +2222,27 @@ async fn execute_build_job(
                 )
                 .await
             {
-                error!("❌ Failed to report job #{} completion: {}", job_id, e);
-            } else if capabilities.supports_current_cve_schema() {
+                Ok(receipt) => Some(receipt),
+                Err(e) => {
+                    error!("❌ Failed to report job #{} completion: {}", job_id, e);
+                    None
+                }
+            };
+            if let Some(
+                cf_builder::builder::api_client::BuildCompletionReceipt::PublicationPending {
+                    code,
+                    attempts,
+                },
+            ) = receipt
+            {
+                info!(job_id = %job_id, ?code, attempts,
+                    "Build completed durably; cache publication remains pending");
+            }
+            if capabilities.supports_current_cve_schema()
+                && receipt.is_some_and(|receipt| {
+                    receipt.permits_post_build_scan(cache_reference.is_some())
+                })
+            {
                 // Build completion is already durable. Scanner claim or
                 // execution failure cannot alter build or cache outcome.
                 match scan_semaphore.try_acquire_owned() {

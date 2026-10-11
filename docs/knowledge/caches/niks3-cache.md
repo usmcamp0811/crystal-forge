@@ -405,31 +405,74 @@ Niks3 requires `cache_destination_id`; a name or URL is not sufficient. Deleted,
 disabled, ineligible, or mismatched destinations cannot be replaced implicitly.
 Reference-only completion remains compatible for eligible legacy non-Niks3 caches.
 
-Before recording reported Niks3 publication, the server probes the independent
-read endpoint and imports the complete closure into a fresh temporary local
-store. The import requires signatures, uses only configured trusted keys,
-refreshes remote metadata, verifies NAR integrity, and checks that the requested
-root materialized. `path-info` alone does not prove valid signatures, and an
-already-present host-store path cannot satisfy the fresh-store check.
+Before recording reported publication, the server probes the independent read
+endpoint with `nix path-info --refresh --store <read-store> <exact-output>`.
+Niks3 uses the same lightweight exact-root metadata contract as Attic. The probe
+does not copy artifacts, traverse recursive dependencies, or create a fresh local
+Nix store. Success means that the selected remote store returned metadata for the
+expected root through the underlying Nix command. It does not prove NAR integrity,
+cryptographic signature validity, or complete-closure availability. Configured
+public keys and `require-sigs = true` remain selected settings; those settings do
+not turn `path-info` into full signature proof.
 
-The total verification process budget is **300 seconds**. The builder completion
-HTTP timeout is **360 seconds**, allowing cleanup and commit beyond verification.
-This is separate from `push_timeout_seconds` (default **3600 seconds** per push
+The metadata process deadline is **60 seconds**. Completion reporting allows at
+most **five POST requests within ten minutes**, with a **90-second deadline per
+attempt** and at least **two seconds between attempts**. Each retry uses fresh
+signatures and timestamps with the same payload and builder/session identity.
+Only completion reporting retries: it does not rebuild, re-sign the output, or
+reupload it. This is separate from `push_timeout_seconds` (default **3600 seconds** per push
 attempt). A push runs one Niks3 CLI process per job, which traverses the closure
 and owns upload concurrency. Server-local cache-queue attempts share one execution
 slot; multiple queue workers do not multiply that cap. Requisite publication from
 the API is not covered by this queue execution slot.
 
-Verification precedes the success transaction. The transaction rechecks output,
-identity, eligibility, and publication configuration, including credentials,
-signing keys, URLs, and environment assignments. A concurrent configuration
-change can reject completion even after a successful probe. Verified publication,
-build/derivation success, and CVE enqueue commit atomically. Probe failure,
-timeout, cancellation, or a failed recheck does not record successful publication
-and retains the recovery GC root. Repair the endpoint, trust, credentials, or
-eligibility and retry through the current claim/recovery workflow. Matching
-successful completion retries are idempotent; GC-root release after commit is
-best-effort.
+The probe precedes the completion transaction. Both confirmed and pending paths
+recheck the claim, exact output, selected destination, eligibility, and mandatory
+publication fingerprint. The fingerprint covers credentials, signing keys, URLs,
+and environment assignments. Bad output or destination identity, stale
+configuration, lease/session mismatch, and cancelled work remain hard 403/409
+rejections; a failed probe cannot downgrade those guards to pending success.
+
+A successful probe commits build/derivation success and completed publication
+atomically, then returns HTTP 200 with `build_status: "success"` and
+`publication_status: "confirmed"`. Completion without a reported cache push returns
+HTTP 200 with build success and publication `none`; this is not publication proof.
+A failed probe that passes all guards instead commits build success and an
+exact-destination pending `cache_push_jobs` row atomically. HTTP 202 reports
+`build_status: "success"`, `publication_status: "pending"`, a static
+`verification_code`, and `retryable`. No new confirmed publication is recorded.
+The recovery GC root and build-log channel remain available.
+
+| `verification_code` | `retryable` |
+| --- | --- |
+| `cache_path_missing` | `true` |
+| `cache_rate_limited` | `true` |
+| `cache_network_error` | `true` |
+| `cache_probe_timeout` | `true` |
+| `cache_authentication_failed` | `false` |
+| `cache_read_configuration_invalid` | `false` |
+| `cache_probe_failed` | `false` |
+
+Retryable responses include `retry_after_secs: 2`. Classification is a safe hint,
+not a root-cause or authorization claim. The process drains stdout and stderr
+privately with a 64 KiB limit per stream; raw output, URLs, response bodies, and
+signed queries never enter logs or receipts. Build-log diagnostics use cache ID,
+an allowlisted cache type, the `availability_path_info` stage, elapsed time, and
+static outcome/status fields. Protected read credentials and isolated metadata
+cache ownership last through cancellation, kill, and reap.
+
+An acknowledged pending receipt proves durable build success even if later
+reporting fails. Network failure without an acknowledgement leaves server state
+unknown: the transaction might or might not have committed. There is no durable
+builder callback recovery after restart, and a pending queue row does not
+guarantee automatic worker startup. After correcting endpoint, trust, credentials,
+or visibility, an operator must arrange a signed completion callback replay under
+the same valid builder/session and payload. Treat `cache_pending` as publication
+recovery, not Retry Build. Configuration changes still face fingerprint guards;
+replay cannot bypass a stale dispatch or retarget publication. Matching callbacks
+can promote the existing row while the job remains `success`, without duplicate
+build jobs or scan admission. A failed current probe never demotes historical
+completed evidence. Confirmed publication releases the root best-effort.
 
 Local `cache_push_jobs` retain `cache_destination_id` and
 `cache_destination_source` (`database`, `static`, or `legacy`). Database IDs
@@ -493,8 +536,10 @@ HTTPS origin (host and effective port) and disables all redirects. Unset behavio
 retains normal native transport. A probe of the actual selected runtime must
 establish support before Basic preparation. Credentials live in owned `0700`
 directories and `0600` netrc files; child-local Nix settings select the file and
-authority. Passwords never enter URLs or argv. Artifact copies and fresh-store
-publication verification retain signatures and independent signing-key trust.
+authority. Passwords never enter URLs or argv. The completion metadata probe uses
+this guard and protected read certificates/CAs where selected. Deployment, CVE
+materialization, and normal Nix substitution retain their artifact-copy signature
+and NAR-hash requirements and independent signing-key trust.
 Redirect-based read proxies cannot be used with this Basic guard; use the native
 streaming endpoint. This does not alter existing mTLS preparation or combine
 token and mTLS write modes.

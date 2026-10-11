@@ -2,8 +2,10 @@
 
 Queue setup and evaluated identities are seeded. The packaged remote builder
 claims a real job, imports its derivation, builds it, pushes it, and signs its
-completion. The server must independently read the selected cache before
-recording publication.
+completion. The server must independently observe refreshed exact-root metadata
+at the selected cache before confirming publication. Completion does not prove
+NAR integrity. Fresh signature-required copies, CVE imports and agent pulls
+exercise materialization separately.
 The deployment target has a no-op activation script: this check proves agent
 pulls, not a complete NixOS generation switch.
 """
@@ -948,15 +950,17 @@ except Exception as error:
 
 
 def split_object_boundary(production, target, before):
-    """Attests exact NAR/narinfo absence and new PUTs privately in the cache VM.
+    """Attests fresh objects and one logical multipart publication privately.
 
     Signed HEAD uses backend-only fixture credentials and never mutates Garage.
     Private object paths exclude queries. Only hashes, counts and booleans leave
     the guest. The pre-dispatch baseline excludes earlier variants and inputs.
+    Successful part PUTs are HTTP requests, not logical upload counts. The
+    trusted native provider completion must identify one upload for this root.
     """
     keys = [target['nar_key'], Path(target['out']).name.split('-', 1)[0] + '.narinfo']
-    source = f"""
-import hashlib,hmac,http.client,json,pathlib,stat
+    source = inspect.getsource(private_journal_message) + f"""
+import hashlib,hmac,http.client,json,pathlib,re,stat,subprocess
 from datetime import datetime,timezone
 try:
     directory = pathlib.Path('/run/niks3-publication-observer')
@@ -965,6 +969,12 @@ try:
     assert stat.S_IMODE(directory.stat().st_mode) == 0o700 and stat.S_IMODE(observer.stat().st_mode) == 0o600
     records = [json.loads(line) for line in observer.read_text().splitlines()]
     keys = {keys!r}
+    journal = subprocess.run(['journalctl','-b','-u','niks3-production.service','--no-pager','-o','json'],
+        stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=5,check=True).stdout
+    assert len(journal) <= 16 * 1024 * 1024, 'provider journal exceeds private capture bound'
+    provider = [json.loads(line) for line in journal.splitlines()]
+    assert provider and len({{record['_BOOT_ID'] for record in provider}}) == 1
+    boot = provider[0]['_BOOT_ID']
     def head(key):
         secrets = pathlib.Path('/run/niks3-production-secrets')
         access = (secrets/'access-key').read_text().strip()
@@ -990,19 +1000,43 @@ try:
     if {before!r}:
         assert all(head(key) == 404 for key in keys), 'fresh NAR or narinfo already exists'
         state_path.write_text(json.dumps({{'keys':keys,'baseline':len(records),
-            'puts':sum(record['put'] for record in records)}}))
+            'puts':sum(record['put'] for record in records),
+            'provider_baseline':len(provider),'provider_boot':boot,
+            'provider_cursor':provider[-1]['__CURSOR']}}))
         state_path.chmod(0o600)
         print(json.dumps({{'absent_nar':True,'absent_narinfo':True,'put_baseline':sum(record['put'] for record in records)}}))
     else:
         state = json.loads(state_path.read_text())
         assert state['keys'] == keys and len(records) >= state['baseline']
+        assert state['provider_boot'] == boot and 0 < state['provider_baseline'] <= len(provider)
+        assert provider[state['provider_baseline']-1]['__CURSOR'] == state['provider_cursor']
         delta = records[state['baseline']:]
         counts = []
         for key in keys:
             matching = [record for record in delta if record['path'] == '/production-niks3/'+key and record['put'] and not record['backend'] and 200 <= record['status'] < 300]
             assert matching and head(key) == 200, 'fresh object missing matching successful direct PUT'
             counts.append(len(matching))
+        uploads = []
+        # Niks3 1.6.0 emits this exact Go slog record after native completion.
+        # The root content-hash key and opaque upload IDs remain private inputs.
+        pattern = (r'[0-9]{{4}}/[0-9]{{2}}/[0-9]{{2}} [0-9]{{2}}:[0-9]{{2}}:[0-9]{{2}} '
+            r'INFO Completed multipart upload object_key='+re.escape(keys[0])+
+            r' upload_id=([0-9a-f]{{64}}) parts=([1-9][0-9]*)')
+        for record in provider[state['provider_baseline']:]:
+            message = private_journal_message(record)
+            if 'Completed multipart upload' not in message or 'object_key='+keys[0]+' ' not in message:
+                continue
+            assert record.get('_SYSTEMD_UNIT') == 'niks3-production.service'
+            match = re.fullmatch(pattern,message)
+            assert match is not None, 'invalid native root multipart completion record'
+            uploads.append((match[1],int(match[2])))
+        assert len(uploads) == len({{identity for identity,parts in uploads}}) == 1, 'root has zero or repeated logical multipart uploads'
+        parts = uploads[0][1]
+        # The fresh fixture carries 16 MiB of incompressible payload. Native
+        # Niks3 splits this NAR into two parts; each part has one successful PUT.
+        assert parts == counts[0] == 2 and counts[1] == 1, 'multipart part or narinfo PUT count mismatch'
         print(json.dumps({{'nar_puts':counts[0],'narinfo_puts':counts[1],
+            'logical_nar_uploads':len(uploads),'unique_upload_ids':1,'multipart_parts':parts,
             'new_puts':sum(record['put'] for record in delta),
             'object_path_sha256':[hashlib.sha256(key.encode()).hexdigest() for key in keys]}}))
 except Exception:
@@ -1010,6 +1044,278 @@ except Exception:
     raise SystemExit(1)
 """
     return json.loads(production.succeed("timeout 30 python3 -c " + shlex.quote(source), timeout=35))
+
+
+def completion_rate_limit(production, reader, server_address, target, enabled):
+    """Routes only the server's exact root metadata through a VM-local 429 sink.
+
+    The normal read location still enforces TLS and Basic authentication before
+    proxying. The same fixed map include remains present through both reloads.
+    NixOS ExecReload validates the actual store-backed config with its configured
+    nginx binary before HUP. An authenticated request from the server then proves
+    the new workers serve the selected status, rather than an old map.
+    No provider object, certificate, credential or guard fixture changes.
+    """
+    narinfo = "/" + Path(target["out"]).name.split("-", 1)[0] + ".narinfo"
+    production.succeed("python3 -c " + shlex.quote(f"""
+import ipaddress,json,pathlib,re,subprocess
+assert str(ipaddress.ip_address({server_address!r})) == {server_address!r}
+assert re.fullmatch(r'/[0123456789abcdfghijklmnpqrsvwxyz]{{32}}\\.narinfo', {narinfo!r})
+path = pathlib.Path('/run/niks3-publication-observer/metadata-map.conf')
+text = json.dumps({server_address!r}+':'+{narinfo!r})+' "http://127.0.0.1:5758";\\n' if {enabled!r} else ''
+path.write_text(text)
+path.chmod(0o600)
+result = subprocess.run(['systemctl','reload','nginx'],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=10)
+assert result.returncode == 0, 'completion metadata map reload failed'
+print(json.dumps({{'selected_root_rate_limit':{enabled!r},'authenticated_proxy_preserved':True}}))
+"""))
+    reader.succeed("timeout 12 python3 -c " + shlex.quote(f"""
+import base64,http.client,json,pathlib,ssl,time
+try:
+    pki = pathlib.Path('/etc/niks3-production-pki')
+    authorization = 'Basic '+base64.b64encode((pki/'basic-username').read_bytes()+b':'+(pki/'basic-password').read_bytes()).decode()
+    context = ssl.create_default_context()
+    def status(authenticated):
+        connection = http.client.HTTPSConnection('read-cache.test',5753,context=context,timeout=2)
+        try:
+            connection.request('GET',{narinfo!r},headers={{'Authorization':authorization}} if authenticated else {{}})
+            response = connection.getresponse()
+            result = response.status
+            response.read(65537)
+            return result
+        finally:
+            connection.close()
+    if {enabled!r}:
+        assert status(False) == 403, 'rate-limit routing bypassed Basic authentication'
+    expected = 429 if {enabled!r} else 200
+    deadline = time.monotonic()+8
+    while status(True) != expected:
+        assert time.monotonic() < deadline, 'selected-root metadata map not active'
+        time.sleep(0.1)
+    print(json.dumps({{'selected_root_status':expected,'basic_unauthenticated_status':403 if {enabled!r} else None}}))
+except Exception:
+    print(json.dumps({{'selected_root_status_failed':True}}))
+    raise SystemExit(1)
+"""), timeout=15)
+
+
+def completion_receipt(server, builder_id, session_id, job_id, cache_id, target, cache_name, pending):
+    """Asserts real signed same-claim JSON receipts without exporting auth bytes.
+
+    The disposable guest loads the public fixture signing key, signs a fresh
+    timestamp and keeps the complete response private. This test-owned replay
+    is distinguished from the packaged builder's automatic callback retries.
+    """
+    source = f"""
+import base64,http.client,json,pathlib,ssl,subprocess,tempfile
+from datetime import datetime,timezone
+try:
+    path = '/api/v1/builders/{builder_id}/jobs/{job_id}/complete'
+    body = json.dumps({{'output_path':{target['out']!r},'cache_pushed':True,
+        'cache_destination_id':{cache_id!r},'cache_reference':{cache_name!r}}},separators=(',',':'))
+    timestamp = datetime.now(timezone.utc).isoformat()
+    raw = base64.b64decode(pathlib.Path('/etc/agent.key').read_bytes(),validate=False)
+    der = bytes.fromhex('302e020100300506032b657004220420')+raw
+    with tempfile.TemporaryDirectory(prefix='niks3-test-receipt-') as directory:
+        directory = pathlib.Path(directory)
+        key, message = directory/'key.der', directory/'message'
+        key.write_bytes(der)
+        message.write_bytes(('POST\\n'+path+'\\n'+timestamp+'\\n'+body).encode())
+        key.chmod(0o600)
+        message.chmod(0o600)
+        signed = subprocess.run(['openssl','pkeyutl','-sign','-rawin','-keyform','DER',
+            '-inkey',str(key),'-in',str(message)],capture_output=True,timeout=5)
+        assert signed.returncode == 0 and len(signed.stdout) == 64
+    connection = http.client.HTTPSConnection('server',context=ssl.create_default_context(),timeout=90)
+    connection.request('POST',path,body,{{'Content-Type':'application/json',
+        'X-Builder-ID':{str(builder_id)!r},'X-Builder-Session-ID':{str(session_id)!r},
+        'X-Timestamp':timestamp,'X-Signature':base64.b64encode(signed.stdout).decode(),
+        'X-CF-Test-Receipt':'true'}})
+    response = connection.getresponse()
+    data = json.loads(response.read(65537))
+    expected = ({{'build_status':'success','publication_status':'pending',
+        'verification_code':'cache_rate_limited','retryable':True,'retry_after_secs':2}}
+        if {pending!r} else {{'build_status':'success','publication_status':'confirmed'}})
+    assert response.status == (202 if {pending!r} else 200) and data == expected
+    connection.close()
+    print(json.dumps({{'http_status':response.status,**expected}}))
+except Exception:
+    print(json.dumps({{'completion_receipt_failed':True}}))
+    raise SystemExit(1)
+"""
+    return json.loads(server.succeed("timeout 100 python3 -c " + shlex.quote(source), timeout=105))
+
+
+def completion_callbacks(server, builder_id, job_id):
+    """Returns safe real callback intervals for one exact job, never other URLs."""
+    return json.loads(server.succeed("python3 -c " + shlex.quote(f"""
+import json,pathlib,stat
+path = pathlib.Path('/run/niks3-completion-observer/callbacks.json')
+assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700 and stat.S_IMODE(path.stat().st_mode) == 0o600
+records = [json.loads(line) for line in path.read_text().splitlines()]
+selected = [record for record in records if record['path'] == '/api/v1/builders/{builder_id}/jobs/{job_id}/complete']
+assert all(record['post'] and set(record) == {{'path','post','driver','status','end','duration'}} for record in selected)
+print(json.dumps([{{key:record[key] for key in ('driver','status','end','duration')}} for record in selected]))
+""")))
+
+
+def selected_build_start_proof(builder, job_id, derivation_id):
+    """Requires one packaged build-engine start for the exact selected job.
+
+    Current-boot journal messages and process context remain private. Only the
+    number of trusted builder-module starts leaves the disposable guest.
+    """
+    source = inspect.getsource(private_journal_message) + f"""
+import json,re,subprocess
+try:
+    journal = subprocess.run(['journalctl','-b','-u','crystal-forge-builder.service',
+        '--no-pager','-o','json'],stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,timeout=5,check=True).stdout
+    assert len(journal) <= 16 * 1024 * 1024
+    pattern = (r'[0-9T:.Z+-]+\\s+INFO\\s+builder:\\s+🔨 Starting build for job #'
+        +re.escape({str(job_id)!r})+r' \\(derivation: {derivation_id}\\)')
+    starts = 0
+    for line in journal.splitlines():
+        record = json.loads(line)
+        message = re.sub(r'\\x1b\\[[0-9;]*m','',private_journal_message(record))
+        if re.fullmatch(pattern,message) is not None:
+            assert record.get('_SYSTEMD_UNIT') == 'crystal-forge-builder.service'
+            starts += 1
+    assert starts == 1, 'selected job rebuilt or build-engine start missing'
+    print(json.dumps({{'selected_job_build_starts':starts}}))
+except Exception:
+    print(json.dumps({{'selected_build_start_proof_failed':True}}))
+    raise SystemExit(1)
+"""
+    return json.loads(builder.succeed("timeout 8 python3 -c " + shlex.quote(source), timeout=10))
+
+
+def completion_metadata_boundary(production, target, callbacks, before=False):
+    """Attests root-only server metadata reads through confirmed receipts.
+
+    nginx records path and timing privately. Only counts leave the guest. The
+    window excludes subsequent explicit CVE and independent signature-copy
+    phases. A private record offset avoids cross-guest clock assumptions. The
+    callback observer separately proves the actual POST intervals and statuses.
+    This proves native gateway behavior, not the CLI argument shape;
+    the server's command-contract tests protect the absence of recursive flags.
+    """
+    source = f"""
+import json,pathlib,stat
+stage = 'observer_permissions'
+counts = {{'total_read_records':0,'window_read_records':0,'server_read_records':0,
+    'server_get_records':0,'server_head_records':0}}
+try:
+    path = pathlib.Path('/run/niks3-publication-observer/reads.json')
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700 and stat.S_IMODE(path.stat().st_mode) == 0o600
+    stage = 'observer_decode'
+    records = [json.loads(line) for line in path.read_text().splitlines()]
+    counts['total_read_records'] = len(records)
+    root = '/'+pathlib.Path({target['out']!r}).name.split('-',1)[0]+'.narinfo'
+    boundary = path.parent/'read-boundary.json'
+    if {before!r}:
+        boundary.write_text(json.dumps({{'root':root,'offset':len(records)}}))
+        boundary.chmod(0o600)
+        print(json.dumps({{'completion_read_baseline':True}}))
+        raise SystemExit(0)
+    stage = 'baseline_identity'
+    state = json.loads(boundary.read_text())
+    assert state['root'] == root and 0 <= state['offset'] <= len(records)
+    counts['window_read_records'] = len(records)-state['offset']
+    reads = [record for record in records[state['offset']:] if record['server']]
+    counts['server_read_records'] = len(reads)
+    counts['server_get_records'] = sum(record['get'] for record in reads)
+    counts['server_head_records'] = sum(record['head'] for record in reads)
+    # Native Nix can HEAD metadata before fetching it. Method acceptance does
+    # not authorize any NAR or reference path; the exact path boundary follows.
+    stage = 'server_metadata_methods'
+    assert reads and all(record['get'] or record['head'] for record in reads)
+    roots = [record for record in reads if record['path'] == root]
+    stage = 'root_status'
+    assert roots and any(record['status'] == 429 for record in roots) and any(record['status'] == 200 for record in roots)
+    # A refreshed isolated metadata cache must not walk root references. NAR
+    # imports are verified later by the unchanged native security fixtures.
+    stage = 'root_only'
+    assert all(record['path'] in (root,'/nix-cache-info') for record in reads), 'completion downloaded NAR or traversed references'
+    print(json.dumps({{**counts,'root_metadata_requests':len(roots),
+        'root_metadata_gets':sum(record['get'] for record in roots),
+        'root_metadata_heads':sum(record['head'] for record in roots),
+        'rate_limited_root_requests':sum(record['status'] == 429 for record in roots),
+        'available_root_requests':sum(record['status'] == 200 for record in roots),
+        'nar_downloads':0,'reference_metadata_gets':0,'completion_intervals':{len(callbacks)}}}))
+except Exception:
+    print(json.dumps({{'completion_metadata_boundary_failed':True,'stage':stage,**counts}}))
+    raise SystemExit(1)
+"""
+    return json.loads(production.succeed("python3 -c " + shlex.quote(source)))
+
+
+def publication_stage_projection(logs, cache_id):
+    """Selects bounded exact-ID availability events without returning raw logs."""
+    import re
+
+    assert isinstance(logs, str) and len(logs.encode()) <= 32 * 1024 * 1024
+    events = []
+    for line in logs.splitlines():
+        if not line.startswith("cache_publication "):
+            continue
+        match = re.fullmatch(r"cache_publication cache_id=(\d+) cache_type=Niks3 "
+                             r"stage=availability_path_info elapsed_ms=(\d+) "
+                             r"outcome=(success|cache_rate_limited) publication_status=(pending|confirmed)", line)
+        assert match is not None, "invalid completion stage projection"
+        identity, elapsed, outcome, status = match.groups()
+        assert int(identity) == cache_id and int(elapsed) <= 90000
+        assert status == ("confirmed" if outcome == "success" else "pending")
+        events.append({"cache_id": cache_id, "cache_type": "Niks3", "stage": "availability_path_info",
+                       "elapsed_ms": int(elapsed), "outcome": outcome, "publication_status": status})
+    assert events and len(events) <= 7, "completion stage evidence missing or retry bound exceeded"
+    return events
+
+
+def test_completion_guest_scripts_compile():
+    """Compiles generated guest code; this check does not attest VM behavior."""
+    class SyntaxGuest:
+        def __init__(self):
+            self.scripts = []
+
+        def succeed(self, command, **kwargs):
+            arguments = shlex.split(command)
+            source = arguments[arguments.index("-c") + 1]
+            compile(source, "<completion-guest>", "exec")
+            self.scripts.append(source)
+            return "{}"
+
+    guest = SyntaxGuest()
+    target = {"out": "/nix/store/0123456789abcdfghijklmnpqrsvwxyz0-completion", "nar_key": "nar/fixture.nar.zst"}
+    identity = "00000000-0000-4000-8000-000000000470"
+    for pending in (True, False):
+        completion_rate_limit(guest, guest, "192.0.2.10", target, pending)
+        completion_receipt(guest, identity, identity, identity, 470, target, "fixture", pending)
+    completion_callbacks(guest, identity, identity)
+    completion_metadata_boundary(guest, target, [], before=True)
+    completion_metadata_boundary(guest, target, [{"end": 42.0, "duration": 1.0, "status": 200, "driver": False}])
+    split_object_boundary(guest, target, before=True)
+    split_object_boundary(guest, target, before=False)
+    selected_build_start_proof(guest, identity, 470)
+    assert len(guest.scripts) == 12
+
+
+def test_publication_stage_projection_rejects_untrusted_fields():
+    """Rejects unrelated IDs, unsafe fields and contradictory persisted stages."""
+    prefix = "cache_publication cache_id=470 cache_type=Niks3 stage=availability_path_info elapsed_ms=12 "
+    pending = prefix + "outcome=cache_rate_limited publication_status=pending"
+    confirmed = prefix + "outcome=success publication_status=confirmed"
+    events = publication_stage_projection("PRIVATE unrelated log\n" + pending + "\n" + confirmed, 470)
+    assert [event["publication_status"] for event in events] == ["pending", "confirmed"]
+    assert "PRIVATE" not in json.dumps(events)
+    for invalid in (pending.replace("470", "471"), pending + " url=PRIVATE",
+                    pending.replace("pending", "confirmed"), pending.replace("=12", "=90001"),
+                    "\n".join([pending] * 8), "PRIVATE"):
+        try:
+            publication_stage_projection(invalid, 470)
+        except AssertionError as error:
+            assert "PRIVATE" not in str(error)
+        else:
+            raise AssertionError("untrusted completion stage accepted")
 
 
 def negative_tls_hint(builder, cursor):
@@ -1238,13 +1544,13 @@ def run_matrix(machines, targets, builder_public_key, credentials, negative_targ
 
     snapshot("initial")
 
-    def wait_row(query, params, predicate, description, timeout=180):
+    def wait_row(query, params, predicate, description, timeout=180, interval=2):
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             rows = sql(query, params)
             if predicate(rows):
                 return rows
-            time.sleep(2)
+            time.sleep(interval)
         # Never dump whole rows: cache configuration and job payloads contain
         # credentials. A timeout is a test failure, not a skipped scenario.
         raise AssertionError(f"Timed out: {description}")
@@ -1571,6 +1877,9 @@ assert (pki / 'client-ca-c.crt').read_bytes().strip() not in system
             api_baseline = len(production_observations(production, "api"))
             s3_baseline = len(production_observations(production, "s3"))
             print("Niks3 mtls-split: pre-dispatch fresh object absence " + json.dumps(object_before, sort_keys=True))
+            server_address = production.succeed("python3 -c 'import socket; print(socket.gethostbyname(\"server\"))'").strip()
+            completion_rate_limit(production, server, server_address, target, enabled=True)
+            completion_metadata_boundary(production, target, [], before=True)
         job_id = sql("INSERT INTO build_jobs(derivation_id,environment_id,status,queue_position,max_retries) VALUES (%s,%s,'queued',1000,0) RETURNING id", (derivation_id, environment_id))[0][0]
         fixture_jobs.append(str(job_id))
         fixture_derivations.append(derivation_id)
@@ -1579,9 +1888,58 @@ assert (pki / 'client-ca-c.crt').read_bytes().strip() not in system
         if split:
             assert sql("SELECT niks3_read_basic_password LIKE 'enc:v1:%%' FROM cache_destinations WHERE id=%s", (cache_id,))[0][0]
             wait_row("SELECT cache_dispatch_recorded_at IS NOT NULL FROM build_jobs WHERE id=%s", (job_id,),
-                     lambda rows: rows and rows[0][0], "split-PKI dispatch before bounded CLI observation")
+                     lambda rows: rows and rows[0][0], "split-PKI dispatch before bounded CLI observation", interval=0.1)
             projection = production_cli_projection(builder, expected_digest=saved["saved_ca_sha256"])
             print("Niks3 mtls-split: remote builder CLI protected mTLS/no-token/no-AWS proof " + json.dumps(projection, sort_keys=True))
+            # Hold the root 429 until the driver sees both states committed by
+            # the same completion transaction. A two-second callback retry can
+            # race a slow driver; leaving the injection active makes that race
+            # deterministic without sleeps, rebuilding or changing providers.
+            pending_rows = wait_row("""SELECT j.status,p.id,p.status,p.cache_destination_id,
+                p.cache_destination_source,p.store_path,p.error_message,j.completed_at
+                FROM build_jobs j JOIN cache_push_jobs p ON p.derivation_id=j.derivation_id
+                WHERE j.id=%s AND p.cache_destination_id=%s""", (job_id, cache_id),
+                lambda rows: len(rows) == 1 and rows[0][:1] == ("success",)
+                and rows[0][2:7] == ("pending", cache_id, "database", target["out"], "cache_rate_limited"),
+                "split-PKI atomic success plus rate-limited pending publication", timeout=180, interval=0.1)
+            pending_identity, completed_at = pending_rows[0][1], pending_rows[0][7]
+            session_id = sql("SELECT builder_session_id FROM build_jobs WHERE id=%s", (job_id,))[0][0]
+            assert completed_at is not None and session_id is not None
+            assert not sql("SELECT id FROM cache_push_jobs WHERE derivation_id=%s AND status='completed'", (derivation_id,))
+            pending_receipt = completion_receipt(server, builder_id, session_id, job_id,
+                                                 cache_id, target, published_name, pending=True)
+            print("Niks3 mtls-split: actual pending completion receipt " + json.dumps(pending_receipt, sort_keys=True))
+            # The server must not materialize the output during completion. This
+            # absence is checked before the explicit CVE import phase below.
+            server.fail(f"test -e {shlex.quote(target['out'])}")
+            completion_rate_limit(production, server, server_address, target, enabled=False)
+            wait_row("SELECT status FROM cache_push_jobs WHERE id=%s", (pending_identity,),
+                     lambda rows: rows == [("completed",)], "split-PKI builder POST-only completion recovery", timeout=180)
+            assert sql("SELECT status,builder_session_id,completed_at FROM build_jobs WHERE id=%s", (job_id,))[0] == (
+                "success", session_id, completed_at), "retry changed the successful build identity or completion time"
+            assert sql("SELECT id FROM build_jobs WHERE derivation_id=%s", (derivation_id,)) == [(job_id,)], "completion retry created another build"
+            confirmed_receipt = completion_receipt(server, builder_id, session_id, job_id,
+                                                   cache_id, target, published_name, pending=False)
+            print("Niks3 mtls-split: actual confirmed completion receipt " + json.dumps(confirmed_receipt, sort_keys=True))
+            callback_deadline = time.monotonic() + 10
+            while True:
+                callbacks = completion_callbacks(server, builder_id, job_id)
+                if any(not record["driver"] and record["status"] == 200 for record in callbacks):
+                    break
+                assert time.monotonic() < callback_deadline, "packaged builder confirmed receipt missing"
+                time.sleep(0.1)
+            automatic = [record for record in callbacks if not record["driver"]]
+            assert [record["status"] for record in callbacks if record["driver"]] == [202, 200]
+            assert 2 <= len(automatic) <= 5 and automatic[0]["status"] == 202 and automatic[-1]["status"] == 200
+            assert all(record["status"] == 202 for record in automatic[:-1]), "completion recovery returned a conflict or false confirmation"
+            assert automatic[-1]["end"] - automatic[0]["end"] + automatic[0]["duration"] <= 600
+            traffic = completion_metadata_boundary(production, target, callbacks)
+            stages = publication_stage_projection(sql("SELECT logs FROM build_jobs WHERE id=%s", (job_id,))[0][0], cache_id)
+            assert stages[0]["outcome"] == "cache_rate_limited" and stages[-1]["outcome"] == "success"
+            assert len(stages) == len(callbacks), "completion stage/callback evidence mismatch"
+            print("Niks3 mtls-split: completion-only native metadata traffic " + json.dumps(traffic, sort_keys=True))
+            print("Niks3 mtls-split: exact-job availability stages " + json.dumps(stages, sort_keys=True))
+            server.fail(f"test -e {shlex.quote(target['out'])}")
         wait_row("SELECT status,builder_id FROM build_jobs WHERE id=%s", (job_id,),
                  lambda rows: rows and rows[0][0] in ("success", "failed"), f"{variant} remote completion")
         assert sql("SELECT status,builder_id FROM build_jobs WHERE id=%s", (job_id,))[0] == ("success", builder_id), f"{variant}: remote build failed"
@@ -1594,6 +1952,11 @@ assert (pki / 'client-ca-c.crt').read_bytes().strip() not in system
             stored = sql("SELECT niks3_auth_token,niks3_write_client_key,s3_access_key_id,s3_secret_access_key,s3_session_token FROM cache_destinations WHERE id=%s", (cache_id,))[0]
             assert stored[0] is None and stored[1].startswith("enc:v1:") and all(value is None for value in stored[2:])
             object_after = split_object_boundary(production, target, before=False)
+            assert object_after["logical_nar_uploads"] == object_after["unique_upload_ids"] == 1
+            assert object_after["nar_puts"] == object_after["multipart_parts"] == 2
+            assert object_after["narinfo_puts"] == 1
+            build_proof = selected_build_start_proof(builder, job_id, derivation_id)
+            print("Niks3 mtls-split: one selected build-engine start " + json.dumps(build_proof, sort_keys=True))
             api_records = production_observations(production, "api")[api_baseline:]
             assert any(record["post"] and record["write_subject"] and record["client_certificate"] and 200 <= record["status"] < 300 for record in api_records)
             assert all(not record["authorization"] for record in api_records)
@@ -1601,7 +1964,7 @@ assert (pki / 'client-ca-c.crt').read_bytes().strip() not in system
             puts = [record for record in s3_records if record["put"] and not record["backend"] and 200 <= record["status"] < 300]
             assert puts and all(record["signature_validated"] and not record["authorization"] and not record["client_certificate"] for record in puts)
             print("Niks3 mtls-split: fresh exact-output CF publication " + json.dumps(object_after, sort_keys=True))
-        print(f"Niks3 {variant}: remote completion, dispatch binding, and selected publication verified")
+        print(f"Niks3 {variant}: remote completion, dispatch binding, and selected publication metadata available")
         snapshot(f"{variant}: publication completed", {"server": server})
         builder.succeed(f"test -e {shlex.quote(target['out'])}")
         agent.fail(f"test -e {shlex.quote(target['out'])}")

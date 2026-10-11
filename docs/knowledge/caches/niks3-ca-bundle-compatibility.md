@@ -142,7 +142,15 @@ A green metadata result reports only the checked API/read stage. Public
 cache-config cannot establish write authentication or authorization:
 `write_auth_valid`, `write_authn_valid`, and `write_authorization_valid` remain
 null when unproved and display **Untested**. Confirm publication with a real
-job and independent signature-required server verification.
+job and the independent server exact-output metadata probe. Completion uses
+`path-info --refresh --store`, with a 60-second metadata deadline; it does not
+copy the closure or prove signatures or NAR integrity. Configured public keys
+and `require-sigs` remain settings, not full signature proof from `path-info`.
+Deployment, CVE materialization, and normal Nix substitution keep their
+copy-time signature and NAR-hash checks. Separate native fresh-store fixture
+reads provide artifact-validation coverage; metadata confirmation does not
+replace that coverage. See [publication recovery](niks3-cache.md#publication-failure-and-recovery)
+for guarded confirmed/pending completion and bounded callback retries.
 
 ## Proof boundaries and diagnosis
 

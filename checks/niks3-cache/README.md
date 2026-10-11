@@ -38,8 +38,9 @@ part of this check. Each variant dispatches a real derivation to the packaged
 remote builder. The check requires a successful signed completion from that
 registered builder and
 a completed publication for the dispatch-bound destination ID. The server must
-verify readability and signatures in its temporary store before recording
-publication. The real agent receives its read configuration over signed
+probe refreshed metadata for the exact authoritative output at the selected read
+store before recording publication. Completion uses bounded `path-info`, not a
+closure copy or signature/NAR-integrity proof. The real agent receives its read configuration over signed
 heartbeats through a verified HTTPS proxy and
 pulls an output that is absent from its local store.
 
@@ -256,10 +257,12 @@ return 403. Read credentials never authenticate the write API or S3 uploads.
 The packaged native Nix exposes `cf-netrc-authority`. Basic consumers probe the
 actual executable before preparing credentials, then select a mode-0600 netrc
 inside a mode-0700 owned directory and the exact HTTPS origin through child-local
-settings. The gate copies the complete closure into two fresh stores, checking
-each signing key independently with `require-sigs = true`. Actual server
-publication, CVE materialization and packaged-agent copies exercise the shared
-consumer path. A signed old-agent request with Niks3 support but no Basic support
+settings. The gate separately copies the complete closure into two fresh stores,
+checking each signing key independently with `require-sigs = true`. Those native
+artifact guards remain required. Actual server completion exercises protected
+exact-root metadata reads only; CVE materialization and packaged-agent copies
+retain signature and NAR-hash checks through the shared read preparation.
+A signed old-agent request with Niks3 support but no Basic support
 must withhold both cache and target and leave the request pending.
 
 The existing gate runs eight native negative operations: 301 same-authority path,
@@ -453,6 +456,19 @@ logging is disabled. These fixtures must never be used on deployed systems.
 
 ## Limits
 
+- Completion confirmation proves refreshed root metadata availability, not full
+  artifact validation. The server's 60-second probe retains configured keys and
+  `require-sigs`, but `path-info` does not establish full signature proof. Failed
+  probes with valid claim/output/destination/fingerprint guards commit build
+  success plus exact-destination pending publication and return HTTP 202 with
+  static hints. Hard 403/409 conflicts cannot become pending success. The builder
+  retries only completion POST reporting, with fresh signatures for the same
+  payload/session: five requests within ten minutes, 90 seconds per attempt,
+  and at least two seconds between attempts. No acknowledged receipt means server
+  state can remain unknown. Callback recovery is not durable across restart,
+  and pending queue insertion does not guarantee worker startup. Operator replay
+  after correction is publication recovery, not a rebuild. See the canonical
+  [publication contract](../../docs/knowledge/caches/niks3-cache.md#publication-failure-and-recovery).
 - Legacy Attic and S3 coverage here proves authenticated cache-backed claims and
   accepted `/start` before execution. It does not prove native Attic/S3 uploads
   or a pass of their separate upload suites. All six Niks3 variants still run

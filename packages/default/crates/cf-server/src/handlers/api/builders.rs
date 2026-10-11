@@ -52,9 +52,11 @@ use crate::queries::builders;
 const NIX_STORE_EXPORT_ARG_BYTES_LIMIT: usize = 128 * 1024;
 const ATTIC_PUSH_PATH_CHUNK_SIZE: usize = 200;
 const BUILDER_SESSION_STALE_TIMEOUT_SECS: i64 = 60;
-// A full signed closure import uses the same five-minute bound as CVE cache
-// materialization. Failed verification keeps the build claim recoverable.
-const CACHE_PUBLICATION_VERIFY_TIMEOUT_SECS: u64 = 300;
+// Metadata reads have a one-minute budget, independent of closure imports.
+// This bounds completion latency and permits bounded client reporting retries.
+const CACHE_PUBLICATION_VERIFY_TIMEOUT_SECS: u64 = 60;
+// Match the read-probe diagnostic budget. One extra byte detects overflow.
+const CACHE_PUBLICATION_CAPTURE_LIMIT: usize = 64 * 1024;
 
 /// Verifies confidential transport through an explicitly trusted direct peer.
 ///
@@ -4205,19 +4207,18 @@ async fn verify_store_path_available_from_cache(
     store_path: &str,
     derivation_id: i32,
     job_id: Uuid,
-) -> Result<(), StatusCode> {
+) -> Result<(), CacheProbeFailure> {
     let status = probe_cache_read(
         destination.clone(),
         store_path.to_owned(),
         std::ffi::OsString::from("nix"),
-        // Full closure import is bounded separately from a narinfo-only probe.
         std::time::Duration::from_secs(CACHE_PUBLICATION_VERIFY_TIMEOUT_SECS),
     )
     .await?;
     if !status.success() {
         tracing::warn!(derivation_id, job_id = %job_id,
             "builder reported cache_pushed, but server publication verification failed");
-        return Err(StatusCode::CONFLICT);
+        return Err(CacheProbeFailure::Process);
     }
     Ok(())
 }
@@ -4227,25 +4228,25 @@ async fn probe_cache_read(
     store_path: String,
     program: std::ffi::OsString,
     deadline: std::time::Duration,
-) -> Result<std::process::ExitStatus, StatusCode> {
+) -> Result<std::process::ExitStatus, CacheProbeFailure> {
     if !cf_protocol::builder::is_canonical_nix_store_path(&store_path, false) {
-        return Err(StatusCode::CONFLICT);
+        return Err(CacheProbeFailure::Configuration);
     }
     let (url, keys, auth) = destination
         .read_config()
-        .map_err(|_| StatusCode::CONFLICT)?;
+        .map_err(|_| CacheProbeFailure::Configuration)?;
     // CONCURRENCY: Dropping the HTTP future signals the process owner to kill
-    // and reap before deleting read credentials or the isolated local store.
+    // and reap before deleting read credentials or the isolated metadata cache.
     let (cancel_guard, mut cancelled) = tokio::sync::oneshot::channel::<()>();
     let result = tokio::spawn(async move {
         let expires = tokio::time::Instant::now() + deadline;
         let prepared = if destination.cache_type == "Niks3" {
             // SECURITY: Establish native support before creating secret files
-            // or the verification store, using the exact read executable.
+            // using the exact read executable.
             let features = if matches!(auth, cf_protocol::cache::CacheReadAuth::Basic { .. }) {
                 probe_nix_read_features(&program)
                     .await
-                    .map_err(|_| StatusCode::CONFLICT)?
+                    .map_err(|_| CacheProbeFailure::Configuration)?
             } else {
                 cf_config::cache_credentials::NixReadFeatures::default()
             };
@@ -4253,19 +4254,19 @@ async fn probe_cache_read(
                 cf_config::cache_credentials::PreparedCacheRead::new_with_nix_features(
                     &url, &keys, &auth, &features,
                 )
-                .map_err(|_| StatusCode::CONFLICT)?,
+                .map_err(|_| CacheProbeFailure::Configuration)?,
             )
         } else {
             None
         };
-        let temporary_store = if prepared.is_some() {
+        let temporary_environment = if prepared.is_some() {
             use std::os::unix::fs::PermissionsExt;
             Some(
                 tempfile::Builder::new()
-                    .prefix("cf-cache-verify-")
+                    .prefix("cf-cache-probe-")
                     .permissions(std::fs::Permissions::from_mode(0o700))
                     .tempdir()
-                    .map_err(|error| verification_io_error("create-store", &error))?,
+                    .map_err(|_| CacheProbeFailure::Configuration)?,
             )
         } else {
             None
@@ -4274,101 +4275,40 @@ async fn probe_cache_read(
             let mut command = Command::new(&program);
             command.args([
                 "path-info",
+                "--refresh",
                 "--store",
                 prepared.as_ref().map_or(url.as_str(), |p| p.url.as_str()),
                 &store_path,
             ]);
-            if let (Some(read), Some(root)) = (&prepared, &temporary_store) {
+            // Completion reporting owns bounded retries. Avoid another retry
+            // loop inside Nix that can hide throttling until the probe expires.
+            command.args(["--option", "download-attempts", "1"]);
+            if let (Some(read), Some(root)) = (&prepared, &temporary_environment) {
                 configure_niks3_verification_read(&mut command, read, root.path());
             } else {
                 command.args(["--option", "extra-trusted-public-keys", &keys.join(" ")]);
                 apply_cache_destination_env(&mut command, &destination);
             }
-            let status = wait_cache_verification_command(command, expires, &mut cancelled).await?;
-            if !status.success() {
-                return Ok(status);
-            }
-            if let (Some(read), Some(root)) = (&prepared, &temporary_store) {
-                // SECURITY: path-info does not validate signatures.
-                // Nix 2.34.8 CmdCopy imports the closure with CheckSigs.
-                // LocalStore rejects untrusted signatures and NAR hashes.
-                // A fresh root prevents valid local paths from skipping
-                // import. Explicit keys exclude machine trust settings.
-                // Sources (Nix 2.34.8): src/nix/copy.cc,
-                // src/libstore/store-api.cc, src/libstore/local-store.cc.
-                let store_url = format!(
-                    "local?{}",
-                    url::form_urlencoded::Serializer::new(String::new())
-                        .append_pair(
-                            "root",
-                            root.path()
-                                .to_str()
-                                .ok_or(StatusCode::INTERNAL_SERVER_ERROR)?
-                        )
-                        .append_pair("require-sigs", "true")
-                        .finish()
-                );
-                let mut copy = Command::new(&program);
-                copy.args(["copy", "--from", &read.url, "--to", &store_url, &store_path]);
-                configure_niks3_verification_read(&mut copy, read, root.path());
-                let status = wait_cache_verification_command(copy, expires, &mut cancelled).await?;
-                // INVARIANT: Successful copy must materialize the requested
-                // root, not only another realised path. Inspect the imported
-                // object itself without following a store-path symlink.
-                let relative_path = store_path.strip_prefix('/').ok_or(StatusCode::CONFLICT)?;
-                if status.success()
-                    && tokio::fs::symlink_metadata(root.path().join(relative_path))
-                        .await
-                        .is_err()
-                {
-                    return Err(StatusCode::CONFLICT);
-                }
-                return Ok(status);
-            }
-            Ok(status)
+            // SECURITY: path-info proves exact-root availability, not NAR
+            // integrity or signatures. Deployment and CVE copy retain those
+            // checks at materialization. No local logical store is created.
+            wait_cache_verification_command(command, expires, &mut cancelled).await
         }
         .await;
         drop(prepared);
-        if let Some(root) = temporary_store {
-            dispose_verification_store(root).await?;
-        }
+        drop(temporary_environment);
         outcome
     })
     .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    .map_err(|_| CacheProbeFailure::Process)?;
     drop(cancel_guard);
     result
-}
-
-// SECURITY: Imported store directories are read-only. After the child is
-// reaped, make only this owner-only root's directories writable for deletion.
-// Never follow imported symlinks, which can refer outside the isolated store.
-async fn dispose_verification_store(root: tempfile::TempDir) -> Result<(), StatusCode> {
-    tokio::task::spawn_blocking(move || {
-        fn writable_directories(path: &std::path::Path) -> std::io::Result<()> {
-            use std::os::unix::fs::PermissionsExt;
-            if !std::fs::symlink_metadata(path)?.is_dir() {
-                return Ok(());
-            }
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
-            for entry in std::fs::read_dir(path)? {
-                writable_directories(&entry?.path())?;
-            }
-            Ok(())
-        }
-        writable_directories(root.path())
-            .map_err(|error| verification_io_error("prepare-store-cleanup", &error))?;
-        root.close()
-            .map_err(|error| verification_io_error("close-store", &error))
-    })
-    .await
-    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
 }
 
 // SECURITY: Do not inherit ambient write auth, Nix user/system trust keys or
 // narinfo metadata. A task-owned cache directory and --refresh ensure each
 // verification observes the selected remote publication instead of old cache
-// metadata. The isolated store retains logical /nix/store path identities.
+// metadata. HOME/config/cache are scratch directories, not a local Nix store.
 fn configure_niks3_verification_read(
     command: &mut Command,
     read: &cf_config::cache_credentials::PreparedCacheRead,
@@ -4389,7 +4329,6 @@ fn configure_niks3_verification_read(
     command.args([
         "--extra-experimental-features",
         "nix-command",
-        "--refresh",
         "--option",
         "trusted-public-keys",
         &read.trusted_public_keys,
@@ -4488,65 +4427,262 @@ async fn wait_cache_verification_command(
     mut command: Command,
     expires: tokio::time::Instant,
     cancelled: &mut tokio::sync::oneshot::Receiver<()>,
-) -> Result<std::process::ExitStatus, StatusCode> {
+) -> Result<std::process::ExitStatus, CacheProbeFailure> {
     use crate::vulnix::process_group::{ScannerProcessGroup, isolate};
+    use tokio::io::AsyncReadExt;
     if tokio::time::Instant::now() >= expires
         || !matches!(
             cancelled.try_recv(),
             Err(tokio::sync::oneshot::error::TryRecvError::Empty)
         )
     {
-        return Err(StatusCode::CONFLICT);
+        return Err(CacheProbeFailure::Timeout);
     }
     command
         .kill_on_drop(true)
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
     isolate(&mut command);
-    let child = command
-        .spawn()
-        .map_err(|error| verification_io_error("spawn-read", &error))?;
+    let mut child = command.spawn().map_err(|_| CacheProbeFailure::Process)?;
+    let stdout = child.stdout.take().ok_or(CacheProbeFailure::Process)?;
+    let stderr = child.stderr.take().ok_or(CacheProbeFailure::Process)?;
     let mut child = ScannerProcessGroup::new(child, "cache publication verification")
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
-    tokio::select! {
-        status = child.wait() => match status {
-            Ok(status) => { child.disarm(); Ok(status) },
-            Err(error) => { child.terminate().await; Err(verification_io_error("wait-read", &error)) },
+        .map_err(|_| CacheProbeFailure::Process)?;
+    // SECURITY: Retain at most 64 KiB per private stream. Oversize output ends
+    // the probe; neither raw stream nor command Debug can reach logs or JSON.
+    let capture = async {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let mut stdout = stdout.take(CACHE_PUBLICATION_CAPTURE_LIMIT as u64 + 1);
+        let mut stderr = stderr.take(CACHE_PUBLICATION_CAPTURE_LIMIT as u64 + 1);
+        let (out_result, err_result) =
+            tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err),);
+        if out_result.is_err()
+            || err_result.is_err()
+            || out.len() > CACHE_PUBLICATION_CAPTURE_LIMIT
+            || err.len() > CACHE_PUBLICATION_CAPTURE_LIMIT
+        {
+            return Err(CacheProbeFailure::Process);
+        }
+        tracing::debug!(
+            stdout_bytes = out.len(),
+            stderr_bytes = err.len(),
+            "Private cache metadata capture completed"
+        );
+        let status = child.wait().await.map_err(|_| CacheProbeFailure::Process)?;
+        if status.success() {
+            Ok(status)
+        } else {
+            Err(classify_cache_probe_failure(&err))
+        }
+    };
+    let result = tokio::select! {
+        result = capture => result,
+        _ = tokio::time::sleep_until(expires) => Err(CacheProbeFailure::Timeout),
+        _ = cancelled => Err(CacheProbeFailure::Timeout),
+    };
+    if result.is_ok() {
+        child.disarm();
+    } else {
+        child.terminate().await;
+    }
+    result
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CacheProbeFailure {
+    MissingPath,
+    AuthenticationFailed,
+    RateLimited,
+    Network,
+    Timeout,
+    Configuration,
+    Process,
+}
+
+// SECURITY: Only public row identity and allowlisted type/stage/outcome enter
+// persisted or streamed logs. Destination names, URLs and process output do not.
+async fn append_publication_probe_log(
+    state: &CFState,
+    job_id: Uuid,
+    destination: &CacheDestination,
+    elapsed: std::time::Duration,
+    failure: Option<CacheProbeFailure>,
+) {
+    let cache_type = match destination.cache_type.as_str() {
+        "Niks3" => "Niks3",
+        "Attic" => "Attic",
+        "S3" => "S3",
+        "Nix" => "Nix",
+        "Http" => "Http",
+        _ => "unsupported",
+    };
+    let message = format!(
+        "cache_publication cache_id={} cache_type={} stage=availability_path_info elapsed_ms={} outcome={} publication_status={}\n",
+        destination.id,
+        cache_type,
+        elapsed.as_millis(),
+        failure.map_or("success", CacheProbeFailure::code),
+        if failure.is_some() {
+            "pending"
+        } else {
+            "confirmed"
         },
-        _ = tokio::time::sleep_until(expires) => {
-            child.terminate().await;
-            Err(StatusCode::CONFLICT)
-        },
-        _ = cancelled => {
-            child.terminate().await;
-            Err(StatusCode::CONFLICT)
-        },
+    );
+    let max_chunk = state
+        .server_config
+        .max_build_log_chunk_mb
+        .saturating_mul(1024 * 1024);
+    let max_total = state
+        .server_config
+        .max_build_log_size_mb
+        .saturating_mul(1024 * 1024);
+    if message.len() > max_chunk
+        || builders::append_job_logs_with_limits(&state.pool, &job_id, &message, max_total)
+            .await
+            .is_err()
+    {
+        tracing::warn!(%job_id, "Publication diagnostic could not be persisted within log limits");
+        return;
+    }
+    if let Some(tx) = get_or_create_build_log_channel(state, job_id).await {
+        let log = BuildStreamMessage::Log { message };
+        record_build_stream_message(state, job_id, &log).await;
+        let _ = broadcast_build_stream_message(&tx, &log);
     }
 }
 
-// SECURITY: Report only the operation stage and OS error category/code. Error
-// text, commands, paths and child diagnostics can contain private configuration.
-// Infrastructure failures remain 500; read rejection/deadline remains 409.
-fn verification_io_error(stage: &'static str, error: &std::io::Error) -> StatusCode {
-    #[cfg(test)]
-    eprintln!(
-        "cache verification I/O failure: stage={stage} kind={:?} errno={:?}",
-        error.kind(),
-        error.raw_os_error()
-    );
-    tracing::warn!(stage, kind = ?error.kind(), errno = ?error.raw_os_error(), "Cache verification I/O failure");
-    StatusCode::INTERNAL_SERVER_ERROR
+impl CacheProbeFailure {
+    fn code(self) -> &'static str {
+        match self {
+            Self::MissingPath => "cache_path_missing",
+            Self::AuthenticationFailed => "cache_authentication_failed",
+            Self::RateLimited => "cache_rate_limited",
+            Self::Network => "cache_network_error",
+            Self::Timeout => "cache_probe_timeout",
+            Self::Configuration => "cache_read_configuration_invalid",
+            Self::Process => "cache_probe_failed",
+        }
+    }
+
+    fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::MissingPath | Self::RateLimited | Self::Network | Self::Timeout
+        )
+    }
+
+    fn response(self) -> Response {
+        let mut body = serde_json::json!({
+            "build_status": "success", "publication_status": "pending",
+            "verification_code": self.code(), "retryable": self.retryable(),
+        });
+        if self.retryable() {
+            body["retry_after_secs"] = serde_json::json!(2);
+        }
+        (StatusCode::ACCEPTED, Json(body)).into_response()
+    }
 }
 
-// CONCURRENCY: Do not poll a success transition until external publication
-// verification finishes. Failure or request cancellation preserves the claim's
-// building state for retry/recovery. The transaction rechecks identity/output.
-async fn complete_after_verification<T>(
-    verification: impl std::future::Future<Output = Result<(), StatusCode>>,
-    completion: impl std::future::Future<Output = Result<T, StatusCode>>,
-) -> Result<T, StatusCode> {
-    verification.await?;
-    completion.await
+// SECURITY: Nix diagnostics can quote credential URLs and append response
+// bodies. Match only fixed Nix diagnostic forms outside quoted spans, and stop
+// before response-body lines. Classification is a retry hint, not authorization.
+fn classify_cache_probe_failure(stderr: &[u8]) -> CacheProbeFailure {
+    let text = String::from_utf8_lossy(stderr);
+    let mut hints = String::new();
+    for line in text.lines() {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("response body") || lower.contains("<!doctype") || lower.contains("<html")
+        {
+            break;
+        }
+        if !lower.trim_start().starts_with("error:") && !lower.trim_start().starts_with("warning:")
+        {
+            continue;
+        }
+        // URL text can itself contain quote characters. Only consider the
+        // suffix after the final enclosing quote, never pieces of that URL.
+        let lower = if let Some(scheme) = lower.find("://") {
+            let Some(open) = lower[..scheme].rfind(['\'', '"', '`']) else {
+                continue;
+            };
+            let delimiter = lower.as_bytes()[open] as char;
+            let Some((close, _)) = lower.rmatch_indices(delimiter).find(|(index, _)| {
+                *index > scheme
+                    && lower[*index + 1..]
+                        .chars()
+                        .next()
+                        .is_none_or(|next| next.is_whitespace() || matches!(next, ':' | ',' | ')'))
+            }) else {
+                continue;
+            };
+            &lower[close + 1..]
+        } else {
+            lower.as_str()
+        };
+        let mut quote = None;
+        let mut previous = ' ';
+        for ch in lower.chars() {
+            if let Some(open) = quote {
+                if ch == open {
+                    quote = None;
+                }
+            } else if matches!(ch, '\'' | '"' | '`') && !previous.is_ascii_alphanumeric() {
+                quote = Some(ch);
+                hints.push(' ');
+            } else {
+                hints.push(ch);
+            }
+            previous = ch;
+        }
+        hints.push('\n');
+    }
+    if hints.contains("http error 401") || hints.contains("http error 403") {
+        CacheProbeFailure::AuthenticationFailed
+    } else if hints.contains("http error 429") {
+        CacheProbeFailure::RateLimited
+    } else if hints.contains("http error 404")
+        || hints.contains("is not valid")
+        || hints.contains("does not exist")
+    {
+        CacheProbeFailure::MissingPath
+    } else if hints.contains("timed out") || hints.contains("timeout was reached") {
+        CacheProbeFailure::Timeout
+    } else if [
+        "could not resolve host",
+        "couldn't resolve host",
+        "couldn't connect to server",
+        "could not connect",
+        "connection refused",
+        "connection reset",
+        "unexpected eof",
+        "ssl connect error",
+    ]
+    .iter()
+    .any(|hint| hints.contains(hint))
+    {
+        CacheProbeFailure::Network
+    } else {
+        CacheProbeFailure::Process
+    }
+}
+
+// CONCURRENCY: Only the selected transaction future is polled. A failed probe
+// cannot record confirmed publication; pending completion still rechecks all
+// claim/output/configuration guards before recording build success.
+async fn complete_after_verification<T, F>(
+    failure: Option<CacheProbeFailure>,
+    completion: impl std::future::Future<Output = T>,
+    pending: impl FnOnce(CacheProbeFailure) -> F,
+) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    if let Some(failure) = failure {
+        pending(failure).await
+    } else {
+        completion.await
+    }
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/complete - Mark job as complete
@@ -4555,10 +4691,14 @@ async fn complete_after_verification<T>(
 /// completion (store path + status) and queues a cache-push job. This keeps all
 /// database writes server-side so API builders never need a DB connection.
 /// Reported publication is verified once against authoritative output before
-/// success. Niks3 requires the persisted dispatch identity and a fresh,
-/// signature-verified remote closure. The success transaction rechecks output,
-/// destination eligibility and publication configuration, and records publication
-/// atomically. A failed probe leaves the claim recoverable without success.
+/// publication confirmation. Niks3 requires the persisted dispatch identity and
+/// refreshed exact-root metadata. This probe does not prove NAR integrity or
+/// signatures. The success transaction rechecks output, destination eligibility
+/// and captured configuration. Failed probes commit build success with durable
+/// pending publication and return 202 with a static retry hint. Confirmed probes
+/// return 200; completion without a reported push returns publication `none`.
+/// The pending queue is operator-visible; automatic worker recovery is not
+/// guaranteed. Same-claim retries can confirm publication without rebuilding.
 /// Admission-time CVE provenance and policy-enabled automatic hardening admission
 /// commit with build success. Idempotent retries retain the original admission.
 /// After commit, confirmed publication releases the derivation's GC root with
@@ -4566,14 +4706,14 @@ async fn complete_after_verification<T>(
 ///
 /// # Errors
 /// Returns an authentication/authorization status for invalid ownership, a
-/// conflict for changed identity, output or unverifiable publication, or an
-/// internal error for database/process failures.
+/// conflict for changed identity, output, status or configuration, or an
+/// internal error for database failures. Probe failures are pending responses.
 pub async fn complete_job(
     State(state): State<CFState>,
     Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
     headers: axum::http::HeaderMap,
     body: Bytes,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<Response, StatusCode> {
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/jobs/{}/complete", builder_id, job_id);
     let verified =
@@ -4656,50 +4796,81 @@ pub async fn complete_job(
     } else {
         None
     };
-    let verification = async {
-        if let Some(destination) = reported_cache_destination.as_ref() {
-            verify_store_path_available_from_cache(
-                destination,
-                output.as_deref().ok_or(StatusCode::CONFLICT)?,
-                job.derivation_id,
-                job_id,
-            )
-            .await?;
-        }
-        Ok(())
+    let probe_started = std::time::Instant::now();
+    let probe_failure = if let Some(destination) = reported_cache_destination.as_ref() {
+        verify_store_path_available_from_cache(
+            destination,
+            output.as_deref().ok_or(StatusCode::CONFLICT)?,
+            job.derivation_id,
+            job_id,
+        )
+        .await
+        .err()
+    } else {
+        None
     };
 
     // Perform atomic completion (job + derivation update in one transaction).
+    let probe_elapsed = probe_started.elapsed();
     // Idempotent: if the job is already 'success' with matching builder+session,
     // this is a safe no-op. The returned bool indicates whether this was a new
     // completion (true) or an idempotent retry (false).
     // The completion policy carries deployment configuration into the
     // transaction after publication verification. Automatic hardening admission
     // uses the handler's configuration, not a query-layer configuration read.
-    let completion = async {
-        builders::complete_preverified_job_atomic_with_policy(
-            &state.pool,
-            &job_id,
-            &builder_id,
-            verified.builder_session_id.as_ref(),
-            output.as_deref(),
-            publication.as_ref(),
-            builders::BuildCompletionPolicy {
-                auto_hardening_scans: state.server_config.auto_hardening_scans,
-            },
-        )
-        .await
-        .map_err(|err| {
-            tracing::warn!(
-                builder_id = %builder_id,
-                job_id = %job_id,
-                error = %err,
-                "Rejected complete transition due to lease/state mismatch"
-            );
-            StatusCode::CONFLICT
-        })
+    let policy = builders::BuildCompletionPolicy {
+        auto_hardening_scans: state.server_config.auto_hardening_scans,
     };
-    let (completed_job, is_new) = complete_after_verification(verification, completion).await?;
+    let pending_state = &state;
+    let pending_output = output.as_deref();
+    let captured = publication.as_ref();
+    let session = verified.builder_session_id.as_ref();
+    let completion = complete_after_verification(
+        probe_failure,
+        async {
+            builders::complete_preverified_job_atomic_with_policy(
+                &state.pool,
+                &job_id,
+                &builder_id,
+                verified.builder_session_id.as_ref(),
+                output.as_deref(),
+                publication.as_ref(),
+                policy,
+            )
+            .await
+        },
+        |failure| async move {
+            builders::complete_pending_publication_atomic_with_policy(
+                &pending_state.pool,
+                &job_id,
+                &builder_id,
+                session,
+                pending_output.ok_or_else(|| anyhow::anyhow!("Missing pending output"))?,
+                captured.ok_or_else(|| anyhow::anyhow!("Missing captured configuration"))?,
+                failure.code(),
+                policy,
+            )
+            .await
+        },
+    )
+    .await;
+    let (completed_job, is_new) = completion.map_err(|_| {
+        tracing::warn!(
+            builder_id = %builder_id,
+            job_id = %job_id,
+            "Rejected complete transition due to lease/state mismatch"
+        );
+        StatusCode::CONFLICT
+    })?;
+
+    if let Some(destination) = reported_cache_destination.as_ref() {
+        append_publication_probe_log(&state, job_id, destination, probe_elapsed, probe_failure)
+            .await;
+    }
+    if let Some(failure) = probe_failure {
+        // INVARIANT: Pending success retains GC root and live log ownership.
+        return Ok(failure.response());
+    }
 
     if publication.is_some() {
         // INVARIANT: Retain the recovery root until verified publication and
@@ -4743,7 +4914,11 @@ pub async fn complete_job(
 
     cleanup_build_log_channel(&state, job_id).await;
 
-    Ok(StatusCode::OK)
+    Ok(Json(serde_json::json!({
+        "build_status": "success",
+        "publication_status": if publication.is_some() { "confirmed" } else { "none" },
+    }))
+    .into_response())
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/fail - Mark job as failed
@@ -6576,7 +6751,125 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn niks3_basic_probe_applies_guard_to_path_info_and_copy() {
+    async fn cache_probe_failure_codes_and_wire_contract_are_static() {
+        use super::{CacheProbeFailure as F, classify_cache_probe_failure as classify};
+        for (diagnostic, expected) in [
+            (
+                "error: unable to download 'https://user:secret@example/?sig=HTTP error 403': HTTP error 404",
+                F::MissingPath,
+            ),
+            (
+                "error: unable to download \"https://example/?sig=HTTP error 404\": HTTP error 403",
+                F::AuthenticationFailed,
+            ),
+            (
+                "error: unable to download 'https://example/': HTTP error 429",
+                F::RateLimited,
+            ),
+            (
+                "error: unable to download 'https://example/': Couldn't connect to server",
+                F::Network,
+            ),
+            (
+                "error: path '/nix/store/output' is not valid",
+                F::MissingPath,
+            ),
+            ("error: operation timed out", F::Timeout),
+            (
+                "error: 'https://user:secret@example/?sig=HTTP error 404'",
+                F::Process,
+            ),
+            (
+                "error: unable to download 'https://user:secret@example/?sig=one' HTTP error 401'",
+                F::Process,
+            ),
+            (
+                "error: unable to download 'https://example/?sig=one' HTTP error 401': HTTP error 429",
+                F::RateLimited,
+            ),
+            (
+                "error: unknown\nresponse body:\nerror: HTTP error 401",
+                F::Process,
+            ),
+            ("<html>HTTP error 401</html>", F::Process),
+            ("error: private diagnostic", F::Process),
+        ] {
+            assert_eq!(classify(diagnostic.as_bytes()), expected);
+        }
+        for failure in [
+            F::MissingPath,
+            F::AuthenticationFailed,
+            F::RateLimited,
+            F::Network,
+            F::Timeout,
+            F::Configuration,
+            F::Process,
+        ] {
+            let response = failure.response();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let bytes = axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["build_status"], "success");
+            assert_eq!(body["publication_status"], "pending");
+            assert_eq!(body["verification_code"], failure.code());
+            assert_eq!(body["retryable"], failure.retryable());
+            assert_eq!(body.get("retry_after_secs").is_some(), failure.retryable());
+            assert_eq!(
+                body.as_object().unwrap().len(),
+                if failure.retryable() { 5 } else { 4 }
+            );
+            assert!(!String::from_utf8_lossy(&bytes).contains("secret"));
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_probe_exact_root_refresh_attic_and_private_capture_bounds() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("nix");
+        let destination = crate::models::cache_destination::CacheDestination {
+            cache_type: "Attic".into(),
+            push_to: Some("https://read.example".into()),
+            attic_cache_name: Some("cache".into()),
+            attic_token: Some("synthetic-token".into()),
+            ..Default::default()
+        };
+        std::fs::write(&program, "#!/bin/sh\nset -eu\ntest \"$1\" = path-info\ntest \"$2\" = --refresh\ntest \"$3\" = --store\ntest \"$4\" = https://read.example/cache\ntest \"$5\" = /nix/store/output\nshift 5\nwhile test \"$#\" -gt 0; do test \"$1\" = --option; shift 3; done\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        super::probe_cache_read(
+            destination.clone(),
+            "/nix/store/output".into(),
+            program.clone().into_os_string(),
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        for stream in ["", " >&2"] {
+            std::fs::write(
+                &program,
+                format!(
+                    "#!/bin/sh\ndd if=/dev/zero bs=65537 count=1 2>/dev/null{stream}\nexit 1\n"
+                ),
+            )
+            .unwrap();
+            assert_eq!(
+                super::probe_cache_read(
+                    destination.clone(),
+                    "/nix/store/output".into(),
+                    program.clone().into_os_string(),
+                    std::time::Duration::from_secs(5)
+                )
+                .await
+                .unwrap_err(),
+                super::CacheProbeFailure::Process
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn niks3_basic_probe_applies_guard_to_path_info_only() {
         use crate::models::cache_destination::CacheDestination;
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
@@ -6593,10 +6886,8 @@ fi
 operation=$1
 case "$*" in *private-user*|*private-password*) exit 24 ;; esac
 case "$operation" in
-path-info) test "$2" = --store; test "$3" = https://read.example/; shift 4 ;;
-copy)
-    test "$2" = --from; test "$3" = https://read.example/; test "$4" = --to
-    mkdir -p "$HOME/nix/store"; touch "$HOME/${6#/}"; shift 6 ;;
+path-info) test "$2" = --refresh; test "$3" = --store; test "$4" = https://read.example/; test "$5" = /nix/store/output; shift 5 ;;
+copy) touch "${0%/*}/copy-called"; exit 29 ;;
 *) exit 10 ;;
 esac
 authority=false; netrc=; sigs=false; keys=false
@@ -6619,6 +6910,7 @@ test "$authority" = true; test "$sigs" = true; test "$keys" = true
 test -f "$netrc"; test "$(stat -c %a "$netrc")" = 600
 test "$(stat -c %a "${netrc%/*}")" = 700
 test -z "${NIX_CONFIG:-}"; test -z "${NIKS3_AUTH_TOKEN_FILE:-}"
+test ! -e "$HOME/nix/store"; test "$(stat -c %a "$HOME")" = 700
 printf '%s' "${netrc%/*}" > "${0%/*}/$operation-credentials"
 "#,
         )
@@ -6647,12 +6939,10 @@ printf '%s' "${netrc%/*}" > "${0%/*}/$operation-credentials"
             .success()
         );
         let path_info = std::fs::read_to_string(dir.path().join("path-info-credentials")).unwrap();
-        let copy = std::fs::read_to_string(dir.path().join("copy-credentials")).unwrap();
-        assert_eq!(path_info, copy);
-        assert!(!std::path::Path::new(&copy).exists());
-        // Unsupported runtimes cannot proceed to either network read.
+        assert!(!dir.path().join("copy-called").exists());
+        assert!(!std::path::Path::new(&path_info).exists());
+        // Unsupported runtimes cannot proceed to network reads or secret files.
         std::fs::remove_file(dir.path().join("path-info-credentials")).unwrap();
-        std::fs::remove_file(dir.path().join("copy-credentials")).unwrap();
         std::fs::write(
             &program,
             "#!/bin/sh\ntest \"$1\" = --extra-experimental-features || exit 23\nprintf '%s' '{}'\n",
@@ -6667,10 +6957,10 @@ printf '%s' "${netrc%/*}" > "${0%/*}/$operation-credentials"
             )
             .await
             .unwrap_err(),
-            StatusCode::CONFLICT
+            super::CacheProbeFailure::Configuration
         );
         assert!(!dir.path().join("path-info-credentials").exists());
-        assert!(!dir.path().join("copy-credentials").exists());
+        assert!(!dir.path().join("copy-called").exists());
     }
 
     #[tokio::test]
@@ -6710,19 +7000,17 @@ printf '%s' "${netrc%/*}" > "${0%/*}/$operation-credentials"
                 r#"#!/bin/sh
 set -eu
 case "$1" in
-path-info) test "$2" = --store; shift 4 ;;
-copy)
-    test "$2" = --from
-    case "$3" in https://read.example/*tls-certificate=*tls-private-key=*) ;; *) exit 11;; esac
-    test "$4" = --to
-    case "$5" in 'local?root='*'&require-sigs=true') ;; *) exit 12;; esac
+path-info)
+    test "$2" = --refresh; test "$3" = --store
+    case "$4" in https://read.example/*tls-certificate=*tls-private-key=*) ;; *) exit 11;; esac
+    test "$5" = /nix/store/output
     test ! -e "$HOME/nix/var/nix/db/db.sqlite"
-    mkdir -p "$HOME/nix/store"
-    touch "$HOME/${{6#/}}"
-    shift 6 ;;
+    test ! -e "$HOME/nix/store"
+    shift 5 ;;
+copy) touch "${{0%/*}}/copy-called"; exit 29 ;;
 *) exit 13 ;;
 esac
-refresh=false; keys=false; signatures=false
+keys=false; signatures=false
 while test "$#" -gt 0; do
     case "$1" in
     --refresh) refresh=true; shift ;;
@@ -6734,13 +7022,14 @@ while test "$#" -gt 0; do
         extra-trusted-public-keys) test -z "$3" || test "$3" = "$expected_keys" ;;
         substituters) test -z "$3" ;;
         narinfo-cache-positive-ttl|narinfo-cache-negative-ttl) test "$3" = 0 ;;
+        download-attempts) test "$3" = 1 ;;
         *) exit 14 ;;
         esac
         shift 3 ;;
     *) exit 15 ;;
     esac
 done
-test "$refresh" = true; test "$keys" = true; test "$signatures" = true
+test "$keys" = true; test "$signatures" = true
 test "$(cat "$NIX_SSL_CERT_FILE")" = "$(cat '{}')"
 test -z "${{AWS_SECRET_ACCESS_KEY:-}}"
 test -z "${{NIKS3_AUTH_TOKEN_FILE:-}}"
@@ -6786,6 +7075,7 @@ printf '%s' "${{NIX_SSL_CERT_FILE%/*}}" > '{}'
         );
         let directory = std::fs::read_to_string(dir.path().join("credentials")).unwrap();
         assert!(!std::path::Path::new(&directory).exists());
+        assert!(!dir.path().join("copy-called").exists());
     }
 
     #[tokio::test]
@@ -6794,26 +7084,34 @@ printf '%s' "${{NIX_SSL_CERT_FILE%/*}}" > '{}'
         use std::sync::atomic::{AtomicUsize, Ordering};
         let dir = tempfile::tempdir().unwrap();
         let program = dir.path().join("nix");
-        for failure in ["missing", "forged", "missing-output"] {
+        for (diagnostic, failure) in [
+            (
+                "error: unable to download 'https://private.example/?signed=secret': HTTP error 404",
+                super::CacheProbeFailure::MissingPath,
+            ),
+            (
+                "error: unable to download 'https://private.example/': HTTP error 401",
+                super::CacheProbeFailure::AuthenticationFailed,
+            ),
+            (
+                "error: unable to download 'https://private.example/': HTTP error 429",
+                super::CacheProbeFailure::RateLimited,
+            ),
+            (
+                "error: unable to download 'https://private.example/': connection reset",
+                super::CacheProbeFailure::Network,
+            ),
+        ] {
             std::fs::write(
                 &program,
                 format!(
                     r#"#!/bin/sh
 set -eu
-if test "$1" = path-info; then exit 0; fi
-test "$1" = copy
-test "$4" = --to
-case "$5" in 'local?root='*'&require-sigs=true') ;; *) exit 10;; esac
-test ! -e "$HOME/nix/var/nix/db/db.sqlite"
-printf '%s' '{}' > '{}'
-printf 'private diagnostic: untrusted {} signature' >&2
-if test '{}' = missing-output; then exit 0; fi
+test "$1" = path-info
+printf '%s' "{}" >&2
 exit 17
 "#,
-                    failure,
-                    dir.path().join("copy-failure").display(),
-                    failure,
-                    failure
+                    diagnostic,
                 ),
             )
             .unwrap();
@@ -6828,48 +7126,43 @@ exit 17
                 ..Default::default()
             };
             let transitions = AtomicUsize::new(0);
+            let pending_transitions = AtomicUsize::new(0);
+            let probe = super::probe_cache_read(
+                destination,
+                "/nix/store/output".into(),
+                program.clone().into_os_string(),
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+            assert_eq!(probe.unwrap_err(), failure);
+            let pending_counter = &pending_transitions;
             let result = super::complete_after_verification(
-                async {
-                    let status = super::probe_cache_read(
-                        destination,
-                        "/nix/store/output".into(),
-                        program.clone().into_os_string(),
-                        std::time::Duration::from_secs(5),
-                    )
-                    .await?;
-                    if status.success() {
-                        Ok(())
-                    } else {
-                        Err(StatusCode::CONFLICT)
-                    }
-                },
+                Some(failure),
                 async {
                     transitions.fetch_add(1, Ordering::SeqCst);
-                    Ok(())
+                    "confirmed"
+                },
+                |reason| async move {
+                    assert_eq!(reason, failure);
+                    pending_counter.fetch_add(1, Ordering::SeqCst);
+                    "pending"
                 },
             )
             .await;
-            assert_eq!(result, Err(StatusCode::CONFLICT));
+            assert_eq!(result, "pending");
             assert_eq!(transitions.load(Ordering::SeqCst), 0);
-            assert_eq!(
-                std::fs::read_to_string(dir.path().join("copy-failure")).unwrap(),
-                failure
-            );
+            assert_eq!(pending_transitions.load(Ordering::SeqCst), 1);
         }
         let events = std::sync::Mutex::new(Vec::new());
         super::complete_after_verification(
-            async {
-                events.lock().unwrap().push("probe");
-                Ok(())
-            },
+            None,
             async {
                 events.lock().unwrap().push("success");
-                Ok(())
             },
+            |_| async { panic!("Successful probe cannot select pending completion") },
         )
-        .await
-        .unwrap();
-        assert_eq!(*events.lock().unwrap(), ["probe", "success"]);
+        .await;
+        assert_eq!(*events.lock().unwrap(), ["success"]);
     }
 
     #[tokio::test]
@@ -6913,7 +7206,7 @@ exec sleep 30
             )
             .await
             .unwrap_err(),
-            StatusCode::CONFLICT
+            super::CacheProbeFailure::Timeout
         );
         let root = std::fs::read_to_string(dir.path().join("root")).unwrap();
         let ca = std::fs::read_to_string(dir.path().join("ca")).unwrap();
@@ -6947,34 +7240,7 @@ exec sleep 30
     }
 
     #[tokio::test]
-    async fn niks3_verification_store_cleanup_preserves_external_symlinks() {
-        use std::os::unix::fs::PermissionsExt;
-        let external = tempfile::tempdir().unwrap();
-        std::fs::write(external.path().join("keep"), b"external").unwrap();
-        std::fs::set_permissions(external.path(), std::fs::Permissions::from_mode(0o500)).unwrap();
-        let root = tempfile::tempdir().unwrap();
-        let root_path = root.path().to_owned();
-        let immutable = root.path().join("nix/store/output");
-        std::fs::create_dir_all(&immutable).unwrap();
-        std::fs::write(immutable.join("file"), b"copied").unwrap();
-        std::os::unix::fs::symlink(external.path(), immutable.join("outside")).unwrap();
-        std::fs::set_permissions(&immutable, std::fs::Permissions::from_mode(0o555)).unwrap();
-        super::dispose_verification_store(root).await.unwrap();
-        assert!(!root_path.exists());
-        assert_eq!(
-            std::fs::metadata(external.path())
-                .unwrap()
-                .permissions()
-                .mode()
-                & 0o777,
-            0o500
-        );
-        assert!(external.path().join("keep").exists());
-        std::fs::set_permissions(external.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-    }
-
-    #[tokio::test]
-    async fn niks3_pinned_nix_accepts_isolated_store_and_refresh_flags() {
+    async fn niks3_pinned_nix_accepts_remote_metadata_and_refresh_flags() {
         use super::Command;
         let version = Command::new("nix").arg("--version").output().await.unwrap();
         assert!(version.status.success());
@@ -6983,41 +7249,23 @@ exec sleep 30
             "nix (Nix) 2.34.8"
         );
         let root = tempfile::tempdir().unwrap();
-        let store_url = format!(
-            "local?{}",
-            url::form_urlencoded::Serializer::new(String::new())
-                .append_pair("root", root.path().to_str().unwrap())
-                .append_pair("require-sigs", "true")
-                .finish()
-        );
         let read = cf_config::cache_credentials::PreparedCacheRead::new(
             "https://read.example",
             &["cache:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into()],
             &cf_protocol::cache::CacheReadAuth::None,
         )
         .unwrap();
-        let mut ping = Command::new("nix");
-        ping.args(["store", "ping", "--store", &store_url]);
-        super::configure_niks3_verification_read(&mut ping, &read, root.path());
-        let output = ping.output().await.unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert!(root.path().join("nix/var/nix/db/db.sqlite").exists());
         let source = tempfile::tempdir().unwrap();
-        let mut copy = Command::new("nix");
-        copy.args([
-            "copy",
-            "--from",
+        let mut probe = Command::new("nix");
+        probe.args([
+            "path-info",
+            "--refresh",
+            "--store",
             &format!("file://{}", source.path().display()),
-            "--to",
-            &store_url,
             "/nix/store/00000000000000000000000000000000-verification-missing",
         ]);
-        super::configure_niks3_verification_read(&mut copy, &read, root.path());
-        let output = copy.output().await.unwrap();
+        super::configure_niks3_verification_read(&mut probe, &read, root.path());
+        let output = probe.output().await.unwrap();
         assert!(!output.status.success());
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(
@@ -7031,7 +7279,7 @@ exec sleep 30
                 || stderr.contains("no substituter"),
             "{stderr}"
         );
-        super::dispose_verification_store(root).await.unwrap();
+        assert!(!root.path().join("nix/store").exists());
     }
 
     // ── ServerBundledArchive / source mirror tests ─────────────────────────

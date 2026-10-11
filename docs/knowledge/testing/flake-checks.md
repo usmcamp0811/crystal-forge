@@ -148,11 +148,11 @@ README: [checks/server-regressions/README.md](../../../checks/server-regressions
   Cargo integration test binaries and a curated list of `#[ignore]`d library
   tests (POA&M, policy, notification, composite AC3, STIG mapping, bundle
   baseline, and agent key rotation areas).
-  TASK-470 also runs 40 explicitly named ignored PostgreSQL tests and 18 named
+   The curated exact-name lists also run 52 ignored PostgreSQL tests and 51 named
   non-ignored tests for cache scope, retained credentials, signed capabilities,
   direct-peer dispatch, and publication-backed reads. Each invocation uses
   `--exact --test-threads=1` and requires the named success line and exactly one
-  passed test with zero ignored tests. Only the 40 selected database tests use
+   passed test with zero ignored tests. Only the 52 selected database tests use
   `--ignored`; missing or renamed tests fail the check. The current README lists
   every qualified name. This gate does not run native Attic/S3 upload suites.
   The two added legacy Attic regressions are
@@ -195,8 +195,31 @@ README: [checks/server-regressions/README.md](../../../checks/server-regressions
   Two ignored stored-discovery tests and four non-ignored discovery/certificate
   tests cover transport projection, strict PEM, authorization/CSRF, retained and
   replacement snapshots, mode changes, CA clearing, and non-mutation. The
-  inspected exact-name list does not select the new Basic-read or storage-metrics
-  test modules; source presence is not blocking-gate execution evidence.
+   current exact-name lists also select Basic-read and all nine storage-metrics
+   tests. Basic coverage includes storage/redaction, authority binding, signed
+   delivery capability, and independent probe planes. Metrics tests preserve
+   native basis, unavailable/null states, authorization, bounds, and non-mutation.
+   Selection is blocking-gate coverage, not a claim that the current run passed.
+   Completion members now include
+   `cache_probe_failure_codes_and_wire_contract_are_static`,
+   `cache_probe_exact_root_refresh_attic_and_private_capture_bounds`,
+   `niks3_basic_probe_applies_guard_to_path_info_only`,
+   `niks3_completion_probe_uses_independent_read_plane`,
+   `niks3_probe_failure_never_polls_success_transition`,
+   `niks3_probe_timeout_and_cancellation_reap_before_cleanup`, and
+   `niks3_pinned_nix_accepts_remote_metadata_and_refresh_flags` in
+   `handlers::api::builders::tests`. They prove bounded exact-root metadata reads,
+   no copy execution, protected independent credentials, static hints, and cleanup.
+   The ignored
+   `queries::builders::tests::niks3_pending_publication_guards_rollback_and_later_promotion`
+   proves guarded atomic build success,
+   exact queue identity/output, later idempotent promotion, rollback, and retained
+   historical publication.
+   These handler/process tests do not replace the separate native fresh-store
+   signature and physical-artifact guards. Builder client tests separately cover
+   typed pending/confirmed receipts, retry allowlists, fresh signatures, five-request
+   exhaustion, deadlines, and acknowledged-pending retention; they are not members
+   of this server-only gate.
 - **Why it exists.** `nix build .#server` runs only `--lib --bins` tests, and
   the `integration` check runs the Python suite, so these Rust integration
   targets would otherwise run nowhere. The list is curated on purpose and is
@@ -260,7 +283,7 @@ README: [checks/niks3-cache/README.md](../../../checks/niks3-cache/README.md).
 
 - **What it verifies.** Four isolated VMs exercise five token/mTLS write and
   public/private read variants with real remote builds, signed destination-bound
-  completion, server signature/read verification, agent pulls, environment
+   completion, server refreshed exact-output metadata verification, agent pulls, environment
   isolation, local CVE materialization, and secret/cleanup audits. Real HTTPS
   proxy claims cover Attic/S3/Niks3 credential gates and public Http/Nix dispatch.
 - **Run it.** `nix build .#checks.x86_64-linux.niks3-cache -L`. The full gate has
@@ -270,7 +293,12 @@ README: [checks/niks3-cache/README.md](../../../checks/niks3-cache/README.md).
 - **Scope limits.** Seeded evaluation identities do not test flake evaluation.
   Agent pulls do not prove a full generation switch/reboot; CVE materialization
   does not prove successful vulnerability analysis. Legacy claims do not prove
-  native Attic/S3 uploads. See the README for certificate and log-audit limits.
+   native Attic/S3 uploads. Completion does not copy or recursively validate the
+   closure. Native fixture fresh-store reads, agent pulls, and CVE materialization
+   retain signature/NAR-integrity checks independently. See the README for
+   certificate and log-audit limits and the
+   [completion API](../api/builder-job-lifecycle-api.md#post-apiv1buildersidjobsjob_idcomplete)
+   for guarded HTTP 200/202 receipts and bounded callback recovery.
 - **CI.** Blocking `flake-check: [niks3-cache]` matrix job on merge requests and
   `main`, using the `nix` runner tag in `.gitlab-ci.yml`; its runner must supply KVM.
   Matrix membership establishes neither check's pass for a particular commit.

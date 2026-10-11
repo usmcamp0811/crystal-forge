@@ -78,17 +78,45 @@ in pkgs.testers.runNixOSTest {
       # Cleanup diagnostics run inside each guest without exporting raw /proc.
       environment.systemPackages = [pkgs.python3];
     };
-    production = {
+    production = {nodes, ...}: {
       imports = [(lib.crystal-forge.makeNiks3CacheNode {inherit pkgs credentials; productionPki = true; basicRead = true;})];
       networking.hosts."127.0.0.1" = ["push-cache.test" "s3-cache.test" "read-cache.test" "read-foreign.test"];
       # Exact object correlation stays inside this guest. $uri excludes signed
       # queries; the private observer never records headers or response bodies.
+      # The exact IP + 32-byte hash + .narinfo map key exceeds the default
+      # 64-byte bucket once nginx includes its per-entry hash overhead.
+      services.nginx.mapHashBucketSize = 128;
       services.nginx.commonHttpConfig = lib.mkAfter ''
         log_format publication_object escape=json '{"path":"$uri","put":$production_put,"backend":$production_backend,"status":$status}';
+        map $remote_addr $completion_server {
+          default false;
+          ${nodes.server.networking.primaryIPAddress} true;
+        }
+        map $request_method $completion_get { default false; GET true; }
+        map $request_method $completion_head { default false; HEAD true; }
+        # The runtime include selects only the server and fresh root narinfo.
+        # Routing occurs in proxy_pass, after the normal Basic access phase.
+        map "$remote_addr:$uri" $completion_read_origin {
+          default "http://unix:/run/niks3-production-api/native.sock:";
+          include /run/niks3-publication-observer/metadata-map.conf;
+        }
+        log_format completion_read escape=json '{"path":"$uri","server":$completion_server,"get":$completion_get,"head":$completion_head,"status":$status,"end":$msec,"duration":$request_time}';
       '';
       services.nginx.virtualHosts.production-s3.extraConfig = lib.mkAfter ''
         access_log /run/niks3-publication-observer/objects.json publication_object;
       '';
+      services.nginx.virtualHosts.production-read.extraConfig = lib.mkAfter ''
+        access_log /run/niks3-publication-observer/reads.json completion_read;
+      '';
+      services.nginx.virtualHosts.production-read.locations."/".proxyPass = lib.mkForce "$completion_read_origin";
+      services.nginx.virtualHosts.completion-rate-limit = {
+        listen = [{addr = "127.0.0.1"; port = 5758;}];
+        extraConfig = ''access_log off; error_log /dev/null;'';
+        locations."/" = {
+          extraConfig = ''add_header Retry-After 2 always;'';
+          return = "429";
+        };
+      };
       # nginx runs unprivileged and nginx -t opens its logs in preStart. A
       # required unit lets systemd create the private directory before that test.
       systemd.services.niks3-publication-observer = {
@@ -104,11 +132,14 @@ in pkgs.testers.runNixOSTest {
         };
         script = ''
           install -m 0600 /dev/null /run/niks3-publication-observer/objects.json
+          install -m 0600 /dev/null /run/niks3-publication-observer/reads.json
+          install -m 0600 /dev/null /run/niks3-publication-observer/metadata-map.conf
         '';
       };
     };
     server = {lib, ...}: {
       imports = [common];
+      environment.systemPackages = [pkgs.openssl];
       security.pki.certificateFiles = [productionWritePki.serverB];
       virtualisation.additionalPaths = [pkgs.busybox] ++ map (target: target.drvPath) (builtins.attrValues (targets // negativeTargets));
       services.crystal-forge = {
@@ -156,16 +187,37 @@ in pkgs.testers.runNixOSTest {
       systemd.timers.crystal-forge-postgres-jobs.wantedBy = lib.mkForce [];
       services.nginx = {
         enable = true;
+        commonHttpConfig = ''
+          map $request_method $completion_post { default false; POST true; }
+          map $http_x_cf_test_receipt $completion_driver { default false; true true; }
+          log_format completion_callback escape=json '{"path":"$uri","post":$completion_post,"driver":$completion_driver,"status":$status,"end":$msec,"duration":$request_time}';
+        '';
         virtualHosts.control = {
           addSSL = true;
           listen = [{addr = "0.0.0.0"; port = 443; ssl = true;}];
           sslCertificate = "${credentials}/server.crt";
           sslCertificateKey = "${credentials}/server.key";
+          extraConfig = ''access_log /run/niks3-completion-observer/callbacks.json completion_callback;'';
           locations."/" = {
             proxyPass = "http://127.0.0.1:8000";
             extraConfig = ''proxy_set_header X-Forwarded-Proto https;'';
           };
         };
+      };
+      # Private completion intervals correlate real server read traffic. Headers,
+      # query strings and signed request/response bodies are never recorded.
+      systemd.services.niks3-completion-observer = {
+        requiredBy = ["nginx.service"];
+        before = ["nginx.service"];
+        serviceConfig = {
+          Type = "oneshot";
+          RemainAfterExit = true;
+          User = "nginx";
+          Group = "nginx";
+          RuntimeDirectory = "niks3-completion-observer";
+          RuntimeDirectoryMode = "0700";
+        };
+        script = ''install -m 0600 /dev/null /run/niks3-completion-observer/callbacks.json'';
       };
     };
     builder = {lib, ...}: {
