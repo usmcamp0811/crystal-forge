@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-11 22:29'
+updated_date: '2026-10-11 22:38'
 labels: []
 dependencies: []
 references:
@@ -791,6 +791,8 @@ Final native niks3-cache gate passed in 135.32 seconds after correcting fixture-
 Six affected operator/API/test contracts were updated to advertised-availability semantics, pending publication and bounded reporting. No artifact-cryptographic-verification claim is made for path-info. Safe build logs identify cache ID/type, availability stage, success/failure and elapsed time without read URLs, private output, credentials or signed parameters. No schema/migration, flake pin, evaluator recovery, CA-bundle policy or netrc-patch changes. Preview remains waived; this slice has no frontend edits. Reckless/blue-ridge deployment replay and final exact-head CI completion remain unverified. Existing work already stranded under an older builder may require authorized completion-callback replay rather than Retry Build.
 
 Log-only slice implemented locally with optional display-only cache_destination_name, bounded safe labels and human-readable publishing/availability messages; IDs/stage/outcome remain structured tracing. Focused server tests: 73 passed, 1 ignored; protocol: 41 tests + 3 doctests passed; builder formatter: 1 passed; native fixture helper: 2 tests passed. Native gate command `sh packages/ci/public-cache-build.sh --no-link -L --max-jobs 1 --cores 2 .#checks.x86_64-linux.niks3-cache` exceeded 1200000 ms during VM startup after package rebuilding. Interrupted, no authoritative verdict. Raw tool output retained in tool_12d068e5c001BBhUlyhPw0Kgch. Investigate before rerun; no assertion weakening. Changes remain uncommitted.
+
+Log-only slice verified and published as a33c1d0cb534ee0a78c41e015a7c75e4c845df28. Native gate rerun reused completed package builds and passed all six variants, split-CA negatives and credential audits in 138.31 seconds; raw output tool_12d170e44001zbzyTJfEarYV5n. Initial interrupted run consumed approximately 18m47s in package compilation/checks; no VM assertion failure. git diff --check passed; six intended files committed; worktree clean after normal push. Exact-head pipeline 2936624843 inspected: running, not claimed passed. MR !331 remains unmerged. Attic metrics research now active: repository fixtures pin Attic source 12cbeca141f46e1ade76728bce8adc447f2166c6, nixpkgs version 0-unstable-2025-09-24; this does not identify campground's deployed version. Pinned upstream route inspection found no stats endpoint. Data model supports per-active-cache object registrations joined to valid NARs: count registrations and sum nar_size once per registration, not distinct size/NAR and not shared physical chunks. Optional provider-side endpoint architecture and deployed version require confirmation before implementation. Direct nix eval package identity exceeded 120000 ms with no result; lock/package-source evidence is available but evaluation is not claimed verified.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
