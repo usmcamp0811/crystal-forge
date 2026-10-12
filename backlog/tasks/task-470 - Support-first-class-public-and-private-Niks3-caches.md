@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-12 18:41'
+updated_date: '2026-10-12 22:50'
 labels: []
 dependencies: []
 references:
@@ -244,6 +244,14 @@ User-delegated independent server regression repair at c3fd244b: own only packag
 Focused UI/API wording delegation at c3fd244b: own web-ui views/caches.rs and api/models.rs, backend caches/attic_probe.rs and narrowly scoped retained_probe_tests assertions only. Read pinned Attic 12cbeca cache_config contract; add optional response-only cache_is_public from valid complete native metadata, default None for browser legacy responses. Distinguish explicit public/private read evidence and keep token/write uncertainty conservative, allowing existing legacy token_auth_valid=true contract without asserting public visibility. Clarify Attic configured-token publication help. Preserve editor/save/metrics state and sibling publication/POAM/CI WIP. User waives preview and expensive local verification: static inspection/diff checks only; Rust unit execution and compilation pending CI. No services, branch changes, commits or pushes.
 
 Focused source-only native Attic metrics delegation: extend checks/attic-metrics/{test.py,default.nix,README.md} and the now-assigned cf-server attic_publication example only. After original inventory assertions, create genuine per-cache native JWT fixtures; transfer protected files privately; create real CF API destinations and prove encrypted-row Test/Cancel/unchanged-Save/reopen invariants. Exercise metrics failure independence and actual DB-selected native upload through the public query API. No Nix/Cargo/VM/PostgreSQL/server execution; parent retains task lock/worktree and runtime verification ownership.
+
+New user-authorized Niks3-only UI/probe slice resumes clean task worktree at latest remote e274f91848be07b76259fbac08d5752a7a2b4558. Existing TASK-484 commits were only fast-forwarded; no evaluation/Attic/publication/authorization edits. Treat committed Niks3Cache.jsx/styles.css as visual source. Missing supplied screenshot attachments are not claimed inspected. Prior no-expensive-host-check instruction and preview waiver remain; lightweight local checks only, authoritative native/browser/build verification in CI.
+
+Backend plan: official upstream v1.6 c29f3641de064545d75f00318cd45bea2b4ea1d0 and v1.8 61501c4223ec3ad804c20625128cab1155166041 source audit confirms protected GET gc/status snapshot (200 typed status or exact404 no-GC-yet), protected POST pending_closures '{}' exact400 missing closure key before domain DB/S3 operations, credential-free native401 controls. Publicmetadata never carriesBearer. Add bounded request sequence, exact allowlisted fingerprints and negative controls, separate selected token/mTLS from read identity, fail-closed inconclusive/unsupported/proxy/error outcomes, static diagnostics and stale-input invalidation. Write evidence means protected POST-handler access only, never S3 upload/signing/publication proof; unknown handler contracts stay untested. Preserve custom-CA replacement, client validation, target policy, pinned DNS/no proxies/no redirects and overall deadline. Native fixtures must independently prove zero domain/object/multipart changes and real authorized/unauthorized uploads.
+
+UI plan: preserve actual modes/names/URLs/environments (mTLS/mTLS valid); align modal/rail/content/type spacing, derive compact Write/Read badges, actual color-coded environment pills, five sections and narrow/keyboard behavior. Freeze pure editable baseline after fresh destination/scope initialization, canonicalize environment IDs, exclude observations/navigation/tests fromdirtystate, include genuine secret replacement/clear intent and invalid numeric drafts, same-mode no-op. Per-plane immutable input stamps and operation generations reject stale results and invalidate changed URL/mode/credentials/trust evidence. Typed Verified/Failed/Untested labels explain read vs write-route vs publication evidence. Add shipped-UI equivalent-viewport/zoom design captures, allsections desktop/narrow and success/denied/untested/in-progress state assertions without baseline weakening.
+
+Delegation ownership: backend Niks3 probe helper/server tests; frontend Niks3 editor/shared Niki state and DTO only; native fixture/browser workflow coordination separate. No competing host stack or production DB/credentials. New source/test changes committed/pushed normally after lightweight audit; inspect exact-head CI without merging or deploying. Do not report required native/browser checks/screenshots passed until actual CI evidence is available.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
