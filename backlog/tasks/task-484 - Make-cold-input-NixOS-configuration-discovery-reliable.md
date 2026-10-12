@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-12 14:29'
-updated_date: '2026-10-12 17:55'
+updated_date: '2026-10-12 20:19'
 labels: []
 dependencies: []
 references:
@@ -75,6 +75,8 @@ Safety review required pure builtins.getFlake rather than a CLI installable, bec
 Progress uses bounded one-shot stderr marker evidence only. Diagnostic persistence is concurrently polled and bounded to 250ms; cancellation queries are bounded to 500ms. Inventory persistence is best effort with a 250ms budget. Bulk admission is independently bounded using the configured overall timeout, while the existing bulk execution budget still starts after admission.
 
 User final instruction: do not run expensive checks that can lock up the host. Finish source changes/review, commit/push, report, and stop for user-provided CI results. Do not monitor/retry CI or start further local checks without further direction.
+
+User retargeted MR !333 to TASK-470-niks3-cache-support and authorized conflict resolution and making the MR ready without running checks. Resume existing locked clean TASK-484 worktree. Merge remote target f8dd8419d4fff007b339d772ed0cb233fcd809a0 into the source branch without rebasing or force-pushing; preserve TASK-470 metrics/publication/regression changes and TASK-484 discovery changes. Inspect conflict resolutions and diff mechanically; commit and normal-push. Remove MR draft status and update target/dependency notes. Do not merge the MR or claim new test results.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -117,4 +119,6 @@ Verification actually passed: cf-config90 tests; targeted discovery/purity/lock/
 Earlier cf-task484-regressions snapshot had ExecMainStatus0; it predates final diagnostics/cancellation/handoff edits and is not final-head evidence. Final current-source regression and full flake-check expensive runs did not establish successful completion. After latest user instruction stopping their units found no units loaded; systemctl list cf-task484* empty and ps -C nix,cargo,rustc,devenv,postgres found no matching processes. No expensive check remains running from this task. Final six ignored SQLx tests and full integration/VM/package checks remain CI verification, not claimed passed.
 
 Exact-head CI results are deliberately not monitored or claimed. Await user results for SHA0e0329bdfd547c91ce5e53fe299297c8f8e069ec. Keep task In Progress (not Review/Done) because final verification is incomplete. LOCK remains task-owned awaiting CI feedback. Remaining deployment proof: actual CF cold locked-input discovery then warm retry in production-equivalent source/credential/runtime; operator manual timings alone do not establish deployed cause. No merge.
+
+Resume preflight: TASK-484 HEAD and remote source both 0e0329bdfd547c91ce5e53fe299297c8f8e069ec; worktree clean. Verified live MR target TASK-470-niks3-cache-support and has_conflicts=true. Latest fetched target f8dd8419 includes c3fd244b metrics plus isolated Attic credentials/regression repair. No application checks or preview required for branch-only integration.
 <!-- SECTION:NOTES:END -->
