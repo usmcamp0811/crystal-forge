@@ -124,9 +124,188 @@ pub(crate) async fn read_capped<R>(mut reader: R, limit: usize) -> std::io::Resu
 where
     R: tokio::io::AsyncRead + Unpin,
 {
+    read_capped_with_progress(&mut reader, limit, None).await
+}
+
+// SECURITY: Only a boolean leaves the pipe reader. Stderr markers record Nix
+// resolution reports, not proof of a fetch. Elapsed time establishes no stage.
+tokio::task_local! {
+    static DISCOVERY_INPUT_PROGRESS: tokio::sync::watch::Sender<bool>;
+    static DISCOVERY_CANCELLATION: tokio::sync::watch::Receiver<bool>;
+}
+
+// A diagnostic write must not delay child deadlines or cancellation. This is a
+// best-effort persistence budget, not an extension of the discovery deadline.
+const DISCOVERY_LOG_BUDGET: Duration = Duration::from_millis(250);
+// Match the bulk evaluator's polling interval. Bound each database query so a
+// stalled connection cannot block discovery or its final cancellation check.
+const DISCOVERY_CANCEL_POLL: Duration = Duration::from_secs(2);
+const DISCOVERY_CANCEL_QUERY_BUDGET: Duration = Duration::from_millis(500);
+// The artifact row is presentation-only. A stalled write must not delay the
+// discovery-to-evaluation handoff; retain the verified inventory in memory.
+const DISCOVERY_INVENTORY_WRITE_BUDGET: Duration = Duration::from_millis(250);
+
+async fn wait_discovery_cancellation(mut requested: Option<tokio::sync::watch::Receiver<bool>>) {
+    if let Some(requested) = &mut requested {
+        loop {
+            if *requested.borrow_and_update() {
+                return;
+            }
+            if requested.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+    std::future::pending::<()>().await;
+}
+
+// CONCURRENCY: One borrowed logging future runs alongside discovery. No task or
+// queue outlives this invocation. Discovery completion drops unfinished logging.
+async fn with_discovery_progress<T>(
+    operation: impl std::future::Future<Output = Result<T>>,
+    mut progress: tokio::sync::watch::Receiver<bool>,
+    log: impl std::future::Future<Output = ()>,
+) -> Result<T> {
+    let logging = async {
+        if !*progress.borrow_and_update() && progress.changed().await.is_err() {
+            return;
+        }
+        if *progress.borrow_and_update() {
+            let _ = tokio::time::timeout(DISCOVERY_LOG_BUDGET, log).await;
+        }
+    };
+    tokio::pin!(operation);
+    tokio::pin!(logging);
+    tokio::select! {
+        biased;
+        result = &mut operation => result,
+        _ = &mut logging => operation.await,
+    }
+}
+
+// CONCURRENCY: Cancellation queries are polled alongside admission and child
+// execution. On a request, signal the runner and keep polling it for bounded
+// foreground cleanup; dropping it after that budget transfers both leases to
+// guard quarantine. Successful return requires a final bounded request check.
+async fn with_discovery_cancellation<T, Check, CheckFuture>(
+    operation: impl std::future::Future<Output = Result<T>>,
+    check: Check,
+) -> Result<T>
+where
+    Check: FnMut() -> CheckFuture,
+    CheckFuture: std::future::Future<Output = Result<bool>>,
+{
+    with_preflight_cancellation(operation, check, BOUNDED_PROCESS_CLEANUP_ACK_TIMEOUT).await
+}
+
+// Childless inventory/admission operations use zero acknowledgement time: a
+// known request drops the operation immediately instead of polling a cancelled
+// waiter into acquisition. Child discovery retains its foreground reap budget.
+async fn with_preflight_cancellation<T, Check, CheckFuture>(
+    operation: impl std::future::Future<Output = Result<T>>,
+    mut check: Check,
+    cleanup_acknowledgement: Duration,
+) -> Result<T>
+where
+    Check: FnMut() -> CheckFuture,
+    CheckFuture: std::future::Future<Output = Result<bool>>,
+{
+    let (requested, receiver) = tokio::sync::watch::channel(false);
+    let operation = DISCOVERY_CANCELLATION.scope(receiver, operation);
+    tokio::pin!(operation);
+    let outcome = {
+        let monitor = async {
+            loop {
+                if matches!(
+                    tokio::time::timeout(DISCOVERY_CANCEL_QUERY_BUDGET, check()).await,
+                    Ok(Ok(true))
+                ) {
+                    return;
+                }
+                tokio::time::sleep(DISCOVERY_CANCEL_POLL).await;
+            }
+        };
+        tokio::pin!(monitor);
+        tokio::select! {
+            biased;
+            _ = &mut monitor => None,
+            result = &mut operation => Some(result),
+        }
+    };
+    match outcome {
+        None => {
+            requested.send_replace(true);
+            if !cleanup_acknowledgement.is_zero() {
+                let _ = tokio::time::timeout(cleanup_acknowledgement, &mut operation).await;
+            }
+            Err(EvaluationCancelled.into())
+        }
+        Some(Ok(result)) => {
+            if tokio::time::timeout(DISCOVERY_CANCEL_QUERY_BUDGET, check())
+                .await
+                .context("discovery final cancellation check timed out")??
+            {
+                Err(EvaluationCancelled.into())
+            } else {
+                Ok(result)
+            }
+        }
+        Some(Err(error)) => {
+            if matches!(
+                tokio::time::timeout(DISCOVERY_CANCEL_QUERY_BUDGET, check()).await,
+                Ok(Ok(true))
+            ) {
+                Err(EvaluationCancelled.into())
+            } else {
+                // Query unavailability cannot replace the original timeout or
+                // genuine Nix failure. This branch never authorizes bulk work.
+                Err(error)
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct InputResolutionEvidence {
+    carry: Vec<u8>,
+    observed: bool,
+}
+
+impl InputResolutionEvidence {
+    fn observe(&mut self, chunk: &[u8]) -> bool {
+        const MARKERS: [&[u8]; 2] = [b"unpacking '", b"fetching git repository"];
+        // The longest marker bounds carry independently of line/output size.
+        const CARRY_LIMIT: usize = b"fetching git repository".len();
+        if self.observed {
+            return false;
+        }
+        for byte in chunk {
+            if self.carry.len() == CARRY_LIMIT {
+                self.carry.remove(0);
+            }
+            self.carry.push(*byte);
+            if MARKERS.iter().any(|marker| self.carry.ends_with(marker)) {
+                self.observed = true;
+                self.carry.clear();
+                return true;
+            }
+        }
+        false
+    }
+}
+
+async fn read_capped_with_progress<R>(
+    mut reader: R,
+    limit: usize,
+    progress: Option<tokio::sync::watch::Sender<bool>>,
+) -> std::io::Result<CappedOutput>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     use tokio::io::AsyncReadExt;
 
     let mut output = CappedOutput::default();
+    let mut evidence = InputResolutionEvidence::default();
     let mut chunk = [0u8; 8192];
     loop {
         let count = reader.read(&mut chunk).await?;
@@ -134,8 +313,37 @@ where
             return Ok(output);
         }
         output.push(&chunk[..count], limit);
+        // Continue observing beyond the output cap while draining both pipes.
+        // watch retains one value and never makes pipe draining wait for logs.
+        if let Some(progress) = &progress {
+            if evidence.observe(&chunk[..count]) {
+                progress.send_replace(true);
+            }
+        }
     }
 }
+
+/// Identifies a runner-owned deadline expiry independently of child stderr.
+#[derive(Debug, Clone)]
+struct BoundedProcessTimeout {
+    process_name: String,
+    deadline: Duration,
+    cleanup_confirmed: bool,
+}
+
+impl std::fmt::Display for BoundedProcessTimeout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} timed out after {}s; cleanup confirmed={}",
+            self.process_name,
+            self.deadline.as_secs(),
+            self.cleanup_confirmed
+        )
+    }
+}
+
+impl std::error::Error for BoundedProcessTimeout {}
 
 /// Complete bounded output from one external evaluation or source helper.
 #[derive(Debug)]
@@ -153,7 +361,12 @@ pub(crate) struct BoundedProcessOutput {
 ///
 /// The function starts a new process group, drains both pipes concurrently, and
 /// keeps draining after each retention ceiling so a verbose child cannot block.
-/// The deadline covers execution, pipe draining, and cleanup acknowledgement.
+/// The deadline covers execution and pipe draining. A timed-out child gets a
+/// separate two-second cleanup acknowledgement opportunity. Enclosing legacy
+/// preparation deadlines can still cancel that opportunity; discovery scopes
+/// let the child finish it before returning.
+/// Within a discovery progress scope, exact stderr fetch markers set a one-shot
+/// boolean while pipes drain. No output text enters that progress channel.
 /// Cleanup signals the inherited process group once and confirms child reap and
 /// group absence. Unconfirmed cleanup remains guard-owned after return. Within
 /// an evaluation preparation scope, the guard inherits the heavy-Nix locks and
@@ -162,7 +375,7 @@ pub(crate) struct BoundedProcessOutput {
 /// # Errors
 ///
 /// Returns an error when the child cannot start, wait, or drain its pipes, or
-/// when the overall deadline expires.
+/// when the execution deadline expires.
 pub(crate) async fn run_nix_command_bounded(
     command: &mut Command,
     process_name: &str,
@@ -170,6 +383,13 @@ pub(crate) async fn run_nix_command_bounded(
     stdout_limit: usize,
     stderr_limit: usize,
 ) -> Result<BoundedProcessOutput> {
+    let cancellation = DISCOVERY_CANCELLATION.try_with(Clone::clone).ok();
+    if cancellation
+        .as_ref()
+        .is_some_and(|requested| *requested.borrow())
+    {
+        return Err(EvaluationCancelled.into());
+    }
     let inherited_cleanup = EVALUATION_CLEANUP.try_with(Clone::clone).ok();
     if inherited_cleanup
         .as_ref()
@@ -207,7 +427,8 @@ pub(crate) async fn run_nix_command_bounded(
         .take()
         .context("bounded child stderr was not piped")?;
     let mut stdout_task = tokio::spawn(read_capped(stdout, stdout_limit));
-    let mut stderr_task = tokio::spawn(read_capped(stderr, stderr_limit));
+    let progress = DISCOVERY_INPUT_PROGRESS.try_with(Clone::clone).ok();
+    let mut stderr_task = tokio::spawn(read_capped_with_progress(stderr, stderr_limit, progress));
 
     let collection = async {
         let status = guard
@@ -224,23 +445,40 @@ pub(crate) async fn run_nix_command_bounded(
             .context("failed to read bounded stderr")?;
         Ok::<_, anyhow::Error>((status, stdout, stderr))
     };
-    let collected = tokio::time::timeout_at(expires_at, collection).await;
+    let collected = tokio::select! {
+        biased;
+        _ = wait_discovery_cancellation(cancellation) => Ok(Err(EvaluationCancelled.into())),
+        result = tokio::time::timeout_at(expires_at, collection) => result,
+    };
     if !matches!(&collected, Ok(Ok(_))) {
         stdout_task.abort();
         stderr_task.abort();
     }
-    let cleanup = guard.terminate_until(expires_at).await;
+    let cancelled = matches!(&collected, Ok(Err(error)) if error.is::<EvaluationCancelled>());
+    let mut cleanup_deadline = if collected.is_err() || cancelled {
+        Instant::now() + BOUNDED_PROCESS_CLEANUP_ACK_TIMEOUT
+    } else {
+        expires_at
+    };
+    if let Some(ownership) = &guard.cleanup_ownership {
+        cleanup_deadline =
+            cleanup_deadline.min(ownership.deadline + BOUNDED_PROCESS_CLEANUP_ACK_TIMEOUT);
+    }
+    let cleanup = guard.terminate_until(cleanup_deadline).await;
     let (status, stdout, stderr) = match collected {
         Ok(result) => {
             let output = result?;
             cleanup.with_context(|| format!("{process_name} cleanup unconfirmed"))?;
             output
         }
-        Err(_) => bail!(
-            "{process_name} timed out after {}s; cleanup confirmed={}",
-            deadline.as_secs(),
-            cleanup.is_ok()
-        ),
+        Err(_) => {
+            return Err(BoundedProcessTimeout {
+                process_name: process_name.to_string(),
+                deadline,
+                cleanup_confirmed: cleanup.is_ok(),
+            }
+            .into());
+        }
     };
 
     Ok(BoundedProcessOutput {
@@ -288,6 +526,10 @@ tokio::task_local! {
 type SharedEvaluationLock =
     Arc<tokio::sync::Mutex<Option<sqlx::Transaction<'static, sqlx::Postgres>>>>;
 
+// Cleanup gets executor time after an execution timeout, but never authorizes
+// replacement work without direct-child reap and process-group absence.
+const BOUNDED_PROCESS_CLEANUP_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
 // Resource-terminal repair is a separate maintenance operation. Its two-minute
 // ceiling covers admission and execution, so quarantine cannot strand the
 // recovery loop indefinitely while still preventing overlapping Nix children.
@@ -326,6 +568,22 @@ async fn run_resource_terminal_preparation_until<T>(
     operation: impl std::future::Future<Output = Result<T>>,
     deadline: Instant,
 ) -> Result<T> {
+    run_heavy_nix_preflight_until(pool, operation, deadline, false).await
+}
+
+// CONCURRENCY: Discovery completes this scope before bulk admission. Both modes
+// preserve advisory-before-permit ordering and child-owned quarantine. Only
+// discovery lets its runner acknowledge timeout after the execution deadline.
+// Legacy repair retains its original outer cancellation deadline.
+async fn run_heavy_nix_preflight_until<T>(
+    pool: &PgPool,
+    operation: impl std::future::Future<Output = Result<T>>,
+    deadline: Instant,
+    child_controls_deadline: bool,
+) -> Result<T> {
+    if EVALUATION_CLEANUP.try_with(|_| ()).is_ok() {
+        bail!("nested heavy Nix preflight admission is forbidden");
+    }
     if Instant::now() >= deadline {
         bail!("resource-terminal preparation deadline expired before admission");
     }
@@ -353,24 +611,232 @@ async fn run_resource_terminal_preparation_until<T>(
         _transaction: transaction.clone(),
         deadline,
     };
-    let output =
-        tokio::time::timeout_at(deadline, EVALUATION_CLEANUP.scope(ownership, operation)).await;
+    let output = run_preflight_operation(ownership, operation, child_controls_deadline).await;
+    let acknowledgement_deadline = if child_controls_deadline {
+        deadline + BOUNDED_PROCESS_CLEANUP_ACK_TIMEOUT
+    } else {
+        (Instant::now() + PREPARATION_ABORT_ACK_TIMEOUT).min(deadline)
+    };
     // A returned operation error can still have a pending child reaper. Do not
     // commit/release the advisory transaction until every inherited lease ends.
-    confirm_preparation_leases_until(
-        &transaction,
-        (Instant::now() + PREPARATION_ABORT_ACK_TIMEOUT).min(deadline),
-    )
-    .await?;
+    if let Err(cleanup_error) =
+        confirm_preparation_leases_until(&transaction, acknowledgement_deadline).await
+    {
+        // Preserve the typed operation cause. Extra leases still own both locks;
+        // this path MUST NOT commit the transaction while cleanup is pending.
+        return match output {
+            Err(error) => Err(error.context(cleanup_error)),
+            Ok(_) => Err(cleanup_error),
+        };
+    }
     let transaction = transaction
         .lock()
         .await
         .take()
         .context("resource-terminal preparation transaction missing")?;
-    tokio::time::timeout_at(deadline, transaction.commit())
+    let release_deadline = if child_controls_deadline {
+        acknowledgement_deadline
+    } else {
+        deadline
+    };
+    tokio::time::timeout_at(release_deadline, transaction.commit())
         .await
         .context("resource-terminal preparation lock release timed out")??;
-    output.context("resource-terminal preparation execution timed out")?
+    output
+}
+
+// The discovery operation is a single bounded child plus bounded JSON parsing.
+// Do not wrap it in an execution timeout: dropping it at the same deadline as
+// its child would skip foreground cleanup acknowledgement. Cancellation still
+// drops the scoped guard, which transfers both locks to its quarantine reaper.
+async fn run_preflight_operation<T>(
+    ownership: CleanupOwnership,
+    operation: impl std::future::Future<Output = Result<T>>,
+    child_controls_deadline: bool,
+) -> Result<T> {
+    let deadline = ownership.deadline;
+    let scoped = EVALUATION_CLEANUP.scope(ownership, operation);
+    if child_controls_deadline {
+        scoped.await
+    } else {
+        tokio::time::timeout_at(deadline, scoped)
+            .await
+            .context("resource-terminal preparation execution timed out")?
+    }
+}
+
+/// Discovers the complete configuration inventory under heavy-Nix admission.
+///
+/// The caller MUST materialize an immutable source before calling and supply its
+/// exact NAR-qualified reference. Discovery uses pure evaluation and IFD=true,
+/// matching bulk policy evaluation. Artifact-cache names have no source/lock
+/// provenance and MUST NOT replace this discovery. Nix's own warm cache remains
+/// available. Admission acquires the advisory lock before the semaphore, with
+/// one configured discovery budget for admission and child execution. Timeout
+/// permits at most two additional seconds for cleanup acknowledgement and lock
+/// release. Cancellation or unconfirmed cleanup retains both locks through the
+/// child guard's quarantine until direct-child reap and process-group absence.
+/// Callers MUST finish this scope before acquiring bulk evaluation admission.
+///
+/// # Errors
+/// Returns errors for invalid evaluator configuration, nested admission, lock
+/// admission timeout, discovery failure, or unconfirmed cleanup/lock release.
+///
+/// # Examples
+/// ```ignore
+/// let names = run_configuration_discovery_preflight(
+///     pool, &verified_source_ref, credentials.as_ref(), &server_config,
+/// ).await?;
+/// ```
+pub(crate) async fn run_configuration_discovery_preflight(
+    pool: &PgPool,
+    source_ref: &str,
+    creds: Option<&FlakeCredentialEnv>,
+    server_config: &ServerConfig,
+) -> Result<Vec<String>> {
+    server_config
+        .validate_evaluator_policy()
+        .map_err(anyhow::Error::msg)?;
+    let deadline = Instant::now() + Duration::from_secs(server_config.eval_discovery_timeout_secs);
+    run_heavy_nix_preflight_until(
+        pool,
+        crate::flake::commits::load_nixos_configurations_from_verified_source(
+            source_ref,
+            creds,
+            true,
+            Some(server_config),
+        ),
+        deadline,
+        true,
+    )
+    .await
+}
+
+/// Discovers configuration names while honoring API cancellation during admission
+/// and child execution.
+///
+/// The caller MUST supply the exact verified NAR-qualified policy source.
+/// Admission acquires the advisory lock before in-process capacity.
+/// Cancellation returns [`EvaluationCancelled`] for the existing attempt-scoped
+/// terminal finalizer. Cleanup gets at most two seconds of foreground polling;
+/// unconfirmed groups keep both leases in quarantine. Success requires a final
+/// bounded cancellation query before the caller can proceed to bulk work.
+///
+/// # Errors
+/// Returns discovery/admission errors, cancellation, or an unavailable final
+/// cancellation check. Callers MUST NOT treat query failure as permission to run.
+///
+/// # Examples
+/// ```ignore
+/// let names = run_cancellable_configuration_discovery_preflight(
+///     pool, commit_id, &verified_source_ref, credentials.as_ref(), &server_config,
+/// ).await?;
+/// ```
+pub(crate) async fn run_cancellable_configuration_discovery_preflight(
+    pool: &PgPool,
+    commit_id: i32,
+    source_ref: &str,
+    creds: Option<&FlakeCredentialEnv>,
+    server_config: &ServerConfig,
+) -> Result<Vec<String>> {
+    server_config
+        .validate_evaluator_policy()
+        .map_err(anyhow::Error::msg)?;
+    run_cancellable_discovery_preflight_until(
+        pool,
+        commit_id,
+        crate::flake::commits::load_nixos_configurations_from_verified_source(
+            source_ref,
+            creds,
+            true,
+            Some(server_config),
+        ),
+        Instant::now() + Duration::from_secs(server_config.eval_discovery_timeout_secs),
+    )
+    .await
+}
+
+// Admission and cancellation form one semantic boundary. The operation must
+// use the bounded runner in this borrowed scope; tests can exercise this same
+// production boundary with deterministic child fixtures instead of network Nix.
+async fn run_cancellable_discovery_preflight_until<T>(
+    pool: &PgPool,
+    commit_id: i32,
+    operation: impl std::future::Future<Output = Result<T>>,
+    deadline: Instant,
+) -> Result<T> {
+    with_discovery_cancellation(
+        run_heavy_nix_preflight_until(pool, operation, deadline, true),
+        || crate::queries::commits::check_cancellation_requested(pool, commit_id),
+    )
+    .await
+}
+
+// Cancellation and its final check remain authoritative even when the optional
+// inventory write fails or times out. Both futures are borrowed and bounded.
+async fn persist_discovery_inventory<Check, CheckFuture>(
+    write: impl std::future::Future<Output = Result<()>>,
+    check: Check,
+) -> Result<()>
+where
+    Check: FnMut() -> CheckFuture,
+    CheckFuture: std::future::Future<Output = Result<bool>>,
+{
+    with_preflight_cancellation(
+        async {
+            match tokio::time::timeout(DISCOVERY_INVENTORY_WRITE_BUDGET, write).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => {
+                    warn!("discovery inventory persistence failed; using verified inventory")
+                }
+                Err(_) => {
+                    warn!("discovery inventory persistence timed out; using verified inventory")
+                }
+            }
+            Ok(())
+        },
+        check,
+        Duration::ZERO,
+    )
+    .await
+}
+
+// CONCURRENCY: Admission returns the actual transaction and permit to the bulk
+// owner. It acquires PostgreSQL before capacity, never commits on success, and
+// starts no child. The independent admission ceiling includes pool waiting and
+// the final cancellation query. The execution overall budget starts afterward.
+async fn acquire_bulk_evaluation_admission_until(
+    pool: &PgPool,
+    commit_id: i32,
+    deadline: Instant,
+) -> Result<(
+    sqlx::Transaction<'static, sqlx::Postgres>,
+    tokio::sync::OwnedSemaphorePermit,
+)> {
+    if EVALUATION_CLEANUP.try_with(|_| ()).is_ok() {
+        bail!("nested bulk evaluation admission is forbidden");
+    }
+    tokio::time::timeout_at(
+        deadline,
+        with_preflight_cancellation(
+            async {
+                let mut transaction = pool.begin().await?;
+                sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                    .bind(HEAVY_NIX_ADVISORY_LOCK)
+                    .execute(&mut *transaction)
+                    .await?;
+                let permit = heavy_nix_limiter()
+                    .acquire_owned()
+                    .await
+                    .context("heavy Nix evaluation limiter was closed")?;
+                Ok((transaction, permit))
+            },
+            || crate::queries::commits::check_cancellation_requested(pool, commit_id),
+            Duration::ZERO,
+        ),
+    )
+    .await
+    .context("bulk evaluation admission timed out")?
 }
 
 // Abort acknowledgement is executor work, not a process reap allowance. Two
@@ -706,7 +1172,6 @@ use crate::models::retry_policy::RetryFailureClass;
 use crate::queries::build_jobs::{
     BuildJobInsertOutcome, QueuedBuild, create_build_job_for_derivation_tx,
 };
-use crate::queries::commits_artifacts::CachedSystemsState;
 use crate::queries::systems::list_configuration_names_for_flake;
 use crate::queue::QueueNotifier;
 
@@ -816,17 +1281,29 @@ fn classify_evaluation_failure(message: &str) -> RetryFailureClass {
 /// The drawer needs one actionable line. Nix traces can reach megabytes, and
 /// `eval_logs` rows are streamed to every connected client, so the excerpt is
 /// bounded well below the evaluator's own stderr caps.
-const PREFLIGHT_LOG_EXCERPT_MAX_CHARS: usize = 480;
+const PREFLIGHT_LOG_EXCERPT_MAX_CHARS: usize = 350;
 
 /// Returns one bounded terminal evaluation-log line for a preflight failure.
 ///
 /// The caller must pass the error from expected-system discovery or source
 /// materialization, which both run before `nix-eval-jobs` emits any result.
-/// The returned text is truncated to [`PREFLIGHT_LOG_EXCERPT_MAX_CHARS`] and is
-/// redacted by [`broadcast_and_persist_eval_log`] before broadcast and
-/// persistence, so this function must not be used to bypass that boundary.
+/// Typed child timeouts retain their deadline and cleanup state across context.
+/// Other failures retain a repository-redacted excerpt capped at
+/// [`PREFLIGHT_LOG_EXCERPT_MAX_CHARS`]. The persistence boundary applies the
+/// shared credential redactor again before broadcast or storage.
 fn preflight_discovery_failure_log(error: &anyhow::Error) -> String {
-    let rendered = format!("{error:#}");
+    if let Some(timeout) = error.downcast_ref::<BoundedProcessTimeout>() {
+        let cleanup = if timeout.cleanup_confirmed {
+            "confirmed"
+        } else {
+            "pending; heavy Nix locks retained"
+        };
+        return format!(
+            "❌ Evaluation preflight failed: Discovery timed out after {}s; cleanup {cleanup}. Locked input fetching or evaluation did not finish within the discovery budget.",
+            timeout.deadline.as_secs()
+        );
+    }
+    let rendered = bounded_preflight_error(error);
     // Collapse the trace to its first informative line. Nix prints the useful
     // `error: ...` summary after banner and warning lines.
     let summary = rendered
@@ -840,7 +1317,10 @@ fn preflight_discovery_failure_log(error: &anyhow::Error) -> String {
                 .find(|line| !line.is_empty())
                 .unwrap_or("evaluation preflight failed")
         });
-    let summary = summary.trim_start_matches("error:").trim();
+    let summary = error
+        .downcast_ref::<crate::flake::commits::DiscoveryNixFailure>()
+        .map_or(summary, |failure| failure.diagnostic.as_str());
+    let summary = redact_preflight_repository_urls(summary.trim_start_matches("error:").trim());
 
     let mut excerpt: String = summary
         .chars()
@@ -850,7 +1330,138 @@ fn preflight_discovery_failure_log(error: &anyhow::Error) -> String {
         excerpt.push('…');
     }
 
-    format!("❌ Evaluation preflight failed: {excerpt}")
+    if error
+        .downcast_ref::<crate::flake::commits::DiscoveryNixFailure>()
+        .is_some()
+    {
+        format!(
+            "❌ Evaluation preflight failed: Nix discovery failed; cleanup confirmed. Check locked-input access, lock integrity and evaluation errors. {excerpt}"
+        )
+    } else {
+        format!("❌ Evaluation preflight failed: {excerpt}")
+    }
+}
+
+/// Removes repository addresses and credentials before excerpt truncation.
+///
+/// The shared redactor preserves URL paths, which can identify private inputs.
+/// This stricter preflight boundary removes complete URL-bearing words, including
+/// forge shorthand and SCP Git addresses. Line boundaries remain available for
+/// fatal-error selection; other control characters are removed.
+pub(crate) fn redact_preflight_repository_urls(text: &str) -> String {
+    let without_urls = text
+        .lines()
+        .map(|line| {
+            line.split_whitespace()
+                .map(|word| {
+                    if word.contains("://")
+                        || [
+                            "gitlab:",
+                            "github:",
+                            "sourcehut:",
+                            "git@",
+                            "ssh:",
+                            "git+",
+                            "path:",
+                            "file:",
+                        ]
+                        .iter()
+                        .any(|prefix| word.contains(prefix))
+                        || (word.contains('@') && word.contains(':'))
+                    {
+                        "[repository URL redacted]"
+                    } else {
+                        word
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    crate::security::snapshot_redaction::redact_text(&without_urls)
+        .chars()
+        .filter(|character| !character.is_control() || *character == '\n')
+        .collect()
+}
+
+// Bound chain rendering before allocation. A hostile trace must not allocate
+// its complete text just to produce a short terminal diagnostic.
+fn bounded_preflight_error(error: &anyhow::Error) -> String {
+    struct LimitedDiagnostic(String);
+    impl std::fmt::Write for LimitedDiagnostic {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            const LIMIT: usize = 16 * 1024;
+            let remaining = LIMIT.saturating_sub(self.0.len());
+            let mut end = remaining.min(text.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.0.push_str(&text[..end]);
+            if end < text.len() {
+                Err(std::fmt::Error)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let mut output = LimitedDiagnostic(String::new());
+    let _ = std::fmt::write(&mut output, format_args!("{error:#}"));
+    output.0
+}
+
+// SECURITY: Lifecycle diagnostics must not retain the raw source error as an
+// alternate chain. Keep retry policy and typed materialization evidence in a
+// safe carrier; cancellation remains the existing terminal control type.
+#[derive(Debug)]
+struct SanitizedMaterializationFailure {
+    diagnostic: String,
+    retry_class: RetryFailureClass,
+    source_class: Option<crate::flake::verified_source::MaterializationFailureClass>,
+}
+
+impl std::fmt::Display for SanitizedMaterializationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(class) = self.source_class {
+            write!(f, "source materialization {class:?}: {}", self.diagnostic)
+        } else {
+            write!(f, "source materialization: {}", self.diagnostic)
+        }
+    }
+}
+
+impl std::error::Error for SanitizedMaterializationFailure {}
+
+fn sanitize_materialization_failure(error: anyhow::Error, repo_url: &str) -> anyhow::Error {
+    use crate::flake::verified_source::{MaterializationError, MaterializationFailureClass};
+    let source_class = error
+        .downcast_ref::<MaterializationError>()
+        .map(|error| error.class);
+    if error.is::<EvaluationCancelled>()
+        || source_class == Some(MaterializationFailureClass::Cancelled)
+    {
+        return EvaluationCancelled.into();
+    }
+    if error.is::<EvaluationSuperseded>() {
+        return EvaluationSuperseded.into();
+    }
+    // Preserve the existing retry decision before diagnostic truncation or URL
+    // removal. Neither sanitization nor an excerpt limit can change retry policy.
+    let retry_class = classify_evaluation_failure(&format!("{error:#}"));
+    let diagnostic = bounded_preflight_error(&error);
+    let diagnostic = redact_preflight_repository_urls(
+        &diagnostic.replace(repo_url, "[repository URL redacted]"),
+    );
+    let safe = SanitizedMaterializationFailure {
+        diagnostic,
+        retry_class,
+        source_class,
+    };
+    if let Some(timeout) = error.downcast_ref::<BoundedProcessTimeout>() {
+        anyhow::Error::new(timeout.clone()).context(safe)
+    } else {
+        safe.into()
+    }
 }
 
 fn structured_evaluation_failure(mut source: anyhow::Error) -> EvaluationFailure {
@@ -860,7 +1471,15 @@ fn structured_evaluation_failure(mut source: anyhow::Error) -> EvaluationFailure
             RetryFailureClass::ResourceFailure,
             resource.retained_plan.take(),
         ),
-        None => (classify_evaluation_failure(&format!("{source:#}")), None),
+        None => (
+            source
+                .downcast_ref::<SanitizedMaterializationFailure>()
+                .map_or_else(
+                    || classify_evaluation_failure(&format!("{source:#}")),
+                    |error| error.retry_class,
+                ),
+            None,
+        ),
     };
     EvaluationFailure {
         source,
@@ -3801,7 +4420,8 @@ enum SystemFinalizeAction {
 /// cleanup transfers heavy-Nix locks to the guard reaper and returns partial
 /// resource failure without starting another child. Nix workers inherit the
 /// group; this barrier does not cover escaped processes. Cancellation polling
-/// is cooperative; a pending handler can delay its next two-second poll.
+/// during discovery is concurrent and query-bounded. Bulk cancellation polling
+/// is cooperative; a pending bulk handler can delay its next two-second poll.
 ///
 /// # Errors
 ///
@@ -3887,10 +4507,21 @@ async fn evaluate_with_nix_eval_jobs_inner(
             }),
     );
 
-    // SECURITY: Only Git receives repository credentials. The authoritative
-    // evaluator consumes the credential-free tracked tree after Nix store
-    // ingestion, so host nix.conf and credential files cannot affect drvPath.
-    let immutable_source = materialize_immutable_source(
+    // SECURITY: Git materialization and Nix discovery input fetchers receive
+    // repository credentials. Bulk evaluation still consumes the verified store
+    // tree in its isolated environment; host credentials cannot affect drvPath.
+    let _ = tokio::time::timeout(
+        DISCOVERY_LOG_BUDGET,
+        broadcast_and_persist_eval_log(
+            pool,
+            cf_state,
+            commit.id,
+            &mut log_sequence,
+            "⏳ Materializing verified source...".to_string(),
+        ),
+    )
+    .await;
+    let immutable_source = match materialize_immutable_source(
         pool,
         commit.id,
         &server_config.source_archive_root,
@@ -3899,7 +4530,39 @@ async fn evaluate_with_nix_eval_jobs_inner(
         creds.as_ref().as_ref(),
     )
     .await
-    .context("failed to materialize authoritative immutable source")?;
+    .context("failed to materialize authoritative immutable source")
+    {
+        Ok(source) => source,
+        Err(error) => {
+            let error = sanitize_materialization_failure(error, repo_url);
+            let _ = tokio::time::timeout(
+                DISCOVERY_LOG_BUDGET,
+                broadcast_and_persist_eval_log(
+                    pool,
+                    cf_state,
+                    commit.id,
+                    &mut log_sequence,
+                    format!(
+                        "Source materialization failed. {}",
+                        preflight_discovery_failure_log(&error)
+                    ),
+                ),
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let _ = tokio::time::timeout(
+        DISCOVERY_LOG_BUDGET,
+        broadcast_and_persist_eval_log(
+            pool,
+            cf_state,
+            commit.id,
+            &mut log_sequence,
+            "✅ Verified source materialization complete".to_string(),
+        ),
+    )
+    .await;
     // Pure `builtins.getFlake` accepts a path reference only when the reference
     // carries its verified NAR hash. The hash also prevents resolution from
     // observing a different tree if the expression is reused incorrectly.
@@ -3948,23 +4611,32 @@ async fn evaluate_with_nix_eval_jobs_inner(
             target_system,
             server_config.eval_workers
         );
-        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, start_msg)
-            .await;
+        let _ = tokio::time::timeout(
+            DISCOVERY_LOG_BUDGET,
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
+                start_msg,
+            ),
+        )
+        .await;
 
         let policy_msg = format!(
             "📋 Loaded {} unique enabled policies across {} configurations with assigned policies",
             unique_policy_count.len(),
             configs_with_policies,
         );
-        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, policy_msg)
-            .await;
-
-        broadcast_and_persist_eval_log(
-            pool,
-            Some(state),
-            commit.id,
-            &mut log_sequence,
-            "⏳ Evaluating nixosConfigurations...".to_string(),
+        let _ = tokio::time::timeout(
+            DISCOVERY_LOG_BUDGET,
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
+                policy_msg,
+            ),
         )
         .await;
     }
@@ -3982,63 +4654,88 @@ async fn evaluate_with_nix_eval_jobs_inner(
         "prepared authoritative evaluator expression"
     );
 
-    // ── Establish expected system set BEFORE spawning the evaluator ───
-    // This must happen now so that discovery failures fail the evaluation
-    // before any child process starts, preventing orphan evaluators.
-    // Load known system names from the artifact cache so we can detect systems
-    // that nix-eval-jobs silently drops (no JSON line at all, not even an error).
-    let known_cache =
-        crate::queries::commits_artifacts::get_commit_nixos_configurations_from_cache(
-            pool, commit.id,
-        )
-        .await?;
-
-    let known_systems: Vec<String> = match known_cache {
-        CachedSystemsState::Ready(systems) => systems,
-        CachedSystemsState::Missing | CachedSystemsState::HydrationFailed => {
-            // No cache row exists, or last hydration failed — hydrate inline now.
-            // Use the credential-aware variant so private flake discovery works.
-            let systems = match crate::flake::commits::load_commit_nixos_configurations_with_creds(
-                repo_url,
-                commit_hash,
-                creds.as_ref().as_ref(),
-                Some(build_config),
+    // INVARIANT: Establish the inventory from the exact policy source before
+    // bulk admission. Legacy artifact rows have no source/lock provenance and
+    // can include names from CLI lock reconciliation. Always rediscover; Nix's
+    // warm fetch/evaluation cache, not those rows, supplies the inexpensive path.
+    let _ = tokio::time::timeout(
+        DISCOVERY_LOG_BUDGET,
+        broadcast_and_persist_eval_log(
+            pool,
+            cf_state,
+            commit.id,
+            &mut log_sequence,
+            "⏳ Discovery starts: evaluating nixosConfigurations".to_string(),
+        ),
+    )
+    .await;
+    let (progress, observed) = tokio::sync::watch::channel(false);
+    let discovery = DISCOVERY_INPUT_PROGRESS.scope(
+        progress,
+        run_cancellable_configuration_discovery_preflight(
+            pool,
+            commit.id,
+            &flake_ref,
+            creds.as_ref().as_ref(),
+            server_config,
+        ),
+    );
+    let result = with_discovery_progress(
+        discovery,
+        observed,
+        broadcast_and_persist_eval_log(
+            pool,
+            cf_state,
+            commit.id,
+            &mut log_sequence,
+            "⏳ Nix reports input resolution (stderr marker observed)".to_string(),
+        ),
+    )
+    .await;
+    let known_systems = match result {
+        Ok(systems) => systems,
+        Err(error) => {
+            // Discovery precedes nix-eval-jobs, so no per-system result can
+            // report this failure. The attempt error remains authoritative.
+            let _ = tokio::time::timeout(
+                DISCOVERY_LOG_BUDGET,
+                broadcast_and_persist_eval_log(
+                    pool,
+                    cf_state,
+                    commit.id,
+                    &mut log_sequence,
+                    preflight_discovery_failure_log(&error),
+                ),
             )
-            .await
-            {
-                Ok(systems) => systems,
-                Err(error) => {
-                    // Preflight discovery runs before nix-eval-jobs starts, so
-                    // no per-system line can ever reach the drawer. Without this
-                    // terminal entry the visible log stops at "Evaluating
-                    // nixosConfigurations..." while the real cause exists only
-                    // in the attempt's error column. The commit/attempt error
-                    // stays authoritative; this entry is a bounded summary.
-                    broadcast_and_persist_eval_log(
-                        pool,
-                        cf_state,
-                        commit.id,
-                        &mut log_sequence,
-                        preflight_discovery_failure_log(&error),
-                    )
-                    .await;
-                    return Err(error);
-                }
-            };
-
-            // Persist discovered systems (including legitimately empty set)
-            // without overwriting changed_files. This also marks
-            // nixos_configurations_populated = true.
-            if let Err(e) = crate::queries::commits_artifacts::upsert_commit_artifact_systems(
-                pool, commit.id, &systems,
-            )
-            .await
-            {
-                warn!("Failed to persist inline artifact cache: {}", e);
-            }
-            systems
+            .await;
+            return Err(error);
         }
     };
+    let _ = tokio::time::timeout(
+        DISCOVERY_LOG_BUDGET,
+        broadcast_and_persist_eval_log(
+            pool,
+            cf_state,
+            commit.id,
+            &mut log_sequence,
+            format!(
+                "✅ Discovery complete: {} systems; cleanup confirmed",
+                known_systems.len()
+            ),
+        ),
+    )
+    .await;
+    // Publish the full inventory for UI reads, including a valid empty set.
+    // Preserve changed_files; this row is never evaluation authority.
+    persist_discovery_inventory(
+        crate::queries::commits_artifacts::upsert_commit_artifact_systems(
+            pool,
+            commit.id,
+            &known_systems,
+        ),
+        || crate::queries::commits::check_cancellation_requested(pool, commit.id),
+    )
+    .await?;
     let has_known_systems = !known_systems.is_empty();
     // INVARIANT: Every replacement expression selects only this original
     // verified inventory/build-scope intersection. Terminal outcomes never
@@ -4080,15 +4777,13 @@ async fn evaluate_with_nix_eval_jobs_inner(
     // IMPORTANT: Do not remove this lock or shorten its scope without also
     // updating `services/hardening_scans.rs::run_hardening_scan` and verifying
     // that hardening evals can never overlap bulk evaluation.
-    let mut heavy_nix_db_lock = pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(HEAVY_NIX_ADVISORY_LOCK)
-        .execute(&mut *heavy_nix_db_lock)
-        .await?;
-    let heavy_nix_permit = heavy_nix_limiter()
-        .acquire_owned()
-        .await
-        .context("heavy Nix evaluation limiter was closed")?;
+    // Admission gets its own bounded wait using the configured overall ceiling.
+    // Do not subtract that wait from the established execution budget below.
+    let admission_deadline = Instant::now()
+        .checked_add(Duration::from_secs(server_config.eval_overall_timeout_secs))
+        .context("bulk evaluation admission deadline is out of range")?;
+    let (heavy_nix_db_lock, heavy_nix_permit) =
+        acquire_bulk_evaluation_admission_until(pool, commit.id, admission_deadline).await?;
     // Resolve current runtime resources only after waiting for both locks.
     // The plan is immutable for this child; output cannot alter its budget.
     let resource_plan =
@@ -5718,8 +6413,8 @@ async fn evaluate_with_nix_eval_jobs_inner(
         // When a system fails evaluation catastrophically, nix-eval-jobs may not
         // produce any JSON line for it at all (not even one with an error field).
         // Such systems silently disappear from the results. By comparing against
-        // the known systems from the artifact cache, we detect these dropouts and
-        // synthesize a failed result for each.
+        // the inventory discovered from the exact verified policy source, we
+        // detect these dropouts and synthesize a failed result for each.
         //
         // This runs regardless of the child exit status so that a partial
         // evaluator crash still creates persisted failure records for all
@@ -7376,6 +8071,420 @@ mod tests {
         assert!(line.chars().count() <= PREFLIGHT_LOG_EXCERPT_MAX_CHARS + 64);
     }
 
+    #[test]
+    fn preflight_progress_evidence_is_bounded_exact_and_cross_chunk() {
+        for marker in [
+            b"unpacking '".as_slice(),
+            b"fetching git repository".as_slice(),
+        ] {
+            for split in 1..marker.len() {
+                let mut evidence = super::InputResolutionEvidence::default();
+                assert!(!evidence.observe(&[b'x'; 1024]));
+                assert!(evidence.carry.len() <= b"fetching git repository".len());
+                assert!(!evidence.observe(&marker[..split]));
+                assert!(evidence.observe(&marker[split..]));
+                assert!(!evidence.observe(marker), "signal must be one-shot");
+                assert!(evidence.carry.is_empty());
+            }
+        }
+        let mut evidence = super::InputResolutionEvidence::default();
+        assert!(!evidence.observe(b"unpacking archive; fetching Git repository; 300s elapsed"));
+    }
+
+    #[tokio::test]
+    async fn preflight_progress_is_live_past_caps_without_time_inference() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = tokio::io::duplex(32);
+        let (progress, mut observed) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(super::read_capped_with_progress(reader, 2, Some(progress)));
+        writer.write_all(&[b'x'; 64]).await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            !*observed.borrow(),
+            "elapsed execution is not fetch evidence"
+        );
+        writer.write_all(b"fetching git repo").await.unwrap();
+        writer
+            .write_all(b"sitory 'https://private.invalid/secret'")
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), observed.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(*observed.borrow_and_update());
+        assert!(!task.is_finished(), "progress precedes pipe EOF");
+        writer.write_all(b" unpacking 'again'").await.unwrap();
+        drop(writer);
+        let output = task.await.unwrap().unwrap();
+        assert_eq!(output.bytes, b"xx");
+        assert!(output.is_truncated());
+        assert!(!observed.has_changed().unwrap_or(false), "only one signal");
+    }
+
+    #[test]
+    fn preflight_timeout_keeps_typed_cause_and_cleanup_through_context() {
+        for cleanup_confirmed in [false, true] {
+            let error = anyhow::Error::new(super::BoundedProcessTimeout {
+                process_name: "fixture".to_string(),
+                deadline: std::time::Duration::from_secs(300),
+                cleanup_confirmed,
+            })
+            .context("failed to evaluate configurations")
+            .context("preparation child cleanup unconfirmed; heavy Nix locks retained");
+            let log = preflight_discovery_failure_log(&error);
+            assert!(log.contains("Discovery timed out after 300s"));
+            assert!(log.contains(if cleanup_confirmed {
+                "cleanup confirmed"
+            } else {
+                "cleanup pending; heavy Nix locks retained"
+            }));
+            assert!(log.chars().count() < 512);
+        }
+    }
+
+    #[test]
+    fn preflight_real_nix_failure_cannot_impersonate_timeout_and_hides_urls() {
+        let error = anyhow::Error::new(crate::flake::commits::DiscoveryNixFailure {
+            diagnostic: "error: timed out fetching https://user:password@private.invalid/team/root?token=secret gitlab:private/team git@private.invalid:root\n  underlying fatal detail".to_string(),
+        }).context("outer context");
+        let log = preflight_discovery_failure_log(&error);
+        assert!(log.contains("Nix discovery failed; cleanup confirmed"));
+        assert!(log.contains("timed out fetching"));
+        assert!(log.contains("underlying fatal detail"));
+        assert!(!log.contains("Discovery timed out"));
+        for secret in [
+            "private.invalid",
+            "password",
+            "token=",
+            "private/team",
+            "untrusted cache",
+        ] {
+            assert!(!log.contains(secret), "leaked {secret}");
+        }
+        assert!(log.chars().count() < 512);
+        let long_failure = anyhow::Error::new(crate::flake::commits::DiscoveryNixFailure {
+            diagnostic: format!("error: {}", "x".repeat(10_000)),
+        });
+        assert!(
+            preflight_discovery_failure_log(&long_failure)
+                .chars()
+                .count()
+                < 512
+        );
+        let huge = anyhow::anyhow!("error: {}", "é".repeat(200_000));
+        assert!(super::bounded_preflight_error(&huge).len() <= 16 * 1024);
+    }
+
+    #[tokio::test]
+    async fn preflight_runner_observes_only_stderr_and_keeps_typed_timeout() {
+        for stderr in [false, true] {
+            let (progress, observed) = tokio::sync::watch::channel(false);
+            let mut command = Command::new("sh");
+            command.args([
+                "-c",
+                if stderr {
+                    "printf 'fetching git repository' >&2; exit 7"
+                } else {
+                    "printf 'fetching git repository'; exit 7"
+                },
+            ]);
+            let output = super::DISCOVERY_INPUT_PROGRESS
+                .scope(
+                    progress,
+                    run_nix_command_bounded(
+                        &mut command,
+                        "progress fixture",
+                        std::time::Duration::from_secs(2),
+                        0,
+                        0,
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_eq!(*observed.borrow(), stderr);
+            assert_eq!(output.status.code(), Some(7));
+        }
+        let (progress, observed) = tokio::sync::watch::channel(false);
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 60"]);
+        let error = super::DISCOVERY_INPUT_PROGRESS
+            .scope(
+                progress,
+                run_nix_command_bounded(
+                    &mut command,
+                    "timeout fixture",
+                    std::time::Duration::from_millis(50),
+                    16,
+                    16,
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(!*observed.borrow());
+        assert!(
+            error
+                .downcast_ref::<super::BoundedProcessTimeout>()
+                .is_some()
+        );
+        assert!(preflight_discovery_failure_log(&error).contains("cleanup confirmed"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn preflight_stalled_progress_logger_does_not_delay_child_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("logger-child");
+        let (progress, observed) = tokio::sync::watch::channel(false);
+        let logged = std::sync::atomic::AtomicBool::new(false);
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "printf '%s' \"$$\" > \"$1\"; printf \"unpacking '\" >&2; exec sleep 60",
+                "--",
+            ])
+            .arg(&pid_file);
+        let started = tokio::time::Instant::now();
+        let operation = super::DISCOVERY_INPUT_PROGRESS.scope(
+            progress,
+            run_nix_command_bounded(
+                &mut command,
+                "stalled log fixture",
+                std::time::Duration::from_millis(100),
+                16,
+                16,
+            ),
+        );
+        let error = super::with_discovery_progress(operation, observed, async {
+            logged.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        })
+        .await
+        .unwrap_err();
+        assert!(logged.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(
+            error
+                .downcast_ref::<super::BoundedProcessTimeout>()
+                .is_some()
+        );
+        let pgid = tokio::fs::read_to_string(pid_file)
+            .await
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(super::process_group_absent(pgid));
+    }
+
+    #[tokio::test]
+    async fn preflight_stalled_cancellation_query_does_not_delay_child_deadline() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 60"]);
+        let started = tokio::time::Instant::now();
+        let error = super::with_discovery_cancellation(
+            run_nix_command_bounded(
+                &mut command,
+                "stalled query fixture",
+                std::time::Duration::from_millis(50),
+                16,
+                16,
+            ),
+            || std::future::pending::<anyhow::Result<bool>>(),
+        )
+        .await
+        .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(
+            error
+                .downcast_ref::<super::BoundedProcessTimeout>()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_success_requires_final_cancellation_check() {
+        let mut checks = 0;
+        let error = super::with_discovery_cancellation(async { Ok(()) }, || {
+            checks += 1;
+            std::future::ready(Ok(checks > 1))
+        })
+        .await
+        .unwrap_err();
+        assert!(error.is::<super::EvaluationCancelled>());
+        let error = super::with_discovery_cancellation(async { Ok(()) }, || {
+            std::future::pending::<anyhow::Result<bool>>()
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("final cancellation check timed out")
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn preflight_requested_cancellation_acknowledges_child_and_keeps_terminal_type() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("requested-cancel-child");
+        let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let transaction = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let ownership = super::CleanupOwnership {
+            _permit: std::sync::Arc::new(limiter.clone().acquire_owned().await.unwrap()),
+            _transaction: transaction.clone(),
+            deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+        };
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "printf '%s' \"$$\" > \"$1\"; exec sleep 60", "--"])
+            .arg(&pid_file);
+        let error = super::with_discovery_cancellation(
+            super::run_preflight_operation(
+                ownership,
+                run_nix_command_bounded(
+                    &mut command,
+                    "requested cancellation fixture",
+                    std::time::Duration::from_secs(30),
+                    16,
+                    16,
+                ),
+                true,
+            ),
+            || async {
+                loop {
+                    if tokio::fs::read_to_string(&pid_file)
+                        .await
+                        .is_ok_and(|text| text.parse::<i32>().is_ok())
+                    {
+                        return Ok(true);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.is::<super::EvaluationCancelled>());
+        let pgid = tokio::fs::read_to_string(pid_file)
+            .await
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(super::process_group_absent(pgid));
+        assert_eq!(std::sync::Arc::strong_count(&transaction), 1);
+        assert!(limiter.try_acquire_owned().is_ok());
+    }
+
+    #[tokio::test]
+    async fn preflight_inventory_stalled_write_is_bounded_and_api_cancellable() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct WriteGuard<'a>(&'a AtomicBool);
+        impl Drop for WriteGuard<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        for cancel in [false, true] {
+            let requested = AtomicBool::new(false);
+            let write_dropped = AtomicBool::new(false);
+            let observed_during_write = AtomicBool::new(false);
+            let (started, observed) = tokio::sync::oneshot::channel();
+            let started_at = tokio::time::Instant::now();
+            let operation = super::persist_discovery_inventory(
+                async {
+                    let _guard = WriteGuard(&write_dropped);
+                    started.send(()).unwrap();
+                    std::future::pending::<anyhow::Result<()>>().await
+                },
+                || async {
+                    if cancel {
+                        while !requested.load(Ordering::SeqCst) {
+                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                        }
+                        observed_during_write
+                            .store(!write_dropped.load(Ordering::SeqCst), Ordering::SeqCst);
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                },
+            );
+            let (result, ()) = tokio::join!(operation, async {
+                observed.await.unwrap();
+                requested.store(cancel, Ordering::SeqCst);
+            });
+            assert!(started_at.elapsed() < std::time::Duration::from_secs(2));
+            assert!(write_dropped.load(Ordering::SeqCst));
+            if cancel {
+                assert!(observed_during_write.load(Ordering::SeqCst));
+                assert!(result.unwrap_err().is::<super::EvaluationCancelled>());
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn preflight_inventory_failure_is_best_effort_but_cancel_check_is_fail_closed() {
+        super::persist_discovery_inventory(
+            async { anyhow::bail!("inventory fixture failed") },
+            || std::future::ready(Ok(false)),
+        )
+        .await
+        .unwrap();
+        let error = super::persist_discovery_inventory(
+            async { anyhow::bail!("inventory fixture failed") },
+            || std::future::pending::<anyhow::Result<bool>>(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("final cancellation check timed out")
+        );
+    }
+
+    #[test]
+    fn preflight_materialization_lifecycle_error_is_safe_and_keeps_classification() {
+        let root = "ssh://private.invalid/team/root";
+        for message in ["connection reset", "unauthorized", "syntax error"] {
+            let raw = anyhow::anyhow!(
+                "{message}: root {root}; input https://user:secret@private.invalid/locked?token=hidden"
+            );
+            let expected = super::structured_evaluation_failure(anyhow::anyhow!("{raw:#}")).class;
+            let safe = super::sanitize_materialization_failure(raw, root);
+            let failure = super::structured_evaluation_failure(safe);
+            assert_eq!(failure.class, expected);
+            let diagnostic = failure.diagnostic_chain();
+            for secret in ["private.invalid", "secret", "hidden", "team/root"] {
+                assert!(!diagnostic.contains(secret));
+            }
+        }
+        let safe = super::sanitize_materialization_failure(super::EvaluationCancelled.into(), root);
+        assert!(safe.is::<super::EvaluationCancelled>());
+        let late_cause = anyhow::anyhow!("{} unauthorized: {root}", "x".repeat(20_000));
+        let safe = super::sanitize_materialization_failure(late_cause, root);
+        assert_eq!(
+            super::structured_evaluation_failure(safe).class,
+            RetryFailureClass::Authorization
+        );
+        let timeout = anyhow::Error::new(super::BoundedProcessTimeout {
+            process_name: "source fixture".to_string(),
+            deadline: std::time::Duration::from_secs(1),
+            cleanup_confirmed: false,
+        })
+        .context(format!("private root {root}"));
+        let safe = super::sanitize_materialization_failure(timeout, root);
+        assert!(
+            safe.downcast_ref::<super::BoundedProcessTimeout>()
+                .is_some()
+        );
+        assert!(!format!("{safe:#}").contains(root));
+    }
+
     use super::{
         CappedOutput, ConfirmedSystemFailure, EvaluationFinalizeOutcome, EvaluationPlan,
         NixEvalJobResult, NixEvalProcessGuard, SuccessfulSystemResult,
@@ -7764,9 +8873,10 @@ mod tests {
             NixEvalProcessGuard::from_spawned_child(child, "cleanup ownership test").unwrap();
         let pgid = guard.pgid();
         let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let transaction = std::sync::Arc::new(tokio::sync::Mutex::new(None));
         guard.cleanup_ownership = Some(super::CleanupOwnership {
             _permit: std::sync::Arc::new(limiter.clone().acquire_owned().await.unwrap()),
-            _transaction: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
+            _transaction: transaction.clone(),
             deadline: tokio::time::Instant::now(),
         });
         // Inject a signal already issued but not yet effective. This exercises
@@ -7780,6 +8890,7 @@ mod tests {
         );
         drop(guard);
         assert!(limiter.clone().try_acquire_owned().is_err());
+        assert_eq!(std::sync::Arc::strong_count(&transaction), 2);
         // SAFETY: This test owns the live positive process group exclusively.
         assert_eq!(unsafe { libc::killpg(pgid, libc::SIGKILL) }, 0);
         let permit =
@@ -7788,6 +8899,12 @@ mod tests {
                 .unwrap()
                 .unwrap();
         assert!(super::process_group_absent(pgid));
+        super::confirm_preparation_leases_until(
+            &transaction,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
         drop(permit);
     }
 
@@ -7931,6 +9048,746 @@ mod tests {
         .unwrap_err();
         assert!(!polled, "preparation cannot run before heavy-Nix admission");
         assert!(error.to_string().contains("before admission"));
+    }
+
+    #[tokio::test]
+    async fn discovery_public_preflight_rejects_invalid_budget_before_admission() {
+        let pool = sqlx::PgPool::connect_lazy("postgresql://unused@127.0.0.1/unused").unwrap();
+        for budget in [0, 1801] {
+            let config = crate::config::ServerConfig {
+                eval_discovery_timeout_secs: budget,
+                ..Default::default()
+            };
+            let error = super::run_configuration_discovery_preflight(
+                &pool,
+                "path:/unused-source?narHash=sha256-unused",
+                None,
+                &config,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("eval_discovery_timeout_secs"));
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_expired_admission_and_nested_scope_do_not_poll_operation() {
+        use super::{CleanupOwnership, EVALUATION_CLEANUP, run_heavy_nix_preflight_until};
+        use tokio::time::{Duration, Instant};
+        let pool = sqlx::PgPool::connect_lazy("postgresql://unused@127.0.0.1/unused").unwrap();
+        let mut polled = false;
+        let error = run_heavy_nix_preflight_until(
+            &pool,
+            async {
+                polled = true;
+                Ok::<_, anyhow::Error>(())
+            },
+            Instant::now(),
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(!polled);
+        assert!(error.to_string().contains("before admission"));
+        let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let transaction = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let ownership = CleanupOwnership {
+            _permit: std::sync::Arc::new(limiter.clone().acquire_owned().await.unwrap()),
+            _transaction: transaction.clone(),
+            deadline: Instant::now() + Duration::from_secs(2),
+        };
+        let error = EVALUATION_CLEANUP
+            .scope(
+                ownership,
+                run_heavy_nix_preflight_until(
+                    &pool,
+                    async {
+                        polled = true;
+                        Ok::<_, anyhow::Error>(())
+                    },
+                    Instant::now() + Duration::from_secs(2),
+                    true,
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(!polled);
+        assert!(error.to_string().contains("nested"));
+        assert_eq!(std::sync::Arc::strong_count(&transaction), 1);
+        assert!(limiter.try_acquire_owned().is_ok());
+    }
+
+    // These tests use sqlx-created disposable databases only. The official
+    // server-regressions sandbox supplies PostgreSQL; normal package tests keep
+    // them ignored. Never use the shared live-database test_pool helper here.
+    mod discovery_database_tests {
+        use super::super::{
+            EVALUATION_CLEANUP, HEAVY_NIX_ADVISORY_LOCK, heavy_nix_limiter,
+            run_heavy_nix_preflight_until,
+        };
+        use super::*;
+        use tokio::time::{Duration, Instant};
+
+        async fn advisory_available(pool: &PgPool) -> bool {
+            let mut transaction = pool.begin().await.unwrap();
+            let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
+                .bind(HEAVY_NIX_ADVISORY_LOCK)
+                .fetch_one(&mut *transaction)
+                .await
+                .unwrap();
+            transaction.rollback().await.unwrap();
+            acquired
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "official server-regressions sandbox PostgreSQL only"]
+        #[cfg(unix)]
+        async fn discovery_api_cancellation_stops_active_child_and_finalizes_original_attempt(
+            pool: PgPool,
+        ) {
+            let flake_id = insert_throwaway_flake(&pool).await;
+            let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+            let attempt = start_eval(&pool, commit_id).await;
+            let directory = tempfile::tempdir().unwrap();
+            let pid_file = directory.path().join("api-cancel-child");
+            let worker_pid_file = pid_file.clone();
+            let worker_pool = pool.clone();
+            let worker = tokio::spawn(async move {
+                super::super::run_cancellable_discovery_preflight_until(
+                    &worker_pool,
+                    commit_id,
+                    async {
+                        let mut command = Command::new("sh");
+                        command
+                            .args(["-c", "printf '%s' \"$$\" > \"$1\"; exec sleep 60", "--"])
+                            .arg(worker_pid_file);
+                        run_nix_command_bounded(
+                            &mut command,
+                            "API cancellation fixture",
+                            Duration::from_secs(30),
+                            16,
+                            16,
+                        )
+                        .await
+                    },
+                    Instant::now() + Duration::from_secs(30),
+                )
+                .await
+            });
+            let pgid: i32 = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(text) = tokio::fs::read_to_string(&pid_file).await {
+                        if let Ok(pid) = text.parse() {
+                            break pid;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(!super::super::process_group_absent(pgid));
+            assert!(!advisory_available(&pool).await);
+            assert!(heavy_nix_limiter().try_acquire_owned().is_err());
+            cancel_commit_evaluation(&pool, commit_id).await.unwrap();
+            let error = tokio::time::timeout(Duration::from_secs(6), worker)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            assert!(error.is::<super::super::EvaluationCancelled>());
+            let capacity =
+                tokio::time::timeout(Duration::from_secs(3), heavy_nix_limiter().acquire_owned())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(super::super::process_group_absent(pgid));
+            assert!(advisory_available(&pool).await);
+            drop(capacity);
+            let outcome =
+                crate::queries::commits::finalize_requested_commit_evaluation_cancellation(
+                    &pool, commit_id, attempt,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                outcome,
+                crate::queries::commits::EvalCancellationOutcome::Cancelled
+            );
+            let terminal: bool = sqlx::query_scalar("SELECT c.evaluation_status = 'cancelled' AND a.status = 'cancelled' AND a.completed_at IS NOT NULL FROM commits c JOIN evaluation_attempts a ON a.commit_id = c.id AND a.attempt_number = $2 WHERE c.id = $1")
+                .bind(commit_id).bind(attempt).fetch_one(&pool).await.unwrap();
+            assert!(terminal);
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "official server-regressions sandbox PostgreSQL only"]
+        async fn discovery_api_cancellation_interrupts_advisory_and_capacity_admission(
+            pool: PgPool,
+        ) {
+            for (bulk, block_capacity) in
+                [(false, false), (false, true), (true, false), (true, true)]
+            {
+                let flake_id = insert_throwaway_flake(&pool).await;
+                let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+                let attempt = start_eval(&pool, commit_id).await;
+                let mut blocker = pool.begin().await.unwrap();
+                let capacity = if block_capacity {
+                    Some(heavy_nix_limiter().acquire_owned().await.unwrap())
+                } else {
+                    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                        .bind(HEAVY_NIX_ADVISORY_LOCK)
+                        .execute(&mut *blocker)
+                        .await
+                        .unwrap();
+                    None
+                };
+                let worker_pool = pool.clone();
+                let worker = tokio::spawn(async move {
+                    if bulk {
+                        super::super::acquire_bulk_evaluation_admission_until(
+                            &worker_pool,
+                            commit_id,
+                            Instant::now() + Duration::from_secs(30),
+                        )
+                        .await
+                        .map(|_ownership| ())
+                    } else {
+                        super::super::run_cancellable_discovery_preflight_until::<()>(
+                            &worker_pool,
+                            commit_id,
+                            async { panic!("cancelled admission must not start discovery") },
+                            Instant::now() + Duration::from_secs(30),
+                        )
+                        .await
+                    }
+                });
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let admitted_or_waiting = if block_capacity {
+                            !advisory_available(&pool).await
+                        } else {
+                            sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND classid::bigint = $1 AND objid::bigint = $2 AND NOT granted)")
+                                .bind(HEAVY_NIX_ADVISORY_LOCK >> 32)
+                                .bind(HEAVY_NIX_ADVISORY_LOCK & 0xffff_ffff)
+                                .fetch_one(&pool).await.unwrap()
+                        };
+                        if admitted_or_waiting { break; }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }).await.unwrap();
+                cancel_commit_evaluation(&pool, commit_id).await.unwrap();
+                let error = tokio::time::timeout(Duration::from_secs(6), worker)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap_err();
+                assert!(error.is::<super::super::EvaluationCancelled>());
+                blocker.rollback().await.unwrap();
+                drop(capacity);
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while !advisory_available(&pool).await {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(heavy_nix_limiter().try_acquire_owned().is_ok());
+                crate::queries::commits::finalize_requested_commit_evaluation_cancellation(
+                    &pool, commit_id, attempt,
+                )
+                .await
+                .unwrap();
+            }
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "official server-regressions sandbox PostgreSQL only"]
+        async fn bulk_admission_preserves_owned_leases_and_bounds_pool_wait(pool: PgPool) {
+            let flake_id = insert_throwaway_flake(&pool).await;
+            let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+            start_eval(&pool, commit_id).await;
+            let (transaction, capacity) = super::super::acquire_bulk_evaluation_admission_until(
+                &pool,
+                commit_id,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+            // No scoped helper released either lease or reacquired a nested lock.
+            assert!(!advisory_available(&pool).await);
+            assert!(heavy_nix_limiter().try_acquire_owned().is_err());
+            transaction.commit().await.unwrap();
+            assert!(advisory_available(&pool).await);
+            assert!(heavy_nix_limiter().try_acquire_owned().is_err());
+            drop(capacity);
+            assert!(heavy_nix_limiter().try_acquire_owned().is_ok());
+
+            // Exhaust only this disposable test database's new one-connection
+            // pool. Both admission and cancellation queries now stall on pool
+            // acquisition, so only the independent admission ceiling can finish.
+            let limited = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with((*pool.connect_options()).clone())
+                .await
+                .unwrap();
+            let connection = limited.acquire().await.unwrap();
+            let started = Instant::now();
+            let error = super::super::acquire_bulk_evaluation_admission_until(
+                &limited,
+                commit_id,
+                started + Duration::from_millis(50),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("bulk evaluation admission timed out")
+            );
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert!(heavy_nix_limiter().try_acquire_owned().is_ok());
+            drop(connection);
+            limited.close().await;
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "official server-regressions sandbox PostgreSQL only"]
+        async fn discovery_advisory_precedes_semaphore_and_releases_before_bulk(pool: PgPool) {
+            let mut blocker = pool.begin().await.unwrap();
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(HEAVY_NIX_ADVISORY_LOCK)
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+            let (started, mut observed) = tokio::sync::oneshot::channel();
+            let worker_pool = pool.clone();
+            let worker = tokio::spawn(async move {
+                run_heavy_nix_preflight_until(
+                    &worker_pool,
+                    async {
+                        assert_eq!(heavy_nix_limiter().available_permits(), 0);
+                        assert!(!advisory_available(&worker_pool).await);
+                        started.send(()).unwrap();
+                        Ok(())
+                    },
+                    Instant::now() + Duration::from_secs(10),
+                    true,
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
+                         AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                         AND classid::bigint = $1 AND objid::bigint = $2 AND NOT granted)",
+                    )
+                    .bind(HEAVY_NIX_ADVISORY_LOCK >> 32)
+                    .bind(HEAVY_NIX_ADVISORY_LOCK & 0xffff_ffff)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    if waiting { break; }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+            // An advisory waiter MUST NOT consume in-process capacity.
+            let capacity = heavy_nix_limiter().try_acquire_owned().unwrap();
+            blocker.rollback().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while advisory_available(&pool).await {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(matches!(
+                observed.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            drop(capacity);
+            observed.await.unwrap();
+            worker.await.unwrap().unwrap();
+            assert!(advisory_available(&pool).await);
+            assert!(heavy_nix_limiter().try_acquire_owned().is_ok());
+            // A second admission completes instead of retaining a nested lease.
+            run_heavy_nix_preflight_until(
+                &pool,
+                async { Ok(()) },
+                Instant::now() + Duration::from_secs(2),
+                true,
+            )
+            .await
+            .unwrap();
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "official server-regressions sandbox PostgreSQL only"]
+        #[cfg(unix)]
+        async fn discovery_quarantine_retains_real_advisory_and_capacity(pool: PgPool) {
+            let (group_sent, group_received) = tokio::sync::oneshot::channel();
+            let error = run_heavy_nix_preflight_until(
+                &pool,
+                async {
+                    let mut command = Command::new("sh");
+                    command.args(["-c", "exec sleep 60"]).process_group(0);
+                    let mut guard = NixEvalProcessGuard::from_spawned_child(
+                        command.spawn().unwrap(),
+                        "quarantined discovery fixture",
+                    )
+                    .unwrap();
+                    guard.cleanup_ownership = Some(EVALUATION_CLEANUP.with(Clone::clone));
+                    group_sent.send(guard.pgid()).unwrap();
+                    // Model a signal that has not become effective, as with a
+                    // D-state child. Only this fixture's explicit kill ends it.
+                    guard.signal_sent = true;
+                    guard
+                        .terminate_until(Instant::now())
+                        .await
+                        .map_err(|cleanup_error| {
+                            anyhow::Error::new(super::super::BoundedProcessTimeout {
+                                process_name: "quarantined discovery fixture".to_string(),
+                                deadline: Duration::from_millis(100),
+                                cleanup_confirmed: false,
+                            })
+                            .context(cleanup_error)
+                        })?;
+                    Ok::<_, anyhow::Error>(())
+                },
+                Instant::now() + Duration::from_millis(100),
+                true,
+            )
+            .await
+            .unwrap_err();
+            let pgid = group_received.await.unwrap();
+            assert!(error.to_string().contains("cleanup unconfirmed"));
+            assert!(
+                error
+                    .downcast_ref::<super::super::BoundedProcessTimeout>()
+                    .is_some()
+            );
+            assert!(
+                super::super::preflight_discovery_failure_log(&error)
+                    .contains("cleanup pending; heavy Nix locks retained")
+            );
+            assert!(!super::super::process_group_absent(pgid));
+            assert!(!advisory_available(&pool).await);
+            assert!(heavy_nix_limiter().try_acquire_owned().is_err());
+            // SAFETY: This fixture exclusively owns the positive live PGID.
+            assert_eq!(unsafe { libc::killpg(pgid, libc::SIGKILL) }, 0);
+            let capacity =
+                tokio::time::timeout(Duration::from_secs(5), heavy_nix_limiter().acquire_owned())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(super::super::process_group_absent(pgid));
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !advisory_available(&pool).await {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            drop(capacity);
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "official server-regressions sandbox PostgreSQL only"]
+        async fn discovery_failures_and_cancellation_terminalize_exact_attempt(pool: PgPool) {
+            use crate::queries::commits::{
+                EvalFailureOutcome, finalize_requested_commit_evaluation_cancellation,
+            };
+            sqlx::query("UPDATE automatic_retry_policy SET max_evaluation_retries = 1, backoff_seconds = 10, transient_only = TRUE WHERE id = 1")
+                .execute(&pool).await.unwrap();
+            for (script, budget, expected_status) in [
+                ("exec sleep 60", Duration::from_millis(100), "pending"),
+                (
+                    "printf 'syntax error in fixture' >&2; exit 1",
+                    Duration::from_secs(2),
+                    "failed",
+                ),
+            ] {
+                let flake_id = insert_throwaway_flake(&pool).await;
+                let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+                let attempt = start_eval(&pool, commit_id).await;
+                let error = run_heavy_nix_preflight_until(
+                    &pool,
+                    async {
+                        let mut command = Command::new("sh");
+                        command.args(["-c", script]);
+                        let output = run_nix_command_bounded(
+                            &mut command,
+                            "terminal discovery fixture",
+                            budget,
+                            4096,
+                            4096,
+                        )
+                        .await?;
+                        if !output.status.success() {
+                            anyhow::bail!("{}", output.stderr.diagnostic_excerpt(4096));
+                        }
+                        Ok(())
+                    },
+                    Instant::now() + budget,
+                    true,
+                )
+                .await
+                .unwrap_err();
+                let failure = super::super::structured_evaluation_failure(error);
+                let outcome = mark_commit_evaluation_failed(
+                    &pool,
+                    commit_id,
+                    &failure.diagnostic_chain(),
+                    attempt,
+                    failure.class,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    outcome,
+                    if expected_status == "pending" {
+                        EvalFailureOutcome::RetryScheduled
+                    } else {
+                        EvalFailureOutcome::PermanentlyFailed
+                    }
+                );
+                let status: String =
+                    sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
+                        .bind(commit_id)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                assert_eq!(status, expected_status);
+                let terminal: bool = sqlx::query_scalar("SELECT status = 'failed' AND completed_at IS NOT NULL FROM evaluation_attempts WHERE commit_id = $1 AND attempt_number = $2")
+                    .bind(commit_id).bind(attempt).fetch_one(&pool).await.unwrap();
+                assert!(terminal);
+            }
+            let flake_id = insert_throwaway_flake(&pool).await;
+            let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+            let attempt = start_eval(&pool, commit_id).await;
+            cancel_commit_evaluation(&pool, commit_id).await.unwrap();
+            finalize_requested_commit_evaluation_cancellation(&pool, commit_id, attempt)
+                .await
+                .unwrap();
+            let terminal: bool = sqlx::query_scalar("SELECT c.evaluation_status = 'cancelled' AND a.status = 'cancelled' AND a.completed_at IS NOT NULL FROM commits c JOIN evaluation_attempts a ON a.commit_id = c.id AND a.attempt_number = $2 WHERE c.id = $1")
+                .bind(commit_id).bind(attempt).fetch_one(&pool).await.unwrap();
+            assert!(terminal);
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn discovery_scope_timeout_acknowledges_reap_before_next_admission() {
+        use tokio::time::{Duration, Instant};
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("discovery-pgid");
+        let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let transaction = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(150);
+        let ownership = super::CleanupOwnership {
+            _permit: std::sync::Arc::new(limiter.clone().acquire_owned().await.unwrap()),
+            _transaction: transaction.clone(),
+            deadline,
+        };
+        let error = super::run_preflight_operation(
+            ownership,
+            async {
+                assert!(limiter.clone().try_acquire_owned().is_err());
+                assert!(std::sync::Arc::strong_count(&transaction) > 1);
+                let mut command = Command::new("sh");
+                command
+                    .args(["-c", "printf '%s' \"$$\" > \"$1\"; exec sleep 60", "--"])
+                    .arg(&pid_file);
+                run_nix_command_bounded(
+                    &mut command,
+                    "discovery timeout fixture",
+                    Duration::from_secs(60),
+                    64,
+                    64,
+                )
+                .await
+            },
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(error.to_string().contains("cleanup confirmed=true"));
+        assert!(
+            started.elapsed()
+                <= Duration::from_millis(150) + super::BOUNDED_PROCESS_CLEANUP_ACK_TIMEOUT
+        );
+        let pgid: i32 = tokio::fs::read_to_string(pid_file)
+            .await
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(super::process_group_absent(pgid));
+        // SAFETY: waitpid only probes the fixture's positive direct-child PID.
+        assert_eq!(
+            unsafe { libc::waitpid(pgid, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        super::confirm_preparation_leases_until(
+            &transaction,
+            deadline + super::BOUNDED_PROCESS_CLEANUP_ACK_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        let next = limiter.acquire_owned().await.unwrap();
+        assert_eq!(std::sync::Arc::strong_count(&transaction), 1);
+        drop(next);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn discovery_scope_completion_and_nix_error_release_before_bulk_admission() {
+        use tokio::time::{Duration, Instant};
+        for exit_code in [0, 7] {
+            let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+            let transaction = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+            let ownership = super::CleanupOwnership {
+                _permit: std::sync::Arc::new(limiter.clone().acquire_owned().await.unwrap()),
+                _transaction: transaction.clone(),
+                deadline: Instant::now() + Duration::from_secs(2),
+            };
+            let output = super::run_preflight_operation(
+                ownership,
+                async {
+                    let mut command = Command::new("sh");
+                    command.args([
+                        "-c",
+                        "printf '%s' '[\"fixture\"]'; printf '%s' 'genuine nix error' >&2; exit \"$1\"",
+                        "--",
+                        &exit_code.to_string(),
+                    ]);
+                    let output = run_nix_command_bounded(
+                        &mut command,
+                        "discovery completion fixture",
+                        Duration::from_secs(2),
+                        4096,
+                        4096,
+                    )
+                    .await?;
+                    if !output.status.success() {
+                        anyhow::bail!("{}", output.stderr.diagnostic_excerpt(4096));
+                    }
+                    Ok(output)
+                },
+                true,
+            )
+            .await;
+            if exit_code == 0 {
+                assert_eq!(output.unwrap().stdout.bytes, b"[\"fixture\"]");
+            } else {
+                assert_eq!(output.unwrap_err().to_string(), "genuine nix error");
+            }
+            assert!(super::EVALUATION_CLEANUP.try_with(|_| ()).is_err());
+            super::confirm_preparation_leases_until(
+                &transaction,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+            assert!(limiter.try_acquire_owned().is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn resource_terminal_preparation_scope_keeps_original_execution_deadline() {
+        use tokio::time::{Duration, Instant};
+        let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let transaction = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let ownership = super::CleanupOwnership {
+            _permit: std::sync::Arc::new(limiter.clone().acquire_owned().await.unwrap()),
+            _transaction: transaction.clone(),
+            deadline: Instant::now() + Duration::from_millis(20),
+        };
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            super::run_preflight_operation(
+                ownership,
+                std::future::pending::<anyhow::Result<()>>(),
+                false,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains("execution timed out"));
+        assert_eq!(std::sync::Arc::strong_count(&transaction), 1);
+        assert!(limiter.try_acquire_owned().is_ok());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn discovery_scope_cancellation_transfers_both_leases_until_group_absence() {
+        use tokio::time::{Duration, Instant};
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("cancel-discovery-pgid");
+        let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let transaction = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let ownership = super::CleanupOwnership {
+            _permit: std::sync::Arc::new(limiter.clone().acquire_owned().await.unwrap()),
+            _transaction: transaction.clone(),
+            deadline: Instant::now() + Duration::from_secs(60),
+        };
+        let child_pid_file = pid_file.clone();
+        let task = tokio::spawn(super::run_preflight_operation(
+            ownership,
+            async move {
+                let mut command = Command::new("sh");
+                command
+                    .args(["-c", "printf '%s' \"$$\" > \"$1\"; exec sleep 60", "--"])
+                    .arg(child_pid_file);
+                run_nix_command_bounded(
+                    &mut command,
+                    "cancel discovery fixture",
+                    Duration::from_secs(60),
+                    64,
+                    64,
+                )
+                .await
+            },
+            true,
+        ));
+        let pgid: i32 = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&pid_file).await {
+                    if let Ok(pid) = text.parse() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(limiter.clone().try_acquire_owned().is_err());
+        assert!(std::sync::Arc::strong_count(&transaction) > 1);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        if !super::process_group_absent(pgid) {
+            assert!(limiter.clone().try_acquire_owned().is_err());
+            assert!(std::sync::Arc::strong_count(&transaction) > 1);
+        }
+        let next = tokio::time::timeout(Duration::from_secs(3), limiter.acquire_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(super::process_group_absent(pgid));
+        super::confirm_preparation_leases_until(
+            &transaction,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        drop(next);
     }
 
     #[tokio::test]

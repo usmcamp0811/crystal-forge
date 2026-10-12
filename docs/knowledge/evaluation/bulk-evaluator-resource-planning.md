@@ -21,11 +21,14 @@ This guide describes the server's bulk commit evaluator resource contract.
 The configuration fields, generated TOML, and evaluator call site use
 `eval_output_idle_timeout_secs` and `eval_overall_timeout_secs`. The resolved
 resource plan supplies `per_worker_mb` to the evaluator command.
+Configuration discovery before bulk evaluation has the separate
+`eval_discovery_timeout_secs` budget described below.
 
 The implementation status records source behavior. It does not establish a
 passing runtime, packaging, or OKF validation result.
 
-These controls apply to the authoritative `nix-eval-jobs` invocation. They do
+The memory and bulk deadline controls apply to the authoritative
+`nix-eval-jobs` invocation. They do
 not change hardening scans, Config Inspector subprocesses, builder evaluation
 or realization, or systemd cgroup configuration. Resource settings can stop an
 evaluation; they do not change a successful `.drvPath` or the
@@ -44,6 +47,7 @@ All keys below are in TOML `[server]` or NixOS
 | `eval_memory_max_percent` | `85` | Percentage of the effective memory limit available to automatic sizing; integer range `1..100`. |
 | `eval_output_idle_timeout_secs` | `900` | Maximum interval without evaluator output, in seconds. Must be positive. |
 | `eval_overall_timeout_secs` | `3600` | Independent elapsed-time deadline for the evaluator, in seconds. Must be positive. |
+| `eval_discovery_timeout_secs` | `300` | Absolute configuration-discovery budget for admission and child execution, in seconds. Integer range `1..1800`, inclusive. |
 
 The compatibility name `_mb` denotes MiB, not decimal megabytes. An explicit
 `eval_max_memory_mb = 12288` still passes `--max-memory-size 12288` for each
@@ -189,6 +193,137 @@ for exact evaluator/Nix selection. This resource policy does not change the
 flake pin or the guarded netrc patch.
 
 ## Independent deadlines and cancellation
+
+### Configuration discovery deadline
+
+`eval_discovery_timeout_secs` defaults to 300 seconds in Rust and the NixOS
+module. Omitted TOML uses the same default. Rust configuration validation and
+the NixOS option reject values outside `1..1800`, inclusive. The upper limit is
+1800 seconds, not an unlimited wait. Output does not reset this monotonic clock.
+The budget starts after immutable source materialization and before discovery
+admission. It includes database admission, PostgreSQL advisory-lock waiting,
+in-process semaphore waiting, and the discovery child. Admission consumes the
+child's remaining allowance; it does not create a second full budget.
+
+Discovery acquires the advisory lock before the semaphore. It completes this
+scope before bulk evaluation takes its own admission locks. Nested heavy-Nix
+preflight admission fails instead of waiting on its own locks. The bounded child
+runner owns the execution deadline so an outer timeout does not drop the runner
+before cleanup acknowledgement. Timeout allows at most two additional seconds
+for cleanup acknowledgement and lock release. This allowance does not extend
+discovery execution. Requested cancellation signals the bounded runner and
+allows up to two seconds for foreground cleanup. Dropping an armed process
+guard after that allowance transfers ownership to the quarantine reaper.
+Unconfirmed cleanup retains both locks beyond the
+deadline until direct-child reap and process-group absence are confirmed. A
+signal request or leader exit alone cannot release ownership or admit replacement
+work. The deadline bounds foreground waiting, not guaranteed kernel termination.
+
+This setting applies to authoritative inventory discovery and background
+artifact hydration through the same preflight path. It does not change Nix
+realization timeouts, the bulk evaluator's 900-second idle or 3600-second overall
+defaults, memory sizing, or adaptive recovery. Discovery timeout and Nix failure
+return through the normal exact-attempt failure finalizer. The active attempt
+becomes failed; an eligible timeout can leave the commit pending with a scheduled
+retry. Permanent errors leave the commit failed. Requested cancellation uses
+the guarded cancellation finalizer. A failure must not leave the exact attempt
+indefinitely in progress.
+
+Authoritative preflight polls database cancellation alongside admission and
+child execution. Each query has a 500-millisecond ceiling, with two seconds
+between polls. A successful operation requires a final bounded cancellation
+check; query failure or timeout cannot authorize bulk work. If the operation
+already failed, an unavailable final check preserves the original failure.
+These bounds do not guarantee cancellation detection within two seconds.
+
+The display-only inventory write has a separate best-effort 250-millisecond
+ceiling. Failure or timeout retains the verified in-memory inventory. Database
+cancellation remains active during that write and its final handoff check.
+Childless inventory and admission waits drop immediately on a known request;
+they do not receive extra child-cleanup time.
+
+### Preflight progress and failure evidence
+
+Discovery observes actual Nix stderr markers, `unpacking '` and
+`fetching git repository`. The pipe reader publishes only one boolean through
+a watch channel, without queuing raw stderr or blocking pipe draining. The
+message `Nix reports input resolution (stderr marker observed)` means a marker
+was observed. It does not prove an input download or identify a repository.
+Elapsed time alone never establishes the input-resolution stage.
+
+One borrowed progress-logging future runs concurrently with discovery. Its
+best-effort write has a 250-millisecond ceiling; discovery completion drops
+unfinished logging. Start, completion, and terminal preflight log writes also
+have 250-millisecond ceilings. Logging does not extend child deadlines or delay
+cancellation cleanup. Completion reports the system count and confirmed cleanup.
+
+Typed process timeouts preserve deadline and cleanup status across error
+context. Terminal logs distinguish `cleanup confirmed` from
+`cleanup pending; heavy Nix locks retained`. Genuine Nix failures retain a
+bounded, sanitized diagnostic selected from actual stderr rather than warning
+text or an elapsed-time inference. Source-materialization errors returned to
+the lifecycle finalizer remove complete URL-bearing words, including forge
+shorthand and SCP Git addresses, before truncation. The returned error does not
+retain the raw source error chain. Sanitization preserves the original retry
+classification and typed materialization class; cancellation and supersession
+remain terminal control outcomes.
+
+For a cold-input discovery allowance of 600 seconds:
+
+```nix
+services.crystal-forge.server.eval_discovery_timeout_secs = 600;
+```
+
+Equivalent TOML:
+
+```toml
+[server]
+eval_discovery_timeout_secs = 600
+```
+
+Check the loaded configuration and discovery failure evidence before raising
+this value. A larger deadline cannot correct an incomplete lock, invalid NAR
+hash, missing private-input authorization, or a genuine Nix evaluation error.
+See the [verified-source contract](../builders/verified-source-evaluator-contract.md)
+for source identity and artifact-cache authority rules.
+
+### Cold-input evidence and limits
+
+TASK-484 began with a deployed discovery failure at the historical 60-second
+deadline, with cleanup reported unconfirmed before `nix-eval-jobs` started.
+Separate local cold runs took 145.41 and 170.34 seconds; a warm retry took
+1.169 seconds, and server evaluation succeeded after cache warming. Large locked
+input fetches make cold-input latency a supported suspicion. The local user,
+checkout, and cache state were not identical to the deployed server runtime.
+Those observations do not establish the exact cause of that deployed failure.
+
+The [deterministic cold/warm check](../../../checks/nixos-discovery-reliability/README.md)
+provides controlled proof of the deadline failure mechanism. A sandbox-local
+Basic-auth archive endpoint delays its locked input response by 65 seconds.
+Pure discovery of an exact NAR-qualified root times out under 60 seconds and
+succeeds cold under 300 seconds. Warm discovery and the production policy
+expression succeed without refetching. The check also rejects a mismatched root
+NAR hash and preserves the root hash and lock bytes. This proves that valid
+locked-input discovery can exceed the old deadline. It does not identify the
+exact deployed cause or prove the Rust admission and quarantine coordinator.
+The Python timeout path sends `killpg(SIGKILL)` and waits for the direct child
+with `communicate`; it does not assert Rust-style process-group absence or
+quarantine ownership. The selected database regressions cover those separate
+contracts.
+
+### Bulk evaluator deadline
+
+After discovery and inventory handoff, bulk admission has its own absolute
+`eval_overall_timeout_secs` allowance. That admission ceiling covers pool
+acquisition, advisory-lock waiting, semaphore waiting, and the final cancellation
+query. Pool and lock waits cannot continue indefinitely; cancellation is checked
+concurrently using bounded queries. Successful admission returns the actual
+transaction and permit to the bulk owner without releasing them or starting a
+child. PostgreSQL advisory-lock acquisition still precedes semaphore acquisition.
+
+The main execution deadline starts after admission and resource-plan resolution.
+Admission waiting does not consume that execution allowance. This separate
+admission bound changes neither the execution defaults nor adaptive recovery.
 
 The defaults remain 900 seconds for output-idle assessment and 3600 seconds
 for the independent overall deadline. The overall deadline starts once before

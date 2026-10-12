@@ -186,6 +186,7 @@ flake-check:
           - oidc-auth
           - run-ui-dev-db-check
           - server-regressions
+          - nixos-discovery-reliability
           - niks3-cache
           - builder-evaluator-packaging
           - web-ui-test-runner
@@ -199,7 +200,7 @@ flake-check:
   script:
     - |
       case "$CHECK_NAME" in
-        server-regressions|niks3-cache|builder-evaluator-packaging)
+        server-regressions|nixos-discovery-reliability|niks3-cache|builder-evaluator-packaging)
           sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace
           ;;
         *)

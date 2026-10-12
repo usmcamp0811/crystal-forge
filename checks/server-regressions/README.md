@@ -71,6 +71,69 @@ would otherwise never execute anywhere. It is intentionally a curated list,
 not `--all-targets --ignored`: the repository also contains manual, slow, and
 environment-specific ignored tests that do not belong in this gate.
 
+## TASK-484 configuration-discovery database tests
+
+These six ignored, migration-backed SQLx tests run against sandbox-owned
+PostgreSQL databases. Each runs in a separate Cargo process because the
+heavy-Nix semaphore is process-global. The runner uses
+`--ignored --exact --test-threads=1` and requires exactly one successful test
+with zero ignored tests. A missing or renamed test fails the exact-test guard.
+
+```text
+models::evaluate_with_policies::tests::discovery_database_tests::discovery_advisory_precedes_semaphore_and_releases_before_bulk
+models::evaluate_with_policies::tests::discovery_database_tests::discovery_quarantine_retains_real_advisory_and_capacity
+models::evaluate_with_policies::tests::discovery_database_tests::discovery_failures_and_cancellation_terminalize_exact_attempt
+models::evaluate_with_policies::tests::discovery_database_tests::discovery_api_cancellation_stops_active_child_and_finalizes_original_attempt
+models::evaluate_with_policies::tests::discovery_database_tests::discovery_api_cancellation_interrupts_advisory_and_capacity_admission
+models::evaluate_with_policies::tests::discovery_database_tests::bulk_admission_preserves_owned_leases_and_bounds_pool_wait
+```
+
+- **Admission order and release:** A real PostgreSQL advisory-lock blocker keeps
+  discovery waiting without consuming semaphore capacity. After the advisory
+  lock becomes available, a separately held permit still prevents the operation
+  from starting. The operation observes both locks owned. Completion releases
+  both locks and a second admission succeeds, proving the preflight scope does
+  not retain a nested lease before bulk admission.
+- **Quarantine ownership:** A fixture-owned process group remains alive after
+  cleanup reports unconfirmed. The fixture simulates a signal that has not
+  become effective; it does not create a real kernel `D`-state process. The real
+  advisory lock and semaphore capacity remain unavailable beyond the preflight
+  deadline and cleanup acknowledgement allowance. Only an explicit fixture
+  kill, direct-child reap, and confirmed group absence allow both locks to
+  become available again.
+- **Exact-attempt terminal state:** Bounded process timeout and a deterministic
+  syntax-error diagnostic pass through production failure classification and
+  persistence. With one transient retry enabled, timeout marks the exact attempt
+  failed with `completed_at` and schedules a retry, leaving the commit pending.
+  The syntax error permanently fails the commit and exact attempt. Requested
+  cancellation passes through the guarded cancellation finalizer and leaves
+  both commit and exact attempt cancelled with the attempt completion recorded.
+  None of these cases leaves that attempt in progress.
+- **Requested cancellation:** A real database cancellation request stops an active
+  discovery child and finalizes the original attempt. Requests also interrupt
+  advisory-lock and semaphore waiting during discovery and bulk admission.
+  Runtime cancellation queries have a 500-millisecond ceiling and a two-second
+  interval between polls. Discovery grants at most two seconds for foreground
+  cleanup after a known request; unconfirmed cleanup keeps lock ownership in
+  quarantine. Childless admission drops immediately on a known request.
+- **Bulk admission:** Successful admission returns both owned leases. Pool
+  acquisition cannot wait beyond its admission deadline. The production
+  `eval_overall_timeout_secs` admission ceiling covers pool, advisory-lock, and
+  semaphore waiting plus the final cancellation check. Main execution receives
+  its established overall budget only after admission and resource planning;
+  admission time is not subtracted from that budget.
+
+These tests exercise the Rust coordinator, process ownership, and database
+finalizers with controlled process fixtures. They do not measure private-input
+downloads or run real Nix discovery. The separate
+[cold/warm discovery check](../nixos-discovery-reliability/README.md) proves
+the exact-source, lock-integrity, private-input, and discovery-to-policy path
+with a controlled 65-second input response. Check membership describes coverage;
+it does not establish a passing result for the current worktree.
+The Python fixture's timeout cleanup sends `killpg(SIGKILL)` and waits for the
+direct child. That fixture does not assert process-group absence or prove Rust
+quarantine ownership; those are separate coordinator regression contracts.
+
 ## TASK-470 selected library tests
 
 The following 52 ignored PostgreSQL tests run with
