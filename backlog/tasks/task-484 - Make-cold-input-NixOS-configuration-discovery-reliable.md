@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-12 14:29'
-updated_date: '2026-10-12 20:19'
+updated_date: '2026-10-12 20:21'
 labels: []
 dependencies: []
 references:
@@ -121,4 +121,8 @@ Earlier cf-task484-regressions snapshot had ExecMainStatus0; it predates final d
 Exact-head CI results are deliberately not monitored or claimed. Await user results for SHA0e0329bdfd547c91ce5e53fe299297c8f8e069ec. Keep task In Progress (not Review/Done) because final verification is incomplete. LOCK remains task-owned awaiting CI feedback. Remaining deployment proof: actual CF cold locked-input discovery then warm retry in production-equivalent source/credential/runtime; operator manual timings alone do not establish deployed cause. No merge.
 
 Resume preflight: TASK-484 HEAD and remote source both 0e0329bdfd547c91ce5e53fe299297c8f8e069ec; worktree clean. Verified live MR target TASK-470-niks3-cache-support and has_conflicts=true. Latest fetched target f8dd8419 includes c3fd244b metrics plus isolated Attic credentials/regression repair. No application checks or preview required for branch-only integration.
+
+Conflict resolution completed at maintainer request without builds/tests. Merged target f8dd8419d4fff007b339d772ed0cb233fcd809a0 into TASK-484 with merge commit 0816c817e784ac4b9b8679294d767d87c3980a93 and pushed normally. Resolved three files: .gitlab-ci.yml retains combined provider/discovery gates and integration/oidc scoped cache policy; packages/ci/test_public_cache_build.py retains both matrix expectations plus target fixture realization regression; cf-config config/server.rs retains both discovery timeout and Attic metrics tests. Automatic merges retained target credential/publication changes. Unmerged index empty; staged diff whitespace inspection passed; worktree clean; exact remote source and unchanged remote target verified.
+
+Live MR !333 verified target TASK-470-niks3-cache-support, draft=false, has_conflicts=false, merge_status=can_be_merged, detailed_merge_status=ci_still_running, and exact source SHA0816c817. Updated MR description for new target and historical-vs-current verification. CI was not investigated or awaited. MR was not merged; target branch was not modified. Task remains In Progress because previously required full verification remains unclaimed despite MR draft removal authorized by user.
 <!-- SECTION:NOTES:END -->
