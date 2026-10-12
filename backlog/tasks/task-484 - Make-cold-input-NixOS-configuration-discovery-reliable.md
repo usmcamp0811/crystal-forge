@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-12 14:29'
-updated_date: '2026-10-12 15:06'
+updated_date: '2026-10-12 15:15'
 labels: []
 dependencies: []
 references:
@@ -53,4 +53,6 @@ Delegated fixture scope: add checks/nixos-discovery-reliability/{default.nix,REA
 LOCK: openai-agent on sledge in /home/mcamp/code/crystal-forge/TASK-484-discovery-timeout
 
 Preflight: clean dedicated branch TASK-484-discovery-timeout at TASK-470 committed head a33c1d0cb534ee0a78c41e015a7c75e4c845df28. No main worktree registered. dev has preserved untracked TASK-478 lock and session-ses_f927.md; no integration writes or cleanup. Pending TASK-470 metrics files remain intact and excluded. User latest instruction prioritizes timeout now over earlier metrics-finalization sequence. Risk high: source identity and subprocess ownership. Merge dependency: TASK-470 must land in dev before this branch merges; implementation can proceed on its committed head. Verification: targeted config/discovery/process Rust tests; deterministic local cold/warm/private/immutable-source fixture and relevant verified-source/evaluator/server VM checks. No external GitLab download-speed test.
+
+Delegated fixture implemented only checks/nixos-discovery-reliability/{default.nix,README.md,test.py}. Snowfall auto-discovery verified via successful focused build: bash packages/ci/public-cache-build.sh 'path:.#checks.x86_64-linux.nixos-discovery-reliability' --no-link -L --print-out-paths (tool timeout 500000ms; exit 0). Final source run: historical deadline timeout 60.063s; real cold discovery 65.040s under 300s; warm 0.021s without refetch; production primary_evaluation.nix via nix-eval-jobs 0.035s, alpha/beta derivations and policy markers succeeded. Separate sandbox-local historical store/cache; Basic-auth netrc endpoint rejected unauthenticated access; two authorized requests total (historical and cold), no warm/policy refetch. Root NAR mismatch exited 102 with actual NAR mismatch diagnostic; root hash and lock bytes unchanged. Output report and redaction-checked per-command stdout/stderr: /nix/store/5vq56mbbvjg9awbcxgq1kk2iw61ds6d2-crystal-forge-nixos-discovery-reliability. Build log: nix log /nix/store/1gd0p585x9l6afxslbqsjizv3a8c2ajd-crystal-forge-nixos-discovery-reliability.drv. Remaining parent scope: Rust coordinator/default-config binding, lock order, cancellation/quarantine and terminal status regressions. No Rust edits, host services, commits or pushes performed.
 <!-- SECTION:NOTES:END -->
