@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-12 17:55'
+updated_date: '2026-10-12 18:00'
 labels: []
 dependencies: []
 references:
@@ -242,6 +242,8 @@ User-approved test-first Attic publication correction at clean c3fd244b. Resume 
 User-delegated independent server regression repair at c3fd244b: own only packages/default/crates/cf-server/tests/poam_workflows.rs; production services/poam.rs only if a production defect is proven. Retrieve exact failed job17116758393 trace, deterministically order triage-triggered and explicit reconciliation using test-only disposable PostgreSQL coordination, reproduce 121-versus-101 failure, then await the actual triage-triggered transaction completion before adding 120 members. Preserve first-page101, eventual121 unique and fail-closed verification/closure assertions. Verify exact test before/after and full poam_workflows via external Nix sandbox PostgreSQL harness. Parent CI owner retains full server-regressions gate; no other source changes/services/commits/pushes.
 
 Focused UI/API wording delegation at c3fd244b: own web-ui views/caches.rs and api/models.rs, backend caches/attic_probe.rs and narrowly scoped retained_probe_tests assertions only. Read pinned Attic 12cbeca cache_config contract; add optional response-only cache_is_public from valid complete native metadata, default None for browser legacy responses. Distinguish explicit public/private read evidence and keep token/write uncertainty conservative, allowing existing legacy token_auth_valid=true contract without asserting public visibility. Clarify Attic configured-token publication help. Preserve editor/save/metrics state and sibling publication/POAM/CI WIP. User waives preview and expensive local verification: static inspection/diff checks only; Rust unit execution and compilation pending CI. No services, branch changes, commits or pushes.
+
+Focused source-only native Attic metrics delegation: extend checks/attic-metrics/{test.py,default.nix,README.md} and the now-assigned cf-server attic_publication example only. After original inventory assertions, create genuine per-cache native JWT fixtures; transfer protected files privately; create real CF API destinations and prove encrypted-row Test/Cancel/unchanged-Save/reopen invariants. Exercise metrics failure independence and actual DB-selected native upload through the public query API. No Nix/Cargo/VM/PostgreSQL/server execution; parent retains task lock/worktree and runtime verification ownership.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
