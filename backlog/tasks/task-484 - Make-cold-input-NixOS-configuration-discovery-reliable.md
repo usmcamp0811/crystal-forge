@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-12 14:29'
-updated_date: '2026-10-12 17:16'
+updated_date: '2026-10-12 17:20'
 labels: []
 dependencies: []
 references:
@@ -49,6 +49,8 @@ Delegated fixture scope: add checks/nixos-discovery-reliability/{default.nix,REA
 Backend diagnostics follow-up in the existing locked worktree: observe only exact Nix stderr input-resolution markers with a fixed-size cross-chunk carry and one-shot watch<bool>; log source completion/failure, discovery start, evidenced resolving inputs and successful system count. Use a typed bounded-child timeout to retain deadline and cleanup state across anyhow context and preserve the operation error if lease confirmation fails. Remove repository URLs before truncating/redacting bounded terminal excerpts. Add focused regressions and run through the Nix shell. User waived persistent preview for backend log-only changes and excluded frontend/service/database/CI edits and commits/pushes.
 
 Final-review runtime fixes, owned eval+commits only: poll one bounded progress-persistence future concurrently with discovery; add a concurrently polled bounded cancellation monitor during advisory/semaphore admission and child execution, signal bounded child cancellation for up-to-two-second cleanup acknowledgment before dropping/quarantine and preserve EvaluationCancelled lifecycle semantics. Recheck cancellation before successful preflight enters bulk. Sanitize returned materialization errors at lifecycle boundary while retaining typed classification/control errors. Keep bounded multiline fatal Nix blocks. Add slow-logger/stalled-query unit regressions and SQLx production-wrapper cancellation regressions; parent owns docs/CI and official DB execution. No frontend/services/commits.
+
+Blocking handoff follow-up (eval file only): bound best-effort post-discovery inventory upsert and poll cancellation concurrently using the existing orchestration; supervise pool/advisory/semaphore bulk admission under a separate deadline derived from eval_overall_timeout_secs, returning actual transaction/permit ownership to the existing execution path. Keep the execution overall budget start after admission. Add externally signaled stalled-write regression and disposable SQLx admission cancellation/ownership/deadline coverage; parent owns five existing ignored test wiring plus any new names, CI/docs. No services/host DB/commits.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
