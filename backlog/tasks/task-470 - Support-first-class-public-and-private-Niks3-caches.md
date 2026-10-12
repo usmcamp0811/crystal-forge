@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-12 14:31'
+updated_date: '2026-10-12 15:01'
 labels: []
 dependencies: []
 references:
@@ -825,6 +825,10 @@ Review artifact blocker: final browser screenshots no longer available locally. 
 CI scoped routing test and GitLab syntax lint passed (valid=true errors=[] warnings=[]). Branch-only CI dry-run returned empty-pipeline due MR/main rules; not claimed execution proof. Full `nix flake check --keep-going --no-build` and eval-cache=false retry fail on missing agent.pub.drv / existing niks3-mtls-split.drv; new Attic package/module/check evaluate successfully. Broader investigation recorded as Backlog TASK-483, not implemented. TASK-470.1 duplicate module defect archived after native proof.
 
 Publication blocked: two `git fetch origin TASK-470-niks3-cache-support` attempts failed DNS resolution for gitlab.com. No metrics commit/push or new exact-head CI inspection performed. Preserve 21 intended WIP files (including staged new files); do not reset/discard. Next: restore GitLab DNS, fetch/reconcile remote head, commit/push focused metrics slice normally, inspect exact-head CI and recover/attach final screenshots. No networking/credential/global Nix changes made. Preview stopped under prior waiver. Production enablement contract in packages/attic-metrics/README.md: verify deployed source/schema, restricted-role grants, protected provider/CF files, private HTTPS routing/trust, actual CF destination-ID mapping, restart and explicit Refresh; deployment remains operator-owned.
+
+User requested commit and push. GitLab DNS recovered; fetched origin/TASK-470-niks3-cache-support and verified HEAD/remote divergence 0/0 before committing. Staged only 21 intended Attic metrics files; git diff --cached --check passed. Published c3fd244b1480c29573d75ecc5dcadc0332eb133e (`TASK-470: Add optional authoritative Attic inventory metrics`) by normal push; task worktree clean. Log-improvement commit a33c1d0c preserved unchanged.
+
+Exact-head pipeline 2939216198 inspected: running for c3fd244b1480c29573d75ecc5dcadc0332eb133e, https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2939216198. No CI success claim or MR merge. Previously recorded final screenshot-artifact gap and full-flake local derivation-path failures (TASK-483) remain unresolved; focused metrics/native/browser passes remain recorded. No production deployment.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
