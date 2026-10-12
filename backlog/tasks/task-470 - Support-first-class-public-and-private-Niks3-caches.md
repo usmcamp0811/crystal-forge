@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-12 22:50'
+updated_date: '2026-10-12 23:11'
 labels: []
 dependencies: []
 references:
@@ -252,6 +252,8 @@ Backend plan: official upstream v1.6 c29f3641de064545d75f00318cd45bea2b4ea1d0 an
 UI plan: preserve actual modes/names/URLs/environments (mTLS/mTLS valid); align modal/rail/content/type spacing, derive compact Write/Read badges, actual color-coded environment pills, five sections and narrow/keyboard behavior. Freeze pure editable baseline after fresh destination/scope initialization, canonicalize environment IDs, exclude observations/navigation/tests fromdirtystate, include genuine secret replacement/clear intent and invalid numeric drafts, same-mode no-op. Per-plane immutable input stamps and operation generations reject stale results and invalidate changed URL/mode/credentials/trust evidence. Typed Verified/Failed/Untested labels explain read vs write-route vs publication evidence. Add shipped-UI equivalent-viewport/zoom design captures, allsections desktop/narrow and success/denied/untested/in-progress state assertions without baseline weakening.
 
 Delegation ownership: backend Niks3 probe helper/server tests; frontend Niks3 editor/shared Niki state and DTO only; native fixture/browser workflow coordination separate. No competing host stack or production DB/credentials. New source/test changes committed/pushed normally after lightweight audit; inspect exact-head CI without merging or deploying. Do not report required native/browser checks/screenshots passed until actual CI evidence is available.
+
+Native write-probe CI delegation at e274f918: own new checks/niks3-write-probe/{default.nix,test.py,README.md} only; reuse native Garage/PostgreSQL fixture without default changes. Add real pinned 1.6 and exact existing web-ui 1.8 native protected-route proof, runtime-private credentials, actual admin retained/draft scoped CF API, domain/storage/raw-row immutability and separate authentic CLI publication controls. Parent owns backend/frontend/check registration/CI. User prohibits host builds/evaluation/tests/services; perform only light existing-binary Python syntax and diff checks and report native execution pending CI.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
