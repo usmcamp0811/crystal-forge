@@ -1,9 +1,11 @@
 ---
 id: TASK-484
 title: Make cold-input NixOS configuration discovery reliable
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@openai-agent'
 created_date: '2026-10-12 14:29'
+updated_date: '2026-10-12 14:30'
 labels: []
 dependencies: []
 references:
@@ -31,3 +33,22 @@ User requests a separate evaluation reliability fix based on TASK-470's committe
 - [ ] #6 Deterministic local cold/warm and private-input fixtures plus Rust regressions cover deadline source identity lock integrity concurrency cancellation cleanup quarantine discovery-to-policy success genuine errors and terminal status
 - [ ] #7 Relevant evaluator/server integration and VM checks are run with exact results; documentation root-cause findings safety review commit pushed MR and exact-head CI evidence are recorded without merging
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Inspect authoritative preflight and artifact discovery call chains, verified source identity, credential environment, configuration and process ownership. Establish facts separately from cold-fetch hypotheses.
+2. Reuse the verified NAR-qualified source for authoritative name discovery. Add a bounded discovery-specific server timeout (default 300s with explicit maximum) and match evaluator source/lock/purity/IFD policy.
+3. Admit cold discovery under existing advisory-lock-before-semaphore ownership scope without nested locks. Retain ownership through bounded cleanup/quarantine. Give timed-out bounded child cleanup a separate small acknowledgment opportunity without releasing unconfirmed ownership.
+4. Add evidence-based bounded/redacted preflight diagnostics and verify terminal failure status. Start isolated task live preview before browser-visible workflow edits; report exact startup blocker if unavailable.
+5. Add deterministic source/lock/auth cold-warm/error/deadline/concurrency/cancel/quarantine regressions, run affected Rust and VM checks, review deadlocks/leaks/source parity and update source/knowledge documentation.
+6. Commit/push separate fix normally; open MR with TASK-470 merge dependency and exact-head CI outcomes. Do not merge.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: openai-agent on sledge in /home/mcamp/code/crystal-forge/TASK-484-discovery-timeout
+
+Preflight: clean dedicated branch TASK-484-discovery-timeout at TASK-470 committed head a33c1d0cb534ee0a78c41e015a7c75e4c845df28. No main worktree registered. dev has preserved untracked TASK-478 lock and session-ses_f927.md; no integration writes or cleanup. Pending TASK-470 metrics files remain intact and excluded. User latest instruction prioritizes timeout now over earlier metrics-finalization sequence. Risk high: source identity and subprocess ownership. Merge dependency: TASK-470 must land in dev before this branch merges; implementation can proceed on its committed head. Verification: targeted config/discovery/process Rust tests; deterministic local cold/warm/private/immutable-source fixture and relevant verified-source/evaluator/server VM checks. No external GitLab download-speed test.
+<!-- SECTION:NOTES:END -->
