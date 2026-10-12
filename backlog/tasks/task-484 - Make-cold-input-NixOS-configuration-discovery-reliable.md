@@ -5,13 +5,31 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-12 14:29'
-updated_date: '2026-10-12 17:35'
+updated_date: '2026-10-12 17:55'
 labels: []
 dependencies: []
 references:
   - packages/default/crates/cf-server/src/flake/commits.rs
   - packages/default/crates/cf-server/src/models/evaluate_with_policies.rs
   - packages/default/crates/cf-server/src/flake/verified_source.rs
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/333'
+modified_files:
+  - .gitlab-ci.yml
+  - checks/nixos-discovery-reliability/README.md
+  - checks/nixos-discovery-reliability/default.nix
+  - checks/nixos-discovery-reliability/test.py
+  - checks/server-regressions/README.md
+  - checks/server-regressions/default.nix
+  - docs/knowledge/builders/verified-source-evaluator-contract.md
+  - docs/knowledge/evaluation/bulk-evaluator-resource-planning.md
+  - docs/knowledge/meta/migration-manifest/testing-operations.md
+  - modules/nixos/crystal-forge/default.nix
+  - packages/ci/test_public_cache_build.py
+  - packages/default/crates/cf-config/src/config/server.rs
+  - packages/default/crates/cf-server/src/flake/commits.rs
+  - packages/default/crates/cf-server/src/flake/credentials.rs
+  - packages/default/crates/cf-server/src/models/evaluate_with_policies.rs
+  - packages/default/crates/cf-server/src/server/mod.rs
 priority: high
 type: bug
 ordinal: 506000
@@ -51,6 +69,12 @@ Backend diagnostics follow-up in the existing locked worktree: observe only exac
 Final-review runtime fixes, owned eval+commits only: poll one bounded progress-persistence future concurrently with discovery; add a concurrently polled bounded cancellation monitor during advisory/semaphore admission and child execution, signal bounded child cancellation for up-to-two-second cleanup acknowledgment before dropping/quarantine and preserve EvaluationCancelled lifecycle semantics. Recheck cancellation before successful preflight enters bulk. Sanitize returned materialization errors at lifecycle boundary while retaining typed classification/control errors. Keep bounded multiline fatal Nix blocks. Add slow-logger/stalled-query unit regressions and SQLx production-wrapper cancellation regressions; parent owns docs/CI and official DB execution. No frontend/services/commits.
 
 Blocking handoff follow-up (eval file only): bound best-effort post-discovery inventory upsert and poll cancellation concurrently using the existing orchestration; supervise pool/advisory/semaphore bulk admission under a separate deadline derived from eval_overall_timeout_secs, returning actual transaction/permit ownership to the existing execution path. Keep the execution overall budget start after admission. Add externally signaled stalled-write regression and disposable SQLx admission cancellation/ownership/deadline coverage; parent owns five existing ignored test wiring plus any new names, CI/docs. No services/host DB/commits.
+
+Safety review required pure builtins.getFlake rather than a CLI installable, because no-write-lock-file alone permits in-memory lock reconciliation. Legacy artifact-cache inventories have no verified-source/lock-graph provenance; always discover authoritatively from the immutable source and retain cache only for display. Background hydration now uses the same source/config/auth/admission path.
+
+Progress uses bounded one-shot stderr marker evidence only. Diagnostic persistence is concurrently polled and bounded to 250ms; cancellation queries are bounded to 500ms. Inventory persistence is best effort with a 250ms budget. Bulk admission is independently bounded using the configured overall timeout, while the existing bulk execution budget still starts after admission.
+
+User final instruction: do not run expensive checks that can lock up the host. Finish source changes/review, commit/push, report, and stop for user-provided CI results. Do not monitor/retry CI or start further local checks without further direction.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -83,4 +107,14 @@ Bulk admission now uses acquire_bulk_evaluation_admission_until(pool: &PgPool, c
 Fresh focused verification exit 0: nix develop --command bash -c 'export SQLX_OFFLINE=true; cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib preflight_ -- --test-threads=1 && cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib discovery_scope_ -- --test-threads=1'. Results: 16 + 3 = 19 passed, zero failed/ignored in selected runs. Log: /tmp/opencode/task484-handoff-tests-final.log. New no-DB tests: models::evaluate_with_policies::tests::preflight_inventory_stalled_write_is_bounded_and_api_cancellable (external cancellation observed while the write is pending; write dropped on cancellation; noncancelled stalled write bounded), and models::evaluate_with_policies::tests::preflight_inventory_failure_is_best_effort_but_cancel_check_is_fail_closed. Existing discovery child cancellation/cleanup tests still pass with their foreground acknowledgement budget. Rustfmt --edition 2024 --check --color never on eval file and git diff --check exit 0.
 
 Parent SQLx wiring: existing exact name models::evaluate_with_policies::tests::discovery_database_tests::discovery_api_cancellation_interrupts_advisory_and_capacity_admission is unchanged, but now loops through both discovery and bulk admission for advisory and semaphore waiters. ONE new ignored SQLx exact name: models::evaluate_with_policies::tests::discovery_database_tests::bulk_admission_preserves_owned_leases_and_bounds_pool_wait. It verifies transaction/permit remain held after successful production admission return and only explicit owner release frees them; a separate one-connection pool for that SQLx-created disposable database exhausts pool acquisition and proves the strict admission ceiling also bounds stalled cancellation queries. New/extended SQLx regressions compiled in the fresh cargo lib build but were not executed here. Parent's five-name ignored check wiring therefore needs this sixth name and a fresh official sandbox snapshot. No host DB operations/services/commits/frontend/CI/docs edits; task stays In Progress and preview waiver remains applicable.
+
+User explicitly selected tests-only waiver for backend diagnostic logs; no frontend rendering changes. Task-owned preview briefly reached HTTP200 but the existing server hard-coded 0.0.0.0 despite task config127.0.0.1. Stopped only cf-task484-preview-live; subsequent listeners5432/3445/8080 absent. No live preview or browser screenshot evidence claimed.
+
+Published normal commit 0e0329bdfd547c91ce5e53fe299297c8f8e069ec to origin/TASK-484-discovery-timeout; git ls-remote confirmed exact SHA and worktree clean. Draft MR !333 targets dev: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/333. Depends on !331/TASK-470 merging first; current dev MR diff includes inherited TASK-470 work, focused fix is single commit relative to a33c1d0c. TASK-470 branch independently advanced to c3fd244b; no changes, merge, or history rewrite made to that branch.
+
+Verification actually passed: cf-config90 tests; targeted discovery/purity/lock/error/doctests and process ownership/cancellation/recovery suites during implementation; latest handoff source tests16 preflight +3 discovery-scope passed; cold/warm isolated private-input check passed with65.078s cold,0.022s warm,0.046s same-source policy expression, old60s timeout, real unauth401, hash mismatch, genuine Nix error and incomplete-lock rejection, unchanged sourcehash/lockbytes. Existing verified-source-evaluator-parity passed. Knowledge58tests/216Mermaid/189concepts passed; CI routing helper and git diff checks passed. Final read-only review found no blocking defect.
+
+Earlier cf-task484-regressions snapshot had ExecMainStatus0; it predates final diagnostics/cancellation/handoff edits and is not final-head evidence. Final current-source regression and full flake-check expensive runs did not establish successful completion. After latest user instruction stopping their units found no units loaded; systemctl list cf-task484* empty and ps -C nix,cargo,rustc,devenv,postgres found no matching processes. No expensive check remains running from this task. Final six ignored SQLx tests and full integration/VM/package checks remain CI verification, not claimed passed.
+
+Exact-head CI results are deliberately not monitored or claimed. Await user results for SHA0e0329bdfd547c91ce5e53fe299297c8f8e069ec. Keep task In Progress (not Review/Done) because final verification is incomplete. LOCK remains task-owned awaiting CI feedback. Remaining deployment proof: actual CF cold locked-input discovery then warm retry in production-equivalent source/credential/runtime; operator manual timings alone do not establish deployed cause. No merge.
 <!-- SECTION:NOTES:END -->
