@@ -792,8 +792,6 @@ async fn push_derivation_requisites_to_cache_destination(
         })
         .await;
     }
-    let remote = std::env::var("ATTIC_REMOTE_NAME").unwrap_or_else(|_| "local".to_string());
-
     for (chunk_index, chunk) in archive_paths.chunks(ATTIC_PUSH_PATH_CHUNK_SIZE).enumerate() {
         sign_derivation_requisites_for_cache(destination, chunk).await?;
 
@@ -805,24 +803,48 @@ async fn push_derivation_requisites_to_cache_destination(
                 );
                 return Ok(false);
             };
-            let cache_ref = if cache_name.contains(':') {
-                cache_name.to_string()
-            } else {
-                format!("{remote}:{cache_name}")
+            // SECURITY: This caller already selected a database destination.
+            // Requisite publication uses its stored Attic credentials, not an
+            // ambient remote or persistent CLI login. This changes only cache
+            // authentication; signing, chunk roots and closure policy stay here.
+            let cache = crate::config::CacheConfig {
+                cache_type: cf_protocol::cache::CacheType::Attic,
+                push_to: destination.push_to.clone(),
+                attic_token: destination.attic_token.clone(),
+                attic_cache_name: Some(cache_name.to_owned()),
+                attic_ignore_upstream_cache_filter: destination
+                    .attic_ignore_upstream_cache_filter
+                    .unwrap_or(true),
+                attic_jobs: destination.attic_jobs.unwrap_or(5).max(1) as u32,
+                ..Default::default()
             };
-            let attic_jobs = destination.attic_jobs.unwrap_or(5).max(1).to_string();
-            let mut command = Command::new("attic");
-            command.arg("push").arg(&cache_ref).args(chunk);
-
-            if destination
-                .attic_ignore_upstream_cache_filter
-                .unwrap_or(true)
-            {
-                command.arg("--ignore-upstream-cache-filter");
-            }
-
-            command.arg("--jobs").arg(attic_jobs);
-            command
+            let prepared = cf_config::cache_credentials::PreparedAtticPush::for_paths(
+                &cache, chunk,
+            )
+            .map_err(|_| {
+                tracing::warn!(
+                    chunk_index,
+                    "selected Attic requisite credentials could not be prepared"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            let deadline = std::time::Duration::from_secs(
+                destination.push_timeout_seconds.unwrap_or(3600).max(1) as u64,
+            );
+            tracing::info!(
+                chunk_index,
+                chunk_path_count = chunk.len(),
+                "publishing derivation requisite closure chunk to selected Attic cache"
+            );
+            // The owner applies private XDG config last and retains it through
+            // child exit or kill/reap. No generic ambient setup follows this call.
+            crate::derivations::cache::run_prepared_attic_push(prepared, deadline)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(chunk_index, error = %error, "selected Attic requisite chunk failed");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            continue;
         } else {
             let Some(push_to) = destination.push_to.as_deref() else {
                 tracing::warn!(

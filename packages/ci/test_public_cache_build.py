@@ -1,9 +1,10 @@
-"""Checks scoped CI routing and real Nix configuration without building gates.
+"""Checks scoped CI routing, real Nix policy, and fixture source realization.
 
 Run with `nix develop -c python3 packages/ci/test_public_cache_build.py`.
 The proxy delegates configuration queries to real Nix and records build argv.
 Synthetic unavailable caches must be removed even when inherited through both
-base and extra settings. No runner configuration values are printed.
+base and extra settings. A fresh instance of the integration test-flake builder
+proves source realization without running a VM gate. No runner settings are printed.
 """
 
 import copy
@@ -42,10 +43,15 @@ for job in old:
     else:
         expected = copy.deepcopy({k: v for k, v in old[job].items() if k != "script"})
         if job == "flake-check":
-            # TASK-484 adds one blocking discovery gate; all other metadata stays.
+            # TASK-470 and TASK-484 add blocking provider and discovery gates.
+            # Preserve every other matrix entry and unrelated job metadata.
             names = expected["parallel"]["matrix"][0]["CHECK_NAME"]
             if "nixos-discovery-reliability" not in names:
                 names.insert(names.index("server-regressions") + 1, "nixos-discovery-reliability")
+            if "attic-metrics" not in names:
+                names.insert(names.index("niks3-cache") + 1, "attic-metrics")
+            if "attic-publication" not in names:
+                names.insert(names.index("attic-metrics") + 1, "attic-publication")
         assert expected == {
             k: v for k, v in new[job].items() if k != "script"}, job
         assert old[job]["script"][1:] == new[job]["script"][1:], job
@@ -134,7 +140,9 @@ max-jobs = 3
         assert result.returncode == 0, name
         recorded = json.loads((directory / "argv").read_text())
         arguments = [f".#checks.x86_64-linux.{name}", "-L", "--show-trace"]
-        scoped = name in {"server-regressions", "nixos-discovery-reliability", "niks3-cache", "builder-evaluator-packaging"}
+        scoped = name in {"integration", "oidc-auth", "server-regressions", "niks3-cache",
+                          "nixos-discovery-reliability", "attic-metrics", "attic-publication",
+                          "builder-evaluator-packaging"}
         assert recorded == ["build", *(POLICY if scoped else []), *arguments], name
         assert result.stdout.count("InheritedInternalCache=") == int(scoped), name
     for job in ("web-ui-check", "web-ui-baseline-candidates"):
@@ -145,7 +153,10 @@ max-jobs = 3
         assert json.loads((directory / "argv").read_text()) == [
             "build", *POLICY, *impure, ".#checks.x86_64-linux.web-ui", "-L", "--show-trace"]
         assert result.stdout.count("InheritedInternalCache=true") == 1
-    assert run(["--check-config"]).returncode == 0
+    configured = run(["--check-config"])
+    assert configured.returncode == 0
+    for setting in ("require-sigs=true", "fallback=true"):
+        assert f"Effective {setting}" in configured.stdout
     (directory / "argv").unlink()
     assert run([".#checks.x86_64-linux.niks3-cache"], BAD_EFFECTIVE="1").returncode == 1
     assert not (directory / "argv").exists()
@@ -164,5 +175,39 @@ max-jobs = 3
                    OLD_CLI="1", LEGACY_MODE=mode).returncode == 1, mode
         assert not (directory / "argv").exists(), mode
 
+    # Exercise the real integration fixture builder without launching its VMs.
+    # A unique derivation name prevents an existing local/cached fixture from
+    # satisfying this assertion. Only the name changes; the runCommand body and
+    # locked inputs remain the repository's actual test-flake implementation.
+    fixture_name = "crystal-forge-test-flake-ci-fallback-" + directory.name
+    expression = f"""
+      let
+        flake = builtins.getFlake {json.dumps('git+file://' + str(ROOT))};
+        pkgs = flake.inputs.nixpkgs.legacyPackages.x86_64-linux;
+        fixture = import {ROOT}/lib/test-flake/default.nix {{
+          lib = pkgs.lib; inputs = flake.inputs; system = "x86_64-linux";
+        }};
+      in fixture.testFlake.overrideAttrs (_: {{ name = {json.dumps(fixture_name)}; }})
+    """
+    real_env = dict(env, PATH=os.pathsep.join(
+        part for part in env["PATH"].split(os.pathsep) if part != str(directory)))
+    built = subprocess.run(
+        ["sh", str(HELPER), "--impure", "--no-link", "--print-out-paths",
+         "--expr", expression], cwd=ROOT, env=real_env,
+        capture_output=True, text=True, timeout=180)
+    assert built.returncode == 0, "integration fixture source build failed"
+    assert fixture_name + ".drv'" in built.stderr, "fixture builder did not execute"
+    output = Path(built.stdout.splitlines()[-1])
+    assert output.is_dir() and output.name.endswith(fixture_name)
+    for branch, count in (("MAIN", 5), ("DEVELOPMENT", 7), ("FEATURE", 3)):
+        assert (output / f"{branch}_COMMIT_COUNT").read_text().strip() == str(count)
+        head = (output / f"{branch}_HEAD").read_text().strip()
+        commits = (output / f"{branch}_COMMITS").read_text().splitlines()
+        assert len(commits) == count and commits[-1] == head
+    assert "private-marker" not in built.stdout + built.stderr
+    assert "Effective require-sigs=true" in built.stdout
+    assert "Effective fallback=true" in built.stdout
+
 print("PASS: modern/legacy Nix policy, builder controls, scoped argv, secret redaction, "
-      "missing/empty/duplicate/conflicting/unsupported settings, exit status")
+      "missing/empty/duplicate/conflicting/unsupported settings, exit status, "
+      "real integration fixture source build with signatures and fallback enabled")

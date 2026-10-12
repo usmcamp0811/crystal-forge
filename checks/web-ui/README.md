@@ -226,6 +226,108 @@ failure, not a write result. No probe performs an upload or proves write permiss
 
 ### Real remote inventory observations
 
+The populated Attic observation uses the optional `cf-attic-metrics` module on
+the native Attic VM. Earlier fixture setup already published a real NAR through
+the Attic CLI. Independent native SQL row reads supply the expected path count
+and uncompressed NAR byte sum. The adapter role has only SELECT access to
+`cache(id,name,deleted_at)`, `object(cache_id,nar_id)` and
+`nar(id,nar_size,state)`, with read-only transactions. Its protected database URI
+stays on the provider VM. A separate runtime 64-hex-character token is scoped to
+`web-ui-private`; credentials never enter screenshots or test output.
+
+The TLS route `https://atticCache:9444/metrics/v1/caches/` proxies to loopback
+9121. Firewall and nginx permit only the CF VM. The existing fixture CA and
+`atticCache` SAN remain verified. The adapter has no external listener.
+
+After the late seed request, the real CF API creates a separate enabled Attic
+destination scoped to the empty metrics-only environment. The driver binds its
+actual assigned ID through a mode-0600 runtime mapping. A fixture-only appended
+`preStart` injects `[[server.attic_metrics_endpoints]]` after normal TOML
+regeneration. The driver restarts only `crystal-forge-server.service` in the
+disposable VM before publishing `seed_complete`. It requires unchanged
+unrelated TOML, encryption identity, existing Admin session and all complete
+guarded raw rows. A real CF metrics GET must match the independent native totals.
+
+The browser checks **Logical NAR** and **cached Nix paths** in Cards and Table,
+including identical basis tooltips. Explicit **Refresh metrics** must show
+loading and produce real responses. Initial load and explicit refresh each make
+one bounded pass; view and detail transitions must reuse observations. Safe
+captures are `native-attic-metrics-populated-cards` and
+`native-attic-metrics-populated-table` under the gate's screenshots output.
+The original seven, legacy, replacement and native Niks3 guards remain strict.
+
+Run the authoritative focused workflow with the command-local public-cache
+wrapper (the selector is `CF_UI_TEST_STEPS`, not `CF_WEB_UI_STEP`):
+
+```sh
+CF_UI_TEST_STEPS=25-caches-modal-attic \
+  sh packages/ci/public-cache-build.sh --impure \
+  --out-link /tmp/opencode/task470-final-browser -L \
+  .#checks.x86_64-linux.web-ui --max-jobs 1 --cores 2
+```
+
+The output link is a GC root. Keep it until the MR uploader has copied the
+screenshots. Check that the path is unused before the run; use a unique owned
+suffix if another run owns it. Captures are under
+`/tmp/opencode/task470-final-browser/screenshots/`. CI uses the existing web-ui
+artifact uploader. New capture definitions are source-only until CI runs them;
+the definitions are not evidence of a successful browser run or inspected images.
+
+Two additional native caches supplement the populated private cache:
+`web-ui-empty` is private and receives no publication, and `web-ui-public` is
+public. Native cache creation uses Attic's actual cache-config API. Independent
+SQL row reads require zero cached paths and zero logical NAR bytes for the empty
+cache. Its separate adapter token is unrelated to native Attic JWTs. Both mapped
+destinations use their actual late API-assigned IDs. Unconfigured and public
+Attic destinations have no adapter mapping. All auxiliary destinations are
+scoped to the dedicated empty metrics environment; the original seven guards
+retain their exact membership and raw-state comparisons.
+
+Cards and Table must display the mapped empty cache as **Logical NAR: 0.00 GiB**
+and **0 cached Nix paths**, never Unavailable. Unconfigured Attic must return
+`unsupported` / `provider_totals_unsupported` with null totals, bases and
+observation time. This state does not indicate a disconnected cache or invalid
+credentials. Detail views expose the same basis explanations. All six metrics
+fixture IDs receive exactly one initial GET and one explicit-refresh GET. View
+and detail transitions make no extra metrics requests. The native adapter
+observer requires exactly two GETs for each mapped cache in that phase and no
+inventory requests for unmapped rows. Logs record only method, path, status and
+Authorization/Cookie/CSRF presence, never values.
+
+Successful private stored-ID Test must return `cache_is_public: false`,
+`cache_access_valid: true`, `token_auth_valid: true` and `write_auth_valid: null`.
+The UI says **Private cache read access verified** and **Write authorization:
+Untested**. The public destination retains a deliberately invalid, nonempty
+runtime JWT. Its real stored-ID Test must return HTTP 200 with
+`cache_is_public: true`, `cache_access_valid: true`, `token_auth_valid: null` and
+`write_auth_valid: null`. The UI says **Public cache read access verified** and
+**Token authentication: Untested**, not token failure. The disabled **Requires
+authentication** checkbox describes configured publication credentials; its
+help explains that public metadata reads can succeed anonymously. Test and
+Cancel preserve the complete public row, ciphertext, timestamps and assignments.
+Both private and public result captures contain only the outer credential
+selector and safe evidence; no raw token input is rendered. No Test uploads.
+
+New capture states (each has dark and light variants):
+
+- `metricsEmptyNone-native-attic-cards`
+- `metricsEmptyNone-native-attic-table`
+- `metricsEmptyNone-{empty,unconfigured,public-unconfigured}-cards`
+- `metricsEmptyNone-{empty,unconfigured,public-unconfigured}-table`
+- `metricsEmptyNone-empty-detail`
+- `metricsEmptyNone-unconfigured-detail`
+- `metricsEmptyNone-public-unconfigured-detail`
+- `metricsRefresh-native-loading-action` (real refresh; image contents depend on
+  the native response timing)
+- `private-native-attic-retained-read-untested-write`
+- `public-native-attic-retained-read-untested-write`
+
+The existing `native-attic-metrics-populated-cards` and
+`native-attic-metrics-populated-table` states remain. Capture filenames prefix
+each state with `25-caches-modal-attic--` and suffix `--dark.png` or `--light.png`.
+Baseline policy and existing security assertions are unchanged. The unrelated
+OSCAL/SARIF login-timeout reporting exception gives no export-validation guarantee.
+
 Production packaging remains Niks3 **1.6.0**. The web-ui fixture separately builds
 remote **1.8.0** for `GET /api/cache-stats`, using the source/vendor hashes from
 Nixpkgs commit `c27cdad491a991b11ed731760aa2ef8db0cb0410`. Its database is separate
@@ -303,6 +405,8 @@ attic:
   id, server_url, cache_name, read_url, public_key, token, replacement_token
   denied_token, missing_cache_name, missing_cache_token, setup_proof,
   browser_observer_baseline
+  additional:
+    empty, public: {server_url, cache_name, public_key, token}
 s3:
   id, endpoint, region, bucket, access_key_id, secret_access_key,
   replacement_access_key_id, replacement_secret_access_key
@@ -324,6 +428,10 @@ production_basic:
   replacement_password, observer_baselines
 metrics:
   environment_id
+  attic, attic_empty:
+    id, expected: {cached_path_count, logical_nar_bytes}
+  attic_unconfigured, attic_public:
+    id
   v16, v18:
     id, server_url, native_status
 nix_basic:

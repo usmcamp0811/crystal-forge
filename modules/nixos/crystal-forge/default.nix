@@ -51,6 +51,7 @@
           auto_hardening_scans = cfg.server.auto_hardening_scans;
           allow_private_cache_test_targets =
             cfg.server.allow_private_cache_test_targets;
+          attic_metrics_endpoints = cfg.server.attic_metrics_endpoints;
           trust_forwarded_builder_https =
             cfg.server.trust_forwarded_builder_https;
           notification_email_enabled = cfg.server.notificationEmail.enable;
@@ -1910,6 +1911,38 @@ in {
 
           Keep disabled unless you explicitly need to test internal Attic/cache
           hosts from the admin UI.
+        '';
+      };
+
+      attic_metrics_endpoints = lib.mkOption {
+        type = lib.types.listOf (lib.types.submodule {
+          options = {
+            destination_id = lib.mkOption {
+              type = lib.types.int;
+              description = "Explicit Crystal Forge Attic destination database ID.";
+            };
+            url = lib.mkOption {
+              type = lib.types.str;
+              description = "HTTPS inventory adapter base with optional path prefix; no userinfo, query or fragment.";
+            };
+            token_file = lib.mkOption {
+              type = lib.types.str;
+              description = "Absolute non-store runtime token file owned by the server user, with no group/other permissions and no symlink.";
+            };
+          };
+        });
+        default = [];
+        example = [{
+          destination_id = 42;
+          url = "https://metrics.example/prefix/";
+          token_file = "/run/credentials/crystal-forge/attic-metrics";
+        }];
+        description = lib.mdDoc ''
+          Explicit destination-ID bindings for Admin-only Attic inventory
+          observations. Empty by default, so Attic totals remain unsupported.
+          Uses a separate adapter token, never an Attic upload credential.
+          Duplicate IDs or invalid entries fail closed on metrics requests.
+          HTTPS targets use the existing cache-test private-target policy.
         '';
       };
 

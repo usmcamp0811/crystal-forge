@@ -3,6 +3,38 @@ use cf_protocol::builder::{RemoteBuildExecutionStrategy, SourceInputDeliveryMode
 use serde::Deserialize;
 use std::path::PathBuf;
 
+/// Binds an Attic inventory adapter to one Crystal Forge destination identity.
+///
+/// Validation occurs on metrics requests, not at server startup. Duplicate IDs
+/// or invalid entries fail closed. This adapter uses its own runtime token;
+/// it never uses an Attic upload token or a destination display name.
+///
+/// # Examples
+/// ```
+/// use cf_config::config::AtticMetricsEndpoint;
+/// let endpoint = AtticMetricsEndpoint {
+///     destination_id: 42,
+///     url: "https://metrics.example/proxy/".into(),
+///     token_file: "/run/credentials/crystal-forge/attic-metrics".into(),
+/// };
+/// assert_eq!(endpoint.destination_id, 42);
+/// ```
+#[derive(Debug, Deserialize, serde::Serialize, Clone, PartialEq, Eq)]
+pub struct AtticMetricsEndpoint {
+    /// Positive database destination ID. Display-name changes cannot retarget it.
+    pub destination_id: i32,
+    /// Explicit HTTPS adapter base, with an optional reverse-proxy prefix.
+    /// Userinfo, queries, and fragments are forbidden.
+    pub url: String,
+    /// Absolute non-store runtime token file, owned by the server user (not root).
+    /// The file must be regular, not a symlink, with no group/other permissions.
+    /// At most 4096 bytes are read. The token must match ASCII
+    /// `[A-Za-z0-9_-]{32,1024}`: URL-safe base64 without padding or hexadecimal.
+    /// Whitespace, including a trailing newline, is forbidden. The Bearer header
+    /// is at most 1031 bytes.
+    pub token_file: PathBuf,
+}
+
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ExecutionMode {
@@ -167,6 +199,17 @@ pub struct ServerConfig {
     /// Default: false (secure-by-default SSRF posture).
     #[serde(default)]
     pub allow_private_cache_test_targets: bool,
+
+    /// Explicit Attic inventory adapters. Omission preserves unsupported totals.
+    ///
+    /// Each entry binds `destination_id`, an HTTPS `url` base, and a protected
+    /// `token_file`. TOML accepts `[[server.attic_metrics_endpoints]]`
+    /// with `destination_id = 42`, `url = "https://metrics.example/prefix/"`, and
+    /// `token_file = "/run/credentials/crystal-forge/attic-metrics"`.
+    /// Metrics requests validate entries and reject duplicate IDs without
+    /// preventing unrelated server startup. Only Admin can observe adapters.
+    #[serde(default)]
+    pub attic_metrics_endpoints: Vec<AtticMetricsEndpoint>,
 
     /// Allow credential-bearing builder cache-push config to be delivered when
     /// the request arrives via a reverse proxy that sets X-Forwarded-Proto /
@@ -395,6 +438,7 @@ impl Default for ServerConfig {
             failed_build_log_retention_days: default_failed_build_log_retention_days(),
             commit_cache_retention_days: default_commit_cache_retention_days(),
             allow_private_cache_test_targets: false,
+            attic_metrics_endpoints: Vec::new(),
             trust_forwarded_builder_https: false,
             remote_build_execution_strategy: default_remote_build_execution_strategy(),
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
@@ -683,6 +727,29 @@ mod tests {
         assert!(
             parse("host = '127.0.0.1'\nport = 3000\neval_discovery_timeout_secs = -1").is_err()
         );
+    }
+
+    #[test]
+    fn attic_metrics_defaults_and_endpoint_roundtrip() {
+        let legacy: ServerConfig =
+            serde_json::from_str(r#"{"host":"localhost","port":3000}"#).unwrap();
+        assert!(legacy.attic_metrics_endpoints.is_empty());
+        assert!(ServerConfig::default().attic_metrics_endpoints.is_empty());
+        let endpoint = AtticMetricsEndpoint {
+            destination_id: 42,
+            url: "https://metrics.example/prefix/".into(),
+            token_file: "/run/credentials/crystal-forge/attic-metrics".into(),
+        };
+        let encoded = serde_json::to_value(&endpoint).unwrap();
+        assert_eq!(
+            serde_json::from_value::<AtticMetricsEndpoint>(encoded.clone()).unwrap(),
+            endpoint
+        );
+        let configured: ServerConfig = serde_json::from_value(serde_json::json!({
+            "host": "localhost", "port": 3000, "attic_metrics_endpoints": [encoded]
+        }))
+        .unwrap();
+        assert_eq!(configured.attic_metrics_endpoints, vec![endpoint]);
     }
 
     #[test]

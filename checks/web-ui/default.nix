@@ -98,12 +98,27 @@ let
       extraConfig = "access_log off;";
     };
   };
-  atticFixtureNode = {
-    imports = [(lib.crystal-forge.makeAtticCacheNode {
+  atticFixtureNode = {nodes, ...}: {
+    imports = [../../modules/nixos/attic-metrics (lib.crystal-forge.makeAtticCacheNode {
       inherit lib pkgs;
       port = 8080;
       jwtSecretB64 = "dGVzdCBzZWNyZXQgZm9yIGF0dGljZA==";
     })];
+    services.crystal-forge.attic-metrics = {
+      enable = true;
+      databaseUriFile = "/run/cf-attic-metrics-secrets/database";
+      tokensFile = "/run/cf-attic-metrics-secrets/tokens";
+    };
+    # Credentials are prepared after genuine CLI publication, not at boot.
+    systemd.services.cf-attic-metrics.wantedBy = lib.mkForce [];
+    networking.firewall.enable = lib.mkForce true;
+    networking.firewall.allowedTCPPorts = [9443];
+    networking.firewall.extraCommands = ''
+      iptables -A nixos-fw -p tcp -s ${nodes.machine.networking.primaryIPAddress} --dport 9444 -j nixos-fw-accept
+    '';
+    services.postgresql.authentication = lib.mkBefore ''
+      host attic cf_attic_metrics 127.0.0.1/32 scram-sha-256
+    '';
     security.pki.certificateFiles = ["${cacheCredentials}/ca.crt"];
     environment.etc."cache-fixture-credentials".source = cacheCredentials;
     environment.etc."cache-fixture-publication-path".text = "${atticPublicationOutput}";
@@ -122,11 +137,30 @@ let
         # Only method, path, status and header presence enter this shared log.
         # Private checkpoint boundaries correlate requests with row identity.
         log_format cf_attic_probe '$request_method $uri status=$status auth=$cf_attic_auth_present';
+        map $http_cookie $cf_metrics_cookie { "" absent; default present; }
+        map $http_x_csrf_token $cf_metrics_csrf { "" absent; default present; }
+        log_format cf_attic_metrics '$request_method $uri status=$status auth=$cf_attic_auth_present cookie=$cf_metrics_cookie csrf=$cf_metrics_csrf';
       '';
       virtualHosts.native-cache-fixture = {
         # A healthy private cache must not make a generic server-root probe pass.
         locations."= /".return = "404";
         extraConfig = "access_log /run/cf-attic-observer/requests.log cf_attic_probe;";
+      };
+      virtualHosts.attic-inventory = {
+        addSSL = true;
+        listen = [{addr = "0.0.0.0"; port = 9444; ssl = true;}];
+        sslCertificate = "${cacheCredentials}/server.crt";
+        sslCertificateKey = "${cacheCredentials}/server.key";
+        extraConfig = "access_log /run/cf-attic-observer/metrics.log cf_attic_metrics;";
+        locations."/metrics/v1/caches/" = {
+          proxyPass = "http://127.0.0.1:9121/v1/caches/";
+          extraConfig = ''
+            allow ${nodes.machine.networking.primaryIPAddress};
+            deny all;
+            limit_except GET { deny all; }
+          '';
+        };
+        locations."/".return = "403";
       };
     };
     # The legacy debug service mints a broad token; it is not required for
@@ -784,6 +818,11 @@ in pkgs.testers.runNixOSTest {
       # this key MUST NOT protect credentials outside this test environment.
       systemd.services.crystal-forge-server.environment.CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY =
         "crystal-forge-web-ui-vm-test-only-cache-encryption-key";
+      # The normal preStart regenerates TOML. Apply only the private fixture
+      # mapping afterwards, including on the single late-seed restart.
+      systemd.services.crystal-forge-server.preStart = lib.mkAfter ''
+        ${cacheFixturePython}/bin/python ${cacheFixtureDriver} metrics-config
+      '';
       systemd.services.crystal-forge-config-inspector.environment.CRYSTAL_FORGE_CONFIG_INSPECTION_STAGE_DEADLINE_SECONDS = "600";
     };
   };
@@ -822,6 +861,9 @@ in pkgs.testers.runNixOSTest {
         with open("/tmp/cf-web-ui-attic-observer/requests.log", "w"):
             pass
         os.chmod("/tmp/cf-web-ui-attic-observer/requests.log", 0o666)
+        with open("/tmp/cf-web-ui-attic-observer/metrics.log", "w"):
+            pass
+        os.chmod("/tmp/cf-web-ui-attic-observer/metrics.log", 0o666)
     if run_native_cache_fixtures:
         os.makedirs("/tmp/cf-web-ui-niks3-observer", exist_ok=True)
         for name in ("production.log", "token.log", "basic-write.log", "basic-read.log", "metrics-v16.log", "metrics-v18.log"):
@@ -1100,17 +1142,23 @@ in pkgs.testers.runNixOSTest {
         # Only file paths enter driver logs. JWTs never enter driver commands,
         # environment strings, screenshots or derivation outputs.
         atticCache.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} attic")
+        atticCache.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} attic-metrics-setup")
+        atticCache.succeed("systemctl start cf-attic-metrics.service")
+        atticCache.wait_for_open_port(9121)
         import pathlib
         import tempfile
         with tempfile.TemporaryDirectory(prefix="cf-cache-private-") as private_dir:
             os.chmod(private_dir, 0o700)
             atticCache.copy_from_vm("/run/cf-attic-fixture.json", private_dir)
             machine.copy_from_host(str(pathlib.Path(private_dir) / "cf-attic-fixture.json"), "/run/cf-attic-fixture.json")
+            atticCache.copy_from_vm("/run/cf-attic-metrics-binding.json", private_dir)
+            machine.copy_from_host(str(pathlib.Path(private_dir) / "cf-attic-metrics-binding.json"), "/run/cf-attic-metrics-binding.json")
             cache.copy_from_vm("/run/cf-http-fixture.json", private_dir)
             machine.copy_from_host(str(pathlib.Path(private_dir) / "cf-http-fixture.json"), "/run/cf-http-fixture.json")
             cache.copy_from_vm("/run/cf-niks3-basic-read-fixture.json", private_dir)
             machine.copy_from_host(str(pathlib.Path(private_dir) / "cf-niks3-basic-read-fixture.json"), "/run/cf-niks3-basic-read-fixture.json")
         machine.succeed("chmod 0600 /run/cf-attic-fixture.json")
+        machine.succeed("chmod 0600 /run/cf-attic-metrics-binding.json")
         machine.succeed("chmod 0600 /run/cf-http-fixture.json /run/cf-niks3-basic-read-fixture.json")
         machine.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} assemble")
         # Provider warmup is independent of row creation. The seed worker waits
@@ -1629,6 +1677,9 @@ in pkgs.testers.runNixOSTest {
       with open("/tmp/cf-web-ui-attic-observer/requests.log", "w"):
           pass
       os.chmod("/tmp/cf-web-ui-attic-observer/requests.log", 0o666)
+      with open("/tmp/cf-web-ui-attic-observer/metrics.log", "w"):
+          pass
+      os.chmod("/tmp/cf-web-ui-attic-observer/metrics.log", 0o666)
       os.makedirs("/tmp/cf-web-ui-niks3-observer", exist_ok=True)
       for name in ("production.log", "token.log", "basic-write.log", "basic-read.log", "metrics-v16.log", "metrics-v18.log"):
           with open("/tmp/cf-web-ui-niks3-observer/" + name, "w"):

@@ -3,7 +3,7 @@ use super::utils::*;
 use crate::config::{BuildConfig, CacheConfig};
 use anyhow::bail;
 use anyhow::{Context, Result};
-use cf_config::cache_credentials::PreparedNiks3Push;
+use cf_config::cache_credentials::{CachePublicationSource, PreparedAtticPush, PreparedNiks3Push};
 use cf_config::config::CacheType;
 use sqlx::PgPool;
 use std::process::Stdio;
@@ -11,6 +11,58 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::time::{Duration, sleep};
 use tracing::{debug, error, info, warn};
 
+/// Runs a prepared single-root or chunked Attic push with private output.
+///
+/// Keeps credentials through native exit or deadline/cancellation kill/reap.
+/// Applies the prepared environment last so ambient login cannot replace it.
+///
+/// # Errors
+/// Returns static process/timeout/cancellation errors or a failed exit status;
+/// never returns child output, credential contents, or the selected endpoint.
+// CONCURRENCY: The detached owner retains private config until native exit or
+// kill/reap. Dropping the caller's sender requests cancellation. Output goes to
+// /dev/null because Attic errors can contain credential-bearing response bodies.
+pub(crate) async fn run_prepared_attic_push(
+    prepared: PreparedAtticPush,
+    deadline: Duration,
+) -> Result<()> {
+    let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+    let owner = tokio::spawn(async move {
+        let mut command = tokio::process::Command::new("attic");
+        command
+            .args(&prepared.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        prepared.apply_to_command(&mut command);
+        let mut child = command
+            .spawn()
+            .map_err(|_| anyhow::anyhow!("selected Attic push spawn failed"))?;
+        let result = tokio::select! {
+            status = child.wait() => match status {
+                Ok(status) if status.success() => Ok(()),
+                Ok(status) => Err(anyhow::anyhow!("selected Attic push failed with {status}; output suppressed")),
+                Err(_) => Err(anyhow::anyhow!("selected Attic push wait failed")),
+            },
+            _ = tokio::time::sleep(deadline) => Err(anyhow::anyhow!("selected Attic push timed out")),
+            _ = cancelled => Err(anyhow::anyhow!("selected Attic push cancelled")),
+        };
+        if child.id().is_some() {
+            child
+                .kill()
+                .await
+                .map_err(|_| anyhow::anyhow!("selected Attic push kill/reap failed"))?;
+        }
+        drop(prepared);
+        result
+    });
+    let result = owner
+        .await
+        .map_err(|_| anyhow::anyhow!("selected Attic push owner failed"))?;
+    drop(cancel);
+    result
+}
 impl Derivation {
     /// Pushes a store path with the configured attempt deadline and retry policy.
     ///
@@ -26,6 +78,42 @@ impl Derivation {
         cache_config: &CacheConfig,
         build_config: &BuildConfig,
     ) -> Result<()> {
+        self.push_to_cache_with_source_and_retry(
+            store_path,
+            cache_config,
+            build_config,
+            CachePublicationSource::Static,
+        )
+        .await
+    }
+
+    /// Publishes with explicit job provenance and the configured retry policy.
+    ///
+    /// Database Attic attempts own their deadline and kill/reap before retry.
+    /// Static attempts retain the legacy ambient login behavior.
+    ///
+    /// # Errors
+    /// Returns the final safe selected-push error or legacy publication error.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # async fn publish(d: &crystal_forge::derivations::Derivation,
+    /// # cache: &cf_config::CacheConfig, build: &cf_config::BuildConfig)
+    /// # -> anyhow::Result<()> {
+    /// use cf_config::cache_credentials::CachePublicationSource;
+    /// d.push_to_cache_with_source_and_retry(
+    ///     "/nix/store/00000000000000000000000000000000-output",
+    ///     cache, build, CachePublicationSource::Database,
+    /// ).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn push_to_cache_with_source_and_retry(
+        &self,
+        store_path: &str,
+        cache_config: &CacheConfig,
+        build_config: &BuildConfig,
+        source: CachePublicationSource,
+    ) -> Result<()> {
         let mut attempts = 0;
         let max_attempts = cache_config.max_retries + 1;
         let base_delay = cache_config.retry_delay_seconds;
@@ -36,14 +124,17 @@ impl Derivation {
             let timeout_duration = Duration::from_secs(cache_config.push_timeout_seconds);
 
             // Niks3 owns its deadline so timeout cleanup finishes before retry.
-            let result = if matches!(cache_config.cache_type, CacheType::Niks3) {
+            let result = if matches!(cache_config.cache_type, CacheType::Niks3)
+                || (source == CachePublicationSource::Database
+                    && cache_config.cache_type == CacheType::Attic)
+            {
                 Ok(self
-                    .push_to_cache(store_path, cache_config, build_config)
+                    .push_to_cache_with_source(store_path, cache_config, build_config, source)
                     .await)
             } else {
                 tokio::time::timeout(
                     timeout_duration,
-                    self.push_to_cache(store_path, cache_config, build_config),
+                    self.push_to_cache_with_source(store_path, cache_config, build_config, source),
                 )
                 .await
             };
@@ -119,6 +210,35 @@ impl Derivation {
         cache_config: &CacheConfig,
         build_config: &BuildConfig,
     ) -> Result<()> {
+        self.push_to_cache_with_source(
+            path,
+            cache_config,
+            build_config,
+            CachePublicationSource::Static,
+        )
+        .await
+    }
+
+    /// Publishes through the authority that selected this job's destination.
+    ///
+    /// Database Attic uses only the selected endpoint, native cache and stored
+    /// token in a private per-attempt XDG config. Static publication retains
+    /// legacy login behavior. Disabled/filtered publication still skips work.
+    ///
+    /// # Errors
+    /// Returns static errors for selected Attic preparation, process failure,
+    /// timeout or cancellation. Other backends retain their existing errors.
+    ///
+    /// See [`Self::push_to_cache_with_source_and_retry`] for a database-selected
+    /// publication example. Queue workers use this single-attempt entry point
+    /// so the queue can refresh the destination before each retry.
+    pub async fn push_to_cache_with_source(
+        &self,
+        path: &str,
+        cache_config: &CacheConfig,
+        build_config: &BuildConfig,
+        source: CachePublicationSource,
+    ) -> Result<()> {
         use tokio::process::Command;
 
         if !cache_config.should_push(&self.derivation_name) {
@@ -136,6 +256,16 @@ impl Derivation {
 
         if matches!(cache_config.cache_type, CacheType::Niks3) {
             return run_niks3_push(&store_path, cache_config).await;
+        }
+
+        if source == CachePublicationSource::Database && cache_config.cache_type == CacheType::Attic
+        {
+            let prepared = PreparedAtticPush::new(cache_config, &store_path)?;
+            return run_prepared_attic_push(
+                prepared,
+                Duration::from_secs(cache_config.push_timeout_seconds),
+            )
+            .await;
         }
 
         // Get command and args from config

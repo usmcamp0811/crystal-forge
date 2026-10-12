@@ -21,11 +21,15 @@ enum Stage {
 }
 
 /// Contains credential-free evidence from one named-cache read operation.
+/// Native visibility is present only after complete metadata validation. Failed
+/// or incomplete probes leave visibility unknown and never prove write access.
 #[derive(Debug, serde::Serialize)]
 pub(super) struct AtticTestResult {
     probe_kind: &'static str,
     stage: Stage,
     cache_access_valid: Option<bool>,
+    // Native visibility is evidence only after complete metadata validation.
+    cache_is_public: Option<bool>,
     token_auth_valid: Option<bool>,
     // Read access never establishes push permission, including private caches.
     write_auth_valid: Option<bool>,
@@ -45,6 +49,7 @@ fn outcome(stage: Stage, status: Option<u16>, message: &'static str) -> CacheCre
             probe_kind: "attic_cache_config",
             stage,
             cache_access_valid,
+            cache_is_public: None,
             token_auth_valid: None,
             write_auth_valid: None,
         })),
@@ -161,6 +166,7 @@ pub(super) fn classify_response(status: u16, body: &[u8]) -> CacheCredentialTest
     result.ok = true;
     if let Some(CacheProbeDetails::Attic(evidence)) = &mut result.niks3 {
         evidence.cache_access_valid = Some(true);
+        evidence.cache_is_public = Some(config.is_public);
         evidence.token_auth_valid = (!config.is_public).then_some(true);
     }
     result

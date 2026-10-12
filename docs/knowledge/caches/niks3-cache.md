@@ -580,17 +580,23 @@ validity or write permission.
 ### Response-only storage observations
 
 `GET /api/v1/caches/:id/metrics` returns a scoped, volatile observation with
-`Cache-Control: no-store`. Only Admin can decrypt an enabled Niks3 snapshot and
-probe its write API using selected write TLS; no Bearer or read Basic identity is
-sent. Disabled destinations and unsupported Attic/S3/Http/Nix totals do no provider
-network work or bucket enumeration. Niks3 1.8's public `GET /api/cache-stats`
+`Cache-Control: no-store`. Only Admin can collect enabled provider metrics.
+Niks3 uses selected write TLS; no Bearer or read Basic identity is sent.
+Disabled destinations, unconfigured Attic metrics, and unsupported S3/Http/Nix
+totals do no provider network work or bucket enumeration. An optional
+[provider-side Attic adapter](../../../packages/attic-metrics/README.md) supplies
+named-cache path counts and uncompressed logical NAR bytes without giving CF
+access to the Attic database. Niks3 1.8's public `GET /api/cache-stats`
 reports `objects` and `logical_bytes` from its singleton database aggregate;
 packaged 1.6 lacks this endpoint. Absence does not identify a remote version.
 
 Logical bytes sum known client-reported uncompressed sizes and omit unknown
 legacy sizes. They are not physical usage, capacity, or Nix-path totals. Counts
 are live tracked objects, including metadata, not paths or untracked bucket
-objects. `path_count` is null. Missing/error values remain null and display
+objects. Niks3 `path_count` is null. Attic `path_count` counts registrations
+referencing valid NARs; shared NAR bytes count once per registered path, not
+once per deduplicated NAR. Neither provider reports physical usage. Missing/error
+values remain null and display
 **Unavailable**, never fabricated zero. Tooltips explain the basis; `measured_at`
 is local observation time, not an upstream timestamp. DNS, TLS and body reading
 share an eight-second total deadline and a 64 KiB body bound, with pinned DNS,
@@ -688,12 +694,16 @@ still runs before DNS; normalization does not grant permission to contact a
 target or send credentials. Test never rewrites the persisted URL or name.
 
 The same resolver supplies the server model's `read_config` for agent delivery,
-the CVE read root, builder/server login endpoints, publication read helpers, and
-the requisite-publication `ATTIC_SERVER_URL` export. Native CLI remote profiles
-still require initialization outside that export. Existing ambient endpoint
-precedence, remote-only login memoization, and already-configured acceptance
-remain separate compatibility behavior; URL normalization does not establish
-that a cached CLI profile holds the current request's credentials.
+the CVE read root, publication read helpers, and Attic publication configuration.
+Database-selected publication uses the selected endpoint, native cache name, and
+decrypted stored token. Each operation creates a private mode-0700
+`XDG_CONFIG_HOME` with mode-0600 configuration and `token-file` credentials. The
+native target is server-qualified as `cf-selected:<cache>`. Ambient Attic tokens,
+endpoints, remote names, and persistent CLI logins cannot replace that selection.
+Credentials remain owned through exit or cancellation/timeout kill and reap.
+Requisite chunks use the same isolated credential mechanism without changing
+signing or the chunk's path set. Static-only legacy configuration retains its
+supported environment fallback and login behavior.
 
 Attic Test sends one Bearer-authenticated GET to the named cache's
 `cache_config_url`, not the generic server root. Bearer authentication is used
@@ -705,12 +715,19 @@ eight-second transport timeout, pinned DNS, verified TLS, no-proxy, and
 no-redirect policy remain enforced; advertised URLs are not followed.
 
 Results expose `probe_kind: "attic_cache_config"`, `stage`,
-`cache_access_valid`, `token_auth_valid`, and `write_auth_valid`. Stages are
+`cache_access_valid`, `cache_is_public`, `token_auth_valid`, and
+`write_auth_valid`. Stages are
 `target_policy`, `dns`, `transport`, `authentication`, `cache_not_found`,
 `response`, and `complete`. Cache access is null before HTTP observation, false
 after an unsuccessful response, and true only for validated metadata. A private
 cache's successful response sets `token_auth_valid = true`; public-cache success
-leaves token authentication untested (null). Write authorization is always
+leaves token authentication untested (null). Visibility is reported only after
+complete native metadata validation; old or incomplete responses leave it
+unknown. Public read success is neither a valid-token nor an invalid-token
+verdict. The editor distinguishes public read access from authenticated private
+reads. Neither the read test nor optional metrics validates upload permission.
+Metrics failures do not change the publishing token or cache connectivity state.
+Write authorization is always
 untested (null). HTTP 401/403 does not establish cache existence. Only HTTP 404
 with typed `code: 404` and `error: "NoSuchCache"` reports cache absence; generic
 404 reports `endpoint_unavailable` at the response stage. Policy refusal returns

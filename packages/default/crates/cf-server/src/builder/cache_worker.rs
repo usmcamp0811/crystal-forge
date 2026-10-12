@@ -426,14 +426,30 @@ async fn process_one_job(
     // CONCURRENCY: The process owner retains the Niks3 slot through child exit
     // even if this worker is cancelled while awaiting the detached push.
     let derivation_name = derivation.derivation_name.clone();
+    // INVARIANT: Resolution pins legacy database jobs before publication. Use
+    // persisted provenance, never token presence, to select Attic authority.
+    let source = if job.cache_destination_source == "database" {
+        cf_config::cache_credentials::CachePublicationSource::Database
+    } else {
+        cf_config::cache_credentials::CachePublicationSource::Static
+    };
     let build_cfg = build_cfg.clone();
     let started = std::time::Instant::now();
-    let push = run_owned_push(niks3_guard, async move {
+    let selected_attic = source == cf_config::cache_credentials::CachePublicationSource::Database
+        && current_config.cache_type == CacheType::Attic;
+    let attempt = async move {
         derivation
-            .push_to_cache(&path, &current_config, &build_cfg)
+            .push_to_cache_with_source(&path, &current_config, &build_cfg, source)
             .await
-    })
-    .await;
+    };
+    // Selected Attic owns cancellation itself. An extra detached wrapper would
+    // hide worker cancellation from its kill/reap owner. Keep the Niks3 slot
+    // owner unchanged for all other attempts.
+    let push = if selected_attic {
+        attempt.await
+    } else {
+        run_owned_push(niks3_guard, attempt).await
+    };
     match push {
         Ok(()) => {
             let duration_ms = (started.elapsed().as_millis() as i32).max(0);

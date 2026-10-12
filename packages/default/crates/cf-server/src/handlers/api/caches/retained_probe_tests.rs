@@ -591,6 +591,7 @@ fn attic_native_metadata_and_status_matrix_never_claims_root_or_write_success() 
         assert_eq!(json["probe_kind"], "attic_cache_config");
         assert_eq!(json["stage"], "complete");
         assert_eq!(json["cache_access_valid"], true);
+        assert_eq!(json["cache_is_public"], is_public);
         assert_eq!(
             json["token_auth_valid"],
             if is_public {
@@ -616,6 +617,7 @@ fn attic_native_metadata_and_status_matrix_never_claims_root_or_write_success() 
         let json = serde_json::to_value(attic_probe::classify_response(200, body)).unwrap();
         assert_eq!(json["ok"], false);
         assert_eq!(json["stage"], "response");
+        assert!(json["cache_is_public"].is_null());
     }
     for (field, value) in [
         ("public_key", serde_json::json!("invalid-key")),
@@ -633,6 +635,9 @@ fn attic_native_metadata_and_status_matrix_never_claims_root_or_write_success() 
             }
             let result = attic_probe::classify_response(200, &serde_json::to_vec(&config).unwrap());
             assert!(!result.ok);
+            let json = serde_json::to_value(result).unwrap();
+            assert!(json["cache_is_public"].is_null());
+            assert!(json["token_auth_valid"].is_null());
         }
     }
     for (status, body, stage) in [
@@ -656,6 +661,7 @@ fn attic_native_metadata_and_status_matrix_never_claims_root_or_write_success() 
         let json = serde_json::to_value(attic_probe::classify_response(status, body)).unwrap();
         assert_eq!(json["ok"], false);
         assert_eq!(json["stage"], stage);
+        assert!(json["cache_is_public"].is_null());
         assert!(json["token_auth_valid"].is_null());
         assert!(json["write_auth_valid"].is_null());
         assert!(!json.to_string().contains("sensitive upstream detail"));

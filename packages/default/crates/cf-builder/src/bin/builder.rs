@@ -2128,8 +2128,16 @@ async fn execute_build_job(
                     )
                     .await;
 
-                let cache_push =
-                    derivation.push_to_cache_with_retry(&store_path, &cache_config, &build_config);
+                let cache_push = derivation.push_to_cache_with_source_and_retry(
+                    &store_path,
+                    &cache_config,
+                    &build_config,
+                    if cache_destination_id.is_some() {
+                        cf_config::cache_credentials::CachePublicationSource::Database
+                    } else {
+                        cf_config::cache_credentials::CachePublicationSource::Static
+                    },
+                );
                 tokio::pin!(cache_push);
 
                 let cache_push_result = tokio::select! {
