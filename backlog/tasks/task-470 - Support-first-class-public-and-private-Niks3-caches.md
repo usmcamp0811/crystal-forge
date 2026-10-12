@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-12 01:02'
+updated_date: '2026-10-12 01:12'
 labels: []
 dependencies: []
 references:
@@ -232,6 +232,8 @@ Authorized Attic metrics backend delegation at a33c1d0c: own cf-config config/se
 Small metrics UI delegation: own web-ui views/caches/metrics.rs, necessary metrics DTO documentation in api/models.rs and minimal shared Cards/Table label call sites. Accept Attic available/attic_inventory uncompressed_nar_bytes and cached_nix_paths with equal path_count; show cached Nix paths, logical per-path NAR bytes with repeated deduplicated bytes and unknown physical usage, and DB inventory without integrity/download claims. Preserve Niks3 bases and existing finite refresh/status behavior. Add populated/zero/large/missing/wrong-basis/contradictory/status unit cases; run native UI tests and existing WASM check through nix develop. Parent retains lock, backend/native gates and recorded no-persistent-preview waiver; no stack, commits or pushes.
 
 Focused delegated Attic inventory gate at a33c1d0c: own only new checks/attic-metrics/{default.nix,README.md,test.py}. Reuse owner task branch/worktree/lock. Boot pinned native atticd migrations and protected CLI publication in one disposable VM, separate Crystal Forge/PostgreSQL in another. Exercise packaged optional adapter with column-only DB grants, per-cache runtime tokens and verified TLS proxy restricted to CF VM. Compare real CF metrics API with independent bound SQL including duplicate/shared NAR and equal-size distinct NAR cases; verify role/auth/no-probe/static-error and exact persistence invariants. Stage only new check and authorized new provider/module paths for flake visibility. Run focused foreground public-cache wrapper with one job/two cores; no old checks/CI/runtime/provider/UI edits or commits.
+
+Focused delegated Attic metrics browser fixture: own checks/web-ui/default.nix native-cache-fixture.py README.md and cache-only JS. Reuse real populated Attic CLI publication; add optional adapter module with restricted SELECT-column role and runtime cache-scoped token. Bind actual late API-created enabled metrics-only destination ID using private runtime mapping injected after disposable server TOML generation; verify stable keys/session and exact rows across targeted VM restart before seed_complete. Preserve all seven/legacy checkpoint guards. Verify real CF responses and Cards/Table labels/tooltips explicit Refresh/loading and bounded requests with safe screenshots through focused authoritative step25 via public-cache wrapper. No host preview per explicit waiver; no production/provider/CI edits or commits.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
