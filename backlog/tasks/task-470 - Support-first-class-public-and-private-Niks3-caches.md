@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-12 17:37'
+updated_date: '2026-10-12 17:55'
 labels: []
 dependencies: []
 references:
@@ -240,6 +240,8 @@ User-approved remediation at clean published c3fd244b: fixtures only; no product
 User-approved test-first Attic publication correction at clean c3fd244b. Resume parent-owned task worktree/lock. Own shared cf-config prepared Attic credentials, builder/server derivation publication and minimal explicit database provenance callers, plus new checks/attic-publication and narrow Rust verification examples. First retain genuine native VM RED through current builder mapping and push function using PostgreSQL-stored JWTs and real uncached Attic uploads; no production writes before RED. Then implement per-operation protected XDG Attic token-file config and qualified cf-selected native cache reference, selected-child ambient removal and cancellation-safe kill/reap ownership. Preserve static legacy login behavior and Niks3/identity/signing/metrics. Verify native GREEN and focused credential/process tests with direct foreground public-cache-wrapper gates and raw logs; no commits/push/services/UI/CI/OKF edits. Parent preview waiver applies.
 
 User-delegated independent server regression repair at c3fd244b: own only packages/default/crates/cf-server/tests/poam_workflows.rs; production services/poam.rs only if a production defect is proven. Retrieve exact failed job17116758393 trace, deterministically order triage-triggered and explicit reconciliation using test-only disposable PostgreSQL coordination, reproduce 121-versus-101 failure, then await the actual triage-triggered transaction completion before adding 120 members. Preserve first-page101, eventual121 unique and fail-closed verification/closure assertions. Verify exact test before/after and full poam_workflows via external Nix sandbox PostgreSQL harness. Parent CI owner retains full server-regressions gate; no other source changes/services/commits/pushes.
+
+Focused UI/API wording delegation at c3fd244b: own web-ui views/caches.rs and api/models.rs, backend caches/attic_probe.rs and narrowly scoped retained_probe_tests assertions only. Read pinned Attic 12cbeca cache_config contract; add optional response-only cache_is_public from valid complete native metadata, default None for browser legacy responses. Distinguish explicit public/private read evidence and keep token/write uncertainty conservative, allowing existing legacy token_auth_valid=true contract without asserting public visibility. Clarify Attic configured-token publication help. Preserve editor/save/metrics state and sibling publication/POAM/CI WIP. User waives preview and expensive local verification: static inspection/diff checks only; Rust unit execution and compilation pending CI. No services, branch changes, commits or pushes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
