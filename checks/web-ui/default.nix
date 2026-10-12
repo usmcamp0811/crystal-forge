@@ -137,6 +137,9 @@ let
         # Only method, path, status and header presence enter this shared log.
         # Private checkpoint boundaries correlate requests with row identity.
         log_format cf_attic_probe '$request_method $uri status=$status auth=$cf_attic_auth_present';
+        map $http_cookie $cf_metrics_cookie { "" absent; default present; }
+        map $http_x_csrf_token $cf_metrics_csrf { "" absent; default present; }
+        log_format cf_attic_metrics '$request_method $uri status=$status auth=$cf_attic_auth_present cookie=$cf_metrics_cookie csrf=$cf_metrics_csrf';
       '';
       virtualHosts.native-cache-fixture = {
         # A healthy private cache must not make a generic server-root probe pass.
@@ -148,7 +151,7 @@ let
         listen = [{addr = "0.0.0.0"; port = 9444; ssl = true;}];
         sslCertificate = "${cacheCredentials}/server.crt";
         sslCertificateKey = "${cacheCredentials}/server.key";
-        extraConfig = "access_log off;";
+        extraConfig = "access_log /run/cf-attic-observer/metrics.log cf_attic_metrics;";
         locations."/metrics/v1/caches/" = {
           proxyPass = "http://127.0.0.1:9121/v1/caches/";
           extraConfig = ''
@@ -858,6 +861,9 @@ in pkgs.testers.runNixOSTest {
         with open("/tmp/cf-web-ui-attic-observer/requests.log", "w"):
             pass
         os.chmod("/tmp/cf-web-ui-attic-observer/requests.log", 0o666)
+        with open("/tmp/cf-web-ui-attic-observer/metrics.log", "w"):
+            pass
+        os.chmod("/tmp/cf-web-ui-attic-observer/metrics.log", 0o666)
     if run_native_cache_fixtures:
         os.makedirs("/tmp/cf-web-ui-niks3-observer", exist_ok=True)
         for name in ("production.log", "token.log", "basic-write.log", "basic-read.log", "metrics-v16.log", "metrics-v18.log"):
@@ -1671,6 +1677,9 @@ in pkgs.testers.runNixOSTest {
       with open("/tmp/cf-web-ui-attic-observer/requests.log", "w"):
           pass
       os.chmod("/tmp/cf-web-ui-attic-observer/requests.log", 0o666)
+      with open("/tmp/cf-web-ui-attic-observer/metrics.log", "w"):
+          pass
+      os.chmod("/tmp/cf-web-ui-attic-observer/metrics.log", 0o666)
       os.makedirs("/tmp/cf-web-ui-niks3-observer", exist_ok=True)
       for name in ("production.log", "token.log", "basic-write.log", "basic-read.log", "metrics-v16.log", "metrics-v18.log"):
           with open("/tmp/cf-web-ui-niks3-observer/" + name, "w"):

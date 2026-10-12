@@ -10,7 +10,9 @@ This focused NixOS check boots two disposable VMs. The Attic VM owns native
 PostgreSQL, local chunk storage, native `atticd` migrations, and the packaged
 `pkgs.crystal-forge.attic-metrics` adapter. The Crystal Forge VM owns a separate
 PostgreSQL cluster and runs the packaged core server with local authentication.
-No host database or long-running preview participates.
+No host database or long-running preview participates. The retained-credential
+extension is source-only in this delegation. Its VM execution and Rust example
+compilation remain pending; the assertions below describe the check contract.
 
 ## Native fixture and accounting
 
@@ -125,3 +127,91 @@ the original token bytes, restarts, and rechecks every native total and complete
 native persistence snapshot. A final stop must remove the module runtime
 directory and both copied credential files, while preserving the original source.
 All readiness waits are bounded. No credential bytes or DSNs enter test output.
+
+## Genuine retained credentials and independent metrics authority
+
+The new phase starts after all original inventory, complete raw snapshot, and
+module stop/restart assertions. Intentional new cache creation and publication
+cannot change the original known-count expectations.
+
+The pinned native API creates separate public and private lifecycle caches from
+the existing native cache's store directory, priority, and upstream settings.
+`atticadm` issues separate real pull+push JWTs for each cache and a pull-only JWT
+for the public cache. The public-only JWT becomes an unauthorized private-cache
+clone. This clone does not replace a working destination's credential.
+
+Native Attic still listens on loopback port 8080. A second ACL-protected TLS
+listener on port 8888 exposes its API and read plane to the CF guest using the
+existing `attic-metrics.test` DNS name and trusted fixture CA. Native metadata
+must advertise that exact `substituter_endpoint`. The metrics adapter retains
+its separate TLS listener on port 9443 and its separate per-cache token map.
+
+JWTs cross guests through a temporary mode-0700 driver directory and mode-0600
+runtime files. JWTs do not enter command arguments or driver output. The CF
+fixture generates a stable runtime service key before startup. The publication
+child receives the same active service key from a protected file through its
+child-local environment. The example does not mutate Rust process environment.
+
+Eight real Admin `POST /api/v1/caches` requests use the native signing public key,
+server-base `push_to`, separate cache name, and one actual environment assignment.
+The fixture requires the returned IDs to match the startup metrics bindings.
+Private SQL reads require each stored token to use `enc:v1:` and differ from the
+submitted JWT. GET must report `attic_token_configured=true` without returning
+the token. There is no generic JSON credential-storage table in this phase.
+
+Each destination exercises GET, stored-ID Test, Cancel, fresh GET/reopen, and
+another Test. Test uses the same public Update-shaped patch as Save and omits
+`attic_token` entirely. Cancel discards the local draft without a PUT or undo.
+Complete raw destination, assignment, and publication-job rows must remain
+identical, including ciphertext, timestamps, and future schema fields.
+A wrong-scope replacement draft also fails native Test without persistence.
+Cancel then returns to a successful Test with the original retained writer JWT.
+
+An intentional unchanged Save permits only that destination's `updated_at` to
+advance and its assignment `created_at` to renew. Exact membership, ciphertext,
+every other destination field, other destinations' assignment timestamps, and
+all publication jobs must remain unchanged. Post-Save retained Test and reopen
+must preserve the new baseline exactly. These are API lifecycle assertions;
+the parent browser workflow owns rendering and dialog interaction evidence.
+
+Metrics independence covers an absent mapping, offline adapter authority,
+wrong separate token, malformed separate token, explicit access denial, and a
+missing separate token file. Malformed token bytes are restored in `finally`.
+Every case still passes the genuine stored private-cache Test. Conversely, the
+unauthorized private-cache JWT fails native Test while valid separate metrics
+authority returns real inventory. Revoking the adapter's native NAR-column grant
+causes CF metrics failure while the real retained private JWT still passes Test.
+The driver restores that grant in `finally`; CF PostgreSQL remains available.
+
+## Real database-selected publication driver
+
+The `cf-server` example adds an optional protected stdin input:
+
+```text
+database_destination: { database_url, id, encryption_key_file }
+```
+
+This input is fixture authority, not an HTTP endpoint. `config` and
+`database_destination` are mutually exclusive. In database mode, the example
+verifies the child key against the protected file, queries the actual migrated
+CF database with `queries::cache_destinations::get_cache_destination`, and builds
+the selected Attic `CacheConfig` from that decrypted model. It invokes the same
+normal server-local publication function used by the original example. Existing
+explicit `config` inputs remain supported. Query/input failures exit 2 without
+printing error values. Publication prints only a static success boolean.
+
+Fresh VM-local Nix store paths must be absent before publication. Both real
+writer rows must publish successfully and produce readable native narinfo and
+NAR responses. The unauthorized private clone must fail with no fresh narinfo,
+even with conflicting ambient Attic settings. Real adapter totals then report
+one published path in each lifecycle cache. The driver calls the publication
+function directly; it does not claim queue/dispatch or completion-transaction
+coverage.
+
+Protected native table hashes and nonsecret write-request counts are checked
+before and after the read-only lifecycle. A separate post-publication baseline
+proves subsequent metrics and native Test operations do not write objects or
+attempt uploads. CF raw hashes remain unchanged after publication and later
+observations. The native proxy records only method, status, and authorization,
+cookie, and CSRF presence booleans. JWTs, keys, ciphertexts, private snapshots,
+actual store paths, provider response bodies, and SQL errors remain guest-private.

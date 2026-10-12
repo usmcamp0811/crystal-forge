@@ -1864,6 +1864,41 @@ async fn scheduled_environment_reconciles_and_verifies_over_one_hundred_members(
     let cve = "CVE-2026-32705";
     let package = "paged-continuity-package";
     let environment = assign_environment(&pool, "paged-continuity-environment", &[&first]).await;
+    // CONCURRENCY: Instrument only this disposable test database. Keep the
+    // production lock function intact behind a wrapper. The extra gate queues
+    // the triage-triggered repair; NOTIFY is delivered only when that repair's
+    // transaction commits, after its final membership writes. Taking the CVE
+    // lock alone would not prove that the detached task had started.
+    sqlx::raw_sql(
+        r#"ALTER FUNCTION lock_poam_cve_key(text) RENAME TO test_original_lock_poam_cve_key;
+           CREATE FUNCTION lock_poam_cve_key(v_cve_id text)
+           RETURNS void LANGUAGE plpgsql AS $$
+           BEGIN
+             IF EXISTS (SELECT 1 FROM cve_current_environment_dispositions
+                        WHERE canonical_cve_id=v_cve_id AND state='scheduled') THEN
+               PERFORM pg_advisory_xact_lock(hashtextextended(v_cve_id, 470));
+               PERFORM pg_notify('test_poam_repair_committed', v_cve_id);
+             END IF;
+             PERFORM test_original_lock_poam_cve_key(v_cve_id);
+           END;
+           $$;"#,
+    )
+    .execute(&pool)
+    .await
+    .unwrap();
+    let mut repair_completed = sqlx::postgres::PgListener::connect_with(&pool)
+        .await
+        .unwrap();
+    repair_completed
+        .listen("test_poam_repair_committed")
+        .await
+        .unwrap();
+    let mut repair_gate = pool.begin().await.unwrap();
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 470))")
+        .bind(cve)
+        .execute(&mut *repair_gate)
+        .await
+        .unwrap();
     let initial = seal_exact_cve_scan(
         &pool,
         &first,
@@ -1888,6 +1923,25 @@ async fn scheduled_environment_reconciles_and_verifies_over_one_hundred_members(
     .await
     .unwrap();
     let poam_id = scheduled.poam_id.unwrap();
+    // Finish the real triage-triggered repair while only the seed exists.
+    // New members must be observed by exactly one explicit page call below.
+    repair_gate.commit().await.unwrap();
+    let completion = tokio::time::timeout(Duration::from_secs(30), repair_completed.recv())
+        .await
+        .expect("triage-triggered repair must commit")
+        .unwrap();
+    assert_eq!(completion.payload(), cve);
+    assert_eq!(
+        sqlx::query_scalar::<_, i64>(
+            "SELECT count(*) FROM poam_cve_finding_links WHERE poam_id=$1 AND retired_at IS NULL",
+        )
+        .bind(poam_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap(),
+        1,
+        "triage-triggered repair completes before new members are added"
+    );
     let (hostname, flake_id): (String, i32) =
         sqlx::query_as("SELECT hostname,flake_id FROM systems WHERE id=$1")
             .bind(first.system_id)

@@ -26,6 +26,7 @@ TOKENS = {name: letter * 64 for name, letter in (
 # Exact inclusive token boundaries use both URL-safe punctuation characters.
 # These public synthetic values remain in protected runtime fixture files.
 TOKENS.update({"Team+1": "Z_-9" * 256, "minimum": "A_-0" * 8})
+TOKENS.update({"lifecycle-public": "i" * 64, "lifecycle-private": "j" * 64})
 CA = "/etc/ssl/certs/ca-certificates.crt"
 STAGE = "startup"
 
@@ -279,6 +280,8 @@ def attic_verify():
 
 
 def cf_tokens():
+    ROOT.mkdir(mode=0o700, exist_ok=True)
+    private(ROOT / "cf-key.env", "CRYSTAL_FORGE_SECRET_KEY=" + secrets.token_hex(32) + "\n")
     directory = Path("/run/cf-metrics-tokens")
     directory.mkdir(mode=0o700, exist_ok=True)
     user = pwd.getpwnam("crystal-forge")
@@ -453,7 +456,7 @@ def cf_setup():
                        if value.startswith(b"CRYSTAL_FORGE_CONFIG="))
     import tomllib
     loaded = tomllib.loads(Path(config_path).read_text())
-    assert len(loaded["server"]["attic_metrics_endpoints"]) == 15
+    assert len(loaded["server"]["attic_metrics_endpoints"]) == 22
     assert loaded["server"]["allow_private_cache_test_targets"] is True
 
 
@@ -567,6 +570,317 @@ def final_cf():
     assert not Path("/run/attic-metrics-secrets").exists()
 
 
+NATIVE = "https://attic-metrics.test:8888/"
+CF = "http://127.0.0.1:8000/api/v1/caches"
+
+
+def mint(*permissions):
+    return run(["atticadm", "--config", "/etc/atticd.toml", "make-token",
+                "--sub", "retained-fixture", "--validity", "1d", *permissions])
+
+
+def lifecycle_attic_setup():
+    """Create real native identities only after the original accounting proofs."""
+    admin = mint("--pull", "*", "--create-cache", "*")
+    headers = {"Authorization": "Bearer " + admin}
+    native = client()
+    source = request(native, "GET", NATIVE + "_api/v1/cache-config/populated",
+                     headers=headers)
+    assert source.status_code == 200, "native source configuration unavailable"
+    source = source.json()
+    bundle = {}
+    for kind, public in (("public", True), ("private", False)):
+        name = "lifecycle-" + kind
+        response = request(native, "POST", NATIVE + "_api/v1/cache-config/" + name,
+                           headers=headers, json={
+                               "keypair": "Generate", "is_public": public,
+                               "store_dir": source["store_dir"], "priority": source["priority"],
+                               "upstream_cache_key_names": source["upstream_cache_key_names"],
+                           })
+        assert response.status_code == 200, "native lifecycle creation failed"
+        writer = mint("--pull", name, "--push", name)
+        config = request(native, "GET", NATIVE + "_api/v1/cache-config/" + name,
+                         headers={"Authorization": "Bearer " + writer})
+        assert config.status_code == 200, "native scoped JWT failed"
+        config = config.json()
+        assert config["is_public"] == public and config["store_dir"] == "/nix/store"
+        assert config["substituter_endpoint"] == NATIVE + name, "native advertised authority mismatch"
+        bundle[kind] = {"name": name, "writer": writer, "config": config}
+    bundle["reader"] = mint("--pull", "lifecycle-public")
+    private(ROOT / "native-lifecycle.json", json.dumps(bundle))
+    # The denied private-cache clone retains a valid JWT for a different cache.
+    assert request(native, "GET", NATIVE + "_api/v1/cache-config/lifecycle-private",
+                   headers={"Authorization": "Bearer " + bundle["reader"]}).status_code in (401, 403)
+
+
+def raw_cf(connection):
+    """Keep complete raw rows private; comparisons include ciphertext and scopes."""
+    return {table: sorted(
+        (row[0] for row in connection.execute(sql.SQL("SELECT to_jsonb(t) FROM {} t").format(
+            sql.Identifier(table)))), key=lambda row: json.dumps(row, sort_keys=True))
+        for table in ("cache_destinations", "cache_destination_environments", "cache_push_jobs")}
+
+
+def assert_redacted(value, secrets_to_hide):
+    assert value["attic_token_configured"] is True, "stored JWT configured flag absent"
+    assert value.get("attic_token") is None, "GET exposed retained JWT"
+    serialized = json.dumps(value)
+    assert all(secret not in serialized for secret in secrets_to_hide), "API exposed private fixture data"
+
+
+def lifecycle_cf_setup():
+    """Create actual encrypted CF rows through validated Admin POST bodies."""
+    import stat
+    bundle_file = ROOT / "native-lifecycle.json"
+    assert stat.S_IMODE(bundle_file.stat().st_mode) == 0o600
+    bundle = json.loads(bundle_file.read_text())
+    session = cf_api()
+    # Read only the disposable service's active fixture key. The same bytes are
+    # supplied to the example as a child-local environment, never in argv.
+    pid = run(["systemctl", "show", "crystal-forge-server", "-p", "MainPID", "--value"])
+    environment = dict(entry.split(b"=", 1) for entry in Path("/proc/" + pid + "/environ").read_bytes().split(b"\0") if b"=" in entry)
+    assert b"CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY" not in environment, "fixture key precedence changed"
+    key = environment[b"CRYSTAL_FORGE_SECRET_KEY"].decode()
+    private(ROOT / "cf-key", key)
+    protected = [key, bundle["reader"], bundle["public"]["writer"], bundle["private"]["writer"]]
+    fixtures = {}
+    response = request(session, "POST", "http://127.0.0.1:8000/api/v1/environments",
+                       json={"name": "retained-native", "color_hex": "#334455", "is_active": True})
+    assert response.status_code == 201, "native fixture environment creation failed"
+    scope = response.json()["id"]
+    for identity, kind, unauthorized in (
+            (1, "public", False), (2, "private", False), (3, "private", True),
+            (4, "private", False), (5, "private", False), (6, "private", False),
+            (7, "private", False), (8, "private", False)):
+        native = bundle[kind]
+        body = {"name": "retained-native-" + str(identity), "cache_type": "Attic",
+                "push_to": NATIVE, "enabled": True, "attic_cache_name": native["name"],
+                "attic_public_key": native["config"]["public_key"],
+                "attic_token": bundle["reader"] if unauthorized else native["writer"],
+                "attic_ignore_upstream_cache_filter": True, "attic_jobs": 1,
+                "max_retries": 0, "retry_delay_seconds": 0, "push_timeout_seconds": 30,
+                "force_repush": False, "require_sigs": True, "environment_ids": [scope]}
+        response = request(session, "POST", CF, json=body)
+        assert response.status_code == 201, "validated CF lifecycle creation failed"
+        value = response.json()
+        assert value["id"] == identity, "startup metrics binding differs from created ID"
+        assert_redacted(value, protected)
+        # Save and Test share this complete public patch. Retained credentials
+        # are omitted, not replaced with null, empty strings or decrypted GETs.
+        fixtures[str(identity)] = {field: value for field, value in body.items() if field != "attic_token"}
+        with db("crystal_forge") as connection:
+            stored, = connection.execute("SELECT attic_token FROM cache_destinations WHERE id=%s", (identity,)).fetchone()
+            assert stored.startswith("enc:v1:") and stored != body["attic_token"], "Admin POST did not encrypt native JWT"
+    private(ROOT / "lifecycle-patches", json.dumps(fixtures))
+    with db("crystal_forge") as connection:
+        private(ROOT / "lifecycle-before", json.dumps(raw_cf(connection)))
+
+
+def retained_test(session, identity, patch=None, expected=True):
+    patches = json.loads((ROOT / "lifecycle-patches").read_text())
+    patch = patches[str(identity)] if patch is None else patch
+    assert "attic_token" not in patch, "retained Test sent credential bytes"
+    response = request(session, "POST", CF + "/" + str(identity) + "/test-credentials", json=patch)
+    assert response.status_code == 200, "stored-ID native Test failed"
+    result = response.json()
+    assert result["ok"] == expected, "native Test contradicted retained authority"
+    assert result["write_auth_valid"] is None, "read Test claimed write authorization"
+    if expected:
+        assert result["stage"] == "complete" and result["cache_access_valid"] is True
+        assert result["token_auth_valid"] == (True if identity != 1 else None)
+    else:
+        assert result["stage"] == "authentication" and result["cache_access_valid"] is False
+    assert result.get("tested_url") is None, "native Test exposed upstream URL"
+
+
+def lifecycle_readonly():
+    """Exercise GET/Test/Cancel/reopen without simulating an undo write."""
+    session = cf_api()
+    bundle = json.loads((ROOT / "native-lifecycle.json").read_text())
+    protected = [(ROOT / "cf-key").read_text(), bundle["reader"],
+                 bundle["public"]["writer"], bundle["private"]["writer"]]
+    with db("crystal_forge") as connection:
+        before = raw_cf(connection)
+        assert before == json.loads((ROOT / "lifecycle-before").read_text())
+        for identity in range(1, 9):
+            value = request(session, "GET", CF + "/" + str(identity))
+            assert value.status_code == 200
+            assert_redacted(value.json(), protected)
+            retained_test(session, identity, expected=identity != 3)
+            # Cancel means discard the local draft and send no PUT. Reopen is a
+            # fresh GET followed by the same retained-ID native Test.
+            assert raw_cf(connection) == before, "GET/Test/Cancel changed raw CF state"
+            reopened = request(session, "GET", CF + "/" + str(identity))
+            assert reopened.status_code == 200 and reopened.json() == value.json()
+            retained_test(session, identity, expected=identity != 3)
+            assert raw_cf(connection) == before, "reopen Test changed raw CF state"
+        # A genuine wrong-scope replacement is tested in memory, then cancelled
+        # without Save. Retained Test must still use the original writer JWT.
+        draft = dict(json.loads((ROOT / "lifecycle-patches").read_text())["2"],
+                     attic_token=bundle["reader"])
+        response = request(session, "POST", CF + "/2/test-credentials", json=draft)
+        assert response.status_code == 200 and response.json()["ok"] is False
+        assert response.json()["stage"] == "authentication"
+        assert raw_cf(connection) == before, "replacement Test persisted draft JWT"
+        retained_test(session, 2)
+        assert raw_cf(connection) == before, "replacement Cancel changed retained JWT"
+
+
+def lifecycle_save():
+    """Permit only Save's timestamp and assignment-row creation timestamps."""
+    patches = json.loads((ROOT / "lifecycle-patches").read_text())
+    session = cf_api()
+    with db("crystal_forge") as connection:
+        for identity in range(1, 9):
+            before = raw_cf(connection)
+            response = request(session, "PUT", CF + "/" + str(identity), json=patches[str(identity)])
+            assert response.status_code == 200, "unchanged retained Save failed"
+            after = raw_cf(connection)
+            assert before["cache_push_jobs"] == after["cache_push_jobs"], "Save changed publication jobs"
+            for old, new in zip(before["cache_destinations"], after["cache_destinations"], strict=True):
+                if old["id"] == identity:
+                    assert new["updated_at"] > old["updated_at"], "intentional Save did not advance timestamp"
+                    new = dict(new, updated_at=old["updated_at"])
+                assert new == old, "unchanged Save rewrote credential or configuration"
+            def membership(rows):
+                return sorted(json.dumps({key: value for key, value in row.items()
+                    if key != "created_at" or row["cache_destination_id"] != identity}, sort_keys=True) for row in rows)
+            assert membership(before["cache_destination_environments"]) == membership(after["cache_destination_environments"]), "Save changed scope membership or unrelated timestamps"
+            retained_test(session, identity, expected=identity != 3)
+            reopened = request(session, "GET", CF + "/" + str(identity))
+            assert reopened.status_code == 200 and reopened.json()["attic_token_configured"] is True
+            assert raw_cf(connection) == after, "post-Save Test/reopen persisted changes"
+        private(ROOT / "lifecycle-saved-hashes", json.dumps(cf_snapshot(connection)))
+
+
+def lifecycle_metrics(published=False):
+    """Metrics authority is independent of the genuine retained upload JWT."""
+    session = cf_api()
+    with db("crystal_forge") as connection:
+        before = raw_cf(connection)
+        for identity, status, reason in ((4, "unsupported", "provider_totals_unsupported"),
+                (5, "unavailable", "transport_unavailable"), (6, "unavailable", "access_denied"),
+                (7, "unavailable", "access_denied"), (8, "error", "invalid_configuration")):
+            absent(metrics(session, identity), status, reason)
+            retained_test(session, identity)
+        for identity in (1, 2, 3):
+            value = metrics(session, identity).json()
+            assert value["status"] == "available" and value["path_count"] == (1 if published else 0)
+            retained_test(session, identity, expected=identity != 3)
+        path = Path("/run/cf-metrics-tokens/lifecycle-private")
+        original = path.read_bytes()
+        try:
+            path.write_bytes(b"invalid-format.")
+            absent(metrics(session, 2), "error", "invalid_configuration")
+            retained_test(session, 2)
+        finally:
+            path.write_bytes(original)
+        assert raw_cf(connection) == before, "metric failure or native Test rewrote retained state"
+
+
+def lifecycle_grant(revoke):
+    with db("attic") as connection:
+        connection.execute("REVOKE SELECT (id,nar_size,state) ON nar FROM cf_attic_metrics" if revoke else
+                           "GRANT SELECT (id,nar_size,state) ON nar TO cf_attic_metrics")
+
+
+def lifecycle_unavailable():
+    with db("crystal_forge") as connection:
+        before = raw_cf(connection)
+        session = cf_api()
+        absent(metrics(session, 2), "error", "unexpected_status")
+        retained_test(session, 2)
+        assert raw_cf(connection) == before, "provider DB denial changed stored upload JWT"
+
+
+def lifecycle_publish():
+    """Upload with the selected real CF row; no JSON credential-storage surrogate."""
+    bundle = json.loads((ROOT / "native-lifecycle.json").read_text())
+    session = cf_api()
+    environment = dict(os.environ, CRYSTAL_FORGE_SECRET_KEY=(ROOT / "cf-key").read_text(),
+                       ATTIC_TOKEN=bundle["public"]["writer"], ATTIC_SERVER_URL="http://127.0.0.1:9/")
+    environment.pop("CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY", None)
+    with db("crystal_forge") as connection:
+        before = raw_cf(connection)
+        for identity, kind, authorized in ((1, "public", True), (2, "private", True), (3, "private", False)):
+            source = ROOT / ("publication-source-" + str(identity))
+            private(source, secrets.token_hex(4096))
+            path = run(["nix-store", "--add", str(source)])
+            hash_part = Path(path).name.split("-", 1)[0]
+            native = bundle[kind]
+            # A stale but authorized ambient JWT must not rescue the selected
+            # unauthorized clone. The database credential remains authoritative.
+            environment["ATTIC_TOKEN"] = native["writer"]
+            headers = {"Authorization": "Bearer " + native["writer"]}
+            url = native["config"]["substituter_endpoint"] + "/" + hash_part + ".narinfo"
+            assert request(client(), "GET", url, headers=headers).status_code == 404, "fresh output already published"
+            derivation = dict(id=1, commit_id=None, derivation_type="Package", derivation_name="retained-native",
+                derivation_path=None, scheduled_at=None, completed_at=None, started_at=None,
+                attempt_count=0, evaluation_duration_ms=None, error_message=None, pname=None,
+                version=None, status_id=0, derivation_target=None, store_path=path)
+            payload = {"database_destination": {"database_url": "postgresql://crystal_forge@127.0.0.1/crystal_forge",
+                "id": identity, "encryption_key_file": str(ROOT / "cf-key")},
+                "database": True, "derivation": derivation, "path": path}
+            result = subprocess.run(["attic-server-publication"], input=json.dumps(payload).encode(),
+                env=environment, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=120, check=False)
+            assert result.returncode == (0 if authorized else 1), "DB-selected publication contradicted native JWT authority"
+            assert result.stdout.strip() == (b"publication_success=true" if authorized else b"publication_success=false"), "publication outcome missing"
+            response = request(client(), "GET", url, headers=headers)
+            assert response.status_code == (200 if authorized else 404), "native narinfo contradicted selected upload"
+            if authorized:
+                nar = next(line[5:] for line in response.text.splitlines() if line.startswith("URL: "))
+                assert request(client(), "GET", native["config"]["substituter_endpoint"] + "/" + nar, headers=headers).status_code == 200, "genuine NAR unavailable"
+            retained_test(session, identity, expected=identity != 3)
+            assert raw_cf(connection) == before, "function-level publication changed raw CF destinations/jobs"
+        for identity in (1, 2, 3):
+            value = metrics(session, identity).json()
+            assert value["status"] == "available" and value["path_count"] == 1 and value["storage_bytes"] > 0
+        assert raw_cf(connection) == before
+
+
+def lifecycle_attic_baseline(published=False):
+    with db("attic") as connection:
+        filename = "lifecycle-published-hashes" if published else "lifecycle-native-hashes"
+        private(ROOT / filename, json.dumps({"tables": attic_snapshot(connection),
+            "write_requests": native_write_requests()}))
+
+
+def native_records():
+    return [json.loads(line) for line in Path("/var/log/nginx/native-safe.log").read_text().splitlines()]
+
+
+def native_write_requests():
+    return sum(row["method"] not in ("GET", "HEAD") for row in native_records())
+
+
+def lifecycle_final():
+    with db("crystal_forge") as connection:
+        assert cf_snapshot(connection) == json.loads((ROOT / "lifecycle-saved-hashes").read_text()), "lifecycle changed protected CF state"
+        ciphertexts = [row[0] for row in connection.execute(
+            "SELECT attic_token FROM cache_destinations WHERE id BETWEEN 1 AND 8")]
+    bundle = json.loads((ROOT / "native-lifecycle.json").read_text())
+    protected = ciphertexts + [(ROOT / "cf-key").read_text(), bundle["reader"],
+                              bundle["public"]["writer"], bundle["private"]["writer"]]
+    journal = run(["journalctl", "-u", "crystal-forge-server", "--no-pager"])
+    assert all(value not in journal for value in protected), "CF journal exposed retained private material"
+
+
+def lifecycle_attic_final(published=False):
+    filename = "lifecycle-published-hashes" if published else "lifecycle-native-hashes"
+    baseline = json.loads((ROOT / filename).read_text())
+    with db("attic") as connection:
+        assert attic_snapshot(connection) == baseline["tables"], "read lifecycle mutated native objects"
+    assert native_write_requests() == baseline["write_requests"], "Test or metrics attempted native writes"
+    records = native_records()
+    assert records and all(not row["cookie"] and not row["csrf"] for row in records), "CF session leaked to native Attic"
+    if published:
+        assert any(row["method"] == "PUT" and row["authorization"] and row["status"] == 200 for row in records), "genuine native upload not observed"
+        assert any(row["authorization"] and row["status"] in (401, 403) for row in records), "native denial not observed"
+    bundle = json.loads((ROOT / "native-lifecycle.json").read_text())
+    journal = run(["journalctl", "-u", "atticd", "-u", "cf-attic-metrics", "-u", "nginx", "--no-pager"])
+    assert all(token not in journal for token in [bundle["reader"], bundle["public"]["writer"], bundle["private"]["writer"]]), "native journal exposed JWT"
+
+
 def main():
     global STAGE
     STAGE = sys.argv[1]
@@ -576,6 +890,15 @@ def main():
         "cf-setup": cf_setup, "cf-gates": cf_gates, "corrupt": corrupt,
         "restore": lambda: corrupt(True), "cf-corrupt": lambda: absent(metrics(cf_api(), 4701), "error", "unexpected_status"),
         "final-attic": final_attic, "final-cf": final_cf,
+        "lifecycle-attic-setup": lifecycle_attic_setup, "lifecycle-cf-setup": lifecycle_cf_setup,
+        "lifecycle-readonly": lifecycle_readonly, "lifecycle-save": lifecycle_save,
+        "lifecycle-metrics": lifecycle_metrics, "lifecycle-unavailable": lifecycle_unavailable,
+        "lifecycle-revoke": lambda: lifecycle_grant(True), "lifecycle-grant": lambda: lifecycle_grant(False),
+        "lifecycle-publish": lifecycle_publish, "lifecycle-final": lifecycle_final,
+        "lifecycle-attic-baseline": lifecycle_attic_baseline, "lifecycle-attic-final": lifecycle_attic_final,
+        "lifecycle-published-baseline": lambda: lifecycle_attic_baseline(True),
+        "lifecycle-published-final": lambda: lifecycle_attic_final(True),
+        "lifecycle-metrics-published": lambda: lifecycle_metrics(True),
     }
     if STAGE == "expected":
         print(json.dumps(expected()))

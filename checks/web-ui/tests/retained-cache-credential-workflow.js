@@ -118,7 +118,12 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
         assert.equal(result.stage, ok ? "complete" : "authentication", "safe native Attic probe stage");
         assert.equal(result.cache_access_valid, ok, "private cache read access");
         assert.equal(result.write_auth_valid, null, "cache-config GET cannot establish push permission");
-        if (ok) assert.equal(result.token_auth_valid, true, "private native success authenticated the token");
+        if (ok) {
+          assert.equal(result.cache_is_public, false, "private native cache visibility");
+          assert.equal(result.token_auth_valid, true, "private native success authenticated the token");
+          await expect(outer).toContainText("Private cache read access verified");
+          if (id === fixture.attic.id && captureState) await captureState("private-native-attic-retained-read-untested-write");
+        }
         else assert.notEqual(result.token_auth_valid, true, "denied replacement cannot claim token authorization");
         await expect(outer).toContainText("Write authorization: Untested");
       }
@@ -681,7 +686,8 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
     console.log("TASK-470 five-rail native Basic Add/Edit passed: real mTLS Discovery, explicit conflict review, atomic encrypted Save, scoped tests and no replacement persistence");
   };
   const metricsWorkflow = async () => {
-    const records = [fixture.metrics.v16, fixture.metrics.v18, fixture.metrics.attic];
+    const records = [fixture.metrics.v16, fixture.metrics.v18, fixture.metrics.attic,
+      fixture.metrics.attic_empty, fixture.metrics.attic_unconfigured, fixture.metrics.attic_public];
     const names = await Promise.all(records.map(value => read(value.id)));
     await checkpoint("metrics-before", records.map(value => value.id));
     const replies = new Map();
@@ -733,24 +739,94 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       const pathsHelp = await cardPaths.getAttribute("title");
       assert(storageHelp.includes(`${expected.logical_nar_bytes} logical NAR bytes`) && storageHelp.includes("Physical storage usage and capacity are unknown"));
       assert(pathsHelp.includes("valid registered paths") && pathsHelp.includes("does not verify content integrity"));
+      const additionalDisplays = [];
+      for (let index = 3; index < records.length; index++) {
+        const value = records[index], body = replies.get(value.id);
+        const target = page.getByText(names[index].name, { exact: true }).locator("xpath=ancestor::div[.//button[@title='Edit'] and .//p][1]");
+        const empty = index === 3;
+        if (empty) {
+          assert.deepEqual(value.expected, { cached_path_count: 0, logical_nar_bytes: 0 });
+          assert.equal(body.status, "available"); assert.equal(body.reason_code, "attic_inventory");
+          assert.equal(body.storage_bytes, 0); assert.equal(body.object_count, 0); assert.equal(body.path_count, 0);
+          assert.equal(body.storage_bytes_basis, "uncompressed_nar_bytes"); assert.equal(body.object_count_basis, "cached_nix_paths");
+          assert(body.measured_at && Number.isFinite(Date.parse(body.measured_at)));
+        } else {
+          assert.equal(body.status, "unsupported"); assert.equal(body.reason_code, "provider_totals_unsupported");
+          for (const field of ["storage_bytes", "storage_bytes_basis", "object_count", "object_count_basis", "path_count", "measured_at"]) assert.equal(body[field], null);
+          await expect(target).not.toContainText(/disconnected|credential.*invalid|authentication.*failed/i);
+          await expect(target.getByText("0.00 GiB", { exact: true })).toHaveCount(0);
+        }
+        const storageText = empty ? "Logical NAR: 0.00 GiB" : "Storage: Unavailable";
+        const pathText = empty ? "0 cached Nix paths" : "Unavailable";
+        const storageElement = target.getByText(storageText, { exact: true });
+        const pathElement = target.getByText(`Paths / Objects: ${pathText}`, { exact: true });
+        await expect(storageElement).toBeVisible(); await expect(pathElement).toBeVisible();
+        const help = await storageElement.getAttribute("title"), pathHelp = await pathElement.getAttribute("title");
+        if (empty) {
+          assert(help.includes("0 logical NAR bytes") && help.includes("Physical storage usage and capacity are unknown"));
+          assert.equal(pathHelp, pathsHelp);
+        } else assert(help.includes("No provider inventory request is made") && help === pathHelp);
+        additionalDisplays.push({ index, storageText, pathText, help, pathHelp });
+      }
       for (const value of records) assert.equal(gets.get(value.id), 1, "one finite initial metrics pass");
       if (captureState) await captureState("native-attic-metrics-populated-cards");
+      if (captureState) await captureState("metricsEmptyNone-native-attic-cards");
+      for (const value of additionalDisplays) {
+        const target = page.getByText(names[value.index].name, { exact: true }).locator("xpath=ancestor::div[.//button[@title='Edit'] and .//p][1]");
+        await target.scrollIntoViewIfNeeded();
+        if (captureState) await captureState(`metricsEmptyNone-${value.index === 3 ? "empty" : value.index === 4 ? "unconfigured" : "public-unconfigured"}-cards`);
+      }
       await page.getByRole("button", { name: "Table", exact: true }).click();
       const row = page.getByRole("row").filter({ has: page.getByText(names[2].name, { exact: true }) });
       await expect(row.getByText(`Logical NAR: ${storage}`, { exact: true })).toBeVisible();
       await expect(row.getByText(paths, { exact: true })).toBeVisible();
       await expect(row.getByText(`Logical NAR: ${storage}`, { exact: true })).toHaveAttribute("title", storageHelp);
       await expect(row.getByRole("cell", { name: paths, exact: true })).toHaveAttribute("title", pathsHelp);
+      for (const value of additionalDisplays) {
+        const target = page.getByRole("row").filter({ has: page.getByText(names[value.index].name, { exact: true }) });
+        const tableStorage = value.index === 3 ? value.storageText : "Unavailable";
+        if (value.index === 3) {
+          await expect(target.getByText(tableStorage, { exact: true })).toBeVisible();
+          await expect(target.getByRole("cell", { name: value.pathText, exact: true })).toBeVisible();
+        } else {
+          await expect(target.getByRole("cell", { name: "Unavailable", exact: true })).toHaveCount(2);
+          await expect(target).not.toContainText(/disconnected|credential.*invalid|authentication.*failed/i);
+        }
+        await expect(target.locator("span[title]").filter({ hasText: tableStorage })).toHaveAttribute("title", value.help);
+        await expect(target.locator("td[title]").filter({ hasText: value.pathText })).toHaveAttribute("title", value.pathHelp);
+      }
       if (captureState) await captureState("native-attic-metrics-populated-table");
+      if (captureState) await captureState("metricsEmptyNone-native-attic-table");
+      for (const value of additionalDisplays) {
+        const target = page.getByRole("row").filter({ has: page.getByText(names[value.index].name, { exact: true }) });
+        await target.scrollIntoViewIfNeeded();
+        if (captureState) await captureState(`metricsEmptyNone-${value.index === 3 ? "empty" : value.index === 4 ? "unconfigured" : "public-unconfigured"}-table`);
+      }
       for (const value of records) assert.equal(gets.get(value.id), 1, "Cards to Table must reuse observations");
       replies.clear();
+      const initialAttic = attic;
       const refreshRequest = page.waitForRequest(request => request.method() === "GET" && request.url() === `${apiBaseUrl}/api/v1/caches/${records[2].id}/metrics`);
       const loading = expect(page.getByRole("button", { name: "Loading metrics…", exact: true })).toBeVisible();
       await page.getByRole("button", { name: "Refresh metrics", exact: true }).click();
       await loading; await refreshRequest;
+      if (captureState) await captureState("metricsRefresh-native-loading-action");
       await expect.poll(() => records.every(value => replies.has(value.id)), { message: "explicit refresh makes real metrics requests" }).toBe(true);
       assert.equal(replies.get(records[2].id).storage_bytes, expected.logical_nar_bytes);
       assert.equal(replies.get(records[2].id).path_count, expected.cached_path_count);
+      assert.deepEqual({ ...replies.get(records[2].id), measured_at: null }, { ...initialAttic, measured_at: null });
+      assert(Number.isFinite(Date.parse(replies.get(records[2].id).measured_at)));
+      for (const value of additionalDisplays) {
+        const refreshed = replies.get(records[value.index].id);
+        assert.equal(refreshed.status, value.index === 3 ? "available" : "unsupported");
+        assert.equal(refreshed.storage_bytes, value.index === 3 ? 0 : null);
+        assert.equal(refreshed.path_count, value.index === 3 ? 0 : null);
+        assert.equal(refreshed.object_count, value.index === 3 ? 0 : null);
+        assert.equal(refreshed.reason_code, value.index === 3 ? "attic_inventory" : "provider_totals_unsupported");
+        assert.equal(refreshed.storage_bytes_basis, value.index === 3 ? "uncompressed_nar_bytes" : null);
+        assert.equal(refreshed.object_count_basis, value.index === 3 ? "cached_nix_paths" : null);
+        if (value.index === 3) assert(Number.isFinite(Date.parse(refreshed.measured_at)));
+        else assert.equal(refreshed.measured_at, null);
+      }
       await expect(page.getByRole("button", { name: "Refresh metrics", exact: true })).toBeEnabled();
       await expect(row.getByText(paths, { exact: true })).toBeVisible();
       for (const value of records) assert.equal(gets.get(value.id), 2, "one initial and one explicit refresh pass");
@@ -776,11 +852,57 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       await expect(missing.getByText("0 objects", { exact: true })).toHaveCount(0);
       if (captureState) await captureState("native-metrics-real-v16-unavailable-detail");
       await missing.getByRole("button", { name: "Close", exact: true }).click();
+      for (const value of additionalDisplays) {
+        await page.getByText(names[value.index].name, { exact: true }).click();
+        const detail = page.getByRole("dialog").filter({ has: page.getByRole("button", { name: "Edit cache", exact: true }) });
+        if (value.index === 3) {
+          await expect(detail.getByText("0.00 GiB", { exact: true })).toBeVisible();
+          await expect(detail.getByText("0 cached Nix paths", { exact: true })).toBeVisible();
+          await expect(detail).toContainText(/Logical NAR/);
+          await expect(detail).toContainText(/Physical storage usage and capacity are unknown/);
+        } else {
+          await expect(detail).toContainText("No provider inventory request is made");
+          await expect(detail.getByText("0.00 GiB", { exact: true })).toHaveCount(0);
+          await expect(detail).not.toContainText(/disconnected|credential.*invalid|authentication.*failed/i);
+        }
+        await expect(detail.getByText(value.index === 3 ? "Logical NAR" : "Reported logical size", { exact: true }).locator("xpath=following-sibling::dd[1]")).toHaveAttribute("title", value.help);
+        await expect(detail.getByText("Paths / Objects", { exact: true }).locator("xpath=following-sibling::dd[1]")).toHaveAttribute("title", value.pathHelp);
+        if (captureState) await captureState(`metricsEmptyNone-${value.index === 3 ? "empty" : value.index === 4 ? "unconfigured" : "public-unconfigured"}-detail`);
+        await detail.getByRole("button", { name: "Close", exact: true }).click();
+      }
       for (let index = 0; index < records.length; index++) unchanged(names[index], await read(records[index].id), "read-only card metrics");
       for (const value of records) assert.equal(gets.get(value.id), 2, "view/detail transitions must not poll metrics");
     } finally { page.off("response", collect); page.off("request", count); }
     await checkpoint("metrics-after", records.map(value => value.id));
     console.log("TASK-470 real native metrics cards passed: 1.6 unavailable, isolated 1.8 empty totals with accurate bases, no raw-state changes");
+  };
+  const publicAtticWorkflow = async () => {
+    const id = fixture.metrics.attic_public.id;
+    const before = await read(id);
+    assert.equal(before.attic_token_configured, true, "retained nonempty publication token is configured, not verified");
+    await checkpoint("attic-public-before", [id]);
+    await open(before);
+    await expect(outer.getByLabel("Credential", { exact: true })).toHaveValue("__current__");
+    await expect(outer.getByRole("checkbox", { name: /^Requires authentication/ })).toBeChecked();
+    await expect(outer).toContainText("Public cache reads can succeed anonymously");
+    const replyPromise = page.waitForResponse(response => response.url() === `${apiBaseUrl}/api/v1/caches/${id}/test-credentials` && response.request().method() === "POST");
+    await outer.getByRole("button", { name: "Test connection", exact: true }).click();
+    const reply = await replyPromise;
+    assert.equal(reply.status(), 200);
+    const patch = reply.request().postDataJSON(), result = await reply.json();
+    assert(!Object.hasOwn(patch, "attic_token"), "Public retained Test must resolve the token by ID");
+    assert.equal(result.ok, true); assert.equal(result.stage, "complete"); assert.equal(result.probe_kind, "attic_cache_config");
+    assert.equal(result.cache_access_valid, true); assert.equal(result.cache_is_public, true);
+    assert.equal(result.token_auth_valid, null); assert.equal(result.write_auth_valid, null);
+    await expect(outer).toContainText("Public cache read access verified");
+    await expect(outer).toContainText("Token authentication: Untested");
+    await expect(outer).toContainText("This is not a token failure");
+    await expect(outer).toContainText("Write authorization: Untested");
+    await expect(outer.getByLabel("Token", { exact: true })).toHaveCount(0);
+    if (captureState) await captureState("public-native-attic-retained-read-untested-write");
+    await close();
+    unchanged(before, await read(id), "public retained Test/Cancel");
+    await checkpoint("attic-public-after", [id]);
   };
   page.on("request", observe);
   try {
@@ -978,6 +1100,7 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
     assert.equal(mutationRequests.length, 0, "all source Test/Cancel phases precede every Save");
     await checkpoint("source-pre-save", kinds.map(kind => fixture[kind].id));
     await checkpoint("legacy-pre-save", Object.values(fixture.legacy_attic).map(value => value.id));
+    await publicAtticWorkflow();
     await metricsWorkflow();
     await basicWorkflow();
     for (const kind of ["legacy_plain", "legacy_encrypted"]) {

@@ -41,8 +41,13 @@ const CACHE_CREDENTIAL_ICON_STYLE: &str =
 const CACHE_FORM_FOOT_STATE_STYLE: &str = "flex-grow:1;min-width:0;";
 
 const ATTIC_ACCESS_VERIFIED: &str = "Cache access verified. Write authorization: Untested.";
+const ATTIC_PUBLIC_ACCESS_VERIFIED: &str =
+    "Public cache read access verified. Write authorization: Untested.";
+const ATTIC_PRIVATE_ACCESS_VERIFIED: &str =
+    "Private cache read access verified. Write authorization: Untested.";
 const ATTIC_ACCESS_UNVERIFIED: &str = "Attic cache access was not verified. Check the server URL and cache name. Write authorization: Untested.";
 const ATTIC_TOKEN_UNTESTED: &str = "Token authentication: Untested.";
+const ATTIC_PUBLIC_TOKEN_UNTESTED: &str = "Token authentication: Untested. This public read can succeed anonymously and does not establish whether the configured token can publish. This is not a token failure.";
 const ATTIC_TOKEN_READ_VERIFIED: &str = "Token authentication for private cache read: Verified.";
 
 // SECURITY: Display only allowlisted stage constants, never server prose, URLs
@@ -58,14 +63,19 @@ fn attic_probe_text(result: &CacheCredentialTestResult) -> (&'static str, &'stat
         && result.write_auth_valid.is_none()
         && result.error.is_none();
     if verified {
-        return (
-            ATTIC_ACCESS_VERIFIED,
-            if result.token_auth_valid == Some(true) {
-                ATTIC_TOKEN_READ_VERIFIED
-            } else {
-                ATTIC_TOKEN_UNTESTED
-            },
-        );
+        // COMPATIBILITY: Older typed probes omit visibility but their true token
+        // result proves private read authentication. Never infer public access
+        // from a missing token result, configured flags, or upstream prose.
+        return match (result.cache_is_public, result.token_auth_valid) {
+            (Some(true), None) => (ATTIC_PUBLIC_ACCESS_VERIFIED, ATTIC_PUBLIC_TOKEN_UNTESTED),
+            (Some(false), Some(true)) => {
+                (ATTIC_PRIVATE_ACCESS_VERIFIED, ATTIC_TOKEN_READ_VERIFIED)
+            }
+            (Some(false), None) => (ATTIC_PRIVATE_ACCESS_VERIFIED, ATTIC_TOKEN_UNTESTED),
+            (None, Some(true)) => (ATTIC_ACCESS_VERIFIED, ATTIC_TOKEN_READ_VERIFIED),
+            (None, None) => (ATTIC_ACCESS_VERIFIED, ATTIC_TOKEN_UNTESTED),
+            _ => (ATTIC_ACCESS_UNVERIFIED, ATTIC_TOKEN_UNTESTED),
+        };
     }
     let message = if result.ok {
         ATTIC_ACCESS_UNVERIFIED
@@ -1239,7 +1249,7 @@ fn CacheDestinationForm(
                         div { class: "pe-sec-head", h3 { "Credentials" } p { "Use the current configured credential or select a dialog-local replacement. Secrets are encrypted on save." } }
                         div { class: "field", label { style: "display:flex;gap:9px;align-items:flex-start;margin:0;text-transform:none;letter-spacing:0;",
                             input { r#type: "checkbox", checked: kind() != "nix" || (current_configured && !url_changed), disabled: true, style: "accent-color:var(--cf-brand-purple);margin-top:1px;" }
-                            span { "Requires authentication" div { class: "help", if kind() == "nix" { if current_configured { "HTTP Basic credentials remain on the server." } else if stored_access_unknown { "Stored authentication metadata is unavailable. Test resolves the server configuration by ID." } else { "Public read access or the executing Nix store configuration." } } else { "Required by the current destination API; anonymous publication is not supported." } } }
+                            span { "Requires authentication" div { class: "help", if kind() == "nix" { if current_configured { "HTTP Basic credentials remain on the server." } else if stored_access_unknown { "Stored authentication metadata is unavailable. Test resolves the server configuration by ID." } else { "Public read access or the executing Nix store configuration." } } else if kind() == "attic" { "The configured token is used for publication. Public cache reads can succeed anonymously; this setting does not establish whether the cache-config endpoint requires authentication." } else { "Required by the current destination API; anonymous publication is not supported." } } }
                         } }
                         if kind() == "nix" {
                             p { class: "help", "Nix HTTPS uses the configured Nix store mechanism. A generic bearer-token provider is not supported by this destination type." }
@@ -3045,6 +3055,7 @@ mod tests {
             "message": "fixture-forbidden-upstream-body", "tested_url": "https://fixture-forbidden-url",
             "probe_kind": "attic_cache_config", "stage": stage,
             "cache_access_valid": ok, "token_auth_valid": if private { Some(true) } else { None },
+            "cache_is_public": if ok { Some(!private) } else { None },
             "write_auth_valid": null
         })).unwrap()
     }
@@ -3055,15 +3066,95 @@ mod tests {
         assert_eq!(
             super::attic_probe_text(&private),
             (
-                super::ATTIC_ACCESS_VERIFIED,
+                super::ATTIC_PRIVATE_ACCESS_VERIFIED,
                 super::ATTIC_TOKEN_READ_VERIFIED
             )
         );
         let public = attic_evidence("complete", true, false);
         assert_eq!(
             super::attic_probe_text(&public),
-            (super::ATTIC_ACCESS_VERIFIED, super::ATTIC_TOKEN_UNTESTED)
+            (
+                super::ATTIC_PUBLIC_ACCESS_VERIFIED,
+                super::ATTIC_PUBLIC_TOKEN_UNTESTED
+            )
         );
+    }
+
+    #[test]
+    fn attic_visibility_and_token_evidence_remain_independent_and_legacy_safe() {
+        for (public, token, expected) in [
+            (
+                None,
+                None,
+                (super::ATTIC_ACCESS_VERIFIED, super::ATTIC_TOKEN_UNTESTED),
+            ),
+            (
+                None,
+                Some(true),
+                (super::ATTIC_ACCESS_VERIFIED, super::ATTIC_TOKEN_READ_VERIFIED),
+            ),
+            (
+                Some(false),
+                None,
+                (
+                    super::ATTIC_PRIVATE_ACCESS_VERIFIED,
+                    super::ATTIC_TOKEN_UNTESTED,
+                ),
+            ),
+            (
+                Some(true),
+                Some(true),
+                (super::ATTIC_ACCESS_UNVERIFIED, super::ATTIC_TOKEN_UNTESTED),
+            ),
+            (
+                Some(true),
+                Some(false),
+                (super::ATTIC_ACCESS_UNVERIFIED, super::ATTIC_TOKEN_UNTESTED),
+            ),
+            (
+                Some(false),
+                Some(false),
+                (super::ATTIC_ACCESS_UNVERIFIED, super::ATTIC_TOKEN_UNTESTED),
+            ),
+            (
+                None,
+                Some(false),
+                (super::ATTIC_ACCESS_UNVERIFIED, super::ATTIC_TOKEN_UNTESTED),
+            ),
+        ] {
+            let mut value = serde_json::to_value(attic_evidence("complete", true, false)).unwrap();
+            if let Some(public) = public {
+                value["cache_is_public"] = serde_json::json!(public);
+            } else {
+                value.as_object_mut().unwrap().remove("cache_is_public");
+            }
+            value["token_auth_valid"] = serde_json::json!(token);
+            // Neither misleading prose nor a configured-auth hint has authority.
+            value["message"] = serde_json::json!("Public cache; token and write verified");
+            value["requires_auth"] = serde_json::json!(true);
+            let result = serde_json::from_value(value).unwrap();
+            assert_eq!(super::attic_probe_text(&result), expected);
+        }
+    }
+
+    #[test]
+    fn attic_visibility_requires_complete_read_evidence_and_a_typed_boolean() {
+        for (stage, ok) in [("complete", false), ("unsupported", true), ("response", true)] {
+            let mut result = attic_evidence(stage, ok, false);
+            result.cache_is_public = Some(true);
+            assert_eq!(
+                super::attic_probe_text(&result),
+                (super::ATTIC_ACCESS_UNVERIFIED, super::ATTIC_TOKEN_UNTESTED)
+            );
+        }
+        for invalid in [serde_json::json!("true"), serde_json::json!(1)] {
+            let mut value = serde_json::to_value(attic_evidence("complete", true, false)).unwrap();
+            value["cache_is_public"] = invalid;
+            assert!(
+                serde_json::from_value::<crate::api::models::CacheCredentialTestResult>(value)
+                    .is_err()
+            );
+        }
     }
 
     #[test]

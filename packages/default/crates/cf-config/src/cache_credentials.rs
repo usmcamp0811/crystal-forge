@@ -1,4 +1,4 @@
-//! Prepares protected, process-scoped credentials for Niks3 writes and Nix reads.
+//! Prepares process-scoped credentials for Attic/Niks3 writes and Nix reads.
 //!
 //! Keep each prepared value alive until all consuming child processes exit,
 //! including cancellation and timeout cleanup. Dropping the value removes its
@@ -13,6 +13,170 @@ use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::PathBuf;
 use tempfile::TempDir;
 use url::Url;
+
+/// Identifies the authority that selected a publication configuration.
+///
+/// This is per-operation provenance, not a persisted configuration option.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CachePublicationSource {
+    /// Uses static service configuration and its legacy ambient Attic login.
+    Static,
+    /// Uses the database destination selected for this job; ambient Attic
+    /// credentials and persistent CLI logins must not replace that selection.
+    Database,
+}
+
+/// Owns one selected Attic upload's private XDG config and token file.
+///
+/// The pinned native client supports `token-file` and server-qualified cache
+/// references. No login is needed. Keep this owner through child exit or
+/// confirmed kill/reap, including cancellation. Debug never exposes config.
+pub struct PreparedAtticPush {
+    /// Native push arguments with a fixed internal server-qualified reference.
+    pub args: Vec<String>,
+    credentials: TempDir,
+}
+
+impl std::fmt::Debug for PreparedAtticPush {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PreparedAtticPush([REDACTED])")
+    }
+}
+
+impl PreparedAtticPush {
+    /// Prepares the configured native cache and stored token for one upload.
+    ///
+    /// Preserves existing push flags. Each call gets a distinct mode-0700 XDG
+    /// directory with mode-0600 token and config files. JSON string escaping is
+    /// also valid TOML basic-string escaping for these UTF-8 values.
+    ///
+    /// # Errors
+    /// Returns static errors for missing/invalid configuration or file creation.
+    /// Native token validity and write authorization belong to the real upload.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// use cf_config::{CacheConfig, CacheType};
+    /// use cf_config::cache_credentials::PreparedAtticPush;
+    /// let cache = CacheConfig {
+    ///     cache_type: CacheType::Attic, push_to: Some("https://cache.example".into()),
+    ///     attic_cache_name: Some("team".into()), attic_token: Some("secret".into()),
+    ///     ..Default::default()
+    /// };
+    /// let prepared = PreparedAtticPush::new(
+    ///     &cache, "/nix/store/00000000000000000000000000000000-output",
+    /// )?;
+    /// let mut command = tokio::process::Command::new("attic");
+    /// command.args(&prepared.args);
+    /// prepared.apply_to_command(&mut command);
+    /// // Keep `prepared` until the child exits or kill/reap completes.
+    /// # Ok::<(), anyhow::Error>(())
+    /// ```
+    pub fn new(cache: &crate::config::CacheConfig, store_path: &str) -> Result<Self> {
+        Self::for_paths(cache, &[store_path.to_owned()])
+    }
+
+    /// Prepares all explicit paths in one selected Attic publication chunk.
+    ///
+    /// Preserves path order, duplicates, jobs, and the upstream-filter flag.
+    /// Does not add `--no-closure`: the existing native push closure policy
+    /// applies to every supplied root. Each path must be a canonical direct
+    /// child of `/nix/store`; `.drv` roots are permitted without resolving them
+    /// to outputs. Credential ownership and environment rules match [`Self::new`].
+    ///
+    /// # Errors
+    /// Returns static errors for an empty chunk, an invalid path, missing or
+    /// invalid selected configuration, or protected-file creation failure.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # fn chunk(cache: &cf_config::CacheConfig) -> anyhow::Result<()> {
+    /// use cf_config::cache_credentials::PreparedAtticPush;
+    /// let paths = vec![
+    ///     "/nix/store/00000000000000000000000000000000-input".into(),
+    ///     "/nix/store/11111111111111111111111111111111-root.drv".into(),
+    /// ];
+    /// let prepared = PreparedAtticPush::for_paths(cache, &paths)?;
+    /// assert_eq!(&prepared.args[2..4], paths.as_slice());
+    /// # Ok(()) }
+    /// ```
+    pub fn for_paths(cache: &crate::config::CacheConfig, paths: &[String]) -> Result<Self> {
+        ensure!(
+            cache.cache_type == crate::config::CacheType::Attic,
+            "selected push requires Attic"
+        );
+        let urls = crate::attic_urls::resolve_attic_urls(
+            cache
+                .push_to
+                .as_deref()
+                .ok_or_else(|| anyhow!("selected Attic endpoint is missing"))?
+                .trim(),
+            cache
+                .attic_cache_name
+                .as_deref()
+                .ok_or_else(|| anyhow!("selected Attic cache is missing"))?
+                .trim(),
+        )?;
+        ensure!(
+            !paths.is_empty(),
+            "selected Attic push requires a nonempty path chunk"
+        );
+        // `false` accepts both output and .drv paths; `true` requires .drv.
+        // The shared validator rejects traversal and non-direct store children.
+        ensure!(
+            paths
+                .iter()
+                .all(|path| cf_protocol::builder::is_canonical_nix_store_path(path, false)),
+            "selected Attic push requires canonical store paths"
+        );
+        let token = cache
+            .attic_token
+            .as_deref()
+            .ok_or_else(|| anyhow!("selected Attic token is missing"))?;
+        let credentials = protected_directory()?;
+        let token_path = protected_file(&credentials, "token", token)?;
+        let attic = credentials.path().join("attic");
+        fs::create_dir(&attic)
+            .map_err(|_| anyhow!("could not create private Attic config directory"))?;
+        fs::set_permissions(&attic, fs::Permissions::from_mode(0o700))
+            .map_err(|_| anyhow!("could not restrict private Attic config directory"))?;
+        let config = format!(
+            "default-server = \"cf-selected\"\n[servers.cf-selected]\nendpoint = {}\ntoken-file = {}\n",
+            serde_json::to_string(urls.server_url.as_str())
+                .map_err(|_| anyhow!("could not encode Attic endpoint"))?,
+            serde_json::to_string(&path_string(&token_path)?)
+                .map_err(|_| anyhow!("could not encode Attic token path"))?,
+        );
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(attic.join("config.toml"))
+            .map_err(|_| anyhow!("could not create private Attic config"))?;
+        file.set_permissions(fs::Permissions::from_mode(0o600))
+            .map_err(|_| anyhow!("could not restrict private Attic config"))?;
+        file.write_all(config.as_bytes())
+            .map_err(|_| anyhow!("could not write private Attic config"))?;
+        let mut args = cache
+            .cache_command(&paths[0])
+            .ok_or_else(|| anyhow!("selected Attic push configuration is missing"))?
+            .args;
+        args[1] = format!("cf-selected:{}", urls.cache_name);
+        args.splice(2..3, paths.iter().cloned());
+        Ok(Self { args, credentials })
+    }
+
+    /// Makes private config authoritative while preserving proxy and signing env.
+    ///
+    /// Must run after all generic environment setup. The native reference is
+    /// already qualified, so ambient remote-name selection cannot affect it.
+    pub fn apply_to_command(&self, command: &mut tokio::process::Command) {
+        command.env("XDG_CONFIG_HOME", self.credentials.path());
+        command.env_remove("ATTIC_TOKEN");
+        command.env_remove("ATTIC_SERVER_URL");
+        command.env_remove("ATTIC_REMOTE_NAME");
+    }
+}
 
 /// Names the native Nix setting that binds netrc reads to one HTTPS origin.
 ///
@@ -490,6 +654,155 @@ fn path_string(path: &std::path::Path) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_attic_uses_distinct_protected_configs_and_native_cache_names() {
+        let cache = crate::CacheConfig {
+            cache_type: crate::CacheType::Attic,
+            push_to: Some("https://cache.example/prefix/team/nix-cache-info?view=one".into()),
+            attic_cache_name: Some("old-alias:team".into()),
+            attic_token: Some("private-token".into()),
+            attic_jobs: 3,
+            ..Default::default()
+        };
+        let first =
+            PreparedAtticPush::new(&cache, "/nix/store/00000000000000000000000000000000-output")
+                .unwrap();
+        let second =
+            PreparedAtticPush::new(&cache, "/nix/store/00000000000000000000000000000000-output")
+                .unwrap();
+        assert_ne!(first.credentials.path(), second.credentials.path());
+        assert_eq!(first.args[1], "cf-selected:team");
+        assert!(first.args.windows(2).any(|args| args == ["--jobs", "3"]));
+        assert!(!format!("{first:?}").contains("private-token"));
+        assert!(!first.args.iter().any(|arg| arg.contains("private-token")));
+        let directory = first.credentials.path().to_owned();
+        for (path, mode) in [
+            (directory.clone(), 0o700),
+            (directory.join("attic"), 0o700),
+            (directory.join("token"), 0o600),
+            (directory.join("attic/config.toml"), 0o600),
+        ] {
+            assert_eq!(
+                fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                mode
+            );
+        }
+        let mut command = tokio::process::Command::new("attic");
+        command.env("ATTIC_TOKEN", "ambient-secret");
+        command.env("ATTIC_SERVER_URL", "https://ambient.example");
+        first.apply_to_command(&mut command);
+        for name in ["ATTIC_TOKEN", "ATTIC_SERVER_URL", "ATTIC_REMOTE_NAME"] {
+            assert!(
+                command
+                    .as_std()
+                    .get_envs()
+                    .any(|(key, value)| key == name && value.is_none())
+            );
+        }
+        drop(first);
+        assert!(!directory.exists());
+        assert!(second.credentials.path().exists());
+    }
+
+    #[test]
+    fn selected_attic_chunk_keeps_every_root_and_existing_native_flags() {
+        let mut cache = crate::CacheConfig {
+            cache_type: crate::CacheType::Attic,
+            push_to: Some("https://cache.example/prefix/team".into()),
+            attic_cache_name: Some("stale-remote:team".into()),
+            attic_token: Some("private-chunk-token".into()),
+            attic_jobs: 3,
+            ..Default::default()
+        };
+        let paths = vec![
+            "/nix/store/00000000000000000000000000000000-input".to_owned(),
+            "/nix/store/11111111111111111111111111111111-root.drv".to_owned(),
+            "/nix/store/00000000000000000000000000000000-input".to_owned(),
+        ];
+        for ignore in [false, true] {
+            cache.attic_ignore_upstream_cache_filter = ignore;
+            let prepared = PreparedAtticPush::for_paths(&cache, &paths).unwrap();
+            let mut expected = vec!["push".to_owned(), "cf-selected:team".to_owned()];
+            expected.extend(paths.clone());
+            if ignore {
+                expected.push("--ignore-upstream-cache-filter".into());
+            }
+            expected.extend(["--jobs".into(), "3".into()]);
+            assert_eq!(prepared.args, expected);
+            assert!(!prepared.args.iter().any(|arg| arg == "--no-closure"));
+            assert!(
+                !prepared
+                    .args
+                    .iter()
+                    .any(|arg| arg.contains("private-chunk-token"))
+            );
+            let mut command = tokio::process::Command::new("attic");
+            command.env("XDG_CONFIG_HOME", "/persistent/ambient");
+            command.env("ATTIC_TOKEN", "ambient-writer");
+            command.env("ATTIC_SERVER_URL", "https://ambient.example");
+            prepared.apply_to_command(&mut command);
+            assert!(command.as_std().get_envs().any(|(key, value)| {
+                key == "XDG_CONFIG_HOME" && value == Some(prepared.credentials.path().as_os_str())
+            }));
+            assert_eq!(
+                fs::read_to_string(prepared.credentials.path().join("token")).unwrap(),
+                "private-chunk-token"
+            );
+            assert!(
+                !fs::read_to_string(prepared.credentials.path().join("attic/config.toml"))
+                    .unwrap()
+                    .contains("private-chunk-token")
+            );
+        }
+        for paths in [
+            vec![],
+            vec!["/nix/store/../escape".into()],
+            vec!["/nix/store/nested/root.drv".into()],
+            vec!["/tmp/root.drv".into()],
+        ] {
+            assert!(PreparedAtticPush::for_paths(&cache, &paths).is_err());
+        }
+        cache.attic_token = None;
+        assert!(PreparedAtticPush::for_paths(&cache, &paths).is_err());
+    }
+
+    #[test]
+    fn selected_attic_missing_or_invalid_configuration_never_borrows_authority() {
+        let valid = crate::CacheConfig {
+            cache_type: crate::CacheType::Attic,
+            push_to: Some("https://cache.example".into()),
+            attic_cache_name: Some("team".into()),
+            attic_token: Some("private-token".into()),
+            ..Default::default()
+        };
+        for cache in [
+            crate::CacheConfig {
+                attic_token: None,
+                ..valid.clone()
+            },
+            crate::CacheConfig {
+                attic_token: Some(" ".into()),
+                ..valid.clone()
+            },
+            crate::CacheConfig {
+                push_to: None,
+                ..valid.clone()
+            },
+            crate::CacheConfig {
+                attic_cache_name: Some("bad:remote:team".into()),
+                ..valid
+            },
+        ] {
+            let error = PreparedAtticPush::new(
+                &cache,
+                "/nix/store/00000000000000000000000000000000-output",
+            )
+            .unwrap_err();
+            assert!(!format!("{error:#}").contains("private-token"));
+            assert!(!format!("{error:#}").contains("https://"));
+        }
+    }
 
     const CERT: &str = "unique-client-certificate";
     const KEY: &str = "unique-private-key";

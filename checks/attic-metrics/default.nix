@@ -13,6 +13,20 @@
   '';
   first = target "AAAA";
   second = target "BBBB";
+  serverDriver = pkgs.crystal-forge.default.cf-server-core-drv.overrideAttrs (_: {
+    pname = "cf-attic-metrics-publication-driver";
+    # Use the same example build contract as the native publication gate.
+    buildPhase = ''
+      runHook preBuild
+      cargoWithProfile build --locked --package cf-server --example attic_publication
+    '';
+    doCheck = false;
+    installPhase = ''
+      mkdir -p "$out/bin"
+      cp target/release/examples/attic_publication "$out/bin/attic-server-publication"
+    '';
+    postFixup = "";
+  });
   common = {
     system.stateVersion = "26.05";
     virtualisation = {memorySize = 3072; cores = 2; writableStore = true; useNixStoreImage = true;};
@@ -23,7 +37,7 @@
   };
   mappings = map (entry: {
     destination_id = entry.id;
-    url = "https://attic-metrics.test:9443/${entry.prefix or "inventory"}/";
+    url = entry.url or "https://attic-metrics.test:9443/${entry.prefix or "inventory"}/";
     token_file = "/run/cf-metrics-tokens/${entry.file or entry.cache}";
   }) [
     {id = 4701; cache = "populated";}
@@ -41,6 +55,15 @@
     {id = 4714; cache = "shared";}
     {id = 4715; cache = "Team+1";}
     {id = 4716; cache = "minimum";}
+    # These IDs are created by real Admin POSTs after all original assertions.
+    # ID 4 intentionally has no metrics mapping.
+    {id = 1; cache = "lifecycle-public";}
+    {id = 2; cache = "lifecycle-private";}
+    {id = 3; cache = "lifecycle-private";}
+    {id = 5; cache = "lifecycle-private"; url = "https://attic-metrics.test:9/inventory/";}
+    {id = 6; cache = "lifecycle-private"; file = "wrong";}
+    {id = 7; cache = "lifecycle-private"; prefix = "denied";}
+    {id = 8; cache = "lifecycle-private"; file = "lifecycle-absent";}
   ];
 in assert pkgs.attic-server.src.rev == atticRevision;
 pkgs.testers.runNixOSTest {
@@ -52,6 +75,7 @@ pkgs.testers.runNixOSTest {
     attic = {nodes, ...}: {
       imports = [common inputs.self.nixosModules.attic-metrics];
       environment.systemPackages = [pkgs.attic-client pkgs.attic-server];
+      networking.hosts."127.0.0.1" = ["attic-metrics.test"];
       environment.etc."publication-first".text = "${first}";
       environment.etc."publication-second".text = "${second}";
       users.users.attic = {isSystemUser = true; group = "attic";};
@@ -75,7 +99,7 @@ pkgs.testers.runNixOSTest {
       };
       environment.etc."atticd.toml".text = ''
         listen = "127.0.0.1:8080"
-        api-endpoint = "http://127.0.0.1:8080/"
+        api-endpoint = "https://attic-metrics.test:8888/"
         [database]
         url = "postgresql://attic@127.0.0.1/attic"
         [storage]
@@ -121,6 +145,7 @@ pkgs.testers.runNixOSTest {
         # loopback and PostgreSQL have no external ingress.
         extraCommands = ''
           iptables -A nixos-fw -p tcp -s ${nodes.server.networking.primaryIPAddress} --dport 9443 -j nixos-fw-accept
+          iptables -A nixos-fw -p tcp -s ${nodes.server.networking.primaryIPAddress} --dport 8888 -j nixos-fw-accept
         '';
       };
       services.nginx = {
@@ -131,7 +156,27 @@ pkgs.testers.runNixOSTest {
           map $http_cookie $metrics_cookie { "" false; default true; }
           map $http_x_csrf_token $metrics_csrf { "" false; default true; }
           log_format metrics_safe escape=json '{"token":$metrics_token,"cookie":$metrics_cookie,"csrf":$metrics_csrf,"status":$status}';
+          map $http_authorization $native_auth { "" false; default true; }
+          log_format native_safe escape=json '{"authorization":$native_auth,"cookie":$metrics_cookie,"csrf":$metrics_csrf,"method":"$request_method","status":$status}';
         '';
+        virtualHosts.native = {
+          addSSL = true;
+          serverName = "attic-metrics.test";
+          listen = [{addr = "0.0.0.0"; port = 8888; ssl = true;}];
+          sslCertificate = "${credentials}/server.crt";
+          sslCertificateKey = "${credentials}/server.key";
+          extraConfig = ''
+            allow ${nodes.server.networking.primaryIPAddress};
+            allow 127.0.0.1;
+            deny all;
+            access_log /var/log/nginx/native-safe.log native_safe;
+            error_log /dev/null;
+          '';
+          locations."/" = {
+            proxyPass = "http://127.0.0.1:8080";
+            extraConfig = ''proxy_set_header Cookie ""; proxy_set_header X-CSRF-Token "";'';
+          };
+        };
         virtualHosts.metrics = {
           addSSL = true;
           serverName = "attic-metrics.test";
@@ -167,6 +212,7 @@ pkgs.testers.runNixOSTest {
     };
     server = {nodes, ...}: {
       imports = [common inputs.self.nixosModules.crystal-forge];
+      environment.systemPackages = [serverDriver pkgs.attic-client pkgs.nix];
       networking.hosts.${nodes.attic.networking.primaryIPAddress} = ["attic-metrics.test"];
       networking.firewall.enable = true;
       services.crystal-forge = {
@@ -189,6 +235,7 @@ pkgs.testers.runNixOSTest {
         flakes.watched = [];
       };
       systemd.services.crystal-forge-server.environment.AUTH_MODE = "local";
+      systemd.services.crystal-forge-server.serviceConfig.EnvironmentFile = ["/run/attic-metrics-test/cf-key.env"];
       systemd.services.crystal-forge-server.after = ["postgresql-setup.service"];
       systemd.services.crystal-forge-server.requires = ["postgresql-setup.service"];
       systemd.services.crystal-forge-postgres-jobs.wantedBy = lib.mkForce [];
@@ -216,9 +263,13 @@ pkgs.testers.runNixOSTest {
   };
   testScript = ''
     import json
+    import os
+    import pathlib
+    import tempfile
     start_all()
     attic.wait_for_unit("atticd.service")
     attic.wait_for_open_port(8080)
+    attic.wait_for_unit("nginx.service")
     attic.succeed("python /etc/attic-metrics-test.py attic-setup")
     attic.succeed("systemctl start cf-attic-metrics.service")
     attic.wait_for_open_port(9121, timeout=30)
@@ -239,5 +290,33 @@ pkgs.testers.runNixOSTest {
     attic.succeed("python /etc/attic-metrics-test.py final-attic")
     server.succeed("python /etc/attic-metrics-test.py final-cf")
     attic.succeed("python /etc/attic-metrics-test.py module-lifecycle")
+    # Original accounting/lifecycle proofs finish before intentional new rows
+    # and uploads. The adapter restarts with the original private token sources.
+    attic.succeed("systemctl start cf-attic-metrics.service")
+    attic.wait_for_open_port(9121, timeout=30)
+    attic.succeed("python /etc/attic-metrics-test.py lifecycle-attic-setup")
+    with tempfile.TemporaryDirectory(prefix="cf-attic-retained-private-") as private_dir:
+        os.chmod(private_dir, 0o700)
+        attic.copy_from_vm("/run/attic-metrics-test/native-lifecycle.json", private_dir)
+        fixture = pathlib.Path(private_dir) / "native-lifecycle.json"
+        os.chmod(fixture, 0o600)
+        server.copy_from_host(str(fixture), "/run/attic-metrics-test/native-lifecycle.json")
+    server.succeed("chmod 0600 /run/attic-metrics-test/native-lifecycle.json")
+    server.succeed("python /etc/attic-metrics-test.py lifecycle-cf-setup")
+    attic.succeed("python /etc/attic-metrics-test.py lifecycle-attic-baseline")
+    server.succeed("python /etc/attic-metrics-test.py lifecycle-readonly")
+    server.succeed("python /etc/attic-metrics-test.py lifecycle-save")
+    server.succeed("python /etc/attic-metrics-test.py lifecycle-metrics")
+    attic.succeed("python /etc/attic-metrics-test.py lifecycle-revoke")
+    try:
+        server.succeed("python /etc/attic-metrics-test.py lifecycle-unavailable")
+    finally:
+        attic.succeed("python /etc/attic-metrics-test.py lifecycle-grant")
+    attic.succeed("python /etc/attic-metrics-test.py lifecycle-attic-final")
+    server.succeed("python /etc/attic-metrics-test.py lifecycle-publish")
+    attic.succeed("python /etc/attic-metrics-test.py lifecycle-published-baseline")
+    server.succeed("python /etc/attic-metrics-test.py lifecycle-metrics-published")
+    attic.succeed("python /etc/attic-metrics-test.py lifecycle-published-final")
+    server.succeed("python /etc/attic-metrics-test.py lifecycle-final")
   '';
 }

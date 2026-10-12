@@ -188,6 +188,7 @@ flake-check:
           - server-regressions
           - niks3-cache
           - attic-metrics
+          - attic-publication
           - builder-evaluator-packaging
           - web-ui-test-runner
           - okf-knowledge
@@ -200,7 +201,7 @@ flake-check:
   script:
     - |
       case "$CHECK_NAME" in
-        server-regressions|niks3-cache|attic-metrics|builder-evaluator-packaging)
+        integration|oidc-auth|server-regressions|niks3-cache|attic-metrics|attic-publication|builder-evaluator-packaging)
           sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace
           ;;
         *)

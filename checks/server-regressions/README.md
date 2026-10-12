@@ -222,12 +222,18 @@ retains HTTPS, pinned DNS, verified TLS, no-proxy, no-redirect, and eight-second
 timeouts. Attic read configuration uses the same resolver's named-cache root.
 
 Results add flat `probe_kind: "attic_cache_config"`, `stage`,
-`cache_access_valid`, `token_auth_valid`, and `write_auth_valid` fields. Stages
+`cache_access_valid`, `cache_is_public`, `token_auth_valid`, and
+`write_auth_valid` fields. Stages
 are `target_policy`, `dns`, `transport`, `authentication`, `cache_not_found`,
 `response`, and `complete`. Access is null before HTTP observation, false after
 an unsuccessful response, and true only for validated native metadata. Token
 validity is true only for private-cache success and null otherwise. Write
-validity is always null (Untested). HTTP 401/403 leaves existence unresolved;
+validity is always null (Untested). Native `cache_is_public` is a boolean only
+after complete metadata validation; failed or incomplete probes leave it null.
+Public read access does not validate a supplied token or establish write access.
+The existing exact classification test covers these fields without adding a new
+test name. Its updated assertions await final-head CI execution.
+HTTP 401/403 leaves existence unresolved;
 only HTTP 404 with typed `code: 404, error: "NoSuchCache"` reports cache absence.
 Generic 404 reports `endpoint_unavailable` at the response stage. Target-policy
 rejection remains HTTP 400 with safe `error`, `message`, and null `details` plus
@@ -278,7 +284,7 @@ source and retain pending work. The publication fingerprint test includes Basic
 credential changes alongside the existing policy and canonical-set assertions.
 Independent write/read probes do not borrow the other plane's credentials.
 
-The nine metrics tests distinguish native values from unavailable measurements.
+The 18 metrics tests distinguish native values from unavailable measurements.
 Missing, denied, redirected, malformed, negative, and overflow responses cannot
 become zero-valued statistics. Metrics retain their reported byte/object basis
 without inventing path counts. Disabled, unsupported, non-admin, and anonymous
@@ -287,7 +293,13 @@ overall deadline, configured-authority requests without authorization headers,
 explicit null fields, and `Cache-Control: no-store`. These unit tests do not prove
 native-provider acceptance or represent real account/storage measurements.
 
-These 51 non-ignored tests run with `--exact --test-threads=1`:
+The nine Attic-specific tests cover exact cache identity, unsigned 64-bit totals,
+optional configuration gates, HTTPS mapping validation, adapter-only Bearer
+projection, protected token files and alphabet boundaries, bounded responses,
+and refusal before file or network access. Native restricted-role and module
+lifecycle acceptance remains covered by the separate `attic-metrics` VM check.
+
+These 60 non-ignored tests run with `--exact --test-threads=1`:
 
 ```text
 queries::commits::partial_resource_failure_tests::partial_failure_diagnostic_uses_proven_counts_not_checkpoint_guesses
@@ -300,6 +312,15 @@ handlers::api::caches::basic_read_tests::niks3_basic_http_projection_and_plane_s
 security::cache_secrets::tests::basic_password_envelope_preserves_spaces_and_literal_prefixes
 queries::builders::tests::niks3_publication_fingerprint_includes_secrets_policy_and_canonical_sets
 handlers::api::caches::storage_metrics::tests::native_values_preserve_basis_without_inventing_paths
+handlers::api::caches::storage_metrics::tests::attic_inventory_preserves_exact_identity_u64_and_path_basis
+handlers::api::caches::storage_metrics::tests::attic_inventory_rejects_missing_null_negative_overflow_and_identity_mismatch
+handlers::api::caches::storage_metrics::tests::attic_optional_metadata_gate_requires_current_enabled_type_and_admin
+handlers::api::caches::storage_metrics::tests::attic_mapping_is_explicit_https_and_fails_closed_for_every_invalid_entry
+handlers::api::caches::storage_metrics::tests::attic_request_uses_only_adapter_bearer_and_exact_canonical_name
+handlers::api::caches::storage_metrics::tests::attic_token_loader_rejects_symlinks_public_files_and_bad_tokens
+handlers::api::caches::storage_metrics::tests::attic_protected_token_file_enforces_exact_adapter_alphabet_and_boundaries
+handlers::api::caches::storage_metrics::tests::attic_response_is_bounded_and_status_errors_are_static
+handlers::api::caches::storage_metrics::tests::attic_invalid_mapping_or_name_stops_before_file_or_network
 handlers::api::caches::storage_metrics::tests::malformed_negative_missing_and_overflow_stats_never_become_zero
 handlers::api::caches::storage_metrics::tests::metadata_gates_skip_all_unsupported_disabled_and_non_admin_probes
 handlers::api::caches::storage_metrics::tests::missing_endpoint_denial_redirects_and_non_native_success_are_not_empty_stats

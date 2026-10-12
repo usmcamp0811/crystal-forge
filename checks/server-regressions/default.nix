@@ -812,6 +812,15 @@ SQL
       security::cache_secrets::tests::basic_password_envelope_preserves_spaces_and_literal_prefixes \
       queries::builders::tests::niks3_publication_fingerprint_includes_secrets_policy_and_canonical_sets \
       handlers::api::caches::storage_metrics::tests::native_values_preserve_basis_without_inventing_paths \
+      handlers::api::caches::storage_metrics::tests::attic_inventory_preserves_exact_identity_u64_and_path_basis \
+      handlers::api::caches::storage_metrics::tests::attic_inventory_rejects_missing_null_negative_overflow_and_identity_mismatch \
+      handlers::api::caches::storage_metrics::tests::attic_optional_metadata_gate_requires_current_enabled_type_and_admin \
+      handlers::api::caches::storage_metrics::tests::attic_mapping_is_explicit_https_and_fails_closed_for_every_invalid_entry \
+      handlers::api::caches::storage_metrics::tests::attic_request_uses_only_adapter_bearer_and_exact_canonical_name \
+      handlers::api::caches::storage_metrics::tests::attic_token_loader_rejects_symlinks_public_files_and_bad_tokens \
+      handlers::api::caches::storage_metrics::tests::attic_protected_token_file_enforces_exact_adapter_alphabet_and_boundaries \
+      handlers::api::caches::storage_metrics::tests::attic_response_is_bounded_and_status_errors_are_static \
+      handlers::api::caches::storage_metrics::tests::attic_invalid_mapping_or_name_stops_before_file_or_network \
       handlers::api::caches::storage_metrics::tests::malformed_negative_missing_and_overflow_stats_never_become_zero \
       handlers::api::caches::storage_metrics::tests::metadata_gates_skip_all_unsupported_disabled_and_non_admin_probes \
       handlers::api::caches::storage_metrics::tests::missing_endpoint_denial_redirects_and_non_native_success_are_not_empty_stats \

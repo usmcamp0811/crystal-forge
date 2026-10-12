@@ -21,6 +21,9 @@ tags:
 | `checks/builder-evaluator-packaging/README.md` | retained in place; see [builder-evaluator-packaging section](../../testing/flake-checks.md#builder-evaluator-packaging) | retained | complete |
 | `checks/niks3-cache/README.md` | retained in place; see [niks3-cache section](../../testing/flake-checks.md#niks3-cache) | retained | complete |
 | `checks/niks3-ca-bundle/README.md` | retained in place; see [CA compatibility operator contract](../../caches/niks3-ca-bundle-compatibility.md) | retained | complete |
+| `checks/attic-metrics/README.md` | retained in place at [the native inventory runbook](../../../../checks/attic-metrics/README.md); see [storage observation contract](../../caches/niks3-cache.md#response-only-storage-observations) | retained | complete |
+| `checks/attic-publication/README.md` | retained in place at [the native publication runbook](../../../../checks/attic-publication/README.md) | retained | complete |
+| `packages/attic-metrics/README.md` | retained in place at [the adapter operator runbook](../../../../packages/attic-metrics/README.md); see [storage observation contract](../../caches/niks3-cache.md#response-only-storage-observations) | retained | complete |
 | `checks/nixos-options-metadata/README.md` | retained in place; see [nixos-options-metadata section](../../testing/flake-checks.md#nixos-options-metadata) | retained | complete |
 | `checks/oidc-auth/README.md` | retained in place; see [oidc-auth section](../../testing/flake-checks.md#oidc-auth) | retained | complete |
 | `checks/oscal-export/README.md` | retained in place; see [oscal-export section](../../testing/flake-checks.md#oscal-export) | retained | complete |
@@ -194,6 +197,36 @@ OKF knowledge bundle. Neither README existed at the original migration base
 - Action: retained. The newly authored README remains authoritative beside the check; it was not present at the original migration base `3b23d36f` and has no historical baseline blob.
 - Destination: [CA compatibility operator contract](../../caches/niks3-ca-bundle-compatibility.md).
 - Unmapped content: none. The runbook retains all operational sections in place and links to the canonical compatibility contract.
+
+### `checks/attic-metrics/README.md` and `packages/attic-metrics/README.md` (new TASK-470 runbooks)
+
+- Titles: Authoritative Attic inventory check; Optional Attic inventory adapter.
+- Purpose: The check runbook describes native fixtures, restricted-role checks,
+  accounting, credential isolation, module lifecycle verification, encrypted
+  retained-credential API assertions, and the database-selected publication driver.
+  The new lifecycle and publication assertions describe source coverage; their
+  final execution remains pending CI. The package
+  runbook defines the adapter API, logical inventory semantics, manual operator
+  setup, token handling, and failure limits.
+- Action: retained. Both newly authored runbooks remain authoritative at their
+  original paths. Neither existed at the original migration base `3b23d36f`.
+  No historical baseline blob is claimed or added to `source-inventory.tsv`.
+- Destinations: [native inventory runbook](../../../../checks/attic-metrics/README.md), [adapter operator runbook](../../../../packages/attic-metrics/README.md), and [storage observation contract](../../caches/niks3-cache.md#response-only-storage-observations).
+- Unmapped content: none. All source sections remain in place. Coverage records
+  document retention, not a claim that a verification command passed.
+
+### `checks/attic-publication/README.md` (new TASK-470 runbook)
+
+- Title: Native Attic publication regression.
+- Purpose: Defines the pinned native builder/server publication fixture,
+  selected-token versus ambient/stale-credential matrix, inventory assertions,
+  process ownership and cleanup, test-first evidence, and upstream contracts.
+- Action: retained. The newly authored runbook remains authoritative beside the
+  check. It did not exist at the original migration base `3b23d36f`; no historical
+  baseline blob is claimed or added to `source-inventory.tsv`.
+- Destination: [native publication runbook](../../../../checks/attic-publication/README.md).
+- Unmapped content: none. Every source section remains in place. The fixture's
+  documented limits remain explicit; final-head CI execution is pending.
 
 ### `packages/cf-test-suite/README.md`
 

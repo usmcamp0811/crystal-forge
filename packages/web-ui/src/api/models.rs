@@ -6770,6 +6770,11 @@ pub struct CacheCredentialTestResult {
     /// Reports validated named-cache read access; omission means untested.
     #[serde(default)]
     pub cache_access_valid: Option<bool>,
+    /// Reports native Attic visibility after complete named-cache validation.
+    /// Missing evidence means unknown, never public. This response-only field
+    /// does not describe configured credentials or establish write permission.
+    #[serde(default)]
+    pub cache_is_public: Option<bool>,
     /// Confirms token acceptance for a private cache read only.
     /// Public success and missing evidence do not establish token validity.
     #[serde(default)]
@@ -7293,6 +7298,7 @@ mod tests {
         assert!(result.probe_kind.is_none());
         assert!(result.stage.is_none());
         assert!(result.cache_access_valid.is_none());
+        assert!(result.cache_is_public.is_none());
         assert!(result.token_auth_valid.is_none());
         assert!(result.write_auth_valid.is_none());
         assert!(result.error.is_none());

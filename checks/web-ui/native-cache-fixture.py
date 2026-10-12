@@ -41,6 +41,9 @@ PHASE_REQUEST = Path("/run/cf-cache-phase-request.json")
 PHASE_ACK = Path("/run/cf-cache-phase-ack.json")
 PHASE_PROOF = Path("/run/cf-cache-phase-proof.json")
 ATTIC_OBSERVER = Path("/run/cf-attic-observer/requests.log")
+ATTIC_METRICS_OBSERVER = Path("/run/cf-attic-observer/metrics.log")
+ATTIC_METRIC_KINDS = ("attic", "attic_empty", "attic_unconfigured", "attic_public")
+METRIC_KINDS = ("v16", "v18") + ATTIC_METRIC_KINDS
 ATTIC_SETUP_PROOF = Path("/run/cf-attic-setup-proof.json")
 SOURCE_KINDS = ("attic", "s3", "nix", "niks3", "nix_basic", "http_basic", "legacy_query")
 LEGACY_KINDS = ("legacy_plain", "legacy_encrypted", "legacy_missing")
@@ -151,6 +154,29 @@ def bootstrap_attic():
     assert config.json()["store_dir"] == "/nix/store"
     assert config.json()["api_endpoint"] == "https://atticCache:9443/", \
         "Native CLI must receive the reachable TLS API endpoint"
+    additional = {}
+    for name, public in (("web-ui-empty", False), ("web-ui-public", True)):
+        creator = mint("web-ui-additional-setup", create=True, cache_name=name)
+        url = "https://atticCache:9443/_api/v1/cache-config/" + name
+        created = request(client, "POST", url, headers={"Authorization": "Bearer " + creator},
+                          json={"keypair": "Generate", "is_public": public,
+                                "store_dir": "/nix/store", "priority": 40, "upstream_cache_key_names": []})
+        assert created.status_code == 200, "Native additional Attic cache creation failed"
+        reader = mint("web-ui-additional-reader", cache_name=name)
+        metadata = request(client, "GET", url, headers={"Authorization": "Bearer " + reader})
+        assert metadata.status_code == 200 and metadata.json()["is_public"] is public
+        # A deliberately invalid retained publication token is still nonempty.
+        # Public cache-config success must not classify that token as valid or
+        # invalid, and must never establish write authorization.
+        retained = "invalid-runtime-jwt-" + secrets.token_hex(24) if public else reader
+        if public:
+            assert request(client, "GET", url).status_code == 200, "Public Attic config must permit anonymous reads"
+            assert request(client, "GET", url, headers={"Authorization": "Bearer " + retained}).status_code == 200, \
+                "Public Attic config must not establish retained token validity"
+        additional["public" if public else "empty"] = {
+            "server_url": "https://atticCache:9443", "cache_name": name,
+            "public_key": metadata.json()["public_key"], "token": retained,
+        }
     # A separate fixture-only writer publishes before any browser/API Test.
     # Login retains token-file configuration; no JWT enters argv or diagnostics.
     writer = mint("web-ui-publication-setup", push=True)
@@ -194,6 +220,7 @@ def bootstrap_attic():
         "missing_cache_name": "web-ui-nonexistent",
         "missing_cache_token": mint("web-ui-missing", cache_name="web-ui-nonexistent"),
         "setup_proof": setup,
+        "additional": additional,
     })
 
 
@@ -243,7 +270,9 @@ def attic_metrics_setup():
     from psycopg2 import sql
     attic = json.loads(ATTIC_FIXTURE.read_text())
     pg = psycopg2.connect(dbname="attic", user="postgres", host="127.0.0.1")
-    password, token = secrets.token_hex(32), secrets.token_hex(32)
+    password = secrets.token_hex(32)
+    tokens = {kind: secrets.token_hex(32) for kind in ("attic", "attic_empty")}
+    expected = {}
     with pg, pg.cursor() as cursor:
         cursor.execute("CREATE ROLE cf_attic_metrics LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS")
         cursor.execute(sql.SQL("ALTER ROLE cf_attic_metrics PASSWORD {}").format(sql.Literal(password)))
@@ -258,21 +287,24 @@ def attic_metrics_setup():
         for table, columns in (("cache", "id,name,deleted_at"), ("object", "cache_id,nar_id"), ("nar", "id,nar_size,state")):
             cursor.execute(sql.SQL("GRANT SELECT ({}) ON {} TO cf_attic_metrics").format(sql.SQL(columns), sql.Identifier(table)))
         cursor.execute("ALTER ROLE cf_attic_metrics SET default_transaction_read_only=on")
-        cursor.execute("SELECT id FROM cache WHERE name=%s AND deleted_at IS NULL", (attic["cache_name"],))
-        cache_id = cursor.fetchone()[0]
-        cursor.execute("SELECT n.nar_size FROM object o JOIN nar n ON n.id=o.nar_id WHERE o.cache_id=%s AND n.state='V' ORDER BY o.id", (cache_id,))
-        sizes = [row[0] for row in cursor.fetchall()]
-        assert sizes and sum(sizes) > 0, "Attic metrics needs genuine populated native NARs"
+        for kind, name in (("attic", attic["cache_name"]), ("attic_empty", attic["additional"]["empty"]["cache_name"])):
+            cursor.execute("SELECT id FROM cache WHERE name=%s AND deleted_at IS NULL", (name,))
+            cache_id = cursor.fetchone()[0]
+            cursor.execute("SELECT n.nar_size FROM object o JOIN nar n ON n.id=o.nar_id WHERE o.cache_id=%s AND n.state='V' ORDER BY o.id", (cache_id,))
+            sizes = [row[0] for row in cursor.fetchall()]
+            expected[kind] = {"cached_path_count": len(sizes), "logical_nar_bytes": sum(sizes)}
+        assert expected["attic"]["cached_path_count"] > 0 and expected["attic"]["logical_nar_bytes"] > 0
+        assert expected["attic_empty"] == {"cached_path_count": 0, "logical_nar_bytes": 0}, "Native empty cache must contain no paths"
     pg.close()
     directory = Path("/run/cf-attic-metrics-secrets")
     directory.mkdir(mode=0o700)
-    protected_json(directory / "tokens", {attic["cache_name"]: token})
+    protected_json(directory / "tokens", {attic["cache_name"]: tokens["attic"],
+                                         attic["additional"]["empty"]["cache_name"]: tokens["attic_empty"]})
     descriptor = os.open(directory / "database", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     with os.fdopen(descriptor, "w") as output:
         output.write("postgresql://cf_attic_metrics:" + password + "@127.0.0.1/attic")
     protected_json(Path("/run/cf-attic-metrics-binding.json"), {
-        "token": token, "url": "https://atticCache:9444/metrics/",
-        "expected": {"cached_path_count": len(sizes), "logical_nar_bytes": sum(sizes)},
+        "tokens": tokens, "url": "https://atticCache:9444/metrics/", "expected": expected,
     })
 
 
@@ -312,16 +344,28 @@ def bind_attic_metrics(fixture, client, origin, hashes):
     import tomllib
     binding = json.loads(Path("/run/cf-attic-metrics-binding.json").read_text())
     attic = fixture["attic"]
-    response = request(client, "POST", origin + "/api/v1/caches", json={
-        "name": "task470-retained-native-metrics-attic", "cache_type": "Attic", "enabled": True,
-        "environment_ids": [fixture["metrics"]["environment_id"]],
-        "push_to": attic["server_url"], "attic_cache_name": attic["cache_name"],
-        "attic_public_key": attic["public_key"], "attic_token": attic["token"],
-    })
-    assert response.status_code in (200, 201), "Late Attic metrics API creation failed"
-    destination_id = response.json()["id"]
-    hashes[str(destination_id)] = {"row": snapshot(destination_id).hex()}
-    fixture["metrics"]["attic"] = {"id": destination_id, "expected": binding["expected"]}
+    endpoints = []
+    owner = pwd.getpwnam("crystal-forge")
+    for kind, native in (("attic", attic), ("attic_empty", attic["additional"]["empty"]),
+                         ("attic_unconfigured", attic), ("attic_public", attic["additional"]["public"])):
+        response = request(client, "POST", origin + "/api/v1/caches", json={
+            "name": "task470-retained-native-metrics-" + kind, "cache_type": "Attic", "enabled": True,
+            "environment_ids": [fixture["metrics"]["environment_id"]],
+            "push_to": native["server_url"], "attic_cache_name": native["cache_name"],
+            "attic_public_key": native["public_key"], "attic_token": native["token"],
+        })
+        assert response.status_code in (200, 201), "Late Attic metrics API creation failed"
+        destination_id = response.json()["id"]
+        hashes[str(destination_id)] = {"row": snapshot(destination_id).hex()}
+        fixture["metrics"][kind] = {"id": destination_id}
+        if kind in binding["tokens"]:
+            fixture["metrics"][kind]["expected"] = binding["expected"][kind]
+            token_file = Path("/var/lib/crystal-forge/web-ui-metrics-token-" + kind)
+            descriptor = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(descriptor, "w") as output:
+                output.write(binding["tokens"][kind])
+            os.chown(token_file, owner.pw_uid, owner.pw_gid)
+            endpoints.append({"destination_id": destination_id, "url": binding["url"], "token_file": str(token_file)})
     def pid():
         result = subprocess.run(["systemctl", "show", "crystal-forge-server.service", "-p", "MainPID", "--value"],
                                 stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8, check=True)
@@ -334,13 +378,7 @@ def bind_attic_metrics(fixture, client, origin, hashes):
     baseline = tomllib.loads(config.read_text())
     assert not baseline["server"].pop("attic_metrics_endpoints", []), "Unexpected pre-seed mapping"
     key = process_encryption_key(old_pid)
-    owner = pwd.getpwnam("crystal-forge")
-    token_file = Path("/var/lib/crystal-forge/web-ui-attic-metrics-token")
-    descriptor = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(descriptor, "w") as output:
-        output.write(binding["token"])
-    os.chown(token_file, owner.pw_uid, owner.pw_gid)
-    protected_json(METRICS_MAPPING, [{"destination_id": destination_id, "url": binding["url"], "token_file": str(token_file)}])
+    protected_json(METRICS_MAPPING, endpoints)
     os.chown(METRICS_MAPPING, owner.pw_uid, owner.pw_gid)
     subprocess.run(["systemctl", "restart", "crystal-forge-server.service"], stdout=subprocess.DEVNULL,
                    stderr=subprocess.DEVNULL, timeout=90, check=True)
@@ -361,15 +399,27 @@ def bind_attic_metrics(fixture, client, origin, hashes):
         time.sleep(0.1)
     for identity, expected in hashes.items():
         assert snapshot(int(identity)).hex() == expected["row"], "Restart changed a guarded raw cache row"
-    response = request(client, "GET", origin + f"/api/v1/caches/{destination_id}/metrics")
-    assert response.status_code == 200 and response.headers.get("Cache-Control") == "no-store"
-    body = response.json()
-    assert body["status"] == "available" and body["reason_code"] == "attic_inventory", "CF did not reach real native Attic inventory"
-    assert body["storage_bytes"] == binding["expected"]["logical_nar_bytes"]
-    assert body["path_count"] == body["object_count"] == binding["expected"]["cached_path_count"]
-    assert snapshot(destination_id).hex() == hashes[str(destination_id)]["row"], "Metrics changed raw destination"
+    for kind in ("attic", "attic_empty", "attic_unconfigured", "attic_public"):
+        destination_id = fixture["metrics"][kind]["id"]
+        response = request(client, "GET", origin + f"/api/v1/caches/{destination_id}/metrics")
+        assert response.status_code == 200 and response.headers.get("Cache-Control") == "no-store"
+        assert_attic_metrics(response.json(), fixture["metrics"][kind].get("expected"))
+        assert snapshot(destination_id).hex() == hashes[str(destination_id)]["row"], "Metrics changed raw destination"
     Path("/run/cf-attic-metrics-binding.json").unlink()
     print("Late Attic metrics binding: stable config/key/session and strict raw rows; real CF API matches independent native SQL totals", flush=True)
+
+
+def assert_attic_metrics(body, expected):
+    """Requires exact typed totals or unsupported evidence, never fabricated zero."""
+    if expected is None:
+        assert body["status"] == "unsupported" and body["reason_code"] == "provider_totals_unsupported"
+        assert all(body[field] is None for field in ("storage_bytes", "storage_bytes_basis", "object_count", "object_count_basis", "path_count", "measured_at"))
+    else:
+        assert body["status"] == "available" and body["reason_code"] == "attic_inventory"
+        assert body["storage_bytes"] == expected["logical_nar_bytes"]
+        assert body["path_count"] == body["object_count"] == expected["cached_path_count"]
+        assert body["storage_bytes_basis"] == "uncompressed_nar_bytes" and body["object_count_basis"] == "cached_nix_paths"
+        assert body["measured_at"] and datetime.datetime.fromisoformat(body["measured_at"].replace("Z", "+00:00")).tzinfo
 
 
 def assemble():
@@ -1087,6 +1137,8 @@ def checkpoints():
     basic_checked = False
     metrics_pending = None
     metrics_checked = False
+    public_checked = False
+    public_pending = None
     while time.monotonic() < deadline:
         if not PHASE_REQUEST.exists():
             time.sleep(0.1)
@@ -1107,13 +1159,35 @@ def checkpoints():
         legacy_ids = sorted(value["id"] for value in fixture["legacy_attic"].values())
         discovery_ids = sorted(source_ids + legacy_ids + [fixture["production_write_mtls"]["id"]])
         if phase == "metrics-before":
-            assert metrics_pending is None and sorted(ids) == sorted(fixture["metrics"][version]["id"] for version in ("v16", "v18", "attic"))
-            metrics_pending = {value: snapshot(value) for value in ids}
+            assert metrics_pending is None and sorted(ids) == sorted(fixture["metrics"][version]["id"] for version in METRIC_KINDS)
+            seed_hashes = json.loads(Path("/run/cf-cache-seed-snapshots.json").read_text())
+            assert all(snapshot(value).hex() == seed_hashes[str(value)]["row"] for value in ids), "Auxiliary metrics rows changed before observation"
+            metrics_pending = {"rows": {value: snapshot(value) for value in ids}, "requests": ATTIC_METRICS_OBSERVER.read_text().splitlines()}
         elif phase == "metrics-after":
-            assert metrics_pending is not None and sorted(ids) == sorted(metrics_pending)
-            assert all(snapshot(value) == digest for value, digest in metrics_pending.items()), "Metrics UI changed a raw cache, usage or assignment field"
+            assert metrics_pending is not None and sorted(ids) == sorted(metrics_pending["rows"])
+            assert all(snapshot(value) == digest for value, digest in metrics_pending["rows"].items()), "Metrics UI changed a raw cache, usage or assignment field"
+            before = metrics_pending["requests"]
+            observed = ATTIC_METRICS_OBSERVER.read_text().splitlines()
+            assert observed[:len(before)] == before, "Attic metrics observer was reset"
+            delta = observed[len(before):]
+            assert len(delta) == 4, "Only two mapped native caches may receive initial and explicit refresh inventory requests"
+            for name in (fixture["attic"]["cache_name"], fixture["attic"]["additional"]["empty"]["cache_name"]):
+                expected = "GET /metrics/v1/caches/" + name + "/inventory status=200 auth=present cookie=absent csrf=absent"
+                assert delta.count(expected) == 2, "Attic inventory must use only the scoped adapter token, never cookies or CSRF"
             metrics_pending = None
             metrics_checked = True
+        elif phase == "attic-public-before":
+            assert public_pending is None and ids == [fixture["metrics"]["attic_public"]["id"]]
+            seed_hashes = json.loads(Path("/run/cf-cache-seed-snapshots.json").read_text())
+            assert snapshot(ids[0]).hex() == seed_hashes[str(ids[0])]["row"]
+            public_pending = {"id": ids[0], "raw": snapshot(ids[0]), "requests": attic_requests()}
+        elif phase == "attic-public-after":
+            assert public_pending is not None and ids == [public_pending["id"]]
+            assert snapshot(ids[0]) == public_pending["raw"], "Public Test/Cancel changed raw retained credentials or scope"
+            calls = check_attic_read_delta(public_pending["requests"], fixture["attic"]["additional"]["public"]["cache_name"], status=200)
+            attic_probes.append({"destination_id": ids[0], "native_get_count": calls, "complete_raw_immutability": "passed", "upload_count": 0})
+            public_pending = None
+            public_checked = True
         elif phase == "basic-added":
             assert basic_id is None and len(ids) == 1 and ids[0] not in discovery_ids
             basic_id = ids[0]
@@ -1317,7 +1391,7 @@ def checkpoints():
         complete = (len(clones) == 2 and all(clone["stage"] == "retained" for clone in clones.values())
                     and legacy_checked and len(legacy_states) == 2
                     and all(state["stage"] == "retained" for state in legacy_states.values())
-                    and discovery_checked and basic_checked and metrics_checked)
+                    and discovery_checked and basic_checked and metrics_checked and public_checked)
         if complete:
             observed = attic_requests()[fixture["attic"]["browser_observer_baseline"]:]
             assert len(observed) == sum(probe["native_get_count"] for probe in attic_probes), \
@@ -1339,6 +1413,10 @@ def checkpoints():
                 "niks3_basic_ui_checkpoints": basic_probes,
                 "niks3_basic_ui_encrypted_save": "passed",
                 "native_metrics_ui_raw_immutability": "passed",
+                "attic_public_retained_test_cancel_raw_immutability": "passed",
+                "attic_public_token_and_write_authorization": "untested",
+                "attic_metrics_mapped_provider_gets": 4,
+                "attic_metrics_unmapped_provider_gets": 0,
                 "replacement_clones": [{"cache_type": clone["type"],
                                         "pre_save_raw_immutability": "passed",
                                         "post_save_retained_raw_immutability": "passed"}
@@ -1479,7 +1557,7 @@ def verify_api():
         assert response.status_code in (200, 204), "Direct legacy fixture cleanup failed"
     response = request(client, "DELETE", origin + f"/api/v1/caches/{fixture['production_write_mtls']['id']}")
     assert response.status_code in (200, 204), "Stored-mTLS discovery fixture cleanup failed"
-    for destination_id in [basic_id] + [fixture["metrics"][version]["id"] for version in ("v16", "v18", "attic")]:
+    for destination_id in [basic_id] + [fixture["metrics"][version]["id"] for version in METRIC_KINDS]:
         assert request(client, "DELETE", origin + f"/api/v1/caches/{destination_id}").status_code in (200, 204)
     assert request(client, "DELETE", origin + f"/api/v1/environments/{fixture['metrics']['environment_id']}").status_code in (200, 204)
     HTTP_FIXTURE.unlink()
@@ -1512,6 +1590,27 @@ def verify_metrics_api(client, origin, fixture):
         proof.append({"native_version": "1.6.0" if version == "v16" else "1.8.0", "status": metrics["status"],
                       "complete_raw_immutability": "passed", "native_stats_get_count": 1,
                       "write_authorization": "untested", "upload_count": 0})
+    for kind in ATTIC_METRIC_KINDS:
+        value = fixture["metrics"][kind]
+        destination_id = value["id"]
+        baseline = snapshot(destination_id)
+        response = request(client, "GET", origin + f"/api/v1/caches/{destination_id}/metrics")
+        assert response.status_code == 200 and response.headers.get("Cache-Control") == "no-store"
+        assert_attic_metrics(response.json(), value.get("expected"))
+        assert snapshot(destination_id) == baseline, "Attic metrics changed a complete raw row or assignments"
+        if kind == "attic_public":
+            before = attic_requests()
+            tested = request(client, "POST", origin + f"/api/v1/caches/{destination_id}/test-credentials", json={})
+            assert tested.status_code == 200
+            result = tested.json()
+            assert result["ok"] is True and result["stage"] == "complete" and result["probe_kind"] == "attic_cache_config"
+            assert result["cache_access_valid"] is True and result["cache_is_public"] is True
+            assert result["token_auth_valid"] is None and result["write_auth_valid"] is None
+            assert fixture["attic"]["additional"]["public"]["token"] not in json.dumps(result), "Public Test exposed retained token"
+            check_attic_read_delta(before, fixture["attic"]["additional"]["public"]["cache_name"], status=200)
+            assert snapshot(destination_id) == baseline, "Public retained Test changed complete raw state"
+        proof.append({"provider": "Attic", "fixture": kind, "status": response.json()["status"],
+                      "expected": value.get("expected"), "complete_raw_immutability": "passed"})
     return proof
 
 
@@ -1522,8 +1621,10 @@ def assert_attic_result(result, stage, accessible):
     assert result["cache_access_valid"] is accessible
     assert result["write_auth_valid"] is None, "A read-only Test cannot prove write authorization"
     if accessible:
+        assert result["cache_is_public"] is False, "Private native success must identify visibility"
         assert result["token_auth_valid"] is True, "Private native success must authenticate"
     else:
+        assert result["cache_is_public"] is None, "Failed probe must not establish native visibility"
         assert result["token_auth_valid"] is not True
 
 
