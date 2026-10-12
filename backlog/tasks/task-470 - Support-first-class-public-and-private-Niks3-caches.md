@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-12 00:17'
+updated_date: '2026-10-12 00:19'
 labels: []
 dependencies: []
 references:
@@ -230,6 +230,8 @@ Approved optional provider adapter delegation at a33c1d0c: own only new packages
 Authorized Attic metrics backend delegation at a33c1d0c: own cf-config config/server.rs, caches/storage_metrics.rs and optional private helper plus optional server-only Nix bindings. Add default-empty explicit destination-ID adapter mappings; per-request fail-closed validation, admin-before-secret/network gates, canonical active Attic name, protected bounded runtime token loading, pinned HTTPS inventory request under total 8s/64KiB limits and typed schema-v1 u64 results. Preserve Niks3 requests/parsing and unsupported unconfigured Attic; run focused config/server metrics tests and owned formatting through nix develop. No migrations/publication/provider package edits/services/commits/pushes.
 
 Small metrics UI delegation: own web-ui views/caches/metrics.rs, necessary metrics DTO documentation in api/models.rs and minimal shared Cards/Table label call sites. Accept Attic available/attic_inventory uncompressed_nar_bytes and cached_nix_paths with equal path_count; show cached Nix paths, logical per-path NAR bytes with repeated deduplicated bytes and unknown physical usage, and DB inventory without integrity/download claims. Preserve Niks3 bases and existing finite refresh/status behavior. Add populated/zero/large/missing/wrong-basis/contradictory/status unit cases; run native UI tests and existing WASM check through nix develop. Parent retains lock, backend/native gates and recorded no-persistent-preview waiver; no stack, commits or pushes.
+
+Focused delegated Attic inventory gate at a33c1d0c: own only new checks/attic-metrics/{default.nix,README.md,test.py}. Reuse owner task branch/worktree/lock. Boot pinned native atticd migrations and protected CLI publication in one disposable VM, separate Crystal Forge/PostgreSQL in another. Exercise packaged optional adapter with column-only DB grants, per-cache runtime tokens and verified TLS proxy restricted to CF VM. Compare real CF metrics API with independent bound SQL including duplicate/shared NAR and equal-size distinct NAR cases; verify role/auth/no-probe/static-error and exact persistence invariants. Stage only new check and authorized new provider/module paths for flake visibility. Run focused foreground public-cache wrapper with one job/two cores; no old checks/CI/runtime/provider/UI edits or commits.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
