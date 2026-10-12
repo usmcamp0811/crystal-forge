@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-12 14:29'
-updated_date: '2026-10-12 14:30'
+updated_date: '2026-10-12 15:06'
 labels: []
 dependencies: []
 references:
@@ -43,6 +43,8 @@ User requests a separate evaluation reliability fix based on TASK-470's committe
 4. Add evidence-based bounded/redacted preflight diagnostics and verify terminal failure status. Start isolated task live preview before browser-visible workflow edits; report exact startup blocker if unavailable.
 5. Add deterministic source/lock/auth cold-warm/error/deadline/concurrency/cancel/quarantine regressions, run affected Rust and VM checks, review deadlocks/leaks/source parity and update source/knowledge documentation.
 6. Commit/push separate fix normally; open MR with TASK-470 merge dependency and exact-head CI outcomes. Do not merge.
+
+Delegated fixture scope: add checks/nixos-discovery-reliability/{default.nix,README.md,test.py}. Use disposable sandbox-local Nix store/cache and Basic-auth loopback archive endpoint delayed 65 seconds. Verify exact NAR-qualified local root, locked private input, 300-second discovery success, warm no-refetch, mismatch rejection, unchanged lock, and production primary evaluation via nix-eval-jobs. Run focused Snowfall check through command-local public-cache wrapper; no parent Rust edits or host services.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
