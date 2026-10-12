@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-12 14:29'
-updated_date: '2026-10-12 20:21'
+updated_date: '2026-10-12 20:23'
 labels: []
 dependencies: []
 references:
@@ -125,4 +125,6 @@ Resume preflight: TASK-484 HEAD and remote source both 0e0329bdfd547c91ce5e53fe2
 Conflict resolution completed at maintainer request without builds/tests. Merged target f8dd8419d4fff007b339d772ed0cb233fcd809a0 into TASK-484 with merge commit 0816c817e784ac4b9b8679294d767d87c3980a93 and pushed normally. Resolved three files: .gitlab-ci.yml retains combined provider/discovery gates and integration/oidc scoped cache policy; packages/ci/test_public_cache_build.py retains both matrix expectations plus target fixture realization regression; cf-config config/server.rs retains both discovery timeout and Attic metrics tests. Automatic merges retained target credential/publication changes. Unmerged index empty; staged diff whitespace inspection passed; worktree clean; exact remote source and unchanged remote target verified.
 
 Live MR !333 verified target TASK-470-niks3-cache-support, draft=false, has_conflicts=false, merge_status=can_be_merged, detailed_merge_status=ci_still_running, and exact source SHA0816c817. Updated MR description for new target and historical-vs-current verification. CI was not investigated or awaited. MR was not merged; target branch was not modified. Task remains In Progress because previously required full verification remains unclaimed despite MR draft removal authorized by user.
+
+User authorized merging and closing MR !333. Attempted normal GitLab merge API pinned to source SHA0816c817e784ac4b9b8679294d767d87c3980a93, preserving the already selected squash and source-branch-removal settings. GitLab rejected immediate merge with HTTP405 Method Not Allowed. Follow-up verified state=opened, merged_at=null, has_conflicts=false, detailed_merge_status=ci_still_running, exact-head pipeline2940048308 pending, and merge_when_pipeline_succeeds=true already enabled. Left automatic merge enabled and MR open so successful CI can merge and close it. No gate bypass, separate close, worktree removal, task completion, or new checks performed.
 <!-- SECTION:NOTES:END -->
