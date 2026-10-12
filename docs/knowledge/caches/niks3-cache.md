@@ -580,17 +580,23 @@ validity or write permission.
 ### Response-only storage observations
 
 `GET /api/v1/caches/:id/metrics` returns a scoped, volatile observation with
-`Cache-Control: no-store`. Only Admin can decrypt an enabled Niks3 snapshot and
-probe its write API using selected write TLS; no Bearer or read Basic identity is
-sent. Disabled destinations and unsupported Attic/S3/Http/Nix totals do no provider
-network work or bucket enumeration. Niks3 1.8's public `GET /api/cache-stats`
+`Cache-Control: no-store`. Only Admin can collect enabled provider metrics.
+Niks3 uses selected write TLS; no Bearer or read Basic identity is sent.
+Disabled destinations, unconfigured Attic metrics, and unsupported S3/Http/Nix
+totals do no provider network work or bucket enumeration. An optional
+[provider-side Attic adapter](../../../packages/attic-metrics/README.md) supplies
+named-cache path counts and uncompressed logical NAR bytes without giving CF
+access to the Attic database. Niks3 1.8's public `GET /api/cache-stats`
 reports `objects` and `logical_bytes` from its singleton database aggregate;
 packaged 1.6 lacks this endpoint. Absence does not identify a remote version.
 
 Logical bytes sum known client-reported uncompressed sizes and omit unknown
 legacy sizes. They are not physical usage, capacity, or Nix-path totals. Counts
 are live tracked objects, including metadata, not paths or untracked bucket
-objects. `path_count` is null. Missing/error values remain null and display
+objects. Niks3 `path_count` is null. Attic `path_count` counts registrations
+referencing valid NARs; shared NAR bytes count once per registered path, not
+once per deduplicated NAR. Neither provider reports physical usage. Missing/error
+values remain null and display
 **Unavailable**, never fabricated zero. Tooltips explain the basis; `measured_at`
 is local observation time, not an upstream timestamp. DNS, TLS and body reading
 share an eight-second total deadline and a 64 KiB body bound, with pinned DNS,

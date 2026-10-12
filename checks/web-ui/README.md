@@ -226,6 +226,45 @@ failure, not a write result. No probe performs an upload or proves write permiss
 
 ### Real remote inventory observations
 
+The populated Attic observation uses the optional `cf-attic-metrics` module on
+the native Attic VM. Earlier fixture setup already published a real NAR through
+the Attic CLI. Independent native SQL row reads supply the expected path count
+and uncompressed NAR byte sum. The adapter role has only SELECT access to
+`cache(id,name,deleted_at)`, `object(cache_id,nar_id)` and
+`nar(id,nar_size,state)`, with read-only transactions. Its protected database URI
+stays on the provider VM. A separate runtime 64-hex-character token is scoped to
+`web-ui-private`; credentials never enter screenshots or test output.
+
+The TLS route `https://atticCache:9444/metrics/v1/caches/` proxies to loopback
+9121. Firewall and nginx permit only the CF VM. The existing fixture CA and
+`atticCache` SAN remain verified. The adapter has no external listener.
+
+After the late seed request, the real CF API creates a separate enabled Attic
+destination scoped to the empty metrics-only environment. The driver binds its
+actual assigned ID through a mode-0600 runtime mapping. A fixture-only appended
+`preStart` injects `[[server.attic_metrics_endpoints]]` after normal TOML
+regeneration. The driver restarts only `crystal-forge-server.service` in the
+disposable VM before publishing `seed_complete`. It requires unchanged
+unrelated TOML, encryption identity, existing Admin session and all complete
+guarded raw rows. A real CF metrics GET must match the independent native totals.
+
+The browser checks **Logical NAR** and **cached Nix paths** in Cards and Table,
+including identical basis tooltips. Explicit **Refresh metrics** must show
+loading and produce real responses. Initial load and explicit refresh each make
+one bounded pass; view and detail transitions must reuse observations. Safe
+captures are `native-attic-metrics-populated-cards` and
+`native-attic-metrics-populated-table` under the gate's screenshots output.
+The original seven, legacy, replacement and native Niks3 guards remain strict.
+
+Run the authoritative focused workflow with the command-local public-cache
+wrapper (the selector is `CF_UI_TEST_STEPS`, not `CF_WEB_UI_STEP`):
+
+```sh
+CF_UI_TEST_STEPS=25-caches-modal-attic \
+  sh packages/ci/public-cache-build.sh --impure --no-link -L \
+  .#checks.x86_64-linux.web-ui --max-jobs 1 --cores 2
+```
+
 Production packaging remains Niks3 **1.6.0**. The web-ui fixture separately builds
 remote **1.8.0** for `GET /api/cache-stats`, using the source/vendor hashes from
 Nixpkgs commit `c27cdad491a991b11ed731760aa2ef8db0cb0410`. Its database is separate
@@ -324,6 +363,8 @@ production_basic:
   replacement_password, observer_baselines
 metrics:
   environment_id
+  attic:
+    id, expected: {cached_path_count, logical_nar_bytes}
   v16, v18:
     id, server_url, native_status
 nix_basic:

@@ -233,6 +233,145 @@ def s3_list(client, fixture, replacement=False, invalid=False):
                    headers=headers)
 
 
+def attic_metrics_setup():
+    """Binds a runtime adapter token to the already CLI-populated native cache.
+
+    Only the adapter receives a database URI. Expected totals come from native
+    row reads summed in Python. The browser receives public totals and CF IDs.
+    """
+    import psycopg2
+    from psycopg2 import sql
+    attic = json.loads(ATTIC_FIXTURE.read_text())
+    pg = psycopg2.connect(dbname="attic", user="postgres", host="127.0.0.1")
+    password, token = secrets.token_hex(32), secrets.token_hex(32)
+    with pg, pg.cursor() as cursor:
+        cursor.execute("CREATE ROLE cf_attic_metrics LOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS")
+        cursor.execute(sql.SQL("ALTER ROLE cf_attic_metrics PASSWORD {}").format(sql.Literal(password)))
+        cursor.execute("SELECT datname FROM pg_database WHERE NOT datistemplate")
+        for database, in cursor.fetchall():
+            cursor.execute(sql.SQL("REVOKE CONNECT,TEMPORARY ON DATABASE {} FROM PUBLIC").format(sql.Identifier(database)))
+        cursor.execute("GRANT CONNECT ON DATABASE attic TO attic")
+        cursor.execute("REVOKE ALL ON SCHEMA public FROM PUBLIC")
+        cursor.execute("GRANT USAGE ON SCHEMA public TO attic")
+        cursor.execute("GRANT CONNECT ON DATABASE attic TO cf_attic_metrics")
+        cursor.execute("GRANT USAGE ON SCHEMA public TO cf_attic_metrics")
+        for table, columns in (("cache", "id,name,deleted_at"), ("object", "cache_id,nar_id"), ("nar", "id,nar_size,state")):
+            cursor.execute(sql.SQL("GRANT SELECT ({}) ON {} TO cf_attic_metrics").format(sql.SQL(columns), sql.Identifier(table)))
+        cursor.execute("ALTER ROLE cf_attic_metrics SET default_transaction_read_only=on")
+        cursor.execute("SELECT id FROM cache WHERE name=%s AND deleted_at IS NULL", (attic["cache_name"],))
+        cache_id = cursor.fetchone()[0]
+        cursor.execute("SELECT n.nar_size FROM object o JOIN nar n ON n.id=o.nar_id WHERE o.cache_id=%s AND n.state='V' ORDER BY o.id", (cache_id,))
+        sizes = [row[0] for row in cursor.fetchall()]
+        assert sizes and sum(sizes) > 0, "Attic metrics needs genuine populated native NARs"
+    pg.close()
+    directory = Path("/run/cf-attic-metrics-secrets")
+    directory.mkdir(mode=0o700)
+    protected_json(directory / "tokens", {attic["cache_name"]: token})
+    descriptor = os.open(directory / "database", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as output:
+        output.write("postgresql://cf_attic_metrics:" + password + "@127.0.0.1/attic")
+    protected_json(Path("/run/cf-attic-metrics-binding.json"), {
+        "token": token, "url": "https://atticCache:9444/metrics/",
+        "expected": {"cached_path_count": len(sizes), "logical_nar_bytes": sum(sizes)},
+    })
+
+
+METRICS_MAPPING = Path("/var/lib/crystal-forge/web-ui-metrics-mapping.json")
+
+
+def metrics_config():
+    """Adds the late-seeded mapping after the normal VM preStart regeneration."""
+    if not METRICS_MAPPING.exists():
+        return
+    import tomllib
+    config = Path("/var/lib/crystal-forge/config.toml")
+    text = config.read_text()
+    before = tomllib.loads(text)
+    endpoints = json.loads(METRICS_MAPPING.read_text())
+    assert not before["server"].pop("attic_metrics_endpoints", []), "Fixture must not replace an existing mapping"
+    # Generated Nix TOML can include the optional field as an empty inline
+    # array. TOML forbids redefining that key as an array of tables.
+    text = re.sub(r"(?m)^attic_metrics_endpoints\s*=\s*\[\s*\]\s*$", "", text)
+    for endpoint in endpoints:
+        text += "\n[[server.attic_metrics_endpoints]]\n" + "\n".join(
+            key + " = " + json.dumps(value) for key, value in endpoint.items()) + "\n"
+    after = tomllib.loads(text)
+    assert after["server"].pop("attic_metrics_endpoints") == endpoints
+    assert after == before, "Metrics injection changed unrelated server configuration"
+    config.write_text(text)
+    config.chmod(0o600)
+
+
+def bind_attic_metrics(fixture, client, origin, hashes):
+    """Restarts only the disposable CF service with actual API-assigned identity.
+
+    Stable encryption key, unchanged TOML apart from the mapping, existing admin
+    session and strict destination snapshots must survive before seed_complete.
+    """
+    import pwd
+    import tomllib
+    binding = json.loads(Path("/run/cf-attic-metrics-binding.json").read_text())
+    attic = fixture["attic"]
+    response = request(client, "POST", origin + "/api/v1/caches", json={
+        "name": "task470-retained-native-metrics-attic", "cache_type": "Attic", "enabled": True,
+        "environment_ids": [fixture["metrics"]["environment_id"]],
+        "push_to": attic["server_url"], "attic_cache_name": attic["cache_name"],
+        "attic_public_key": attic["public_key"], "attic_token": attic["token"],
+    })
+    assert response.status_code in (200, 201), "Late Attic metrics API creation failed"
+    destination_id = response.json()["id"]
+    hashes[str(destination_id)] = {"row": snapshot(destination_id).hex()}
+    fixture["metrics"]["attic"] = {"id": destination_id, "expected": binding["expected"]}
+    def pid():
+        result = subprocess.run(["systemctl", "show", "crystal-forge-server.service", "-p", "MainPID", "--value"],
+                                stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8, check=True)
+        return int(result.stdout)
+    old_pid = pid()
+    environment = dict(value.split("=", 1) for value in Path(f"/proc/{old_pid}/environ").read_bytes().decode().split("\0") if "=" in value)
+    assert not any(key.startswith("CRYSTAL_FORGE_SERVER__ATTIC_METRICS") for key in environment), "Environment overrides fixture mapping"
+    config = Path(environment["CRYSTAL_FORGE_CONFIG"])
+    assert str(config) == "/var/lib/crystal-forge/config.toml", "Unexpected disposable server config source"
+    baseline = tomllib.loads(config.read_text())
+    assert not baseline["server"].pop("attic_metrics_endpoints", []), "Unexpected pre-seed mapping"
+    key = process_encryption_key(old_pid)
+    owner = pwd.getpwnam("crystal-forge")
+    token_file = Path("/var/lib/crystal-forge/web-ui-attic-metrics-token")
+    descriptor = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w") as output:
+        output.write(binding["token"])
+    os.chown(token_file, owner.pw_uid, owner.pw_gid)
+    protected_json(METRICS_MAPPING, [{"destination_id": destination_id, "url": binding["url"], "token_file": str(token_file)}])
+    os.chown(METRICS_MAPPING, owner.pw_uid, owner.pw_gid)
+    subprocess.run(["systemctl", "restart", "crystal-forge-server.service"], stdout=subprocess.DEVNULL,
+                   stderr=subprocess.DEVNULL, timeout=90, check=True)
+    assert pid() != old_pid and process_encryption_key(pid()) == key, "Restart changed encryption identity"
+    actual = tomllib.loads(config.read_text())
+    assert actual["server"].pop("attic_metrics_endpoints") == json.loads(METRICS_MAPPING.read_text())
+    assert actual == baseline, "Restart changed unrelated effective TOML"
+    deadline = time.monotonic() + 60
+    while True:
+        try:
+            whoami = request(client, "GET", origin + "/api/auth/whoami")
+            if whoami.status_code == 200:
+                assert "Admin" in whoami.json()["roles"], "Restart lost existing admin session"
+                break
+        except requests.exceptions.ConnectionError:
+            pass
+        assert time.monotonic() < deadline, "Restart did not restore existing session"
+        time.sleep(0.1)
+    for identity, expected in hashes.items():
+        assert snapshot(int(identity)).hex() == expected["row"], "Restart changed a guarded raw cache row"
+    response = request(client, "GET", origin + f"/api/v1/caches/{destination_id}/metrics")
+    assert response.status_code == 200 and response.headers.get("Cache-Control") == "no-store"
+    body = response.json()
+    assert body["status"] == "available" and body["reason_code"] == "attic_inventory", "CF did not reach real native Attic inventory"
+    assert body["storage_bytes"] == binding["expected"]["logical_nar_bytes"]
+    assert body["path_count"] == body["object_count"] == binding["expected"]["cached_path_count"]
+    assert snapshot(destination_id).hex() == hashes[str(destination_id)]["row"], "Metrics changed raw destination"
+    Path("/run/cf-attic-metrics-binding.json").unlink()
+    print("Late Attic metrics binding: stable config/key/session and strict raw rows; real CF API matches independent native SQL totals", flush=True)
+
+
 def assemble():
     """Proves authentication against native services before exposing the file."""
     global STAGE
@@ -878,6 +1017,10 @@ def seed():
         assert response.status_code in (200, 201)
         fixture["metrics"][version]["id"] = response.json()["id"]
         hashes[str(response.json()["id"])] = {"row": snapshot(response.json()["id"]).hex()}
+    # Restart before direct-SQL legacy fixtures: server startup deliberately
+    # encrypts plaintext rows. Legacy Test/Cancel must observe their original
+    # storage format, so no server restart may occur after those inserts.
+    bind_attic_metrics(fixture, client, origin, hashes)
     # Legacy compatibility must not be manufactured by the current API writer.
     import psycopg2
     server = subprocess.run(["systemctl", "show", "crystal-forge-server.service", "-p", "MainPID", "--value"],
@@ -964,7 +1107,7 @@ def checkpoints():
         legacy_ids = sorted(value["id"] for value in fixture["legacy_attic"].values())
         discovery_ids = sorted(source_ids + legacy_ids + [fixture["production_write_mtls"]["id"]])
         if phase == "metrics-before":
-            assert metrics_pending is None and sorted(ids) == sorted(fixture["metrics"][version]["id"] for version in ("v16", "v18"))
+            assert metrics_pending is None and sorted(ids) == sorted(fixture["metrics"][version]["id"] for version in ("v16", "v18", "attic"))
             metrics_pending = {value: snapshot(value) for value in ids}
         elif phase == "metrics-after":
             assert metrics_pending is not None and sorted(ids) == sorted(metrics_pending)
@@ -1336,7 +1479,7 @@ def verify_api():
         assert response.status_code in (200, 204), "Direct legacy fixture cleanup failed"
     response = request(client, "DELETE", origin + f"/api/v1/caches/{fixture['production_write_mtls']['id']}")
     assert response.status_code in (200, 204), "Stored-mTLS discovery fixture cleanup failed"
-    for destination_id in [basic_id] + [fixture["metrics"][version]["id"] for version in ("v16", "v18")]:
+    for destination_id in [basic_id] + [fixture["metrics"][version]["id"] for version in ("v16", "v18", "attic")]:
         assert request(client, "DELETE", origin + f"/api/v1/caches/{destination_id}").status_code in (200, 204)
     assert request(client, "DELETE", origin + f"/api/v1/environments/{fixture['metrics']['environment_id']}").status_code in (200, 204)
     HTTP_FIXTURE.unlink()
@@ -1579,6 +1722,7 @@ if __name__ == "__main__":
     try:
         STAGE = sys.argv[1]
         {"attic": bootstrap_attic, "http-setup": bootstrap_http, "assemble": assemble,
+         "attic-metrics-setup": attic_metrics_setup, "metrics-config": metrics_config,
          "seed": seed, "verify": verify_api, "observe": observe,
          "checkpoints": checkpoints,
          "snapshot-policy-regressions": snapshot_policy_regressions,

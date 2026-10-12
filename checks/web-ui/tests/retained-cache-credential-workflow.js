@@ -681,10 +681,16 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
     console.log("TASK-470 five-rail native Basic Add/Edit passed: real mTLS Discovery, explicit conflict review, atomic encrypted Save, scoped tests and no replacement persistence");
   };
   const metricsWorkflow = async () => {
-    const records = [fixture.metrics.v16, fixture.metrics.v18];
+    const records = [fixture.metrics.v16, fixture.metrics.v18, fixture.metrics.attic];
     const names = await Promise.all(records.map(value => read(value.id)));
     await checkpoint("metrics-before", records.map(value => value.id));
     const replies = new Map();
+    const gets = new Map(records.map(value => [value.id, 0]));
+    const count = request => {
+      for (const value of records) if (request.method() === "GET" && request.url() === `${apiBaseUrl}/api/v1/caches/${value.id}/metrics`) {
+        gets.set(value.id, gets.get(value.id) + 1);
+      }
+    };
     const collect = async response => {
       for (const value of records) if (response.request().method() === "GET" && response.url() === `${apiBaseUrl}/api/v1/caches/${value.id}/metrics`) {
         assert.equal(response.status(), 200);
@@ -693,6 +699,7 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       }
     };
     page.on("response", collect);
+    page.on("request", count);
     try {
       await page.goto(`${baseUrl}/caches`);
       await page.getByRole("button", { name: "Cards", exact: true }).click();
@@ -706,6 +713,48 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       assert.equal(available.storage_bytes_basis, "reported_logical");
       assert.equal(available.object_count_basis, "live_tracked_objects");
       assert.equal(available.path_count, null);
+      const attic = replies.get(records[2].id);
+      const expected = fixture.metrics.attic.expected;
+      assert.equal(attic.status, "available"); assert.equal(attic.reason_code, "attic_inventory");
+      assert.equal(attic.storage_bytes, expected.logical_nar_bytes);
+      assert.equal(attic.path_count, expected.cached_path_count);
+      assert.equal(attic.object_count, expected.cached_path_count);
+      assert.equal(attic.storage_bytes_basis, "uncompressed_nar_bytes");
+      assert.equal(attic.object_count_basis, "cached_nix_paths");
+      assert(attic.measured_at, "real Attic response supplies observation time");
+      const size = expected.logical_nar_bytes / 1073741824;
+      const storage = size < 0.01 ? "<0.01 GiB" : `${size.toFixed(2)} GiB`;
+      const paths = `${expected.cached_path_count} cached Nix ${expected.cached_path_count === 1 ? "path" : "paths"}`;
+      const card = page.getByText(names[2].name, { exact: true }).locator("xpath=ancestor::div[.//button[@title='Edit'] and .//p][1]");
+      const cardStorage = card.getByText(`Logical NAR: ${storage}`, { exact: true });
+      const cardPaths = card.getByText(`Paths / Objects: ${paths}`, { exact: true });
+      await expect(cardStorage).toBeVisible(); await expect(cardPaths).toBeVisible();
+      const storageHelp = await cardStorage.getAttribute("title");
+      const pathsHelp = await cardPaths.getAttribute("title");
+      assert(storageHelp.includes(`${expected.logical_nar_bytes} logical NAR bytes`) && storageHelp.includes("Physical storage usage and capacity are unknown"));
+      assert(pathsHelp.includes("valid registered paths") && pathsHelp.includes("does not verify content integrity"));
+      for (const value of records) assert.equal(gets.get(value.id), 1, "one finite initial metrics pass");
+      if (captureState) await captureState("native-attic-metrics-populated-cards");
+      await page.getByRole("button", { name: "Table", exact: true }).click();
+      const row = page.getByRole("row").filter({ has: page.getByText(names[2].name, { exact: true }) });
+      await expect(row.getByText(`Logical NAR: ${storage}`, { exact: true })).toBeVisible();
+      await expect(row.getByText(paths, { exact: true })).toBeVisible();
+      await expect(row.getByText(`Logical NAR: ${storage}`, { exact: true })).toHaveAttribute("title", storageHelp);
+      await expect(row.getByRole("cell", { name: paths, exact: true })).toHaveAttribute("title", pathsHelp);
+      if (captureState) await captureState("native-attic-metrics-populated-table");
+      for (const value of records) assert.equal(gets.get(value.id), 1, "Cards to Table must reuse observations");
+      replies.clear();
+      const refreshRequest = page.waitForRequest(request => request.method() === "GET" && request.url() === `${apiBaseUrl}/api/v1/caches/${records[2].id}/metrics`);
+      const loading = expect(page.getByRole("button", { name: "Loading metrics…", exact: true })).toBeVisible();
+      await page.getByRole("button", { name: "Refresh metrics", exact: true }).click();
+      await loading; await refreshRequest;
+      await expect.poll(() => records.every(value => replies.has(value.id)), { message: "explicit refresh makes real metrics requests" }).toBe(true);
+      assert.equal(replies.get(records[2].id).storage_bytes, expected.logical_nar_bytes);
+      assert.equal(replies.get(records[2].id).path_count, expected.cached_path_count);
+      await expect(page.getByRole("button", { name: "Refresh metrics", exact: true })).toBeEnabled();
+      await expect(row.getByText(paths, { exact: true })).toBeVisible();
+      for (const value of records) assert.equal(gets.get(value.id), 2, "one initial and one explicit refresh pass");
+      await page.getByRole("button", { name: "Cards", exact: true }).click();
       if (captureState) await captureState("native-metrics-real-v16-v18-cards");
       await page.getByText(names[1].name, { exact: true }).click();
       const panel = page.getByRole("dialog").filter({ has: page.getByRole("button", { name: "Edit cache", exact: true }) });
@@ -728,7 +777,8 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       if (captureState) await captureState("native-metrics-real-v16-unavailable-detail");
       await missing.getByRole("button", { name: "Close", exact: true }).click();
       for (let index = 0; index < records.length; index++) unchanged(names[index], await read(records[index].id), "read-only card metrics");
-    } finally { page.off("response", collect); }
+      for (const value of records) assert.equal(gets.get(value.id), 2, "view/detail transitions must not poll metrics");
+    } finally { page.off("response", collect); page.off("request", count); }
     await checkpoint("metrics-after", records.map(value => value.id));
     console.log("TASK-470 real native metrics cards passed: 1.6 unavailable, isolated 1.8 empty totals with accurate bases, no raw-state changes");
   };

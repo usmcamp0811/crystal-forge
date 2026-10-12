@@ -6476,24 +6476,26 @@ pub enum CacheMetricsStatus {
 }
 
 /// Contains a credential-free observation from `GET /caches/:id/metrics`.
-/// Values are not persisted. Objects are not Nix paths; reported logical bytes
-/// are not physical storage usage or capacity. Missing values remain unknown.
+/// Values are not persisted. Count and byte meanings depend on their explicit
+/// bases. Logical bytes are not physical usage or capacity. Attic inventory does
+/// not verify integrity or download availability. Missing values remain unknown.
 #[derive(Debug, Clone, Deserialize, PartialEq)]
 pub struct CacheStorageMetrics {
     /// Classifies the observation; values are usable only when available.
     pub status: CacheMetricsStatus,
     /// Contains a reason code; presentation must map it to static explanations.
     pub reason_code: String,
-    /// Contains the known client-reported logical byte total, including zero.
+    /// Contains the logical byte total for the reported basis, including zero.
     pub storage_bytes: Option<u64>,
-    /// Identifies the byte basis; currently only `reported_logical` is supported.
+    /// Identifies `reported_logical` (Niks3) or `uncompressed_nar_bytes` (Attic).
+    /// Attic sums per-path NAR sizes, including repeated deduplicated bytes.
     pub storage_bytes_basis: Option<String>,
-    /// Contains the number of live tracked objects, including metadata objects.
+    /// Contains live tracked objects (Niks3) or cached Nix paths (Attic).
     pub object_count: Option<u64>,
-    /// Identifies the count basis; currently only `live_tracked_objects` is supported.
+    /// Identifies `live_tracked_objects` or `cached_nix_paths` respectively.
     pub object_count_basis: Option<String>,
-    /// Contains a Nix path count if a future provider explicitly reports one.
-    /// The current API always returns null; objects must not substitute for it.
+    /// Contains Attic's cached Nix path count, equal to its compatibility object
+    /// count. Niks3 returns null; tracked objects must not substitute for paths.
     pub path_count: Option<u64>,
     /// Contains the server's UTC observation time, not an upstream measurement time.
     pub measured_at: Option<DateTime<Utc>>,

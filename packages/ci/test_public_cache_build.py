@@ -6,6 +6,7 @@ Synthetic unavailable caches must be removed even when inherited through both
 base and extra settings. No runner configuration values are printed.
 """
 
+import copy
 import json
 import os
 from pathlib import Path
@@ -39,7 +40,14 @@ for job in old:
     if job not in changed:
         assert old[job] == new[job], job
     else:
-        assert {k: v for k, v in old[job].items() if k != "script"} == {
+        expected = copy.deepcopy({k: v for k, v in old[job].items() if k != "script"})
+        if job == "flake-check":
+            # TASK-470 adds exactly one blocking metrics gate. Preserve every
+            # other matrix entry, its order, and all unrelated job metadata.
+            names = expected["parallel"]["matrix"][0]["CHECK_NAME"]
+            if "attic-metrics" not in names:
+                names.insert(names.index("niks3-cache") + 1, "attic-metrics")
+        assert expected == {
             k: v for k, v in new[job].items() if k != "script"}, job
         assert old[job]["script"][1:] == new[job]["script"][1:], job
 
@@ -121,13 +129,13 @@ max-jobs = 3
         return result
 
     route = new["flake-check"]["script"][0]
-    for name in old["flake-check"]["parallel"]["matrix"][0]["CHECK_NAME"]:
+    for name in new["flake-check"]["parallel"]["matrix"][0]["CHECK_NAME"]:
         result = subprocess.run(["sh", "-euc", route], cwd=ROOT,
                                 env=dict(env, CHECK_NAME=name), capture_output=True, text=True)
         assert result.returncode == 0, name
         recorded = json.loads((directory / "argv").read_text())
         arguments = [f".#checks.x86_64-linux.{name}", "-L", "--show-trace"]
-        scoped = name in {"server-regressions", "niks3-cache", "builder-evaluator-packaging"}
+        scoped = name in {"server-regressions", "niks3-cache", "attic-metrics", "builder-evaluator-packaging"}
         assert recorded == ["build", *(POLICY if scoped else []), *arguments], name
         assert result.stdout.count("InheritedInternalCache=") == int(scoped), name
     for job in ("web-ui-check", "web-ui-baseline-candidates"):

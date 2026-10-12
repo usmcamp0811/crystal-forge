@@ -2574,7 +2574,7 @@ fn CacheDestinationCardNew(
             }
             div { style: "padding:12px 16px 0;",
                 p { style: "font-size:11px;color:var(--cf-text-muted);",
-                    span { title: "{metric_display.storage_help}", "Storage: {metric_display.storage}" }
+                    span { title: "{metric_display.storage_help}", {metric_display.storage_label.unwrap_or("Storage")}, ": {metric_display.storage}" }
                     " · "
                     span { title: "{metric_display.objects_help}", "Paths / Objects: {metric_display.objects}" }
                 }
@@ -2704,6 +2704,7 @@ fn CacheDestinationRow(
                 span {
                     style: "font-size:11px; color:var(--cf-text-muted);",
                     title: "{metric_display.storage_help}",
+                    if let Some(label) = metric_display.storage_label { "{label}: " }
                     "{metric_display.storage}"
                 }
             }
