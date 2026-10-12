@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-12 14:29'
-updated_date: '2026-10-12 15:56'
+updated_date: '2026-10-12 16:22'
 labels: []
 dependencies: []
 references:
@@ -45,6 +45,8 @@ User requests a separate evaluation reliability fix based on TASK-470's committe
 6. Commit/push separate fix normally; open MR with TASK-470 merge dependency and exact-head CI outcomes. Do not merge.
 
 Delegated fixture scope: add checks/nixos-discovery-reliability/{default.nix,README.md,test.py}. Use disposable sandbox-local Nix store/cache and Basic-auth loopback archive endpoint delayed 65 seconds. Verify exact NAR-qualified local root, locked private input, 300-second discovery success, warm no-refetch, mismatch rejection, unchanged lock, and production primary evaluation via nix-eval-jobs. Run focused Snowfall check through command-local public-cache wrapper; no parent Rust edits or host services.
+
+Backend diagnostics follow-up in the existing locked worktree: observe only exact Nix stderr input-resolution markers with a fixed-size cross-chunk carry and one-shot watch<bool>; log source completion/failure, discovery start, evidenced resolving inputs and successful system count. Use a typed bounded-child timeout to retain deadline and cleanup state across anyhow context and preserve the operation error if lease confirmation fails. Remove repository URLs before truncating/redacting bounded terminal excerpts. Add focused regressions and run through the Nix shell. User waived persistent preview for backend log-only changes and excluded frontend/service/database/CI edits and commits/pushes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
