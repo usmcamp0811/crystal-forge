@@ -43,9 +43,11 @@ for job in old:
     else:
         expected = copy.deepcopy({k: v for k, v in old[job].items() if k != "script"})
         if job == "flake-check":
-            # TASK-470 adds blocking metrics and publication gates. Preserve every
-            # other matrix entry, its order, and all unrelated job metadata.
+            # TASK-470 and TASK-484 add blocking provider and discovery gates.
+            # Preserve every other matrix entry and unrelated job metadata.
             names = expected["parallel"]["matrix"][0]["CHECK_NAME"]
+            if "nixos-discovery-reliability" not in names:
+                names.insert(names.index("server-regressions") + 1, "nixos-discovery-reliability")
             if "attic-metrics" not in names:
                 names.insert(names.index("niks3-cache") + 1, "attic-metrics")
             if "attic-publication" not in names:
@@ -139,7 +141,8 @@ max-jobs = 3
         recorded = json.loads((directory / "argv").read_text())
         arguments = [f".#checks.x86_64-linux.{name}", "-L", "--show-trace"]
         scoped = name in {"integration", "oidc-auth", "server-regressions", "niks3-cache",
-                          "attic-metrics", "attic-publication", "builder-evaluator-packaging"}
+                          "nixos-discovery-reliability", "attic-metrics", "attic-publication",
+                          "builder-evaluator-packaging"}
         assert recorded == ["build", *(POLICY if scoped else []), *arguments], name
         assert result.stdout.count("InheritedInternalCache=") == int(scoped), name
     for job in ("web-ui-check", "web-ui-baseline-candidates"):

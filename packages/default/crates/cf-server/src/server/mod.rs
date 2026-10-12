@@ -2790,14 +2790,24 @@ in cfg.config.security.auditd.enable}""#;
     }
 }
 
-/// Background task to hydrate commit artifact cache (nixosConfigurations + changed files).
-/// Processes commits with missing cache entries, with progressive backoff on failure.
+/// Hydrates display-only configuration inventories and best-effort changed files.
+///
+/// Configuration discovery uses the commit's flake credentials, current server
+/// configuration, and exact immutable source. Source materialization precedes
+/// heavy-Nix admission. Discovery holds both locks through acknowledged cleanup
+/// and finishes its scope before cache persistence. Failed discovery marks the
+/// cache row unpopulated; the missing-row query does not select that row again.
+/// Authoritative evaluation rediscovers names instead of trusting these rows.
 async fn run_commit_artifact_hydration_loop(pool: PgPool) {
-    use crate::flake::commits::{get_commit_changed_files, get_commit_nixos_configurations};
+    use crate::flake::commits::get_commit_changed_files;
+    use crate::flake::credentials::FlakeCredentialEnv;
+    use crate::flake::verified_source::materialize_immutable_source;
+    use crate::models::evaluate_with_policies::run_configuration_discovery_preflight;
     use crate::queries::commits_artifacts::{
         get_commits_needing_artifact_cache, mark_commit_artifact_hydration_failed,
         upsert_commit_artifact_cache,
     };
+    use cf_protocol::builder::nar_qualified_store_flake_ref;
 
     info!("🔁 Starting commit artifact hydration background task...");
 
@@ -2816,16 +2826,40 @@ async fn run_commit_artifact_hydration_loop(pool: PgPool) {
                         repo_url, commit_hash
                     );
 
-                    // Try to get nixosConfigurations
-                    let configs = match get_commit_nixos_configurations(
-                        &repo_url,
-                        &[commit_hash.clone()],
-                    )
-                    .await
-                    .remove(&commit_hash)
-                    {
-                        Some(configs) => configs,
-                        None => {
+                    // SECURITY: Resolve auth from the commit's actual flake,
+                    // never from a repository URL shared by unrelated flakes.
+                    // No remote CLI fallback can reconcile this source's locks.
+                    let discovery = async {
+                        let config = CrystalForgeConfig::load()?;
+                        let server_config = config.get_server_config();
+                        let commit =
+                            crate::queries::commits::get_commit_by_id(&pool, commit_id).await?;
+                        let flake = commit.get_flake(&pool).await?;
+                        let creds = FlakeCredentialEnv::load(&pool, flake.id).await?;
+                        let source = materialize_immutable_source(
+                            &pool,
+                            commit.id,
+                            &server_config.source_archive_root,
+                            &flake.repo_url,
+                            &commit.git_commit_hash,
+                            creds.as_ref(),
+                        )
+                        .await?;
+                        let source_ref = nar_qualified_store_flake_ref(
+                            &source.server_store_path,
+                            &source.nar_hash,
+                        );
+                        run_configuration_discovery_preflight(
+                            &pool,
+                            &source_ref,
+                            creds.as_ref(),
+                            server_config,
+                        )
+                        .await
+                    };
+                    let configs = match discovery.await {
+                        Ok(configs) => configs,
+                        Err(_) => {
                             warn!(
                                 "⚠️  Failed to get nixosConfigurations for {} @ {}, marking as failed",
                                 repo_url, commit_hash

@@ -25,6 +25,7 @@ tags:
 | `checks/attic-publication/README.md` | retained in place at [the native publication runbook](../../../../checks/attic-publication/README.md) | retained | complete |
 | `packages/attic-metrics/README.md` | retained in place at [the adapter operator runbook](../../../../packages/attic-metrics/README.md); see [storage observation contract](../../caches/niks3-cache.md#response-only-storage-observations) | retained | complete |
 | `checks/nixos-options-metadata/README.md` | retained in place; see [nixos-options-metadata section](../../testing/flake-checks.md#nixos-options-metadata) | retained | complete |
+| `checks/nixos-discovery-reliability/README.md` | retained in place; see [cold-input evidence and limits](../../evaluation/bulk-evaluator-resource-planning.md#cold-input-evidence-and-limits) | retained | complete |
 | `checks/oidc-auth/README.md` | retained in place; see [oidc-auth section](../../testing/flake-checks.md#oidc-auth) | retained | complete |
 | `checks/oscal-export/README.md` | retained in place; see [oscal-export section](../../testing/flake-checks.md#oscal-export) | retained | complete |
 | `checks/run-ui-dev-db-check/README.md` | retained in place; see [run-ui-dev-db-check section](../../testing/flake-checks.md#run-ui-dev-db-check) | retained | complete |

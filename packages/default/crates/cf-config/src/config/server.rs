@@ -95,6 +95,12 @@ pub struct ServerConfig {
     #[serde(default = "default_eval_overall_timeout_secs")]
     pub eval_overall_timeout_secs: u64,
 
+    /// Absolute configuration-discovery deadline in seconds, in 1..=1800.
+    /// Defaults to 300 to allow cold locked-input downloads. This budget is
+    /// independent of realization and bulk evaluator deadlines.
+    #[serde(default = "default_eval_discovery_timeout_secs")]
+    pub eval_discovery_timeout_secs: u64,
+
     /// Whether to check cache status during evaluation.
     /// Adds --check-cache-status flag to nix-eval-jobs.
     /// Default: true
@@ -377,6 +383,10 @@ fn default_eval_overall_timeout_secs() -> u64 {
     3600
 }
 
+fn default_eval_discovery_timeout_secs() -> u64 {
+    300
+}
+
 fn default_eval_check_cache() -> bool {
     true // Usually helpful for build planning
 }
@@ -416,6 +426,7 @@ impl Default for ServerConfig {
             eval_memory_max_percent: default_eval_memory_max_percent(),
             eval_output_idle_timeout_secs: default_eval_output_idle_timeout_secs(),
             eval_overall_timeout_secs: default_eval_overall_timeout_secs(),
+            eval_discovery_timeout_secs: default_eval_discovery_timeout_secs(),
             eval_check_cache: default_eval_check_cache(),
             auto_hardening_scans: false,
             auth_mode: default_auth_mode(),
@@ -493,6 +504,11 @@ impl ServerConfig {
     /// # Errors
     /// Returns an error for invalid memory/reserve/percentage/timeouts or overflow.
     pub fn validate_evaluator_policy(&self) -> Result<(), String> {
+        if !(1..=1800).contains(&self.eval_discovery_timeout_secs) {
+            return Err(
+                "eval_discovery_timeout_secs must be between 1 and 1800 seconds".to_string(),
+            );
+        }
         crate::evaluator_resources::validate_evaluator_policy(
             self.eval_workers,
             self.eval_max_memory_mb,
@@ -677,6 +693,41 @@ pub fn notification_public_base_url_allowed(value: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn discovery_timeout_defaults_and_validates_bounds() {
+        let parse = |text: &str| {
+            ::config::Config::builder()
+                .add_source(::config::File::from_str(text, ::config::FileFormat::Toml))
+                .build()
+                .unwrap()
+                .try_deserialize::<ServerConfig>()
+        };
+        let omitted = parse("host = '127.0.0.1'\nport = 3000").unwrap();
+        assert_eq!(omitted.eval_discovery_timeout_secs, 300);
+        assert_eq!(ServerConfig::default().eval_discovery_timeout_secs, 300);
+        for seconds in [1, 300, 1800] {
+            let cfg = ServerConfig {
+                eval_discovery_timeout_secs: seconds,
+                ..omitted.clone()
+            };
+            cfg.validate().unwrap();
+        }
+        for seconds in [0, 1801, u64::MAX] {
+            let cfg = ServerConfig {
+                eval_discovery_timeout_secs: seconds,
+                ..omitted.clone()
+            };
+            assert!(
+                cfg.validate()
+                    .unwrap_err()
+                    .contains("eval_discovery_timeout_secs")
+            );
+        }
+        assert!(
+            parse("host = '127.0.0.1'\nport = 3000\neval_discovery_timeout_secs = -1").is_err()
+        );
+    }
 
     #[test]
     fn attic_metrics_defaults_and_endpoint_roundtrip() {

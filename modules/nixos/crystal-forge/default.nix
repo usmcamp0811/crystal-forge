@@ -46,6 +46,7 @@
           eval_memory_max_percent = cfg.server.eval_memory_max_percent;
           eval_output_idle_timeout_secs = cfg.server.eval_output_idle_timeout_secs;
           eval_overall_timeout_secs = cfg.server.eval_overall_timeout_secs;
+          eval_discovery_timeout_secs = cfg.server.eval_discovery_timeout_secs;
           eval_check_cache = cfg.server.eval_check_cache;
           auto_hardening_scans = cfg.server.auto_hardening_scans;
           allow_private_cache_test_targets =
@@ -1832,6 +1833,17 @@ in {
           Absolute evaluator deadline in seconds from process start.
           Output does not reset this clock. The output-idle deadline can
           cancel evaluation earlier and is configured independently.
+        '';
+      };
+
+      eval_discovery_timeout_secs = lib.mkOption {
+        type = lib.types.ints.between 1 1800;
+        default = 300;
+        description = lib.mdDoc ''
+          Absolute configuration-discovery deadline in seconds, from 1 through
+          1800 inclusive. The default allows cold locked-input downloads.
+          This deadline is independent of realization and bulk evaluator
+          deadlines. Output does not reset this clock.
         '';
       };
 
