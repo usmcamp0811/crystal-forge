@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-12 01:02'
-updated_date: '2026-10-12 01:04'
+updated_date: '2026-10-12 14:28'
 labels: []
 dependencies: []
 references:
@@ -37,4 +37,6 @@ The TASK-470 native Attic inventory fixture reproduced optional-module startup f
 
 <!-- SECTION:NOTES:BEGIN -->
 User-approved correction implemented within parent TASK-470 provider scope: optional module now creates DynamicUser-owned RuntimeDirectory=cf-attic-metrics with mode0700. Two unprivileged ExecStartPre coreutils install -m0600 commands copy read-only LoadCredential originals into /run/cf-attic-metrics/{database-uri,tokens}; ExecStart reads the private copies. README documents fresh copies on startup/restart and runtime-directory removal on stop. protected_read and adapter/test code unchanged. Locked-nixpkgs NixOS module probe passed exit0 with assertions for runtime directory/mode, both copy commands, runtime credential paths, DynamicUser and ProtectSystem=strict; default remains disabled and firewall ports empty. Actual VM service-owner/credential-permission/startup/authenticated-inventory proof is pending with native-check agent. Parent owns closure/archive after that proof; no host services or commits.
+
+Resolved within the authorized parent TASK-470 implementation. Final native optional-module gate passed exit 0: DynamicUser nonroot UID; runtime directory 0700; both credential copies 0600 owned by the service UID; protected root-owned originals unchanged; restart refreshes token/scopes; stop removes runtime credentials. Later final contract gate also passed with native Team+1 and 32/1024-byte tokens. No general credential-file checks or database privileges were relaxed. This tracking item duplicates the parent implementation and will be archived rather than treated as separate sprint work.
 <!-- SECTION:NOTES:END -->
