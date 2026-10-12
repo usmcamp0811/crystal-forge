@@ -1,11 +1,11 @@
 ---
 id: TASK-484
 title: Make cold-input NixOS configuration discovery reliable
-status: In Progress
+status: Done
 assignee:
   - '@openai-agent'
 created_date: '2026-10-12 14:29'
-updated_date: '2026-10-12 20:23'
+updated_date: '2026-10-12 20:25'
 labels: []
 dependencies: []
 references:
@@ -127,4 +127,14 @@ Conflict resolution completed at maintainer request without builds/tests. Merged
 Live MR !333 verified target TASK-470-niks3-cache-support, draft=false, has_conflicts=false, merge_status=can_be_merged, detailed_merge_status=ci_still_running, and exact source SHA0816c817. Updated MR description for new target and historical-vs-current verification. CI was not investigated or awaited. MR was not merged; target branch was not modified. Task remains In Progress because previously required full verification remains unclaimed despite MR draft removal authorized by user.
 
 User authorized merging and closing MR !333. Attempted normal GitLab merge API pinned to source SHA0816c817e784ac4b9b8679294d767d87c3980a93, preserving the already selected squash and source-branch-removal settings. GitLab rejected immediate merge with HTTP405 Method Not Allowed. Follow-up verified state=opened, merged_at=null, has_conflicts=false, detailed_merge_status=ci_still_running, exact-head pipeline2940048308 pending, and merge_when_pipeline_succeeds=true already enabled. Left automatic merge enabled and MR open so successful CI can merge and close it. No gate bypass, separate close, worktree removal, task completion, or new checks performed.
+
+Maintainer explicitly authorized local merge and normal target push without checks after GitLab's immediate merge endpoint rejected pending CI. Created an isolated detached administrative worktree based on remote target f8dd8419; merged exact source0816c817 with --no-ff, committed e274f91848be07b76259fbac08d5752a7a2b4558, and pushed HEAD:TASK-470-niks3-cache-support normally. Remote target SHA verified. GitLab then automatically recorded MR !333 as state=merged with merge_commit_sha=e274f918 and merged_at2026-10-12T20:24:31.751Z. No separate close required. No checks, force-push, CI configuration override, or local target-worktree update performed.
+
+Cleanup completed with normal non-force git worktree remove for both TASK-484-merge-task470 and TASK-484-discovery-timeout; git worktree list confirmed absence. Existing TASK-470 worktree remains at its owner-controlled local f8dd8419 while origin target has e274f918. LOCK RELEASED: TASK-484 retired after verified merge and worktree cleanup. Status Done records the authorized merge lifecycle, not a claim that unexecuted checks or deployment acceptance passed.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Merged TASK-484 into TASK-470-niks3-cache-support at the maintainer's explicit instruction without waiting for CI. The fix uses verified immutable-source discovery, a bounded configurable discovery timeout, heavy-Nix admission and cleanup ownership, cancellation-safe handoff, and evidence-based redacted diagnostics. Historical targeted tests and a deterministic private-input cold/warm fixture passed during implementation; no final merged-head CI or deployment pass is claimed. Normal local merge commit e274f91848be07b76259fbac08d5752a7a2b4558 was pushed to the target branch. GitLab verified MR !333 state=merged with that merge commit. Both clean TASK-484 worktrees were removed. The existing TASK-470 worktree and unrelated worktrees were left untouched. Production-equivalent cold/warm deployment verification and outstanding CI remain maintainer follow-up.
+<!-- SECTION:FINAL_SUMMARY:END -->
