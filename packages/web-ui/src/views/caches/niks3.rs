@@ -3,13 +3,45 @@
 //! Write API transport and Nix read identity are independent. Stored secrets
 //! never seed inputs. Discovery and scoped Test operate on snapshots only;
 //! Save commits complete configuration and scope in one request.
+//!
+//! A fresh destination and loaded scope establish one immutable draft baseline.
+//! Only editable values, credential selection and explicit clear intent affect
+//! dirty state. Plane-specific input generations and operation sequences fence
+//! stale successes, failures and busy completion. Public discovery never proves
+//! authentication. API authorization does not prove S3 upload or publication.
+//! Discovery responses are proposals only. Explicit application changes read
+//! settings; matching metadata and stale responses never change the draft.
 
 use super::*;
 use crate::api::models::{Niks3DiscoverRequest, Niks3Discovery, Niks3ProbeScope};
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use std::{cell::Cell, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+};
 
 const CSS: &str = r#"
+.n3-shell .input,.n3-credential .input{font-size:12px}
+.n3-shell .n3-key-row .input{font-size:11.5px}
+.n3-shell .pe-head-sub{max-width:760px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.n3-title-row{display:flex;align-items:center;gap:9px;min-width:0}
+.n3-title-row .chip,.n3-title-row svg{flex-shrink:0}
+.n3-toggle{display:flex;align-items:flex-start;gap:9px;font-size:13px;font-weight:600;cursor:pointer}
+.n3-toggle input{accent-color:var(--cf-brand-purple);margin-top:2px}
+.n3-shell .seg{width:fit-content;max-width:100%;flex-wrap:wrap}
+.n3-shell .n3-key-row+.n3-key-row{margin-top:6px}
+.n3-shell .n3-cred{margin-top:8px;margin-bottom:14px}
+.n3-env{padding:6px 12px;border-radius:99px;font-size:12px;font-weight:600;border:1px solid var(--cf-card-border);background:transparent;color:var(--cf-text-muted);cursor:pointer;display:inline-flex;align-items:center;gap:7px;font-family:inherit}
+.n3-env[aria-pressed=true]{border-color:var(--n3-env-color);background:color-mix(in oklab,var(--n3-env-color) 14%,var(--cf-card-bg));color:var(--cf-text-primary)}
+.n3-env-dot{width:8px;height:8px;border-radius:50%;background:var(--n3-env-color);flex-shrink:0}
+.n3-credential.modal{width:min(560px,calc(100vw - 16px));max-height:min(88vh,760px);display:flex;flex-direction:column;overflow:hidden;min-width:0}
+.n3-credential .modal-head,.n3-credential .modal-foot{flex-shrink:0}
+.n3-credential .modal-head{position:sticky;top:0;z-index:1;background:var(--cf-card-bg)}
+.n3-credential .modal-foot{position:sticky;bottom:0;z-index:1;background:var(--cf-card-bg)}
+.n3-credential .modal-body{overflow-y:auto;min-height:0}
+.n3-credential textarea.input{min-height:92px}
+.n3-credential .modal-head h2{overflow-wrap:anywhere}
+@media(max-width:860px){.n3-shell .pe-rail-item{grid-template-columns:15px minmax(0,1fr) auto}.n3-shell .pe-head>div{min-width:0;flex:1}}
 .n3-cred{border:1px solid var(--cf-divider);border-radius:9px;padding:9px 12px;background:var(--cf-subtle-bg)}
 .n3-cred-main{display:flex;align-items:center;justify-content:space-between;gap:10px;flex-wrap:wrap}
 .n3-cred-state{display:inline-flex;align-items:center;gap:7px;font-size:12px;color:var(--cf-text-primary);flex-wrap:wrap}
@@ -23,7 +55,7 @@ const CSS: &str = r#"
 .n3-advanced{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:12px}
 .n3-key-row{display:flex;gap:6px;min-width:0}.n3-key-row input{min-width:0;flex:1}
 .n3-public-value{overflow-wrap:anywhere;white-space:pre-wrap;font-size:11.5px}
-@media(max-width:600px){.n3-advanced{grid-template-columns:1fr}.n3-plane-head{flex-wrap:wrap}}
+@media(max-width:600px){.n3-advanced{grid-template-columns:1fr}.n3-plane-head,.n3-title-row{flex-wrap:wrap}}
 "#;
 
 const CA_HELP: &str = "Trust bundle used by the client to verify remote HTTPS servers, not the CA validating your client certificate. Multiple CA certificates are supported.";
@@ -34,6 +66,320 @@ enum Choice {
     Current,
     Draft,
     None,
+}
+
+fn auth_label(mode: &str) -> &'static str {
+    match mode {
+        "token" => "API token",
+        "mtls" => "mTLS",
+        "none" => "Public",
+        "basic" => "Basic",
+        _ => "Unknown",
+    }
+}
+
+// SECURITY: Use the shared empty-color fallback, but accept only CSS hex colors
+// in Niks3's custom property. API color text cannot introduce CSS declarations.
+fn environment_color(raw: &str) -> &str {
+    let color = normalize_env_color(raw);
+    if color.strip_prefix('#').is_some_and(|hex| {
+        matches!(hex.len(), 3 | 4 | 6 | 8) && hex.bytes().all(|b| b.is_ascii_hexdigit())
+    }) {
+        color
+    } else {
+        normalize_env_color("")
+    }
+}
+
+// SECURITY: Drafts include secrets for equality only. Do not derive Debug or
+// serialization, log these values, or put them in diagnostic DOM attributes.
+#[derive(Clone, PartialEq)]
+struct PureDraft {
+    form: Niks3FormState,
+    environments: Vec<Uuid>,
+    write: Choice,
+    read: Choice,
+    // Raw parallel-upload, retry and timeout inputs include invalid drafts.
+    numbers: [String; 3],
+}
+
+impl PureDraft {
+    fn new(
+        form: Niks3FormState,
+        mut environments: Vec<Uuid>,
+        write: Choice,
+        read: Choice,
+        numbers: [String; 3],
+    ) -> Self {
+        environments.sort_unstable();
+        environments.dedup();
+        Self {
+            form,
+            environments,
+            write,
+            read,
+            numbers,
+        }
+    }
+}
+
+fn initialize_baseline(initial: &mut Option<PureDraft>, ready: bool, draft: PureDraft) {
+    if ready && initial.is_none() {
+        *initial = Some(draft);
+    }
+}
+
+fn draft_is_dirty(initial: Option<&PureDraft>, draft: &PureDraft) -> bool {
+    initial.is_some_and(|initial| initial != draft)
+}
+
+// Only the selected plane's effective inputs invalidate its evidence. Retained
+// identity and draft identity are different inputs even when fields are blank.
+#[derive(Clone, PartialEq)]
+struct PlaneInput {
+    values: Vec<String>,
+    choice: Choice,
+    clear_ca: bool,
+}
+
+fn plane_input(form: &Niks3FormState, write: bool, choice: Choice) -> PlaneInput {
+    let mut values = if write {
+        vec![form.server_url.clone(), form.write_mode.clone()]
+    } else {
+        vec![
+            form.read_url.clone(),
+            form.read_mode.clone(),
+            form.keys.clone(),
+            form.require_sigs.to_string(),
+        ]
+    };
+    let mtls = if write {
+        form.write_mode == "mtls"
+    } else {
+        form.read_mode == "mtls"
+    };
+    if write && form.write_mode == "token" {
+        values.push(form.token.clone());
+    } else if write && mtls {
+        values.extend([
+            form.write_cert.clone(),
+            form.write_key.clone(),
+            form.write_ca.clone(),
+        ]);
+    } else if !write && form.read_mode == "basic" {
+        values.extend([form.basic_user.clone(), form.basic_password.clone()]);
+    } else if !write && mtls {
+        values.extend([
+            form.read_cert.clone(),
+            form.read_key.clone(),
+            form.read_ca.clone(),
+        ]);
+    }
+    PlaneInput {
+        values,
+        choice: if !write && form.read_mode == "none" {
+            Choice::None
+        } else {
+            choice
+        },
+        clear_ca: if !mtls {
+            false
+        } else if write {
+            form.clear_write_ca
+        } else {
+            form.clear_read_ca
+        },
+    }
+}
+
+fn discovery_input(form: &Niks3FormState, choice: Choice) -> PlaneInput {
+    // Public discovery never sends Bearer credentials or proves token validity.
+    if form.write_mode == "mtls" {
+        plane_input(form, true, choice)
+    } else {
+        PlaneInput {
+            values: vec![form.server_url.clone(), form.write_mode.clone()],
+            choice: Choice::None,
+            clear_ca: false,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Operation {
+    generation: u64,
+    sequence: u64,
+}
+
+#[derive(Clone)]
+struct InputStamp {
+    generation: u64,
+    input: PlaneInput,
+}
+
+#[derive(Clone)]
+struct DiscoveryProposal {
+    metadata: Niks3Discovery,
+    write_operation: Operation,
+    read_stamp: InputStamp,
+}
+
+// CONCURRENCY: Every observed input transition advances generation, including
+// edit-away/revert. Sequence fences overlapping operations on the same inputs.
+// Success, failure and busy completion all use the same acceptance predicate.
+#[derive(Default)]
+struct PlaneOwner {
+    input: Option<PlaneInput>,
+    generation: u64,
+    sequence: u64,
+}
+
+impl PlaneOwner {
+    fn observe(&mut self, input: PlaneInput) -> bool {
+        if self.input.as_ref() == Some(&input) {
+            return false;
+        }
+        self.input = Some(input);
+        self.generation += 1;
+        true
+    }
+    fn start(&mut self, input: PlaneInput) -> Operation {
+        self.observe(input);
+        self.sequence += 1;
+        Operation {
+            generation: self.generation,
+            sequence: self.sequence,
+        }
+    }
+    fn accepts(&self, operation: Operation, input: PlaneInput) -> bool {
+        self.input.as_ref() == Some(&input)
+            && operation.generation == self.generation
+            && operation.sequence == self.sequence
+    }
+    fn stamp(&self, input: PlaneInput) -> InputStamp {
+        InputStamp {
+            generation: self.generation,
+            input,
+        }
+    }
+    fn accepts_stamp(&self, stamp: &InputStamp, input: PlaneInput) -> bool {
+        self.generation == stamp.generation
+            && self.input.as_ref() == Some(&input)
+            && stamp.input == input
+    }
+}
+
+// Observation never mutates editable values or rebases the initial snapshot.
+// A matching response needs no proposal, including equivalent trimmed inputs.
+fn discovery_proposal(
+    form: &Niks3FormState,
+    metadata: Niks3Discovery,
+    write_operation: Operation,
+    read_stamp: InputStamp,
+) -> Option<DiscoveryProposal> {
+    if form.read_url.trim() == metadata.substituter_url.trim()
+        && form.request().niks3_public_keys == metadata.public_keys
+    {
+        None
+    } else {
+        Some(DiscoveryProposal {
+            metadata,
+            write_operation,
+            read_stamp,
+        })
+    }
+}
+
+// CONCURRENCY: Recheck both input stamps at the explicit application boundary.
+// A read test on unchanged inputs does not stale a proposal; read edits do,
+// including edit-away/revert. A newer discovery supersedes its older proposal.
+fn apply_discovery_proposal(
+    form: &mut Niks3FormState,
+    proposal: &DiscoveryProposal,
+    write_owner: &PlaneOwner,
+    read_owner: &PlaneOwner,
+    write: Choice,
+    read: Choice,
+) -> bool {
+    if !write_owner.accepts(proposal.write_operation, discovery_input(form, write))
+        || !read_owner.accepts_stamp(&proposal.read_stamp, plane_input(form, false, read))
+    {
+        return false;
+    }
+    form.read_url = proposal.metadata.substituter_url.clone();
+    form.keys = proposal.metadata.public_keys.join("\n");
+    true
+}
+
+fn select_mode(
+    form: &mut Niks3FormState,
+    write: bool,
+    mode: &str,
+    original_mode: Option<&str>,
+    choice: &mut Choice,
+) -> bool {
+    let current = if write {
+        &mut form.write_mode
+    } else {
+        &mut form.read_mode
+    };
+    if current.as_str() == mode {
+        return false;
+    }
+    *current = mode.into();
+    let drafted = match (write, mode) {
+        (true, "token") => !form.token.is_empty(),
+        (true, _) => {
+            !form.write_cert.is_empty()
+                || !form.write_key.is_empty()
+                || !form.write_ca.is_empty()
+                || form.clear_write_ca
+        }
+        (false, "basic") => !form.basic_user.is_empty() || !form.basic_password.is_empty(),
+        (false, "mtls") => {
+            !form.read_cert.is_empty()
+                || !form.read_key.is_empty()
+                || !form.read_ca.is_empty()
+                || form.clear_read_ca
+        }
+        _ => false,
+    };
+    *choice = if drafted {
+        Choice::Draft
+    } else if original_mode == Some(mode) {
+        Choice::Current
+    } else {
+        Choice::None
+    };
+    true
+}
+
+// Confirmation changes only the selected plane. Cancel leaves both selections,
+// secret drafts, public fields and explicit trust removal intents unchanged.
+fn confirm_credential(
+    form: &mut Niks3FormState,
+    write: bool,
+    value: Option<Niks3FormState>,
+    choice: &mut Choice,
+) {
+    let Some(value) = value else {
+        return;
+    };
+    if write {
+        form.token = value.token;
+        form.write_cert = value.write_cert;
+        form.write_key = value.write_key;
+        form.write_ca = value.write_ca;
+        form.clear_write_ca = value.clear_write_ca;
+    } else {
+        form.read_cert = value.read_cert;
+        form.read_key = value.read_key;
+        form.read_ca = value.read_ca;
+        form.clear_read_ca = value.clear_read_ca;
+        form.basic_user = value.basic_user;
+        form.basic_password = value.basic_password;
+    }
+    *choice = Choice::Draft;
 }
 
 #[derive(Clone, Copy, Default)]
@@ -258,6 +604,23 @@ fn validate_plane(
     }
 }
 
+fn validate_test_selection(
+    form: &Niks3FormState,
+    scope: Niks3ProbeScope,
+    existing: bool,
+    choice: Choice,
+) -> Result<(), String> {
+    validate_plane(form, scope, existing)?;
+    if scope == Niks3ProbeScope::Write
+        && form.write_mode == "token"
+        && (!existing || choice == Choice::Draft)
+        && form.token.trim().is_empty()
+    {
+        return Err("Enter an API token or explicitly use the current credential.".into());
+    }
+    Ok(())
+}
+
 fn discovery_request(form: &Niks3FormState) -> Niks3DiscoverRequest {
     let req = form.request();
     Niks3DiscoverRequest {
@@ -343,7 +706,6 @@ fn project_update(
 ) -> UpdateCacheDestination {
     req.probe_scope = Some(scope);
     if scope == Niks3ProbeScope::Write {
-        req.niks3_auth_token = None;
         req.push_to = None;
         req.niks3_public_keys.clear();
         req.niks3_read_auth_mode = None;
@@ -374,7 +736,6 @@ fn project_create(
 ) -> CreateCacheDestination {
     req.probe_scope = Some(scope);
     if scope == Niks3ProbeScope::Write {
-        req.niks3_auth_token = None;
         req.push_to = None;
         req.niks3_public_keys.clear();
         req.niks3_read_auth_mode = None;
@@ -398,9 +759,21 @@ fn project_create(
 fn Evidence(label: String, value: Option<bool>, running: bool) -> Element {
     rsx! { div { class: "n3-plane-row", span { "{label}" }
         span { class: if running || value.is_none() { "chip chip-unknown" } else if value == Some(true) { "chip chip-healthy" } else { "chip chip-critical" },
-            if running { "Testing…" } else { match value { Some(true) => "Verified", Some(false) => "Failed", None => "Untested" } }
+            "{evidence_text(value, running)}"
         }
     } }
+}
+
+fn evidence_text(value: Option<bool>, running: bool) -> &'static str {
+    if running {
+        "Testing…"
+    } else {
+        match value {
+            Some(true) => "Verified",
+            Some(false) => "Failed",
+            None => "Untested",
+        }
+    }
 }
 
 /// Renders the dedicated five-section Niks3 editor using a fresh parent snapshot.
@@ -447,7 +820,7 @@ pub(super) fn Niks3DestinationForm(
     let mut write_result = use_signal(|| None::<CacheCredentialTestResult>);
     let mut read_result = use_signal(|| None::<CacheCredentialTestResult>);
     let mut discovery_note = use_signal(|| None::<String>);
-    let mut pending = use_signal(|| None::<Niks3Discovery>);
+    let mut pending = use_signal(|| None::<DiscoveryProposal>);
     let initial_keys = form().request().niks3_public_keys;
     let mut key_rows = use_signal(move || {
         if initial_keys.is_empty() {
@@ -464,23 +837,133 @@ pub(super) fn Niks3DestinationForm(
     let mut parallel_input = use_signal(|| form().parallel_uploads.to_string());
     let mut retries_input = use_signal(|| form().max_retries.to_string());
     let mut timeout_input = use_signal(|| form().push_timeout_seconds.to_string());
+    let initial_draft = use_hook(move || {
+        PureDraft::new(
+            form(),
+            Vec::new(),
+            write_choice(),
+            read_choice(),
+            [parallel_input(), retries_input(), timeout_input()],
+        )
+    });
+    let mut baseline = use_signal(|| None::<PureDraft>);
+    let write_owner = use_hook(|| Rc::new(RefCell::new(PlaneOwner::default())));
+    let read_owner = use_hook(|| Rc::new(RefCell::new(PlaneOwner::default())));
+    let discovery_owner = use_hook(|| Rc::new(RefCell::new(PlaneOwner::default())));
     let id = destination.as_ref().map(|d| d.id);
     let scope_ready = environment_ready() && matches!(environments.read().as_ref(), Some(Ok(_)));
+    let draft = PureDraft::new(
+        form(),
+        environment_ids(),
+        write_choice(),
+        read_choice(),
+        [parallel_input(), retries_input(), timeout_input()],
+    );
+    let dirty = draft_is_dirty(baseline.read().as_ref(), &draft);
+    // INVARIANT: The fresh GET and asynchronous scope fill establish one clean
+    // baseline. Catalogue refresh, navigation and probe responses never rebase it.
     use_effect(move || {
-        let _state = form();
-        write_result.set(None);
-        read_result.set(None);
+        if destination_ready
+            && environment_ready()
+            && matches!(environments.read().as_ref(), Some(Ok(_)))
+            && baseline.peek().is_none()
+        {
+            let mut initial = None;
+            initialize_baseline(
+                &mut initial,
+                true,
+                PureDraft::new(
+                    initial_draft.form.clone(),
+                    environment_ids(),
+                    initial_draft.write,
+                    initial_draft.read,
+                    initial_draft.numbers.clone(),
+                ),
+            );
+            baseline.set(initial);
+        }
+    });
+    let observed_write = write_owner.clone();
+    let observed_read = read_owner.clone();
+    let observed_discovery = discovery_owner.clone();
+    let write_input = use_memo(move || plane_input(&form(), true, write_choice()));
+    let read_input = use_memo(move || plane_input(&form(), false, read_choice()));
+    let public_input = use_memo(move || discovery_input(&form(), write_choice()));
+    // CONCURRENCY: Observe after each bubbled edit event and credential commit,
+    // before rendering can coalesce edit-away/revert into an unchanged memo.
+    // The effect also observes external input updates. Peek keeps its
+    // subscriptions limited to the plane projections, not the complete form.
+    let invalidate_planes = EventHandler::new(move |_: ()| {
+        let state = form.peek();
+        if observed_write
+            .borrow_mut()
+            .observe(plane_input(&state, true, *write_choice.peek()))
+        {
+            write_result.set(None);
+            if *busy.peek() == Some("write-test") {
+                busy.set(None);
+            }
+        }
+        if observed_read
+            .borrow_mut()
+            .observe(plane_input(&state, false, *read_choice.peek()))
+        {
+            read_result.set(None);
+            pending.set(None);
+            discovery_note.set(None);
+            if *busy.peek() == Some("read-test") {
+                busy.set(None);
+            }
+        }
+        if observed_discovery
+            .borrow_mut()
+            .observe(discovery_input(&state, *write_choice.peek()))
+        {
+            pending.set(None);
+            discovery_note.set(None);
+            if *busy.peek() == Some("discover") {
+                busy.set(None);
+            }
+        }
+    });
+    use_effect(move || {
+        let _ = (write_input(), read_input(), public_input());
+        invalidate_planes.call(());
     });
     let original_test = destination.clone();
+    let test_write_owner = write_owner.clone();
+    let test_read_owner = read_owner.clone();
     let test = EventHandler::new(move |scope: Niks3ProbeScope| {
         error.set(None);
         let ready = environment_ready() && matches!(environments.read().as_ref(), Some(Ok(_)));
         if let Err(message) = cache_action_ready(destination_ready, ready, busy().is_some())
-            .and_then(|_| validate_plane(&form(), scope, id.is_some()))
+            .and_then(|_| {
+                validate_test_selection(
+                    &form(),
+                    scope,
+                    id.is_some(),
+                    if scope == Niks3ProbeScope::Write {
+                        write_choice()
+                    } else {
+                        read_choice()
+                    },
+                )
+            })
         {
             error.set(Some(format!("Test not run: {message}")));
             return;
         }
+        let write = scope == Niks3ProbeScope::Write;
+        let owner = if write {
+            test_write_owner.clone()
+        } else {
+            test_read_owner.clone()
+        };
+        let operation = owner.borrow_mut().start(plane_input(
+            &form(),
+            write,
+            if write { write_choice() } else { read_choice() },
+        ));
         let patch = project_update(
             cache_update_patch(
                 "niks3",
@@ -510,8 +993,26 @@ pub(super) fn Niks3DestinationForm(
             } else {
                 client::test_cache_destination_credentials(&create).await
             };
+            if !owner.borrow_mut().accepts(
+                operation,
+                plane_input(
+                    &form(),
+                    write,
+                    if write { write_choice() } else { read_choice() },
+                ),
+            ) {
+                return;
+            }
             match response {
                 Ok(value) => {
+                    // A response for another plane cannot establish evidence.
+                    if value.probe_scope != Some(scope) {
+                        error.set(Some(
+                            "Test returned no evidence for the selected plane.".into(),
+                        ));
+                        busy.set(None);
+                        return;
+                    }
                     if !value.ok {
                         error.set(Some(value.failure_message().into()));
                     }
@@ -527,6 +1028,9 @@ pub(super) fn Niks3DestinationForm(
         });
     });
     let original_discovery = destination.clone();
+    let discover_read_owner = read_owner.clone();
+    let proposal_write_owner = discovery_owner.clone();
+    let proposal_read_owner = read_owner.clone();
     let discover = move |_| {
         error.set(None);
         discovery_note.set(None);
@@ -539,6 +1043,16 @@ pub(super) fn Niks3DestinationForm(
             return;
         }
         let request = discovery_request(&form());
+        let owner = discovery_owner.clone();
+        let operation = owner
+            .borrow_mut()
+            .start(discovery_input(&form(), write_choice()));
+        let read_owner = discover_read_owner.clone();
+        // Discovery does not own the read probe sequence. Read observations on
+        // unchanged inputs must not invalidate the resulting settings proposal.
+        let read_stamp = read_owner
+            .borrow()
+            .stamp(plane_input(&form(), false, read_choice()));
         let mut patch = project_update(
             cache_update_patch(
                 "niks3",
@@ -551,6 +1065,7 @@ pub(super) fn Niks3DestinationForm(
             Niks3ProbeScope::Write,
         );
         patch.probe_scope = None;
+        patch.niks3_auth_token = None;
         busy.set(Some("discover"));
         spawn(async move {
             let response = if let Some(id) = id {
@@ -558,6 +1073,12 @@ pub(super) fn Niks3DestinationForm(
             } else {
                 client::discover_niks3(&request).await
             };
+            if !owner
+                .borrow_mut()
+                .accepts(operation, discovery_input(&form(), write_choice()))
+            {
+                return;
+            }
             match response {
                 Ok(value) => {
                     if !https(&value.substituter_url)
@@ -566,31 +1087,21 @@ pub(super) fn Niks3DestinationForm(
                     {
                         error.set(Some("Discovery returned invalid public metadata. Review the API URL and proxy configuration.".into()));
                     } else {
-                        let mut state = form.write();
-                        let conflict = (!state.read_url.trim().is_empty()
-                            && state.read_url.trim() != value.substituter_url)
-                            || (!state.request().niks3_public_keys.is_empty()
-                                && state.request().niks3_public_keys != value.public_keys);
-                        if state.read_url.trim().is_empty() {
-                            state.read_url = value.substituter_url.clone();
-                        }
-                        if state.request().niks3_public_keys.is_empty() {
-                            state.keys = value.public_keys.join("\n");
-                            key_rows.set(
-                                value
-                                    .public_keys
-                                    .iter()
-                                    .enumerate()
-                                    .map(|(i, key)| (i as u64 + 1, key.clone()))
-                                    .collect(),
-                            );
-                        }
-                        drop(state);
-                        if conflict {
-                            pending.set(Some(value));
-                            discovery_note.set(Some("Discovery successful. Existing read URL or keys differ; review the public values below before applying. Nothing has been saved.".into()));
+                        if !read_owner
+                            .borrow()
+                            .accepts_stamp(&read_stamp, plane_input(&form(), false, read_choice()))
+                        {
+                            pending.set(None);
+                            discovery_note.set(Some("Discovery response ignored because read settings changed. Discover again to review current settings.".into()));
                         } else {
-                            discovery_note.set(Some("Discovery successful. Empty read URL and signing-key fields were populated. Review before saving; no write permission was tested.".into()));
+                            let proposal =
+                                discovery_proposal(&form(), value, operation, read_stamp);
+                            discovery_note.set(Some(if proposal.is_some() {
+                                "Discovery successful. Review the proposed read URL and signing keys, then apply them explicitly. Draft settings are unchanged; nothing has been saved."
+                            } else {
+                                "Discovery successful. Public metadata matches the current read settings. Draft settings are unchanged; no write permission was tested."
+                            }.into()));
+                            pending.set(proposal);
                         }
                     }
                 }
@@ -611,20 +1122,27 @@ pub(super) fn Niks3DestinationForm(
         .err()
         .or_else(|| save_validation.err());
     let nested = modal().is_some();
+    let write_original_mode = destination
+        .as_ref()
+        .and_then(|d| d.niks3_write_auth_mode.clone());
+    let read_original_mode = destination
+        .as_ref()
+        .and_then(|d| d.niks3_read_auth_mode.clone());
     rsx! {
         div { class: "modal-backdrop", style: "padding:8px;", onclick: move |_| { if busy().is_none() && modal().is_none() { on_close.call(()); } },
             style { "{CACHE_FORM_CSS}" } style { "{CSS}" }
-            div { id: "cache-destination-dialog", class: "pe-shell cache-form-shell", role: "dialog", aria_modal: if nested { "false" } else { "true" }, aria_hidden: if nested { "true" } else { "false" }, "inert": if nested { Some("") } else { None }, aria_label: "Cache destination", tabindex: "-1", onclick: move |e| e.stop_propagation(), onkeydown: move |e| { e.stop_propagation(); if e.key() == Key::Escape { e.prevent_default(); if busy().is_none() && modal().is_none() { on_close.call(()); } } else if e.key() == Key::Tab && busy().is_some() { e.prevent_default(); } },
+            div { id: "cache-destination-dialog", class: "pe-shell cache-form-shell n3-shell", role: "dialog", aria_modal: if nested { "false" } else { "true" }, aria_hidden: if nested { "true" } else { "false" }, "inert": if nested { Some("") } else { None }, aria_label: "Cache destination", tabindex: "-1", onclick: move |e| { e.stop_propagation(); invalidate_planes.call(()); }, oninput: move |_| invalidate_planes.call(()), onchange: move |_| invalidate_planes.call(()), onkeydown: move |e| { e.stop_propagation(); if e.key() == Key::Escape { e.prevent_default(); if busy().is_none() && modal().is_none() { on_close.call(()); } } else if e.key() == Key::Tab && busy().is_some() { e.prevent_default(); } },
                 if restore_focus { DialogFocusRestore {} }
                 DialogInitialFocus { dialog_id: "cache-destination-dialog".to_string() }
                 DialogFocusSentinel { dialog_id: "cache-destination-dialog".to_string(), boundary: DialogFocusBoundary::Last }
                 if busy().is_some() { DialogInitialFocus { dialog_id: "niks3-operation-status".to_string() } }
                 header { class: "pe-head",
-                    div { style: "min-width:0;", div { style: "display:flex;align-items:center;gap:8px;flex-wrap:wrap;",
+                    div { style: "min-width:0;flex:1;", div { class: "n3-title-row",
                         Icon { name: if id.is_some() { IconName::Gear } else { IconName::Plus }, size: 15 }
                         h2 { class: "pe-head-title", if form().name.is_empty() { "Add cache destination" } else { "{form().name}" } }
                         span { class: "chip chip-info", "Niks3" } if !form().enabled { span { class: "chip chip-unknown", "disabled" } }
-                        span { id: "niks3-operation-status", role: "status", aria_live: "polite", tabindex: "-1", class: "chip chip-unknown", if busy().is_some() { "Working" } else { "Unsaved changes" } }
+                        if dirty { span { class: "chip chip-unknown", "Unsaved changes" } }
+                        span { id: "niks3-operation-status", role: "status", aria_live: "polite", tabindex: "-1", style: if busy().is_some() { "" } else { "display:none;" }, class: "chip chip-unknown", if busy().is_some() { "Working" } }
                     } p { class: "pe-head-sub", if id.is_some() { "Update Niks3 destination." } else { "Register a Niks3 destination. Write and read are configured separately." } } }
                     button { class: "btn-icon focus-ring", aria_label: "Close", disabled: busy().is_some(), onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } }
                 }
@@ -633,6 +1151,8 @@ pub(super) fn Niks3DestinationForm(
                         button { class: if section() == value { "pe-rail-item focus-ring active" } else { "pe-rail-item focus-ring" }, aria_label: label, aria_current: section() == value, disabled: busy().is_some(), onclick: move |_| section.set(value),
                             if value == "write" { svg { width: "13", height: "13", view_box: "0 0 24 24", fill: "none", stroke: "currentColor", stroke_width: "2", path { d: "M12 16V3m-5 5 5-5 5 5M3 16v5h18v-5" } } } else { Icon { name: icon, size: 13 } }
                             span { class: "pe-rail-label", "{label}" }
+                            if value == "write" { span { class: "pe-rail-badge", "{auth_label(&form().write_mode)}" } }
+                            if value == "read" { span { class: "pe-rail-badge", "{auth_label(&form().read_mode)}" } }
                             if value == "trust" { span { class: "pe-rail-badge", "{form().request().niks3_public_keys.len()}" } }
                         }
                     }
@@ -649,42 +1169,58 @@ pub(super) fn Niks3DestinationForm(
                             } p { class: "help", "Niks3 publishes through its API and serves Nix reads independently. Do not enter underlying S3 or Garage credentials." } }
                             div { class: "field", label { "Environment scope" }
                                 match environments.read().as_ref() {
-                                    Some(Ok(values)) => rsx! { div { style: "display:flex;gap:6px;flex-wrap:wrap;", for env in values { button { class: "btn btn-ghost focus-ring xs", aria_label: "{env.name}", aria_pressed: environment_ids().contains(&env.id), onclick: { let id = env.id; move |_| { let mut ids = environment_ids.write(); if ids.contains(&id) { ids.retain(|v| *v != id); } else { ids.push(id); } } }, "{env.name}" if environment_ids().contains(&env.id) { Icon { name: IconName::Check, size: 11 } } } } } },
+                                    Some(Ok(values)) => rsx! { div { style: "display:flex;gap:6px;flex-wrap:wrap;", for env in values { button { key: "{env.id}", class: "n3-env focus-ring", style: format!("--n3-env-color:{};", environment_color(&env.color_hex)), aria_label: "{env.name}", aria_pressed: environment_ids().contains(&env.id), onclick: { let id = env.id; move |_| { let mut ids = environment_ids.write(); if ids.contains(&id) { ids.retain(|v| *v != id); } else { ids.push(id); } } }, span { class: "n3-env-dot" } "{env.name}" if environment_ids().contains(&env.id) { Icon { name: IconName::Check, size: 11 } } } } } },
                                     Some(Err(_)) => rsx! { p { role: "alert", "Environment list unavailable. Close and reopen." } },
                                     None => rsx! { p { "Loading environments…" } },
                                 }
                             }
                             p { class: "help", if !scope_ready { "Scope not loaded. Saving is disabled." } else if environment_ids().is_empty() { "Global scope: no environment restriction. Select environments to restrict this destination." } else { "Configuration and selected environments are saved together." } }
-                            label { input { r#type: "checkbox", checked: form().enabled, onchange: move |e| form.write().enabled = e.checked() } " Enabled" }
+                            label { class: "n3-toggle", input { r#type: "checkbox", checked: form().enabled, onchange: move |e| form.write().enabled = e.checked() } "Enabled" }
                         }
                         if section() == "write" {
                             div { class: "pe-sec-head", h3 { "Write / API" } p { "Where the Niks3 client publishes store paths. Presigned upload targets have their own HTTPS trust requirements." } }
                             div { class: "field", label { r#for: "n3-write-url", "Write / API URL" } div { style: "display:flex;gap:8px;",
                                 input { id: "n3-write-url", class: "input focus-ring mono", style: "min-width:0;flex:1;", value: form().server_url, placeholder: "https://push.niks3.example.com", oninput: move |e| { form.write().server_url = e.value(); pending.set(None); discovery_note.set(None); } }
                                 button { class: "btn btn-ghost focus-ring xs", disabled: form().server_url.trim().is_empty(), onclick: discover, if busy() == Some("discover") { "Discovering…" } else { "Discover" } }
-                            } p { class: "help", "Discover uses selected write TLS, never a bearer token. Empty read URL and signing-key fields are populated without saving." } }
+                            } p { class: "help", "Discover uses selected write TLS, never a bearer token. It proposes read settings without changing the draft. Apply discovered settings explicitly before saving." } }
                             if let Some(note) = discovery_note() { div { class: "n3-disc", role: "status", "{note}" } }
                             if let Some(value) = pending() { div { class: "n3-disc", h4 { "Review discovered public metadata" }
-                                p { class: "n3-public-value", "Read URL: {value.substituter_url}" }
-                                for key in &value.public_keys { p { class: "n3-public-value mono", "{key}" } }
-                                button { class: "btn btn-ghost focus-ring xs", onclick: move |_| { let Some(value) = pending() else { return }; form.write().read_url = value.substituter_url; form.write().keys = value.public_keys.join("\n"); key_rows.set(value.public_keys.into_iter().enumerate().map(|(i, key)| (i as u64 + 1, key)).collect()); pending.set(None); discovery_note.set(Some("Discovered public metadata applied to the draft. Review before saving.".into())); }, "Apply discovered metadata" }
+                                p { class: "n3-public-value", "Read URL: {value.metadata.substituter_url}" }
+                                for key in &value.metadata.public_keys { p { class: "n3-public-value mono", "{key}" } }
+                                button { class: "btn btn-ghost focus-ring xs", onclick: move |_| {
+                                    let Some(value) = pending() else { return };
+                                    let applied = apply_discovery_proposal(&mut form.write(), &value,
+                                        &proposal_write_owner.borrow(), &proposal_read_owner.borrow(), write_choice(), read_choice());
+                                    pending.set(None);
+                                    if applied {
+                                        key_rows.set(value.metadata.public_keys.into_iter().enumerate().map(|(i, key)| (i as u64 + 1, key)).collect());
+                                        invalidate_planes.call(());
+                                        discovery_note.set(Some("Discovered settings applied to the draft. Review before saving.".into()));
+                                    } else {
+                                        discovery_note.set(Some("Proposal ignored because its inputs changed. Discover again before applying settings.".into()));
+                                    }
+                                }, "Apply discovered settings" }
                             } }
                             div { class: "field", label { "Write authentication" } div { class: "seg", role: "group", aria_label: "Write authentication",
-                                for (value, label) in [("token", "API token"), ("mtls", "mTLS")] { button { class: if form().write_mode == value { "active focus-ring" } else { "focus-ring" }, aria_pressed: form().write_mode == value, onclick: move |_| { clear_identity(&mut form.write(), true); form.write().write_mode = value.into(); write_choice.set(Choice::None); pending.set(None); discovery_note.set(None); }, "{label}" } }
+                                for (value, label) in [("token", "API token"), ("mtls", "mTLS")] { button { class: if form().write_mode == value { "active focus-ring" } else { "focus-ring" }, aria_pressed: form().write_mode == value, onclick: { let original = write_original_mode.clone(); move |_| { let mut choice = write_choice(); if select_mode(&mut form.write(), true, value, original.as_deref(), &mut choice) { write_choice.set(choice); } } }, "{label}" } }
                             } }
                             CredentialRow { write: true, form, choice: write_choice, destination: destination.clone(), on_open: move |_| modal.set(Some(true)) }
                             div { class: "n3-plane", div { class: "n3-plane-head", strong { "Write API" } button { class: "btn btn-ghost focus-ring xs", disabled: !https(&form().server_url), onclick: move |_| test.call(Niks3ProbeScope::Write), if busy() == Some("write-test") { "Testing…" } else { "Test write API" } } }
-                                Evidence { label: "API reachable", value: write_result().and_then(|r| r.write_api_reachable), running: busy() == Some("write-test") }
+                                Evidence { label: "Write API access", value: write_result().and_then(|r| r.write_api_reachable), running: busy() == Some("write-test") }
                                 Evidence { label: "Authentication", value: write_result().and_then(|r| r.write_authn_valid), running: busy() == Some("write-test") }
-                                Evidence { label: "Write authorization", value: write_result().and_then(|r| r.write_authorization_valid), running: false }
+                                Evidence { label: "Write authorization", value: write_result().and_then(|r| r.write_authorization_valid), running: busy() == Some("write-test") }
+                                Evidence { label: "Object publication", value: None, running: false }
                             }
-                            p { class: "help", "Public metadata and TLS reachability do not prove token validity or upload permission. Write authorization remains Untested unless independently established." }
+                            if let Some(message) = write_result().and_then(|r| r.write_probe_diagnostic()) {
+                                p { class: "help", role: "status", "{message}" }
+                            }
+                            p { class: "help", "Write API access checks the API route and method. Each typed result reports its own evidence. This test does not validate S3 upload, signing or object publication; publication remains Untested. Public discovery alone does not prove authentication or authorization." }
                         }
                         if section() == "read" {
                             div { class: "pe-sec-head", h3 { "Read / Pull" } p { "Nix client → Niks3 read endpoint → storage. This endpoint can have a different hostname from the write API." } }
                             div { class: "field", label { r#for: "n3-read-url", "Read / substituter URL" } input { id: "n3-read-url", class: "input focus-ring mono", value: form().read_url, placeholder: "https://cache.example.com", oninput: move |e| form.write().read_url = e.value() } p { class: "help", "Never embed a username or password in the URL." } }
                             div { class: "field", label { "Read authentication" } div { class: "seg", role: "group", aria_label: "Read authentication",
-                                for (value, label) in [("none", "Public"), ("basic", "Basic"), ("mtls", "mTLS")] { button { class: if form().read_mode == value { "active focus-ring" } else { "focus-ring" }, aria_pressed: form().read_mode == value, onclick: move |_| { clear_identity(&mut form.write(), false); form.write().read_mode = value.into(); read_choice.set(Choice::None); }, "{label}" } }
+                                for (value, label) in [("none", "Public"), ("basic", "Basic"), ("mtls", "mTLS")] { button { class: if form().read_mode == value { "active focus-ring" } else { "focus-ring" }, aria_pressed: form().read_mode == value, onclick: { let original = read_original_mode.clone(); move |_| { let mut choice = read_choice(); if select_mode(&mut form.write(), false, value, original.as_deref(), &mut choice) { read_choice.set(choice); } } }, "{label}" } }
                             } }
                             CredentialRow { write: false, form, choice: read_choice, destination: destination.clone(), on_open: move |_| modal.set(Some(false)) }
                             if form().read_mode == "basic" { p { class: "help", "Basic values remain outside URLs and global configuration. Native consumers use protected authority-bound mode-0600 netrc files. Basic reads use system CA trust." } }
@@ -712,7 +1248,7 @@ pub(super) fn Niks3DestinationForm(
                                 div { class: "field", label { r#for: "n3-retries", "Retry attempts" } input { id: "n3-retries", r#type: "number", min: "0", max: "2147483647", class: "input focus-ring", value: retries_input(), oninput: move |e| { retries_input.set(e.value()); if let Ok(value) = e.value().parse() { form.write().max_retries = value; } } } p { class: "help", "per path" } }
                                 div { class: "field", label { r#for: "n3-timeout", "Push timeout" } input { id: "n3-timeout", r#type: "number", min: "1", class: "input focus-ring", value: timeout_input(), oninput: move |e| { timeout_input.set(e.value()); if let Ok(value) = e.value().parse() { form.write().push_timeout_seconds = value; } } } p { class: "help", "seconds" } }
                             }
-                            label { input { r#type: "checkbox", checked: form().require_sigs, onchange: move |e| form.write().require_sigs = e.checked() } " Require signatures" }
+                            label { class: "n3-toggle", input { r#type: "checkbox", checked: form().require_sigs, onchange: move |e| form.write().require_sigs = e.checked() } "Require signatures" }
                             p { class: "help", "Only pull paths accepted by the selected Nix signature policy and trusted keys. Save requires at least one valid signing key." }
                         }
                         if let Some(message) = error() { p { role: "alert", "{message}" } }
@@ -720,7 +1256,7 @@ pub(super) fn Niks3DestinationForm(
                 }
                 footer { class: "pe-foot",
                     div { class: "pe-foot-state", style: CACHE_FORM_FOOT_STATE_STYLE,
-                        span { "{form().name}" span { class: "pe-foot-dot", "·" } "write {form().write_mode}" span { class: "pe-foot-dot", "·" } "read {form().read_mode}" span { class: "pe-foot-dot", "·" }
+                        span { "{form().name}" span { class: "pe-foot-dot", "·" } "write {auth_label(&form().write_mode)}" span { class: "pe-foot-dot", "·" } "read {auth_label(&form().read_mode)}" span { class: "pe-foot-dot", "·" }
                             if !scope_ready { "Scope not loaded" } else if environment_ids().is_empty() { "Global scope" } else { "{environment_ids().len()} selected" }
                         }
                         if let Some(reason) = blocked.as_ref() { p { "data-testid": "cache-save-blocked", role: "status", aria_live: "polite", "{reason}" } }
@@ -749,9 +1285,10 @@ pub(super) fn Niks3DestinationForm(
             CredentialModal { write, initial: form(), original: destination.clone(), on_close: move |value: Option<Niks3FormState>| {
                 modal.set(None);
                 if let Some(value) = value {
-                    let mut state = form.write();
-                    if write { state.token = value.token; state.write_cert = value.write_cert; state.write_key = value.write_key; state.write_ca = value.write_ca; state.clear_write_ca = value.clear_write_ca; write_choice.set(Choice::Draft); }
-                    else { state.read_cert = value.read_cert; state.read_key = value.read_key; state.read_ca = value.read_ca; state.clear_read_ca = value.clear_read_ca; state.basic_user = value.basic_user; state.basic_password = value.basic_password; read_choice.set(Choice::Draft); }
+                    let mut choice = if write { write_choice() } else { read_choice() };
+                    confirm_credential(&mut form.write(), write, Some(value), &mut choice);
+                    if write { write_choice.set(choice); } else { read_choice.set(choice); }
+                    invalidate_planes.call(());
                 }
             } }
         }
@@ -865,12 +1402,13 @@ fn CredentialModal(
         }
     };
     rsx! { div { class: "modal-backdrop modal-backdrop-above-drawer", style: CACHE_CREDENTIAL_BACKDROP_STYLE, onclick: move |e| { e.stop_propagation(); on_close.call(None); },
-        div { id: "niks3-credential-dialog", class: "modal", style: "width:min(560px,calc(100vw - 16px));max-height:92vh;overflow-y:auto;", role: "dialog", aria_modal: "true", aria_label: "{plane} credential", tabindex: "-1", onclick: move |e| e.stop_propagation(), onkeydown: move |e| { e.stop_propagation(); if e.key() == Key::Escape { e.prevent_default(); on_close.call(None); } },
+        div { id: "niks3-credential-dialog", class: "modal n3-credential", role: "dialog", aria_modal: "true", aria_label: "{plane} credential", tabindex: "-1", onclick: move |e| e.stop_propagation(), onkeydown: move |e| { e.stop_propagation(); if e.key() == Key::Escape { e.prevent_default(); on_close.call(None); } },
+            style { "{CSS}" }
             // The parent restores the current trigger after its inert state and
             // credential selection commit. Do not capture the old opener node.
             DialogInitialFocus { dialog_id: "niks3-credential-dialog".to_string() }
             DialogFocusSentinel { dialog_id: "niks3-credential-dialog".to_string(), boundary: DialogFocusBoundary::Last }
-            div { class: "modal-head", h2 { Icon { name: IconName::Key, size: 14 } if has_current { " Replace" } else { " Add" } " {plane} credential · {mode}" } p { "Stored secrets are never shown. This local draft is not persisted until the cache Save action." } }
+            div { class: "modal-head", h2 { Icon { name: IconName::Key, size: 14 } if has_current { " Replace" } else { " Add" } " {plane} credential · {auth_label(&mode)}" } p { "Stored secrets are never shown. This local draft is not persisted until the cache Save action." } }
             div { class: "modal-body",
                 if mode == "token" { div { class: "field", label { r#for: "n3-token", "API token" } input { id: "n3-token", r#type: "password", autocomplete: "off", class: "input focus-ring mono", value: form().token, oninput: move |e| form.write().token = e.value() } } }
                 else if mode == "basic" {
@@ -926,11 +1464,11 @@ pub(super) fn details(destination: &CacheDestination) -> Element {
     rsx! {
         section { class: "panel-section", h3 { "Write / API" } dl { class: "kv-grid",
             dt { "URL" } dd { class: "mono", style: "overflow-wrap:anywhere;", "{write_url}" }
-            dt { "Authentication" } dd { "{write_mode}" span { class: "chip chip-unknown", if write_configured { "Current configured credential" } else { "Stored credential status unavailable" } } }
+            dt { "Authentication" } dd { "{auth_label(write_mode)}" span { class: "chip chip-unknown", if write_configured { "Current configured credential" } else { "Stored credential status unavailable" } } }
         } }
         section { class: "panel-section", h3 { "Read / Pull" } dl { class: "kv-grid",
             dt { "Substituter URL" } dd { class: "mono", style: "overflow-wrap:anywhere;", "{read_url}" }
-            dt { "Authentication" } dd { if read_mode == "none" { "Public · no credential needed" } else { "{read_mode}" span { class: "chip chip-unknown", if read_configured { "Current configured credential" } else { "Stored credential status unavailable" } } } }
+            dt { "Authentication" } dd { if read_mode == "none" { "Public · no credential needed" } else { "{auth_label(read_mode)}" span { class: "chip chip-unknown", if read_configured { "Current configured credential" } else { "Stored credential status unavailable" } } } }
         } }
         section { class: "panel-section", h3 { "Trusted signing public keys ({destination.niks3_public_keys.len()})" }
             for key in &destination.niks3_public_keys { p { class: "mono", style: "font-size:11px;overflow-wrap:anywhere;", "{key}" } }
@@ -941,6 +1479,524 @@ pub(super) fn details(destination: &CacheDestination) -> Element {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn snapshot(form: Niks3FormState, ids: Vec<Uuid>) -> PureDraft {
+        let numbers = [
+            form.parallel_uploads.to_string(),
+            form.max_retries.to_string(),
+            form.push_timeout_seconds.to_string(),
+        ];
+        PureDraft::new(form, ids, Choice::Current, Choice::Current, numbers)
+    }
+
+    fn public_metadata() -> Niks3Discovery {
+        Niks3Discovery {
+            server_url: "https://write.example.test".into(),
+            substituter_url: "https://read.example.test".into(),
+            public_keys: vec!["fixture:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into()],
+            oidc_audience: None,
+        }
+    }
+
+    #[test]
+    fn discovery_observation_is_clean_for_blank_different_and_matching_read_settings() {
+        for existing in [false, true] {
+            let mut form = Niks3FormState::from_destination(None);
+            form.name = "actual draft name".into();
+            form.token = "retained local replacement".into();
+            if existing {
+                form.read_url = "https://existing.example.test".into();
+                form.keys = "existing key".into();
+            }
+            let initial = snapshot(form.clone(), vec![]);
+            let mut write_owner = PlaneOwner::default();
+            let mut read_owner = PlaneOwner::default();
+            let operation = write_owner.start(discovery_input(&form, Choice::Current));
+            read_owner.observe(plane_input(&form, false, Choice::Current));
+            let stamp = read_owner.stamp(plane_input(&form, false, Choice::Current));
+            let proposal = discovery_proposal(&form, public_metadata(), operation, stamp).unwrap();
+            assert!(!draft_is_dirty(
+                Some(&initial),
+                &snapshot(form.clone(), vec![])
+            ));
+            assert!(form == initial.form);
+            // Testing unchanged read inputs changes operation sequence only.
+            read_owner.start(plane_input(&form, false, Choice::Current));
+            assert!(apply_discovery_proposal(
+                &mut form,
+                &proposal,
+                &write_owner,
+                &read_owner,
+                Choice::Current,
+                Choice::Current
+            ));
+            assert!(draft_is_dirty(
+                Some(&initial),
+                &snapshot(form.clone(), vec![])
+            ));
+            assert_eq!(form.name, initial.form.name);
+            assert!(form.token == initial.form.token);
+            read_owner.observe(plane_input(&form, false, Choice::Current));
+            let applied = snapshot(form.clone(), vec![]);
+            assert!(
+                discovery_proposal(
+                    &form,
+                    public_metadata(),
+                    operation,
+                    read_owner.stamp(plane_input(&form, false, Choice::Current))
+                )
+                .is_none()
+            );
+            assert!(!draft_is_dirty(Some(&applied), &snapshot(form, vec![])));
+        }
+    }
+
+    #[test]
+    fn stale_discovery_proposals_cannot_overwrite_new_or_reverted_read_settings() {
+        for edit in ["read", "read_revert", "write", "new_discovery"] {
+            let mut form = Niks3FormState::from_destination(None);
+            let mut write_owner = PlaneOwner::default();
+            let mut read_owner = PlaneOwner::default();
+            let operation = write_owner.start(discovery_input(&form, Choice::Current));
+            read_owner.observe(plane_input(&form, false, Choice::Current));
+            let stamp = read_owner.stamp(plane_input(&form, false, Choice::Current));
+            let proposal =
+                discovery_proposal(&form, public_metadata(), operation, stamp.clone()).unwrap();
+            match edit {
+                "read" | "read_revert" => {
+                    form.read_url = "https://new-draft.example.test".into();
+                    read_owner.observe(plane_input(&form, false, Choice::Current));
+                    if edit == "read_revert" {
+                        form.read_url.clear();
+                        read_owner.observe(plane_input(&form, false, Choice::Current));
+                    }
+                    // The response boundary rejects the captured read stamp.
+                    assert!(
+                        !read_owner
+                            .accepts_stamp(&stamp, plane_input(&form, false, Choice::Current))
+                    );
+                }
+                "write" => {
+                    form.server_url = "https://new-write.example.test".into();
+                    write_owner.observe(discovery_input(&form, Choice::Current));
+                }
+                _ => {
+                    write_owner.start(discovery_input(&form, Choice::Current));
+                }
+            }
+            let before = form.clone();
+            assert!(!apply_discovery_proposal(
+                &mut form,
+                &proposal,
+                &write_owner,
+                &read_owner,
+                Choice::Current,
+                Choice::Current
+            ));
+            assert!(form == before);
+        }
+    }
+
+    #[test]
+    fn initial_scope_fill_is_clean_and_catalogue_refresh_never_rebases_edits() {
+        let form = Niks3FormState::from_destination(None);
+        let mut initial = None;
+        let before_scope = snapshot(form.clone(), vec![]);
+        initialize_baseline(&mut initial, false, before_scope.clone());
+        assert!(initial.is_none());
+        assert!(!draft_is_dirty(initial.as_ref(), &before_scope));
+        let loaded = snapshot(form, vec![Uuid::from_u128(2), Uuid::from_u128(1)]);
+        initialize_baseline(&mut initial, true, loaded.clone());
+        assert!(!draft_is_dirty(initial.as_ref(), &loaded));
+        let mut edited = loaded.clone();
+        edited.form.name.push_str("changed");
+        initialize_baseline(&mut initial, true, edited.clone());
+        assert!(draft_is_dirty(initial.as_ref(), &edited));
+        edited.form.name = loaded.form.name.clone();
+        assert!(!draft_is_dirty(initial.as_ref(), &edited));
+        let reordered = snapshot(
+            loaded.form.clone(),
+            vec![Uuid::from_u128(1), Uuid::from_u128(2), Uuid::from_u128(1)],
+        );
+        assert!(!draft_is_dirty(initial.as_ref(), &reordered));
+        assert!(draft_is_dirty(
+            initial.as_ref(),
+            &snapshot(loaded.form, vec![])
+        ));
+    }
+
+    #[test]
+    fn draft_comparison_includes_secrets_selection_clear_intent_and_raw_numbers() {
+        let initial = snapshot(Niks3FormState::from_destination(None), vec![]);
+        let mut edited = initial.clone();
+        edited.form.token = "local replacement".into();
+        edited.write = Choice::Draft;
+        assert!(draft_is_dirty(Some(&initial), &edited));
+        clear_identity(&mut edited.form, true);
+        edited.write = Choice::Current;
+        assert!(!draft_is_dirty(Some(&initial), &edited));
+        edited.read = Choice::None;
+        assert!(draft_is_dirty(Some(&initial), &edited));
+        edited.read = Choice::Current;
+        edited.form.clear_read_ca = true;
+        assert!(draft_is_dirty(Some(&initial), &edited));
+        edited.form.clear_read_ca = false;
+        for invalid in ["", "1.5", "2147483648"] {
+            edited.numbers[0] = invalid.into();
+            assert!(draft_is_dirty(Some(&initial), &edited));
+            assert!(
+                validate_advanced_input(&edited.numbers[0], &edited.numbers[1], &edited.numbers[2])
+                    .is_err()
+            );
+        }
+        edited.numbers = initial.numbers.clone();
+        assert!(!draft_is_dirty(Some(&initial), &edited));
+    }
+
+    #[test]
+    fn credential_dialog_cancel_and_observation_state_do_not_edit_the_baseline() {
+        let initial = snapshot(Niks3FormState::from_destination(None), vec![]);
+        let mut live = initial.clone();
+        let mut focus = CredentialFocusOwner::default();
+        for plane in [true, false] {
+            focus.transition(Some(plane));
+            let mut unconfirmed = live.form.clone();
+            if plane {
+                unconfirmed.token = "unconfirmed".into();
+            } else {
+                unconfirmed.basic_password = "unconfirmed".into();
+            }
+            let mut choice = if plane { live.write } else { live.read };
+            confirm_credential(&mut live.form, plane, None, &mut choice);
+            assert!(choice == Choice::Current);
+            focus.transition(None);
+            assert!(!draft_is_dirty(Some(&initial), &live));
+            // A confirmed replacement changes only its plane, not public fields.
+            let mut confirmed = live.form.clone();
+            confirm_credential(&mut confirmed, plane, Some(unconfirmed), &mut choice);
+            assert!(choice == Choice::Draft);
+            assert_eq!(confirmed.name, live.form.name);
+            if plane {
+                assert!(confirmed.basic_password.is_empty());
+            } else {
+                assert!(confirmed.token.is_empty());
+            }
+        }
+        let mut owner = PlaneOwner::default();
+        let operation = owner.start(plane_input(&live.form, true, live.write));
+        assert!(owner.accepts(operation, plane_input(&live.form, true, live.write)));
+        assert!(!draft_is_dirty(Some(&initial), &live));
+    }
+
+    #[test]
+    fn same_mode_is_noop_and_reverting_restores_retention_without_erasing_drafts() {
+        for (write, mode, other) in [
+            (true, "token", "mtls"),
+            (false, "basic", "mtls"),
+            (false, "mtls", "none"),
+        ] {
+            let mut form = Niks3FormState::from_destination(None);
+            if write {
+                form.write_mode = mode.into();
+            } else {
+                form.read_mode = mode.into();
+            }
+            let original = form.clone();
+            let mut choice = Choice::Current;
+            assert!(!select_mode(
+                &mut form,
+                write,
+                mode,
+                Some(mode),
+                &mut choice
+            ));
+            assert!(form == original && choice == Choice::Current);
+            assert!(select_mode(
+                &mut form,
+                write,
+                other,
+                Some(mode),
+                &mut choice
+            ));
+            assert!(select_mode(&mut form, write, mode, Some(mode), &mut choice));
+            assert!(form == original && choice == Choice::Current);
+        }
+        let mut form = Niks3FormState::from_destination(None);
+        form.token = "replacement".into();
+        let mut choice = Choice::Draft;
+        assert!(!select_mode(
+            &mut form,
+            true,
+            "token",
+            Some("token"),
+            &mut choice
+        ));
+        assert!(choice == Choice::Draft && form.token == "replacement");
+        select_mode(&mut form, true, "mtls", Some("token"), &mut choice);
+        select_mode(&mut form, true, "token", Some("token"), &mut choice);
+        assert!(choice == Choice::Draft && form.token == "replacement");
+        let retained = Niks3FormState::from_destination(None).update_request();
+        assert!(retained.niks3_auth_token.is_none());
+        assert!(
+            !retained.clear_niks3_auth_token
+                && !retained.clear_niks3_write_client_key
+                && !retained.clear_niks3_read_client_key
+        );
+    }
+
+    #[test]
+    fn plane_inputs_isolate_evidence_from_name_scope_numbers_and_other_plane() {
+        let mut form = Niks3FormState::from_destination(None);
+        let write = plane_input(&form, true, Choice::Current);
+        let read = plane_input(&form, false, Choice::Current);
+        form.name = "new name".into();
+        form.enabled = false;
+        form.parallel_uploads += 1;
+        assert!(write == plane_input(&form, true, Choice::Current));
+        assert!(read == plane_input(&form, false, Choice::Current));
+        form.keys = "changed key".into();
+        assert!(write == plane_input(&form, true, Choice::Current));
+        assert!(read != plane_input(&form, false, Choice::Current));
+        let public = discovery_input(&form, Choice::Current);
+        form.token = "new token".into();
+        assert!(public == discovery_input(&form, Choice::Draft));
+        assert!(write != plane_input(&form, true, Choice::Draft));
+    }
+
+    #[test]
+    fn stale_operations_cannot_publish_success_failure_or_busy_completion() {
+        for write in [true, false] {
+            let mut owner = PlaneOwner::default();
+            let mut form = Niks3FormState::from_destination(None);
+            let input = plane_input(&form, write, Choice::Current);
+            let old = owner.start(input.clone());
+            assert!(owner.accepts(old, input.clone()));
+            if write {
+                form.server_url.push_str("/changed");
+            } else {
+                form.keys.push_str("changed");
+            }
+            let changed = plane_input(&form, write, Choice::Current);
+            // A response between the edit and its effect must also be rejected.
+            assert!(!owner.accepts(old, changed.clone()));
+            owner.observe(changed);
+            owner.observe(input.clone());
+            for _outcome in ["success", "failure", "busy completion"] {
+                assert!(!owner.accepts(old, input.clone()));
+            }
+            let next = owner.start(input.clone());
+            let latest = owner.start(input.clone());
+            assert!(!owner.accepts(next, input.clone()));
+            assert!(owner.accepts(latest, input));
+        }
+    }
+
+    #[test]
+    fn selected_tls_identity_trust_and_mode_transitions_fence_reverted_results() {
+        for write in [true, false] {
+            let mut original = Niks3FormState::from_destination(None);
+            original.write_mode = "mtls".into();
+            original.read_mode = "mtls".into();
+            for field in ["endpoint", "mode", "certificate", "key", "ca", "clear"] {
+                let input = plane_input(&original, write, Choice::Current);
+                let other = plane_input(&original, !write, Choice::Current);
+                let mut owner = PlaneOwner::default();
+                let operation = owner.start(input.clone());
+                let mut edited = original.clone();
+                match (write, field) {
+                    (true, "endpoint") => edited.server_url.push_str("changed"),
+                    (false, "endpoint") => edited.read_url.push_str("changed"),
+                    (true, "mode") => edited.write_mode = "token".into(),
+                    (false, "mode") => edited.read_mode = "basic".into(),
+                    (true, "certificate") => edited.write_cert = "local".into(),
+                    (false, "certificate") => edited.read_cert = "local".into(),
+                    (true, "key") => edited.write_key = "local".into(),
+                    (false, "key") => edited.read_key = "local".into(),
+                    (true, "ca") => edited.write_ca = "local".into(),
+                    (false, "ca") => edited.read_ca = "local".into(),
+                    (true, _) => edited.clear_write_ca = true,
+                    (false, _) => edited.clear_read_ca = true,
+                }
+                assert!(other == plane_input(&edited, !write, Choice::Current));
+                assert!(owner.observe(plane_input(&edited, write, Choice::Current)));
+                owner.observe(input.clone());
+                assert!(!owner.accepts(operation, input));
+            }
+        }
+    }
+
+    #[test]
+    fn typed_api_evidence_never_infers_authentication_or_publication() {
+        for (json, expected) in [
+            (serde_json::json!(true), "Verified"),
+            (serde_json::json!(false), "Failed"),
+            (serde_json::Value::Null, "Untested"),
+        ] {
+            let result: CacheCredentialTestResult = serde_json::from_value(serde_json::json!({
+                "ok": true, "message": "untrusted response", "probe_scope": "write",
+                "write_api_reachable": json, "write_authn_valid": json,
+                "write_authorization_valid": json
+            }))
+            .unwrap();
+            assert_eq!(evidence_text(result.write_api_reachable, false), expected);
+            assert_eq!(evidence_text(result.write_authn_valid, false), expected);
+            assert_eq!(
+                evidence_text(result.write_authorization_valid, false),
+                expected
+            );
+            assert_eq!(evidence_text(None, false), "Untested");
+        }
+        let legacy: CacheCredentialTestResult = serde_json::from_value(serde_json::json!({
+            "ok": true, "message": "legacy metadata success", "server_reachable": true,
+            "discovery_valid": true
+        }))
+        .unwrap();
+        assert_eq!(evidence_text(legacy.write_api_reachable, false), "Untested");
+        assert_eq!(evidence_text(legacy.write_authn_valid, false), "Untested");
+        assert_eq!(
+            evidence_text(legacy.write_authorization_valid, false),
+            "Untested"
+        );
+        assert_eq!(evidence_text(Some(true), true), "Testing…");
+        for invalid in [serde_json::json!("true"), serde_json::json!(1)] {
+            assert!(
+                serde_json::from_value::<CacheCredentialTestResult>(serde_json::json!({
+                    "ok": true, "message": "", "write_api_reachable": invalid
+                }))
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn write_diagnostic_allowlist_never_uses_server_prose_or_decorated_codes() {
+        use crate::api::models::cache_diagnostic_message;
+        for code in [
+            "token_rejected",
+            "mtls_subject_rejected",
+            "proxy_access_denied",
+            "method_rejected",
+            "route_unsupported",
+            "unexpected_write_response",
+            "auth_control_inconclusive",
+            "write_route_verified",
+            "write_route_verified_certificate_gate",
+            "probe_response_too_large",
+            "read_access_verified",
+            "write_credentials_missing",
+            "write_credentials_invalid",
+        ] {
+            assert!(cache_diagnostic_message(code).is_some());
+            assert!(cache_diagnostic_message(&format!("{code} secret")).is_none());
+            assert!(cache_diagnostic_message(&code.to_uppercase()).is_none());
+        }
+    }
+
+    #[test]
+    fn per_write_diagnostic_requires_write_provenance_and_ignores_aggregate_read_codes() {
+        use crate::api::models::cache_diagnostic_message;
+        let decode = |scope: serde_json::Value, write: serde_json::Value| {
+            serde_json::from_value::<CacheCredentialTestResult>(serde_json::json!({
+                "ok": false, "message": "forbidden upstream prose", "probe_scope": scope,
+                "diagnostic_code": "read_access_verified", "write_probe_diagnostic_code": write,
+                "write_api_reachable": true, "write_authn_valid": false,
+                "write_authorization_valid": false
+            }))
+            .unwrap()
+        };
+        for scope in ["write", "all"] {
+            let result = decode(
+                serde_json::json!(scope),
+                serde_json::json!("token_rejected"),
+            );
+            assert_eq!(
+                result.write_probe_diagnostic(),
+                cache_diagnostic_message("token_rejected")
+            );
+            assert_eq!(evidence_text(result.write_api_reachable, false), "Verified");
+            assert_eq!(evidence_text(result.write_authn_valid, false), "Failed");
+        }
+        for scope in [serde_json::json!("read"), serde_json::Value::Null] {
+            assert!(
+                decode(scope, serde_json::json!("token_rejected"))
+                    .write_probe_diagnostic()
+                    .is_none()
+            );
+        }
+        for invalid in [
+            serde_json::json!("read_access_verified"),
+            serde_json::json!("token_rejected secret"),
+            serde_json::json!("TOKEN_REJECTED"),
+            serde_json::json!(true),
+            serde_json::json!(27),
+            serde_json::Value::Null,
+        ] {
+            let result = decode(serde_json::json!("all"), invalid);
+            assert!(result.write_probe_diagnostic_code.is_none());
+            assert!(result.write_probe_diagnostic().is_none());
+        }
+        let mut standalone: CacheCredentialTestResult = serde_json::from_value(serde_json::json!({
+            "ok": false, "message": "", "probe_scope": "write", "diagnostic_code": "method_rejected"
+        }))
+        .unwrap();
+        assert!(standalone.write_probe_diagnostic_code.is_none());
+        assert_eq!(
+            standalone.write_probe_diagnostic(),
+            cache_diagnostic_message("method_rejected")
+        );
+        standalone.probe_scope = Some(Niks3ProbeScope::All);
+        assert!(standalone.write_probe_diagnostic().is_none());
+    }
+
+    #[test]
+    fn local_credential_failure_keeps_api_reachability_untested_and_never_claims_upstream_rejection()
+     {
+        for code in ["write_credentials_missing", "write_credentials_invalid"] {
+            let result: CacheCredentialTestResult = serde_json::from_value(serde_json::json!({
+                "ok": false, "message": "", "probe_scope": "write", "diagnostic_code": code,
+                "write_api_reachable": null, "status_code": null,
+                "write_authn_valid": false, "write_authorization_valid": false
+            }))
+            .unwrap();
+            assert_eq!(evidence_text(result.write_api_reachable, false), "Untested");
+            assert_eq!(evidence_text(result.write_authn_valid, false), "Failed");
+            assert_eq!(
+                evidence_text(result.write_authorization_valid, false),
+                "Failed"
+            );
+            assert!(result.status_code.is_none());
+            assert!(
+                result
+                    .write_probe_diagnostic()
+                    .unwrap()
+                    .contains("endpoint was not contacted")
+            );
+        }
+        let gate: CacheCredentialTestResult = serde_json::from_value(serde_json::json!({
+            "ok": true, "message": "", "probe_scope": "write",
+            "diagnostic_code": "write_route_verified_certificate_gate"
+        }))
+        .unwrap();
+        let message = gate.write_probe_diagnostic().unwrap();
+        assert!(message.contains("Native Go subject enforcement is not proved"));
+        assert!(message.contains("publication remain untested"));
+    }
+
+    #[test]
+    fn labels_and_environment_colors_use_wire_modes_and_safe_real_metadata() {
+        for (mode, label) in [
+            ("token", "API token"),
+            ("mtls", "mTLS"),
+            ("none", "Public"),
+            ("basic", "Basic"),
+        ] {
+            assert_eq!(auth_label(mode), label);
+        }
+        assert_eq!(environment_color(" #A1b2C3 "), "#A1b2C3");
+        for invalid in ["", "red", "#12", "#abcdef;display:none", "url(secret)"] {
+            assert_eq!(environment_color(invalid), normalize_env_color(""));
+        }
+    }
 
     #[test]
     fn credential_focus_owner_restores_only_the_closed_plane_and_invalidates_reopens() {
@@ -1137,7 +2193,7 @@ mod tests {
     }
 
     #[test]
-    fn discovery_and_scoped_tests_exclude_tokens_and_untested_plane_material() {
+    fn discovery_excludes_tokens_and_tests_exclude_untested_plane_material() {
         let mut form = Niks3FormState::from_destination(None);
         form.token = "fixture-write-token".into();
         form.read_mode = "basic".into();
@@ -1184,7 +2240,6 @@ mod tests {
             serde_json::to_value(project_create(form.request(), Niks3ProbeScope::Write)).unwrap(),
         ] {
             for field in [
-                "niks3_auth_token",
                 "niks3_read_basic_username",
                 "niks3_read_basic_password",
                 "niks3_read_client_cert",
@@ -1200,6 +2255,18 @@ mod tests {
         let mtls = serde_json::to_value(discovery_request(&form)).unwrap();
         assert!(mtls.get("niks3_auth_token").is_none());
         assert!(mtls.get("niks3_read_basic_password").is_none());
+        form.write_mode = "token".into();
+        for wire in [
+            serde_json::to_value(project_update(
+                form.update_request(),
+                Niks3ProbeScope::Write,
+            ))
+            .unwrap(),
+            serde_json::to_value(project_create(form.request(), Niks3ProbeScope::Write)).unwrap(),
+        ] {
+            assert_eq!(wire["niks3_auth_token"], "fixture-write-token");
+            assert!(wire.get("niks3_read_basic_password").is_none());
+        }
     }
 
     #[test]

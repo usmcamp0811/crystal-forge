@@ -6668,7 +6668,8 @@ pub struct UpdateCacheDestination {
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum Niks3ProbeScope {
-    /// Tests public write metadata and selected write TLS only.
+    /// Tests write metadata and protected API route/method access with the
+    /// selected write identity. Does not upload, sign or publish objects.
     Write,
     /// Tests the read endpoint and selected read identity only.
     Read,
@@ -6759,6 +6760,12 @@ pub struct CacheCredentialTestResult {
     /// Missing codes preserve compatibility with older servers.
     #[serde(default)]
     pub diagnostic_code: Option<String>,
+    /// Preserves the per-write outcome when aggregate discovery or read guidance
+    /// differs. Decoding retains only recognized write diagnostic constants.
+    /// Presentation also requires [`Niks3ProbeScope::Write`] or
+    /// [`Niks3ProbeScope::All`]; codes never replace boolean evidence.
+    #[serde(default, deserialize_with = "deserialize_write_probe_diagnostic")]
+    pub write_probe_diagnostic_code: Option<String>,
     /// Untrusted endpoint metadata; probe presentation must not display this URL.
     pub tested_url: Option<String>,
     /// Identifies the typed probe; omission preserves older server compatibility.
@@ -6786,7 +6793,8 @@ pub struct CacheCredentialTestResult {
     pub server_reachable: Option<bool>,
     /// Whether the public cache configuration passed validation.
     pub discovery_valid: Option<bool>,
-    /// Whether write permission was proved; `None` MUST display as untested.
+    /// Contains the legacy Niks3 alias for protected write API route access.
+    /// Does not establish upload or publication; `None` means untested.
     pub write_auth_valid: Option<bool>,
     /// Whether the independently authenticated read endpoint responded.
     pub read_endpoint_reachable: Option<bool>,
@@ -6795,13 +6803,17 @@ pub struct CacheCredentialTestResult {
     /// Identifies the selected Niks3 probe plane; missing evidence stays untested.
     #[serde(default)]
     pub probe_scope: Option<Niks3ProbeScope>,
-    /// Reports a response from the write API, not upload permission.
+    /// Reports access to the probed write API route and method.
+    /// Only `Some(true)` establishes API access. This field does not validate
+    /// S3 upload, signing, or object publication; absence means untested.
     #[serde(default)]
     pub write_api_reachable: Option<bool>,
-    /// Reports only explicitly observed write-transport authentication.
+    /// Reports explicitly observed authentication for the probed write API.
+    /// Metadata discovery and configured flags cannot establish this result.
     #[serde(default)]
     pub write_authn_valid: Option<bool>,
-    /// Reports write permission only when independently established.
+    /// Reports authorization for the probed write API route and method.
+    /// This result does not establish successful object publication.
     #[serde(default)]
     pub write_authorization_valid: Option<bool>,
     /// Reports selected read endpoint access, not write readiness.
@@ -6867,6 +6879,45 @@ pub fn cache_diagnostic_message(code: &str) -> Option<&'static str> {
         "probe_timeout" => {
             "The cache probe timed out. Check endpoint availability and connectivity, then retry."
         }
+        "token_rejected" => {
+            "The write API rejected the selected token. Check the token and API endpoint."
+        }
+        "mtls_subject_rejected" => {
+            "The write API rejected the selected client identity. Check the certificate and permitted identity."
+        }
+        "proxy_access_denied" => {
+            "The proxy denied API access. Check its access policy for the selected identity."
+        }
+        "method_rejected" => {
+            "The write API rejected the probe method. Check proxy routing and the supported API contract."
+        }
+        "route_unsupported" => {
+            "The endpoint did not establish the supported write API contract. Check the API URL and proxy routes."
+        }
+        "unexpected_write_response" => {
+            "The write API returned an unexpected probe response. Upload and publication remain untested."
+        }
+        "probe_response_too_large" => {
+            "The probe response exceeded the supported size limit. API access and publication are not established by an oversized response."
+        }
+        "write_credentials_missing" => {
+            "Write credentials are missing. Select a stored credential or enter a complete replacement. The write endpoint was not contacted."
+        }
+        "write_credentials_invalid" => {
+            "Write credentials failed local validation. Check the token format or client identity. The write endpoint was not contacted; this is not an upstream credential rejection."
+        }
+        "auth_control_inconclusive" => {
+            "The credential-omission control was inconclusive. API authentication and authorization are not established by metadata access."
+        }
+        "write_route_verified" => {
+            "Protected write API route and method access was verified. S3 upload, signing and object publication remain untested."
+        }
+        "write_route_verified_certificate_gate" => {
+            "The selected session reached the protected write API route, and transport rejected the certificate-omission control. Native Go subject enforcement is not proved. S3 upload, signing and object publication remain untested."
+        }
+        "read_access_verified" => {
+            "Read endpoint access was verified. This does not establish write API access, upload or publication."
+        }
         "probe_failed" => CACHE_PROBE_FAILURE_MESSAGE,
         _ => return None,
     })
@@ -6875,7 +6926,81 @@ pub fn cache_diagnostic_message(code: &str) -> Option<&'static str> {
 /// Contains generic local guidance when a cache probe has no recognized code.
 pub const CACHE_PROBE_FAILURE_MESSAGE: &str = "Test failed. Review the selected endpoint, identity, server trust and permitted target policy.";
 
+// SECURITY: Read-only success and aggregate metadata diagnostics cannot be
+// presented as per-write outcomes. Retain shared transport/identity failures,
+// but never arbitrary upstream prose or an unsupported successful-read code.
+fn write_probe_diagnostic_message(code: &str) -> Option<&'static str> {
+    match code {
+        "token_rejected"
+        | "mtls_subject_rejected"
+        | "proxy_access_denied"
+        | "method_rejected"
+        | "route_unsupported"
+        | "auth_control_inconclusive"
+        | "unexpected_write_response"
+        | "probe_response_too_large"
+        | "write_route_verified"
+        | "write_route_verified_certificate_gate"
+        | "write_credentials_missing"
+        | "write_credentials_invalid"
+        | "ca_bundle_framing_invalid"
+        | "ca_certificate_invalid"
+        | "ca_bundle_content_unsupported"
+        | "ca_bundle_trust_ambiguous"
+        | "ca_bundle_empty"
+        | "ca_bundle_too_large"
+        | "client_identity_invalid"
+        | "client_certificate_invalid"
+        | "client_private_key_invalid"
+        | "client_identity_mismatch"
+        | "tls_verification_failed"
+        | "dns_or_connection_failed"
+        | "http_response_failed"
+        | "target_policy_rejected"
+        | "probe_timeout"
+        | "probe_failed" => cache_diagnostic_message(code),
+        _ => None,
+    }
+}
+
+fn deserialize_write_probe_diagnostic<'de, D>(decoder: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(decoder)?;
+    Ok(value
+        .as_str()
+        .filter(|code| write_probe_diagnostic_message(code).is_some())
+        .map(str::to_owned))
+}
+
 impl CacheCredentialTestResult {
+    /// Returns allowlisted local guidance for the response's write-plane outcome.
+    ///
+    /// A write-only response may use its aggregate code for older servers. An
+    /// all-plane response requires the explicit per-write code because read or
+    /// discovery failure can replace the aggregate diagnostic. Read-only and
+    /// missing-scope responses return `None`. Guidance never establishes evidence;
+    /// callers must render the nullable write booleans independently.
+    pub fn write_probe_diagnostic(&self) -> Option<&'static str> {
+        match self.probe_scope {
+            Some(Niks3ProbeScope::Write) => self
+                .write_probe_diagnostic_code
+                .as_deref()
+                .and_then(write_probe_diagnostic_message)
+                .or_else(|| {
+                    self.diagnostic_code
+                        .as_deref()
+                        .and_then(write_probe_diagnostic_message)
+                }),
+            Some(Niks3ProbeScope::All) => self
+                .write_probe_diagnostic_code
+                .as_deref()
+                .and_then(write_probe_diagnostic_message),
+            _ => None,
+        }
+    }
+
     /// Returns static failure guidance without displaying untrusted response prose.
     ///
     /// The caller must use the individual evidence fields for probe outcomes.

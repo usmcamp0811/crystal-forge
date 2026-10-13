@@ -145,6 +145,22 @@ async fn stored_probe_preserves_ciphertext_scope_and_timestamps(pool: PgPool) {
                         assert!(effective.niks3_read_client_key.is_none());
                         assert!(effective.niks3_read_client_cert.is_none());
                     }
+                    if ty == "Niks3" {
+                        // This fixture proves retained merging/lock release, not
+                        // native authentication. Metadata alone is not success.
+                        return Ok(CacheCredentialTestResult {
+                            ok: false,
+                            status_code: Some(200),
+                            message: "Synthetic metadata only; write access unproven".into(),
+                            tested_url: None,
+                            niks3: Some(CacheProbeDetails::Niks3(Niks3ConnectionTestResult {
+                                server_reachable: true,
+                                discovery_valid: true,
+                                write_api_reachable: Some(true),
+                                ..Default::default()
+                            })),
+                        });
+                    }
                     Ok(CacheCredentialTestResult {
                         ok: true,
                         status_code: Some(200),
@@ -156,7 +172,19 @@ async fn stored_probe_preserves_ciphertext_scope_and_timestamps(pool: PgPool) {
             )
             .await;
             assert_eq!(response.status(), StatusCode::OK);
-            let body = json_response(response).await.to_string();
+            let json = json_response(response).await;
+            if ty == "Niks3" {
+                assert_eq!(json["ok"], false);
+                assert_eq!(json["write_api_reachable"], true);
+                for field in [
+                    "write_auth_valid",
+                    "write_authn_valid",
+                    "write_authorization_valid",
+                ] {
+                    assert!(json[field].is_null());
+                }
+            }
+            let body = json.to_string();
             assert!(!body.contains("marker"));
             assert!(!body.contains("configuration"));
             assert_eq!(snapshot(&pool, id).await, before);

@@ -130,13 +130,20 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       if (niks3) {
         assert.equal(body.probe_scope, plane, "Niks3 Test explicitly scopes one plane");
         assert.equal(result.probe_scope, plane);
-        assert.equal(result.write_authorization_valid, null, "read-only metadata cannot establish uploads");
         if (plane === "write") {
+          assert.equal(result.status_code, 400, "native invalid closure proves protected handler access only");
+          assert.equal(result.write_authn_valid, true);
+          assert.equal(result.write_authorization_valid, true);
+          assert.equal(result.write_auth_valid, true);
           assert.equal(result.write_api_reachable, true);
           assert.equal(result.read_access_valid, null);
           assert(body.push_to == null && body.niks3_read_client_key == null && body.niks3_read_basic_password == null);
-          await expect(outer.getByText("Write authorization", { exact: true }).locator("..")).toContainText("Untested");
+          for (const label of ["Write API access", "Authentication", "Write authorization"]) await expect(outer.getByText(label, { exact: true }).locator("..")).toContainText("Verified");
+          await expect(outer.getByText("Object publication", { exact: true }).locator("..")).toContainText("Untested");
         } else {
+          assert.equal(result.write_authn_valid, null);
+          assert.equal(result.write_authorization_valid, null);
+          assert.equal(result.write_auth_valid, null);
           assert.equal(result.read_access_valid, true);
           assert.equal(result.signing_keys_valid, true);
           assert.equal(result.write_api_reachable, null);
@@ -212,6 +219,11 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
     await expect(outer.getByLabel("Private key", { exact: true })).toHaveCount(0);
   };
   const discovery = async (id, source, { retained = false, replacement = false, reject = false, token = false } = {}) => {
+    await outer.getByRole("button", { name: "Read / Pull", exact: true }).click();
+    const priorRead = await outer.getByLabel("Read / substituter URL", { exact: true }).inputValue();
+    await outer.getByRole("button", { name: "Trust", exact: true }).click();
+    const priorKeys = await outer.getByRole("textbox", { name: /^Signing public key / }).evaluateAll(nodes => nodes.map(node => node.value));
+    const priorDirty = await outer.locator("header").innerText();
     await outer.getByRole("button", { name: "Write / API", exact: true }).click();
     const url = `${apiBaseUrl}/api/v1/caches/${id == null ? "niks3/discover" : `${id}/niks3/discover`}`;
     await checkpoint("discovery-before", discoveryRows());
@@ -245,11 +257,14 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       assert.deepEqual(reply.public_keys, source.public_keys);
       assert(reply.write_auth_valid == null, "Discovery cannot prove write authorization");
       await expect(outer).toContainText("Discovery successful");
+      await expect(outer.locator("header")).toHaveText(priorDirty);
       await outer.getByRole("button", { name: "Read / Pull", exact: true }).click();
-      await expect.poll(async () => new URL(await outer.getByLabel("Read / substituter URL", { exact: true }).inputValue()).href).toBe(new URL(source.substituter_url).href);
+      await expect(outer.getByLabel("Read / substituter URL", { exact: true })).toHaveValue(priorRead);
       await outer.getByRole("button", { name: "Trust", exact: true }).click();
-      assert.deepEqual(await outer.getByRole("textbox", { name: /^Signing public key / }).evaluateAll(nodes => nodes.map(node => node.value)), source.public_keys);
+      assert.deepEqual(await outer.getByRole("textbox", { name: /^Signing public key / }).evaluateAll(nodes => nodes.map(node => node.value)), priorKeys, "Discovery never overwrites draft or stored keys implicitly");
       await outer.getByRole("button", { name: "Write / API", exact: true }).click();
+      const matches = priorRead.trim() === reply.substituter_url.trim() && JSON.stringify(priorKeys.filter(value => value.trim()).map(value => value.trim())) === JSON.stringify(reply.public_keys);
+      await expect(outer.getByRole("button", { name: "Apply discovered settings", exact: true })).toHaveCount(matches ? 0 : 1);
       await expect(outer.getByText("Write authorization", { exact: true }).locator("..")).toContainText("Untested");
     }
     await checkpoint(reject ? "discovery-rejected" : token ? "discovery-token-after" : "discovery-after", discoveryRows());
@@ -509,6 +524,11 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       await expect(outer.getByLabel("Username", { exact: true })).toHaveCount(0);
     };
     const nativeDiscover = async (conflict = false) => {
+      await rail("Read / Pull");
+      const priorRead = await outer.getByLabel("Read / substituter URL", { exact: true }).inputValue();
+      await rail("Trust");
+      const priorKeys = await keys().evaluateAll(nodes => nodes.map(node => node.value));
+      const priorDirty = await outer.locator("header").innerText();
       await rail("Write / API");
       await checkpoint("basic-before", ids());
       const url = `${apiBaseUrl}/api/v1/caches/${id == null ? "niks3/discover" : `${id}/niks3/discover`}`;
@@ -523,7 +543,16 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       for (const field of ["niks3_auth_token", "niks3_read_basic_username", "niks3_read_basic_password", "niks3_read_client_key", "s3_secret_access_key"])
         assert(patch[field] == null, "Discovery sends only the selected write transport");
       if (id != null) assert(patch.niks3_write_client_key == null, "retained Edit Discovery omits the private key");
-      await expect(outer).toContainText(conflict ? "Existing read URL or keys differ" : "Discovery successful");
+      await expect(outer).toContainText("Discovery successful");
+      await expect(outer.locator("header")).toHaveText(priorDirty);
+      await rail("Read / Pull");
+      await expect(outer.getByLabel("Read / substituter URL", { exact: true })).toHaveValue(priorRead);
+      await rail("Trust");
+      assert.deepEqual(await keys().evaluateAll(nodes => nodes.map(node => node.value)), priorKeys);
+      await rail("Write / API");
+      const matches = priorRead.trim() === result.substituter_url.trim() && JSON.stringify(priorKeys.filter(value => value.trim()).map(value => value.trim())) === JSON.stringify(result.public_keys);
+      if (conflict) assert.equal(matches, false, "conflicting drafts require a settings proposal");
+      await expect(outer.getByRole("button", { name: "Apply discovered settings", exact: true })).toHaveCount(matches ? 0 : 1);
       await checkpoint("basic-after-discovery", ids());
     };
     const planeTest = async (plane, ok = true, retained = false, redirect = false) => {
@@ -539,14 +568,21 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       assert.equal(patch.probe_scope, plane);
       assert.equal(result.probe_scope, plane);
       assert.equal(result.ok, ok);
-      assert.equal(result.write_authorization_valid, null);
       if (plane === "write") {
+        assert.equal(result.status_code, 400);
+        assert.equal(result.write_authn_valid, true);
+        assert.equal(result.write_authorization_valid, true);
+        assert.equal(result.write_auth_valid, true);
         assert.equal(result.write_api_reachable, true);
         assert.equal(result.read_access_valid, null);
         assert(patch.push_to == null && patch.niks3_read_basic_username == null && patch.niks3_read_basic_password == null);
         assert(patch.niks3_auth_token == null);
-        await expect(outer.getByText("Write authorization", { exact: true }).locator("..")).toContainText("Untested");
+        for (const label of ["Write API access", "Authentication", "Write authorization"]) await expect(outer.getByText(label, { exact: true }).locator("..")).toContainText("Verified");
+        await expect(outer.getByText("Object publication", { exact: true }).locator("..")).toContainText("Untested");
       } else {
+        assert.equal(result.write_authn_valid, null);
+        assert.equal(result.write_authorization_valid, null);
+        assert.equal(result.write_auth_valid, null);
         assert.equal(result.read_access_valid, ok);
         if (ok) assert.equal(result.signing_keys_valid, true);
         assert.equal(result.write_api_reachable, null);
@@ -582,6 +618,7 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
     await outer.getByLabel("Write / API URL", { exact: true }).fill(source.server_url);
     await writeIdentity(source);
     await nativeDiscover();
+    await outer.getByRole("button", { name: "Apply discovered settings", exact: true }).click();
     await shots("write-discovered");
     await rail("Read / Pull");
     await expect.poll(async () => new URL(await outer.getByLabel("Read / substituter URL", { exact: true }).inputValue()).href).toBe(new URL(source.substituter_url).href);
@@ -596,7 +633,11 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
     await rail("Trust");
     assert.deepEqual(await keys().evaluateAll(nodes => nodes.map(node => node.value)), reversed, "Discovery cannot silently overwrite nonempty signing keys");
     await rail("Write / API");
-    await outer.getByRole("button", { name: "Apply discovered metadata", exact: true }).click();
+    await outer.getByRole("button", { name: "Apply discovered settings", exact: true }).click();
+    await rail("Read / Pull");
+    await expect.poll(async () => new URL(await outer.getByLabel("Read / substituter URL", { exact: true }).inputValue()).href).toBe(new URL(source.substituter_url).href);
+    await rail("Trust");
+    assert.deepEqual(await keys().evaluateAll(nodes => nodes.map(node => node.value)), source.public_keys);
     await basicIdentity();
     await shots("read-basic");
     await rail("Trust");

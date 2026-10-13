@@ -2,8 +2,10 @@
 //!
 //! Niks3 keeps write API and Nix read authentication independent. Edit forms
 //! contain replacements only; configured flags describe retained server secrets.
-//! Discovery populates public metadata without saving. Non-mutating probes cannot
-//! establish write permission, so absent authorization results remain untested.
+//! Discovery proposes public metadata without editing the draft. Explicit
+//! application changes read settings without saving. Scoped probes report API
+//! access separately from authentication and authorization. Missing evidence and
+//! object publication remain untested; API access does not prove an S3 upload.
 //! Cache forms save configuration and environment scope in one API transaction. A
 //! failed save retains the draft and does not publish a transient global cache.
 //! Inventory observations load once per page-list refresh with bounded requests.
@@ -280,8 +282,9 @@ impl Niks3FormState {
         }
     }
 
-    // INVARIANT: Empty replacements retain server-side identities. Clear flags
-    // remove only inactive credentials or a CA explicitly selected for removal.
+    // INVARIANT: Empty replacements retain server-side identities. An unrelated
+    // edit never requests inactive-identity removal. Explicit mode transitions
+    // remain subject to the server's atomic mode policy; CA removal is explicit.
     fn update_request(&self) -> UpdateCacheDestination {
         let req = self.request();
         UpdateCacheDestination {
@@ -298,9 +301,9 @@ impl Niks3FormState {
             niks3_read_client_cert: req.niks3_read_client_cert,
             niks3_read_client_key: req.niks3_read_client_key,
             niks3_read_ca_cert: req.niks3_read_ca_cert,
-            clear_niks3_auth_token: self.write_mode == "mtls",
-            clear_niks3_write_client_key: self.write_mode == "token",
-            clear_niks3_read_client_key: self.read_mode == "none",
+            clear_niks3_auth_token: false,
+            clear_niks3_write_client_key: false,
+            clear_niks3_read_client_key: false,
             clear_niks3_write_ca_cert: self.clear_write_ca,
             clear_niks3_read_ca_cert: self.clear_read_ca,
             niks3_read_basic_username: req.niks3_read_basic_username,
@@ -3631,13 +3634,13 @@ mod tests {
         assert!(request.niks3_write_client_cert.is_none());
         assert!(request.niks3_write_client_key.is_none());
         assert!(request.niks3_read_client_key.is_none());
-        assert!(request.clear_niks3_write_client_key);
-        assert!(request.clear_niks3_read_client_key);
+        assert!(!request.clear_niks3_write_client_key);
+        assert!(!request.clear_niks3_read_client_key);
         assert!(!request.clear_niks3_auth_token);
         state.write_mode = "mtls".into();
         let request = state.update_request();
         assert!(request.niks3_auth_token.is_none());
-        assert!(request.clear_niks3_auth_token);
+        assert!(!request.clear_niks3_auth_token);
         assert!(!request.clear_niks3_write_client_key);
     }
 

@@ -478,19 +478,38 @@ async fn canonical_ca_get_test_cancel_and_ca_only_save_preserve_ciphertext(pool:
                 effective.niks3_write_ca_cert.as_deref(),
                 Some(TEST_CERTIFICATE)
             );
+            // This callback proves the canonical CA projection and models only
+            // public metadata. No protected GC/control or POST fixture exists.
             Ok(CacheCredentialTestResult {
-                ok: true,
+                ok: false,
                 status_code: Some(200),
                 message: "synthetic metadata only".into(),
                 tested_url: None,
-                niks3: Some(CacheProbeDetails::Niks3(
-                    Niks3ConnectionTestResult::default(),
-                )),
+                niks3: Some(CacheProbeDetails::Niks3(Niks3ConnectionTestResult {
+                    server_reachable: true,
+                    discovery_valid: true,
+                    write_api_reachable: Some(true),
+                    signing_keys_found: true,
+                    ..Default::default()
+                })),
             })
         },
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
+    let body = axum::body::to_bytes(response.into_body(), 16 * 1024)
+        .await
+        .unwrap();
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(body["ok"], false);
+    assert_eq!(body["write_api_reachable"], true);
+    for field in [
+        "write_auth_valid",
+        "write_authn_valid",
+        "write_authorization_valid",
+    ] {
+        assert!(body[field].is_null());
+    }
     let request = axum::http::Request::builder()
         .method("POST")
         .header("content-type", "application/json")

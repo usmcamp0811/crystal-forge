@@ -188,6 +188,8 @@ flake-check:
           - server-regressions
           - nixos-discovery-reliability
           - niks3-cache
+          - niks3-write-probe
+          - niks3-ui
           - attic-metrics
           - attic-publication
           - builder-evaluator-packaging
@@ -202,7 +204,7 @@ flake-check:
   script:
     - |
       case "$CHECK_NAME" in
-        integration|oidc-auth|server-regressions|nixos-discovery-reliability|niks3-cache|attic-metrics|attic-publication|builder-evaluator-packaging)
+        integration|oidc-auth|server-regressions|nixos-discovery-reliability|niks3-cache|niks3-write-probe|niks3-ui|attic-metrics|attic-publication|builder-evaluator-packaging)
           sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace
           ;;
         *)
@@ -212,7 +214,7 @@ flake-check:
     # Copy web-ui screenshots out of the Nix build result into the CI workspace
     - mkdir -p web-ui-screenshots
     - |
-      if [ "$CHECK_NAME" = "web-ui" ]; then
+      if [ "$CHECK_NAME" = "web-ui" ] || [ "$CHECK_NAME" = "niks3-ui" ]; then
         STORE_PATH=$(readlink -f result)
         if [ -d "$STORE_PATH/screenshots" ]; then
           cp -r "$STORE_PATH/screenshots/"* web-ui-screenshots/

@@ -311,9 +311,12 @@ impl CreateCacheDestination {
     }
     /// Validates only the selected Niks3 probe plane without admitting a Save.
     ///
-    /// Write metadata needs no read URL or signing keys and cannot prove token
-    /// validity. Read metadata needs no write settings; supplied signing keys
-    /// are format-checked but metadata cannot verify artifact signatures.
+    /// Write probing needs no read URL or signing keys. A missing token remains
+    /// a reportable credential failure, not permission to borrow read identity.
+    /// Protected-route observations establish authentication and API access;
+    /// validation alone does not. Read metadata needs no write settings;
+    /// supplied signing keys are format-checked but metadata cannot verify
+    /// artifact signatures.
     ///
     /// # Errors
     /// Returns static errors for invalid selected settings. `All` retains the
@@ -806,7 +809,8 @@ pub enum Niks3ProbeScope {
     /// Checks both planes using complete Save validation (the legacy default).
     #[default]
     All,
-    /// Checks public write-API metadata and optional write mTLS transport only.
+    /// Checks public API metadata, selected authentication, and non-destructive
+    /// protected write-route access. Does not publish objects or verify S3 access.
     Write,
     /// Checks the configured Nix metadata endpoint with selected read auth only.
     Read,

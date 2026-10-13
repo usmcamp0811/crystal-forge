@@ -225,6 +225,18 @@ let
         ];
       };
     };
+    # Keep the existing GET-only discovery ingress unchanged. This separate
+    # fixture relay exposes only native protected status and invalid-POST probes.
+    systemd.services.niks3-protected-write-relay = {
+      wantedBy = ["multi-user.target"];
+      after = ["niks3-basic-discovery.service"];
+      requires = ["niks3-basic-discovery.service"];
+      serviceConfig = {
+        ExecStart = "${cacheFixturePython}/bin/python ${cacheFixtureDriver} niks3-protected-relay";
+        Restart = "on-failure";
+        UMask = "0077";
+      };
+    };
     services.postgresql = {
       # Each native process owns its migrations. Sharing the helper's database
       # races Goose's initial sequence creation during parallel VM startup.
@@ -1127,6 +1139,7 @@ in pkgs.testers.runNixOSTest {
         cache.wait_for_unit("niks3.service")
         cache.wait_for_unit("niks3-production-discovery.service")
         cache.wait_for_unit("niks3-basic-discovery.service")
+        cache.wait_for_unit("niks3-protected-write-relay.service")
         cache.wait_for_unit("niks3-metrics.service")
         cache.wait_for_unit("garage-web-ui-key.service")
         cache.wait_for_unit("nginx.service")
@@ -1138,6 +1151,8 @@ in pkgs.testers.runNixOSTest {
         cache.wait_for_open_port(5756)
         cache.wait_for_open_port(5757)
         cache.wait_for_open_port(5758)
+        cache.wait_for_open_port(5759)
+        cache.wait_for_open_port(5762)
         cache.wait_for_open_port(5760)
         # Only file paths enter driver logs. JWTs never enter driver commands,
         # environment strings, screenshots or derivation outputs.
@@ -1161,6 +1176,7 @@ in pkgs.testers.runNixOSTest {
         machine.succeed("chmod 0600 /run/cf-attic-metrics-binding.json")
         machine.succeed("chmod 0600 /run/cf-http-fixture.json /run/cf-niks3-basic-read-fixture.json")
         machine.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} assemble")
+        machine.succeed("nohup ${cacheFixturePython}/bin/python ${cacheFixtureDriver} niks3-form-checkpoints > /run/cf-niks3-form-checkpoints.log 2>&1 </dev/null &")
         # Provider warmup is independent of row creation. The seed worker waits
         # for step25's retained-workflow marker, not merely login readiness, so
         # earlier cache workflows retain their original data. The consumer then
@@ -1692,6 +1708,7 @@ in pkgs.testers.runNixOSTest {
       cache.wait_for_unit("niks3.service")
       cache.wait_for_unit("niks3-production-discovery.service")
       cache.wait_for_unit("niks3-basic-discovery.service")
+      cache.wait_for_unit("niks3-protected-write-relay.service")
       cache.wait_for_unit("niks3-metrics.service")
       cache.wait_for_unit("garage-web-ui-key.service")
       cache.wait_for_unit("nginx.service")
@@ -1703,6 +1720,8 @@ in pkgs.testers.runNixOSTest {
       cache.wait_for_open_port(5756)
       cache.wait_for_open_port(5757)
       cache.wait_for_open_port(5758)
+      cache.wait_for_open_port(5759)
+      cache.wait_for_open_port(5762)
       cache.wait_for_open_port(5760)
       atticCache.succeed("${cacheFixturePython}/bin/python ${cacheFixtureDriver} attic")
       with tempfile.TemporaryDirectory(prefix="cf-cache-private-") as private_dir:

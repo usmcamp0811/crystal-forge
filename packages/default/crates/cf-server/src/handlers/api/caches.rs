@@ -23,6 +23,7 @@ use crate::models::cache_destination::{
 use crate::queries::{cache_destinations, cache_push};
 
 mod attic_probe;
+mod niks3_write_probe;
 mod s3_probe;
 mod storage_metrics;
 
@@ -121,6 +122,55 @@ fn diagnostic(code: &str) -> ProbeDiagnostic {
             "The target is not permitted by the cache probe policy.",
         ),
         "probe_timeout" => ("probe_timeout", "The cache probe exceeded its deadline."),
+        "token_rejected" => (
+            "token_rejected",
+            "The protected API rejected the selected token.",
+        ),
+        "write_credentials_missing" => (
+            "write_credentials_missing",
+            "Selected write credentials are missing. No protected API request was sent.",
+        ),
+        "write_credentials_invalid" => (
+            "write_credentials_invalid",
+            "Selected write credentials are invalid. No protected API request was sent.",
+        ),
+        "mtls_subject_rejected" => (
+            "mtls_subject_rejected",
+            "The protected API rejected the selected client certificate identity or subject.",
+        ),
+        "proxy_access_denied" => (
+            "proxy_access_denied",
+            "The endpoint denied access. This is not the native Niks3 authentication fingerprint.",
+        ),
+        "method_rejected" => ("method_rejected", "The endpoint rejected the probe method."),
+        "route_unsupported" => (
+            "route_unsupported",
+            "The protected route did not match the supported Niks3 contract. Write authorization: Untested.",
+        ),
+        "auth_control_inconclusive" => (
+            "auth_control_inconclusive",
+            "Credential omission did not establish the expected authentication gate. Write authorization: Untested.",
+        ),
+        "unexpected_write_response" => (
+            "unexpected_write_response",
+            "The invalid write request received an unexpected response. Write authorization: Untested; no retry was sent.",
+        ),
+        "probe_response_too_large" => (
+            "probe_response_too_large",
+            "The protected API response exceeded 64 KiB.",
+        ),
+        "write_route_verified" => (
+            "write_route_verified",
+            "API authentication and protected write-handler access verified. Upload, storage permissions and publication: Untested.",
+        ),
+        "write_route_verified_certificate_gate" => (
+            "write_route_verified_certificate_gate",
+            "Protected API and write-handler access accepted the client identity; omission was rejected at TLS. Native subject enforcement, upload and publication: Untested.",
+        ),
+        "read_access_verified" => (
+            "read_access_verified",
+            "Read access and /nix/store metadata verified. Artifact signatures and write authorization: Untested.",
+        ),
         _ => (
             "probe_failed",
             "The cache probe failed. Check configuration and endpoint availability.",
@@ -660,20 +710,27 @@ enum CacheProbeDetails {
     Attic(attic_probe::AtticTestResult),
 }
 
-// Each stage describes only observed read-only behavior. In particular, the
-// public cache-config endpoint cannot establish write authorization.
+// Each stage describes observed access, never publication. Write authorization
+// means an authenticated invalid POST reached the supported validation gate.
 #[derive(Debug, Default, serde::Serialize)]
 struct Niks3ConnectionTestResult {
     #[serde(skip_serializing_if = "Option::is_none")]
     diagnostic_code: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    write_probe_diagnostic_code: Option<&'static str>,
     server_reachable: bool,
     discovery_valid: bool,
     write_auth_valid: Option<bool>,
     read_endpoint_reachable: bool,
     signing_keys_found: bool,
     probe_scope: Option<Niks3ProbeScope>,
+    // True means verified write TLS returned expected public cache-config
+    // metadata. Protected-route auth responses cannot establish this field.
     write_api_reachable: Option<bool>,
+    // Records accepted GET authentication plus its omission control.
     write_authn_valid: Option<bool>,
+    // Records invalid-POST handler access plus its omission control. Publication
+    // is a separate operation; the legacy write_auth_valid aliases this field.
     write_authorization_valid: Option<bool>,
     read_access_valid: Option<bool>,
     signing_keys_valid: Option<bool>,
@@ -1006,14 +1063,22 @@ async fn validate_niks3_discovery(
     allow_private_targets: bool,
     stages: &mut Niks3ConnectionTestResult,
 ) -> Result<(Niks3CacheConfig, Url), String> {
-    let config = parse_niks3_config(body)?;
-    validate_niks3_keys(&config).map_err(|_| "invalid_niks3_metadata")?;
+    let (config, read) = validate_niks3_metadata(body, allow_private_targets)?;
     stages.signing_keys_found = true;
-    let read = niks3_base_url(&config.substituter_url, allow_private_targets)
-        .map_err(|_| "target_policy_rejected")?;
     cache_test_addresses(&read, allow_private_targets)
         .await
         .map_err(|error| static_target_failure(&error))?;
+    Ok((config, read))
+}
+
+fn validate_niks3_metadata(
+    body: &[u8],
+    allow_private_targets: bool,
+) -> Result<(Niks3CacheConfig, Url), String> {
+    let config = parse_niks3_config(body)?;
+    validate_niks3_keys(&config).map_err(|_| "invalid_niks3_metadata")?;
+    let read = niks3_base_url(&config.substituter_url, allow_private_targets)
+        .map_err(|_| "target_policy_rejected")?;
     Ok((config, read))
 }
 
@@ -1074,15 +1139,75 @@ async fn run_niks3_test_scope(
     allow_private_targets: bool,
     scope: Niks3ProbeScope,
 ) -> Result<CacheCredentialTestResult, String> {
+    // A single budget covers DNS, trust/identity preparation, discovery, every
+    // protected request/control and the separately configured read plane.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(8);
+    let mut stages = Niks3ConnectionTestResult {
+        probe_scope: Some(scope),
+        ..Default::default()
+    };
+    let mut status_code = None;
+    let operation = run_niks3_test_scope_inner(
+        create,
+        allow_private_targets,
+        scope,
+        deadline,
+        &mut stages,
+        &mut status_code,
+    );
+    let (ok, code) = match tokio::time::timeout_at(deadline, operation).await {
+        Ok(result) => result?,
+        Err(_) => (false, "probe_timeout"),
+    };
+    stages.diagnostic_code = Some(code);
+    Ok(CacheCredentialTestResult {
+        ok,
+        status_code,
+        message: diagnostic(code).message.into(),
+        tested_url: None,
+        niks3: Some(CacheProbeDetails::Niks3(stages)),
+    })
+}
+
+async fn run_niks3_test_scope_inner(
+    create: &CreateCacheDestination,
+    allow_private_targets: bool,
+    scope: Niks3ProbeScope,
+    deadline: tokio::time::Instant,
+    stages: &mut Niks3ConnectionTestResult,
+    status_code: &mut Option<u16>,
+) -> Result<(bool, &'static str), String> {
     if scope == Niks3ProbeScope::Read {
-        return run_niks3_read_test(
+        let result = run_niks3_read_test(
             create,
             allow_private_targets,
             scope,
             Niks3ConnectionTestResult::default(),
         )
-        .await;
+        .await?;
+        *status_code = result.status_code;
+        if let Some(CacheProbeDetails::Niks3(read)) = result.niks3 {
+            *stages = read;
+        }
+        return Ok((
+            result.ok,
+            stages.diagnostic_code.unwrap_or("read_access_verified"),
+        ));
     }
+    // All retains complete Save validation, including missing-token rejection.
+    // Header-validity preflight then rejects unusable write credentials before
+    // any metadata request, DNS, read request or provider authentication claim.
+    if scope == Niks3ProbeScope::All {
+        create.validate_probe(scope)?;
+    }
+    let auth = match niks3_write_probe::preflight(create, stages) {
+        Ok(auth) => auth,
+        Err(error) => {
+            let code = static_probe_diagnostic(&error).code;
+            stages.write_probe_diagnostic_code = Some(code);
+            return Ok((false, code));
+        }
+    };
     let server = niks3_base_url(
         create
             .niks3_server_url
@@ -1097,68 +1222,142 @@ async fn run_niks3_test_scope(
         create.niks3_write_client_key.as_deref(),
         create.niks3_write_ca_cert.as_deref(),
     )?;
-    let client = niks3_write_test_client(&server, allow_private_targets, &write).await?;
-    let mut stages = Niks3ConnectionTestResult::default();
-    stages.probe_scope = Some(scope);
+    // Both write scopes observe public metadata once, without a Bearer. Write
+    // needs no configured read URL/keys; All separately checks their consistency.
     stages.write_api_reachable = Some(false);
-    let mut status_code = None;
-    let result: Result<(), String> = async {
-        // SECURITY: Do not send the write token to this public endpoint. Never
-        // infer write authorization from discovery or TLS handshake success.
-        let response = niks3_metadata_request(&client, &server)?
-            .send()
-            .await
-            .map_err(|error| request_failure(&error))?;
-        stages.server_reachable = true;
-        stages.write_api_reachable = Some(true);
-        status_code = Some(response.status().as_u16());
-        let (config, discovered) = validate_niks3_discovery(
-            &probe_body(response).await?,
+    let discovery: Result<(), String> = async {
+        let client = niks3_write_test_client(&server, allow_private_targets, &write).await?;
+        probe_niks3_metadata(
+            create,
+            scope,
+            &client,
+            &server,
             allow_private_targets,
-            &mut stages,
+            stages,
+            status_code,
         )
-        .await?;
-        if scope == Niks3ProbeScope::All
-            && !config
-                .public_keys
-                .iter()
-                .any(|key| create.niks3_public_keys.contains(key))
+        .await
+    }
+    .await;
+    // A metadata mismatch cannot skip write authentication. Each requested plane
+    // contributes independent evidence; the overall result requires all of them.
+    let write_result = niks3_write_probe::run(
+        &auth,
+        &server,
+        allow_private_targets,
+        deadline,
+        stages,
+        status_code,
+    )
+    .await;
+    let write_ok = write_result.is_ok();
+    let write_code = match write_result {
+        Ok(code) => code,
+        Err(code) => static_probe_diagnostic(&code).code,
+    };
+    stages.write_probe_diagnostic_code = Some(write_code);
+    let mut read_ok = true;
+    let mut read_code = None;
+    if scope == Niks3ProbeScope::All {
+        let read = run_niks3_read_test(
+            create,
+            allow_private_targets,
+            scope,
+            Niks3ConnectionTestResult::default(),
+        )
+        .await;
+        match read {
+            Ok(result) => {
+                read_ok = result.ok;
+                if let Some(CacheProbeDetails::Niks3(read)) = result.niks3 {
+                    stages.read_endpoint_reachable = read.read_endpoint_reachable;
+                    stages.read_access_valid = read.read_access_valid;
+                    read_code = read.diagnostic_code;
+                }
+            }
+            Err(error) => {
+                read_ok = false;
+                read_code = Some(static_probe_diagnostic(&error).code);
+            }
+        }
+    }
+    let code = if !write_ok {
+        write_code
+    } else if let Err(error) = &discovery {
+        static_probe_diagnostic(error).code
+    } else if !read_ok {
+        read_code.unwrap_or("probe_failed")
+    } else {
+        write_code
+    };
+    Ok((write_ok && discovery.is_ok() && read_ok, code))
+}
+
+async fn probe_niks3_metadata(
+    create: &CreateCacheDestination,
+    scope: Niks3ProbeScope,
+    client: &reqwest::Client,
+    server: &Url,
+    allow_private_targets: bool,
+    stages: &mut Niks3ConnectionTestResult,
+    status_code: &mut Option<u16>,
+) -> Result<(), String> {
+    stages.write_api_reachable = Some(false);
+    // SECURITY: Public metadata never receives a write Bearer. A successful
+    // metadata observation establishes reachability, not authentication/version.
+    let response = niks3_metadata_request(client, server)?
+        .send()
+        .await
+        .map_err(|error| request_failure(&error))?;
+    stages.server_reachable = true;
+    *status_code = Some(response.status().as_u16());
+    // Scope results require the native metadata status/media type, not an
+    // arbitrary successful proxy response. Public Discover keeps its own policy.
+    if response.status().as_u16() != 200
+        || response
+            .headers()
+            .get_all(reqwest::header::CONTENT_TYPE)
+            .iter()
+            .count()
+            != 1
+        || response
+            .headers()
+            .get(reqwest::header::CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            != Some("application/json")
+    {
+        return Err("invalid_niks3_metadata".into());
+    }
+    let (config, discovered) =
+        validate_niks3_metadata(&probe_body(response).await?, allow_private_targets)?;
+    stages.write_api_reachable = Some(true);
+    stages.signing_keys_found = true;
+    if scope == Niks3ProbeScope::All {
+        if !config
+            .public_keys
+            .iter()
+            .any(|key| create.niks3_public_keys.contains(key))
         {
+            stages.signing_keys_valid = Some(false);
             return Err("Advertised signing keys do not match configured trust".into());
         }
-        // SECURITY: Discovery cannot redirect the configured read identity to
-        // another origin/path and receive its client certificate. Probe only
-        // the configured URL with a separately pinned read client.
-        if scope == Niks3ProbeScope::All
-            && discovered
-                != niks3_base_url(
-                    create.push_to.as_deref().ok_or("Missing Niks3 read URL")?,
-                    allow_private_targets,
-                )?
+        stages.signing_keys_valid = Some(true);
+        // Discovery cannot retarget the configured read identity. All additionally
+        // validates advertised read DNS and requires the configured URL to match.
+        if discovered
+            != niks3_base_url(
+                create.push_to.as_deref().ok_or("Missing Niks3 read URL")?,
+                allow_private_targets,
+            )?
         {
             return Err("Discovered substituter URL does not match the configured read URL".into());
         }
-        stages.discovery_valid = true;
-        Ok(())
+        cache_test_addresses(&discovered, allow_private_targets)
+            .await
+            .map_err(|error| static_target_failure(&error))?;
     }
-    .await;
-    if result.is_ok() && scope == Niks3ProbeScope::All {
-        return run_niks3_read_test(create, allow_private_targets, scope, stages).await;
-    }
-    let hint = result
-        .as_ref()
-        .err()
-        .map(|error| static_probe_diagnostic(error));
-    stages.diagnostic_code = hint.map(|hint| hint.code);
-    Ok(CacheCredentialTestResult {
-        ok: result.is_ok(),
-        status_code,
-        message: hint.map(|hint| hint.message.into()).unwrap_or_else(|| {
-            "Public write API metadata verified. Write authentication and authorization: Untested. Read plane: Untested.".into()
-        }),
-        tested_url: None,
-        niks3: Some(CacheProbeDetails::Niks3(stages)),
-    })
+    stages.discovery_valid = true;
+    Ok(())
 }
 
 // SECURITY: Basic is sent only to the configured HTTPS authority. The shared
@@ -1199,6 +1398,28 @@ fn niks3_read_base_url(raw: &str, allow_private_targets: bool) -> Result<Url, St
     Ok(url)
 }
 
+fn niks3_read_root_policy(ca: Option<&str>) -> RootPolicy {
+    if ca.is_some_and(|ca| !ca.trim().is_empty()) {
+        RootPolicy::ReplaceCustom
+    } else {
+        RootPolicy::ExtendSystem
+    }
+}
+
+async fn niks3_read_test_client(
+    url: &Url,
+    allow_private_targets: bool,
+    cert: Option<&str>,
+    key: Option<&str>,
+    ca: Option<&str>,
+) -> Result<reqwest::Client, String> {
+    let addresses = cache_test_addresses(url, allow_private_targets).await?;
+    // SECURITY: Explicit Niks3 read roots replace ambient and built-in trust,
+    // matching child-local NIX_SSL_CERT_FILE. Generic provider policy is separate.
+    cache_test_client_pinned_policy(url, &addresses, cert, key, ca, niks3_read_root_policy(ca))
+        .await
+}
+
 async fn run_niks3_read_test(
     create: &CreateCacheDestination,
     allow_private_targets: bool,
@@ -1219,7 +1440,7 @@ async fn run_niks3_read_test(
     } else {
         (None, None, None)
     };
-    let client = cache_test_client(&read, allow_private_targets, cert, key, ca)
+    let client = niks3_read_test_client(&read, allow_private_targets, cert, key, ca)
         .await
         .map_err(|error| static_target_failure(&error))?;
     stages.probe_scope = Some(scope);
@@ -1723,16 +1944,20 @@ pub async fn create_cache_destination(
 /// `read_endpoint_reachable`, and `signing_keys_found` to the existing result.
 /// `server_reachable` means an HTTP response was received, including an error.
 /// `signing_keys_found` means discovery supplied valid Nix Ed25519 public keys.
-/// `discovery_valid` means the advertised read URL passed target validation and
-/// matches the configured read URL. `read_endpoint_reachable` means an
+/// `discovery_valid` means expected public metadata and advertised URL validation
+/// succeeded. `All` additionally requires configured read URL/key consistency.
+/// Write needs no configured read URL or keys. `read_endpoint_reachable` means an
 /// authenticated GET returned successful `nix-cache-info` for `/nix/store`.
-/// `write_auth_valid` is always null: public discovery does not verify write
-/// authorization. `ok` reports discovery/read success only, not write readiness.
+/// `write_auth_valid` aliases protected write-handler access evidence, not upload
+/// or publication readiness. `ok` requires complete evidence for every requested
+/// plane. Inconclusive write evidence leaves `ok` false and authorization null.
 ///
+/// # Errors
 /// Returns `403` without admin permission, `400` for invalid local settings or
 /// rejected configured targets, and `200` with stage results for probe failures.
 /// Redirects are errors. Read mTLS credentials go only to the configured read
-/// endpoint; the write token is never sent. An untested stage is false or null.
+/// endpoint; the write token goes only to protected API routes. Unproven nullable
+/// stages stay null. No provider error prose or credential material is returned.
 /// JSON parsing follows admin authorization and rejects invalid bodies without
 /// echoing values. Validates the same create configuration as persistence.
 /// Supplied double-submit CSRF state must match. S3 checks path-style bucket
@@ -1746,12 +1971,44 @@ pub async fn create_cache_destination(
 /// Niks3 accepts optional `probe_scope` (`write`, `read`, or default `all`). The
 /// result adds nullable `write_api_reachable`, `write_authn_valid`,
 /// `write_authorization_valid`, `read_access_valid`, and `signing_keys_valid`.
+/// Both write scopes fetch token-free cache-config once with selected write TLS.
+/// `write_api_reachable` means expected public metadata was received over verified
+/// TLS; protected auth responses alone cannot establish API reachability. Public
+/// metadata failure does not skip the independent protected-route probes.
 /// Null means unattempted or unproven. Public API metadata leaves write auth
 /// unproven. Read signing-key evidence checks configured format (and metadata
 /// overlap for `all`), not an artifact signature. Basic auth uses system CA
 /// trust and a sensitive header pinned to the configured HTTPS authority.
 /// Niks3 failures add an allowlisted `diagnostic_code`. Local certificate errors
 /// can add a static `field`; no submitted material or upstream prose is returned.
+/// Write probes pair protected `GET /api/gc/status` with credential omission.
+/// Only its strict native JSON or exact no-GC 404 fingerprint plus rejection of
+/// the control permits `POST /api/pending_closures` with `{}` and its control.
+/// Exact native validation 400 proves handler access without a valid upload.
+/// `write_probe_diagnostic_code` retains the per-write outcome when another plane
+/// fails. Certificate-required TLS controls establish accepted protected sessions
+/// but do not establish native subject enforcement. One eight-second deadline
+/// includes DNS, client preparation, requests and bounded response bodies.
+/// Local Bearer header validation precedes every metadata/DNS/read operation.
+/// Explicit Niks3 read CA roots replace ambient and built-in roots; omission uses
+/// normal system trust. Generic provider trust policies are independent.
+/// Scoped Write permits a missing token through historical input validation, but
+/// reports a local failed credential candidate with false write-authentication
+/// and handler-access flags. Protected API reachability stays null without an
+/// attempt. `write_credentials_missing` and `write_credentials_invalid` do not
+/// claim native rejection. `All` keeps its complete-validation HTTP 400 behavior.
+///
+/// # Examples
+/// ```text
+/// POST /api/v1/caches/test-credentials
+/// Content-Type: application/json
+///
+/// {
+///   "cache_type": "Niks3", "probe_scope": "write",
+///   "niks3_server_url": "https://cache.example",
+///   "niks3_write_auth_mode": "token", "niks3_auth_token": "<write-token>"
+/// }
+/// ```
 pub async fn test_cache_destination_credentials(
     State(pool): State<PgPool>,
     State(server_config): State<ServerConfig>,
@@ -2245,12 +2502,12 @@ mod tests {
             ),
             (
                 format!(r#"{{"substituter_url":"invalid","public_keys":["{key}"]}}"#),
-                true,
+                false,
                 "target_policy_rejected",
             ),
             (
                 format!(r#"{{"substituter_url":"https://127.0.0.1","public_keys":["{key}"]}}"#),
-                true,
+                false,
                 "target_policy_rejected",
             ),
         ] {
@@ -2265,10 +2522,14 @@ mod tests {
                     .contains(error)
             );
             assert!(stages.server_reachable);
+            // Invalid advertised URLs reject the complete metadata observation;
+            // no accepted key or protected-route evidence can be reported.
             assert_eq!(stages.signing_keys_found, keys_found);
             assert!(!stages.discovery_valid);
             assert!(!stages.read_endpoint_reachable);
             assert!(stages.write_auth_valid.is_none());
+            assert!(stages.write_authn_valid.is_none());
+            assert!(stages.write_authorization_valid.is_none());
         }
         let body = format!(r#"{{"substituter_url":"https://127.0.0.1","public_keys":["{key}"]}}"#);
         let mut stages = Niks3ConnectionTestResult::default();

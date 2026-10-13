@@ -155,17 +155,48 @@ async fn niks3_basic_get_save_test_cancel_modes_and_authority_preserve_secrets(p
                     scope,
                     Niks3ProbeScope::Read | Niks3ProbeScope::Write
                 ));
-                std::future::ready(Ok(CacheCredentialTestResult {
-                    ok: true,
-                    status_code: Some(200),
-                    message: "Scoped synthetic probe successful".into(),
-                    tested_url: None,
-                    niks3: None,
-                }))
+                let result = if scope == Niks3ProbeScope::Write {
+                    // The merge fixture supplies public metadata only, not a
+                    // native GC/control pair or a protected POST response.
+                    CacheCredentialTestResult {
+                        ok: false,
+                        status_code: Some(200),
+                        message: "Synthetic metadata only; write access unproven".into(),
+                        tested_url: None,
+                        niks3: Some(CacheProbeDetails::Niks3(Niks3ConnectionTestResult {
+                            probe_scope: Some(scope),
+                            server_reachable: true,
+                            discovery_valid: true,
+                            write_api_reachable: Some(true),
+                            ..Default::default()
+                        })),
+                    }
+                } else {
+                    CacheCredentialTestResult {
+                        ok: true,
+                        status_code: Some(200),
+                        message: "Scoped synthetic probe successful".into(),
+                        tested_url: None,
+                        niks3: None,
+                    }
+                };
+                std::future::ready(Ok(result))
             },
         )
         .await;
         assert_eq!(response.status(), StatusCode::OK);
+        if patch["probe_scope"] == "write" {
+            let body = json(response).await;
+            assert_eq!(body["ok"], false);
+            assert_eq!(body["write_api_reachable"], true);
+            for field in [
+                "write_auth_valid",
+                "write_authn_valid",
+                "write_authorization_valid",
+            ] {
+                assert!(body[field].is_null());
+            }
+        }
         assert!(snapshot(&pool, current.id).await == before);
     }
     // Cancel sends no server request and cannot persist the local draft.

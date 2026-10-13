@@ -52,9 +52,20 @@ for job in old:
                 names.insert(names.index("niks3-cache") + 1, "attic-metrics")
             if "attic-publication" not in names:
                 names.insert(names.index("attic-metrics") + 1, "attic-publication")
+            if "niks3-write-probe" not in names:
+                names.insert(names.index("niks3-cache") + 1, "niks3-write-probe")
+            if "niks3-ui" not in names:
+                names.insert(names.index("niks3-write-probe") + 1, "niks3-ui")
         assert expected == {
             k: v for k, v in new[job].items() if k != "script"}, job
-        assert old[job]["script"][1:] == new[job]["script"][1:], job
+        expected_scripts = copy.deepcopy(old[job]["script"][1:])
+        if job == "flake-check":
+            # Only the new shipped-UI alias also exports the existing artifacts.
+            # The replacement is idempotent after the CI source is committed.
+            expected_scripts[1] = expected_scripts[1].replace(
+                'if [ "$CHECK_NAME" = "web-ui" ]; then',
+                'if [ "$CHECK_NAME" = "web-ui" ] || [ "$CHECK_NAME" = "niks3-ui" ]; then')
+        assert expected_scripts == new[job]["script"][1:], job
 
 with tempfile.TemporaryDirectory(prefix="cf-ci-policy-") as temporary:
     directory = Path(temporary)
@@ -140,7 +151,7 @@ max-jobs = 3
         assert result.returncode == 0, name
         recorded = json.loads((directory / "argv").read_text())
         arguments = [f".#checks.x86_64-linux.{name}", "-L", "--show-trace"]
-        scoped = name in {"integration", "oidc-auth", "server-regressions", "niks3-cache",
+        scoped = name in {"integration", "oidc-auth", "server-regressions", "niks3-cache", "niks3-write-probe", "niks3-ui",
                           "nixos-discovery-reliability", "attic-metrics", "attic-publication",
                           "builder-evaluator-packaging"}
         assert recorded == ["build", *(POLICY if scoped else []), *arguments], name

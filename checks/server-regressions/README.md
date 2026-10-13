@@ -334,9 +334,36 @@ policy, all-address DNS validation and pinning, hostname verification, no proxie
 no redirects, eight-second timeouts, and the 64 KiB body limit remain enforced.
 The pinned Niks3 v1.6.0 `GET /api/cache-config` is public metadata, not a write
 authorization check. Discovery success leaves write authorization Untested;
-connection Test's `write_auth_valid` remains null. No alternative GC/auth probe
-or upload is attempted. Actual native TLS acceptance is covered by the separate
-owner-managed VM fixture; these regressions prove transport projection and state.
+discovery does not invoke the protected write-route probe. Actual native TLS
+acceptance is covered by the separate owner-managed VM fixture; the discovery
+regressions prove transport projection and state.
+
+The 19 Niks3 write-probe regressions guard the supported v1.6.0/v1.8.0 handler
+contract without changing the production package pin. Exact status, media type,
+body fingerprints, and typed GC snapshot fields must match. A successful protected
+GET and a discriminating credential-omission control permit one invalid `{}` POST
+to `/api/pending_closures` plus its control. Unknown GET fingerprints prohibit
+POST. No GC-start request or valid closure is sent. Unexpected POST success is
+inconclusive and is not retried. Successful evidence proves protected-handler
+access only, not S3 permission, signing, upload, or verified publication.
+
+Tests cover selected versus omitted credentials, mTLS subject denial versus a
+specific certificate-gate rejection, retained/replacement write snapshots,
+metadata/read credential isolation, bounded chunked bodies, shared deadlines,
+generic proxy responses, and contradictory controls. Missing or invalid local
+write-only tokens report false authentication and authorization before DNS.
+Full `all` scope retains its existing local missing-token validation refusal.
+Invalid Bearer headers in `all` scope fail before metadata DNS or read requests.
+Token-free public metadata reachability remains independent of protected
+authentication. A metadata signing-key mismatch in `all` scope does not hide API
+reachability or skip the protected authentication check. Metadata-only evidence
+leaves write authorization inconclusive. Explicit read CA bundles replace ambient
+roots; invalid or empty bundles fail without fallback to system trust. These
+client-construction assertions do not prove native TLS handshakes.
+Provider bodies and error prose never become diagnostics. These classifier and
+scheduled-response tests do not prove native acceptance. The blocking
+[native write-probe check](../niks3-write-probe/README.md) covers real retained
+encrypted CF rows, native handlers, and non-mutation; execution remains pending CI.
 
 Basic read regressions cover encrypted password storage, management redaction,
 configured flags, complete pair replacement, mode clears, and HTTPS authority
@@ -362,7 +389,7 @@ projection, protected token files and alphabet boundaries, bounded responses,
 and refusal before file or network access. Native restricted-role and module
 lifecycle acceptance remains covered by the separate `attic-metrics` VM check.
 
-These 60 non-ignored tests run with `--exact --test-threads=1`:
+These 79 non-ignored tests run with `--exact --test-threads=1`:
 
 ```text
 queries::commits::partial_resource_failure_tests::partial_failure_diagnostic_uses_proven_counts_not_checkpoint_guesses
@@ -372,6 +399,25 @@ models::retry_policy::tests::resource_failure_never_retries_whole_flake_despite_
 models::cache_destination::tests::niks3_basic_pair_validation_redaction_modes_and_authority
 models::cache_destination::tests::niks3_probe_planes_bootstrap_without_unselected_settings
 handlers::api::caches::basic_read_tests::niks3_basic_http_projection_and_plane_scope_do_not_cross_credentials
+handlers::api::caches::niks3_write_probe::tests::native_gc_schema_rejects_generic_json_and_invalid_typed_fields
+handlers::api::caches::niks3_write_probe::tests::exact_status_media_type_and_body_are_required
+handlers::api::caches::niks3_write_probe::tests::mtls_control_requires_a_specific_identity_alert_not_any_transport_failure
+handlers::api::caches::niks3_write_probe::tests::native_token_route_pair_proves_access_and_sends_only_invalid_bodies
+handlers::api::caches::niks3_write_probe::tests::no_post_follows_unknown_get_or_non_discriminating_authentication_control
+handlers::api::caches::niks3_write_probe::tests::definite_native_token_denial_is_false_not_untested
+handlers::api::caches::niks3_write_probe::tests::strict_gc_json_accepts_finished_failure_without_exposing_provider_error
+handlers::api::caches::niks3_write_probe::tests::mtls_route_requests_send_no_bearer_and_native_subject_denial_is_false
+handlers::api::caches::niks3_write_probe::tests::retained_and_replacement_effective_snapshots_select_only_active_write_credentials
+handlers::api::caches::niks3_write_probe::tests::missing_or_invalid_write_token_reports_local_failure_without_dns_or_read_borrowing
+handlers::api::caches::niks3_write_probe::tests::all_scope_invalid_bearer_preflight_precedes_metadata_dns_and_read_requests
+handlers::api::caches::niks3_write_probe::tests::niks3_read_custom_ca_replaces_ambient_roots_and_invalid_bundles_do_not_fallback
+handlers::api::caches::niks3_write_probe::tests::write_metadata_reachability_is_independent_of_protected_authentication
+handlers::api::caches::niks3_write_probe::tests::all_metadata_key_mismatch_keeps_api_reachable_and_does_not_skip_authentication
+handlers::api::caches::niks3_write_probe::tests::all_scope_missing_token_keeps_existing_local_validation_rejection
+handlers::api::caches::niks3_write_probe::tests::generic_post_errors_and_contradictory_controls_never_verify_authorization
+handlers::api::caches::niks3_write_probe::tests::unexpected_success_stops_without_control_retry_or_valid_request
+handlers::api::caches::niks3_write_probe::tests::metadata_and_read_requests_do_not_receive_write_bearer
+handlers::api::caches::niks3_write_probe::tests::chunked_bodies_are_bounded_and_a_shared_deadline_covers_stream_consumption
 security::cache_secrets::tests::basic_password_envelope_preserves_spaces_and_literal_prefixes
 queries::builders::tests::niks3_publication_fingerprint_includes_secrets_policy_and_canonical_sets
 handlers::api::caches::storage_metrics::tests::native_values_preserve_basis_without_inventing_paths

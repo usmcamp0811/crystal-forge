@@ -20,6 +20,7 @@ tags:
 | `checks/integration/README.md` | retained in place; see [integration section](../../testing/flake-checks.md#integration) | retained | complete |
 | `checks/builder-evaluator-packaging/README.md` | retained in place; see [builder-evaluator-packaging section](../../testing/flake-checks.md#builder-evaluator-packaging) | retained | complete |
 | `checks/niks3-cache/README.md` | retained in place; see [niks3-cache section](../../testing/flake-checks.md#niks3-cache) | retained | complete |
+| `checks/niks3-write-probe/README.md` | retained in place at [the native write-probe runbook](../../../../checks/niks3-write-probe/README.md) | retained | complete |
 | `checks/niks3-ca-bundle/README.md` | retained in place; see [CA compatibility operator contract](../../caches/niks3-ca-bundle-compatibility.md) | retained | complete |
 | `checks/attic-metrics/README.md` | retained in place at [the native inventory runbook](../../../../checks/attic-metrics/README.md); see [storage observation contract](../../caches/niks3-cache.md#response-only-storage-observations) | retained | complete |
 | `checks/attic-publication/README.md` | retained in place at [the native publication runbook](../../../../checks/attic-publication/README.md) | retained | complete |
@@ -190,6 +191,21 @@ OKF knowledge bundle. Neither README existed at the original migration base
 - `checks/builder-evaluator-packaging/README.md`: Title "Builder and server runtime packaging". Action: retained. Destination: [builder-evaluator-packaging](../../testing/flake-checks.md#builder-evaluator-packaging).
 - `checks/niks3-cache/README.md`: Title "Niks3 cache integration". Action: retained. Destination: [niks3-cache](../../testing/flake-checks.md#niks3-cache).
 - Unmapped content: none. Both READMEs remain authoritative in place; the catalog summarizes scope, commands, limits, and CI membership.
+
+### `checks/niks3-write-probe/README.md` (new TASK-470 runbook)
+
+- Title: Native Niks3 write-route proof.
+- Purpose: Defines the v1.6.0/v1.8.0 protected-handler compatibility gate,
+  scoped token-free public metadata, protected-route authentication controls,
+  retained-credential API matrix, TLS boundaries,
+  complete CF/native/S3 non-mutation assertions, and separate CLI publication
+  controls. Native execution and compilation remain pending CI.
+- Action: retained. The new runbook remains authoritative beside its check. It
+  did not exist at the original migration base `3b23d36f`; no historical baseline
+  blob is claimed or added to `source-inventory.tsv`.
+- Destination: [native write-probe runbook](../../../../checks/niks3-write-probe/README.md).
+- Unmapped content: none. All source sections remain in place, including the
+  distinction between protected-handler evidence and actual publication proof.
 
 ### `checks/niks3-ca-bundle/README.md` (new TASK-470 runbook)
 

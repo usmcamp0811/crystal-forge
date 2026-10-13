@@ -523,29 +523,64 @@ request or an unsaved write-mTLS certificate/key/optional-CA draft and reads
 `POST /api/v1/caches/:id/niks3/discover` with the unwrapped Update shape; the
 server decrypts and merges one unlocked snapshot without writes. Both forms
 return public discovery metadata only, never read credentials, keys, or PEM.
-Connection testing validates discovery and the configured read endpoint's
-`nix-cache-info`, using separate write/read mTLS identities where selected.
+Connection testing observes public API metadata, protected API access, and the
+configured read endpoint's `nix-cache-info`, using separate write/read identities.
 The discovered read URL must match the configured URL before read credentials
 are sent.
 
-Structured results contain `server_reachable`, `discovery_valid`,
-`read_endpoint_reachable`, `signing_keys_found`, and `write_auth_valid`.
-**`write_auth_valid` is always null (untested).** An `ok` result proves the tested
-discovery/read stages, not write authorization or signed closure publication.
-Confirm writes with a real job.
+Structured results retain `server_reachable`, `discovery_valid`,
+`read_endpoint_reachable`, and `signing_keys_found`. The independent
+`write_api_reachable`, `write_authn_valid`, and `write_authorization_valid` fields
+describe API metadata, selected authentication, and protected write-route access.
+The legacy `write_auth_valid` aliases write-route access, not object publication.
+Absent evidence is null, not success. `write_probe_diagnostic_code` preserves a
+safe write-specific outcome when another plane fails.
 
 Test accepts `probe_scope: "write" | "read" | "all"`, default `all`.
-Write scope observes metadata/API transport only. Read scope checks the configured
-read endpoint with its selected Public, Basic, or mTLS identity; all scope also
-checks discovery consistency. Optional stage fields distinguish untested work.
-Neither TLS acceptance nor metadata success proves write authorization on pinned
-Niks3 1.6.0. Errors never echo provider bodies, credentials, or PEM.
-The browser maps only the 17 exact codes in the
+Write scope first validates selected credentials locally, then requests public
+cache configuration without Bearer authentication. It needs no configured read
+URL or signing keys. Protected `GET /api/gc/status` observes authentication;
+credential-omission controls distinguish authenticated access from public access.
+Only a known protected-handler contract permits `POST /api/pending_closures`
+with the deliberately invalid body `{}`. The audited upstream 1.6.0 and 1.8.0
+handlers reject that body with the exact `missing closure key` response before
+domain database or S3 work. An arbitrary HTTP 400, public metadata, successful
+TLS, or an unsupported handler cannot establish write-route access. Unexpected
+POST success stops the probe without retrying or issuing a valid upload request.
+
+Read scope checks only the configured read endpoint with Public, Basic, or mTLS
+identity. An explicit Niks3 read CA replaces ambient roots, matching native read
+trust; absent custom trust retains system roots. All scope additionally checks
+discovery consistency. Invalid nonempty Bearer header material fails before DNS
+or requests. All-scope missing credentials retain full configuration-validation
+failure. One eight-second deadline bounds preparation, requests and response
+consumption; each protected response is bounded to 64 KiB.
+
+**Verified Write API access is not verified publication.** It does not prove
+S3 upload permission or trust, signing, object integrity, or completed publication.
+The compatibility gate is not server-version detection. A certificate-required
+ingress control establishes its certificate gate, not native Go subject
+enforcement; the diagnostic states that limitation. The
+[native check](../../../checks/niks3-write-probe/README.md) covers known versions,
+credential isolation, negative controls, domain/storage immutability, and genuine
+uploads as a separate disposable-fixture phase. Confirm publication with a real
+authorized job, never an ordinary connection-test button.
+
+Errors never echo provider bodies, credentials, or PEM. The browser maps the
+exact codes in the
 [CA diagnostic contract](niks3-ca-bundle-compatibility.md#exact-probe-diagnostic-codes)
-to static local guidance. Unknown provider prose and URLs never become error
-text. `write_authn_valid` and `write_authorization_valid` remain null when
-unproved, alongside the legacy `write_auth_valid`; metadata success is not
-write-readiness evidence.
+and the protected-route helper to static local guidance. Unknown provider prose
+and URLs never become error text. CF does not log request tokens or retain raw
+provider diagnostics. Upstream 1.6/1.8 authentication rejection logging can include
+token previews; credential-free negative controls avoid submitting an extra wrong
+token. Provider log retention/redaction remains the provider operator's concern.
+
+The Niks3 editor compares actual editable values and canonical environment IDs
+against an immutable initial draft. Navigation, Test, catalogue refresh and
+Discovery observations do not mark it dirty. Discovery only proposes settings;
+**Apply discovered settings** explicitly edits the read URL and signing keys.
+Stored credentials remain server-side. Same-mode selection is a no-op, and
+per-plane input generations discard stale test or discovery completions.
 
 ### Basic read transport and CA trust
 

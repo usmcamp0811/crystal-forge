@@ -100,6 +100,134 @@ Infrastructure-only startup/authentication proof is also available as
 `.#checks.x86_64-linux.web-ui.nativeCacheFixture`. It shares the same native
 nodes and runtime driver. It does not satisfy the authoritative browser gate.
 
+### Niks3 protected-write browser evidence and shell parity
+
+`tests/niks3-cache-workflow.js` uses the prepared native fixture before the late
+retained-workflow seed. The workflow creates only its own disabled, scoped
+`task470-ui-*` destination through the real API. Successful Discovery, write
+Tests and read Tests are not fulfilled by Playwright. Failure injection remains
+limited to negative renderer/rollback cases. A timing-only stale-result test
+holds an unchanged real native denial; it never replaces an authentication
+success body.
+
+Write Tests accept CF HTTP 200 with `ok: true` and provider `status_code: 400`.
+The native missing-closure response is the protected positive result, not a
+failed publication. `write_api_reachable`, `write_authn_valid`,
+`write_authorization_valid` and compatibility `write_auth_valid` must be true.
+The UI shows three **Verified** results while **Object publication** remains
+**Untested**. Verification establishes protected route/method access only.
+It does not prove uploads, signing, S3 permission or publication.
+
+The same native 1.6 endpoint exercises selected token and selected write mTLS
+plus credential-omission controls. Token-mode positives use the actual native
+root, not the mTLS-only relay that drops Bearer. Read mTLS is tested independently. A read
+subject used as a write replacement must fail with native 401 and
+`mtls_subject_rejected`; a wrong token must fail with native 401 and
+`token_rejected`. A generic prefixed-route 404 leaves protected API/auth evidence
+unknown and reports `route_unsupported`, without a version claim. A missing
+write token returns structured local failure with unattempted protected API
+reachability; an incomplete all-plane request returns HTTP 400. An explicitly
+negative legacy public-metadata renderer case cannot promote missing typed
+evidence to Verified. Tokens never enter Discovery or read requests.
+
+The independent `niks3-form-checkpoints` VM worker checks only the owned clone.
+Its mode-0600 request/ack messages contain sequence, phase and actual assigned
+ID. Test, Discovery and Cancel groups must preserve the complete raw destination
+and assignment snapshot, including ciphertext and timestamps. This worker does
+not create rows, trigger the late retained seed or modify the seven-source,
+legacy, Attic or metrics checkpoint sequences.
+
+The source-defined benchmark uses desktop 1440×1000 at DPR1/100% zoom, narrow
+390×844, and unconditional geometry/keyboard checks at the 860px breakpoint.
+It requires the 1120px shell and 236px desktop rail, bounded narrow geometry,
+header/footer containment, actual metadata environment names/colors, and five
+keyboard-accessible navigation buttons. Auth badges follow actual saved modes.
+An unchanged Edit is clean; field/scope changes and reverts use the canonical
+baseline. A same-mode click and an untouched nested-dialog close retain selected
+credentials and evidence. Write/read observations have independent provenance;
+a delayed old denial cannot overwrite a fresh editor's verified generation.
+Canonical scope ordering uses two existing fixture environments. The workflow
+temporarily assigns both actual UUIDs to its own disabled clone, rebuilds the
+same membership in reverse UI order, and requires clean Edit state. The raw
+checkpoint covers that two-environment baseline. An explicit later update
+restores the clone's original one-environment membership. No environment or
+shared retained destination is created or changed by this ordering proof.
+
+The committed design reference is
+`docs/design/CrystalForge/components/Niks3Cache.jsx`. Compare dialog crops at the
+same benchmark viewport, not whole pages with different fixture data. Actual
+mTLS/mTLS sample state is expected to differ from the design's Basic sample.
+Production defaults remain 1 parallel upload, 3 retries and 3600 seconds rather
+than the design's 8/600 defaults. Empty scope means **Global scope**, not
+Unassigned. These semantic differences do not permit baseline bypasses.
+
+Capture states include:
+
+- `niks3-native-parity-{destination,write-api,read-pull,trust,advanced}-{1440,390}-dialog`
+- `niks3-native-protected-{mtls,token}-verified-publication-untested`
+- `niks3-native-mtls-subject-denied`
+- `niks3-native-token-denied-no-publication`
+- `niks3-native-unsupported-route-no-version-claim`
+- `niks3-renderer-negative-legacy-public-metadata-only`
+- `niks3-native-denial-in-progress-locked`
+- `niks3-native-stale-denial-cannot-overwrite-current`
+- `niks3-native-discovery-blank-proposal-unapplied`
+- `niks3-native-discovery-read-edit-revert-clears-proposal`
+- `niks3-native-discovery-explicit-apply-read-settings-only`
+- `niks3-native-discovery-matching-edit-clean`
+
+The Niks3 step entry additionally emits `--crop--dark.png` and
+`--crop--light.png` dialog images for each parity state. All PNGs use the
+existing web-ui artifact copying path. No outer capture contains raw token,
+password or PEM inputs. New definitions are source-only until CI runs them;
+they are not screenshots or proof that runtime checks passed.
+
+The retained Niks3 workflow now uses protected-write evidence as well. Its
+original metadata-only Discovery ingresses on 5754/5758 remain GET-only. The
+Basic/mTLS destination instead uses a separate fixture TLS relay on 5762. That
+relay exposes only `GET /api/cache-config`, `GET /api/gc/status`, and
+`POST /api/pending_closures` with exactly the two bytes `{}`. Other routes,
+methods, transfer framing and valid closure bodies are rejected locally. Native
+Go on loopback 5759 owns positive/negative response bodies and subject checks.
+The relay presents the same known fixture certificate selected by CF; omission
+controls present none. It does not forward Bearer, cookies, CSRF or asserted
+identity headers. Server TLS uses existing API root A and client verification
+uses existing issuer C; CF keeps the existing A+B trust bundle and target policy.
+
+Protected warmup verifies token and mTLS profiles on the original native root,
+and mTLS profiles on the relay, before the private fixture JSON is published.
+Warmup creates no CF cache destinations. At original Niks3 workflow entry,
+after shared Add checks, a separate mode-0600 START marker requests readiness.
+The clone worker acknowledges already prepared profiles before the first native
+Test. It does not wait for `seed_complete` or late retained IDs. The browser
+then creates its own disabled clone through the real API. The original seven
+and legacy rows still require their unchanged late retained seed request.
+
+Discovery is proposal-only, including when read URL and keys are blank. It never
+changes form values or the dirty baseline. Matching metadata produces no
+proposal. **Apply discovered settings** explicitly changes only read URL and
+signing keys; it leaves write URL, auth modes and credential selections intact.
+Read edits, including edit-away/revert, invalidate a pending proposal. The
+browser verifies blank Add proposals, explicit application before Save, stale
+proposal rejection, and clean matching saved Edit. Existing database snapshots
+still guard Discovery and Cancel independently of draft state.
+
+Every retained Basic write Test must account for five native relay records:
+one public token-free cache-config GET, selected GC status (exact no-GC 404 or
+strict native snapshot 200), omitted GC
+401, selected invalid-closure POST 400, and omitted POST 401. Discovery accounts
+for one token-free cache-config GET. Read and Cancel retain their exact counters
+and plane isolation. Complete raw snapshots remain unchanged. Write-only and
+all-plane positives retain provider `status_code: 400`; all-plane success also
+requires actual read access. Read-only results leave write evidence null. No
+protected-method result establishes object publication.
+Valid public metadata, rather than a GC/error body alone, establishes API
+reachability. Wrong-token probes observe that token-free metadata before native
+authentication denial and never POST. Missing/invalid local tokens fail before
+any DNS or metadata request. The backend's 19-case native/persistence evidence
+belongs to its separate authoritative gate; this source-only update does not
+claim that gate or new browser captures ran locally.
+
 ### Certificate-required Niks3 discovery
 
 The additional production-shaped write-discovery fixture requires three
@@ -186,9 +314,11 @@ The dedicated production UI has **Destination**, **Write / API**, **Read / Pull*
 **Trust**, and **Advanced** rails. The native workflow exercises every rail at
 desktop width and 390 px. The original capture states and provider guards remain.
 
-A separate native instance advertises `https://read-cache.test:5757`. Its write
-ingress at `https://cache:5758` requires the C-issued client identity and API root
-A. The read ingress uses a B-issued `read-cache.test` certificate and a runtime
+A separate native instance advertises `https://read-cache.test:5757`. Its
+metadata-only ingress at `https://cache:5758` keeps its existing certificate gate.
+The saved write/API root is `https://cache:5762`, whose selected and omitted
+fixture identities reach native Go through the allowlisted relay. Both use API
+root A. The read ingress uses a B-issued `read-cache.test` certificate and a runtime
 Basic ACL. Root B is in the VM system trust bundle. Read requests stream native
 Nix metadata through the proxy without redirects; the proxy does not forward
 the Basic header to native storage. API and presigned-server trust remains the
@@ -200,16 +330,18 @@ replacement pairs. The username includes a space and passwords have legal
 leading/trailing spaces. An untrimmed pair succeeds against the native ACL;
 trimmed or wrong passwords fail. These values never enter a URL or log.
 
-The Add workflow performs real unsaved mTLS Discovery, then checks that a second
-Discovery cannot silently replace nonempty read URL or signing-key rows. Only
-**Apply discovered metadata** changes conflicting public draft values. Basic
+The Add workflow performs real unsaved mTLS Discovery, verifies that blank read
+URL and key rows remain unchanged, and explicitly applies the first proposal.
+A second Discovery cannot silently replace nonempty read URL or signing-key
+rows. Only **Apply discovered settings** changes public draft values. Basic
 credentials are entered in the nested Read credential dialog; its password is
 masked, the parent is inert, and closing restores focus. No filled private-key
 dialog is captured. Outside the nested dialog, the UI shows lifecycle state only.
 
 Trust retains multiple real native signing keys. Advanced defaults are 1 parallel
 upload, 3 retries, a 3600-second timeout and required signatures. Scoped **Test
-write API** sends no read identity and contacts only cache-config. **Test read
+write API** sends no read identity and checks native protected GC status and the
+invalid closure POST with omission controls. **Test read
 endpoint** sends no write transport and contacts only native `nix-cache-info`.
 Both use real Admin API POSTs. The Add Save includes environment IDs atomically
 and persists encrypted write private key plus both Basic fields. The added cache
@@ -414,7 +546,10 @@ nix:
   id, url
 niks3:
   id, server_url, substituter_url, public_keys[], token, ca_cert,
-  write_client_cert, write_client_key, read_client_cert, read_client_key
+  write_client_cert, write_client_key, read_client_cert, read_client_key,
+  protected_profile_ready
+niks3_form_checkpoint:
+  start_path, request_path, ack_path
 production_write_mtls:
   id, server_url, substituter_url, public_keys[], server_ca_bundle,
   write_client_cert, write_client_key,
@@ -422,7 +557,8 @@ production_write_mtls:
   wrong_client_cert, wrong_client_key, token_discovery_server_url,
   observer_baselines
 production_basic:
-  id_after_ui_save, server_url, substituter_url, public_keys[], server_ca_bundle,
+  id (published after UI Save), server_url, metadata_only_server_url, protected_profile_ready,
+  substituter_url, public_keys[], server_ca_bundle,
   write_client_cert, write_client_key, replacement_write_client_cert,
   replacement_write_client_key, username, password, replacement_username,
   replacement_password, observer_baselines
@@ -645,3 +781,17 @@ manual, allow-failure job that runs this same check with
 - `design-parity/` — the offline design-parity rendering and comparison
   harness.
 - `design-fixtures.json` — shared fixture data referenced by the harness.
+
+## Blocking Niks3 UI acceptance alias
+
+`flake-check: [niks3-ui]` is a blocking job that imports this same production
+embedded-Dioxus UI check with `testSteps = "25-caches-modal-attic"`. The existing
+argument controls native provider startup, late fixture seeding, browser selection,
+semantic assertions, and captures together. The alias preserves all Attic and
+Niks3 assertions within that workflow, production asset verification, and the
+existing strict/advisory visual policy. It sets `updateVisualBaselines = false`;
+no baseline-update mode, assertion skip, or duplicate provider implementation is
+introduced. Selection needs no `--impure` or host environment setting. CI uses the
+existing scoped public-cache wrapper and copies the result's screenshots into
+`web-ui-screenshots/`. The separate full Web UI job retains its existing policy.
+Final-source compilation, browser execution, and screenshot evidence are pending CI.

@@ -35,6 +35,9 @@ FIXTURE = Path("/run/cf-cache-credential-fixture.json")
 ATTIC_FIXTURE = Path("/run/cf-attic-fixture.json")
 HTTP_FIXTURE = Path("/run/cf-http-fixture.json")
 NIKS3_BASIC_FIXTURE = Path("/run/cf-niks3-basic-read-fixture.json")
+NIKS3_FORM_REQUEST = Path("/run/cf-niks3-form-request.json")
+NIKS3_FORM_ACK = Path("/run/cf-niks3-form-ack.json")
+NIKS3_FORM_START = Path("/run/cf-niks3-form-start.json")
 LEGACY_TOKEN = Path("/run/cf-legacy-attic-token.json")
 SEED_REQUEST = Path("/run/cf-cache-seed-request.json")
 PHASE_REQUEST = Path("/run/cf-cache-phase-request.json")
@@ -515,6 +518,23 @@ def assemble():
     assert request(client, "GET", read_url,
                     cert=(str(CREDENTIALS / "write.crt"), str(CREDENTIALS / "write.key"))).status_code == 403, \
         "Write subject must not authorize private reads"
+    STAGE = "native protected token and mTLS profiles"
+    for selected in ({"headers": {"Authorization": "Bearer " + niks3["token"]}},
+                     {"cert": (str(CREDENTIALS / "write.crt"), str(CREDENTIALS / "write.key"))}):
+        gc = request(client, "GET", niks3["server_url"] + "/api/gc/status", **selected)
+        assert gc.status_code in (200, 404), "Native primary protected GC contract unavailable"
+        if gc.status_code == 404:
+            assert gc.content == b"no garbage collection has run yet\n" and gc.headers["Content-Type"] == "text/plain; charset=utf-8"
+        else:
+            assert gc.headers["Content-Type"] == "application/json" and native_gc_fixture_valid(gc.json())
+        control = request(client, "GET", niks3["server_url"] + "/api/gc/status")
+        assert control.status_code == 401 and control.content == b"Unauthorized\n"
+        positive = request(client, "POST", niks3["server_url"] + "/api/pending_closures", json={}, **selected)
+        assert positive.status_code == 400 and positive.content == b"missing closure key\n"
+        assert positive.headers["Content-Type"] == "text/plain; charset=utf-8"
+        omitted = request(client, "POST", niks3["server_url"] + "/api/pending_closures", json={})
+        assert omitted.status_code == 401 and omitted.content == b"Unauthorized\n"
+    niks3["protected_profile_ready"] = True
     STAGE = "native certificate-required Niks3 discovery"
     production_mtls = production_discovery_fixture(client, niks3["public_keys"])
     production_basic = production_basic_fixture(production_mtls)
@@ -540,7 +560,8 @@ def assemble():
                              "nix": nix, "niks3": niks3,
                              "production_write_mtls": production_mtls,
                              "production_basic": production_basic,
-                             "metrics": metrics,
+                              "metrics": metrics,
+                               "niks3_form_checkpoint": {"start_path": str(NIKS3_FORM_START), "request_path": str(NIKS3_FORM_REQUEST), "ack_path": str(NIKS3_FORM_ACK)},
                              "nix_basic": dict(basic_public), "http_basic": dict(basic_public),
                              "checkpoint": {"request_path": str(PHASE_REQUEST), "ack_path": str(PHASE_ACK)},
                              "seed_request_path": str(SEED_REQUEST),
@@ -635,11 +656,47 @@ def production_discovery_fixture(client, public_keys):
     }
 
 
+def native_gc_fixture_valid(value):
+    """Checks the native GC snapshot contract without retaining error prose."""
+    try:
+        fields = {"state", "phase", "params", "stats", "started_at", "updated_at", "finished_at"}
+        if not fields <= value.keys() or value.keys() - fields - {"error"}:
+            return False
+        params, stats = value["params"], value["stats"]
+        if set(params) != {"older_than", "failed_uploads_older_than", "force"} or type(params["force"]) is not bool:
+            return False
+        if not all(isinstance(params[key], str) and params[key] for key in ("older_than", "failed_uploads_older_than")):
+            return False
+        if set(stats) != {"failed_uploads_deleted", "old_closures_deleted", "objects_marked_for_deletion", "objects_deleted_after_grace_period", "objects_failed_to_delete"}:
+            return False
+        if not all(type(count) is int and 0 <= count <= 9223372036854775807 for count in stats.values()):
+            return False
+        if value["phase"] not in (None, "cleanup_pending_uploads", "cleanup_old_closures", "cleanup_orphan_objects", "vacuum_tables"):
+            return False
+        if "error" in value and not isinstance(value["error"], str):
+            return False
+        def date(raw):
+            parsed = datetime.datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            assert parsed.tzinfo is not None
+            return parsed
+        started, updated = date(value["started_at"]), date(value["updated_at"])
+        finished = date(value["finished_at"]) if value["finished_at"] is not None else None
+        if updated < started or finished is not None and not started <= finished <= updated:
+            return False
+        if value["state"] == "running":
+            return finished is None and "error" not in value
+        if value["state"] == "succeeded":
+            return finished is not None and value["phase"] is None and "error" not in value
+        return value["state"] == "failed" and finished is not None
+    except (KeyError, TypeError, ValueError, AttributeError, AssertionError):
+        return False
+
+
 def production_basic_fixture(production_mtls):
-    """Checks native Basic reads over root-B TLS without uploading or redirecting."""
+    """Checks native protected write access and Basic reads without publication."""
     source = {key: value for key, value in production_mtls.items() if key not in ("id", "observer_baselines", "token_discovery_server_url")}
     source.update(json.loads(NIKS3_BASIC_FIXTURE.read_text()))
-    source.update(server_url="https://cache:5758", substituter_url="https://read-cache.test:5757",
+    source.update(server_url="https://cache:5762", metadata_only_server_url="https://cache:5758", substituter_url="https://read-cache.test:5757",
                   public_keys=[(PRODUCTION_PKI / f"signing-{index}.pub").read_text().strip() for index in range(2)])
     writer = session()
     writer.verify = str(PRODUCTION_PKI / "server-ca-bundle.pem")
@@ -647,6 +704,29 @@ def production_basic_fixture(production_mtls):
                      cert=(str(PRODUCTION_PKI / "write-client.crt"), str(PRODUCTION_PKI / "write-client.key")))
     assert config.status_code == 200 and config.json()["substituter_url"] == source["substituter_url"]
     assert config.json()["public_keys"] == source["public_keys"]
+    # Prepare real protected profiles before any browser Test. No CF rows are
+    # seeded here; selected and omitted identities reach native Go separately.
+    identity = (str(PRODUCTION_PKI / "write-client.crt"), str(PRODUCTION_PKI / "write-client.key"))
+    gc = request(writer, "GET", source["server_url"] + "/api/gc/status", cert=identity)
+    assert gc.status_code in (200, 404), "Native protected GC status must be recognized"
+    if gc.status_code == 404:
+        assert gc.content == b"no garbage collection has run yet\n"
+        assert gc.headers["Content-Type"] == "text/plain; charset=utf-8"
+    else:
+        assert gc.headers["Content-Type"] == "application/json"
+        assert native_gc_fixture_valid(gc.json()), "Native GC snapshot must match the strict contract"
+    control = request(writer, "GET", source["server_url"] + "/api/gc/status")
+    assert control.status_code == 401 and control.content == b"Unauthorized\n"
+    for certificate, expected_status, expected_body in ((identity, 400, b"missing closure key\n"), (None, 401, b"Unauthorized\n")):
+        tested = request(writer, "POST", source["server_url"] + "/api/pending_closures", json={},
+                         **({"cert": certificate} if certificate else {}))
+        assert tested.status_code == expected_status and tested.content == expected_body
+        assert tested.headers["Content-Type"] == "text/plain; charset=utf-8"
+    source["protected_profile_ready"] = True
+    wrong_cert, wrong_key = PRODUCTION_PKI / "wrong-subject.crt", PRODUCTION_PKI / "wrong-subject.key"
+    if wrong_cert.exists() and wrong_key.exists():
+        denied = request(writer, "GET", source["server_url"] + "/api/gc/status", cert=(str(wrong_cert), str(wrong_key)))
+        assert denied.status_code == 401 and denied.content == b"Unauthorized\n", "Native Go must reject the wrong fixture subject"
     # Basic has no custom read-CA override. The browser/server VM system bundle
     # explicitly trusts public root B, while API root A remains custom trust.
     reader = session()
@@ -661,9 +741,101 @@ def production_basic_fixture(production_mtls):
     Path("/run/cf-niks3-basic-public-proof.json").write_text(json.dumps({
         "native_write_mtls_discovery": "passed", "native_basic_original_and_replacement": "passed",
         "anonymous_wrong_and_trimmed_password": "rejected", "tls_server_trust": "system_root_B",
-        "url_userinfo": "absent", "setup_requests": "read_only", "upload_count": 0,
+        "url_userinfo": "absent", "setup_requests": "metadata_and_invalid_protected_probe", "upload_count": 0,
+        "protected_selected_and_omission_controls": "passed", "object_publication": "untested",
     }))
     return source
+
+
+def niks3_protected_relay():
+    """Relays a bounded fixture contract to native Go with selected identities.
+
+    Cache-config GET never forwards Authorization. Protected GET and exact {}
+    POST use the selected known fixture identity or no identity for controls.
+    Native Go owns authorization and responses. No valid closure or GC start
+    route, cookie, Bearer or forwarded identity header can pass this relay.
+    """
+    import http.client
+    import http.server
+    import ssl
+    identities = {}
+    for name in ("write-client", "replacement-write-client", "wrong-subject"):
+        certificate, key = PRODUCTION_PKI / (name + ".crt"), PRODUCTION_PKI / (name + ".key")
+        if name == "wrong-subject" and not (certificate.exists() and key.exists()):
+            continue
+        identities[ssl.PEM_cert_to_DER_cert(certificate.read_text())] = (certificate, key)
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *_):
+            pass
+
+        def do_GET(self):
+            self.relay()
+
+        def do_POST(self):
+            self.relay()
+
+        def relay(self):
+            self.connection.settimeout(8)
+            allowed = ((self.command == "GET" and self.path in ("/api/cache-config", "/api/gc/status"))
+                       or (self.command == "POST" and self.path == "/api/pending_closures"))
+            if not allowed:
+                self.send_error(405, "Fixture route not allowed")
+                return
+            body = None
+            if self.command == "POST":
+                # Only the exact invalid payload can reach native validation.
+                # Reject framing before reading; this relay cannot register a
+                # valid closure even for an authenticated fixture client.
+                if self.headers.get("Content-Length") != "2" or self.headers.get("Transfer-Encoding"):
+                    self.send_error(405, "Fixture body not allowed")
+                    return
+                body = self.rfile.read(2)
+                if body != b"{}":
+                    self.send_error(405, "Fixture body not allowed")
+                    return
+            peer = self.connection.getpeercert(binary_form=True)
+            identity = identities.get(peer)
+            context = ssl.create_default_context(cafile=str(PRODUCTION_PKI / "api-ca.crt"))
+            if identity is not None:
+                context.load_cert_chain(str(identity[0]), str(identity[1]))
+            upstream = http.client.HTTPSConnection("localhost", 5759, context=context, timeout=8)
+            try:
+                # Known fixture certificates use their corresponding keys on
+                # native TLS. An omitted certificate stays omitted. Native Go
+                # checks the selected subject; proxy headers cannot authorize.
+                upstream.request(self.command, self.path, body=body,
+                                 headers={"Content-Type": "application/json"} if body is not None else {})
+                response = upstream.getresponse()
+                payload = response.read(65537)
+                assert len(payload) <= 65536, "Native fixture response exceeds bound"
+                status, media = response.status, response.getheader("Content-Type")
+                with NIKS3_BASIC_WRITE_OBSERVER.open("a") as log:
+                    log.write(f"{self.command} {self.path} status={status} client={'present' if peer else 'absent'} auth={'present' if self.headers.get('Authorization') else 'absent'}\n")
+                self.send_response(status)
+                if media:
+                    self.send_header("Content-Type", media)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+            except (OSError, http.client.HTTPException, AssertionError):
+                # No native body, key, token or TLS error enters diagnostics.
+                self.close_connection = True
+            finally:
+                upstream.close()
+
+    class Server(http.server.ThreadingHTTPServer):
+        def handle_error(self, *_):
+            # Do not print a threaded handler traceback or provider exception.
+            pass
+
+    server = Server(("0.0.0.0", 5762), Handler)
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    context.load_cert_chain(str(PRODUCTION_PKI / "api-server.crt"), str(PRODUCTION_PKI / "api-server.key"))
+    context.load_verify_locations(cafile=str(PRODUCTION_PKI / "client-ca.crt"))
+    context.verify_mode = ssl.CERT_OPTIONAL
+    server.socket = context.wrap_socket(server.socket, server_side=True)
+    server.serve_forever()
 
 
 def native_metrics_fixture():
@@ -741,6 +913,56 @@ def snapshot(destination_id, intentional_save=False, uri_only=False):
     )
     assert result.returncode == 0 and result.stdout.strip(), "Private snapshot failed"
     return snapshot_digest(json.loads(result.stdout), intentional_save=intentional_save)
+
+
+def niks3_form_checkpoints():
+    """Guards only the browser-owned disabled Niks3 clone before late seeding.
+
+    This independent handshake never creates destinations or changes the shared
+    retained-credential checkpoint sequence. Each Test/Discovery/Cancel group
+    must preserve the complete raw row and assignments, including ciphertext.
+    """
+    sequence, pending = 1, None
+    deadline = time.monotonic() + 2700
+    while not NIKS3_FORM_START.exists():
+        assert time.monotonic() < deadline, "Original Niks3 workflow did not request profile readiness"
+        time.sleep(0.1)
+    assert NIKS3_FORM_START.stat().st_mode & 0o777 == 0o600
+    assert json.loads(NIKS3_FORM_START.read_text()) == {"version": 1, "workflow": "original-niks3-form"}
+    prepared = json.loads(FIXTURE.read_text())
+    assert prepared["niks3"]["protected_profile_ready"] is True
+    assert prepared["production_basic"]["protected_profile_ready"] is True
+    # Readiness publishes no provider identity, secret or early destination ID.
+    protected_replace(NIKS3_FORM_ACK, {"ready": True, "workflow": "original-niks3-form"})
+    while time.monotonic() < deadline:
+        if not NIKS3_FORM_REQUEST.exists():
+            time.sleep(0.1)
+            continue
+        assert NIKS3_FORM_REQUEST.stat().st_mode & 0o777 == 0o600
+        message = json.loads(NIKS3_FORM_REQUEST.read_text())
+        if message["sequence"] < sequence:
+            time.sleep(0.1)
+            continue
+        assert message["sequence"] == sequence
+        destination_id, phase = message["id"], message["phase"]
+        assert type(destination_id) is int and destination_id > 0
+        if phase == "before":
+            assert pending is None
+            result = subprocess.run(["sudo", "-u", "postgres", "psql", "-d", "crystal_forge", "-At",
+                                     "-v", "ON_ERROR_STOP=1", "-c",
+                                     f"SELECT name,cache_type,enabled FROM cache_destinations WHERE id={destination_id}"],
+                                    stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=8, check=False)
+            assert result.returncode == 0
+            identity = result.stdout.decode().strip().split("|")
+            assert len(identity) == 3 and identity[0].startswith("task470-ui-") and identity[1:] == ["Niks3", "f"]
+            pending = (destination_id, snapshot(destination_id))
+        else:
+            assert phase == "after" and pending is not None and pending[0] == destination_id
+            assert snapshot(destination_id) == pending[1], "Niks3 Test/Discovery/Cancel changed ciphertext/configuration/timestamps/scope"
+            pending = None
+        protected_replace(NIKS3_FORM_ACK, {"sequence": sequence, "id": destination_id, "phase": phase, "ok": True})
+        sequence += 1
+    assert pending is None, "Niks3 form checkpoint did not complete"
 
 
 def snapshot_policy_regressions():
@@ -1225,7 +1447,22 @@ def checkpoints():
                 before = basic_pending[name]
                 assert rows[:len(before)] == before
                 deltas[name] = rows[len(before):]
-            if phase in ("basic-after-write", "basic-after-discovery"):
+            if phase == "basic-after-write":
+                assert len(deltas["write"]) == 5, "Write must account for public metadata and four protected calls"
+                expected = [
+                    "GET /api/cache-config status=200 client=present auth=absent",
+                    "GET /api/gc/status status=404 client=present auth=absent",
+                    "GET /api/gc/status status=401 client=absent auth=absent",
+                    "POST /api/pending_closures status=400 client=present auth=absent",
+                    "POST /api/pending_closures status=401 client=absent auth=absent",
+                ]
+                # A native GC snapshot can replace the exact initial no-GC 404;
+                # CF validates the complete native schema before attempting POST.
+                if deltas["write"][1] == "GET /api/gc/status status=200 client=present auth=absent":
+                    expected[1] = deltas["write"][1]
+                assert deltas["write"] == expected, "Protected native sequence, identities or authorization headers differ"
+                assert not deltas["read"], "Protected write contacted the read plane"
+            elif phase == "basic-after-discovery":
                 assert len(deltas["write"]) == 1 and deltas["write"][0].startswith("GET /api/cache-config status=200 ")
                 assert deltas["write"][0].endswith("auth=absent") and "client=present " in deltas["write"][0]
                 assert not deltas["read"], "Write Test or Discovery contacted the read plane"
@@ -1241,7 +1478,9 @@ def checkpoints():
             else:
                 assert not deltas["write"] and not deltas["read"], "Cancel contacted a provider"
             basic_probes.append({"phase": phase, "whole_raw_rows": len(basic_pending["rows"]),
-                                 "raw_immutability": "passed", "write_gets": len(deltas["write"]),
+                                 "raw_immutability": "passed", "write_requests": len(deltas["write"]),
+                                 "write_gets": sum(row.startswith("GET ") for row in deltas["write"]),
+                                 "write_invalid_posts": sum(row.startswith("POST /api/pending_closures ") for row in deltas["write"]),
                                  "read_gets": len(deltas["read"]), "upload_count": 0})
             basic_pending = None
         elif phase == "basic-complete":
@@ -1495,12 +1734,15 @@ def verify_api():
                 response = request(client, "POST", url + "/test-credentials", json=patch)
                 assert response.status_code == 200, "Stored-ID native probe HTTP failure"
                 result = response.json()
-                assert result["ok"] is True and result["status_code"] == 200, \
-                    "Stored-ID native read probe must succeed"
+                assert result["ok"] is True, "Stored-ID native probe must succeed"
                 if cache_type == "Niks3":
-                    assert result["write_auth_valid"] is None, \
-                        "Public Niks3 metadata does not prove write authorization"
+                    assert result["status_code"] == 400, "All-plane Test retains protected invalid-POST status"
+                    for field in ("write_api_reachable", "write_authn_valid", "write_authorization_valid", "write_auth_valid"):
+                        assert result[field] is True, "All-plane Test requires protected write route access"
                     assert result["read_endpoint_reachable"] is True
+                    assert result["read_access_valid"] is True
+                else:
+                    assert result["status_code"] == 200, "Stored-ID native read probe must succeed"
                 if cache_type == "Attic":
                     assert_attic_result(result, "complete", True)
                     check_attic_read_delta(native_before, fixture["attic"]["cache_name"], status=200)
@@ -1546,7 +1788,8 @@ def verify_api():
     assert not redacted.json().get("niks3_write_client_key")
     proof.append({"cache_type": "Niks3", "read_mode": "basic", "five_rail_ui_save": phase_proof["niks3_basic_ui_encrypted_save"],
                   "scoped_checkpoints": phase_proof["niks3_basic_ui_checkpoints"], "basic_pair_get_redacted": "passed",
-                  "password_whitespace": "preserved", "write_authorization": "untested", "test_upload_count": 0})
+                  "password_whitespace": "preserved", "write_authorization": "protected_route_access_verified",
+                  "object_publication": "untested", "test_upload_count": 0})
     proof.extend(verify_metrics_api(client, origin, fixture))
     Path("/tmp/screenshots/native-cache-proof.json").write_text(json.dumps(proof, indent=2))
     for kind in ("attic", "s3", "nix", "niks3", "nix_basic", "http_basic", "legacy_query"):
@@ -1801,10 +2044,13 @@ def observe(native_only=False):
         for name, log in (("write", NIKS3_BASIC_WRITE_OBSERVER), ("read", NIKS3_BASIC_READ_OBSERVER)):
             rows = log.read_text().splitlines()[fixture["production_basic"]["observer_baselines"][name]:]
             probes = phase["niks3_basic_ui_checkpoints"]
-            assert len(rows) == sum(probe[name + "_gets"] for probe in probes)
-            expected = "GET /api/cache-config " if name == "write" else "GET /nix-cache-info "
-            assert all(row.startswith(expected) or name == "read" and row.startswith("GET /redirect/nix-cache-info ") for row in rows), \
+            counter = "write_requests" if name == "write" else "read_gets"
+            assert len(rows) == sum(probe[counter] for probe in probes)
+            expected = ("GET /api/cache-config ", "GET /api/gc/status ", "POST /api/pending_closures ") if name == "write" else ("GET /nix-cache-info ", "GET /redirect/nix-cache-info ")
+            assert all(row.startswith(expected) for row in rows), \
                 "Scoped Basic UI probe uploaded or followed a redirect"
+            if name == "write":
+                assert all(row.endswith("auth=absent") for row in rows), "mTLS protected or Discovery request forwarded Bearer"
         for log in METRICS_OBSERVERS.values():
             assert all(row.startswith("GET /api/cache-stats ") and row.endswith("auth=absent") for row in log.read_text().splitlines()), \
                 "Metrics enumerated, uploaded or forwarded Authorization"
@@ -1824,6 +2070,8 @@ if __name__ == "__main__":
         STAGE = sys.argv[1]
         {"attic": bootstrap_attic, "http-setup": bootstrap_http, "assemble": assemble,
          "attic-metrics-setup": attic_metrics_setup, "metrics-config": metrics_config,
+         "niks3-form-checkpoints": niks3_form_checkpoints,
+         "niks3-protected-relay": niks3_protected_relay,
          "seed": seed, "verify": verify_api, "observe": observe,
          "checkpoints": checkpoints,
          "snapshot-policy-regressions": snapshot_policy_regressions,

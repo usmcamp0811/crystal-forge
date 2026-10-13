@@ -20967,7 +20967,14 @@ security.audit.enable = true;</fixtext>
       );
       await require("./niks3-cache-workflow.js").niks3CacheWorkflow(
         page, baseUrl, apiBaseUrl, undefined,
-        state => captureWorkflowState(page, "25-caches-modal-attic", state),
+        state => captureWorkflowState(page, "25-caches-modal-attic", state, async theme => {
+          if (state.startsWith("niks3-native-parity-")) {
+            await page.getByRole("dialog", { name: "Cache destination", exact: true }).screenshot({
+              path: `${outputDir}/25-caches-modal-attic--${state}--crop--${theme}.png`,
+              animations: "disabled",
+            });
+          }
+        }),
       );
       await require("./retained-cache-credential-workflow.js").retainedCacheCredentialWorkflow(
         page, baseUrl, apiBaseUrl,
