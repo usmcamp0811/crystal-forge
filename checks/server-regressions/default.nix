@@ -816,6 +816,8 @@ SQL
     done
     for testName in \
       queries::commits::partial_resource_failure_tests::partial_failure_diagnostic_uses_proven_counts_not_checkpoint_guesses \
+      handlers::api::builders::tests::evaluator_fixture_reproduces_inherited_cloexec_writer \
+      handlers::api::builders::tests::evaluator_fingerprint_reports_executing_nix_and_pure_contract \
       queries::commits::partial_resource_failure_tests::evaluation_failure_resource_marker_is_server_owned \
       queries::commits::partial_resource_failure_tests::partial_failure_cohort_keeps_confirmed_and_resource_systems_disjoint \
       models::retry_policy::tests::resource_failure_never_retries_whole_flake_despite_available_budget \

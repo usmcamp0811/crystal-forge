@@ -7697,19 +7697,132 @@ exec sleep 30
         assert!(!super::looks_like_store_path("/nix/store/abc\0evil"));
     }
 
+    fn write_nix_version_fixture(path: &std::path::Path) {
+        // CONCURRENCY: Only this child opens the fixture for writing. A fork
+        // in another test cannot inherit its writer from the test process.
+        // Waiting for child exit closes all writers before the real probe;
+        // closing a parent writer alone does not cover pre-exec inheritance.
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("printf '%s' \"$1\" > \"$2\" && chmod 700 \"$2\"")
+            .arg("write-nix-version-fixture")
+            .arg("#!/bin/sh\n[ \"$1\" = --version ] || exit 1\nprintf 'nix (Nix) 2.34.5\\n'\n")
+            .arg(path)
+            .status()
+            .expect("fixture writer child should run");
+        assert!(status.success(), "fixture writer child should succeed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn evaluator_fixture_reproduces_inherited_cloexec_writer() {
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        struct InheritedWriter {
+            pid: libc::pid_t,
+            barrier: UnixStream,
+        }
+
+        impl InheritedWriter {
+            fn reap(&mut self) -> std::io::Result<i32> {
+                let mut status = 0;
+                loop {
+                    // SAFETY: pid identifies only our child, and status is
+                    // writable. No other code waits for this child's exit.
+                    if unsafe { libc::waitpid(self.pid, &mut status, 0) } == self.pid {
+                        self.pid = 0;
+                        return Ok(status);
+                    }
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() != std::io::ErrorKind::Interrupted {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+
+        impl Drop for InheritedWriter {
+            fn drop(&mut self) {
+                if self.pid != 0 {
+                    // Release and reap on assertion failure as well. The
+                    // child closes the opposite endpoint before waiting.
+                    let _ = self.barrier.shutdown(std::net::Shutdown::Both);
+                    let _ = self.reap();
+                }
+            }
+        }
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let nix = tempdir.path().join("nix");
+        let mut writer = std::fs::File::create(&nix).unwrap();
+        writer
+            .write_all(b"#!/bin/sh\nprintf 'nix (Nix) 2.34.5\\n'\n")
+            .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&nix, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let writer_fd = writer.as_raw_fd();
+        // SAFETY: F_GETFD reads flags for this live, owned file descriptor.
+        let flags = unsafe { libc::fcntl(writer_fd, libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+
+        let (parent, child) = UnixStream::pair().unwrap();
+        let parent_fd = parent.as_raw_fd();
+        let child_fd = child.as_raw_fd();
+        // SAFETY: The child uses only async-signal-safe close, read, write,
+        // and _exit calls. It does not access Rust state or locks after fork.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "controlled fixture fork must succeed");
+        if pid == 0 {
+            let mut byte = 1_u8;
+            // SAFETY: Both socket descriptors are inherited and live. Closing
+            // parent_fd lets parent shutdown release the read on failure. The
+            // byte buffers are valid; _exit avoids inherited Rust destructors.
+            unsafe {
+                libc::close(parent_fd);
+                if libc::write(child_fd, (&byte as *const u8).cast(), 1) != 1 {
+                    libc::_exit(1);
+                }
+                if libc::read(child_fd, (&mut byte as *mut u8).cast(), 1) != 1 {
+                    libc::_exit(2);
+                }
+                libc::_exit(0);
+            }
+        }
+        let mut inherited = InheritedWriter {
+            pid,
+            barrier: parent,
+        };
+        drop(child);
+        drop(writer);
+        inherited.barrier.read_exact(&mut [0_u8]).unwrap();
+
+        // CONCURRENCY: The parent writer is closed, but the child has not
+        // executed anything. CLOEXEC does not close its inherited writer yet.
+        let blocked = super::probe_nix_version(&nix).await;
+        let isolated = tempdir.path().join("isolated-nix");
+        write_nix_version_fixture(&isolated);
+        let isolated_version = super::probe_nix_version(&isolated).await;
+        inherited.barrier.write_all(&[1]).unwrap();
+        assert_eq!(inherited.reap().unwrap(), 0);
+        let error = blocked.expect_err("inherited writable FD must prohibit exec");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::ETXTBSY)
+        );
+        assert_eq!(isolated_version.unwrap(), "2.34.5");
+    }
+
     #[tokio::test]
     async fn evaluator_fingerprint_reports_executing_nix_and_pure_contract() {
         let tempdir = tempfile::tempdir().expect("Nix probe test tempdir should create");
         let nix = tempdir.path().join("nix");
-        std::fs::write(&nix, "#!/bin/sh\nprintf 'nix (Nix) 2.34.5\\n'\n")
-            .expect("fake Nix executable should write");
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = std::fs::metadata(&nix)
-            .expect("fake Nix executable should stat")
-            .permissions();
-        permissions.set_mode(0o700);
-        std::fs::set_permissions(&nix, permissions)
-            .expect("fake Nix executable should be executable");
+        write_nix_version_fixture(&nix);
 
         let nix_version = super::probe_nix_version(&nix)
             .await

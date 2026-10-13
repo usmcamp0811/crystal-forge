@@ -389,10 +389,12 @@ projection, protected token files and alphabet boundaries, bounded responses,
 and refusal before file or network access. Native restricted-role and module
 lifecycle acceptance remains covered by the separate `attic-metrics` VM check.
 
-These 81 non-ignored tests run with `--exact --test-threads=1`:
+These 83 non-ignored tests run with `--exact --test-threads=1`:
 
 ```text
 queries::commits::partial_resource_failure_tests::partial_failure_diagnostic_uses_proven_counts_not_checkpoint_guesses
+handlers::api::builders::tests::evaluator_fixture_reproduces_inherited_cloexec_writer
+handlers::api::builders::tests::evaluator_fingerprint_reports_executing_nix_and_pure_contract
 queries::commits::partial_resource_failure_tests::evaluation_failure_resource_marker_is_server_owned
 queries::commits::partial_resource_failure_tests::partial_failure_cohort_keeps_confirmed_and_resource_systems_disjoint
 models::retry_policy::tests::resource_failure_never_retries_whole_flake_despite_available_budget
