@@ -12,6 +12,9 @@
 //! This gate identifies a supported handler contract, not a server version.
 //! Public metadata, generic HTTP errors and TLS success cannot open the gate.
 //! Unknown or contradictory contracts leave write authorization unproven.
+//! mTLS omission can match nginx's complete certificate-required HTTP 400 page.
+//! That ingress gate does not prove native Go subject enforcement. Token mode,
+//! generic HTML errors and incomplete pages cannot use that exception.
 //! A matching POST proves protected-handler access only. It does not prove S3
 //! permissions, signing, uploads or independently verified publication.
 //! No valid closure, retry, cleanup, process, persistence or GC-start call exists
@@ -38,6 +41,7 @@ enum Fingerprint {
     GcSnapshot,
     Unauthorized,
     MissingClosure,
+    CertificateRequired,
     Unknown,
 }
 
@@ -168,9 +172,52 @@ fn fingerprint(status: u16, content_type: Option<&str>, body: &[u8]) -> Fingerpr
         (400, Some("text/plain; charset=utf-8")) if body == MISSING_CLOSURE => {
             Fingerprint::MissingClosure
         }
+        (400, Some("text/html")) if nginx_certificate_required(body) => {
+            Fingerprint::CertificateRequired
+        }
         (200, Some("application/json")) if valid_gc_snapshot(body) => Fingerprint::GcSnapshot,
         _ => Fingerprint::Unknown,
     }
+}
+
+// COMPATIBILITY: nginx's ngx_http_error_496_page and standard tail produce
+// this complete HTTP 400 response when ssl_verify_client on sees no identity.
+// Match every byte, permitting only the stock hidden or numeric-version footer.
+// Custom pages, padding, truncation and extra provider content remain unknown.
+fn nginx_certificate_required(body: &[u8]) -> bool {
+    const HEAD: &[u8] = concat!(
+        "<html>\r\n",
+        "<head><title>400 No required SSL certificate was sent</title></head>\r\n",
+        "<body>\r\n",
+        "<center><h1>400 Bad Request</h1></center>\r\n",
+        "<center>No required SSL certificate was sent</center>\r\n",
+        "<hr><center>nginx"
+    )
+    .as_bytes();
+    const TAIL: &[u8] = b"</center>\r\n</body>\r\n</html>\r\n";
+    let Some(footer) = body
+        .strip_prefix(HEAD)
+        .and_then(|rest| rest.strip_suffix(TAIL))
+    else {
+        return false;
+    };
+    if footer.is_empty() {
+        return true;
+    }
+    let Some(version) = footer.strip_prefix(b"/") else {
+        return false;
+    };
+    // A stock nginx release has three numeric components. Bound each component
+    // to three digits; build names and arbitrary footer values are unsupported.
+    let mut components = version.split(|byte| *byte == b'.');
+    for _ in 0..3 {
+        if !components.next().is_some_and(|part| {
+            (1..=3).contains(&part.len()) && part.iter().all(u8::is_ascii_digit)
+        }) {
+            return false;
+        }
+    }
+    components.next().is_none()
 }
 
 fn selected_auth(create: &CreateCacheDestination) -> Result<Niks3WriteAuth, String> {
@@ -437,7 +484,21 @@ fn rejected_control(control: Observation, mtls: bool) -> bool {
             status: 401,
             fingerprint: Fingerprint::Unauthorized
         }
-    ) || (mtls && control == Observation::Transport("client_identity_invalid"))
+    ) || (mtls && certificate_control(control))
+}
+
+// Accepted certificate-omission controls prove an ingress/session gate only.
+// Use the same predicate for acceptance and diagnostic selection so HTTP and
+// TLS ingress gates cannot accidentally claim native subject enforcement.
+fn certificate_control(control: Observation) -> bool {
+    matches!(
+        control,
+        Observation::Transport("client_identity_invalid")
+            | Observation::Http {
+                status: 400,
+                fingerprint: Fingerprint::CertificateRequired
+            }
+    )
 }
 
 fn rejection(positive: Observation, mtls: bool, post: bool) -> &'static str {
@@ -526,7 +587,7 @@ async fn probe_with_clients(
         return Err(control_failure(negative).into());
     }
     stages.write_authn_valid = Some(true);
-    let mut certificate_gate = matches!(negative, Observation::Transport(_));
+    let mut certificate_gate = certificate_control(negative);
 
     // INVARIANT: The invalid POST is unreachable until both protected GET
     // evidence and the omission gate match. Never use a valid closure or retry.
@@ -574,7 +635,7 @@ async fn probe_with_clients(
     if !rejected_control(negative, mtls) {
         return Err(control_failure(negative).into());
     }
-    certificate_gate |= matches!(negative, Observation::Transport(_));
+    certificate_gate |= certificate_control(negative);
     stages.write_authorization_valid = Some(true);
     stages.write_auth_valid = Some(true);
     Ok(if certificate_gate {

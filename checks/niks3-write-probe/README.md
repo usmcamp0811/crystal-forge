@@ -15,6 +15,10 @@ native client trust follows the deployed union A+B+C shape. Tokens, JWT-shaped
 invalid tokens, signing keys, certificate private keys,
 admin password and the CF encryption key are created inside disposable VMs.
 Private files have mode `0600` and their directory has mode `0700`.
+Systemd supplies private copies of only the S3 certificate and key to Nginx.
+The S3 proxy binds the signed Host authority to `cache:3904`. The cache VM
+explicitly overrides the imported 2048 MiB allocation with 3072 MiB because
+both native Go servers share Garage and PostgreSQL.
 
 The direct native preflight requires these exact status/media/body contracts:
 
@@ -63,8 +67,7 @@ acceptance, not native origin subject enforcement. Direct native wrong-subject
   missing-token Tests must report false authentication/authorization booleans and
   null API reachability without metadata, DNS or protected requests. Invalid
   Bearer headers fail the same local preflight in both write scopes, even with an
-  unresolved target. These false-evidence cases are implemented in source but
-  remain unexecuted locally and pending CI.
+  unresolved target. The complete local native gate exercises these cases.
 - Trusted wrong subjects reach native `401`; wrong issuers fail TLS. Invalid key
   material fails local validation. Explicit B-only write trust cannot borrow
   ambient A. After selected-identity TLS failure, the anonymous GC control may
@@ -93,6 +96,8 @@ acceptance, not native origin subject enforcement. Direct native wrong-subject
   included in the baseline. No closure, NAR, object or multipart upload is created
   by an operator Test. The initial closure/object/upload tables must have zero
   rows; startup migration records and metadata objects remain in the comparison.
+  Native 1.8 seeds one `object_stats` row. Its exact zero-object/zero-byte state
+  is asserted at baseline and remains included in the full before/after hash.
 
 Only after those snapshots match, a separate fixture phase uses the real packaged
 Niks3 CLI to publish fresh paths through token and mTLS authentication to both
@@ -102,6 +107,14 @@ derivations, so content-addressed trust cannot bypass signature verification. A
 fresh-root copy with an unrelated signing key must fail. Bad-token and read-subject
 CLI pushes use fresh uncached paths and must fail with the paths still absent. This does not
 replace the existing builder/job/publication gates.
+
+The runtime-resolved BusyBox builder uses `builtins.storePath` to preserve its
+Nix dependency context and sandbox executable closure. Native 1.8 publication
+paths contain 11 MiB of zero padding. The uncompressed NAR exceeds the upstream
+10 MiB simple-upload threshold, selecting the multipart protocol supported by
+the pinned 1.6 CLI. Padding compresses to a small transfer and is compared after
+signature-required unpack. This fixture does not claim that the 1.6 CLI can
+consume 1.8 simple-upload responses for smaller paths.
 
 ## Credential-safe output and upstream limit
 
@@ -115,19 +128,40 @@ upstream invalid-token preview fragments. Provider
 journals are never exported. Native Niks3 AuthMiddleware logs invalid-token
 previews upstream; this check preserves native authentication and does not claim
 provider-wide secret-log cleanliness or suppress that behavior.
+The cache guest disables journal forwarding to the test driver's serial console;
+native journals remain in the guest. Child-command failures report only static
+stage/category enums and exit codes. Child stdout and stderr remain private.
 
 ## Verification status
 
-Implementation verification is source-only under the user's no-heavy-host-check
-constraint. Python AST syntax checks passed for `test.py` and the embedded VM
-driver. `nix-instantiate --parse checks/niks3-write-probe/default.nix` passed as a
-parser-only check, without evaluating the expression. A source comparison confirmed that the complete 1.8 declaration matches
-the existing web-ui fixture byte-for-byte. New-file whitespace checks and
-`git diff --check` passed. These checks do not execute the fixture or evaluate Nix.
-Nix evaluation, builds, Go/Rust compilation, tests, VM execution and server startup
-were not run locally for this delegation. Native behavior remains **pending CI**.
+On 2026-10-13, the repaired working tree based on `269b58ad` passed derivation
+evaluation and the complete native gate. Evaluation returned exit 0:
 
-Once the parent registers the blocking job, its authoritative command is:
+```sh
+nix eval --raw .#checks.x86_64-linux.niks3-write-probe.drvPath
+```
+
+The successful runtime derivation was
+`jzlh3a4wbyqbkaxd5kvizz1hk70zflqr-vm-test-run-niks3-write-probe.drv`.
+The foreground build returned exit 0 in 74 seconds with one build job and two
+cores. The existing wrapper validated public-cache substitution, source fallback
+and required signatures for the exact `checks.x86_64-linux.niks3-write-probe`
+attribute:
+
+```sh
+sh packages/ci/public-cache-build.sh \
+  --out-link /tmp/opencode/task470-niks3-write-probe-repaired -L \
+  .#checks.x86_64-linux.niks3-write-probe --max-jobs 1 --cores 2
+```
+
+The successful run observed 146 CF Tests, 16 Discover operations and 325 exact
+raw-state comparisons. The separate publication phase passed four authorized
+pushes, four signed copies, four wrong-signature denials and eight denied pushes.
+Both test QEMU processes exited through normal driver cleanup. The private local
+log is `/tmp/opencode/task470-niks3-write-probe-repaired-attempt14.log`.
+This local working-tree result does not establish exact-head remote CI success.
+
+The unwrapped authoritative command is:
 
 ```sh
 nix build --no-link -L .#checks.x86_64-linux.niks3-write-probe

@@ -114,9 +114,13 @@ async function niks3CacheWorkflow(page, baseUrl, apiBaseUrl, screenshot, capture
     await route.continue();
   });
   const csrf = async () => {
-    const cookies = await page.context().cookies(apiBaseUrl);
-    const cookie = cookies.find(c => c.name.includes("csrf"));
-    return cookie ? { "X-CSRF-Token": cookie.value } : {};
+    // Match the production browser client: Chromium sends Secure loopback
+    // cookies over HTTP, but Playwright's URL-filtered cookie list omits them.
+    const value = await page.evaluate(() => document.cookie.split(";")
+      .map(cookie => cookie.trim()).find(cookie => cookie.startsWith("__Host-cf-csrf="))
+      ?.slice("__Host-cf-csrf=".length));
+    assert(value, "authenticated browser CSRF cookie required");
+    return { "X-CSRF-Token": value };
   };
   const api = async (method, url, data, expectedStatus) => {
     // Browser fetch preserves the fixture's secure loopback session-cookie
@@ -171,7 +175,7 @@ async function niks3CacheWorkflow(page, baseUrl, apiBaseUrl, screenshot, capture
   const tokenDraft = (dialog, value) => identity(dialog, "Write", nested => nested.getByLabel("API token").fill(value));
   const evidence = (dialog, label) => dialog.getByText(label, { exact: true }).locator("..");
   const assertWrite = async (dialog, values) => {
-    for (const [label, value] of [["Write API access", values[0]], ["Authentication", values[1]], ["Write authorization", values[2]]]) await expect(evidence(dialog, label)).toContainText(value);
+    for (const [label, value] of [["API reachable", values[0]], ["Authentication", values[1]], ["Write authorization", values[2]]]) await expect(evidence(dialog, label)).toContainText(value);
     await expect(evidence(dialog, "Object publication")).toContainText("Untested");
     await expect(dialog).toContainText("publication remains Untested");
   };
@@ -237,9 +241,20 @@ async function niks3CacheWorkflow(page, baseUrl, apiBaseUrl, screenshot, capture
     await page.getByRole("button", { name: "Niks3", exact: true }).click();
     let dialog = page.getByRole("dialog", { name: "Cache destination" });
     await expect(dialog).toBeVisible();
+    // Wait for loaded scope before exercising the dedicated mount's baseline.
+    // Retained common values seed this draft; a clean badge is not a saved row.
+    await expect(dialog.getByLabel("Name", { exact: true })).toBeEnabled();
+    await expect(dialog.getByRole("button", { name: selected.name, exact: true })).toBeEnabled();
+    await expect(dialog.locator("footer")).toContainText("1 selected");
     await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue(name);
     await expect(dialog.locator("header")).toContainText(name);
+    await expect(dialog.locator("header")).not.toContainText("Unsaved changes");
+    await dialog.getByLabel("Name", { exact: true }).fill(name + "x");
+    await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue(name + "x");
     await expect(dialog.locator("header")).toContainText("Unsaved changes");
+    await dialog.getByLabel("Name", { exact: true }).fill(name);
+    await expect(dialog.getByLabel("Name", { exact: true })).toHaveValue(name);
+    await expect(dialog.locator("header")).not.toContainText("Unsaved changes");
     for (const name of ["Destination", "Write / API", "Read / Pull", "Trust", "Advanced"]) await expect(dialog.getByRole("navigation").getByRole("button", { name, exact: true })).toBeVisible();
     await expect(dialog.getByRole("button", { name: selected.name, exact: true })).toHaveAttribute("aria-pressed", "true");
     await section(dialog, "Read / Pull");
@@ -303,7 +318,7 @@ async function niks3CacheWorkflow(page, baseUrl, apiBaseUrl, screenshot, capture
     discoveredReadUrl = blankMetadata.substituter_url;
     await expect(dialog.getByRole("status").filter({ hasText: "Discovery successful" })).toBeVisible();
     await expect(dialog.getByRole("button", { name: "Apply discovered settings", exact: true })).toBeVisible();
-    await expect(dialog.locator("header")).toHaveText(dirtyBeforeDiscovery);
+    await expect(dialog.locator("header")).toHaveText(dirtyBeforeDiscovery, { useInnerText: true });
     await expect(dialog.getByLabel("Write / API URL", { exact: true })).toHaveValue(writeUrl);
     await section(dialog, "Read / Pull");
     await expect(dialog.getByLabel("Read / substituter URL", { exact: true })).toHaveValue("");
@@ -342,7 +357,7 @@ async function niks3CacheWorkflow(page, baseUrl, apiBaseUrl, screenshot, capture
     const authorization = dialog.getByText("Write authorization", { exact: true }).locator("..");
     await expect(authorization).toContainText("Verified");
     await expect(dialog.getByText("Authentication", { exact: true }).locator("..")).toContainText("Verified");
-    await expect(dialog.getByText("Write API access", { exact: true }).locator("..")).toContainText("Verified");
+    await expect(dialog.getByText("API reachable", { exact: true }).locator("..")).toContainText("Verified");
     await expect(dialog.getByText("Object publication", { exact: true }).locator("..")).toContainText("Untested");
     await section(dialog, "Read / Pull");
     await dialog.getByLabel("Read / substituter URL", { exact: true }).fill(readUrl);

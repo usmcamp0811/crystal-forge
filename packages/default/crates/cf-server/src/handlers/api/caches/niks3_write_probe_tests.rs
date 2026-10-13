@@ -138,6 +138,156 @@ fn mtls_control_requires_a_specific_identity_alert_not_any_transport_failure() {
     ));
 }
 
+fn nginx_required(footer: &str) -> Vec<u8> {
+    format!(
+        "<html>\r\n<head><title>400 No required SSL certificate was sent</title></head>\r\n\
+         <body>\r\n<center><h1>400 Bad Request</h1></center>\r\n\
+         <center>No required SSL certificate was sent</center>\r\n\
+         <hr><center>{footer}</center>\r\n</body>\r\n</html>\r\n"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn nginx_omission_requires_complete_page_and_only_opens_mtls_control() {
+    for footer in ["nginx", "nginx/1.30.0"] {
+        let body = nginx_required(footer);
+        let observed = fingerprint(400, Some("text/html"), &body);
+        assert_eq!(observed, Fingerprint::CertificateRequired);
+        let control = Observation::Http {
+            status: 400,
+            fingerprint: observed,
+        };
+        assert!(rejected_control(control, true));
+        assert!(!rejected_control(control, false));
+        for (status, media) in [
+            (401, Some("text/html")),
+            (403, Some("text/html")),
+            (400, Some("text/plain; charset=utf-8")),
+            (400, Some("text/html; charset=utf-8")),
+            (400, None),
+        ] {
+            assert_eq!(fingerprint(status, media, &body), Fingerprint::Unknown);
+        }
+        for candidate in [
+            body[..body.len() - 1].to_vec(),
+            [body.as_slice(), b"extra"].concat(),
+            [b"prefix", body.as_slice()].concat(),
+            String::from_utf8(body.clone())
+                .unwrap()
+                .replace(
+                    "No required SSL certificate was sent",
+                    "The SSL certificate error",
+                )
+                .into_bytes(),
+            String::from_utf8(body)
+                .unwrap()
+                .replace("\r\n", "\n")
+                .into_bytes(),
+        ] {
+            assert_eq!(
+                fingerprint(400, Some("text/html"), &candidate),
+                Fingerprint::Unknown
+            );
+        }
+    }
+    for footer in [
+        "other",
+        "nginx/1.30",
+        "nginx/1.30.0.extra",
+        "nginx/1234.1.1",
+        "nginx/1.x.1",
+        "nginx/1..1",
+    ] {
+        assert!(!nginx_certificate_required(&nginx_required(footer)));
+    }
+    assert_eq!(
+        fingerprint(400, Some("text/html"), b"<html>Bad Request</html>"),
+        Fingerprint::Unknown
+    );
+}
+
+#[tokio::test]
+async fn nginx_ingress_control_still_requires_both_native_handler_fingerprints() {
+    let denial = Reply {
+        status: 400,
+        media: "text/html",
+        body: nginx_required("nginx"),
+    };
+    let auth = Niks3WriteAuth::Mtls {
+        client_certificate: "unused fake transport certificate".into(),
+        client_private_key: "unused fake transport key".into(),
+        ca_certificate: None,
+    };
+    for (get, post, expected, count) in [
+        (
+            native_get(),
+            native_post(),
+            Ok("write_route_verified_certificate_gate"),
+            4,
+        ),
+        (
+            reply(404, b"Not Found\n"),
+            native_post(),
+            Err("route_unsupported"),
+            2,
+        ),
+        (
+            native_get(),
+            reply(400, b"Bad Request\n"),
+            Err("route_unsupported"),
+            4,
+        ),
+        (native_get(), denial.clone(), Err("route_unsupported"), 4),
+    ] {
+        let fake = fake(vec![get, denial.clone(), post, denial.clone()]).await;
+        let mut stages = Niks3ConnectionTestResult::default();
+        let mut status = None;
+        let result = probe_with_clients(
+            &fake.client,
+            &fake.client,
+            &auth,
+            &fake.url,
+            Instant::now() + Duration::from_secs(2),
+            &mut stages,
+            &mut status,
+        )
+        .await;
+        assert_eq!(
+            result
+                .as_ref()
+                .map(|value| *value)
+                .map_err(|error| error.as_str()),
+            expected
+        );
+        assert_eq!(
+            stages.write_authorization_valid,
+            expected.is_ok().then_some(true)
+        );
+        assert_eq!(stages.write_auth_valid, expected.is_ok().then_some(true));
+        let fixture = fake.state.lock().unwrap();
+        assert_eq!(fixture.requests.len(), count);
+        assert!(
+            fixture
+                .requests
+                .iter()
+                .all(|request| !request.authorization_present)
+        );
+        assert!(
+            fixture
+                .requests
+                .iter()
+                .filter(|request| request.method == "POST")
+                .all(|request| request.body == b"{}")
+        );
+    }
+    let fake = fake(vec![native_get(), denial]).await;
+    let (result, stages, _) = probe(&fake).await;
+    assert_eq!(result.unwrap_err(), "auth_control_inconclusive");
+    assert_eq!(stages.write_authn_valid, None);
+    assert_eq!(fake.state.lock().unwrap().requests.len(), 2);
+}
+
 #[derive(Clone)]
 struct Reply {
     status: u16,

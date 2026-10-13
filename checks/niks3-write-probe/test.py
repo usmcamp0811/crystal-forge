@@ -51,10 +51,47 @@ def read(name):
     return (ROOT / name).read_text().strip()
 
 
-def command(args, *, data=None, timeout=120, success=True, env=None):
+def command(args, *, data=None, timeout=120, success=True, env=None, stage="private-command"):
     result = subprocess.run(args, input=data, stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE, timeout=timeout, env=env)
-    check((result.returncode == 0) == success, "private subprocess exit mismatch")
+    if (result.returncode == 0) != success:
+        # Classify captured diagnostics without exporting child output, argv,
+        # paths, URLs or credential-bearing provider response bodies.
+        categories = {
+            "tls_trust": (b"unknown authority", b"certificate verify failed", b"unable to get local issuer"),
+            "cli_shape": (b"unknown flag", b"unrecognized", b"unexpected argument"),
+            "execution": (b"No such file", b"not found", b"Permission denied"),
+            "signature": (b"lacks a signature", b"not signed"),
+            "nix_metadata": (b"parsing nix path-info", b"command failed:", b"experimental Nix feature"),
+            "provider_denial": (b"server returned 403:", b"server returned 401:", b"<Code>AccessDenied</Code>"),
+            "s3_signature": (b"SignatureDoesNotMatch",),
+            "s3_invalid_request": (b"InvalidRequest", b"InvalidArgument", b"AuthorizationQueryParametersError"),
+            "transport": (b"connection refused", b"no such host", b"timeout", b"proxyconnect"),
+            "tls_session": (b"tls:", b"x509:", b"certificate"),
+            "http_framing": (b"server returned 411:", b"server returned 413:", b"server returned 501:", b"LengthRequired", b"NotImplemented"),
+            "provider_request": (b"server returned 400:", b"server returned 500:", b"server returned 502:", b"unexpected status"),
+            "provider_upload": (b"uploading", b"pending closure", b"presigned"),
+            "closure_prepare": (b"preparing closures:", b"getting path info:"),
+            "closure_create": (b"creating pending closures:", b"creating pending closure:"),
+            "object_upload": (b"uploading objects:",),
+            "narinfo_sign": (b"signing and uploading narinfos:", b"signing narinfos"),
+            "closure_complete": (b"completing pending closure",),
+            "json_shape": (b"cannot unmarshal", b"decoding response:", b"invalid character"),
+            "stream_end": (b"EOF", b"broken pipe", b"reset by peer"),
+            "multipart_shape": (b"NAR files require multipart upload info", b"no ETag in response", b"server returned empty"),
+            "multipart_complete": (b"completing multipart upload:",),
+            "multipart_part": (b"uploading part ", b"reading part ", b"requesting more parts"),
+            "nar_serialization": (b"serializing NAR:", b"opening file ", b"reading directory "),
+            "listing_upload": (b"uploading listing ", b"compressing listing:"),
+            "build_log_upload": (b"build log", b"compressed log", b"mmap file:"),
+            "cancellation": (b"context canceled", b"context deadline exceeded"),
+        }
+        diagnostic = result.stdout + result.stderr
+        category = [name for name, markers in categories.items()
+                    if any(marker in diagnostic for marker in markers)] or ["unclassified"]
+        print(json.dumps({"stage": stage, "exit_code": result.returncode,
+                          "diagnostic_category": category}), flush=True)
+        check(False, "private subprocess exit mismatch")
     return result.stdout
 
 
@@ -357,6 +394,13 @@ def baseline():
     for database in ("niks3", "niks3-v18"):
         tables = json.loads(sql_snapshot(database))["tables"]
         for name, rows in tables.items():
+            if name == "object_stats":
+                # Native 1.8 seeds one inventory row even before any upload.
+                # Validate its exact empty state; the full snapshot retains it.
+                check([json.loads(row) for row in rows] ==
+                      [{"id": True, "object_count": 0, "total_bytes": 0}],
+                      "native seeded object inventory must report zero objects and bytes")
+                continue
             if any(domain in name for domain in ("closure", "object", "multipart", "upload")):
                 check(not rows, "native domain baseline must have zero closure/object/upload rows")
     private("domain-baseline", domain_snapshot())
@@ -388,6 +432,7 @@ def matrix():
     origin = "http://127.0.0.1:8000"
     client = requests.Session()
     client.trust_env = False
+    counts = {"tests": 0, "discoveries": 0, "raw_state_comparisons": 0}
 
     def api(method, path, payload=None, expected=200):
         response = client.request(method, origin + path, json=payload, timeout=15, allow_redirects=False)
@@ -403,10 +448,13 @@ def matrix():
     check(csrf, "admin CSRF cookie missing")
     client.headers["X-CSRF-Token"] = csrf
     check("Admin" in api("GET", "/api/auth/whoami")["roles"], "real admin role required")
-    environments = api("GET", "/api/v1/environments")
-    if isinstance(environments, dict):
-        environments = environments.get("environments", environments.get("items", []))
-    scope = [next(item["id"] for item in environments if item["name"] == "write-probe")]
+    # Create the disposable scope through the real Admin API before snapshots;
+    # an empty watched-flake configuration does not seed module environments.
+    environment = api("POST", "/api/v1/environments", {
+        "name": "write-probe", "description": "Disposable native probe scope",
+        "color_hex": "#7755aa", "is_active": True, "is_production": False,
+    }, expected=201)
+    scope = [environment["id"]]
 
     def events():
         response = requests.get("http://cache:9080/events", timeout=5)
@@ -440,6 +488,7 @@ def matrix():
     def immutable():
         check(sql_snapshot("crystal_forge", protected_tables) == before,
               "Test/Discover changed raw destination, scope, timestamp or queue state")
+        counts["raw_state_comparisons"] += 1
 
     def discover(settings, destination_id, patch=None, expected=200):
         immutable()
@@ -453,6 +502,7 @@ def matrix():
                        **{key: value for key, value in settings.items() if key.startswith("niks3_write_")},
                        **(patch or {})}
         result = api("POST", path, payload, expected)
+        counts["discoveries"] += 1
         immutable()
         observed = events()[cursor:]
         check(all(e["method"] == "GET" and e["path"] == "/api/cache-config" and not e["auth"] for e in observed),
@@ -468,6 +518,7 @@ def matrix():
         payload = {**(settings if destination_id is None else {}), **patch, "probe_scope": probe_scope}
         started = time.monotonic()
         result = api("POST", url, payload, expected)
+        counts["tests"] += 1
         check(time.monotonic() - started < 12, "CF probe exceeded bounded overall deadline")
         immutable()
         observed = events()[cursor:]
@@ -670,6 +721,7 @@ def matrix():
     check(password.encode() not in logs, "CF logs leaked admin credential")
     check(all(c.value.encode() not in logs for c in client.cookies), "CF logs leaked authenticated cookies")
     print("Native retained/draft write/read matrix and exact CF raw-state immutability passed", flush=True)
+    print(json.dumps({"phase": "matrix", "result": "passed", **counts}), flush=True)
 
 
 def publication():
@@ -683,12 +735,23 @@ def publication():
         builder = str(Path(shutil.which("busybox")).resolve())
         proof = secrets.token_hex(64)
         shell = builder + ' mkdir -p "$out"; ' + builder + ' printf %s ' + proof + ' > "$out/proof"'
-        expression = ('builtins.derivation { name = ' + json.dumps(name) + '; system = builtins.currentSystem; '
-                      'builder = ' + json.dumps(builder) + '; args = ["sh" "-c" ' + json.dumps(shell) + ']; }')
-        output = command(["nix-build", "--no-out-link", "--expr", expression], env=env).decode().strip()
-        info = json.loads(command(["nix", "path-info", "--json", output], env=env))
+        # COMPATIBILITY: Native 1.8 uses simple uploads up to 10 MiB, which the
+        # pinned 1.6 CLI cannot consume. Eleven MiB of compressible fixture data
+        # selects genuine multipart uploads with bounded memory/transfer costs.
+        padded = name.startswith("v18-")
+        if padded:
+            shell += '; ' + builder + ' dd if=/dev/zero of="$out/multipart-padding" bs=1048576 count=11'
+        # Restore Nix string context for the runtime-resolved executable. Without
+        # this input dependency, its dynamic-loader closure is absent in sandbox.
+        expression = ('let tools = builtins.storePath ' + json.dumps(str(Path(builder).parent.parent)) +
+                      '; in builtins.derivation { name = ' + json.dumps(name) + '; system = builtins.currentSystem; '
+                      'builder = tools + "/bin/busybox"; args = ["sh" "-c" ' + json.dumps(shell) + ']; }')
+        output = command(["nix-build", "--no-out-link", "--expr", expression], env=env, stage="publication-build").decode().strip()
+        info = json.loads(command(["nix", "path-info", "--json", output], env=env, stage="publication-path-info"))
         entry = info[output] if isinstance(info, dict) else info[0]
         check(not entry.get("ca"), "publication fixture must require signature, not content-addressed bypass")
+        if padded:
+            check(entry["narSize"] > 10 * 1024 * 1024, "native 1.8 fixture must select multipart protocol")
         return output, proof.encode()
 
     for version, native_port, _, _, _ in VERSIONS:
@@ -697,18 +760,21 @@ def publication():
             auth = (["--auth-token-path", str(ROOT / "token")] if mode == "token" else
                     ["--client-cert", str(ROOT / "write.crt"), "--client-key", str(ROOT / "write.key")])
             base = ["niks3", "push", "--server-url", f"https://cache:{native_port}"]
-            command(base + auth + [output], env=env)
+            command(base + auth + [output], env=env, stage="publication-authorized-push-" + version + "-" + mode)
             narinfo = "/" + output.split("/")[-1].split("-")[0] + ".narinfo"
             status, _, body = native_request(native_port, narinfo)
             check(status == 200 and b"Sig: probe:" in body, "real upload lacks signed narinfo")
             target = ROOT / (version + "-" + mode + "-unpacked")
             command(["nix", "copy", "--from", f"https://cache:{native_port}", "--to", "local?root=" + str(target),
-                     "--option", "trusted-public-keys", read("signing.pub"), "--option", "require-sigs", "true", output], env=env)
+                     "--option", "trusted-public-keys", read("signing.pub"), "--option", "require-sigs", "true", output], env=env, stage="publication-signed-copy")
             check((target / output.lstrip("/") / "proof").read_bytes() == proof, "authoritative NAR unpack differs")
+            if version == "v18":
+                padding = (target / output.lstrip("/") / "multipart-padding").read_bytes()
+                check(padding == bytes(11 * 1024 * 1024), "authoritative multipart padding differs")
             wrong_root = ROOT / (version + "-" + mode + "-wrong-signature")
             command(["nix", "copy", "--from", f"https://cache:{native_port}", "--to", "local?root=" + str(wrong_root),
                      "--option", "trusted-public-keys", untrusted_key, "--option", "require-sigs", "true", output],
-                    env=env, success=False)
+                     env=env, success=False, stage="publication-wrong-signature")
             check(not (wrong_root / output.lstrip("/")).exists(), "wrong key imported authoritative NAR")
             for bad in ("token", "subject"):
                 rejected, _ = build_output(version + "-" + mode + "-bad-" + bad)
@@ -716,9 +782,11 @@ def publication():
                 check(native_request(native_port, rejected_info)[0] == 404, "negative CLI path already cached")
                 bad_auth = (["--auth-token-path", str(ROOT / "wrong-token")] if bad == "token" else
                             ["--client-cert", str(ROOT / "read.crt"), "--client-key", str(ROOT / "read.key")])
-                command(base + bad_auth + [rejected], env=env, success=False)
+                command(base + bad_auth + [rejected], env=env, success=False, stage="publication-denied-push")
                 check(native_request(native_port, rejected_info)[0] == 404, "negative CLI silently published fresh path")
     print("Separate genuine CLI publication and signature-required NAR unpack passed", flush=True)
+    print(json.dumps({"phase": "publication", "result": "passed", "authorized_pushes": 4,
+                      "signed_copies": 4, "wrong_signature_denials": 4, "denied_pushes": 8}), flush=True)
 
 
 if __name__ == "__main__":

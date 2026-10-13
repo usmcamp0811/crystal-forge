@@ -118,6 +118,11 @@ The UI shows three **Verified** results while **Object publication** remains
 **Untested**. Verification establishes protected route/method access only.
 It does not prove uploads, signing, S3 permission or publication.
 
+The first write-panel row, **API reachable**, displays `write_api_reachable`:
+valid public API metadata establishes reachability, not write permission.
+**Write authorization** separately reports protected route/method evidence.
+**Object publication** remains **Untested**; neither row proves an upload.
+
 The same native 1.6 endpoint exercises selected token and selected write mTLS
 plus credential-omission controls. Token-mode positives use the actual native
 root, not the mTLS-only relay that drops Bearer. Read mTLS is tested independently. A read
@@ -146,6 +151,18 @@ An unchanged Edit is clean; field/scope changes and reverts use the canonical
 baseline. A same-mode click and an untouched nested-dialog close retain selected
 credentials and evidence. Write/read observations have independent provenance;
 a delayed old denial cannot overwrite a fresh editor's verified generation.
+
+Switching a new Add draft to Niks3 mounts a dedicated editor. Retained common
+name, enabled state and loaded environment scope initialize its clean baseline.
+Generic type-specific URLs remain in their own drafts; they do not become Niks3
+read settings. Clean means unchanged from that editor's initial draft, not saved
+on the server. Generic **Unsaved draft** and **Set** labels describe validation,
+not persistence or the Niks3 dirty comparison. The browser waits for editable
+controls and loaded scope, requires no initial **Unsaved changes** badge, adds
+one character to the name and requires the badge, then restores the exact name
+and requires clean state. Later field, scope and credential assertions continue
+to exercise changes against the immutable baseline.
+
 Canonical scope ordering uses two existing fixture environments. The workflow
 temporarily assigns both actual UUIDs to its own disabled clone, rebuilds the
 same membership in reverse UI order, and requires clean Edit state. The raw
@@ -795,3 +812,18 @@ introduced. Selection needs no `--impure` or host environment setting. CI uses t
 existing scoped public-cache wrapper and copies the result's screenshots into
 `web-ui-screenshots/`. The separate full Web UI job retains its existing policy.
 Final-source compilation, browser execution, and screenshot evidence are pending CI.
+
+Run the same blocking alias locally with the scoped public-cache policy and a
+GC-rooted artifact output:
+
+```sh
+sh packages/ci/public-cache-build.sh \
+  --out-link /tmp/opencode/task470-niks3-ui-repaired -L \
+  .#checks.x86_64-linux.niks3-ui --max-jobs 1 --cores 2
+```
+
+Verify that the output path is unused before the first run. Keep the output link
+until review and artifact upload finish. Screenshots and observer proof files
+are under `/tmp/opencode/task470-niks3-ui-repaired/screenshots/`. Retain raw build
+logs privately with mode `0600`. A local passing result does not establish
+exact-head CI success or approve new visual baselines.

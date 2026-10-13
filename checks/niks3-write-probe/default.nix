@@ -49,7 +49,9 @@ in assert pkgs.crystal-forge.default.niks3.version == "1.6.0"; pkgs.testers.runN
         accessKey = "GK0123456789abcdef01234567";
         importCredentials = true;
       })];
-      virtualisation = {useNixStoreImage = true; writableStore = true; memorySize = 3072; cores = 2;};
+      # Two native Go servers share Garage and PostgreSQL, so this fixture needs
+      # 3072 MiB instead of the imported single-cache node's 2048 MiB allocation.
+      virtualisation = {useNixStoreImage = true; writableStore = true; memorySize = lib.mkForce 3072; cores = 2;};
       environment.systemPackages = [python pkgs.busybox pkgs.crystal-forge.default.niks3 pkgs.nix-eval-jobs.nix];
       environment.etc."niks3-write-probe.py".source = script;
       networking.hosts."127.0.0.1" = ["cache"];
@@ -57,6 +59,9 @@ in assert pkgs.crystal-forge.default.niks3.version == "1.6.0"; pkgs.testers.runN
       # Native invalid-token previews are an upstream limitation. Do not export
       # provider journals; do not weaken AuthMiddleware or its logging level.
       systemd.services.garage.environment.RUST_LOG = lib.mkForce "error";
+      # Native invalid-token previews must stay in guest journals. The test
+      # instrumentation otherwise forwards those journals to the serial log.
+      services.journald.extraConfig = lib.mkForce "ForwardToConsole=no";
       users.users.niks3 = {isSystemUser = true; group = "niks3";};
       users.groups.niks3 = {};
       services.postgresql = {
@@ -80,6 +85,12 @@ in assert pkgs.crystal-forge.default.niks3.version == "1.6.0"; pkgs.testers.runN
       };
       systemd.services.niks3 = native pkgs.crystal-forge.default.niks3 "niks3" 5751 9746;
       systemd.services.niks3-v18 = native statsNiks3 "niks3-v18" 5758 9748;
+      # Nginx runs as a different user. Keep the source directory private and
+      # let systemd supply only its certificate and key to that service.
+      systemd.services.nginx.serviceConfig.LoadCredential = [
+        "s3.crt:/run/niks3-probe/s3.crt"
+        "s3.key:/run/niks3-probe/s3.key"
+      ];
       systemd.services.probe-observer = {
         wantedBy = ["multi-user.target"];
         after = ["niks3.service" "niks3-v18.service"];
@@ -96,12 +107,14 @@ in assert pkgs.crystal-forge.default.niks3.version == "1.6.0"; pkgs.testers.runN
         virtualHosts.s3 = {
           addSSL = true;
           listen = [{addr = "0.0.0.0"; port = 3904; ssl = true;}];
-          sslCertificate = "/run/niks3-probe/s3.crt";
-          sslCertificateKey = "/run/niks3-probe/s3.key";
+          sslCertificate = "/run/credentials/nginx.service/s3.crt";
+          sslCertificateKey = "/run/credentials/nginx.service/s3.key";
           extraConfig = "access_log off; error_log /dev/null;";
           locations."/" = {
             proxyPass = "http://127.0.0.1:3900";
-            extraConfig = "proxy_set_header Host $http_host;";
+            # SigV4 signs the port-bearing authority. Bind this fixture's exact
+            # authority instead of forwarding a caller-controlled Host header.
+            extraConfig = "proxy_set_header Host cache:3904;";
           };
         };
       };
@@ -165,9 +178,9 @@ in assert pkgs.crystal-forge.default.niks3.version == "1.6.0"; pkgs.testers.runN
     server.wait_for_open_port(8000)
     cache.succeed("python /etc/niks3-write-probe.py native-contract")
     cache.succeed("python /etc/niks3-write-probe.py baseline")
-    server.succeed("python /etc/niks3-write-probe.py matrix")
+    print(server.succeed("python /etc/niks3-write-probe.py matrix"))
     cache.succeed("python /etc/niks3-write-probe.py unchanged")
     # This is fixture publication AFTER the non-mutating matrix, never Test.
-    cache.succeed("python /etc/niks3-write-probe.py publication")
+    print(cache.succeed("python /etc/niks3-write-probe.py publication"))
   '';
 }

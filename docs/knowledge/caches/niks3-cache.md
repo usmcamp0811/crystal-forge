@@ -541,6 +541,12 @@ Write scope first validates selected credentials locally, then requests public
 cache configuration without Bearer authentication. It needs no configured read
 URL or signing keys. Protected `GET /api/gc/status` observes authentication;
 credential-omission controls distinguish authenticated access from public access.
+In mTLS mode only, omission can match nginx's complete stock certificate-required
+HTTP 400 page with `text/html` and a hidden or bounded numeric-version footer.
+Generic HTTP 400, unrelated HTML, truncated pages, and token-mode HTML controls
+remain inconclusive. This exception proves an ingress certificate gate, not
+native Go subject enforcement. Native positive-handler fingerprints remain
+required for both protected requests.
 Only a known protected-handler contract permits `POST /api/pending_closures`
 with the deliberately invalid body `{}`. The audited upstream 1.6.0 and 1.8.0
 handlers reject that body with the exact `missing closure key` response before

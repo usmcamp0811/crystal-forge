@@ -11,8 +11,8 @@ PostgreSQL, local chunk storage, native `atticd` migrations, and the packaged
 `pkgs.crystal-forge.attic-metrics` adapter. The Crystal Forge VM owns a separate
 PostgreSQL cluster and runs the packaged core server with local authentication.
 No host database or long-running preview participates. The retained-credential
-extension is source-only in this delegation. Its VM execution and Rust example
-compilation remain pending; the assertions below describe the check contract.
+extension executes the real stored-token API lifecycle and Rust publication
+example in those isolated guests. The assertions below describe the check contract.
 
 ## Native fixture and accounting
 
@@ -177,6 +177,11 @@ the parent browser workflow owns rendering and dialog interaction evidence.
 Metrics independence covers an absent mapping, offline adapter authority,
 wrong separate token, malformed separate token, explicit access denial, and a
 missing separate token file. Malformed token bytes are restored in `finally`.
+Fixture ID 5 targets port 9 outside the Attic VM's permitted ingress ports.
+The firewall silently drops that connection. CF must return `unavailable` with
+exact reason `deadline_exceeded` under its existing eight-second observation
+budget. This fixture does not model a fast TCP connection refusal. The deadline
+failure leaves all inventory totals null and does not change retained upload auth.
 Every case still passes the genuine stored private-cache Test. Conversely, the
 unauthorized private-cache JWT fails native Test while valid separate metrics
 authority returns real inventory. Revoking the adapter's native NAR-column grant

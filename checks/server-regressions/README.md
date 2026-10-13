@@ -338,7 +338,7 @@ discovery does not invoke the protected write-route probe. Actual native TLS
 acceptance is covered by the separate owner-managed VM fixture; the discovery
 regressions prove transport projection and state.
 
-The 19 Niks3 write-probe regressions guard the supported v1.6.0/v1.8.0 handler
+The 21 Niks3 write-probe regressions guard the supported v1.6.0/v1.8.0 handler
 contract without changing the production package pin. Exact status, media type,
 body fingerprints, and typed GC snapshot fields must match. A successful protected
 GET and a discriminating credential-omission control permit one invalid `{}` POST
@@ -389,7 +389,7 @@ projection, protected token files and alphabet boundaries, bounded responses,
 and refusal before file or network access. Native restricted-role and module
 lifecycle acceptance remains covered by the separate `attic-metrics` VM check.
 
-These 79 non-ignored tests run with `--exact --test-threads=1`:
+These 81 non-ignored tests run with `--exact --test-threads=1`:
 
 ```text
 queries::commits::partial_resource_failure_tests::partial_failure_diagnostic_uses_proven_counts_not_checkpoint_guesses
@@ -402,6 +402,8 @@ handlers::api::caches::basic_read_tests::niks3_basic_http_projection_and_plane_s
 handlers::api::caches::niks3_write_probe::tests::native_gc_schema_rejects_generic_json_and_invalid_typed_fields
 handlers::api::caches::niks3_write_probe::tests::exact_status_media_type_and_body_are_required
 handlers::api::caches::niks3_write_probe::tests::mtls_control_requires_a_specific_identity_alert_not_any_transport_failure
+handlers::api::caches::niks3_write_probe::tests::nginx_omission_requires_complete_page_and_only_opens_mtls_control
+handlers::api::caches::niks3_write_probe::tests::nginx_ingress_control_still_requires_both_native_handler_fingerprints
 handlers::api::caches::niks3_write_probe::tests::native_token_route_pair_proves_access_and_sends_only_invalid_bodies
 handlers::api::caches::niks3_write_probe::tests::no_post_follows_unknown_get_or_non_discriminating_authentication_control
 handlers::api::caches::niks3_write_probe::tests::definite_native_token_denial_is_false_not_untested

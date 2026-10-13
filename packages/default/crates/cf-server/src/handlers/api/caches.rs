@@ -165,7 +165,7 @@ fn diagnostic(code: &str) -> ProbeDiagnostic {
         ),
         "write_route_verified_certificate_gate" => (
             "write_route_verified_certificate_gate",
-            "Protected API and write-handler access accepted the client identity; omission was rejected at TLS. Native subject enforcement, upload and publication: Untested.",
+            "Protected API and write-handler access accepted the client identity; omission was rejected by a certificate-required TLS or ingress gate. Native subject enforcement, upload and publication: Untested.",
         ),
         "read_access_verified" => (
             "read_access_verified",
@@ -1986,8 +1986,11 @@ pub async fn create_cache_destination(
 /// the control permits `POST /api/pending_closures` with `{}` and its control.
 /// Exact native validation 400 proves handler access without a valid upload.
 /// `write_probe_diagnostic_code` retains the per-write outcome when another plane
-/// fails. Certificate-required TLS controls establish accepted protected sessions
-/// but do not establish native subject enforcement. One eight-second deadline
+/// fails. Certificate-required TLS controls or the complete stock nginx HTTP 400
+/// omission page establish accepted protected sessions only in mTLS mode. The
+/// nginx page requires `text/html` and an exact hidden or bounded numeric-version
+/// footer. Generic errors remain inconclusive. These ingress controls do not
+/// establish native subject enforcement. One eight-second deadline
 /// includes DNS, client preparation, requests and bounded response bodies.
 /// Local Bearer header validation precedes every metadata/DNS/read operation.
 /// Explicit Niks3 read CA roots replace ambient and built-in roots; omission uses

@@ -138,7 +138,7 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
           assert.equal(result.write_api_reachable, true);
           assert.equal(result.read_access_valid, null);
           assert(body.push_to == null && body.niks3_read_client_key == null && body.niks3_read_basic_password == null);
-          for (const label of ["Write API access", "Authentication", "Write authorization"]) await expect(outer.getByText(label, { exact: true }).locator("..")).toContainText("Verified");
+          for (const label of ["API reachable", "Authentication", "Write authorization"]) await expect(outer.getByText(label, { exact: true }).locator("..")).toContainText("Verified");
           await expect(outer.getByText("Object publication", { exact: true }).locator("..")).toContainText("Untested");
         } else {
           assert.equal(result.write_authn_valid, null);
@@ -257,7 +257,7 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
       assert.deepEqual(reply.public_keys, source.public_keys);
       assert(reply.write_auth_valid == null, "Discovery cannot prove write authorization");
       await expect(outer).toContainText("Discovery successful");
-      await expect(outer.locator("header")).toHaveText(priorDirty);
+      await expect(outer.locator("header")).toHaveText(priorDirty, { useInnerText: true });
       await outer.getByRole("button", { name: "Read / Pull", exact: true }).click();
       await expect(outer.getByLabel("Read / substituter URL", { exact: true })).toHaveValue(priorRead);
       await outer.getByRole("button", { name: "Trust", exact: true }).click();
@@ -544,7 +544,7 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
         assert(patch[field] == null, "Discovery sends only the selected write transport");
       if (id != null) assert(patch.niks3_write_client_key == null, "retained Edit Discovery omits the private key");
       await expect(outer).toContainText("Discovery successful");
-      await expect(outer.locator("header")).toHaveText(priorDirty);
+      await expect(outer.locator("header")).toHaveText(priorDirty, { useInnerText: true });
       await rail("Read / Pull");
       await expect(outer.getByLabel("Read / substituter URL", { exact: true })).toHaveValue(priorRead);
       await rail("Trust");
@@ -577,7 +577,7 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
         assert.equal(result.read_access_valid, null);
         assert(patch.push_to == null && patch.niks3_read_basic_username == null && patch.niks3_read_basic_password == null);
         assert(patch.niks3_auth_token == null);
-        for (const label of ["Write API access", "Authentication", "Write authorization"]) await expect(outer.getByText(label, { exact: true }).locator("..")).toContainText("Verified");
+        for (const label of ["API reachable", "Authentication", "Write authorization"]) await expect(outer.getByText(label, { exact: true }).locator("..")).toContainText("Verified");
         await expect(outer.getByText("Object publication", { exact: true }).locator("..")).toContainText("Untested");
       } else {
         assert.equal(result.write_authn_valid, null);

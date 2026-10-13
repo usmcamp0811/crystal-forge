@@ -835,12 +835,46 @@ def save_split_ca(server, cache_id, expected_ca_digest, expected_raw_digest):
 
     Retained client identity and Basic read credentials are omitted. Response
     bytes and session cookies stay in the guest; only safe evidence is emitted.
+    Probe results are projected before assertions. Protected handler access is
+    distinct from the later CLI upload, storage and publication proofs.
     """
     source = f"""
-import hashlib,http.client,json,pathlib,secrets,ssl,subprocess
+import hashlib,http.client,json,pathlib,re,secrets,ssl,subprocess
 from http.cookies import SimpleCookie
 stage,http_status = 'registration',None
 replacement_projection = None
+omission_projection = None
+probe_results = []
+allowed_codes = ('ca_bundle_framing_invalid','ca_certificate_invalid','ca_bundle_content_unsupported',
+    'ca_bundle_trust_ambiguous','ca_bundle_empty','ca_bundle_too_large','client_identity_invalid',
+    'client_certificate_invalid','client_private_key_invalid','client_identity_mismatch',
+    'tls_verification_failed','dns_or_connection_failed','http_response_failed',
+    'invalid_niks3_metadata','target_policy_rejected','probe_timeout','probe_failed',
+    'proxy_access_denied','method_rejected','mtls_subject_rejected','token_rejected',
+    'unexpected_write_response','route_unsupported','auth_control_inconclusive',
+    'probe_response_too_large','write_credentials_missing','write_credentials_invalid',
+    'write_route_verified','write_route_verified_certificate_gate','read_access_verified')
+def probe_projection(result):
+    # Export only typed evidence and fixed labels. All other response fields,
+    # including provider prose and public metadata, remain private inputs.
+    value = result if type(result) is dict else {{}}
+    def boolean(field):
+        item = value.get(field)
+        return item if type(item) is bool else None
+    def code(field):
+        item = value.get(field)
+        return item if type(item) is str and item in allowed_codes else 'unknown'
+    scope = value.get('probe_scope')
+    status = value.get('status_code')
+    return {{'stage':stage,'probe_scope':scope if type(scope) is str and scope in ('read','write','all') else 'unknown',
+        'status_code':status if type(status) is int and 100 <= status <= 599 else 'unknown',
+        'ok':boolean('ok'),'write_api_reachable':boolean('write_api_reachable'),
+        'write_authn_valid':boolean('write_authn_valid'),
+        'write_authorization_valid':boolean('write_authorization_valid'),
+        'write_auth_valid':boolean('write_auth_valid'),
+        'diagnostic_code':code('diagnostic_code'),
+        'write_probe_diagnostic_code':code('write_probe_diagnostic_code'),
+        'tls_verification_failed':value.get('diagnostic_code') == 'tls_verification_failed'}}
 try:
     connection = http.client.HTTPSConnection('server',context=ssl.create_default_context(),timeout=12)
     cookies = {{}}
@@ -859,8 +893,14 @@ try:
                 parsed.load(value)
                 cookies.update({{k:v.value for k,v in parsed.items()}})
         data = response.read(1024 * 1024)
+        try:
+            result = json.loads(data)
+        except ValueError:
+            result = None
+        if path.endswith('/test-credentials'):
+            probe_results.append(probe_projection(result))
         assert response.status in expected, 'synthetic admin API request failed'
-        result = json.loads(data)
+        assert result is not None, 'synthetic admin API JSON unavailable'
         assert b'PRIVATE KEY' not in data, 'API exposed private key'
         return result
     password = secrets.token_hex(24)
@@ -903,19 +943,39 @@ try:
     request('POST',path+'/test-credentials',{{'probe_scope':'write','niks3_write_client_key':(pki/'write-client-2.key').read_text()}},expected=(400,))
     assert raw_state() == baseline, 'mismatched client identity Test mutated raw destination or scope'
     stage = 'ambient_trust'
+    # Measure the genuine ingress omission response without an identity or
+    # token. Exact body matching stays private; no header value is exported.
+    omitted = http.client.HTTPSConnection('push-cache.test',5754,
+        context=ssl.create_default_context(cafile=str(pki/'server-ca-a.crt')),timeout=8)
+    try:
+        omitted.request('GET','/api/gc/status')
+        response = omitted.getresponse()
+        status = response.status
+        media = response.getheader('Content-Type')
+        body = response.read(65537)
+        nginx_head = (b'<html>\\r\\n<head><title>400 No required SSL certificate was sent</title></head>\\r\\n'
+            b'<body>\\r\\n<center><h1>400 Bad Request</h1></center>\\r\\n'
+            b'<center>No required SSL certificate was sent</center>\\r\\n')
+        nginx_tail = rb'<hr><center>nginx(?:/[0-9]{{1,3}}\\.[0-9]{{1,3}}\\.[0-9]{{1,3}})?</center>\\r\\n</body>\\r\\n</html>\\r\\n'
+        fingerprint = 'other'
+        if status == 401 and media == 'text/plain; charset=utf-8' and body == b'Unauthorized\\n':
+            fingerprint = 'native401Unauthorized'
+        elif status == 400 and media == 'text/html' and body.startswith(nginx_head) and re.fullmatch(nginx_tail,body[len(nginx_head):]):
+            fingerprint = 'nginx400certrequired'
+        omission_projection = {{'status':status,'mime_class':'html' if media == 'text/html' else 'plain' if media == 'text/plain; charset=utf-8' else 'other',
+            'fingerprint':fingerprint}}
+    finally:
+        omitted.close()
     ambient = request('POST',path+'/test-credentials',{{'probe_scope':'write','clear_niks3_write_ca_cert':True}})
-    assert ambient['ok'] and ambient['write_api_reachable'] is True and ambient['discovery_valid'] is True
-    assert ambient['write_auth_valid'] is None and ambient['write_authn_valid'] is None and ambient['write_authorization_valid'] is None
+    assert ambient['ok'] is True and ambient['write_api_reachable'] is True and ambient['discovery_valid'] is True
+    assert ambient['write_auth_valid'] is True and ambient['write_authn_valid'] is True and ambient['write_authorization_valid'] is True
+    assert ambient['probe_scope'] == 'write' and ambient['status_code'] == 400
+    assert ambient['write_probe_diagnostic_code'] == 'write_route_verified_certificate_gate'
     assert raw_state() == baseline, 'ambient trust Test mutated raw destination or scope'
     stage = 'custom_trust_replacement'
     replacement = request('POST',path+'/test-credentials',{{'probe_scope':'write','niks3_write_ca_cert':(pki/'server-ca-b.crt').read_text()}})
     # Keep finite response fields for the one success or failure JSON record.
     # Provider prose, URLs, PEM, request bodies and exceptions stay private.
-    allowed_codes = ('ca_bundle_framing_invalid','ca_certificate_invalid','ca_bundle_content_unsupported',
-        'ca_bundle_trust_ambiguous','ca_bundle_empty','ca_bundle_too_large','client_identity_invalid',
-        'client_certificate_invalid','client_private_key_invalid','client_identity_mismatch',
-        'tls_verification_failed','dns_or_connection_failed','http_response_failed',
-        'invalid_niks3_metadata','target_policy_rejected','probe_timeout','probe_failed')
     code = replacement.get('diagnostic_code')
     reachable = replacement.get('write_api_reachable')
     replacement_projection = {{'ok':replacement.get('ok') if type(replacement.get('ok')) is bool else False,
@@ -927,23 +987,47 @@ try:
     assert raw_state() == baseline, 'explicit B-only Test mutated raw destination or scope'
     stage = 'write_metadata'
     probe = request('POST',path+'/test-credentials',{{'probe_scope':'write'}})
-    assert probe['ok'] and probe['write_api_reachable'] is True and probe['discovery_valid'] is True
-    assert probe['write_auth_valid'] is None and probe['write_authorization_valid'] is None
-    assert probe['write_authn_valid'] is None, 'public metadata cannot prove write authentication'
-    assert raw_state() == baseline, 'metadata Test mutated raw destination or scope'
+    assert probe['ok'] is True and probe['write_api_reachable'] is True and probe['discovery_valid'] is True
+    assert probe['write_auth_valid'] is True and probe['write_authorization_valid'] is True and probe['write_authn_valid'] is True
+    assert probe['probe_scope'] == 'write' and probe['status_code'] == 400
+    assert probe['write_probe_diagnostic_code'] == 'write_route_verified_certificate_gate'
+    assert raw_state() == baseline, 'protected write Test mutated raw destination or scope'
+    stage = 'all_planes'
+    combined = request('POST',path+'/test-credentials',{{'probe_scope':'all'}})
+    assert combined['ok'] is True and combined['probe_scope'] == 'all'
+    assert combined['write_api_reachable'] is True and combined['discovery_valid'] is True
+    assert combined['write_authn_valid'] is True and combined['write_authorization_valid'] is True and combined['write_auth_valid'] is True
+    assert combined['read_access_valid'] is True and combined['signing_keys_valid'] is True
+    assert combined['write_probe_diagnostic_code'] == 'write_route_verified_certificate_gate'
+    assert raw_state() == baseline, 'All Test mutated raw destination or scope'
+    stage = 'denied_write_identity'
+    # The existing C-issued wrong-subject identity passes ingress client trust.
+    # Public metadata remains reachable, but native bound-subject auth must fail.
+    denied = request('POST',path+'/test-credentials',{{'probe_scope':'write',
+        'niks3_write_client_cert':(pki/'wrong-subject.crt').read_text(),
+        'niks3_write_client_key':(pki/'wrong-subject.key').read_text()}})
+    assert denied['ok'] is False and denied['write_api_reachable'] is True and denied['discovery_valid'] is True
+    assert denied['write_authn_valid'] is False and denied['write_authorization_valid'] is False and denied['write_auth_valid'] is False
+    assert denied['probe_scope'] == 'write' and denied['status_code'] == 401
+    assert denied['write_probe_diagnostic_code'] == 'mtls_subject_rejected'
+    assert raw_state() == baseline, 'denied identity Test mutated raw destination or scope'
     print(json.dumps({{'saved_ca_sha256':hashlib.sha256(canonical.encode()).hexdigest(),
                       'raw_ordinary_roots':124,'raw_trusted_blocks':172,'saved_ordinary_roots':124,
                       'raw_annotation_lines':605,'trusted_blocks_ignored':172,'trusted_roots_promoted':0,
                       'ambient_metadata_valid':True,'b_only_replaces_ambient':True,
                       'replacement_diagnostic':'tls_verification_failed','saved_metadata_valid':True,
                       'invalid_ca_rejected':True,'mismatched_identity_rejected':True,
-                      'retained_flags':True,'redacted':True,'metadata_only':True,
-                      'trust_negative':replacement_projection}}))
+                      'retained_flags':True,'redacted':True,'protected_handler_access_only':True,
+                      'all_planes_valid':True,'denied_write_identity':True,'raw_state_unchanged':True,
+                      'probe_calls':len(probe_results),
+                      'trust_negative':replacement_projection,'probe_results':probe_results,
+                      'omission_control':omission_projection}}))
 except Exception as error:
     # Never let an HTTP/TLS error or response-body traceback export private data.
     print(json.dumps({{'saved_ca_api_proof_failed':True,'stage':stage,'http_status':http_status,
         'tls_verification_failed':isinstance(error,ssl.SSLCertVerificationError),
-        'trust_negative':replacement_projection}}))
+        'trust_negative':replacement_projection,'probe_results':probe_results,
+        'omission_control':omission_projection}}))
     raise SystemExit(1)
 """
     return json.loads(server.succeed("timeout 60 python3 -c " + shlex.quote(source), timeout=65))
@@ -1900,13 +1984,26 @@ assert (pki / 'client-ca-c.crt').read_bytes().strip() not in system
             assert {k: v for k, v in persisted.items() if k not in ("niks3_write_ca_cert", "updated_at")} == {
                 k: v for k, v in baseline.items() if k not in ("niks3_write_ca_cert", "updated_at")}
             assert sql("SELECT * FROM cache_destination_environments WHERE cache_destination_id=%s ORDER BY environment_id", (cache_id,)) == scope_before
-            # The scoped Test adds only metadata GETs, never a write operation.
+            # Protected probes add only the native invalid-body validation POSTs.
+            # Exact ordering and identity flags distinguish those calls from a
+            # valid upload. Local validation and B-only trust make no API call.
             api_delta = production_observations(production, "api")[api_baseline:]
-            assert len(api_delta) == 2 and all(record["status"] == 200 for record in api_delta), "unexpected provider contact or metadata Test missing"
-            assert not any(record["post"] or record["put"] for record in api_delta)
+            positive = [(False, True, True, 200), (False, True, True, 404),
+                        (False, False, False, 400), (True, True, True, 400),
+                        (True, False, False, 400)]
+            expected_api = ([(False, False, False, 400)] + positive * 3
+                            + [(False, True, False, 200), (False, True, False, 401),
+                               (False, False, False, 400)])
+            observed_api = [(record["post"], record["client_certificate"],
+                             record["write_subject"], record["status"]) for record in api_delta]
+            assert observed_api == expected_api, "unexpected protected probe choreography"
+            assert not any(record["put"] or record["authorization"] for record in api_delta)
             assert not any(record["put"] or record["post"] for record in
                            production_observations(production, "s3")[s3_baseline:])
             print("Niks3 mtls-split: saved synthetic CA-only correction " + json.dumps(saved, sort_keys=True))
+            print("Niks3 mtls-split: protected probe counts " + json.dumps({
+                "api_requests": len(api_delta), "invalid_validation_posts": sum(record["post"] for record in api_delta),
+                "api_puts": 0, "s3_writes": 0, "raw_cf_state_unchanged": True}, sort_keys=True))
         derivation_id = sql("""INSERT INTO derivations
             (commit_id,derivation_type,derivation_name,derivation_target,derivation_path,
              store_path,status_id,cf_agent_enabled,policy_requirements_met,scheduled_at)

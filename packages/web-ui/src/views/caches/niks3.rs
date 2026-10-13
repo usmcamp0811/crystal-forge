@@ -1206,7 +1206,7 @@ pub(super) fn Niks3DestinationForm(
                             } }
                             CredentialRow { write: true, form, choice: write_choice, destination: destination.clone(), on_open: move |_| modal.set(Some(true)) }
                             div { class: "n3-plane", div { class: "n3-plane-head", strong { "Write API" } button { class: "btn btn-ghost focus-ring xs", disabled: !https(&form().server_url), onclick: move |_| test.call(Niks3ProbeScope::Write), if busy() == Some("write-test") { "Testing…" } else { "Test write API" } } }
-                                Evidence { label: "Write API access", value: write_result().and_then(|r| r.write_api_reachable), running: busy() == Some("write-test") }
+                                Evidence { label: "API reachable", value: write_result().and_then(|r| r.write_api_reachable), running: busy() == Some("write-test") }
                                 Evidence { label: "Authentication", value: write_result().and_then(|r| r.write_authn_valid), running: busy() == Some("write-test") }
                                 Evidence { label: "Write authorization", value: write_result().and_then(|r| r.write_authorization_valid), running: busy() == Some("write-test") }
                                 Evidence { label: "Object publication", value: None, running: false }

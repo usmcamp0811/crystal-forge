@@ -464,10 +464,38 @@ def metrics(session, destination_id):
     return request(session, "GET", "http://127.0.0.1:8000/api/v1/caches/" + str(destination_id) + "/metrics")
 
 
-def absent(response, status, reason):
-    assert response.status_code == 200 and response.headers.get("Cache-Control") == "no-store"
-    value = response.json()
-    assert value["status"] == status and value["reason_code"] == reason, "wrong static metric outcome"
+def absent(response, status, reason, destination_id):
+    """Checks absent totals and reports only validated outcome labels on mismatch.
+
+    Invalid JSON and non-object responses remain unknown. Provider response
+    bytes, headers and exception text never enter the diagnostic boundary.
+    """
+    assert type(destination_id) is int, "metric fixture ID must be numeric"
+    statuses = {"available", "unsupported", "unavailable", "error"}
+    reasons = {"native_stats", "attic_inventory", "disabled", "requires_admin",
+               "provider_totals_unsupported", "unsupported_cache_type",
+               "destination_unavailable", "invalid_configuration",
+               "transport_unavailable", "response_unavailable", "invalid_stats",
+               "stats_too_large", "endpoint_unavailable", "access_denied",
+               "unexpected_status", "deadline_exceeded"}
+    try:
+        value = response.json()
+    except ValueError:
+        value = {}
+    observed = value if type(value) is dict else {}
+    observed_status = observed.get("status")
+    observed_reason = observed.get("reason_code")
+    if (response.status_code != 200 or observed_status != status
+            or observed_reason != reason):
+        evidence = {"fixture_id": destination_id,
+                    "expected_status": status if type(status) is str and status in statuses else "unknown",
+                    "expected_reason": reason if type(reason) is str and reason in reasons else "unknown",
+                    "observed_status": observed_status if type(observed_status) is str and observed_status in statuses else "unknown",
+                    "observed_reason": observed_reason if type(observed_reason) is str and observed_reason in reasons else "unknown",
+                    "http_status": response.status_code if type(response.status_code) is int and 100 <= response.status_code <= 599 else "unknown"}
+        print("ATTIC_METRICS " + json.dumps(evidence, sort_keys=True), flush=True)
+        raise AssertionError("wrong static metric outcome for fixture " + str(destination_id))
+    assert response.headers.get("Cache-Control") == "no-store"
     assert set(value) == {"status", "reason_code", "storage_bytes", "storage_bytes_basis", "object_count",
                           "object_count_basis", "path_count", "measured_at"}
     assert all(value[field] is None for field in set(value) - {"status", "reason_code"}), "unknown totals became values"
@@ -504,7 +532,7 @@ def cf_verify(totals):
             (4708, "unavailable", "endpoint_unavailable"), (4709, "error", "invalid_stats"),
             (4710, "error", "invalid_stats"), (4711, "error", "invalid_stats"),
             (4712, "unavailable", "access_denied"), (4713, "error", "invalid_configuration")):
-        absent(metrics(session, destination_id), status, reason)
+        absent(metrics(session, destination_id), status, reason, destination_id)
 
 
 def cf_gates():
@@ -514,12 +542,12 @@ def cf_gates():
     path = Path("/run/cf-metrics-tokens/populated")
     path.rename(path.with_suffix(".held"))
     try:
-        absent(metrics(admin, 4701), "error", "invalid_configuration")
-        absent(metrics(viewer, 4701), "unavailable", "requires_admin")
-        absent(metrics(admin, 4704), "unavailable", "disabled")
-        absent(metrics(viewer, 4704), "unavailable", "disabled")
-        absent(metrics(admin, 4705), "unsupported", "provider_totals_unsupported")
-        absent(metrics(viewer, 4705), "unsupported", "provider_totals_unsupported")
+        absent(metrics(admin, 4701), "error", "invalid_configuration", 4701)
+        absent(metrics(viewer, 4701), "unavailable", "requires_admin", 4701)
+        absent(metrics(admin, 4704), "unavailable", "disabled", 4704)
+        absent(metrics(viewer, 4704), "unavailable", "disabled", 4704)
+        absent(metrics(admin, 4705), "unsupported", "provider_totals_unsupported", 4705)
+        absent(metrics(viewer, 4705), "unsupported", "provider_totals_unsupported", 4705)
         assert metrics(client(), 4701).status_code == 401
         assert metrics(client(), 999999).status_code == 401
         assert metrics(unassigned, 4701).status_code == 403
@@ -536,7 +564,7 @@ def cf_gates():
         for invalid in (original + b"\n", original[:-1] + b".", original[:-1] + b"+",
                         b"x" * 31, b"x" * 1025):
             boundary_path.write_bytes(invalid)
-            absent(metrics(admin, 4716), "error", "invalid_configuration")
+            absent(metrics(admin, 4716), "error", "invalid_configuration", 4716)
     finally:
         boundary_path.write_bytes(original)
 
@@ -758,10 +786,13 @@ def lifecycle_metrics(published=False):
     session = cf_api()
     with db("crystal_forge") as connection:
         before = raw_cf(connection)
+        # ID 5 targets port 9 outside the native VM's permitted ingress ports.
+        # The firewall silently drops the connection, so the existing eight-
+        # second observation deadline expires instead of a fast TCP refusal.
         for identity, status, reason in ((4, "unsupported", "provider_totals_unsupported"),
-                (5, "unavailable", "transport_unavailable"), (6, "unavailable", "access_denied"),
+                (5, "unavailable", "deadline_exceeded"), (6, "unavailable", "access_denied"),
                 (7, "unavailable", "access_denied"), (8, "error", "invalid_configuration")):
-            absent(metrics(session, identity), status, reason)
+            absent(metrics(session, identity), status, reason, identity)
             retained_test(session, identity)
         for identity in (1, 2, 3):
             value = metrics(session, identity).json()
@@ -771,7 +802,7 @@ def lifecycle_metrics(published=False):
         original = path.read_bytes()
         try:
             path.write_bytes(b"invalid-format.")
-            absent(metrics(session, 2), "error", "invalid_configuration")
+            absent(metrics(session, 2), "error", "invalid_configuration", 2)
             retained_test(session, 2)
         finally:
             path.write_bytes(original)
@@ -788,7 +819,7 @@ def lifecycle_unavailable():
     with db("crystal_forge") as connection:
         before = raw_cf(connection)
         session = cf_api()
-        absent(metrics(session, 2), "error", "unexpected_status")
+        absent(metrics(session, 2), "error", "unexpected_status", 2)
         retained_test(session, 2)
         assert raw_cf(connection) == before, "provider DB denial changed stored upload JWT"
 
@@ -888,7 +919,7 @@ def main():
         "attic-setup": attic_setup, "attic-verify": attic_verify, "cf-tokens": cf_tokens,
         "module-credentials": module_credentials, "module-lifecycle": module_lifecycle,
         "cf-setup": cf_setup, "cf-gates": cf_gates, "corrupt": corrupt,
-        "restore": lambda: corrupt(True), "cf-corrupt": lambda: absent(metrics(cf_api(), 4701), "error", "unexpected_status"),
+        "restore": lambda: corrupt(True), "cf-corrupt": lambda: absent(metrics(cf_api(), 4701), "error", "unexpected_status", 4701),
         "final-attic": final_attic, "final-cf": final_cf,
         "lifecycle-attic-setup": lifecycle_attic_setup, "lifecycle-cf-setup": lifecycle_cf_setup,
         "lifecycle-readonly": lifecycle_readonly, "lifecycle-save": lifecycle_save,
