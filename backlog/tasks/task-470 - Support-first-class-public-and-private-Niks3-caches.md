@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-13 13:16'
+updated_date: '2026-10-13 19:32'
 labels: []
 dependencies: []
 references:
@@ -260,6 +260,8 @@ Exact-head CI repair requested for269b58ad/pipeline2940782379. Remote verified u
 Implementation/verification plan: smallestmemorypriority fix onlynewcachefixture if3GiBmulti-nativeallocationjustified; evaluate actual NixOSderivation then runnativegatefully. AddsafeCA/result diagnostics and verify actual positiveprotectedroute evidence before updating authorizedassertions, preservemetadata-only/CAnegative/identitydenial distinctions; runfullniks3-cache. Preservegenericdraft values across type-switch withnewNiki mountbaseline, assertclean mount then edit/revert/env/cred dirty behavior; fixapplication onlyifdemonstrated, keep native observerstrict andrunwholefocusedUI withrootedartifacts. AddAtticdiagnostics onlynumericID expected/observedstatus+reasonHTTP; firstrepro identifiesmismatch; correctfixture orcodefromactualevidence, thenfullmetrics lifecycle/publication/immutability. No security/signature/visualthreshold/assertion weakening. Fix anyadditionalfailures exposed bynative checks.
 
 Resource plan: host observed126GiB total/55GiB available/32CPU,swapunused. RunVMgates serially withmax-jobs1/cores2 andforeground deadlines; useexistingcommand-local bounded signedpubliccache/sourcefallback policy, rootartifactoutputforactualscreenshots. Lightweight source repairs maydelegate independently butno concurrentfullgate builds. Prior previewwaiverretained. Verify focused Rust/offline SQLx ifcodechanges +format/static/diff thenallfourfinal-statechecks,commit/pushnormal andinspectALLrequiredCIjobs throughdownstreamcoverage/complexity completion. No merge/deploy/prod access. Optionalfullbrowserred classifiedwithprecise baselineevidence limits; do notexpandintoeval/compliance/POAM redesign or claimallchecks green.
+
+User-authorized test-only CI2943655967/job17149150255 remediation at d0246e00: reproduce Linux ETXTBSY with an O_CLOEXEC fixture writer inherited across a controlled fork, after closing the parent writer. Keep the original evaluator fingerprint assertions and actual production probe. Move fixture writing into a dedicated shell child whose successful exit establishes writer closure; add same-package deterministic regression proving old inode refusal and child-written fixture execution. Change only builders.rs cfg(test) code; no production retry, packaging serialization, runtime evaluator changes, commits, pushes or CI triggers. Verify exact tests then normal-parallel server lib tests via nix develop .#sqlx with CARGO_BUILD_JOBS=2 and SQLX_OFFLINE=true.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
