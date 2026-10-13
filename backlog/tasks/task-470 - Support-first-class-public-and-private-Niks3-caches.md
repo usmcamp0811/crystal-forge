@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-13 03:06'
+updated_date: '2026-10-13 13:16'
 labels: []
 dependencies: []
 references:
@@ -254,6 +254,12 @@ UI plan: preserve actual modes/names/URLs/environments (mTLS/mTLS valid); align 
 Delegation ownership: backend Niks3 probe helper/server tests; frontend Niks3 editor/shared Niki state and DTO only; native fixture/browser workflow coordination separate. No competing host stack or production DB/credentials. New source/test changes committed/pushed normally after lightweight audit; inspect exact-head CI without merging or deploying. Do not report required native/browser checks/screenshots passed until actual CI evidence is available.
 
 Native write-probe CI delegation at e274f918: own new checks/niks3-write-probe/{default.nix,test.py,README.md} only; reuse native Garage/PostgreSQL fixture without default changes. Add real pinned 1.6 and exact existing web-ui 1.8 native protected-route proof, runtime-private credentials, actual admin retained/draft scoped CF API, domain/storage/raw-row immutability and separate authentic CLI publication controls. Parent owns backend/frontend/check registration/CI. User prohibits host builds/evaluation/tests/services; perform only light existing-binary Python syntax and diff checks and report native execution pending CI.
+
+Exact-head CI repair requested for269b58ad/pipeline2940782379. Remote verified unchanged/clean0/0. Complete traces inspected before edits: native write-probe17127883240 Nix memory priority collision2048/3072 beforeVM; niks3-cache17127883239 saved-CA ambient_trust metadata-era null-auth assertions fail aftersuccessfulHTTP200; niks3-ui17127883241 type-switch newlymountedbaseline clean vsstaleUnsaved assertion, observererror followsabort; attic-metrics17127883242 lifecycle_metrics failed8.4s butfixture/observedcodesunknown, diagnosebeforeexpectationchange. Optional17127883247 93passed51failed144; fulltrace/priorhistory classified separately, no currentdev passing144-workflowbaseline proven.
+
+Implementation/verification plan: smallestmemorypriority fix onlynewcachefixture if3GiBmulti-nativeallocationjustified; evaluate actual NixOSderivation then runnativegatefully. AddsafeCA/result diagnostics and verify actual positiveprotectedroute evidence before updating authorizedassertions, preservemetadata-only/CAnegative/identitydenial distinctions; runfullniks3-cache. Preservegenericdraft values across type-switch withnewNiki mountbaseline, assertclean mount then edit/revert/env/cred dirty behavior; fixapplication onlyifdemonstrated, keep native observerstrict andrunwholefocusedUI withrootedartifacts. AddAtticdiagnostics onlynumericID expected/observedstatus+reasonHTTP; firstrepro identifiesmismatch; correctfixture orcodefromactualevidence, thenfullmetrics lifecycle/publication/immutability. No security/signature/visualthreshold/assertion weakening. Fix anyadditionalfailures exposed bynative checks.
+
+Resource plan: host observed126GiB total/55GiB available/32CPU,swapunused. RunVMgates serially withmax-jobs1/cores2 andforeground deadlines; useexistingcommand-local bounded signedpubliccache/sourcefallback policy, rootartifactoutputforactualscreenshots. Lightweight source repairs maydelegate independently butno concurrentfullgate builds. Prior previewwaiverretained. Verify focused Rust/offline SQLx ifcodechanges +format/static/diff thenallfourfinal-statechecks,commit/pushnormal andinspectALLrequiredCIjobs throughdownstreamcoverage/complexity completion. No merge/deploy/prod access. Optionalfullbrowserred classifiedwithprecise baselineevidence limits; do notexpandintoeval/compliance/POAM redesign or claimallchecks green.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
