@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-14 02:04'
+updated_date: '2026-10-14 22:35'
 labels: []
 dependencies: []
 references:
@@ -268,6 +268,10 @@ Integration observability/reliability repair at unchanged remote e4709ef7, owner
 Implementation plan: fixture-only normal barelevelinfo plus per-enabled-CFservice RUST_LOG override with valid EnvFilter (candidate info,crystal_forge=debug,sqlx=warn); public module log_level enum and productiondefaults unchanged. Validate actualsystemd environment andrunningprocess RUST_LOG byprivate parsing/boolean-only projections, no fullenv dumps; measure filtered runtime trace queryverbosity. Add meaningful monotonicphase START/END/outcome/elapsed plus actual pytestitem start/end lifecycle, no heartbeat. Preserveallthree existing database/dashboard/server phases and selection/assertions. Addonlybounded failure diagnostics safe service/procstates/aggregatePG waitcounts where needed, neverquerytext/binds/argv/secrets. KeepglobalTimeout1200; verifydriver timerstart/cleanup scope frompinnedsource andactualrun. Do notclaim20minboundswholeCI/build/cleanup.
 
 Verification plan: runexactCIequivalent authoritativeintegration viaexistingpublicsignedcache/sourcefallback wrapper, max-jobs1cores2foreground withretainedmode600 rawlogs/rootedartifacts; recordactualsource/derivation/exitcounts/phasedurations/outputbytes andcleanownedQEMU/Nix children. Ifreducedloggingrevealsfailure/stall diagnoseactualoperation beforechangingbehavior. Runsecondfresh VM execution (notmerelycachedresult) againstsamesource toprove reproducibility, maintaininglimits1200. Formatting/staticdiff, minimalcommitnormalpush, verifynewSHA/MRbranch/pipelineidentity andALLrequiredjobsinclcoverage/complexity/screenshotdownstreamthroughcompletion. OptionalfullwebUI remainsallowedfailureunchanged andreportseparately. Historicalprolongedjobcause mayremainunproven ifnotreproduced; distinguishthatfromprovenloggingloss without inventingrunnercontention.
+
+Exact-head6dc3da1b/pipeline2944979038 terminaltraces exposedinfra boundary, notpytestfail: integration17158170072 remoteQueryValidPaths socketclosed;Atticmetrics17158170080 remoteFetchNars unavailablepublication-driver output;Atticpublication17158170081 remoteQueryValidPaths socketclosed. AllReckless. Completeprivate tracesbytes10963/17137/13433, no cap/SQLxdebug/runtimephaseoutput (didnotreachobservedVM). GenericNixTLShint notspecificcertdiagnosis. Existingpublic-cachewrapper deliberatelypreservesinheritedbuilderselection, so--fallbackforsubstitutiondoesnotrepairthese remote executionerrors.
+
+CI-only correction plan authorizedbyuserappropriateinfrastructurefix: constrain only integration/attic-metrics/attic-publication jobcommandstolocal Nixexecution (--builders empty, max-jobs1, cores2). Sameexactflakechecks/nativeassertions, TLS/signatures/publicsourcefallback unchanged; no productionbuilder/globalsettings or fixturebehavior changes. Preserveallotherjobselection andoptionalUIpolicy. UpdateexactscopedCIargvregressiontest soonlythese3 override inheritedbuilders, verifiesremainingjobsretaincontrols. Validatehelpertests/GitLabsyntax andrepresentativeauthoritativecommand underlocalCIargs. Normalcommitpushnewexacthead thenobserveallrequiredCI/downstreams; optionalfullUIseparatered.No claimhistorical5145s stallsolelylogging orremote builderremoteTLScause beyondobservedQuery/Fetcherrors.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
