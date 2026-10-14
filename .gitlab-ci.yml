@@ -204,7 +204,11 @@ flake-check:
   script:
     - |
       case "$CHECK_NAME" in
-        integration|oidc-auth|server-regressions|nixos-discovery-reliability|niks3-cache|niks3-write-probe|niks3-ui|attic-metrics|attic-publication|builder-evaluator-packaging)
+        integration|attic-metrics|attic-publication)
+          # Remote QueryValidPaths/FetchNars failures precede these VM tests.
+          sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace --builders '' --max-jobs 1 --cores 2
+          ;;
+        oidc-auth|server-regressions|nixos-discovery-reliability|niks3-cache|niks3-write-probe|niks3-ui|builder-evaluator-packaging)
           sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace
           ;;
         *)

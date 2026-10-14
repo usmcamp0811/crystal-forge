@@ -31,6 +31,8 @@ POLICY = [
     "--option", "require-sigs", "true",
     "--fallback",
 ]
+LOCAL_CHECKS = {"integration", "attic-metrics", "attic-publication"}
+LOCAL_EXECUTION = ["--builders", "", "--max-jobs", "1", "--cores", "2"]
 
 old = yaml.safe_load(subprocess.check_output(
     ["git", "show", "HEAD:.gitlab-ci.yml"], cwd=ROOT, text=True))
@@ -71,7 +73,7 @@ with tempfile.TemporaryDirectory(prefix="cf-ci-policy-") as temporary:
     directory = Path(temporary)
     real_nix = shutil.which("nix")
     assert real_nix
-    for name in ("builders", "builders-use-substitutes", "max-jobs"):
+    for name in ("builders", "builders-use-substitutes", "max-jobs", "cores"):
         before = subprocess.check_output([real_nix, "config", "show", name])
         after = subprocess.check_output([real_nix, *POLICY, "config", "show", name])
         assert before == after, name
@@ -128,14 +130,17 @@ connect-timeout = 300
 stalled-download-timeout = 300
 download-attempts = 5
 require-sigs = true
-builders =
+builders = ssh://private-marker@builder.invalid x86_64-linux - 1 1
 builders-use-substitutes = true
 max-jobs = 3
+cores = 4
 """
-    for name in ("builders", "builders-use-substitutes", "max-jobs"):
+    inherited_controls = {}
+    for name in ("builders", "builders-use-substitutes", "max-jobs", "cores"):
         before = subprocess.check_output([real_nix, "config", "show", name], env=env)
         after = subprocess.check_output([real_nix, *POLICY, "config", "show", name], env=env)
         assert before == after, name
+        inherited_controls[name] = before
 
     def run(arguments, **extra):
         result = subprocess.run(["sh", str(HELPER), *arguments],
@@ -151,11 +156,26 @@ max-jobs = 3
         assert result.returncode == 0, name
         recorded = json.loads((directory / "argv").read_text())
         arguments = [f".#checks.x86_64-linux.{name}", "-L", "--show-trace"]
+        local = name in LOCAL_CHECKS
+        if local:
+            arguments.extend(LOCAL_EXECUTION)
         scoped = name in {"integration", "oidc-auth", "server-regressions", "niks3-cache", "niks3-write-probe", "niks3-ui",
                           "nixos-discovery-reliability", "attic-metrics", "attic-publication",
                           "builder-evaluator-packaging"}
         assert recorded == ["build", *(POLICY if scoped else []), *arguments], name
         assert result.stdout.count("InheritedInternalCache=") == int(scoped), name
+        # Query real Nix with the recorded build's exact configuration flags.
+        # Compare private inherited values in memory; never print those values.
+        controls = recorded[1:]
+        controls = [arg for arg in controls if arg not in
+                    {arguments[0], "-L", "--show-trace"}]
+        for setting in inherited_controls:
+            effective = subprocess.check_output(
+                [real_nix, *controls, "config", "show", setting], env=env)
+            expected = ({"builders": b"\n", "max-jobs": b"1\n", "cores": b"2\n"}
+                        .get(setting, inherited_controls[setting]) if local
+                        else inherited_controls[setting])
+            assert effective == expected, (name, setting)
     for job in ("web-ui-check", "web-ui-baseline-candidates"):
         result = subprocess.run(["sh", "-euc", new[job]["script"][0]], cwd=ROOT,
                                 env=env, capture_output=True, text=True)
@@ -164,6 +184,10 @@ max-jobs = 3
         assert json.loads((directory / "argv").read_text()) == [
             "build", *POLICY, *impure, ".#checks.x86_64-linux.web-ui", "-L", "--show-trace"]
         assert result.stdout.count("InheritedInternalCache=true") == 1
+        for setting, expected in inherited_controls.items():
+            effective = subprocess.check_output(
+                [real_nix, *POLICY, "config", "show", setting], env=env)
+            assert effective == expected, (job, setting)
     configured = run(["--check-config"])
     assert configured.returncode == 0
     for setting in ("require-sigs=true", "fallback=true"):
@@ -202,6 +226,10 @@ max-jobs = 3
     """
     real_env = dict(env, PATH=os.pathsep.join(
         part for part in env["PATH"].split(os.pathsep) if part != str(directory)))
+    # The fresh source-build proof uses the original local-builder environment.
+    real_env["NIX_CONFIG"] = env["NIX_CONFIG"].replace(
+        "builders = ssh://private-marker@builder.invalid x86_64-linux - 1 1",
+        "builders =")
     built = subprocess.run(
         ["sh", str(HELPER), "--impure", "--no-link", "--print-out-paths",
          "--expr", expression], cwd=ROOT, env=real_env,
@@ -219,6 +247,7 @@ max-jobs = 3
     assert "Effective require-sigs=true" in built.stdout
     assert "Effective fallback=true" in built.stdout
 
-print("PASS: modern/legacy Nix policy, builder controls, scoped argv, secret redaction, "
+print("PASS: modern/legacy Nix policy, inherited builder controls equal=true, "
+      "three local execution cases equal=true, scoped argv, secret redaction, "
       "missing/empty/duplicate/conflicting/unsupported settings, exit status, "
       "real integration fixture source build with signatures and fallback enabled")

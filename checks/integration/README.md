@@ -69,3 +69,16 @@ Phase END runs in `finally`; pytest failures retain their original exit status.
 
 Part of the `.gitlab-ci.yml` `flake-check` matrix (`CHECK_NAME: integration`),
 so it runs on every merge request and on `main`.
+
+CI runs this same attribute through `packages/ci/public-cache-build.sh` with
+`--builders '' --max-jobs 1 --cores 2`. Only `integration`, `attic-metrics`, and
+`attic-publication` receive these local execution arguments. Other jobs retain
+inherited builder controls; production builders are unaffected.
+
+Pipeline 2944979038 failed before observed VM execution or assertions: remote
+`QueryValidPaths` closed its socket for integration and Attic publication, and
+remote `FetchNars` reported a missing publication driver for Attic metrics.
+These remote execution failures do not prove a server certificate defect.
+The wrapper's substitution fallback retains builders and does not automatically
+retry remote builder errors locally. The scoped arguments select local execution
+without changing TLS verification, signatures, test attributes, or assertions.
