@@ -31,12 +31,12 @@ POLICY = [
     "--option", "require-sigs", "true",
     "--fallback",
 ]
-LOCAL_CHECKS = {"integration", "attic-metrics", "attic-publication"}
 LOCAL_EXECUTION = ["--builders", "", "--max-jobs", "1", "--cores", "2"]
 
 old = yaml.safe_load(subprocess.check_output(
     ["git", "show", "HEAD:.gitlab-ci.yml"], cwd=ROOT, text=True))
 new = yaml.safe_load((ROOT / ".gitlab-ci.yml").read_text())
+LOCAL_CHECKS = set(new["flake-check"]["parallel"]["matrix"][0]["CHECK_NAME"])
 changed = {"flake-check", "web-ui-check", "web-ui-baseline-candidates"}
 assert old.keys() == new.keys()
 for job in old:
@@ -248,6 +248,6 @@ cores = 4
     assert "Effective fallback=true" in built.stdout
 
 print("PASS: modern/legacy Nix policy, inherited builder controls equal=true, "
-      "three local execution cases equal=true, scoped argv, secret redaction, "
+      "all matrix local execution cases equal=true, scoped argv, secret redaction, "
       "missing/empty/duplicate/conflicting/unsupported settings, exit status, "
       "real integration fixture source build with signatures and fallback enabled")

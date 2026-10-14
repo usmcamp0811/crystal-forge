@@ -71,13 +71,16 @@ Part of the `.gitlab-ci.yml` `flake-check` matrix (`CHECK_NAME: integration`),
 so it runs on every merge request and on `main`.
 
 CI runs this same attribute through `packages/ci/public-cache-build.sh` with
-`--builders '' --max-jobs 1 --cores 2`. Only `integration`, `attic-metrics`, and
-`attic-publication` receive these local execution arguments. Other jobs retain
-inherited builder controls; production builders are unaffected.
+`--builders '' --max-jobs 1 --cores 2`. All `flake-check` matrix entries receive
+these local execution arguments, preserving each entry's existing cache policy.
+Jobs outside this matrix, including the optional Web UI and manual baseline jobs,
+retain inherited builder controls. Production builders are unaffected.
 
 Pipeline 2944979038 failed before observed VM execution or assertions: remote
 `QueryValidPaths` closed its socket for integration and Attic publication, and
 remote `FetchNars` reported a missing publication driver for Attic metrics.
+Pipeline 2948588801 passed all three local cases, but remote `QueryValidPaths`
+still failed before assertions for packaging and before the OKF validator.
 These remote execution failures do not prove a server certificate defect.
 The wrapper's substitution fallback retains builders and does not automatically
 retry remote builder errors locally. The scoped arguments select local execution

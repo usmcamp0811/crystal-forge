@@ -204,15 +204,12 @@ flake-check:
   script:
     - |
       case "$CHECK_NAME" in
-        integration|attic-metrics|attic-publication)
-          # Remote QueryValidPaths/FetchNars failures precede these VM tests.
+        integration|oidc-auth|server-regressions|nixos-discovery-reliability|niks3-cache|niks3-write-probe|niks3-ui|attic-metrics|attic-publication|builder-evaluator-packaging)
+          # Bound matrix execution locally while remote Query/Fetch is unhealthy.
           sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace --builders '' --max-jobs 1 --cores 2
           ;;
-        oidc-auth|server-regressions|nixos-discovery-reliability|niks3-cache|niks3-write-probe|niks3-ui|builder-evaluator-packaging)
-          sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace
-          ;;
         *)
-          nix build ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace
+          nix build ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace --builders '' --max-jobs 1 --cores 2
           ;;
       esac
     # Copy web-ui screenshots out of the Nix build result into the CI workspace
