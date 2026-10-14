@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-13 20:13'
+updated_date: '2026-10-14 02:04'
 labels: []
 dependencies: []
 references:
@@ -262,6 +262,12 @@ Implementation/verification plan: smallestmemorypriority fix onlynewcachefixture
 Resource plan: host observed126GiB total/55GiB available/32CPU,swapunused. RunVMgates serially withmax-jobs1/cores2 andforeground deadlines; useexistingcommand-local bounded signedpubliccache/sourcefallback policy, rootartifactoutputforactualscreenshots. Lightweight source repairs maydelegate independently butno concurrentfullgate builds. Prior previewwaiverretained. Verify focused Rust/offline SQLx ifcodechanges +format/static/diff thenallfourfinal-statechecks,commit/pushnormal andinspectALLrequiredCIjobs throughdownstreamcoverage/complexity completion. No merge/deploy/prod access. Optionalfullbrowserred classifiedwithprecise baselineevidence limits; do notexpandintoeval/compliance/POAM redesign or claimallchecks green.
 
 User-authorized test-only CI2943655967/job17149150255 remediation at d0246e00: reproduce Linux ETXTBSY with an O_CLOEXEC fixture writer inherited across a controlled fork, after closing the parent writer. Keep the original evaluator fingerprint assertions and actual production probe. Move fixture writing into a dedicated shell child whose successful exit establishes writer closure; add same-package deterministic regression proving old inode refusal and child-written fixture execution. Change only builders.rs cfg(test) code; no production retry, packaging serialization, runtime evaluator changes, commits, pushes or CI triggers. Verify exact tests then normal-parallel server lib tests via nix develop .#sqlx with CARGO_BUILD_JOBS=2 and SQLX_OFFLINE=true.
+
+Integration observability/reliability repair at unchanged remote e4709ef7, owner lock preserved. User's repeated request treated as one scoped instruction; no production/deployment/Niks3/Attic changes. Full capped failed17153764387 vs passed17149150248 traces+metadata inspected before writes. Both exactly4194426 retained bytes, ~1934/2004 DEBUG SQLx lines; startup-reset passed and latestterminal-logic serverrestart completed beforecap duringnormal5s sleep. No assertion or root stall evidence retained. Reckless association has earlier no_updates jobs but not causation; no historical CPU/IO data. Newwriter-regression tests passed inbuild beforeVM and arecfgtest only.
+
+Implementation plan: fixture-only normal barelevelinfo plus per-enabled-CFservice RUST_LOG override with valid EnvFilter (candidate info,crystal_forge=debug,sqlx=warn); public module log_level enum and productiondefaults unchanged. Validate actualsystemd environment andrunningprocess RUST_LOG byprivate parsing/boolean-only projections, no fullenv dumps; measure filtered runtime trace queryverbosity. Add meaningful monotonicphase START/END/outcome/elapsed plus actual pytestitem start/end lifecycle, no heartbeat. Preserveallthree existing database/dashboard/server phases and selection/assertions. Addonlybounded failure diagnostics safe service/procstates/aggregatePG waitcounts where needed, neverquerytext/binds/argv/secrets. KeepglobalTimeout1200; verifydriver timerstart/cleanup scope frompinnedsource andactualrun. Do notclaim20minboundswholeCI/build/cleanup.
+
+Verification plan: runexactCIequivalent authoritativeintegration viaexistingpublicsignedcache/sourcefallback wrapper, max-jobs1cores2foreground withretainedmode600 rawlogs/rootedartifacts; recordactualsource/derivation/exitcounts/phasedurations/outputbytes andcleanownedQEMU/Nix children. Ifreducedloggingrevealsfailure/stall diagnoseactualoperation beforechangingbehavior. Runsecondfresh VM execution (notmerelycachedresult) againstsamesource toprove reproducibility, maintaininglimits1200. Formatting/staticdiff, minimalcommitnormalpush, verifynewSHA/MRbranch/pipelineidentity andALLrequiredjobsinclcoverage/complexity/screenshotdownstreamthroughcompletion. OptionalfullwebUI remainsallowedfailureunchanged andreportseparately. Historicalprolongedjobcause mayremainunproven ifnotreproduced; distinguishthatfromprovenloggingloss without inventingrunnercontention.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
