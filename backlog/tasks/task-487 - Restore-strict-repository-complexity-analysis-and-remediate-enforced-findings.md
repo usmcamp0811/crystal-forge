@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-15 00:39'
-updated_date: '2026-10-15 01:01'
+updated_date: '2026-10-15 01:02'
 labels: []
 dependencies: []
 references:
@@ -55,4 +55,12 @@ Initial source-only ownership: services/register_export_selection.rs and the fat
 Dedicated worktree created and verified clean at 5ebfa8876e797e4aac1097a3263ecb2e51cdd965. User selected Authorize strict remediation. Scope can take substantially longer than the parent integration repair; no readiness claim. Parent metrics artifacts /tmp/opencode/task470-complexity-repaired remain the partial inventory source, not a passing report.
 
 Resumed existing TASK-487 branch/worktree at 5ebfa887 with matching openai-agent task lock. No tracked changes in the task worktree or dev; dev has existing unrelated untracked lock/session files. No main worktree is registered. The referenced docs/agent/worktrees.md and verification.md paths are absent at this base; inspect available repository tooling instead. This is a target-compilation-only correction with unchanged browser behavior.
+
+Server fatal-blocker source handoff ready in /home/mcamp/code/crystal-forge/TASK-487-strict-complexity-remediation at base 5ebfa887. This actor edited only packages/default/crates/cf-server/src/services/register_export_selection.rs and src/handlers/api/deployment_policies.rs. The two immutable while conditions now use if plus loop; original loop bodies, repeatable-read transaction, authorization, deduplication, row ordering/caps, next_offset failure, and acceptance offset increment remain intact. Expected removal: two while_immutable_condition diagnostics and one absurd_extreme_comparisons diagnostic; Clippy has NOT been executed by this actor.
+
+Replaced test_list_deployment_policies_empty with ignored isolated sqlx::test test_list_deployment_policies_includes_fixture. Uses existing create_test_policy helper and a dynamic COUNT(*) query; migration seed count plus one must match the returned total. Fixture UUID appears exactly once, with expected name/type/enabled fields. Does not use the legacy hardcoded localhost test_pool. No assertions weakened; no SQLx checked-query/schema changes or metadata updates. No new/materially changed public Rust items; existing public rustdoc contracts remain accurate and preserved.
+
+Light verification: nix develop --command rustfmt --edition 2024 --check packages/default/crates/cf-server/src/services/register_export_selection.rs packages/default/crates/cf-server/src/handlers/api/deployment_policies.rs initially exited 1 for fixture chain formatting; corrected with a scoped patch and reran successfully (exit 0). git diff --check passed (exit 0). Reviewed owned-file diff for documentation and behavior preservation. Concurrent UI actor changes in evaluations.rs and system_detail.rs are present; this actor did not edit them.
+
+Parent single-runner handoff: through pinned Nix environment, SQLX_OFFLINE=true CARGO_BUILD_JOBS=2, and verified disposable PostgreSQL only, run cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib handlers::api::deployment_policies::tests::test_list_deployment_policies_includes_fixture -- --ignored --exact --test-threads=1; run cargo test --manifest-path packages/default/Cargo.toml -p cf-server --test register_export_selection -- --ignored --test-threads=1. Existing integration cases cover multiple acceptance pages/rechecked authorization, acceptance-only scope, Plans excluding acceptance rows, cap rejection, linked-context visibility and historical context. Runtime tests and actual fatal-Clippy removal remain pending. No Cargo compilation/full server-regressions started, no commits or pushes, no task-completion claim.
 <!-- SECTION:NOTES:END -->
