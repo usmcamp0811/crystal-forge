@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-15 00:39'
-updated_date: '2026-10-15 01:05'
+updated_date: '2026-10-15 02:06'
 labels: []
 dependencies: []
 references:
@@ -71,4 +71,14 @@ Verification passed (exit 0): nix develop --command nix shell --inputs-from . ni
 Verification passed (exit 0): nix develop --command sh -c 'CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/tmp/opencode/task487-ui-wasm cargo check --manifest-path packages/web-ui/Cargo.toml --locked --offline --target wasm32-unknown-unknown --all-features --message-format=short'. Log: /tmp/opencode/task487-ui-wasm-check.log. Formatting check passed: nix develop --command nix shell --inputs-from . nixpkgs#rustfmt --command rustfmt --edition 2024 --check packages/web-ui/src/views/evaluations.rs packages/web-ui/src/views/system_detail.rs. git diff --check passed. Documentation review: no public contracts or polling semantics changed; existing lifecycle comments remain valid.
 
 Concurrent changes appeared in cf-server handlers/api/deployment_policies.rs and services/register_export_selection.rs during verification. This pass did not edit those files. UI changes remain uncommitted in the dedicated TASK-487 worktree. Full strict metrics, coverage and exact-head CI remain outstanding; TASK-487 stays In Progress.
+
+Verified partial checkpoint committed and pushed to dedicated branch as9f0cb90cea4c7c2c5929fcbccd1ed058fa5fa255 (`TASK-487: Unblock strict analysis and separate CA trust responsibilities`). No integration into TASK-470/MR331, no merge/deploy. Parent TASK-470 remains published5ebfa887; its original owned metrics WIP remains preserved and byte-identical to the child port. Child worktree tracked files clean, owner lock untracked/intentionally retained.
+
+Fatal-blocker verification: complete native Clippy for both backend workspace and UI nowexit0/build-finished success, zero error-severitydiagnostics. Whole-loop wasm cfg preserves10browserpolling loops and native no-op, WASMcompilationpassed. Backend conditionalpagination loops retaintransaction/auth/caps/order; deployment-policy fixture assertsrealID/count insteadvacuouslen>=0. Server-regressions isolatedsandboxpassed1183s:59normallyignoredlib+83nonignoredexact+7register-export integrationcases allsuccess; cluster cleanlystopped. No production/localdefaultDB used.
+
+CA responsibility refactor verified:8source/testfilesallunder500lines, publicsignatures/modulepathsunchanged, no selectedcomplexitydiagnostics. cf-config94unitpassed incl13CA,14doctestspassed,rustdocbrokenlinksdeniedpassed, originalClippygroup+6clausesexecuted, nativeGo CA3datasets match122ordinaryroots/172AUXeach. No suppressions, exclusions, threshold changes, dependencies, or trust-selection behavior changes. Evidence /tmp/opencode/task487-ca-verified/verification.md.
+
+Fresh self-contained checkpoint inventory using child launcher: both Clippy exits0 (backend139s679findings/UI1s54cached), STRICTMETRICSexit1/FAILED, notINCOMPLETE. Actualcomplete-native counts733selectedfindings:199cognitive/71args/429lines/32types/2bools/0vec_box. 536trackedRustfiles allincluded;195over500. Previous complete-native734/196 became733/195afterCA. Initial714waspartial, notregressioncomparison. JUnit539cases196failures0errors0skips. Five launcherfixturecases+actualartifactvalidationpassed; rawJSONL0600. Artifacts /tmp/opencode/task487-checkpoint-inventory, log /tmp/opencode/task487-checkpoint-inventory-run.log. WASMlintscopeandcoverageNOTassessed bynativeinventory.
+
+Strict remediation and parent readiness remain incomplete. Nextcoherentbatches: servercompliance/POAM/evaluation snapshots/builders, UI tab/render/state/DTO modules, remainingconfig/protocol/agent/tests. Do not arbitrarysplitfiles,hidelints,lowerthresholds,excludeapplicationtestsorclaimMRready. Requiredcomplexityremainsred andcoverageunverified untilremainingfindingsare remediated andcompleteexact-headCIpasses.
 <!-- SECTION:NOTES:END -->
