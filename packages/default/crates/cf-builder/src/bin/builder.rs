@@ -98,13 +98,32 @@ fn required_cache_push_reference(
         );
     }
 
-    if cache_config.cache_command(store_path).is_none() {
+    if !matches!(cache_config.cache_type, CacheType::Niks3)
+        && cache_config.cache_command(store_path).is_none()
+    {
         anyhow::bail!(
             "cache push is enabled for {target_name}, but no cache push command can be built from builder configuration"
         );
     }
 
     match cache_config.cache_type {
+        CacheType::Niks3 => {
+            cache_config
+                .niks3_server_url
+                .as_deref()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| anyhow::anyhow!("Niks3 cache push requires niks3_server_url"))?;
+            if cache_config.niks3_write_auth.is_none() {
+                anyhow::bail!("Niks3 cache push requires niks3_write_auth");
+            }
+            cache_config
+                .push_to
+                .clone()
+                .filter(|value| !value.trim().is_empty())
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Niks3 cache push requires a read cache reference in push_to")
+                })
+        }
         CacheType::Attic => cache_config
             .attic_cache_name
             .clone()
@@ -167,7 +186,7 @@ async fn run_api_mode(cfg: &CrystalForgeConfig) -> anyhow::Result<()> {
         None
     };
 
-    let capabilities = detect_cve_capabilities(builder_config.cve_scanning_enabled).await;
+    let capabilities = runtime_capabilities(builder_config.cve_scanning_enabled).await;
     info!("Initializing API client...");
     let api_client =
         BuilderApiClient::new(builder_config, evaluator.clone(), capabilities.clone()).await?;
@@ -308,6 +327,15 @@ async fn probe_evaluator_fingerprint(
         allow_import_from_derivation,
         source_materialization_schema_version: VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
     })
+}
+
+// COMPATIBILITY: Niks3 support belongs to this runtime, even when the optional
+// CVE scanner is disabled or unavailable. Both session setup and polling use
+// this advertisement; cache read/write authentication defaults stay unchanged.
+async fn runtime_capabilities(cve_enabled: bool) -> BuilderCapabilities {
+    let mut capabilities = detect_cve_capabilities(cve_enabled).await;
+    capabilities.niks3_cache = true;
+    capabilities
 }
 
 /// Heartbeat loop - sends metrics to server periodically
@@ -535,11 +563,8 @@ where
 async fn remote_job_cancellation_requested(client: &BuilderApiClient, job_id: uuid::Uuid) -> bool {
     match client.get_job_status(job_id).await {
         Ok(status) => job_status_requests_cancellation(status.as_deref()),
-        Err(err) => {
-            warn!(
-                "⚠️ Failed to poll cancellation status for job #{}: {}",
-                job_id, err
-            );
+        Err(_) => {
+            warn!("⚠️ Failed to poll cancellation status for job #{}", job_id);
             false
         }
     }
@@ -561,8 +586,8 @@ async fn abort_cancelled_remote_job(
 ) {
     info!("🛑 Job #{} cancelled by operator — finalizing", job_id);
     send_log_with_fallback(client, job_id, ws_shared, message).await;
-    if let Err(e) = client.finalize_cancelled_job(job_id).await {
-        error!("❌ Failed to finalize cancelled job #{}: {}", job_id, e);
+    if client.finalize_cancelled_job(job_id).await.is_err() {
+        error!("❌ Failed to finalize cancelled job #{}", job_id);
     }
 }
 
@@ -1660,6 +1685,14 @@ async fn execute_build_job(
         job_id, derivation_payload.id
     );
 
+    let cache_destination_id = derivation_payload
+        .cache_push
+        .as_ref()
+        .and_then(|push| push.cache_destination_id);
+    let cache_destination_name = derivation_payload
+        .cache_push
+        .as_ref()
+        .and_then(|push| push.cache_destination_name.clone());
     let cache_config = derivation_payload
         .cache_push
         .as_ref()
@@ -2085,11 +2118,26 @@ async fn execute_build_job(
                 };
 
                 let _ = client
-                    .append_logs(job_id, "📤 Pushing build output to cache...\n")
+                    .append_logs(
+                        job_id,
+                        &cache_publication_log(
+                            cache_destination_name.as_deref(),
+                            &cache_config.cache_type,
+                            false,
+                        ),
+                    )
                     .await;
 
-                let cache_push =
-                    derivation.push_to_cache_with_retry(&store_path, &cache_config, &build_config);
+                let cache_push = derivation.push_to_cache_with_source_and_retry(
+                    &store_path,
+                    &cache_config,
+                    &build_config,
+                    if cache_destination_id.is_some() {
+                        cf_config::cache_credentials::CachePublicationSource::Database
+                    } else {
+                        cf_config::cache_credentials::CachePublicationSource::Static
+                    },
+                );
                 tokio::pin!(cache_push);
 
                 let cache_push_result = tokio::select! {
@@ -2117,7 +2165,14 @@ async fn execute_build_job(
                 match cache_push_result {
                     Ok(()) => {
                         let _ = client
-                            .append_logs(job_id, "✅ Build output pushed to cache\n")
+                            .append_logs(
+                                job_id,
+                                &cache_publication_log(
+                                    cache_destination_name.as_deref(),
+                                    &cache_config.cache_type,
+                                    true,
+                                ),
+                            )
                             .await;
                     }
                     Err(e) => {
@@ -2177,12 +2232,43 @@ async fn execute_build_job(
                 return;
             }
 
-            if let Err(e) = client
-                .complete_job(job_id, &store_path, cache_reference.as_deref())
+            // Cancellation is checked before reporting starts. Once the server
+            // acknowledges durable success (including HTTP 202), publication
+            // reporting must not finalize cancellation or report build failure.
+            let receipt = match client
+                .complete_job(
+                    job_id,
+                    &store_path,
+                    cache_reference.as_deref(),
+                    if cache_reference.is_some() {
+                        cache_destination_id
+                    } else {
+                        None
+                    },
+                )
                 .await
             {
-                error!("❌ Failed to report job #{} completion: {}", job_id, e);
-            } else if capabilities.supports_current_cve_schema() {
+                Ok(receipt) => Some(receipt),
+                Err(e) => {
+                    error!("❌ Failed to report job #{} completion: {}", job_id, e);
+                    None
+                }
+            };
+            if let Some(
+                cf_builder::builder::api_client::BuildCompletionReceipt::PublicationPending {
+                    code,
+                    attempts,
+                },
+            ) = receipt
+            {
+                info!(job_id = %job_id, ?code, attempts,
+                    "Build completed durably; cache publication remains pending");
+            }
+            if capabilities.supports_current_cve_schema()
+                && receipt.is_some_and(|receipt| {
+                    receipt.permits_post_build_scan(cache_reference.is_some())
+                })
+            {
                 // Build completion is already durable. Scanner claim or
                 // execution failure cannot alter build or cache outcome.
                 match scan_semaphore.try_acquire_owned() {
@@ -2710,8 +2796,62 @@ fn is_local_db_host(host: &str) -> bool {
     matches!(host, "localhost" | "127.0.0.1" | "::1")
 }
 
+// Display metadata is untrusted even when it came from a signed server DTO.
+// Keep the type on the start line only and preserve the existing log transport.
+fn cache_publication_log(name: Option<&str>, cache_type: &CacheType, success: bool) -> String {
+    let name = cf_protocol::cache::cache_log_display_name(name);
+    if success {
+        format!("✅ Build output published to {name}\n")
+    } else {
+        format!("📤 Publishing build output to {name} ({cache_type:?})...\n")
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cache_publication_logs_use_only_safe_display_metadata() {
+        use cf_config::config::CacheType;
+        assert_eq!(
+            super::cache_publication_log(Some("niks3"), &CacheType::Niks3, false),
+            "📤 Publishing build output to niks3 (Niks3)...\n"
+        );
+        assert_eq!(
+            super::cache_publication_log(Some("niks3"), &CacheType::Niks3, true),
+            "✅ Build output published to niks3\n"
+        );
+        for kind in [
+            CacheType::Attic,
+            CacheType::S3,
+            CacheType::Http,
+            CacheType::Nix,
+        ] {
+            assert_eq!(
+                super::cache_publication_log(None, &kind, false),
+                format!("📤 Publishing build output to cache ({kind:?})...\n")
+            );
+            assert_eq!(
+                super::cache_publication_log(None, &kind, true),
+                "✅ Build output published to cache\n"
+            );
+        }
+        for name in [
+            "https://user:secret@cache.example",
+            "cache\nforged",
+            "token=value",
+        ] {
+            assert_eq!(
+                super::cache_publication_log(Some(name), &CacheType::Niks3, true),
+                "✅ Build output published to cache\n"
+            );
+        }
+    }
+    #[tokio::test]
+    async fn niks3_runtime_advertisement_is_independent_of_disabled_cve() {
+        let capabilities = super::runtime_capabilities(false).await;
+        assert!(capabilities.niks3_cache);
+        assert!(!capabilities.supports_current_cve_schema());
+    }
     use super::{classify_nix_failure, source_download_failure};
     use cf_protocol::builder::BuildFailureClass;
 

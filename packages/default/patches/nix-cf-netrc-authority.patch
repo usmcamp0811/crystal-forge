@@ -1,0 +1,172 @@
+From: Crystal Forge maintainers
+Subject: [PATCH] libstore: opt in to authority-bound netrc reads
+
+Netrc matches hostname, not scheme or port, and libcurl can reload netrc
+credentials after a redirect. Confine CF Basic read subprocesses before curl
+can perform any transfer. Leave ordinary Nix transfers unchanged.
+
+Classify CF policy refusals as Misc, not Forbidden: the HTTP binary-cache
+reader converts Forbidden into missing-file results. Misc preserves the
+static policy error. Preflight refusals never enqueue a transfer; HTTP 3xx
+refusals call fail directly without entering transient retry handling.
+
+diff --git a/src/libstore/include/nix/store/filetransfer.hh b/src/libstore/include/nix/store/filetransfer.hh
+--- a/src/libstore/include/nix/store/filetransfer.hh
++++ b/src/libstore/include/nix/store/filetransfer.hh
+@@ -122,6 +122,21 @@ public:
+           > `.netrc`.
+         )"};
+
++    Setting<std::string> cfNetrcAuthority{
++        this,
++        "",
++        "cf-netrc-authority",
++        R"(
++          Confines every file transfer in this process to one HTTPS origin
++          before network access or netrc authentication. Supply an HTTPS URL
++          with a hostname and optional port, no userinfo, query or fragment,
++          and no path other than `/`. Hostnames are case-insensitive and IDNA
++          normalized; omitted HTTPS ports and explicit port 443 are equivalent.
++          Redirects and all HTTP 3xx responses are rejected, including 304.
++          Use this only with a process-owned netrc file for Basic cache reads.
++          An empty value preserves ordinary Nix transfer behavior.
++        )"};
++
+     Setting<std::optional<AbsolutePath>> caFile{
+         this,
+         getDefaultSSLCertFile(),
+diff --git a/src/libstore/filetransfer.cc b/src/libstore/filetransfer.cc
+--- a/src/libstore/filetransfer.cc
++++ b/src/libstore/filetransfer.cc
+@@ -23,6 +23,7 @@
+ #include <curl/curl.h>
+
++#include <algorithm>
+ #include <cmath>
+ #include <cstring>
+ #include <queue>
+ #include <random>
+@@ -70,6 +71,66 @@ struct curlMultiError final : CloneableError<curlMultiError, Error>
+     }
+ };
+
++// SECURITY: Netrc itself cannot bind credentials to a scheme or port. Parse
++// both origins with curl's URL parser before any handle enters the multi loop.
++// Do not attach parser input to these errors: it may contain userinfo.
++static std::pair<std::string, std::string> cfNetrcOrigin(const std::string & value, bool configured)
++{
++    auto invalid = []() -> void {
++        throw FileTransferError(FileTransfer::Misc, {}, "CF netrc authority requires a credential-free HTTPS origin");
++    };
++    if (value.empty() || std::any_of(value.begin(), value.end(), [](unsigned char c) { return c <= 0x20 || c == 0x7f; }))
++        invalid();
++    auto url = std::unique_ptr<CURLU, decltype(&curl_url_cleanup)>(curl_url(), curl_url_cleanup);
++    if (!url || curl_url_set(url.get(), CURLUPART_URL, value.c_str(), CURLU_DISALLOW_USER) != CURLUE_OK)
++        invalid();
++    auto part = [&](CURLUPart name, unsigned int flags = 0) {
++        char * raw = nullptr;
++        if (curl_url_get(url.get(), name, &raw, flags) != CURLUE_OK)
++            invalid();
++        auto owned = std::unique_ptr<char, decltype(&curl_free)>(raw, curl_free);
++        return std::string(owned.get());
++    };
++    auto scheme = toLower(part(CURLUPART_SCHEME));
++    if (scheme != "https")
++        invalid();
++    auto host = toLower(part(CURLUPART_HOST, CURLU_PUNYCODE));
++    auto port = part(CURLUPART_PORT, CURLU_DEFAULT_PORT);
++    // A scoped IPv6 address's zone is part of its authority, not its hostname.
++    char * rawZone = nullptr;
++    auto zoneResult = curl_url_get(url.get(), CURLUPART_ZONEID, &rawZone, 0);
++    auto zone = std::unique_ptr<char, decltype(&curl_free)>(rawZone, curl_free);
++    if (zoneResult == CURLUE_OK)
++        host += "%" + std::string(zone.get());
++    else if (zoneResult != CURLUE_NO_ZONEID)
++        invalid();
++    if (configured) {
++        if (part(CURLUPART_PATH) != "/")
++            invalid();
++        for (auto name : {CURLUPART_QUERY, CURLUPART_FRAGMENT}) {
++            char * raw = nullptr;
++            auto result = curl_url_get(url.get(), name, &raw, CURLU_GET_EMPTY);
++            auto owned = std::unique_ptr<char, decltype(&curl_free)>(raw, curl_free);
++            if (result != CURLUE_NO_QUERY && result != CURLUE_NO_FRAGMENT)
++                invalid();
++        }
++    }
++    return {host, port};
++}
++
++static void checkCfNetrcAuthority(const FileTransferSettings & settings, const FileTransferRequest & request)
++{
++    if (settings.cfNetrcAuthority.get().empty())
++        return;
++    auto origin = cfNetrcOrigin(settings.cfNetrcAuthority.get(), true);
++    if (cfNetrcOrigin(request.uri.to_string(), false) != origin)
++        throw FileTransferError(FileTransfer::Misc, {}, "CF netrc transfer authority mismatch");
++    // SECURITY: The guarded reader is read-only. It must not authenticate
++    // uploads or S3 operations even if their endpoint shares the read origin.
++    if (request.data || (request.method != HttpMethod::Get && request.method != HttpMethod::Head))
++        throw FileTransferError(FileTransfer::Misc, {}, "CF netrc transfer requires a read request");
++}
++
+ } // namespace
+
+ struct curlFileTransfer : public FileTransfer
+@@ -289,7 +350,10 @@ struct curlFileTransfer : public FileTransfer
+         try {
+             size_t realSize = size * nmemb;
+             std::string line((char *) contents, realSize);
+-            printMsg(lvlVomit, "got header for '%s': %s", request.uri, trim(line));
++            // SECURITY: Guarded reads must not trace a redirect Location or
++            // upstream header that could echo authentication material.
++            if (fileTransfer.settings.cfNetrcAuthority.get().empty())
++                printMsg(lvlVomit, "got header for '%s': %s", request.uri, trim(line));
+
+             static std::regex statusLine("HTTP/[^ ]+ +[0-9]+(.*)", std::regex::extended | std::regex::icase);
+             if (std::smatch match; std::regex_match(line, match, statusLine)) {
+@@ -477,7 +541,7 @@ struct curlFileTransfer : public FileTransfer
+
+             curl_easy_reset(req);
+
+-            if (verbosity >= lvlVomit) {
++            if (verbosity >= lvlVomit && fileTransfer.settings.cfNetrcAuthority.get().empty()) {
+                 curl_easy_setopt(req, CURLOPT_VERBOSE, 1);
+                 curl_easy_setopt(req, CURLOPT_DEBUGFUNCTION, TransferItem::debugCallback);
+             }
+@@ -493,7 +557,7 @@ struct curlFileTransfer : public FileTransfer
+                    been linked to support) encodings. */
+                 curl_easy_setopt(req, CURLOPT_ACCEPT_ENCODING, "");
+
+-            curl_easy_setopt(req, CURLOPT_FOLLOWLOCATION, 1L);
++            curl_easy_setopt(req, CURLOPT_FOLLOWLOCATION, fileTransfer.settings.cfNetrcAuthority.get().empty() ? 1L : 0L);
+             curl_easy_setopt(req, CURLOPT_MAXREDIRS, 10);
+             curl_easy_setopt(req, CURLOPT_NOSIGNAL, 1);
+             curl_easy_setopt(
+@@ -622,6 +686,13 @@ struct curlFileTransfer : public FileTransfer
+
+             auto httpStatus = getHTTPStatus();
+
++            // SECURITY: A redirect is terminal in guarded mode. Discard its
++            // response body and location rather than expose upstream text.
++            if (!fileTransfer.settings.cfNetrcAuthority.get().empty() && httpStatus >= 300 && httpStatus < 400) {
++                fail(FileTransferError(FileTransfer::Misc, {}, "CF netrc reads reject HTTP 3xx responses"));
++                return;
++            }
++
+             debug(
+                 "finished %s of '%s'; curl status = %d, HTTP status = %d, body = %d bytes, duration = %.2f s",
+                 Uncolored(request.noun()),
+@@ -1029,6 +1100,12 @@ struct curlFileTransfer : public FileTransfer
+
+     ItemHandle enqueueFileTransfer(const FileTransferRequest & request, Callback<FileTransferResult> callback) override
+     {
++        // SECURITY: This covers every transfer, including absolute NAR URLs
++        // supplied by narinfo. Retries keep the same validated request and
++        // guarded handles cannot follow redirects. Check before S3 rewriting,
++        // activity creation, curl setup, or netrc credential selection.
++        checkCfNetrcAuthority(settings, request);
++
+         /* Handle s3:// URIs by converting to HTTPS and optionally adding auth */
+         if (request.uri.scheme() == "s3") {
+             auto modifiedRequest = request;

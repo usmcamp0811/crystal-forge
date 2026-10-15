@@ -1173,6 +1173,26 @@ async fn main() -> anyhow::Result<()> {
             post(caches::test_cache_destination_credentials),
         )
         .route(
+            "/api/v1/caches/:id/test-credentials",
+            post(caches::test_stored_cache_destination_credentials),
+        )
+        .route(
+            "/api/v1/caches/niks3/discover",
+            post(caches::discover_niks3_cache),
+        )
+        .route(
+            "/api/caches/niks3/discover",
+            post(caches::discover_niks3_cache),
+        )
+        .route(
+            "/api/v1/caches/:id/niks3/discover",
+            post(caches::discover_stored_niks3_cache),
+        )
+        .route(
+            "/api/v1/caches/:id/metrics",
+            get(caches::get_cache_metrics),
+        )
+        .route(
             "/api/v1/caches/:id",
             get(caches::get_cache_destination)
                 .put(caches::update_cache_destination)

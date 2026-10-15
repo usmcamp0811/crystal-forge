@@ -505,6 +505,7 @@ impl BuilderApiClient {
     /// derivation build payload so the builder needs no database access.
     pub async fn get_next_job(&self) -> Result<Option<NextJobResponse>> {
         let body = serde_json::to_vec(&NextJobRequest {
+            capabilities: Default::default(),
             protocol_version: 2,
             supported_execution_strategies: self.supported_execution_strategies.clone(),
             supported_evaluator_contract_versions: self

@@ -90,4 +90,13 @@ const CACHE_DESTINATIONS = (typeof __fx === "function" && __fx("caches")) || [
   },
 ];
 
+if (!CACHE_DESTINATIONS.some(c => c.type === "niks3")) CACHE_DESTINATIONS.push({
+  id: "cache-campground-niks3", name: "campground-niks3", type: "niks3", enabled: true,
+  url: "https://niks3.example.com", writeUrl: "https://push.niks3.example.com",
+  writeAuth: "mtls", writeCredConfigured: true, readAuth: "basic", readCredConfigured: true,
+  signingKeys: ["niks3.example.com-1:Zm9yLWRlbW8tb25seS1wdWJsaWMta2V5LXBsYWNlaG9sZGVy"],
+  parallel: 8, retries: 3, timeout: 600, requireSig: true,
+  status: "healthy", storage: { used: 94.2, total: null, unit: "GiB" }, paths: 61470,
+  lastPush: "3m ago", environments: ["production", "staging"], requiresAuth: true, createdAt: "2mo ago", createdBy: "mreyes",
+});
 Object.assign(window, { CACHE_DESTINATIONS });

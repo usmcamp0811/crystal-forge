@@ -2,6 +2,8 @@ use crate::build::Derivation;
 use crate::derivations::utils::*;
 use anyhow::bail;
 use anyhow::{Context, Result};
+use cf_config::cache_credentials::{CachePublicationSource, PreparedAtticPush, PreparedNiks3Push};
+use cf_config::config::CacheType;
 use cf_config::config::{BuildConfig, CacheConfig};
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -34,11 +36,55 @@ fn format_command_for_log(command: &str, args: &[String]) -> String {
 }
 
 impl Derivation {
+    /// Pushes a store path with the configured attempt deadline and retry policy.
+    ///
+    /// Niks3 credentials remain owned until the child exits, including when the
+    /// attempt times out or the caller cancels the future.
+    ///
+    /// # Errors
+    ///
+    /// Returns the final push error or an exhausted-attempt timeout error.
     pub async fn push_to_cache_with_retry(
         &self,
         store_path: &str,
         cache_config: &CacheConfig,
         build_config: &BuildConfig,
+    ) -> Result<()> {
+        self.push_to_cache_with_source_and_retry(
+            store_path,
+            cache_config,
+            build_config,
+            CachePublicationSource::Static,
+        )
+        .await
+    }
+
+    /// Publishes with explicit job provenance and the configured retry policy.
+    ///
+    /// Database Attic attempts own their deadline and kill/reap before retry.
+    /// Static attempts retain the legacy ambient login behavior.
+    ///
+    /// # Errors
+    /// Returns the final safe selected-push error or legacy publication error.
+    ///
+    /// # Examples
+    /// ```no_run
+    /// # async fn publish(d: &cf_builder::build::Derivation,
+    /// # cache: &cf_config::CacheConfig, build: &cf_config::BuildConfig)
+    /// # -> anyhow::Result<()> {
+    /// use cf_config::cache_credentials::CachePublicationSource;
+    /// d.push_to_cache_with_source_and_retry(
+    ///     "/nix/store/00000000000000000000000000000000-output",
+    ///     cache, build, CachePublicationSource::Database,
+    /// ).await?;
+    /// # Ok(()) }
+    /// ```
+    pub async fn push_to_cache_with_source_and_retry(
+        &self,
+        store_path: &str,
+        cache_config: &CacheConfig,
+        build_config: &BuildConfig,
+        source: CachePublicationSource,
     ) -> Result<()> {
         let mut attempts = 0;
         let max_attempts = cache_config.max_retries + 1;
@@ -49,12 +95,22 @@ impl Derivation {
             // For large systems (40GB+), increase push_timeout_seconds to 3600 (1 hour) or more
             let timeout_duration = Duration::from_secs(cache_config.push_timeout_seconds);
 
-            match tokio::time::timeout(
-                timeout_duration,
-                self.push_to_cache(store_path, cache_config, build_config),
-            )
-            .await
+            // Niks3 owns its deadline so timeout cleanup finishes before retry.
+            let result = if matches!(cache_config.cache_type, CacheType::Niks3)
+                || (source == CachePublicationSource::Database
+                    && cache_config.cache_type == CacheType::Attic)
             {
+                Ok(self
+                    .push_to_cache_with_source(store_path, cache_config, build_config, source)
+                    .await)
+            } else {
+                tokio::time::timeout(
+                    timeout_duration,
+                    self.push_to_cache_with_source(store_path, cache_config, build_config, source),
+                )
+                .await
+            };
+            match result {
                 Ok(Ok(())) => return Ok(()),
                 Ok(Err(e)) if attempts < max_attempts - 1 => {
                     let err_msg = e.to_string();
@@ -104,15 +160,56 @@ impl Derivation {
         unreachable!()
     }
 
-    /// Push a store path to the configured cache. Includes robust Attic handling:
-    /// - resolves .drv -> output path
-    /// - ensures a fresh login every time
-    /// - retries once on 401 Unauthorized by redoing login
+    /// Pushes a store path, resolving a derivation to its output when necessary.
+    ///
+    /// Niks3 uses one CLI process with file-based write credentials and
+    /// `parallel_uploads` concurrency. Both output streams are drained into
+    /// bounded private tails; only static diagnostic hints can leave the owner.
+    /// Attic retries authorization once after login.
+    /// Disabled or filtered pushes return success without running a command.
+    ///
+    /// Attic login preserves ambient endpoint and token precedence. The chosen
+    /// endpoint is resolved to the canonical server base before login.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for resolution, invalid Niks3 or Attic configuration,
+    /// missing Attic credentials, process execution, timeout, or failed
+    /// publication.
     pub async fn push_to_cache(
         &self,
         path: &str,
         cache_config: &CacheConfig,
         build_config: &BuildConfig,
+    ) -> Result<()> {
+        self.push_to_cache_with_source(
+            path,
+            cache_config,
+            build_config,
+            CachePublicationSource::Static,
+        )
+        .await
+    }
+
+    /// Publishes through the authority that selected this job's destination.
+    ///
+    /// Database Attic uses only the selected endpoint, native cache and stored
+    /// token in a private per-attempt XDG config. Static publication retains
+    /// legacy login behavior. Disabled/filtered publication still skips work.
+    ///
+    /// # Errors
+    /// Returns static errors for selected Attic preparation, process failure,
+    /// timeout or cancellation. Other backends retain their existing errors.
+    ///
+    /// See [`Self::push_to_cache_with_source_and_retry`] for a database-selected
+    /// publication example. Queue workers use this single-attempt entry point
+    /// so the queue can refresh the destination before each retry.
+    pub async fn push_to_cache_with_source(
+        &self,
+        path: &str,
+        cache_config: &CacheConfig,
+        build_config: &BuildConfig,
+        source: CachePublicationSource,
     ) -> Result<()> {
         use tokio::process::Command;
 
@@ -128,6 +225,20 @@ impl Derivation {
         } else {
             path.to_string()
         };
+
+        if matches!(cache_config.cache_type, CacheType::Niks3) {
+            return run_niks3_push(&store_path, cache_config).await;
+        }
+
+        if source == CachePublicationSource::Database && cache_config.cache_type == CacheType::Attic
+        {
+            let prepared = PreparedAtticPush::new(cache_config, &store_path)?;
+            return run_prepared_attic_push(
+                prepared,
+                Duration::from_secs(cache_config.push_timeout_seconds),
+            )
+            .await;
+        }
 
         // Get command and args from config
         let cache_cmd = match cache_config.cache_command(&store_path) {
@@ -147,10 +258,10 @@ impl Derivation {
         {
             ensure_attic_client_available().await?;
 
-            let endpoint = std::env::var("ATTIC_SERVER_URL")
-                .ok()
-                .or_else(|| attic_server_url_from_cache_config(cache_config))
-                .context("ATTIC_SERVER_URL not set (e.g. http://atticCache:8080)")?;
+            let endpoint = resolve_attic_login_endpoint(
+                cache_config,
+                std::env::var("ATTIC_SERVER_URL").ok().as_deref(),
+            )?;
             let token = std::env::var("ATTIC_TOKEN")
                 .ok()
                 .or_else(|| cache_config.attic_token.clone())
@@ -339,9 +450,452 @@ impl Derivation {
     }
 }
 
+// CONCURRENCY: The detached owner retains private config until native exit or
+// kill/reap. Dropping the caller's sender requests cancellation. Output goes to
+// /dev/null because Attic errors can contain credential-bearing response bodies.
+async fn run_prepared_attic_push(prepared: PreparedAtticPush, deadline: Duration) -> Result<()> {
+    let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+    let owner = tokio::spawn(async move {
+        let mut command = tokio::process::Command::new("attic");
+        command
+            .args(&prepared.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .kill_on_drop(true);
+        prepared.apply_to_command(&mut command);
+        let mut child = command
+            .spawn()
+            .map_err(|_| anyhow::anyhow!("selected Attic push spawn failed"))?;
+        let result = tokio::select! {
+            status = child.wait() => match status {
+                Ok(status) if status.success() => Ok(()),
+                Ok(status) => Err(anyhow::anyhow!("selected Attic push failed with {status}; output suppressed")),
+                Err(_) => Err(anyhow::anyhow!("selected Attic push wait failed")),
+            },
+            _ = tokio::time::sleep(deadline) => Err(anyhow::anyhow!("selected Attic push timed out")),
+            _ = cancelled => Err(anyhow::anyhow!("selected Attic push cancelled")),
+        };
+        if child.id().is_some() {
+            child
+                .kill()
+                .await
+                .map_err(|_| anyhow::anyhow!("selected Attic push kill/reap failed"))?;
+        }
+        drop(prepared);
+        result
+    });
+    let result = owner
+        .await
+        .map_err(|_| anyhow::anyhow!("selected Attic push owner failed"))?;
+    drop(cancel);
+    result
+}
+
+/// Runs one Niks3 upload without exposing credentials or presigned URLs.
+async fn run_niks3_push(store_path: &str, cache: &CacheConfig) -> Result<()> {
+    let server_url = cache
+        .niks3_server_url
+        .as_deref()
+        .context("Niks3 push requires niks3_server_url")?;
+    let auth = cache
+        .niks3_write_auth
+        .as_ref()
+        .context("Niks3 push requires niks3_write_auth")?;
+    let prepared = PreparedNiks3Push::new(server_url, auth, cache.parallel_uploads, store_path)
+        .map_err(|_| {
+            anyhow::anyhow!("Failed to prepare Niks3 push credentials or configuration")
+        })?;
+    run_prepared_niks3_push(prepared, Duration::from_secs(cache.push_timeout_seconds)).await
+}
+
+async fn run_prepared_niks3_push(prepared: PreparedNiks3Push, deadline: Duration) -> Result<()> {
+    let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+
+    // CONCURRENCY: This owner outlives cancellation of the calling future. The
+    // dropped sender requests kill/reap before protected files are removed.
+    let owner = tokio::spawn(async move {
+        let mut command = tokio::process::Command::new(&prepared.command);
+        command
+            .args(&prepared.args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        // The shared helper owns all auth files in one protected directory.
+        let credential_directory = prepared
+            .args
+            .windows(2)
+            .find(|pair| matches!(pair[0].as_str(), "--auth-token-path" | "--client-key"))
+            .and_then(|pair| std::path::Path::new(&pair[1]).parent())
+            .context("Niks3 preparation did not supply a credential directory")?;
+        apply_niks3_env_to_command(&mut command, credential_directory);
+        let mut child = command.spawn().context("Failed to spawn Niks3 push")?;
+        let expires = tokio::time::Instant::now() + deadline;
+        let result = tokio::select! {
+            result = wait_niks3_diagnostics(&mut child, expires) => result,
+            _ = cancelled => Err(anyhow::anyhow!("Niks3 push cancelled")),
+        };
+        if child.id().is_some() {
+            child
+                .kill()
+                .await
+                .context("Failed to kill and reap Niks3 push")?;
+        }
+        // SECURITY: Keep temporary credentials until exit or confirmed kill.
+        drop(prepared);
+        result
+    });
+    let result = owner.await.context("Niks3 push owner failed")?;
+    drop(cancel);
+    result
+}
+
+// CONCURRENCY: Inline reader futures are dropped on cancellation or deadline,
+// including when descendants retain pipe descriptors after the CLI exits. The
+// caller remains responsible for direct-child kill/reap and credential lifetime.
+async fn wait_niks3_diagnostics(
+    child: &mut tokio::process::Child,
+    expires: tokio::time::Instant,
+) -> Result<()> {
+    use cf_config::niks3_diagnostics::{Niks3PushDiagnostic, capture_niks3_output};
+
+    let stdout = child
+        .stdout
+        .take()
+        .context("Niks3 stdout pipe unavailable")?;
+    let stderr = child
+        .stderr
+        .take()
+        .context("Niks3 stderr pipe unavailable")?;
+    let mut stdout_output = None;
+    let mut stderr_output = None;
+    let (status, drained) = {
+        let drain = async {
+            tokio::join!(
+                async { stdout_output = capture_niks3_output(stdout).await.ok() },
+                async { stderr_output = capture_niks3_output(stderr).await.ok() },
+            );
+        };
+        tokio::pin!(drain);
+        let mut drained = false;
+        let status = tokio::time::timeout_at(expires, async {
+            tokio::select! {
+                status = child.wait() => status,
+                _ = &mut drain => {
+                    drained = true;
+                    child.wait().await
+                }
+            }
+        })
+        .await
+        .map_err(|error| {
+            anyhow::Error::new(error).context("Niks3 push timed out; diagnostic_hint=Timeout")
+        })?
+        .map_err(|_| anyhow::anyhow!("Failed to wait for Niks3 push"))?;
+        if status.success() {
+            return Ok(());
+        }
+        // The same deadline bounds collection after a failed CLI exit. Dropping
+        // this scope cancels pending readers without detached tasks or raw logs.
+        if !drained {
+            drained = tokio::time::timeout_at(expires, &mut drain).await.is_ok();
+        }
+        (status, drained)
+    };
+    let capture_incomplete = !drained || stdout_output.is_none() || stderr_output.is_none();
+    let diagnostic = Niks3PushDiagnostic::from_outputs(
+        status,
+        &stderr_output.unwrap_or_default(),
+        &stdout_output.unwrap_or_default(),
+    );
+    anyhow::bail!(
+        "Niks3 push failed with {status}; diagnostic_hint={:?}; capture_incomplete={capture_incomplete}; truncated={}; output_read_failed={}; output suppressed; {diagnostic}",
+        diagnostic.category,
+        diagnostic.truncated,
+        diagnostic.output_read_failed,
+    )
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{attic_streaming_push_args, format_command_for_log};
+    use super::{attic_streaming_push_args, format_command_for_log, run_prepared_niks3_push};
+    use cf_config::cache_credentials::PreparedNiks3Push;
+    use cf_protocol::cache::Niks3WriteAuth;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::PathBuf;
+    use std::time::Duration;
+
+    // Use the shared preparation helper; these tests cover process ownership
+    // and output suppression rather than reimplementing credential creation.
+    fn fake_niks3(body: &str) -> (tempfile::TempDir, PreparedNiks3Push, PathBuf) {
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("niks3");
+        std::fs::write(&script, format!("#!/bin/sh\nset -eu\n{body}\n")).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut prepared = PreparedNiks3Push::new(
+            "https://write.example.org",
+            &Niks3WriteAuth::Token {
+                token: "synthetic-private-token".into(),
+            },
+            3,
+            "/nix/store/00000000000000000000000000000000-output",
+        )
+        .unwrap();
+        let credential = PathBuf::from(
+            &prepared.args[prepared
+                .args
+                .iter()
+                .position(|arg| arg == "--auth-token-path")
+                .unwrap()
+                + 1],
+        );
+        prepared.command = script.to_str().unwrap().into();
+        (directory, prepared, credential)
+    }
+
+    #[tokio::test]
+    async fn niks3_process_receives_flags_without_token_and_cleans_credentials() {
+        let (_directory, prepared, credential) = fake_niks3(
+            r#"
+test "$1" = push
+test "$2" = --server-url
+test "$3" = https://write.example.org/
+test "$4" = --max-concurrent-uploads
+test "$5" = 3
+test "$6" = --auth-token-path
+test -f "$7"
+test "$HOME/token" = "$7"
+test "$XDG_CONFIG_HOME" = "$HOME"
+test "$8" = --
+test "$9" = /nix/store/00000000000000000000000000000000-output
+case "$*" in *synthetic-private-token*) exit 42;; esac
+test -z "${AWS_ACCESS_KEY_ID-}${AWS_SECRET_ACCESS_KEY-}${GARAGE_SECRET_KEY-}${ATTIC_TOKEN-}${NIKS3_AUTH_TOKEN_FILE-}"
+"#,
+        );
+        run_prepared_niks3_push(prepared, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(!credential.exists());
+        assert!(!credential.parent().unwrap().exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_mtls_uses_isolated_home_and_file_credentials() {
+        let (directory, token_prepared, _) = fake_niks3(
+            r#"
+test "$6" = --client-cert
+test -f "$7"
+test "$8" = --client-key
+test -f "$9"
+test "$HOME/client-key.pem" = "$9"
+test "$XDG_CONFIG_HOME" = "$HOME"
+test ! -e "$HOME/token"
+test -z "${NIKS3_AUTH_TOKEN_FILE-}"
+case "$*" in *synthetic-private-key*) exit 42;; esac
+"#,
+        );
+        drop(token_prepared);
+        let mut prepared = PreparedNiks3Push::new(
+            "https://write.example.org",
+            &Niks3WriteAuth::Mtls {
+                client_certificate: "synthetic-certificate".into(),
+                client_private_key: "synthetic-private-key".into(),
+                ca_certificate: None,
+            },
+            3,
+            "/nix/store/00000000000000000000000000000000-output",
+        )
+        .unwrap();
+        prepared.command = directory.path().join("niks3").to_str().unwrap().into();
+        let key = PathBuf::from(
+            &prepared.args[prepared
+                .args
+                .iter()
+                .position(|arg| arg == "--client-key")
+                .unwrap()
+                + 1],
+        );
+        run_prepared_niks3_push(prepared, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(!key.exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_failure_suppresses_sensitive_child_output() {
+        let (_directory, prepared, credential) = fake_niks3(
+            r#"
+printf '%s\n' 'https://object.example.org/?presigned=synthetic-secret'
+printf '%s\n' 'synthetic-private-token' >&2
+exit 23
+"#,
+        );
+        let error = run_prepared_niks3_push(prepared, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("23"));
+        assert!(message.contains("output suppressed"));
+        assert!(!message.contains("synthetic"));
+        assert!(!message.contains("https://"));
+        assert!(!credential.exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_drains_both_oversized_streams_without_exposing_bytes() {
+        let (_directory, prepared, credential) = fake_niks3(
+            r#"
+emit() {
+    i=0
+    while test "$i" -lt 4096; do
+        printf '%s' 'https://object.invalid/?signature=synthetic-private-token&certificate=TLS'
+        i=$((i + 1))
+    done
+}
+emit &
+emit >&2
+wait
+printf '\n%s\n' 'unrecognized terminal failure' >&2
+exit 1
+"#,
+        );
+        let error = run_prepared_niks3_push(prepared, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("exit status: 1"));
+        assert!(!message.contains("synthetic"));
+        assert!(!message.contains("https://"));
+        assert!(!message.contains("signature="));
+        assert!(message.contains("diagnostic_hint=Unknown"));
+        assert!(message.contains("truncated=true"));
+        assert!(!credential.exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_terminal_fatal_record_yields_only_a_static_hint() {
+        let (_directory, prepared, credential) = fake_niks3(
+            r#"
+i=0
+while test "$i" -lt 4096; do
+    printf '%s' 'synthetic-private-token progress' >&2
+    i=$((i + 1))
+done
+printf '\n%s\n' 'time=2026-10-10T01:00:00Z level=ERROR msg="Fatal error" error="setting up client TLS: loading CA certificate: synthetic-private-token"' >&2
+exit 1
+"#,
+        );
+        let error = run_prepared_niks3_push(prepared, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("diagnostic_hint=TlsTrust"));
+        assert!(message.contains("truncated=true"));
+        assert!(!message.contains("synthetic"));
+        assert!(!credential.exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_response_body_keywords_do_not_establish_a_failure_hint() {
+        let (_directory, prepared, credential) = fake_niks3(
+            r#"
+printf '%s\n' 'time=2026-10-10T01:00:00Z level=ERROR msg="Fatal error" error="pushing paths: creating pending closures: creating pending closure: server returned 500: <Error><Message>Unauthorized x509: certificate signed by unknown authority https://object.invalid/?signature=private</Message></Error>"' >&2
+exit 1
+"#,
+        );
+        let error = run_prepared_niks3_push(prepared, Duration::from_secs(5))
+            .await
+            .unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("diagnostic_hint=Unknown"));
+        assert!(!message.contains("https://"));
+        assert!(!message.contains("<Error>"));
+        assert!(!message.contains("signature="));
+        assert!(!credential.exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_success_ignores_diagnostic_words_from_earlier_output() {
+        let (_directory, prepared, credential) = fake_niks3(
+            "printf '%s\\n' 'certificate verify failed; presigned upload failed' >&2\nexit 0",
+        );
+        run_prepared_niks3_push(prepared, Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert!(!credential.exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_inherited_pipes_do_not_replace_failed_cli_status() {
+        let (_directory, prepared, credential) =
+            fake_niks3("sleep 1 &\nprintf '%s\\n' 'unknown failure' >&2\nexit 1");
+        let error = tokio::time::timeout(
+            Duration::from_secs(2),
+            run_prepared_niks3_push(prepared, Duration::from_millis(100)),
+        )
+        .await
+        .expect("inherited pipes exceeded the collection deadline")
+        .unwrap_err();
+        assert!(error.to_string().contains("exit status: 1"));
+        assert!(!error.to_string().contains("timed out"));
+        assert!(!credential.exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_success_does_not_wait_for_inherited_pipe_eof() {
+        let (_directory, prepared, credential) = fake_niks3("sleep 1 &\nexit 0");
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            run_prepared_niks3_push(prepared, Duration::from_secs(5)),
+        )
+        .await
+        .expect("successful CLI waited for descendant pipe EOF")
+        .unwrap();
+        assert!(!credential.exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_timeout_reaps_child_before_credential_cleanup() {
+        let (directory, prepared, credential) =
+            fake_niks3("printf '%s' \"$$\" > \"${0%/*}/pid\"\nexec sleep 30");
+        let error = run_prepared_niks3_push(prepared, Duration::from_secs(1))
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(!credential.exists());
+        let pid = std::fs::read_to_string(directory.path().join("pid")).unwrap();
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_cancellation_keeps_owner_until_child_cleanup() {
+        let (directory, prepared, credential) = fake_niks3(
+            "printf '%s' \"$$\" > \"${0%/*}/pid\"\nwhile :; do printf '%s' 'synthetic-private-token'; printf '%s' 'https://object.invalid/?signature=private' >&2; done",
+        );
+        let task = tokio::spawn(run_prepared_niks3_push(prepared, Duration::from_secs(30)));
+        // Wait until the owner has started, then cancel only the caller.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !directory.path().join("pid").exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let pid = std::fs::read_to_string(directory.path().join("pid")).unwrap();
+        assert!(credential.exists());
+        task.abort();
+        let _ = task.await;
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while credential.exists() {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+        drop(directory);
+    }
 
     #[test]
     fn attic_streaming_push_args_do_not_add_verbose_flags() {
@@ -425,9 +979,42 @@ async fn run_cache_command_streaming(
     Ok(status.success())
 }
 
-/// Log into Attic so the remote is available to the client.
-/// Always runs *directly* and writes config under /var/lib/crystal-forge.
+// COMPATIBILITY: Ambient ATTIC_SERVER_URL still wins over configured push_to.
+// Canonicalize that chosen endpoint before login; do not change push references.
+fn resolve_attic_login_endpoint(
+    cache: &CacheConfig,
+    endpoint_override: Option<&str>,
+) -> Result<String> {
+    let endpoint = endpoint_override
+        .or(cache.push_to.as_deref().map(str::trim))
+        .context("Attic server endpoint is missing")?;
+    let urls = cf_config::attic_urls::resolve_attic_urls(
+        endpoint,
+        cache.attic_cache_name.as_deref().unwrap_or_default().trim(),
+    )?;
+    Ok(urls.server_url.to_string())
+}
+
+/// Logs into Attic with a canonical server base under the service account.
+///
+/// Remote-only memoization and already-configured acceptance preserve existing
+/// behavior; neither proves that persisted credentials match this request.
 async fn ensure_attic_login(remote: &str, endpoint: &str, token: &str) -> anyhow::Result<()> {
+    ensure_attic_login_with_command(
+        remote,
+        endpoint,
+        token,
+        tokio::process::Command::new("attic"),
+    )
+    .await
+}
+
+async fn ensure_attic_login_with_command(
+    remote: &str,
+    endpoint: &str,
+    token: &str,
+    mut cmd: tokio::process::Command,
+) -> anyhow::Result<()> {
     if is_attic_logged(remote) {
         tracing::debug!(
             "attic: remote '{}' already initialized in this process",
@@ -436,8 +1023,7 @@ async fn ensure_attic_login(remote: &str, endpoint: &str, token: &str) -> anyhow
         return Ok(());
     }
 
-    tracing::info!("Attic login for remote '{remote}' at {endpoint}");
-    let mut cmd = tokio::process::Command::new("attic");
+    tracing::info!("Attic login for remote '{remote}'");
     cmd.args(["login", remote, endpoint, token]);
     // Ensure credentials are persisted under the crystal-forge account:
     cmd.env("HOME", "/var/lib/crystal-forge");
@@ -482,5 +1068,89 @@ async fn ensure_attic_client_available() -> anyhow::Result<()> {
              module builds add it to crystal-forge-builder.service PATH)"
         ),
         Err(e) => Err(e).context("failed to probe attic client availability"),
+    }
+}
+
+#[cfg(test)]
+mod attic_url_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn attic_login_cli_receives_canonical_base_and_existing_token_argument() {
+        for (index, (input, expected)) in [
+            ("http://cache.example:8080", "http://cache.example:8080/"),
+            ("https://cache.example/", "https://cache.example/"),
+            ("https://cache.example/team", "https://cache.example/"),
+            ("attic://cache.example/team", "https://cache.example/"),
+            (
+                "https://cache.example/team/nix-cache-info",
+                "https://cache.example/",
+            ),
+            (
+                "https://cache.example/prefix/team/?view=one",
+                "https://cache.example/prefix/?view=one",
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let config = CacheConfig {
+                cache_type: CacheType::Attic,
+                push_to: Some(input.into()),
+                attic_cache_name: Some("configured-remote:team".into()),
+                ..Default::default()
+            };
+            let endpoint = resolve_attic_login_endpoint(&config, None).unwrap();
+            assert_eq!(endpoint, expected);
+            assert_eq!(config.push_to.as_deref(), Some(input));
+            assert_eq!(
+                config.attic_cache_name.as_deref(),
+                Some("configured-remote:team")
+            );
+            let remote = format!("builder-url-test-{index}");
+            let directory = tempfile::tempdir().unwrap();
+            let script = directory.path().join("attic");
+            std::fs::write(&script, format!(
+                "#!/bin/sh\nset -eu\ntest \"$#\" = 4\ntest \"$1\" = login\ntest \"$2\" = '{remote}'\ntest \"$3\" = '{expected}'\ntest \"$4\" = synthetic-attic-cli-token\ntest \"$HOME\" = /var/lib/crystal-forge\ntest \"$XDG_CONFIG_HOME\" = /var/lib/crystal-forge/.config\n"
+            )).unwrap();
+            std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+            clear_attic_logged(&remote);
+            // Execute an immutable interpreter, not the freshly written file.
+            // Concurrent fork/exec can briefly retain a writable descriptor to
+            // a fixture script and make direct execution fail with ETXTBSY.
+            let mut command = tokio::process::Command::new("/bin/sh");
+            command.arg(&script);
+            ensure_attic_login_with_command(
+                &remote,
+                &endpoint,
+                "synthetic-attic-cli-token",
+                command,
+            )
+            .await
+            .unwrap();
+            assert!(is_attic_logged(&remote));
+            clear_attic_logged(&remote);
+        }
+    }
+
+    #[test]
+    fn attic_login_preserves_ambient_endpoint_precedence_and_fails_closed() {
+        let config = CacheConfig {
+            cache_type: CacheType::Attic,
+            push_to: Some("https://configured.example/team".into()),
+            attic_cache_name: Some("team".into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            resolve_attic_login_endpoint(
+                &config,
+                Some("http://override.example/prefix/team/nix-cache-info?view=one")
+            )
+            .unwrap(),
+            "http://override.example/prefix/?view=one"
+        );
+        assert!(resolve_attic_login_endpoint(&config, Some("invalid")).is_err());
+        assert!(resolve_attic_login_endpoint(&config, Some("")).is_err());
     }
 }

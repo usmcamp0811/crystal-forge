@@ -20952,7 +20952,7 @@ security.audit.enable = true;</fixtext>
       await page.locator("[role='dialog']").first().waitFor({ timeout: 5000 });
 
       const dialog = page.locator("[role='dialog']").first();
-      await dialog.getByRole("button", { name: "S3" }).click();
+      await dialog.getByRole("button", { name: "S3-compatible", exact: true }).click();
       await page.waitForTimeout(1200);
     },
   },
@@ -20960,17 +20960,32 @@ security.audit.enable = true;</fixtext>
     name: "25-caches-modal-attic",
     description: "Add cache modal with Attic type selected",
     action: async (page) => {
+      // TASK-470: shared-shell real creates plus Niks3 security/scope regressions.
+      await require("./shared-cache-modal-workflow.js").sharedCacheModalWorkflow(
+        page, baseUrl, apiBaseUrl, undefined,
+        state => captureWorkflowState(page, "25-caches-modal-attic", state),
+      );
+      await require("./niks3-cache-workflow.js").niks3CacheWorkflow(
+        page, baseUrl, apiBaseUrl, undefined,
+        state => captureWorkflowState(page, "25-caches-modal-attic", state, async theme => {
+          if (state.startsWith("niks3-native-parity-")) {
+            await page.getByRole("dialog", { name: "Cache destination", exact: true }).screenshot({
+              path: `${outputDir}/25-caches-modal-attic--${state}--crop--${theme}.png`,
+              animations: "disabled",
+            });
+          }
+        }),
+      );
+      await require("./retained-cache-credential-workflow.js").retainedCacheCredentialWorkflow(
+        page, baseUrl, apiBaseUrl,
+        state => captureWorkflowState(page, "25-caches-modal-attic", state),
+      );
+      const { expect } = require("@playwright/test");
       await page.goto(`${baseUrl}/caches`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2500);
-
-      const addBtn = page.locator("button:has-text('Add cache')").first();
-      await addBtn.waitFor({ timeout: 5000 });
-      await addBtn.click();
-      await page.locator("[role='dialog']").first().waitFor({ timeout: 5000 });
-
-      const dialog = page.locator("[role='dialog']").first();
-      await dialog.getByRole("button", { name: "Attic" }).click();
-      await page.waitForTimeout(1200);
+      await page.getByRole("button", { name: "Add cache", exact: true }).click();
+      await expect(page.getByRole("heading", { name: "Add cache destination", exact: true })).toBeVisible();
+      await page.getByRole("button", { name: "Attic", exact: true }).click();
+      await expect(page.getByLabel("Attic server URL", { exact: true })).toBeVisible();
     },
   },
   // ── TASK-273: Evaluation cancellation and history ────────────────────────

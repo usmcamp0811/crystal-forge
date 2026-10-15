@@ -60,7 +60,18 @@ Builders never need access to:
 - OIDC client secrets
 - Deployment authorization or keys for managed hosts
 
-Builders may receive narrowly scoped cache push credentials (for example Attic tokens or S3 access/session keys) only for jobs that require builder-side cache publication. Credential-bearing cache config is included in the signed next-job response only when trusted HTTPS forwarding is explicitly configured; otherwise the server rejects the job claim before sending those credentials. Operators must ensure builders cannot bypass the trusted HTTPS reverse proxy and reach the backend service over plaintext.
+Builders may receive narrowly scoped Attic, S3, or Niks3 push credentials only
+for jobs that require builder-side cache publication. The signed next-job
+response includes private material only when the opt-in, direct-peer CIDR, and
+single exact `X-Forwarded-Proto: https` checks all pass. A failed credential gate
+records a post-claim transient `[dispatch:cache_config]` failure and returns
+HTTP 404 before sending credentials. Operators must protect the
+proxy-to-backend path and prevent untrusted direct access. See the
+[cache publication boundary](../builders/remote-build-execution-strategies.md#recommended-default)
+for exact checks and recovery, and the
+[operator upgrade procedure](../caches/niks3-cache.md#proxy-upgrade-repair-and-loaded-configuration)
+for loaded-configuration inspection and denial diagnostics. Diagnostics must
+not log tokens, private keys, signed URLs, raw headers, or request bodies.
 
 ### Key Management
 

@@ -65,7 +65,9 @@ authoritative text and stay in place, because each check and package uses its
 README as its ecosystem entry point. This catalog records, for each README, what
 the check verifies, how to run it, and where the README lives. The summaries
 come from reading each README together with the matching `default.nix` at the
-migration base commit.
+migration base commit. The TASK-470 packaging and Niks3 sections and cache
+regression summary were added after rebase and describe the current checks,
+not files or behavior present at the original migration base `3b23d36f`.
 
 Every check below runs with
 `nix build .#checks.x86_64-linux.<name> --print-build-logs`, unless the section
@@ -84,6 +86,8 @@ says otherwise. For the web UI check in depth, see the
 | `web-ui-test-runner` | No | The `web-ui-test` wrapper script logic | [README](../../../checks/web-ui-test-runner/README.md) |
 | `ui-screenshots` | No | Fixture-driven screenshots of every view in two themes | [README](../../../checks/ui-screenshots/README.md) |
 | `server-regressions` | No | PostgreSQL-backed Rust regression tests and a migration upgrade rehearsal | [README](../../../checks/server-regressions/README.md) |
+| `builder-evaluator-packaging` | No | Evaluator-bound Nix/Niks3 wrappers, service PATH, proxy assertions, and generated configuration | [README](../../../checks/builder-evaluator-packaging/README.md) |
+| `niks3-cache` | Yes (cache, server, builder, agent) | Real cache publication, proxy claims, capability gates, agent pulls, and local CVE materialization | [README](../../../checks/niks3-cache/README.md) |
 | `okf-knowledge` | No | OKF structural validation, checker unit tests, exact diagram audit, and a pinned Mermaid syntax parse of every diagram (no browser render; `nix run .#okf-mermaid-renderer` renders SVG manually) | — |
 | `oscal-export` | No | OSCAL 1.1.2 schema validation of fixture output | [README](../../../checks/oscal-export/README.md) |
 | `xccdf-schema` | No | XCCDF 1.2 and `cf-xccdf-1` schema validation | [README](../../../checks/xccdf-schema/README.md) |
@@ -144,6 +148,78 @@ README: [checks/server-regressions/README.md](../../../checks/server-regressions
   Cargo integration test binaries and a curated list of `#[ignore]`d library
   tests (POA&M, policy, notification, composite AC3, STIG mapping, bundle
   baseline, and agent key rotation areas).
+   The curated exact-name lists also run 52 ignored PostgreSQL tests and 51 named
+  non-ignored tests for cache scope, retained credentials, signed capabilities,
+  direct-peer dispatch, and publication-backed reads. Each invocation uses
+  `--exact --test-threads=1` and requires the named success line and exactly one
+   passed test with zero ignored tests. Only the 52 selected database tests use
+  `--ignored`; missing or renamed tests fail the check. The current README lists
+  every qualified name. This gate does not run native Attic/S3 upload suites.
+  The two added legacy Attic regressions are
+  `legacy_attic_plaintext_and_historical_ciphertext_retain_on_test_and_save` and
+  `legacy_attic_null_and_empty_token_refuse_before_probe_without_mutation` in
+  `handlers::api::caches::retained_probe_tests`. They insert historical columns
+  directly, check independent `enc:v1` compatibility, exact Test/Cancel snapshots,
+  raw credential retention on unrelated Save, and pre-probe NULL/empty refusal.
+  Synthetic Rust tokens do not prove native Bearer authentication. The separate
+  [native browser fixture](../../../checks/web-ui/README.md#existing-legacy-attic-rows)
+  requires real private Attic metadata reads for plaintext/historical rows and
+  zero provider requests for the NULL row. Neither catalog membership nor this
+  scope description establishes a pass for the current revision.
+  The added ignored
+  `handlers::api::caches::retained_probe_tests::attic_named_cache_retained_replacement_results_and_policy_preserve_raw_state`
+  covers retained/replacement probe results, safe policy refusal, lock release,
+  and exact raw-state preservation. Three added non-ignored tests in that module
+  are `attic_canonical_api_and_model_read_roots_share_named_cache`,
+  `attic_native_metadata_and_status_matrix_never_claims_root_or_write_success`,
+  and `attic_target_policy_and_credential_queries_fail_before_network`.
+  The fourth is
+  `handlers::api::builders::tests::attic_requisite_env_uses_shared_server_base`.
+  They cover canonical endpoint/read-root agreement, typed native metadata and
+  status classification, pre-network policy, and the requisite server-base export.
+  The native fixture separately requires server-root 404 and cache-config 200,
+  real CLI setup publication before Test, one named-cache GET per successful
+  Test, and zero Test uploads. Corrected runtime proof remains pending owner
+  verification. See the
+  [Attic endpoint contract](../caches/niks3-cache.md#attic-url-interpretation-and-named-cache-test)
+  for normalization, authentication, and compatibility limits.
+  The input-owner lifetime regression runs through the same exact-test guard:
+  `handlers::api::builders::niks3_input_owner_tests::niks3_input_owner_acknowledges_reap_and_cleanup_after_detach`.
+  FIFO handshakes check success, exit failure, timeout, caller detachment, spawn
+  failure, and invalid preparation, with completion after reap and credential
+  drop. The companion
+  `handlers::api::builders::niks3_input_owner_tests::fifo_deadlines_cover_missing_readiness_and_absent_release_reader`
+  checks bounded, nonblocking coordination when readiness or a release reader
+  is absent. Both tests are selected by the current runner; the coordination
+  regression must fail at its deadline rather than hang Cargo.
+  Two ignored stored-discovery tests and four non-ignored discovery/certificate
+  tests cover transport projection, strict PEM, authorization/CSRF, retained and
+  replacement snapshots, mode changes, CA clearing, and non-mutation. The
+   current exact-name lists also select Basic-read and all nine storage-metrics
+   tests. Basic coverage includes storage/redaction, authority binding, signed
+   delivery capability, and independent probe planes. Metrics tests preserve
+   native basis, unavailable/null states, authorization, bounds, and non-mutation.
+   Selection is blocking-gate coverage, not a claim that the current run passed.
+   Completion members now include
+   `cache_probe_failure_codes_and_wire_contract_are_static`,
+   `cache_probe_exact_root_refresh_attic_and_private_capture_bounds`,
+   `niks3_basic_probe_applies_guard_to_path_info_only`,
+   `niks3_completion_probe_uses_independent_read_plane`,
+   `niks3_probe_failure_never_polls_success_transition`,
+   `niks3_probe_timeout_and_cancellation_reap_before_cleanup`, and
+   `niks3_pinned_nix_accepts_remote_metadata_and_refresh_flags` in
+   `handlers::api::builders::tests`. They prove bounded exact-root metadata reads,
+   no copy execution, protected independent credentials, static hints, and cleanup.
+   The ignored
+   `queries::builders::tests::niks3_pending_publication_guards_rollback_and_later_promotion`
+   proves guarded atomic build success,
+   exact queue identity/output, later idempotent promotion, rollback, and retained
+   historical publication.
+   These handler/process tests do not replace the separate native fresh-store
+   signature and physical-artifact guards. Builder client tests separately cover
+   typed pending/confirmed receipts, retry allowlists, fresh signatures, five-request
+   exhaustion, deadlines, and acknowledged-pending retention; they are not members
+   of this server-only gate.
 - **Why it exists.** `nix build .#server` runs only `--lib --bins` tests, and
   the `integration` check runs the Python suite, so these Rust integration
   targets would otherwise run nowhere. The list is curated on purpose and is
@@ -159,7 +235,85 @@ README: [checks/server-regressions/README.md](../../../checks/server-regressions
 > the `compliance_assignment_zombie_repair` test binary, which the README list
 > does not name.
 
+The runner emits timestamped `START`/`END` phase boundaries, actual exit status,
+and elapsed seconds. Eleven critical integration targets each have separate
+named compile and run boundaries; the library has a compile boundary, and each
+selected TASK-470 test reports its qualified name and mode through the unchanged
+exact-test guard. Progress adds no heartbeat, command-argument dump, environment
+dump, or `--nocapture`. Earlier aggregate compilation output did not identify a
+hung target or the cause of a remote failure; these boundaries aid future diagnosis.
+
+For the three matrix entries `server-regressions`, `niks3-cache`, and
+`builder-evaluator-packaging`, current CI invokes
+`bash packages/ci/public-cache-build.sh` before the normal build attribute.
+The full `web-ui-check` and optional manual `web-ui-baseline-candidates` jobs use
+the same wrapper; the full browser job remains `allow_failure: true`, and the
+candidate job remains manual and optional. Other matrix entries keep their
+existing commands. This is command-local policy, not removal of organization
+caches from global configuration or a change to the application's Attic access.
+The wrapper validates public-only substituters, empty extra substituters, and
+rejection of flake-supplied cache settings. It bounds connection attempts to
+10 seconds, stalled downloads to 30 seconds, and download attempts to two, with
+fallback source builds and signature checks retained. Builder settings remain
+inherited; these limits do not bound total compilation or test duration. It
+prints the actual Nix version, a boolean inherited-cache indicator, and known
+effective settings without exposing unknown runner values. Local configuration
+evidence does not establish the remote runner's settings or a CI pass. No manual
+baseline action is implied by this catalog entry.
+
+### `builder-evaluator-packaging`
+
+README: [checks/builder-evaluator-packaging/README.md](../../../checks/builder-evaluator-packaging/README.md).
+
+- **What it verifies.** Sandbox probes check component/public wrappers and service
+  PATH for the exact evaluator Nix and evaluator-bound Niks3 1.6.0. The dependent
+  module proof checks enabled/disabled proxy assertions, typed generated TOML,
+  and the unchanged ExecStart wrapper's selected configuration path and overrides.
+- **Run it.** `nix build .#checks.x86_64-linux.builder-evaluator-packaging -L`.
+  The smaller proof is `.#checks.x86_64-linux.builder-evaluator-packaging.moduleValidation`.
+- **Scope limits.** No VM, host service, browser, or HTTP authorization runs.
+  Recording-binary probes establish the startup contract, not live credential
+  delivery. Runtime peer/header verification remains required.
+- **CI.** Blocking `flake-check: [builder-evaluator-packaging]` matrix job on
+  merge requests and `main`, using the `nix` runner tag in `.gitlab-ci.yml`.
+
+### `niks3-cache`
+
+README: [checks/niks3-cache/README.md](../../../checks/niks3-cache/README.md).
+
+- **What it verifies.** Four isolated VMs exercise five token/mTLS write and
+  public/private read variants with real remote builds, signed destination-bound
+   completion, server refreshed exact-output metadata verification, agent pulls, environment
+  isolation, local CVE materialization, and secret/cleanup audits. Real HTTPS
+  proxy claims cover Attic/S3/Niks3 credential gates and public Http/Nix dispatch.
+- **Run it.** `nix build .#checks.x86_64-linux.niks3-cache -L`. The full gate has
+  `globalTimeout = 1800` seconds and requires KVM. Disposable VM databases do not
+  use the host development database. `.#checks.x86_64-linux.niks3-cache.fixture`
+  provides smaller CLI/infrastructure diagnosis; it does not replace the full gate.
+- **Scope limits.** Seeded evaluation identities do not test flake evaluation.
+  Agent pulls do not prove a full generation switch/reboot; CVE materialization
+  does not prove successful vulnerability analysis. Legacy claims do not prove
+   native Attic/S3 uploads. Completion does not copy or recursively validate the
+   closure. Native fixture fresh-store reads, agent pulls, and CVE materialization
+   retain signature/NAR-integrity checks independently. See the README for
+   certificate and log-audit limits and the
+   [completion API](../api/builder-job-lifecycle-api.md#post-apiv1buildersidjobsjob_idcomplete)
+   for guarded HTTP 200/202 receipts and bounded callback recovery.
+- **CI.** Blocking `flake-check: [niks3-cache]` matrix job on merge requests and
+  `main`, using the `nix` runner tag in `.gitlab-ci.yml`; its runner must supply KVM.
+  Matrix membership establishes neither check's pass for a particular commit.
+
 ## Web UI checks
+
+The expanded native Niks3 graph adds Basic reads and independent API/storage CA
+roots. Basic requires actual runtime `cf-netrc-authority` support and exact-origin,
+no-redirect protection. The two-root write case trusts API and presigned storage
+servers independently of the client certificate issuer. A separate native 1.8
+database/bucket tests stats; production packaging remains Niks3 1.6. Discovery
+and Test cannot prove write authorization from TLS acceptance. Earlier mTLS-only
+results do not verify this graph. The current native guard run failed its
+NAR-host expected-error assertion; final expanded native and browser verification
+remains pending owner evidence. No current-head CI pass is established here.
 
 ### `web-ui`
 
@@ -193,7 +347,8 @@ procedural guide is the [Web UI check runbook](web-ui-check.md).
 `playwrightResultTimeout ? 2700`. `.gitlab-ci.yml` runs the Web UI check as a
 separate `web-ui-check` job with `allow_failure: true`. The `flake-check`
 matrix includes `integration`, `oidc-auth`, `run-ui-dev-db-check`,
-`server-regressions`, `web-ui-test-runner`, and `okf-knowledge`.
+`server-regressions`, `niks3-cache`, `builder-evaluator-packaging`,
+`web-ui-test-runner`, and `okf-knowledge`.
 
 ### `web-ui/baselines`
 
@@ -386,10 +541,12 @@ The package is `packages/cf-test-suite/`. Its `scenarioRunner` member builds
 ## Checks without a README
 
 At the migration base commit, these directories under `checks/` have no
-README, and this catalog does not describe them: `builder-cve-contract`,
+README: `builder-cve-contract`,
 `builder-evaluator-packaging`, `config-inspector`, `config-observer`,
 `evaluator-snapshot-isolation`, `okf-knowledge`, `test-keys`, and
-`verified-source-evaluator-parity`. Read each `default.nix` for its scope.
+`verified-source-evaluator-parity`. TASK-470 subsequently added the
+`builder-evaluator-packaging` README and catalog section above. Read each
+remaining check's `default.nix` for its scope.
 
 ## Related concepts
 

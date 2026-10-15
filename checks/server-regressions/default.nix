@@ -50,8 +50,56 @@ pkgs.rustPlatform.buildRustPackage {
   checkPhase = ''
     runHook preCheck
 
+    # Keep the timing EXIT trap local so PostgreSQL hook cleanup retains its
+    # ownership. Boundaries report real work, never periodic synthetic output.
+    (
+    checkStarted=$SECONDS
+    phaseName=""
+    phaseStarted=$SECONDS
+    finishPhase() {
+      local status="$1"
+      if [[ -n "$phaseName" ]]; then
+        printf 'END phase=%s exit=%s elapsed=%ss at=%s\n' \
+          "$phaseName" "$status" "$((SECONDS - phaseStarted))" "$(date -u +%FT%TZ)"
+      fi
+    }
+    beginPhase() {
+      finishPhase 0
+      phaseName="$1"
+      phaseStarted=$SECONDS
+      printf 'START phase=%s at=%s\n' "$phaseName" "$(date -u +%FT%TZ)"
+    }
+    finishCheck() {
+      local status="$?"
+      finishPhase "$status"
+      printf 'END check=server-regressions exit=%s elapsed=%ss at=%s\n' \
+        "$status" "$((SECONDS - checkStarted))" "$(date -u +%FT%TZ)"
+      exit "$status"
+    }
+    trap finishCheck EXIT
+    printf 'START check=server-regressions at=%s\n' "$(date -u +%FT%TZ)"
+
+    # Only caller-supplied target/mode labels are printed, never argv or env.
+    # A failed command retains its actual status even under Bash errexit.
+    runRegressionCommand() {
+      local testName="$1" mode="$2" started=$SECONDS status
+      shift 2
+      printf 'START %s mode=%s at=%s\n' "$testName" "$mode" "$(date -u +%FT%TZ)"
+      if "$@"; then
+        status=0
+      else
+        status=$?
+      fi
+      printf 'END %s mode=%s exit=%s elapsed=%ss at=%s\n' \
+        "$testName" "$mode" "$status" "$((SECONDS - started))" "$(date -u +%FT%TZ)"
+      return "$status"
+    }
+
+    beginPhase migrations-and-upgrade-rehearsals
     export DATABASE_URL="postgresql://$PGUSER@127.0.0.1/$PGDATABASE"
     export CRYSTAL_FORGE_TEST_DATABASE_URL="$DATABASE_URL"
+    # Public sandbox-only fixture key. Never inherit deployment credentials.
+    export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="server-regressions-public-fixture-key"
 
     # Shared-database tests (resolver/deletion and selected live lib tests)
     # expect the schema to exist before they start. sqlx::test targets create
@@ -430,20 +478,32 @@ SQL
 SQL
 
     echo "=== Critical cf-server integration targets ==="
-    cargo test --offline --package cf-server \
-      --test assignment_semantics \
-      --test compliance_assignment_zombie_repair \
-      --test composite_policy \
-      --test evidence_for_ato \
-      --test framework_version_id_lifecycle \
-      --test policy_counts_defect \
-      --test policy_editor_phase2 \
-      --test poam_workflows \
-      --test task433_assignment_visibility \
-      --test task433_csrf \
-      --test time_window_policy_test \
-      -- --test-threads=1
+    beginPhase critical-integration-targets
+    # Preserve all eleven targets and Cargo's failure propagation. Separate
+    # compilation/linking from execution to identify a silent boundary.
+    for testTarget in \
+      assignment_semantics \
+      compliance_assignment_zombie_repair \
+      composite_policy \
+      evidence_for_ato \
+      framework_version_id_lifecycle \
+      policy_counts_defect \
+      policy_editor_phase2 \
+      poam_workflows \
+      task433_assignment_visibility \
+      task433_csrf \
+      time_window_policy_test
+    do
+      runRegressionCommand "$testTarget" compile \
+        cargo test --offline --package cf-server --test "$testTarget" --no-run
+      runRegressionCommand "$testTarget" run \
+        cargo test --offline --package cf-server --test "$testTarget" \
+          -- --test-threads=1
+    done
 
+    beginPhase selected-library-and-additional-integration-regressions
+    runRegressionCommand cf-server-lib compile \
+      cargo test --offline --package cf-server --lib --no-run
     echo "=== Selected POA&M authorization, setup, notification, and overdue regressions ==="
     cargo test --offline --package cf-server --lib \
       handlers::api::poam::tests::http_requires_session_csrf_and_mutator_role \
@@ -656,6 +716,226 @@ SQL
       exact_build_lookup_plan_stays_primary_key_bounded_at_production_scale \
       -- --ignored --test-threads=1
 
+    echo "=== TASK-470 cache scope, signed capability, selection, and dispatch contracts ==="
+    beginPhase task470-exact-cache-regressions
+    # --exact alone succeeds when a test is renamed or removed. Require both
+    # the named success line and exactly one executed test. pipefail preserves
+    # Cargo failures through tee; ignored tests are enabled only by name.
+    runExactCacheRegression() {
+      local testName="$1" mode=nonignored started=$SECONDS status
+      shift
+      if [[ "''${1:-}" == --ignored ]]; then
+        mode=ignored
+      fi
+      local testLog="$TMPDIR/task470-exact-test.log"
+      printf 'START %s mode=%s at=%s\n' "$testName" "$mode" "$(date -u +%FT%TZ)"
+      if (set -o pipefail; cargo test --offline --package cf-server --lib "$testName" \
+        -- --exact --test-threads=1 --color=never "$@" 2>&1 | tee "$testLog"); then
+        status=0
+      else
+        status=$?
+      fi
+      if (( status == 0 )) && { ! grep -Fxq "test $testName ... ok" "$testLog" || \
+        ! grep -Fq "test result: ok. 1 passed; 0 failed; 0 ignored;" "$testLog"; }; then
+        echo "Expected exactly one successful test: $testName" >&2
+        status=1
+      fi
+      printf 'END %s mode=%s exit=%s elapsed=%ss at=%s\n' \
+        "$testName" "$mode" "$status" "$((SECONDS - started))" "$(date -u +%FT%TZ)"
+      return "$status"
+    }
+
+    # TASK-487 replaces a vacuous list assertion with fixture membership in a
+    # sqlx-created database. The exact guard rejects missing or renamed tests.
+    runExactCacheRegression \
+      handlers::api::deployment_policies::tests::test_list_deployment_policies_includes_fixture \
+      --ignored
+
+    # Exercise both refactored pagination loops and their authorization/cap
+    # contracts against sandbox-owned databases. Require each of the seven
+    # selected integration tests to execute; an empty target cannot pass.
+    runRegressionCommand register_export_selection compile \
+      cargo test --offline --package cf-server --test register_export_selection --no-run
+    for testName in \
+      pages_whole_filtered_scope_and_rechecks_reader \
+      acceptance_only_does_not_apply_unrelated_poam_filters \
+      policy_export_context_uses_actual_waiver_finding \
+      exceeds_combined_cap_without_partial_selection \
+      plan_context_retains_all_linked_systems_in_one_snapshot \
+      retired_link_in_same_environment_exports_but_moved_out_link_does_not \
+      scheduled_environment_keeps_both_exact_packages
+    do
+      testLog="$TMPDIR/task487-register-export-exact-test.log"
+      runRegressionCommand "$testName" ignored \
+        bash -o pipefail -c 'cargo test --offline --package cf-server \
+          --test register_export_selection "$1" \
+          -- --ignored --exact --test-threads=1 --color=never 2>&1 | tee "$2"' \
+          _ "$testName" "$testLog"
+      if ! grep -Fxq "test $testName ... ok" "$testLog" || \
+        ! grep -Fq "test result: ok. 1 passed; 0 failed; 0 ignored;" "$testLog"; then
+        echo "Expected exactly one successful test: $testName" >&2
+        exit 1
+      fi
+    done
+
+    # TASK-484 uses sqlx-created databases in this sandbox. Run each test in a
+    # separate process because the heavy-Nix semaphore is process-global.
+    for testName in \
+      models::evaluate_with_policies::tests::discovery_database_tests::discovery_advisory_precedes_semaphore_and_releases_before_bulk \
+      models::evaluate_with_policies::tests::discovery_database_tests::discovery_quarantine_retains_real_advisory_and_capacity \
+      models::evaluate_with_policies::tests::discovery_database_tests::discovery_failures_and_cancellation_terminalize_exact_attempt \
+      models::evaluate_with_policies::tests::discovery_database_tests::discovery_api_cancellation_stops_active_child_and_finalizes_original_attempt \
+      models::evaluate_with_policies::tests::discovery_database_tests::discovery_api_cancellation_interrupts_advisory_and_capacity_admission \
+      models::evaluate_with_policies::tests::discovery_database_tests::bulk_admission_preserves_owned_leases_and_bounds_pool_wait
+    do
+      runExactCacheRegression "$testName" --ignored
+    done
+
+    for testName in \
+      queries::commits::partial_resource_failure_tests::partial_resource_failure_retains_rejected_completion_with_preserved_build_history \
+      queries::commits::partial_resource_failure_tests::partial_resource_failure_reconciles_committed_but_unacknowledged_completion \
+      queries::commits::partial_resource_failure_tests::partial_resource_failure_ignores_never_committed_completion_candidate \
+      queries::commits::partial_resource_failure_tests::partial_resource_failure_mixed_confirmed_and_resource_cohorts_terminalize \
+      queries::build_jobs::tests::resource_terminal_pending_preparation_is_exact_guarded_and_activates_once \
+      queries::commits::partial_resource_failure_tests::partial_resource_failure_retains_completed_evidence_snapshots_and_jobs \
+      queries::commits::partial_resource_failure_tests::partial_resource_failure_rejects_unverified_retention_atomically \
+      queries::commits::partial_resource_failure_tests::partial_resource_failure_respects_supersession_and_cancellation \
+      handlers::api::caches::basic_read_tests::niks3_basic_get_save_test_cancel_modes_and_authority_preserve_secrets \
+      queries::cache_publication_reads::tests::niks3_basic_publication_withholds_old_capabilities_and_insecure_delivery \
+      handlers::api::caches::discovery_tests::niks3_stored_discovery_retains_replaces_clears_modes_without_persistence \
+      handlers::api::caches::discovery_tests::niks3_stored_discovery_auth_invalid_json_type_tls_and_csrf_fail_without_mutation \
+      handlers::api::caches::niks3_ca_tests::canonical_ca_get_test_cancel_and_ca_only_save_preserve_ciphertext \
+      handlers::api::caches::retained_probe_tests::attic_named_cache_retained_replacement_results_and_policy_preserve_raw_state \
+      handlers::api::caches::retained_probe_tests::legacy_attic_plaintext_and_historical_ciphertext_retain_on_test_and_save \
+      handlers::api::caches::retained_probe_tests::legacy_attic_null_and_empty_token_refuse_before_probe_without_mutation \
+      handlers::api::caches::retained_probe_tests::stored_probe_preserves_ciphertext_scope_and_timestamps \
+      handlers::api::caches::retained_probe_tests::stored_probe_admin_json_missing_id_conversion_and_ssrf \
+      handlers::api::caches::retained_probe_tests::add_probe_validates_without_writes_and_niks3_requires_token \
+      handlers::api::caches::retained_probe_tests::legacy_basic_probe_preserves_raw_url_and_sanitized_roundtrip \
+      handlers::api::caches::retained_probe_tests::legacy_query_probe_refuses_without_mutation_or_replay \
+      handlers::api::caches::retained_probe_tests::legacy_s3_presigned_endpoint_redacts_and_refuses_replay \
+      handlers::api::caches::retained_probe_tests::legacy_uri_type_conversion_strips_inherited_auth \
+      queries::cache_destinations::atomic_scope_tests::create_scope_failure_leaves_no_cache_credentials_or_global_fallback \
+      queries::cache_destinations::atomic_scope_tests::update_scope_failure_preserves_entire_config_ciphertext_and_assignments \
+      queries::cache_destinations::tests::niks3_selection_assigned_first_disabled_fallback_and_stable_order \
+      queries::cache_destinations::tests::niks3_assignment_writers_wait_for_publication_snapshot \
+      handlers::agent::heartbeat::tests::niks3_signed_handler_preserves_pending_deployment_and_delivers_only_selected_reads \
+      handlers::api::builders::tests::niks3_builder_and_agent_selection_share_assigned_first_policy \
+      queries::builders::tests::niks3_canonical_environment_dispatch_rejects_ambiguity_before_credentials \
+      queries::builders::tests::niks3_canonical_environment_completion_rejects_post_dispatch_ambiguity \
+      queries::builders::tests::niks3_preclaim_handler_rejects_legacy_and_allows_capable_builder \
+      handlers::api::builders::proxy_dispatch_tests::proxy_credential_dispatch_signed_tcp_next_job \
+      queries::builders::tests::niks3_exact_candidate_claim_never_substitutes_after_queue_races \
+      queries::builders::tests::niks3_dispatch_identity_and_completion_transaction_rechecks \
+      queries::builders::tests::niks3_missing_push_queues_exact_id_and_requires_authoritative_output \
+      queries::builders::tests::niks3_pending_publication_guards_rollback_and_later_promotion \
+      queries::cache_push::niks3_tests::niks3_recorded_no_cache_dispatch_differs_from_unrecorded_enqueue \
+      queries::cache_push::niks3_tests::niks3_queue_persists_provenance_pins_legacy_and_retains_deleted_identity \
+      queries::cache_publication_reads::tests::niks3_publication_exact_identity_rename_and_secondary_source \
+      queries::cache_publication_reads::tests::niks3_publication_private_capability_and_current_scope_retry \
+      queries::cache_publication_reads::tests::niks3_publication_deleted_id_legacy_and_global_evidence \
+      queries::cache_publication_reads::tests::niks3_publication_database_precedes_legacy_and_ambiguity_fails_closed \
+      queries::cache_publication_reads::tests::niks3_publication_manual_pinned_auto_latest_retained_archive \
+      queries::cache_publication_reads::tests::niks3_publication_unknown_historical_and_bridge_remain_retryable \
+      queries::cache_publication_reads::tests::niks3_publication_rotation_race_before_claim_locks \
+      queries::cache_publication_reads::tests::niks3_publication_assignment_race_before_claim_locks \
+      queries::cache_publication_reads::tests::niks3_publication_deletion_race_before_claim_locks \
+      queries::cache_publication_reads::tests::niks3_publication_assigned_gates_never_downgrade_to_proven_global \
+      builder::cve_worker::tests::materialization_completed_provenance_identity_and_eligibility \
+      handlers::api::caches::tests::niks3_api_create_rejects_malformed_keys_in_all_auth_modes \
+      handlers::api::caches::tests::niks3_api_update_rejects_malformed_keys_in_all_auth_modes
+    do
+      runExactCacheRegression "$testName" --ignored
+    done
+    for testName in \
+      queries::commits::partial_resource_failure_tests::partial_failure_diagnostic_uses_proven_counts_not_checkpoint_guesses \
+      handlers::api::builders::tests::evaluator_fixture_reproduces_inherited_cloexec_writer \
+      handlers::api::builders::tests::evaluator_fingerprint_reports_executing_nix_and_pure_contract \
+      queries::commits::partial_resource_failure_tests::evaluation_failure_resource_marker_is_server_owned \
+      queries::commits::partial_resource_failure_tests::partial_failure_cohort_keeps_confirmed_and_resource_systems_disjoint \
+      models::retry_policy::tests::resource_failure_never_retries_whole_flake_despite_available_budget \
+      models::cache_destination::tests::niks3_basic_pair_validation_redaction_modes_and_authority \
+      models::cache_destination::tests::niks3_probe_planes_bootstrap_without_unselected_settings \
+      handlers::api::caches::basic_read_tests::niks3_basic_http_projection_and_plane_scope_do_not_cross_credentials \
+      handlers::api::caches::niks3_write_probe::tests::native_gc_schema_rejects_generic_json_and_invalid_typed_fields \
+      handlers::api::caches::niks3_write_probe::tests::exact_status_media_type_and_body_are_required \
+      handlers::api::caches::niks3_write_probe::tests::mtls_control_requires_a_specific_identity_alert_not_any_transport_failure \
+      handlers::api::caches::niks3_write_probe::tests::nginx_omission_requires_complete_page_and_only_opens_mtls_control \
+      handlers::api::caches::niks3_write_probe::tests::nginx_ingress_control_still_requires_both_native_handler_fingerprints \
+      handlers::api::caches::niks3_write_probe::tests::native_token_route_pair_proves_access_and_sends_only_invalid_bodies \
+      handlers::api::caches::niks3_write_probe::tests::no_post_follows_unknown_get_or_non_discriminating_authentication_control \
+      handlers::api::caches::niks3_write_probe::tests::definite_native_token_denial_is_false_not_untested \
+      handlers::api::caches::niks3_write_probe::tests::strict_gc_json_accepts_finished_failure_without_exposing_provider_error \
+      handlers::api::caches::niks3_write_probe::tests::mtls_route_requests_send_no_bearer_and_native_subject_denial_is_false \
+      handlers::api::caches::niks3_write_probe::tests::retained_and_replacement_effective_snapshots_select_only_active_write_credentials \
+      handlers::api::caches::niks3_write_probe::tests::missing_or_invalid_write_token_reports_local_failure_without_dns_or_read_borrowing \
+      handlers::api::caches::niks3_write_probe::tests::all_scope_invalid_bearer_preflight_precedes_metadata_dns_and_read_requests \
+      handlers::api::caches::niks3_write_probe::tests::niks3_read_custom_ca_replaces_ambient_roots_and_invalid_bundles_do_not_fallback \
+      handlers::api::caches::niks3_write_probe::tests::write_metadata_reachability_is_independent_of_protected_authentication \
+      handlers::api::caches::niks3_write_probe::tests::all_metadata_key_mismatch_keeps_api_reachable_and_does_not_skip_authentication \
+      handlers::api::caches::niks3_write_probe::tests::all_scope_missing_token_keeps_existing_local_validation_rejection \
+      handlers::api::caches::niks3_write_probe::tests::generic_post_errors_and_contradictory_controls_never_verify_authorization \
+      handlers::api::caches::niks3_write_probe::tests::unexpected_success_stops_without_control_retry_or_valid_request \
+      handlers::api::caches::niks3_write_probe::tests::metadata_and_read_requests_do_not_receive_write_bearer \
+      handlers::api::caches::niks3_write_probe::tests::chunked_bodies_are_bounded_and_a_shared_deadline_covers_stream_consumption \
+      security::cache_secrets::tests::basic_password_envelope_preserves_spaces_and_literal_prefixes \
+      queries::builders::tests::niks3_publication_fingerprint_includes_secrets_policy_and_canonical_sets \
+      handlers::api::caches::storage_metrics::tests::native_values_preserve_basis_without_inventing_paths \
+      handlers::api::caches::storage_metrics::tests::attic_inventory_preserves_exact_identity_u64_and_path_basis \
+      handlers::api::caches::storage_metrics::tests::attic_inventory_rejects_missing_null_negative_overflow_and_identity_mismatch \
+      handlers::api::caches::storage_metrics::tests::attic_optional_metadata_gate_requires_current_enabled_type_and_admin \
+      handlers::api::caches::storage_metrics::tests::attic_mapping_is_explicit_https_and_fails_closed_for_every_invalid_entry \
+      handlers::api::caches::storage_metrics::tests::attic_request_uses_only_adapter_bearer_and_exact_canonical_name \
+      handlers::api::caches::storage_metrics::tests::attic_token_loader_rejects_symlinks_public_files_and_bad_tokens \
+      handlers::api::caches::storage_metrics::tests::attic_protected_token_file_enforces_exact_adapter_alphabet_and_boundaries \
+      handlers::api::caches::storage_metrics::tests::attic_response_is_bounded_and_status_errors_are_static \
+      handlers::api::caches::storage_metrics::tests::attic_invalid_mapping_or_name_stops_before_file_or_network \
+      handlers::api::caches::storage_metrics::tests::malformed_negative_missing_and_overflow_stats_never_become_zero \
+      handlers::api::caches::storage_metrics::tests::metadata_gates_skip_all_unsupported_disabled_and_non_admin_probes \
+      handlers::api::caches::storage_metrics::tests::missing_endpoint_denial_redirects_and_non_native_success_are_not_empty_stats \
+      handlers::api::caches::storage_metrics::tests::streamed_body_limit_rejects_overflow_without_retaining_rejected_chunk \
+      handlers::api::caches::storage_metrics::tests::absent_metrics_wire_shape_is_explicit_and_not_http_cached \
+      handlers::api::caches::storage_metrics::tests::stats_request_keeps_configured_authority_prefix_and_no_authorization \
+      handlers::api::caches::storage_metrics::tests::overall_deadline_cancels_pending_work_and_returns_nulls \
+      handlers::api::caches::storage_metrics::tests::unauthenticated_request_stops_before_database_lookup \
+      handlers::api::caches::discovery_tests::niks3_discovery_projects_only_write_mtls_and_public_mode \
+      handlers::api::caches::discovery_tests::niks3_discovery_rejects_invalid_bundles_and_queries_before_network \
+      handlers::api::caches::discovery_tests::niks3_discovery_admin_first_and_public_response_redact_tls_material \
+      security::cache_secrets::tests::certificate_bundle_regressions_reject_interleaved_comments_and_noncert_blocks \
+      handlers::api::caches::niks3_ca_tests::ca_normalization_keeps_roots_separate_from_strict_client_chains \
+      handlers::api::caches::niks3_ca_tests::ca_diagnostics_are_typed_static_and_field_scoped \
+      handlers::api::caches::niks3_ca_tests::mismatched_write_identity_fails_before_dns_and_never_proves_auth \
+      handlers::api::caches::niks3_ca_tests::custom_write_roots_skip_ambient_trust_and_validate_every_root \
+      handlers::api::caches::niks3_ca_tests::transport_diagnostics_use_local_causes_not_url_or_body_text \
+      queries::cache_destinations::tests::retained_niks3_secrets_preserve_exact_opaque_storage \
+      queries::cache_destinations::tests::effective_niks3_secret_clears_discard_original_storage \
+      queries::cache_destinations::tests::ca_updates_retain_all_niks3_secret_storage_and_inactive_fields \
+      handlers::api::builders::tests::attic_requisite_env_uses_shared_server_base \
+      handlers::api::caches::retained_probe_tests::attic_canonical_api_and_model_read_roots_share_named_cache \
+      handlers::api::caches::retained_probe_tests::attic_native_metadata_and_status_matrix_never_claims_root_or_write_success \
+      handlers::api::caches::retained_probe_tests::attic_target_policy_and_credential_queries_fail_before_network \
+      handlers::api::caches::retained_probe_tests::active_type_metadata_and_serialization_never_reveal_inactive_credentials \
+      handlers::api::caches::retained_probe_tests::effective_update_never_borrows_inactive_credentials_on_type_conversion \
+      handlers::api::caches::retained_probe_tests::bearer_auth_is_exclusive_to_active_attic \
+      handlers::api::caches::retained_probe_tests::every_url_field_redacts_decoded_aws_queries_and_invalid_urls_fail_closed \
+      handlers::api::caches::s3_probe::tests::sigv4_signs_exact_bucket_host_path_query_and_sensitive_session \
+      handlers::agent_request::tests::niks3_capability_requires_authenticated_body_and_ignores_unsigned_headers \
+      handlers::agent::heartbeat::tests::niks3_selected_cache_never_drops_private_or_unsupported_first_for_fallback \
+      handlers::api::builders::tests::niks3_preclaim_capability_gate_preserves_legacy_cache_dispatch \
+      handlers::api::builders::tests::cache_probe_failure_codes_and_wire_contract_are_static \
+      handlers::api::builders::tests::cache_probe_exact_root_refresh_attic_and_private_capture_bounds \
+      handlers::api::builders::tests::niks3_basic_probe_applies_guard_to_path_info_only \
+      handlers::api::builders::tests::niks3_completion_probe_uses_independent_read_plane \
+      handlers::api::builders::tests::niks3_probe_failure_never_polls_success_transition \
+      handlers::api::builders::tests::niks3_probe_timeout_and_cancellation_reap_before_cleanup \
+      handlers::api::builders::tests::niks3_pinned_nix_accepts_remote_metadata_and_refresh_flags \
+      handlers::api::builders::niks3_input_owner_tests::niks3_input_owner_acknowledges_reap_and_cleanup_after_detach \
+      handlers::api::builders::niks3_input_owner_tests::fifo_deadlines_cover_missing_readiness_and_absent_release_reader
+    do
+      runExactCacheRegression "$testName"
+    done
+
+    )
     runHook postCheck
   '';
 

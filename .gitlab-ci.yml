@@ -63,7 +63,7 @@ coverage-check:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - nix run .#coverage.coverage-report
+    - nix run .#coverage.coverage-report --builders '' --max-jobs 1 --cores 2
   artifacts:
     when: always
     expire_in: 30 days
@@ -131,7 +131,7 @@ complexity-check:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - nix run .#code-metrics.complexity-report
+    - nix run .#code-metrics.complexity-report --builders '' --max-jobs 1 --cores 2
   artifacts:
     when: always
     expire_in: 30 days
@@ -186,6 +186,13 @@ flake-check:
           - oidc-auth
           - run-ui-dev-db-check
           - server-regressions
+          - nixos-discovery-reliability
+          - niks3-cache
+          - niks3-write-probe
+          - niks3-ui
+          - attic-metrics
+          - attic-publication
+          - builder-evaluator-packaging
           - web-ui-test-runner
           - okf-knowledge
   before_script:
@@ -195,11 +202,20 @@ flake-check:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - nix build ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace
+    - |
+      case "$CHECK_NAME" in
+        integration|oidc-auth|server-regressions|nixos-discovery-reliability|niks3-cache|niks3-write-probe|niks3-ui|attic-metrics|attic-publication|builder-evaluator-packaging)
+          # Bound matrix execution locally while remote Query/Fetch is unhealthy.
+          sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace --builders '' --max-jobs 1 --cores 2
+          ;;
+        *)
+          nix build ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace --builders '' --max-jobs 1 --cores 2
+          ;;
+      esac
     # Copy web-ui screenshots out of the Nix build result into the CI workspace
     - mkdir -p web-ui-screenshots
     - |
-      if [ "$CHECK_NAME" = "web-ui" ]; then
+      if [ "$CHECK_NAME" = "web-ui" ] || [ "$CHECK_NAME" = "niks3-ui" ]; then
         STORE_PATH=$(readlink -f result)
         if [ -d "$STORE_PATH/screenshots" ]; then
           cp -r "$STORE_PATH/screenshots/"* web-ui-screenshots/
@@ -231,7 +247,7 @@ web-ui-check:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - nix build ".#checks.x86_64-linux.web-ui" -L --show-trace
+    - sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.web-ui" -L --show-trace
     - mkdir -p web-ui-screenshots
     - |
       STORE_PATH=$(readlink -f result)
@@ -266,7 +282,7 @@ web-ui-baseline-candidates:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - CF_UI_UPDATE_BASELINES=1 nix build --impure ".#checks.x86_64-linux.web-ui" -L --show-trace
+    - CF_UI_UPDATE_BASELINES=1 sh packages/ci/public-cache-build.sh --impure ".#checks.x86_64-linux.web-ui" -L --show-trace
     - mkdir -p web-ui-baseline-candidates
     - STORE_PATH=$(readlink -f result)
     - test -d "$STORE_PATH/screenshots"

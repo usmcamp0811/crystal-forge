@@ -7,6 +7,52 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// Declares cache-read support for one authenticated heartbeat.
+///
+/// Missing capabilities mean no support. Version strings and build hashes do
+/// not attest to support; servers must read these flags from the signed body.
+#[derive(Debug, Default, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub struct AgentCapabilities {
+    /// Supports explicit Niks3 public and mTLS read settings without write secrets.
+    #[serde(default)]
+    pub supports_niks3: bool,
+    /// Supports Basic reads with a runtime-verified native exact-origin guard.
+    ///
+    /// This independent signed flag defaults to false for mixed-version agents.
+    /// General Niks3 support does not establish Basic deserialization or safe
+    /// native credential handling. Servers must require both flags for Basic.
+    #[serde(default)]
+    pub supports_niks3_basic_read: bool,
+}
+
+/// Extends the legacy flat system-state JSON with signed capabilities.
+///
+/// `state` remains flattened so old servers and agents retain the existing
+/// SystemState wire shape. Capabilities are request-local, not persisted state.
+///
+/// # Examples
+/// ```
+/// use cf_protocol::agent::{AgentCapabilities, CurrentSystemRequest};
+/// let request = CurrentSystemRequest {
+///     state: serde_json::json!({"hostname": "host", "change_reason": "startup"}),
+///     capabilities: AgentCapabilities {
+///         supports_niks3: true, ..AgentCapabilities::default()
+///     },
+/// };
+/// let json = serde_json::to_value(request).unwrap();
+/// assert_eq!(json["hostname"], "host");
+/// assert_eq!(json["capabilities"]["supports_niks3"], true);
+/// ```
+#[derive(Debug, Serialize, Deserialize)]
+pub struct CurrentSystemRequest<T> {
+    /// Retains the legacy system-state fields at the JSON root.
+    #[serde(flatten)]
+    pub state: T,
+    /// Declares support authenticated by the signature over the whole body.
+    #[serde(default)]
+    pub capabilities: AgentCapabilities,
+}
+
 /// Reason for a system state change/heartbeat.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum ChangeReason {
@@ -138,6 +184,56 @@ impl SystemState {
 mod tests {
     use super::*;
 
+    #[test]
+    fn basic_read_capability_is_independent_and_defaults_false() {
+        for legacy in [
+            serde_json::json!({}),
+            serde_json::json!({"supports_niks3":true}),
+        ] {
+            let caps: AgentCapabilities = serde_json::from_value(legacy).unwrap();
+            assert!(!caps.supports_niks3_basic_read);
+        }
+        let request: CurrentSystemRequest<serde_json::Value> =
+            serde_json::from_value(serde_json::json!({"hostname":"host", "capabilities":{
+                "supports_niks3":true, "supports_niks3_basic_read":true
+            }}))
+            .unwrap();
+        assert!(request.capabilities.supports_niks3_basic_read);
+        assert!(request.capabilities.supports_niks3);
+        assert_eq!(
+            serde_json::to_value(request).unwrap()["capabilities"]["supports_niks3_basic_read"],
+            true
+        );
+    }
+
+    #[test]
+    fn legacy_current_system_json_defaults_missing_capabilities_to_false() {
+        let legacy = serde_json::json!({
+            "hostname": "legacy-host",
+            "change_reason": "startup",
+            "agent_version": "999.0.0",
+            "agent_build_hash": "claimed-current",
+            "network_interfaces": "[]"
+        });
+        let parsed: CurrentSystemRequest<SystemState> =
+            serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(parsed.capabilities, AgentCapabilities::default());
+        let old: SystemState = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(&parsed.state).unwrap(),
+            serde_json::to_value(&old).unwrap()
+        );
+        for capabilities in [
+            serde_json::json!({}),
+            serde_json::json!({"supports_niks3": false}),
+        ] {
+            let mut body = legacy.clone();
+            body["capabilities"] = capabilities;
+            let request: CurrentSystemRequest<SystemState> = serde_json::from_value(body).unwrap();
+            assert!(!request.capabilities.supports_niks3);
+        }
+    }
+
     /// Ensure `network_interfaces` serializes as a JSON *string* (double-encoded),
     /// not as an array or object. This protects the existing wire and persisted-data
     /// contract from accidental format changes.
@@ -182,6 +278,22 @@ mod tests {
         };
 
         let value = serde_json::to_value(&state).expect("serialize system state");
+        assert!(value.get("capabilities").is_none());
+        let legacy: CurrentSystemRequest<SystemState> =
+            serde_json::from_value(value.clone()).unwrap();
+        assert!(!legacy.capabilities.supports_niks3);
+        let advertised = serde_json::to_value(CurrentSystemRequest {
+            state: &state,
+            capabilities: AgentCapabilities {
+                supports_niks3: true,
+                ..AgentCapabilities::default()
+            },
+        })
+        .unwrap();
+        assert_eq!(advertised["capabilities"]["supports_niks3"], true);
+        // Old parsers ignore the additive field and retain the original state.
+        let old_parser: SystemState = serde_json::from_value(advertised).unwrap();
+        assert_eq!(serde_json::to_value(old_parser).unwrap(), value);
         let ni = value["network_interfaces"]
             .as_str()
             .expect("network_interfaces should serialize as a JSON string");
@@ -226,6 +338,12 @@ impl std::fmt::Display for SystemState {
 /// Cache configuration delivered to agents in heartbeat responses.
 #[derive(Serialize, Deserialize)]
 pub struct RuntimeCacheConfig {
+    /// Signing keys for the read endpoint; legacy keys remain available below.
+    #[serde(default)]
+    pub cache_public_keys: Vec<String>,
+    /// Read-only credentials scoped to the receiving agent's environment.
+    #[serde(default)]
+    pub read_auth: crate::cache::CacheReadAuth,
     pub cache_type: String,
     pub cache_url: String,
     pub cache_public_key: Option<String>,

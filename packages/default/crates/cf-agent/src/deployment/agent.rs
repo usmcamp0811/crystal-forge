@@ -101,6 +101,7 @@ struct DeploymentFailedReport<'a> {
 }
 
 impl AgentDeploymentManager {
+    /// Creates a deployment manager with local fallback cache settings.
     pub fn new(config: DeploymentConfig) -> Self {
         Self {
             config,
@@ -111,32 +112,34 @@ impl AgentDeploymentManager {
         }
     }
 
-    fn effective_runtime_cache(
-        &self,
-    ) -> Option<(String, CacheType, Option<String>, Option<String>)> {
+    fn effective_runtime_cache(&self) -> Result<Option<RuntimeCacheConfig>> {
         if let Some(cache) = self.runtime_caches.first() {
-            let cache_type = match cache.cache_type.as_str() {
-                "Attic" => CacheType::Attic,
-                "S3" => CacheType::S3,
-                "Http" => CacheType::Http,
-                _ => CacheType::Nix,
-            };
-            return Some((
-                cache.cache_url.clone(),
-                cache_type,
-                cache.cache_public_key.clone(),
-                cache.attic_cache_name.clone(),
-            ));
+            if !matches!(
+                cache.cache_type.as_str(),
+                "Attic" | "S3" | "Http" | "Nix" | "Niks3"
+            ) {
+                anyhow::bail!("Unknown runtime cache type");
+            }
+            return Ok(Some(clone_runtime_cache(cache)));
         }
 
-        self.config.cache_url.as_ref().map(|cache_url| {
-            (
-                cache_url.clone(),
-                self.config.cache_type.clone(),
-                self.config.cache_public_key.clone(),
-                self.config.attic_cache_name.clone(),
-            )
-        })
+        // INVARIANT: Static deployment settings cannot express Niks3 auth.
+        // Do not infer a public cache when runtime credentials are unavailable.
+        if self.config.cache_type == CacheType::Niks3 {
+            anyhow::bail!("Niks3 deployment requires server-provided read settings");
+        }
+        Ok(self
+            .config
+            .cache_url
+            .as_ref()
+            .map(|cache_url| RuntimeCacheConfig {
+                cache_url: cache_url.clone(),
+                cache_type: format!("{:?}", self.config.cache_type),
+                cache_public_key: self.config.cache_public_key.clone(),
+                attic_cache_name: self.config.attic_cache_name.clone(),
+                cache_public_keys: self.config.cache_public_key.iter().cloned().collect(),
+                read_auth: cf_protocol::cache::CacheReadAuth::None,
+            }))
     }
 
     /// Read the actual current system from /run/current-system
@@ -152,6 +155,11 @@ impl AgentDeploymentManager {
         Ok(target_str)
     }
 
+    /// Updates read-only runtime caches and applies an authorized desired target.
+    ///
+    /// # Errors
+    /// Returns an error if the current system cannot be read. Deployment failures
+    /// are returned as [`DeploymentResult::Failed`] after best-effort reporting.
     pub async fn process_heartbeat_response(
         &mut self,
         response: LogResponse,
@@ -226,7 +234,7 @@ impl AgentDeploymentManager {
 
         let is_store_path = target.starts_with("/nix/store/");
 
-        let effective_cache = self.effective_runtime_cache();
+        let effective_cache = self.effective_runtime_cache()?;
 
         // Store paths REQUIRE cache to be configured
         if is_store_path && effective_cache.is_none() {
@@ -240,18 +248,10 @@ impl AgentDeploymentManager {
 
         let result = if is_store_path {
             // Store paths: deploy from cache
-            let Some((cache_url, cache_type, cache_public_key, attic_cache_name)) = effective_cache
-            else {
+            let Some(cache) = effective_cache else {
                 anyhow::bail!("Store path deployment requested without effective cache config");
             };
-            self.deploy_store_path_from_cache(
-                target,
-                &cache_url,
-                &cache_type,
-                cache_public_key.as_deref(),
-                attic_cache_name.as_deref(),
-            )
-            .await?
+            self.deploy_store_path_from_cache(target, &cache).await?
         } else {
             anyhow::bail!(
                 "This is not a store path we don't know how to handle it! Target: {}",
@@ -270,38 +270,18 @@ impl AgentDeploymentManager {
     async fn deploy_store_path_from_cache(
         &self,
         store_path: &str,
-        cache_url: &str,
-        cache_type: &CacheType,
-        cache_public_key: Option<&str>,
-        attic_cache_name: Option<&str>,
+        cache: &RuntimeCacheConfig,
     ) -> Result<DeploymentResult> {
         info!("Deploying store path from cache: {}", store_path);
-        info!("Cache type: {:?}", cache_type);
-        info!("Cache URL: {}", cache_url);
-        if let Some(pk) = cache_public_key {
-            info!("Using runtime cache public key: {}", pk);
-        }
-        if let Some(name) = attic_cache_name {
-            info!("Using runtime attic cache name: {}", name);
-        }
 
         let timestamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)?
             .as_secs();
         let unit_name = format!("crystal-forge-deploy-{}", timestamp);
 
-        // For all cache types, use cache_url directly
-        let binary_cache_url = cache_url.to_string();
-
         // Step 1: Copy from cache with retry logic
         info!("Starting cache copy with retry logic...");
-        self.copy_from_cache_with_retry(
-            &binary_cache_url,
-            store_path,
-            cache_type,
-            cache_public_key,
-        )
-        .await?;
+        self.copy_from_cache_with_retry(cache, store_path).await?;
 
         // Step 2: Activate the configuration using systemd-run
         info!("Activating configuration via systemd-run...");
@@ -313,10 +293,8 @@ impl AgentDeploymentManager {
 
     async fn copy_from_cache_with_retry(
         &self,
-        cache_url: &str,
+        cache: &RuntimeCacheConfig,
         store_path: &str,
-        cache_type: &CacheType,
-        cache_public_key: Option<&str>,
     ) -> Result<()> {
         const MAX_RETRIES: u32 = 3;
         const BASE_RETRY_DELAY: Duration = Duration::from_secs(5);
@@ -328,16 +306,7 @@ impl AgentDeploymentManager {
             // Attempt 3: clear local nix cache directory, then retry
             let use_refresh = attempt == 2;
 
-            match self
-                .copy_from_cache(
-                    cache_url,
-                    store_path,
-                    use_refresh,
-                    cache_type,
-                    cache_public_key,
-                )
-                .await
-            {
+            match self.copy_from_cache(cache, store_path, use_refresh).await {
                 Ok(()) => {
                     info!(
                         "Successfully copied {} from cache on attempt {}",
@@ -407,17 +376,35 @@ impl AgentDeploymentManager {
 
     async fn copy_from_cache(
         &self,
-        cache_url: &str,
+        cache: &RuntimeCacheConfig,
         store_path: &str,
         refresh: bool,
-        cache_type: &CacheType,
-        cache_public_key: Option<&str>,
     ) -> Result<()> {
         use std::process::Stdio;
         use tokio::io::{AsyncBufReadExt, BufReader};
         use tokio::process::Command as TokioCommand;
 
         let copy_timeout = self.config.deployment_timeout_minutes * 60;
+        if cache.cache_type == "Niks3"
+            || !matches!(cache.read_auth, cf_protocol::cache::CacheReadAuth::None)
+        {
+            return copy_authenticated_cache(
+                clone_runtime_cache(cache),
+                store_path.to_owned(),
+                refresh,
+                Duration::from_secs(copy_timeout),
+                std::ffi::OsString::from("nix"),
+            )
+            .await;
+        }
+        let cache_url = &cache.cache_url;
+        let keys = if cache.cache_public_keys.is_empty() {
+            cache.cache_public_key.iter().cloned().collect::<Vec<_>>()
+        } else {
+            cache.cache_public_keys.clone()
+        };
+        let joined_keys = keys.join(" ");
+        let cache_public_key = (!joined_keys.is_empty()).then_some(joined_keys.as_str());
 
         let mut copy_args = vec![
             "copy".to_string(),
@@ -432,7 +419,7 @@ impl AgentDeploymentManager {
         }
 
         // Disable HTTP/2 for Attic to avoid framing errors
-        if matches!(cache_type, CacheType::Attic) {
+        if cache.cache_type == "Attic" {
             debug!("Disabling HTTP/2 for Attic cache");
             copy_args.extend(vec![
                 "--option".to_string(),
@@ -444,7 +431,7 @@ impl AgentDeploymentManager {
         if let Some(public_key) = cache_public_key {
             copy_args.extend(vec![
                 "--option".to_string(),
-                "trusted-public-keys".to_string(),
+                "extra-trusted-public-keys".to_string(),
                 public_key.to_string(),
             ]);
         }
@@ -883,8 +870,183 @@ impl AgentDeploymentManager {
         Ok(())
     }
 
+    /// Updates the manager's remembered target without activating a system.
     pub fn update_current_target(&mut self, target: Option<String>) {
         self.current_target = target;
+    }
+}
+
+fn clone_runtime_cache(cache: &RuntimeCacheConfig) -> RuntimeCacheConfig {
+    RuntimeCacheConfig {
+        cache_type: cache.cache_type.clone(),
+        cache_url: cache.cache_url.clone(),
+        cache_public_key: cache.cache_public_key.clone(),
+        attic_cache_name: cache.attic_cache_name.clone(),
+        cache_public_keys: cache.cache_public_keys.clone(),
+        read_auth: cache.read_auth.clone(),
+    }
+}
+
+// CONCURRENCY: The detached task owns read credentials until child exit or
+// timeout kill/reap, even when the deployment future is dropped. Child output
+// is discarded because TLS diagnostics may contain private configuration.
+async fn copy_authenticated_cache(
+    cache: RuntimeCacheConfig,
+    store_path: String,
+    refresh: bool,
+    timeout: Duration,
+    program: std::ffi::OsString,
+) -> Result<()> {
+    tokio::spawn(async move {
+        if cache.cache_type == "Niks3" && cache.cache_public_keys.is_empty() {
+            anyhow::bail!("Niks3 reads require signing keys");
+        }
+        let features = if matches!(
+            cache.read_auth,
+            cf_protocol::cache::CacheReadAuth::Basic { .. }
+        ) {
+            probe_nix_read_features(&program).await?
+        } else {
+            cf_config::cache_credentials::NixReadFeatures::default()
+        };
+        let read = cf_config::cache_credentials::PreparedCacheRead::new_with_nix_features(
+            &cache.cache_url,
+            &cache.cache_public_keys,
+            &cache.read_auth,
+            &features,
+        )?;
+        let mut command = tokio::process::Command::new(program);
+        // SECURITY: Only read auth is available to this child. Ambient write
+        // tokens, AWS credentials, and Nix access-token config are excluded.
+        command.env_clear();
+        for key in ["PATH", "NIX_REMOTE", "SSL_CERT_FILE", "SSL_CERT_DIR"] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
+        command.args([
+            "copy",
+            "--from",
+            &read.url,
+            "--option",
+            "extra-trusted-public-keys",
+            &read.trusted_public_keys,
+            "--option",
+            "require-sigs",
+            "true",
+            &store_path,
+        ]);
+        if refresh {
+            command.arg("--refresh");
+        }
+        read.apply_to_nix_command(command.as_std_mut());
+        let mut child = command
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .context("Failed to spawn authenticated cache copy")?;
+        let result = match tokio::time::timeout(timeout, child.wait()).await {
+            Ok(Ok(status)) => {
+                if status.success() {
+                    Ok(())
+                } else {
+                    anyhow::bail!("Authenticated cache copy failed with status {status}")
+                }
+            }
+            Ok(Err(error)) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                Err(error).context("Failed to wait for authenticated cache copy")
+            }
+            Err(_) => {
+                let _ = child.kill().await;
+                let _ = child.wait().await;
+                anyhow::bail!("Authenticated cache copy timed out");
+            }
+        };
+        drop(read);
+        result
+    })
+    .await
+    .context("Authenticated cache copy owner failed")?
+}
+
+/// Probes the read executable for native netrc authority protection.
+///
+/// Captures settings privately, with a ten-second deadline and a 2 MiB stdout
+/// limit. Callers must use the same executable and PATH for the subsequent read.
+/// Probe diagnostics are never included in errors because settings can contain
+/// unrelated credentials. No credential files are created by this operation.
+///
+/// # Errors
+/// Returns a static error on spawn, timeout, excessive output, nonzero exit,
+/// or malformed settings. A valid unpatched runtime returns absent support.
+///
+/// # Examples
+/// ```no_run
+/// # async fn example() -> anyhow::Result<()> {
+/// use cf_agent::deployment::agent::probe_nix_read_features;
+/// let program = std::ffi::OsStr::new("nix");
+/// let features = probe_nix_read_features(program).await?;
+/// if !features.supports_netrc_authority() {
+///     anyhow::bail!("Basic reads require the native authority guard");
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn probe_nix_read_features(
+    program: &std::ffi::OsStr,
+) -> Result<cf_config::cache_credentials::NixReadFeatures> {
+    use tokio::io::AsyncReadExt;
+    // SECURITY: Bound both captured streams; never expose settings or stderr.
+    const MAX_SETTINGS: u64 = 2 * 1024 * 1024;
+    let mut command = tokio::process::Command::new(program);
+    command.args([
+        "--extra-experimental-features",
+        "nix-command",
+        "config",
+        "show",
+        "--json",
+    ]);
+    let mut child = command
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|_| anyhow::anyhow!("Nix runtime feature probe failed"))?;
+    let stdout = child.stdout.take().context("Missing Nix probe stdout")?;
+    let stderr = child.stderr.take().context("Missing Nix probe stderr")?;
+    let capture = async {
+        let mut settings = Vec::new();
+        let mut diagnostics = Vec::new();
+        let mut stdout = stdout.take(MAX_SETTINGS + 1);
+        let mut stderr = stderr.take(64 * 1024 + 1);
+        let (out, err) = tokio::join!(
+            stdout.read_to_end(&mut settings),
+            stderr.read_to_end(&mut diagnostics),
+        );
+        if out.is_err()
+            || err.is_err()
+            || settings.len() > MAX_SETTINGS as usize
+            || diagnostics.len() > 64 * 1024
+        {
+            anyhow::bail!("Nix runtime feature probe exceeded capture limits");
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|_| anyhow::anyhow!("Nix runtime feature probe failed"))?;
+        anyhow::ensure!(status.success(), "Nix runtime feature probe failed");
+        cf_config::cache_credentials::NixReadFeatures::from_settings_json(&settings)
+    };
+    match tokio::time::timeout(Duration::from_secs(10), capture).await {
+        Ok(Ok(features)) => Ok(features),
+        _ => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            anyhow::bail!("Nix runtime feature probe failed");
+        }
     }
 }
 
@@ -900,6 +1062,306 @@ fn shell_quote(s: &str) -> String {
         s.to_string()
     } else {
         format!("'{}'", s.replace('\'', "'\"'\"'"))
+    }
+}
+
+#[cfg(test)]
+mod niks3_tests {
+    use super::*;
+    use cf_protocol::cache::CacheReadAuth;
+    use std::os::unix::fs::PermissionsExt;
+
+    // Frozen public X.509 fixture from cf-server/security/cache_secrets.rs.
+    // Canonical certificate-only PEM lets ownership tests reach the fake child.
+    // No private key is retained for this CA fixture.
+    const TEST_CERTIFICATE: &str = "-----BEGIN CERTIFICATE-----\n\
+MIIBYzCCARWgAwIBAgIUUiT5rFbIc6C8wVUsrDv3mmB3PDkwBQYDK2VwMCYxJDAi\n\
+BgNVBAMMG3Rhc2s0NzAtY2VydGlmaWNhdGUtZml4dHVyZTAgFw0yNjEwMDMwMDQ1\n\
+MTJaGA8yMTI2MDkwOTAwNDUxMlowJjEkMCIGA1UEAwwbdGFzazQ3MC1jZXJ0aWZp\n\
+Y2F0ZS1maXh0dXJlMCowBQYDK2VwAyEArmgxjwzB+VI7yxPnKKkVj9uulx0wtyrf\n\
+HC/p+1wXxpOjUzBRMB0GA1UdDgQWBBS5G+8DC/fImjFHjQtXKwSe/LTS7TAfBgNV\n\
+HSMEGDAWgBS5G+8DC/fImjFHjQtXKwSe/LTS7TAPBgNVHRMBAf8EBTADAQH/MAUG\n\
+AytlcANBANv0+9Ic9w11sJMah7/3hykwUUhs+iQqGZWTnWwQumZ7bkfKPl4Illm2\n\
+Zh/vQ6oHa2rNyo8ob+V7jS6Zzq1/6Qk=\n\
+-----END CERTIFICATE-----\n";
+
+    struct Fixture(PathBuf);
+    impl Fixture {
+        fn new(script: &str) -> Self {
+            let path =
+                std::env::temp_dir().join(format!("cf-agent-read-test-{}", rand::random::<u64>()));
+            std::fs::create_dir(&path).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let program = path.join("nix");
+            std::fs::write(
+                &program,
+                script
+                    .replace("FIXTURE", path.to_str().unwrap())
+                    .replace("TEST_CA_CERTIFICATE", TEST_CERTIFICATE.trim_end()),
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            Self(path)
+        }
+        fn program(&self) -> std::ffi::OsString {
+            self.0.join("nix").into_os_string()
+        }
+    }
+    impl Drop for Fixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn cache(private: bool) -> RuntimeCacheConfig {
+        RuntimeCacheConfig {
+            cache_type: "Niks3".into(),
+            cache_url: "https://read.example".into(),
+            cache_public_key: None,
+            attic_cache_name: None,
+            cache_public_keys: vec!["one:key".into(), "two:key".into()],
+            read_auth: if private {
+                CacheReadAuth::Mtls {
+                    client_certificate: "read-cert".into(),
+                    client_private_key: "read-key".into(),
+                    ca_certificate: Some(TEST_CERTIFICATE.into()),
+                }
+            } else {
+                CacheReadAuth::None
+            },
+        }
+    }
+    const PRIVATE_SCRIPT: &str = r#"#!/bin/sh
+set -eu
+test "$1" = copy
+test "$2" = --from
+test "$6" = 'one:key two:key'
+test "$9" = true
+case "$3" in https://read.example/*tls-certificate=*tls-private-key=*) ;; *) exit 11;; esac
+directory=${NIX_SSL_CERT_FILE%/*}
+test "$(cat "$directory/client-cert.pem")" = read-cert
+test "$(cat "$directory/client-key.pem")" = read-key
+test "$(cat "$NIX_SSL_CERT_FILE")" = 'TEST_CA_CERTIFICATE'
+test "$(stat -c %a "$directory")" = 700
+test "$(stat -c %a "$directory/client-key.pem")" = 600
+test -z "${AWS_SECRET_ACCESS_KEY:-}"
+test -z "${NIKS3_AUTH_TOKEN_FILE:-}"
+test -z "${ATTIC_TOKEN:-}"
+printf '%s' "$directory" > FIXTURE/credentials
+"#;
+
+    #[tokio::test]
+    async fn niks3_basic_read_applies_guard_paths_and_signatures() {
+        let fixture = Fixture::new(
+            r#"#!/bin/sh
+set -eu
+if test "$1" = --extra-experimental-features; then
+    test "$2" = nix-command; test "$3" = config; test "$4" = show; test "$5" = --json
+    printf '%s' '{"cf-netrc-authority":{"value":""}}'
+    exit 0
+fi
+test "$1" = copy; test "$3" = https://read.example/
+case "$*" in *private-user*|*private-password*) exit 24 ;; esac
+shift 10
+netrc=; authority=false; sigs=false; keys=false
+while test "$#" -gt 0; do
+    test "$1" = --option
+    case "$2" in
+    netrc-file) netrc=$3 ;;
+    cf-netrc-authority) test "$3" = https://read.example; authority=true ;;
+    require-sigs) test "$3" = true; sigs=true ;;
+    extra-trusted-public-keys) test "$3" = 'one:key two:key'; keys=true ;;
+    *) exit 11 ;;
+    esac
+    shift 3
+done
+test "$authority" = true; test "$sigs" = true; test "$keys" = true
+test -f "$netrc"; test "$(stat -c %a "$netrc")" = 600
+test "$(stat -c %a "${netrc%/*}")" = 700
+test -z "${NIX_CONFIG:-}"; test -z "${NIKS3_AUTH_TOKEN_FILE:-}"
+printf '%s' "${netrc%/*}" > FIXTURE/credentials
+"#,
+        );
+        let mut basic = cache(false);
+        basic.read_auth = CacheReadAuth::Basic {
+            username: "private-user".into(),
+            password: " private-password ".into(),
+        };
+        copy_authenticated_cache(
+            basic,
+            "/nix/store/output".into(),
+            false,
+            Duration::from_secs(5),
+            fixture.program(),
+        )
+        .await
+        .unwrap();
+        let directory = std::fs::read_to_string(fixture.0.join("credentials")).unwrap();
+        assert!(!std::path::Path::new(&directory).exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_basic_read_unpatched_runtime_never_copies() {
+        let fixture = Fixture::new(
+            r#"#!/bin/sh
+set -eu
+test "$1" = --extra-experimental-features
+printf '%s' '{"require-sigs":{"value":true}}'
+"#,
+        );
+        let mut basic = cache(false);
+        basic.read_auth = CacheReadAuth::Basic {
+            username: "private-user".into(),
+            password: "private-password".into(),
+        };
+        assert!(
+            copy_authenticated_cache(
+                basic,
+                "/nix/store/output".into(),
+                false,
+                Duration::from_secs(5),
+                fixture.program()
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn niks3_private_read_owns_files_and_ca_until_exit() {
+        let fixture = Fixture::new(&format!(
+            "{PRIVATE_SCRIPT}\nsleep 0.05\ntest -f \"$directory/client-key.pem\"\n"
+        ));
+        copy_authenticated_cache(
+            cache(true),
+            "/nix/store/output".into(),
+            true,
+            Duration::from_secs(5),
+            fixture.program(),
+        )
+        .await
+        .unwrap();
+        let directory = std::fs::read_to_string(fixture.0.join("credentials")).unwrap();
+        assert!(!std::path::Path::new(&directory).exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_public_read_preserves_multiple_keys_and_signatures() {
+        let fixture = Fixture::new(
+            r#"#!/bin/sh
+set -eu
+test "$3" = https://read.example/
+test "$6" = 'one:key two:key'
+test "$9" = true
+test -z "${NIX_SSL_CERT_FILE:-}"
+test -z "${AWS_SECRET_ACCESS_KEY:-}"
+"#,
+        );
+        copy_authenticated_cache(
+            cache(false),
+            "/nix/store/output".into(),
+            false,
+            Duration::from_secs(5),
+            fixture.program(),
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn niks3_read_failures_suppress_child_secrets_and_clean_up() {
+        let fixture = Fixture::new(&format!(
+            "{PRIVATE_SCRIPT}\nprintf 'read-key write-token' >&2\nexit 17\n"
+        ));
+        let error = copy_authenticated_cache(
+            cache(true),
+            "/nix/store/output".into(),
+            false,
+            Duration::from_secs(5),
+            fixture.program(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(!error.contains("read-key"));
+        assert!(!error.contains("write-token"));
+        let directory = std::fs::read_to_string(fixture.0.join("credentials")).unwrap();
+        assert!(!std::path::Path::new(&directory).exists());
+        let mut insecure = cache(true);
+        insecure.cache_url = "http://read.example".into();
+        assert!(
+            copy_authenticated_cache(
+                insecure,
+                "/nix/store/output".into(),
+                false,
+                Duration::from_secs(5),
+                fixture.program()
+            )
+            .await
+            .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn niks3_read_cancellation_retains_credentials_through_child_exit() {
+        let fixture = Fixture::new(&format!(
+            "{PRIVATE_SCRIPT}\nsleep 0.2\ntest -f \"$directory/client-key.pem\"\ntouch FIXTURE/exited\n"
+        ));
+        let operation = tokio::spawn(copy_authenticated_cache(
+            cache(true),
+            "/nix/store/output".into(),
+            false,
+            Duration::from_secs(5),
+            fixture.program(),
+        ));
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while !fixture.0.join("credentials").exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let directory = std::fs::read_to_string(fixture.0.join("credentials")).unwrap();
+        operation.abort();
+        assert!(std::path::Path::new(&directory).exists());
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while std::path::Path::new(&directory).exists() {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(fixture.0.join("exited").exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_read_timeout_kills_and_reaps_before_credential_cleanup() {
+        let fixture = Fixture::new(&format!("{PRIVATE_SCRIPT}\nexec sleep 30\n"));
+        assert!(
+            copy_authenticated_cache(
+                cache(true),
+                "/nix/store/output".into(),
+                false,
+                Duration::from_millis(100),
+                fixture.program()
+            )
+            .await
+            .is_err()
+        );
+        let directory = std::fs::read_to_string(fixture.0.join("credentials")).unwrap();
+        assert!(!std::path::Path::new(&directory).exists());
+    }
+
+    #[test]
+    fn niks3_runtime_unknown_types_and_missing_static_auth_fail_closed() {
+        let mut manager = AgentDeploymentManager::new(DeploymentConfig::default());
+        let mut unknown = cache(false);
+        unknown.cache_type = "unknown".into();
+        manager.runtime_caches = vec![unknown];
+        assert!(manager.effective_runtime_cache().is_err());
+        manager.runtime_caches.clear();
+        manager.config.cache_type = CacheType::Niks3;
+        manager.config.cache_url = Some("https://read.example".into());
+        assert!(manager.effective_runtime_cache().is_err());
     }
 }
 

@@ -1,9 +1,10 @@
 use crate::handlers::agent_request::{
-    CFState, authenticate_agent_request, deserialize_system_state_versioned,
+    CFState, authenticate_agent_request, deserialize_agent_capabilities,
+    deserialize_system_state_versioned,
 };
 use crate::models::agent_heartbeats::AgentHeartbeat;
+#[cfg(test)]
 use crate::models::cache_destination::CacheDestination;
-use crate::queries::cache_destinations::{get_caches_for_environment, get_global_caches};
 use crate::queries::systems::{
     BootIdChange, deactivate_duplicate_active_systems_by_public_key,
     get_agent_desired_target_by_hostname, get_system_heartbeat_interval_secs, update_boot_id_tx,
@@ -17,7 +18,7 @@ use crate::queries::{
 use axum::response::Response;
 use axum::{
     body::Bytes,
-    extract::State,
+    extract::{ConnectInfo, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
 };
@@ -29,35 +30,54 @@ use uuid::Uuid;
 //   use crystal_forge::handlers::agent::heartbeat::{LogResponse, RuntimeCacheConfig};
 pub use cf_protocol::agent::{LogResponse, RuntimeCacheConfig};
 
-fn destination_to_runtime_cache(destination: CacheDestination) -> Option<RuntimeCacheConfig> {
-    let cache_url = destination.push_to?;
+#[cfg(test)]
+fn destination_to_runtime_cache(
+    destination: CacheDestination,
+    confidential: bool,
+) -> Option<RuntimeCacheConfig> {
+    if !destination.enabled {
+        return None;
+    }
+    let (cache_url, cache_public_keys, read_auth) = destination.read_config().ok()?;
+    // SECURITY: Agent signatures authenticate requests, not confidentiality.
+    // Never downgrade a private cache to a public read on insecure transport.
+    if !confidential && !matches!(read_auth, cf_protocol::cache::CacheReadAuth::None) {
+        return None;
+    }
     Some(RuntimeCacheConfig {
         cache_type: destination.cache_type,
         cache_url,
         cache_public_key: destination.attic_public_key,
         attic_cache_name: destination.attic_cache_name,
+        cache_public_keys,
+        read_auth,
     })
 }
 
-async fn load_runtime_caches_for_agent(
-    pool: &PgPool,
-    environment_id: Option<uuid::Uuid>,
-) -> Vec<RuntimeCacheConfig> {
-    let destinations = match environment_id {
-        Some(env_id) => get_caches_for_environment(pool, env_id).await,
-        None => get_global_caches(pool).await,
+// These fixtures exercise one nominated source without unrelated fallback.
+// Completed alternatives are resolved by the transactional publication helper.
+#[cfg(test)]
+fn selected_runtime_cache(
+    destinations: Vec<CacheDestination>,
+    confidential: bool,
+    capabilities: cf_protocol::agent::AgentCapabilities,
+) -> anyhow::Result<Vec<RuntimeCacheConfig>> {
+    let Some(selected) = destinations.into_iter().next() else {
+        return Ok(Vec::new());
     };
-
-    match destinations {
-        Ok(dests) => dests
-            .into_iter()
-            .filter_map(destination_to_runtime_cache)
-            .collect(),
-        Err(e) => {
-            debug!("❌ Failed to load runtime cache config for agent: {e:?}");
-            Vec::new()
-        }
-    }
+    anyhow::ensure!(
+        selected.cache_type != "Niks3" || capabilities.supports_niks3,
+        "Agent does not support the selected cache type"
+    );
+    anyhow::ensure!(
+        selected.cache_type != "Niks3"
+            || selected.niks3_read_auth_mode.as_deref() != Some("basic")
+            || capabilities.supports_niks3_basic_read,
+        "Agent does not support authority-bound Basic reads"
+    );
+    let runtime = destination_to_runtime_cache(selected, confidential)
+        .ok_or_else(|| anyhow::anyhow!("Selected cache read settings cannot be delivered"))?;
+    Ok(vec![runtime])
 }
 
 /// Best-effort result handler for duplicate-active-system cleanup.
@@ -88,12 +108,18 @@ fn handle_duplicate_active_system_cleanup_result(
         }
     }
 }
-/// Handles the `/current-system` POST route.
+/// Handles `/agent/heartbeat` and delivers read-only cache settings.
 /// Verifies the body signature using headers, parses the payload, and
 /// stores system state info in the database.
+/// Delivers only a completed publication for the exact authorized target.
+/// Niks3 requires capability in the verified body. Private reads require a
+/// trusted HTTPS proxy. An exact
+/// publication source failure suppresses the target before claiming deployment;
+/// heartbeat ingestion still commits and the deployment remains retryable.
 pub async fn log(
     State(state): State<CFState>,
     State(pool): State<PgPool>,
+    peer: Option<ConnectInfo<std::net::SocketAddr>>,
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
@@ -101,6 +127,10 @@ pub async fn log(
     let agent_request = match authenticate_agent_request(&headers, body, &pool).await {
         Ok(req) => req,
         Err(status) => return status.into_response(),
+    };
+    let capabilities = match deserialize_agent_capabilities(&agent_request) {
+        Ok(capabilities) => capabilities,
+        Err(_) => return StatusCode::BAD_REQUEST.into_response(),
     };
 
     // Hotfix: if the same public key appears on multiple active hostnames,
@@ -397,15 +427,29 @@ pub async fn log(
             }
         };
 
+    let confidential = crate::handlers::api::builders::builder_https_verified_by_trusted_proxy(
+        &state.server_config,
+        &headers,
+        peer.map(|peer| peer.0),
+    );
+    let mut runtime_caches = Vec::new();
+
     if let Some(target) = desired_target.clone() {
-        match crate::services::composite_enforcement::authorize_and_claim_desired_target(
+        match crate::services::composite_enforcement::authorize_and_claim_desired_target_with_read(
             &pool,
             agent_request.system.id,
             &target,
+            confidential,
+            capabilities,
         )
         .await
         {
             Ok(delivery) if delivery.target.is_some() => {
+                runtime_caches = delivery
+                    .publication_read
+                    .into_iter()
+                    .map(|read| read.into_runtime_cache())
+                    .collect();
                 desired_target = delivery.target;
             }
             Ok(delivery) => {
@@ -414,7 +458,7 @@ pub async fn log(
                     target = %target,
                     outcome = ?delivery.authorization.outcome,
                     detail = %delivery.authorization.detail,
-                    "Composite policy or desired-target guard blocked final deployment target delivery"
+                    "Composite policy, publication source, or desired-target guard blocked delivery"
                 );
                 desired_target = None;
             }
@@ -428,9 +472,6 @@ pub async fn log(
             }
         }
     }
-
-    let runtime_caches =
-        load_runtime_caches_for_agent(&pool, agent_request.system.environment_id).await;
 
     // Resolve per-system heartbeat interval, falling back to server-config default.
     let heartbeat_interval_secs = {
@@ -585,6 +626,312 @@ async fn reconcile_system_health_attention(pool: &PgPool, system_id: Uuid, hostn
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified isolated database and database creation privileges"]
+    async fn niks3_signed_handler_preserves_pending_deployment_and_delivers_only_selected_reads(
+        pool: PgPool,
+    ) {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use ed25519_dalek::Signer;
+        let (key, verifying) = crate::test_utils::crypto::generate_keypair();
+        let environment: Uuid = sqlx::query_scalar("INSERT INTO environments (name, description, is_active) VALUES ('signed-agent', 'test', TRUE) RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        let system_id: Uuid = sqlx::query_scalar("INSERT INTO systems (hostname, environment_id, public_key, derivation, deployment_policy, desired_target, desired_target_set_at) VALUES ('signed-host', $1, $2, '/nix/store/current', 'manual', '/nix/store/target', now()) RETURNING id")
+            .bind(environment).bind(STANDARD.encode(verifying.to_bytes())).fetch_one(&pool).await.unwrap();
+        let pending_id: Uuid = sqlx::query_scalar("INSERT INTO pending_system_deployments (system_id, target_store_path, source, request_action) VALUES ($1, '/nix/store/target', 'manual_rollback', 'rollback') RETURNING id")
+            .bind(system_id).fetch_one(&pool).await.unwrap();
+        let selected_id: i32 = sqlx::query_scalar("INSERT INTO cache_destinations (name, cache_type, enabled, push_to, niks3_server_url, niks3_write_auth_mode, niks3_public_keys, niks3_read_auth_mode, niks3_auth_token) VALUES ('z-assigned-niks3', 'Niks3', TRUE, 'https://selected.example', 'https://write.example', 'token', ARRAY['cache:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='], 'none', 'write-token') RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO cache_destination_environments (cache_destination_id, environment_id) VALUES ($1, $2)")
+            .bind(selected_id).bind(environment).execute(&pool).await.unwrap();
+        let flake: i32 = sqlx::query_scalar("INSERT INTO flakes (name, repo_url, branch) VALUES ('signed-flake', 'https://example.invalid/signed', 'main') RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        let commit: i32 = sqlx::query_scalar("INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, 'signed-target', now()) RETURNING id")
+            .bind(flake).fetch_one(&pool).await.unwrap();
+        let derivation: i32 = sqlx::query_scalar("INSERT INTO derivations (commit_id, derivation_name, derivation_type, derivation_path, store_path, status_id, cf_agent_enabled, policy_requirements_met) VALUES ($1, 'signed-host', 'nixos', '/nix/store/signed.drv', '/nix/store/target', 10, TRUE, TRUE) RETURNING id")
+            .bind(commit).fetch_one(&pool).await.unwrap();
+        sqlx::query("UPDATE systems SET flake_id = $2 WHERE id = $1")
+            .bind(system_id)
+            .bind(flake)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE pending_system_deployments SET requested_commit_id = $2, requested_derivation_id = $3 WHERE id = $1")
+            .bind(pending_id).bind(commit).bind(derivation).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO cache_push_jobs (derivation_id, store_path, status, cache_destination_id, cache_destination_source) VALUES ($1, '/nix/store/target', 'completed', $2, 'database')")
+            .bind(derivation).bind(selected_id).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO cache_destinations (name, cache_type, enabled, push_to) VALUES ('a-global', 'Nix', TRUE, 'https://fallback.example')")
+            .execute(&pool).await.unwrap();
+        let mut config = crate::config::ServerConfig::default();
+        config.trust_forwarded_builder_https = true;
+        config.trusted_proxy_cidrs = vec!["127.0.0.1/32".into()];
+        let state = CFState::new(
+            pool.clone(),
+            config,
+            std::sync::Arc::new(crate::queue::QueueNotifier::new()),
+            crate::server::jobs::BackgroundJobRegistry::new(),
+        );
+        let legacy_state = crate::test_utils::builders::SystemStateBuilder::new()
+            .hostname("signed-host")
+            .store_path("/nix/store/current")
+            .build();
+        let legacy = serde_json::to_value(legacy_state).unwrap();
+
+        async fn send(
+            state: &CFState,
+            key: &ed25519_dalek::SigningKey,
+            value: &serde_json::Value,
+            confidential: bool,
+        ) -> LogResponse {
+            let body = serde_json::to_vec(value).unwrap();
+            let mut headers = HeaderMap::new();
+            headers.insert("x-key-id", "signed-host".parse().unwrap());
+            headers.insert(
+                "x-signature",
+                STANDARD.encode(key.sign(&body).to_bytes()).parse().unwrap(),
+            );
+            // An attacker can supply headers even on an authenticated legacy body.
+            headers.insert("x-agent-supports-niks3", "true".parse().unwrap());
+            headers.insert(
+                "x-agent-capabilities",
+                "{\"supports_niks3\":true}".parse().unwrap(),
+            );
+            headers.insert("x-forwarded-proto", "https".parse().unwrap());
+            let verified =
+                authenticate_agent_request(&headers, Bytes::from(body.clone()), &state.pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                deserialize_agent_capabilities(&verified)
+                    .unwrap()
+                    .supports_niks3,
+                value["capabilities"]["supports_niks3"]
+                    .as_bool()
+                    .unwrap_or(false)
+            );
+            let (old_server_state, compatible) =
+                deserialize_system_state_versioned(&verified).unwrap();
+            assert!(compatible);
+            assert_eq!(old_server_state.hostname, "signed-host");
+            assert_eq!(
+                old_server_state.store_path.as_deref(),
+                Some("/nix/store/current")
+            );
+            let peer = confidential.then(|| ConnectInfo("127.0.0.1:12345".parse().unwrap()));
+            let response = log(
+                State(state.clone()),
+                State(state.pool.clone()),
+                peer,
+                headers,
+                Bytes::from(body),
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+            serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap()
+        }
+        for private in [false, true] {
+            if private {
+                sqlx::query("UPDATE cache_destinations SET niks3_read_auth_mode = 'mtls', niks3_read_client_cert = $2, niks3_read_client_key = 'read-secret' WHERE id = $1")
+                    .bind(selected_id).bind(crate::security::cache_secrets::TEST_CERTIFICATE).execute(&pool).await.unwrap();
+            }
+            for (policy, confidential) in [
+                ("manual", false),
+                ("manual", true),
+                ("pinned", false),
+                ("pinned", true),
+                ("auto_latest", false),
+                ("auto_latest", true),
+            ] {
+                sqlx::query("UPDATE systems SET deployment_policy = $2 WHERE id = $1")
+                    .bind(system_id)
+                    .bind(policy)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                let response = send(&state, &key, &legacy, confidential).await;
+                assert!(response.desired_target.is_none());
+                assert!(response.runtime_caches.is_empty());
+                let pending: (String, Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>, Option<String>) = sqlx::query_as(
+                    "SELECT status, completed_at, delivered_at, request_action FROM pending_system_deployments WHERE id = $1",
+                )
+                .bind(pending_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(
+                    pending,
+                    ("pending".into(), None, None, Some("rollback".into()))
+                );
+                assert_eq!(
+                    get_agent_desired_target_by_hostname(&pool, "signed-host")
+                        .await
+                        .unwrap()
+                        .as_deref(),
+                    Some("/nix/store/target")
+                );
+            }
+        }
+        let ingested: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM system_states WHERE hostname = 'signed-host'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(ingested > 0);
+
+        let mut current = legacy;
+        current["capabilities"] = serde_json::json!({"supports_niks3": true});
+        let response = send(&state, &key, &current, false).await;
+        assert!(response.desired_target.is_none());
+        assert!(response.runtime_caches.is_empty());
+        // The capable response must pair the exact target and its publication.
+        let response = send(&state, &key, &current, true).await;
+        assert_eq!(
+            response.desired_target.as_deref(),
+            Some("/nix/store/target")
+        );
+        assert_eq!(response.runtime_caches.len(), 1);
+        assert_eq!(
+            response.runtime_caches[0].cache_url,
+            "https://selected.example"
+        );
+        let json = serde_json::to_string(&response).unwrap();
+        assert!(json.contains("read-secret"));
+        assert!(!json.contains("write-token"));
+        assert!(!json.contains("fallback.example"));
+        sqlx::query("UPDATE cache_destinations SET niks3_read_auth_mode = 'none', niks3_read_client_cert = NULL, niks3_read_client_key = NULL WHERE id = $1")
+            .bind(selected_id).execute(&pool).await.unwrap();
+        let response = send(&state, &key, &current, false).await;
+        assert_eq!(response.runtime_caches.len(), 1);
+        assert!(matches!(
+            response.runtime_caches[0].read_auth,
+            cf_protocol::cache::CacheReadAuth::None
+        ));
+        assert!(
+            !serde_json::to_string(&response)
+                .unwrap()
+                .contains("write-token")
+        );
+        // An unreadable selected cache cannot expose the alphabetically earlier global.
+        sqlx::query("UPDATE systems SET desired_target = '/nix/store/target', desired_target_set_at = now() WHERE id = $1")
+            .bind(system_id).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE cache_destinations SET push_to = '' WHERE id = $1")
+            .bind(selected_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let response = send(&state, &key, &current, true).await;
+        assert!(response.runtime_caches.is_empty());
+        assert!(response.desired_target.is_none());
+        let pending: String =
+            sqlx::query_scalar("SELECT status FROM pending_system_deployments WHERE id = $1")
+                .bind(pending_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(pending, "pending");
+    }
+
+    #[test]
+    fn niks3_selected_cache_never_drops_private_or_unsupported_first_for_fallback() {
+        let current = cf_protocol::agent::AgentCapabilities {
+            supports_niks3: true,
+            ..Default::default()
+        };
+        let legacy = cf_protocol::agent::AgentCapabilities::default();
+        let mut first = CacheDestination {
+            enabled: true,
+            cache_type: "Niks3".into(),
+            push_to: Some("https://selected.example".into()),
+            niks3_public_keys: vec!["cache:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into()],
+            niks3_read_auth_mode: Some("none".into()),
+            niks3_auth_token: Some("write-secret".into()),
+            ..Default::default()
+        };
+        let fallback = CacheDestination {
+            enabled: true,
+            cache_type: "Nix".into(),
+            push_to: Some("https://fallback.example".into()),
+            ..Default::default()
+        };
+        for confidential in [false, true] {
+            assert!(
+                selected_runtime_cache(vec![first.clone(), fallback.clone()], confidential, legacy)
+                    .is_err()
+            );
+            let caches = selected_runtime_cache(
+                vec![first.clone(), fallback.clone()],
+                confidential,
+                current,
+            )
+            .unwrap();
+            assert_eq!(caches.len(), 1);
+            assert_eq!(caches[0].cache_url, "https://selected.example");
+            assert!(
+                !serde_json::to_string(&caches)
+                    .unwrap()
+                    .contains("write-secret")
+            );
+        }
+        first.niks3_read_auth_mode = Some("mtls".into());
+        first.niks3_read_client_cert =
+            Some(crate::security::cache_secrets::TEST_CERTIFICATE.into());
+        first.niks3_read_client_key = Some("read-secret".into());
+        assert!(
+            selected_runtime_cache(vec![first.clone(), fallback.clone()], false, current).is_err()
+        );
+        assert!(
+            selected_runtime_cache(vec![first.clone(), fallback.clone()], true, legacy).is_err()
+        );
+        let caches =
+            selected_runtime_cache(vec![first.clone(), fallback.clone()], true, current).unwrap();
+        assert_eq!(caches.len(), 1);
+        let json = serde_json::to_string(&caches).unwrap();
+        assert!(json.contains("read-secret"));
+        assert!(!json.contains("write-secret"));
+        first.push_to = None;
+        assert!(selected_runtime_cache(vec![first, fallback], true, current).is_err());
+    }
+
+    #[test]
+    fn niks3_heartbeat_is_read_only_and_private_reads_fail_closed() {
+        let mut destination = CacheDestination {
+            enabled: true,
+            cache_type: "Niks3".into(),
+            push_to: Some("https://read.example".into()),
+            niks3_public_keys: vec![
+                "one:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+                "two:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+            ],
+            niks3_read_auth_mode: Some("mtls".into()),
+            niks3_read_client_cert: Some(crate::security::cache_secrets::TEST_CERTIFICATE.into()),
+            niks3_read_client_key: Some("read-key".into()),
+            niks3_auth_token: Some("write-token".into()),
+            s3_secret_access_key: Some("aws-secret".into()),
+            ..Default::default()
+        };
+        assert!(destination_to_runtime_cache(destination.clone(), false).is_none());
+        let cache = destination_to_runtime_cache(destination.clone(), true).unwrap();
+        assert_eq!(cache.cache_public_keys, destination.niks3_public_keys);
+        let json = serde_json::to_string(&cache).unwrap();
+        assert!(json.contains("read-key"));
+        assert!(!json.contains("write-token"));
+        assert!(!json.contains("aws-secret"));
+        destination.niks3_read_auth_mode = Some("none".into());
+        destination.niks3_read_client_cert = None;
+        destination.niks3_read_client_key = None;
+        assert!(destination_to_runtime_cache(destination.clone(), false).is_some());
+        destination.enabled = false;
+        assert!(destination_to_runtime_cache(destination.clone(), true).is_none());
+        destination.enabled = true;
+        destination.cache_type = "unknown".into();
+        assert!(destination_to_runtime_cache(destination, true).is_none());
+    }
 
     // ─── classify_restart_type tests ───────────────────────────────────────
 

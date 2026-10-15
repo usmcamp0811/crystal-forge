@@ -1509,16 +1509,29 @@ mod tests {
             .id
     }
 
-    #[tokio::test]
-    #[ignore = "requires live postgres"]
-    async fn test_list_deployment_policies_empty() {
-        let pool = test_pool().await;
-        let policies = deployment_policies::list_deployment_policies(&pool, 100, 0)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified disposable PostgreSQL"]
+    async fn test_list_deployment_policies_includes_fixture(pool: PgPool) {
+        // Migrations can seed policies; the fixture must add exactly one row.
+        let initial_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies")
+            .fetch_one(&pool)
             .await
-            .unwrap();
+            .expect("seed policy count should load");
+        let name = format!("List fixture {}", Uuid::new_v4());
+        let policy_id = create_test_policy(&pool, &name).await;
+        let policies = deployment_policies::list_deployment_policies(&pool, initial_count + 1, 0)
+            .await
+            .expect("policies should list");
 
-        // May have seed data, just verify it doesn't error
-        assert!(policies.len() >= 0);
+        assert_eq!(policies.len() as i64, initial_count + 1);
+        let fixtures: Vec<_> = policies
+            .iter()
+            .filter(|policy| policy.id == policy_id)
+            .collect();
+        assert_eq!(fixtures.len(), 1, "the fixture must appear exactly once");
+        assert_eq!(fixtures[0].name, name);
+        assert_eq!(fixtures[0].policy_type, "custom_check");
+        assert!(fixtures[0].enabled);
     }
 
     #[tokio::test]

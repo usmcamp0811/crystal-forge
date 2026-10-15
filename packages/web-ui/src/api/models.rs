@@ -6397,6 +6397,56 @@ pub struct CacheDestination {
     pub attic_public_key: Option<String>,
     pub attic_ignore_upstream_cache_filter: Option<bool>,
     pub attic_jobs: Option<i32>,
+    /// Indicates an active Attic token without exposing stored material.
+    #[serde(default)]
+    pub attic_token_configured: bool,
+    /// Indicates a complete active S3 access-key identity.
+    #[serde(default)]
+    pub s3_credentials_configured: bool,
+    /// Indicates an active S3 session token without exposing its value.
+    #[serde(default)]
+    pub s3_session_token_configured: bool,
+    /// Indicates retained HTTP Basic credentials in the server-only URL.
+    #[serde(default)]
+    pub http_basic_auth_configured: bool,
+    /// Indicates a legacy credential query that requires explicit migration.
+    #[serde(default)]
+    pub legacy_query_credentials_configured: bool,
+    /// HTTPS write API URL; `push_to` remains the independent read URL.
+    pub niks3_server_url: Option<String>,
+    /// Trusted Nix signing keys for reads, including rotation overlap.
+    #[serde(default)]
+    pub niks3_public_keys: Vec<String>,
+    /// Selected write authentication: `token` or `mtls`.
+    pub niks3_write_auth_mode: Option<String>,
+    /// Redacted write token; GET responses never populate this field.
+    pub niks3_auth_token: Option<String>,
+    /// Public PEM write client certificate.
+    pub niks3_write_client_cert: Option<String>,
+    /// Redacted write private key; GET responses never populate this field.
+    pub niks3_write_client_key: Option<String>,
+    /// Optional PEM trust anchor for the write server.
+    pub niks3_write_ca_cert: Option<String>,
+    /// Selected read authentication: `none`, `basic` or `mtls`.
+    pub niks3_read_auth_mode: Option<String>,
+    /// Public PEM read client certificate.
+    pub niks3_read_client_cert: Option<String>,
+    /// Redacted read private key; GET responses never populate this field.
+    pub niks3_read_client_key: Option<String>,
+    /// Optional PEM trust anchor for the read server.
+    pub niks3_read_ca_cert: Option<String>,
+    /// Indicates an existing write token without exposing its value.
+    #[serde(default)]
+    pub niks3_write_token_configured: bool,
+    /// Indicates an existing complete write mTLS identity.
+    #[serde(default)]
+    pub niks3_write_mtls_configured: bool,
+    /// Indicates an existing complete read mTLS identity.
+    #[serde(default)]
+    pub niks3_read_mtls_configured: bool,
+    /// Indicates an active complete Basic read identity without returning either value.
+    #[serde(default)]
+    pub niks3_read_basic_configured: bool,
     pub parallel_uploads: Option<i32>,
     pub max_retries: Option<i32>,
     pub retry_delay_seconds: Option<i64>,
@@ -6406,6 +6456,49 @@ pub struct CacheDestination {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// Classifies a request-local cache inventory observation.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheMetricsStatus {
+    /// Contains provider-reported values with explicit measurement bases.
+    Available,
+    /// Indicates that the provider has no supported cheap inventory totals.
+    Unsupported,
+    /// Indicates that an observation could not be made.
+    Unavailable,
+    /// Indicates invalid configuration or invalid provider metadata.
+    Error,
+    /// Represents an unrecognized status without granting evidence to values.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Contains a credential-free observation from `GET /caches/:id/metrics`.
+/// Values are not persisted. Count and byte meanings depend on their explicit
+/// bases. Logical bytes are not physical usage or capacity. Attic inventory does
+/// not verify integrity or download availability. Missing values remain unknown.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CacheStorageMetrics {
+    /// Classifies the observation; values are usable only when available.
+    pub status: CacheMetricsStatus,
+    /// Contains a reason code; presentation must map it to static explanations.
+    pub reason_code: String,
+    /// Contains the logical byte total for the reported basis, including zero.
+    pub storage_bytes: Option<u64>,
+    /// Identifies `reported_logical` (Niks3) or `uncompressed_nar_bytes` (Attic).
+    /// Attic sums per-path NAR sizes, including repeated deduplicated bytes.
+    pub storage_bytes_basis: Option<String>,
+    /// Contains live tracked objects (Niks3) or cached Nix paths (Attic).
+    pub object_count: Option<u64>,
+    /// Identifies `live_tracked_objects` or `cached_nix_paths` respectively.
+    pub object_count_basis: Option<String>,
+    /// Contains Attic's cached Nix path count, equal to its compatibility object
+    /// count. Niks3 returns null; tracked objects must not substitute for paths.
+    pub path_count: Option<u64>,
+    /// Contains the server's UTC observation time, not an upstream measurement time.
+    pub measured_at: Option<DateTime<Utc>>,
 }
 
 /// Create cache destination request
@@ -6435,6 +6528,47 @@ pub struct CreateCacheDestination {
     pub force_repush: Option<bool>,
     pub require_sigs: Option<bool>,
     pub environment_ids: Option<Vec<Uuid>>,
+    /// HTTPS write API URL, separate from the read URL in `push_to`.
+    pub niks3_server_url: Option<String>,
+    /// Nonempty trusted Nix signing keys.
+    #[serde(default)]
+    pub niks3_public_keys: Vec<String>,
+    /// Required Niks3 write mode: `token` or `mtls`.
+    pub niks3_write_auth_mode: Option<String>,
+    /// Plaintext replacement token, sent only in authenticated Save bodies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_auth_token: Option<String>,
+    /// PEM write client certificate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_client_cert: Option<String>,
+    /// PEM write private key, encrypted by the server on save.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_client_key: Option<String>,
+    /// Optional PEM write server trust anchor.
+    /// Preserves raw delimiter columns until server validation and normalization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_ca_cert: Option<String>,
+    /// Required Niks3 read mode: `none`, `basic` or `mtls`.
+    pub niks3_read_auth_mode: Option<String>,
+    /// PEM read client certificate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_client_cert: Option<String>,
+    /// PEM read private key, encrypted by the server on save.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_client_key: Option<String>,
+    /// Optional PEM read server trust anchor.
+    /// Preserves raw delimiter columns until server validation and normalization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_ca_cert: Option<String>,
+    /// Supplies a replacement Basic read username only with its password.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_basic_username: Option<String>,
+    /// Supplies a Basic password; allowed whitespace is preserved verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_basic_password: Option<String>,
+    /// Selects a non-mutating Niks3 test plane; Save omits this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_scope: Option<Niks3ProbeScope>,
 }
 
 /// Update cache destination request
@@ -6448,10 +6582,18 @@ pub struct UpdateCacheDestination {
     pub compression: Option<String>,
     pub s3_region: Option<String>,
     pub s3_profile: Option<String>,
+    /// Replaces the S3 access key ID; omission retains the configured identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub s3_access_key_id: Option<String>,
+    /// Replaces the S3 secret access key; omission retains stored material.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub s3_secret_access_key: Option<String>,
+    /// Retains the session token when omitted; an empty replacement clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub s3_session_token: Option<String>,
     pub s3_endpoint_url: Option<String>,
+    /// Replaces the Attic token; omission retains the configured token.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub attic_token: Option<String>,
     pub attic_cache_name: Option<String>,
     pub attic_public_key: Option<String>,
@@ -6464,14 +6606,424 @@ pub struct UpdateCacheDestination {
     pub force_repush: Option<bool>,
     pub require_sigs: Option<bool>,
     pub environment_ids: Option<Vec<Uuid>>,
+    /// Replaces the HTTPS write API URL.
+    pub niks3_server_url: Option<String>,
+    /// Replaces trusted signing keys when nonempty.
+    #[serde(default)]
+    pub niks3_public_keys: Vec<String>,
+    /// Selects write mode; mode changes clear the previous identity atomically.
+    pub niks3_write_auth_mode: Option<String>,
+    /// Replaces the token; omission preserves the configured token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_auth_token: Option<String>,
+    /// Replaces the write client certificate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_client_cert: Option<String>,
+    /// Replaces the write private key; omission preserves it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_client_key: Option<String>,
+    /// Replaces the write trust anchor; omission preserves it.
+    /// Must preserve raw text because trimming can change the Go root set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_ca_cert: Option<String>,
+    /// Selects read mode; `none` clears the read identity atomically.
+    pub niks3_read_auth_mode: Option<String>,
+    /// Replaces the read client certificate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_client_cert: Option<String>,
+    /// Replaces the read private key; omission preserves it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_client_key: Option<String>,
+    /// Replaces the read trust anchor; omission preserves it.
+    /// Must preserve raw text because trimming can change the Go root set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_ca_cert: Option<String>,
+    /// Explicitly clears the token; incompatible with a simultaneous replacement.
+    #[serde(default)]
+    pub clear_niks3_auth_token: bool,
+    /// Explicitly clears the write key when changing authentication mode.
+    #[serde(default)]
+    pub clear_niks3_write_client_key: bool,
+    /// Explicitly clears the read key when changing to public reads.
+    #[serde(default)]
+    pub clear_niks3_read_client_key: bool,
+    /// Removes the custom write CA and restores system trust.
+    #[serde(default)]
+    pub clear_niks3_write_ca_cert: bool,
+    /// Removes the custom read CA and restores system trust.
+    #[serde(default)]
+    pub clear_niks3_read_ca_cert: bool,
+    /// Replaces the Basic username as part of an atomic read-identity pair.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_basic_username: Option<String>,
+    /// Replaces the Basic password; omission retains it on the same authority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_basic_password: Option<String>,
+    /// Selects a non-mutating Niks3 test plane; Save omits this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_scope: Option<Niks3ProbeScope>,
 }
 
+/// Selects the independently tested Niks3 plane without granting Save permission.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Niks3ProbeScope {
+    /// Tests write metadata and protected API route/method access with the
+    /// selected write identity. Does not upload, sign or publish objects.
+    Write,
+    /// Tests the read endpoint and selected read identity only.
+    Read,
+    /// Tests both planes using the complete configuration.
+    All,
+}
+
+/// Supplies write-only discovery transport; tokens and read identities are excluded.
+/// Private keys are sent only in authenticated request bodies, never diagnostics.
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct Niks3DiscoverRequest {
+    /// HTTPS write API URL without userinfo, queries or fragments.
+    pub server_url: String,
+    /// Selects mTLS explicitly; omitted fields retain public URL-only discovery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_auth_mode: Option<String>,
+    /// Contains the draft client certificate chain for mTLS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_client_cert: Option<String>,
+    /// Contains the draft private key for mTLS; GET never supplies it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_client_key: Option<String>,
+    /// Contains an optional raw server trust bundle for server-side validation.
+    /// Must preserve delimiter columns because trimming can change the root set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_ca_cert: Option<String>,
+}
+
+/// Identifies an allowlisted cache probe without preserving unknown wire text.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheProbeKind {
+    /// Reads the canonical named Attic cache-config API.
+    AtticCacheConfig,
+    /// Represents an unsupported probe kind; its evidence cannot prove access.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Identifies the observed stage of a named-cache read probe.
+/// A completed read does not establish upload authorization.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheProbeStage {
+    /// Rejects the configured target before network access.
+    TargetPolicy,
+    /// Fails to resolve the configured server.
+    Dns,
+    /// Fails verified TLS setup or connectivity; no finer cause is asserted.
+    Transport,
+    /// Receives an upstream access denial; cache existence remains unresolved.
+    Authentication,
+    /// Receives a recognized named-cache-not-found response.
+    CacheNotFound,
+    /// Receives unexpected status or invalid cache-config metadata.
+    Response,
+    /// Validates successful named-cache configuration metadata.
+    Complete,
+    /// Represents unsupported stage text without exposing that text.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Classifies the safe policy errors accepted by the Attic probe parser.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheProbePolicyError {
+    /// Rejects local configuration or configured-target policy.
+    InvalidCacheTestConfig,
+    /// Rejects a legacy credential query before network access.
+    LegacyQueryCredentialsUnsupported,
+    /// Represents an unsupported error code; it must remain an API error.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Reports non-mutating connectivity checks; absent authorization is untested.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CacheCredentialTestResult {
+    /// Legacy aggregate result; does not establish cache write permission.
+    #[serde(alias = "success")]
     pub ok: bool,
+    /// Optional HTTP response code from the probe.
     pub status_code: Option<u16>,
+    /// Untrusted legacy prose; presentation must use local diagnostic constants.
     pub message: String,
+    /// Optional diagnostic classification; unknown values have no display authority.
+    /// Missing codes preserve compatibility with older servers.
+    #[serde(default)]
+    pub diagnostic_code: Option<String>,
+    /// Preserves the per-write outcome when aggregate discovery or read guidance
+    /// differs. Decoding retains only recognized write diagnostic constants.
+    /// Presentation also requires [`Niks3ProbeScope::Write`] or
+    /// [`Niks3ProbeScope::All`]; codes never replace boolean evidence.
+    #[serde(default, deserialize_with = "deserialize_write_probe_diagnostic")]
+    pub write_probe_diagnostic_code: Option<String>,
+    /// Untrusted endpoint metadata; probe presentation must not display this URL.
     pub tested_url: Option<String>,
+    /// Identifies the typed probe; omission preserves older server compatibility.
+    #[serde(default)]
+    pub probe_kind: Option<CacheProbeKind>,
+    /// Identifies the observed stage, never an inferred upstream error cause.
+    #[serde(default)]
+    pub stage: Option<CacheProbeStage>,
+    /// Reports validated named-cache read access; omission means untested.
+    #[serde(default)]
+    pub cache_access_valid: Option<bool>,
+    /// Reports native Attic visibility after complete named-cache validation.
+    /// Missing evidence means unknown, never public. This response-only field
+    /// does not describe configured credentials or establish write permission.
+    #[serde(default)]
+    pub cache_is_public: Option<bool>,
+    /// Confirms token acceptance for a private cache read only.
+    /// Public success and missing evidence do not establish token validity.
+    #[serde(default)]
+    pub token_auth_valid: Option<bool>,
+    /// Contains an allowlisted classification for a structured HTTP 400 result.
+    #[serde(default)]
+    pub error: Option<CacheProbePolicyError>,
+    /// Whether the Niks3 API responded.
+    pub server_reachable: Option<bool>,
+    /// Whether the public cache configuration passed validation.
+    pub discovery_valid: Option<bool>,
+    /// Contains the legacy Niks3 alias for protected write API route access.
+    /// Does not establish upload or publication; `None` means untested.
+    pub write_auth_valid: Option<bool>,
+    /// Whether the independently authenticated read endpoint responded.
+    pub read_endpoint_reachable: Option<bool>,
+    /// Whether trusted signing keys were found.
+    pub signing_keys_found: Option<bool>,
+    /// Identifies the selected Niks3 probe plane; missing evidence stays untested.
+    #[serde(default)]
+    pub probe_scope: Option<Niks3ProbeScope>,
+    /// Reports access to the probed write API route and method.
+    /// Only `Some(true)` establishes API access. This field does not validate
+    /// S3 upload, signing, or object publication; absence means untested.
+    #[serde(default)]
+    pub write_api_reachable: Option<bool>,
+    /// Reports explicitly observed authentication for the probed write API.
+    /// Metadata discovery and configured flags cannot establish this result.
+    #[serde(default)]
+    pub write_authn_valid: Option<bool>,
+    /// Reports authorization for the probed write API route and method.
+    /// This result does not establish successful object publication.
+    #[serde(default)]
+    pub write_authorization_valid: Option<bool>,
+    /// Reports selected read endpoint access, not write readiness.
+    #[serde(default)]
+    pub read_access_valid: Option<bool>,
+    /// Reports signing-key metadata validity, not artifact signature verification.
+    #[serde(default)]
+    pub signing_keys_valid: Option<bool>,
+}
+
+/// Returns local guidance for an exact allowlisted cache diagnostic code.
+///
+/// Codes are hints, not authentication or write-authorization evidence. Unknown,
+/// decorated, or differently cased codes return `None`. Server prose and URLs
+/// must never be used as a fallback.
+pub fn cache_diagnostic_message(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "ca_bundle_framing_invalid" => {
+            "Server CA bundle framing is invalid. Check the PEM begin and end markers."
+        }
+        "ca_certificate_invalid" => {
+            "Server CA bundle contains an invalid certificate. Check the certificate encoding."
+        }
+        "ca_bundle_content_unsupported" => {
+            "Server CA bundle contains unsupported content. Use supported certificate PEM blocks."
+        }
+        "ca_bundle_trust_ambiguous" => {
+            "Server CA bundle trust is ambiguous. Use an unambiguous certificate trust bundle."
+        }
+        "ca_bundle_empty" => {
+            "Server CA bundle contains no certificates. Supply a certificate bundle or select system trust."
+        }
+        "ca_bundle_too_large" => {
+            "Server CA bundle exceeds the supported size limit. Use a smaller certificate bundle."
+        }
+        "client_identity_invalid" => {
+            "Client identity is invalid. Check the client certificate and matching private key."
+        }
+        "client_certificate_invalid" => {
+            "Client certificate is invalid. Use a certificate-only chain with the leaf certificate first."
+        }
+        "client_private_key_invalid" => {
+            "Client private key is invalid. Use exactly one supported unencrypted PEM private key."
+        }
+        "client_identity_mismatch" => {
+            "Client identity does not match. The private key must match the first certificate in the client chain."
+        }
+        "tls_verification_failed" => {
+            "TLS verification failed. Check server certificate trust and the selected client identity."
+        }
+        "dns_or_connection_failed" => {
+            "DNS resolution or connection failed. Check the endpoint, DNS and connectivity."
+        }
+        "http_response_failed" => {
+            "The endpoint returned an unsuccessful HTTP response. Check endpoint access and proxy configuration."
+        }
+        "invalid_niks3_metadata" => {
+            "Niks3 metadata is invalid. Check the API endpoint and published cache configuration."
+        }
+        "target_policy_rejected" => {
+            "Target policy rejected the endpoint. Ask an administrator to review the permitted target policy."
+        }
+        "probe_timeout" => {
+            "The cache probe timed out. Check endpoint availability and connectivity, then retry."
+        }
+        "token_rejected" => {
+            "The write API rejected the selected token. Check the token and API endpoint."
+        }
+        "mtls_subject_rejected" => {
+            "The write API rejected the selected client identity. Check the certificate and permitted identity."
+        }
+        "proxy_access_denied" => {
+            "The proxy denied API access. Check its access policy for the selected identity."
+        }
+        "method_rejected" => {
+            "The write API rejected the probe method. Check proxy routing and the supported API contract."
+        }
+        "route_unsupported" => {
+            "The endpoint did not establish the supported write API contract. Check the API URL and proxy routes."
+        }
+        "unexpected_write_response" => {
+            "The write API returned an unexpected probe response. Upload and publication remain untested."
+        }
+        "probe_response_too_large" => {
+            "The probe response exceeded the supported size limit. API access and publication are not established by an oversized response."
+        }
+        "write_credentials_missing" => {
+            "Write credentials are missing. Select a stored credential or enter a complete replacement. The write endpoint was not contacted."
+        }
+        "write_credentials_invalid" => {
+            "Write credentials failed local validation. Check the token format or client identity. The write endpoint was not contacted; this is not an upstream credential rejection."
+        }
+        "auth_control_inconclusive" => {
+            "The credential-omission control was inconclusive. API authentication and authorization are not established by metadata access."
+        }
+        "write_route_verified" => {
+            "Protected write API route and method access was verified. S3 upload, signing and object publication remain untested."
+        }
+        "write_route_verified_certificate_gate" => {
+            "The selected session reached the protected write API route, and transport rejected the certificate-omission control. Native Go subject enforcement is not proved. S3 upload, signing and object publication remain untested."
+        }
+        "read_access_verified" => {
+            "Read endpoint access was verified. This does not establish write API access, upload or publication."
+        }
+        "probe_failed" => CACHE_PROBE_FAILURE_MESSAGE,
+        _ => return None,
+    })
+}
+
+/// Contains generic local guidance when a cache probe has no recognized code.
+pub const CACHE_PROBE_FAILURE_MESSAGE: &str = "Test failed. Review the selected endpoint, identity, server trust and permitted target policy.";
+
+// SECURITY: Read-only success and aggregate metadata diagnostics cannot be
+// presented as per-write outcomes. Retain shared transport/identity failures,
+// but never arbitrary upstream prose or an unsupported successful-read code.
+fn write_probe_diagnostic_message(code: &str) -> Option<&'static str> {
+    match code {
+        "token_rejected"
+        | "mtls_subject_rejected"
+        | "proxy_access_denied"
+        | "method_rejected"
+        | "route_unsupported"
+        | "auth_control_inconclusive"
+        | "unexpected_write_response"
+        | "probe_response_too_large"
+        | "write_route_verified"
+        | "write_route_verified_certificate_gate"
+        | "write_credentials_missing"
+        | "write_credentials_invalid"
+        | "ca_bundle_framing_invalid"
+        | "ca_certificate_invalid"
+        | "ca_bundle_content_unsupported"
+        | "ca_bundle_trust_ambiguous"
+        | "ca_bundle_empty"
+        | "ca_bundle_too_large"
+        | "client_identity_invalid"
+        | "client_certificate_invalid"
+        | "client_private_key_invalid"
+        | "client_identity_mismatch"
+        | "tls_verification_failed"
+        | "dns_or_connection_failed"
+        | "http_response_failed"
+        | "target_policy_rejected"
+        | "probe_timeout"
+        | "probe_failed" => cache_diagnostic_message(code),
+        _ => None,
+    }
+}
+
+fn deserialize_write_probe_diagnostic<'de, D>(decoder: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(decoder)?;
+    Ok(value
+        .as_str()
+        .filter(|code| write_probe_diagnostic_message(code).is_some())
+        .map(str::to_owned))
+}
+
+impl CacheCredentialTestResult {
+    /// Returns allowlisted local guidance for the response's write-plane outcome.
+    ///
+    /// A write-only response may use its aggregate code for older servers. An
+    /// all-plane response requires the explicit per-write code because read or
+    /// discovery failure can replace the aggregate diagnostic. Read-only and
+    /// missing-scope responses return `None`. Guidance never establishes evidence;
+    /// callers must render the nullable write booleans independently.
+    pub fn write_probe_diagnostic(&self) -> Option<&'static str> {
+        match self.probe_scope {
+            Some(Niks3ProbeScope::Write) => self
+                .write_probe_diagnostic_code
+                .as_deref()
+                .and_then(write_probe_diagnostic_message)
+                .or_else(|| {
+                    self.diagnostic_code
+                        .as_deref()
+                        .and_then(write_probe_diagnostic_message)
+                }),
+            Some(Niks3ProbeScope::All) => self
+                .write_probe_diagnostic_code
+                .as_deref()
+                .and_then(write_probe_diagnostic_message),
+            _ => None,
+        }
+    }
+
+    /// Returns static failure guidance without displaying untrusted response prose.
+    ///
+    /// The caller must use the individual evidence fields for probe outcomes.
+    /// This message never establishes authentication or write authorization.
+    pub fn failure_message(&self) -> &'static str {
+        self.diagnostic_code
+            .as_deref()
+            .and_then(cache_diagnostic_message)
+            .unwrap_or(CACHE_PROBE_FAILURE_MESSAGE)
+    }
+}
+
+/// Contains public Niks3 discovery metadata; discovery does not save a cache.
+#[derive(Clone, Deserialize, PartialEq)]
+pub struct Niks3Discovery {
+    /// Canonical HTTPS write API URL.
+    pub server_url: String,
+    /// Independent HTTPS Nix read URL.
+    pub substituter_url: String,
+    /// Published trusted Nix signing keys.
+    pub public_keys: Vec<String>,
+    /// Advertised OIDC audience; external providers are not initially supported.
+    pub oidc_audience: Option<String>,
 }
 
 /// Cache push job status and details
@@ -6863,6 +7415,101 @@ pub struct UpdatePolicyMappingRequest {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn cache_probe_evidence_defaults_untested_for_legacy_results() {
+        let result: super::CacheCredentialTestResult =
+            serde_json::from_value(serde_json::json!({"success":true,"message":"legacy"})).unwrap();
+        assert!(result.ok);
+        assert!(result.probe_kind.is_none());
+        assert!(result.stage.is_none());
+        assert!(result.cache_access_valid.is_none());
+        assert!(result.cache_is_public.is_none());
+        assert!(result.token_auth_valid.is_none());
+        assert!(result.write_auth_valid.is_none());
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn cache_probe_wire_enums_discard_unknown_values_and_preserve_known_case() {
+        let result: super::CacheCredentialTestResult = serde_json::from_value(
+            serde_json::json!({"ok":true,"message":"untrusted","probe_kind":"unexpected-kind","stage":"unexpected-stage","error":"unexpected-code"})
+        ).unwrap();
+        assert_eq!(result.probe_kind, Some(super::CacheProbeKind::Unknown));
+        assert_eq!(result.stage, Some(super::CacheProbeStage::Unknown));
+        assert_eq!(result.error, Some(super::CacheProbePolicyError::Unknown));
+        assert_eq!(
+            serde_json::to_value(super::CacheProbeKind::AtticCacheConfig).unwrap(),
+            "attic_cache_config"
+        );
+        assert_eq!(
+            serde_json::to_value(super::CacheProbeStage::CacheNotFound).unwrap(),
+            "cache_not_found"
+        );
+        assert_eq!(
+            serde_json::to_value(super::CacheProbeStage::TargetPolicy).unwrap(),
+            "target_policy"
+        );
+    }
+
+    #[test]
+    fn cache_update_omits_retained_secrets_but_preserves_explicit_session_clear() {
+        let retained = serde_json::to_value(super::UpdateCacheDestination::default())
+            .expect("serialize retained credential patch");
+        for field in [
+            "attic_token",
+            "s3_access_key_id",
+            "s3_secret_access_key",
+            "s3_session_token",
+            "niks3_auth_token",
+            "niks3_write_client_key",
+            "niks3_read_client_key",
+        ] {
+            assert!(retained.get(field).is_none(), "omit {field}");
+        }
+        let replacement = serde_json::to_value(super::UpdateCacheDestination {
+            s3_access_key_id: Some("fixture-access".into()),
+            s3_secret_access_key: Some("fixture-secret".into()),
+            s3_session_token: Some(String::new()),
+            ..Default::default()
+        })
+        .expect("serialize explicit credential replacement");
+        assert_eq!(replacement["s3_session_token"], "");
+        assert!(replacement.get("attic_token").is_none());
+        assert!(replacement.get("niks3_auth_token").is_none());
+    }
+
+    #[test]
+    fn cache_configured_flags_default_false_for_older_servers() {
+        let legacy = serde_json::json!({
+            "id": 7, "name": "fixture", "cache_type": "Attic",
+            "enabled": true, "created_at": "2026-10-04T00:00:00Z",
+            "updated_at": "2026-10-04T00:00:00Z"
+        });
+        let cache: super::CacheDestination =
+            serde_json::from_value(legacy.clone()).expect("deserialize legacy destination");
+        assert!(!cache.attic_token_configured);
+        assert!(!cache.s3_credentials_configured);
+        assert!(!cache.s3_session_token_configured);
+        assert!(!cache.http_basic_auth_configured);
+        assert!(!cache.legacy_query_credentials_configured);
+        let mut configured = legacy;
+        configured["attic_token_configured"] = true.into();
+        configured["s3_credentials_configured"] = true.into();
+        configured["s3_session_token_configured"] = true.into();
+        configured["http_basic_auth_configured"] = true.into();
+        configured["legacy_query_credentials_configured"] = true.into();
+        let cache: super::CacheDestination =
+            serde_json::from_value(configured).expect("deserialize configured flags");
+        assert!(cache.attic_token_configured);
+        assert!(cache.s3_credentials_configured);
+        assert!(cache.s3_session_token_configured);
+        assert!(cache.http_basic_auth_configured);
+        assert!(cache.legacy_query_credentials_configured);
+        assert!(cache.attic_token.is_none());
+        assert!(cache.s3_secret_access_key.is_none());
+        assert!(cache.s3_session_token.is_none());
+    }
+
     use super::{
         ComplianceControlEvidence, ConfigObservationLifecycle, ConfigObservationPayload,
         ConfigObservationRequestResponse, ConfigObservationResponse, CreatePolicyDraftRequest,

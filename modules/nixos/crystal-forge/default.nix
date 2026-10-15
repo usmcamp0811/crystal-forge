@@ -8,9 +8,9 @@
   tomlFormat = pkgs.formats.toml {};
   postgres_pkg = config.services.postgresql.package;
   # INVARIANT: The Nix CLI and nix-eval-jobs must use the same Nix library
-  # version. The evaluator package exposes its matching CLI through this
-  # passthru attribute.
-  evaluatorNix = pkgs.nix-eval-jobs.nix;
+  # version. The CF package exports that matching CLI with the native netrc
+  # authority guard. Agent Basic reads must use this CLI before other PATH tools.
+  evaluatorNix = pkgs.crystal-forge.default.evaluatorNix;
 
   # Recursively remove any null values so TOML generation won’t choke.
   stripNulls = v:
@@ -42,10 +42,16 @@
           port = cfg.server.port;
           eval_workers = cfg.server.eval_workers;
           eval_max_memory_mb = cfg.server.eval_max_memory_mb;
+          eval_memory_reserve_mb = cfg.server.eval_memory_reserve_mb;
+          eval_memory_max_percent = cfg.server.eval_memory_max_percent;
+          eval_output_idle_timeout_secs = cfg.server.eval_output_idle_timeout_secs;
+          eval_overall_timeout_secs = cfg.server.eval_overall_timeout_secs;
+          eval_discovery_timeout_secs = cfg.server.eval_discovery_timeout_secs;
           eval_check_cache = cfg.server.eval_check_cache;
           auto_hardening_scans = cfg.server.auto_hardening_scans;
           allow_private_cache_test_targets =
             cfg.server.allow_private_cache_test_targets;
+          attic_metrics_endpoints = cfg.server.attic_metrics_endpoints;
           trust_forwarded_builder_https =
             cfg.server.trust_forwarded_builder_https;
           notification_email_enabled = cfg.server.notificationEmail.enable;
@@ -67,8 +73,8 @@
           notification_email_digest_schedule = cfg.server.notificationEmail.digestSchedule;
           session_last_seen_throttle_seconds =
             cfg.server.sessionLastSeenThrottleSeconds;
-           session_retention_days = cfg.server.sessionRetentionDays;
-           trusted_proxy_cidrs = cfg.server.trustedProxyCidrs;
+          session_retention_days = cfg.server.sessionRetentionDays;
+          trusted_proxy_cidrs = cfg.server.trustedProxyCidrs;
           remote_build_execution_strategy = cfg.build.remote_execution_strategy;
           source_delivery_mode = cfg.build.source_delivery_mode;
           source_archive_root = toString cfg.build.source_archive_root;
@@ -1752,11 +1758,12 @@ in {
         };
       };
       eval_workers = lib.mkOption {
-        type = lib.types.int;
+        type = lib.types.ints.unsigned;
         default = 2;
         description = lib.mdDoc ''
           Number of worker threads for nix-eval-jobs parallel evaluation.
-          Set to 0 to automatically use the number of CPU cores available.
+          Set to 0 for Crystal Forge to resolve Rust available_parallelism
+          explicitly before starting nix-eval-jobs.
 
           This controls how many systems can be evaluated concurrently
           when processing flake commits.
@@ -1764,18 +1771,79 @@ in {
       };
 
       eval_max_memory_mb = lib.mkOption {
-        type = lib.types.int;
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = null;
+        description = lib.mdDoc ''
+          Per-worker memory threshold in MiB (despite the historical _mb name).
+          An explicit value is passed unchanged, including 12288. Null omits
+          the TOML field and selects Crystal Forge's automatic budget.
+
+          Automatic sizing uses the minimum of physical memory and independently
+          detected finite memory.high and memory.max across visible cgroup
+          ancestors, not fluctuating MemAvailable. memory.high is a reclaim and
+          throttling boundary, not an OOM-kill limit. Numeric zero is finite.
+          It divides
+          min(floor(effective MiB * eval_memory_max_percent / 100),
+          effective MiB - eval_memory_reserve_mb) by the resolved worker count.
+          Insufficient headroom is an error rather than a silent fallback.
+
+          The pinned nix-eval-jobs 2.34.3 checks each worker's RSS after a job
+          and restarts an oversized worker. A job can exceed this threshold;
+          it is not a hard memory limit. Later nix-eval-jobs versions use a
+          distinct aggregate workers * max-memory-size scheduler budget.
+          Service-cgroup limits provide hard containment independently.
+        '';
+      };
+
+      eval_memory_reserve_mb = lib.mkOption {
+        type = lib.types.ints.positive;
         default = 4096;
         description = lib.mdDoc ''
-          Worker restart threshold in MB for nix-eval-jobs.
+          Headroom reserved in MiB from stable effective memory for automatic
+          evaluator sizing. The reserve must be positive and leave room for
+          the resolved workers. An explicit eval_max_memory_mb bypasses sizing.
+        '';
+      };
 
-          nix-eval-jobs checks this threshold after evaluating an attribute and
-          then restarts an oversized worker. It is not a hard memory limit and
-          a worker can temporarily exceed it while evaluating an attribute.
-          Default is 4096 MB (4 GB) per worker. Use the server systemd memory
-          options for hard service-cgroup containment.
+      eval_memory_max_percent = lib.mkOption {
+        type = lib.types.ints.between 1 100;
+        default = 85;
+        description = lib.mdDoc ''
+          Maximum percentage of stable effective memory for automatic evaluator
+          sizing, from 1 through 100 inclusive. Crystal Forge uses the smaller
+          of the floored percentage budget and the reserve-subtracted budget,
+          then divides by the resolved worker count.
+        '';
+      };
 
-          Adjust based on available system memory and the number of workers.
+      eval_output_idle_timeout_secs = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 900;
+        description = lib.mdDoc ''
+          Maximum seconds without evaluator output before cancellation.
+          Output resets this idle clock. The independent absolute deadline
+          remains active even when the evaluator continues producing output.
+        '';
+      };
+
+      eval_overall_timeout_secs = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 3600;
+        description = lib.mdDoc ''
+          Absolute evaluator deadline in seconds from process start.
+          Output does not reset this clock. The output-idle deadline can
+          cancel evaluation earlier and is configured independently.
+        '';
+      };
+
+      eval_discovery_timeout_secs = lib.mkOption {
+        type = lib.types.ints.between 1 1800;
+        default = 300;
+        description = lib.mdDoc ''
+          Absolute configuration-discovery deadline in seconds, from 1 through
+          1800 inclusive. The default allows cold locked-input downloads.
+          This deadline is independent of realization and bulk evaluator
+          deadlines. Output does not reset this clock.
         '';
       };
 
@@ -1846,26 +1914,60 @@ in {
         '';
       };
 
+      attic_metrics_endpoints = lib.mkOption {
+        type = lib.types.listOf (lib.types.submodule {
+          options = {
+            destination_id = lib.mkOption {
+              type = lib.types.int;
+              description = "Explicit Crystal Forge Attic destination database ID.";
+            };
+            url = lib.mkOption {
+              type = lib.types.str;
+              description = "HTTPS inventory adapter base with optional path prefix; no userinfo, query or fragment.";
+            };
+            token_file = lib.mkOption {
+              type = lib.types.str;
+              description = "Absolute non-store runtime token file owned by the server user, with no group/other permissions and no symlink.";
+            };
+          };
+        });
+        default = [];
+        example = [{
+          destination_id = 42;
+          url = "https://metrics.example/prefix/";
+          token_file = "/run/credentials/crystal-forge/attic-metrics";
+        }];
+        description = lib.mdDoc ''
+          Explicit destination-ID bindings for Admin-only Attic inventory
+          observations. Empty by default, so Attic totals remain unsupported.
+          Uses a separate adapter token, never an Attic upload credential.
+          Duplicate IDs or invalid entries fail closed on metrics requests.
+          HTTPS targets use the existing cache-test private-target policy.
+        '';
+      };
+
       trust_forwarded_builder_https = lib.mkOption {
         type = lib.types.bool;
         default = false;
         description = lib.mdDoc ''
-          Trust the `X-Forwarded-Proto: https` / `Forwarded: proto=https`
-          headers set by a reverse proxy when sending cache-push credentials
-          to remote builders.
+          Permit forwarded HTTPS verification for builder cache-push secrets
+          and private agent cache-read credentials. Verification requires the
+          actual direct socket peer to match `trustedProxyCidrs` and exactly
+          one `X-Forwarded-Proto` header with the value `https`. `Forwarded`
+          and protocol lists do not establish verified HTTPS.
 
-          When `false` (the default), the server refuses to send any
-          credential-bearing cache-push config to builders and returns
-          `426 Upgrade Required`, regardless of forwarded-proto headers.
+          When `false` (the default), forwarded headers cannot authorize secret
+          delivery. Builder requests that require secrets return
+          a transient `dispatch:cache_config` failure and HTTP 404 (no work for
+          that poll); unverified private agent delivery is withheld.
 
-          **Only set this to `true` when your reverse proxy unconditionally
-          strips and re-sets these headers itself.** Builders that can reach
-          the server directly over plaintext HTTP could otherwise spoof the
-          header and receive real cache credentials.
-
-          Typical deployment: set this to `true` when Crystal Forge is behind
-          an HTTPS-terminating reverse proxy (e.g. nginx, Caddy) that you
-          control, and builders only reach the server through that proxy.
+          Enable only behind a controlled HTTPS-terminating proxy that strips
+          incoming `X-Forwarded-Proto` and sets one value itself. An enabled
+          server requires an explicit nonempty `trustedProxyCidrs` list.
+          Allow only narrow CIDRs for the proxy's direct backend socket peer,
+          not builder or client addresses. Same-host loopback connections can
+          use `127.0.0.1/32` and `::1/128`; remote proxies require their actual
+          peer IP as `/32` or `/128`. No proxy CIDRs are added automatically.
         '';
       };
 
@@ -1987,11 +2089,19 @@ in {
         type = lib.types.listOf lib.types.str;
         default = [];
         description = lib.mdDoc ''
-          CIDR ranges of trusted reverse proxies. X-Forwarded-For is used only
-          when the direct peer is in one of these ranges; otherwise the direct
-          peer address is recorded for active sessions.
+          Explicit CIDRs for trusted reverse proxies' direct socket peers.
+          Active-session address recording uses `X-Forwarded-For` only when
+          the direct peer matches; otherwise it records the direct peer.
+
+          Builder secret delivery and private agent cache-read delivery also
+          require a matching direct peer, `trust_forwarded_builder_https`, and
+          exactly one `X-Forwarded-Proto: https` header. A nonempty list alone
+          does not authorize secret delivery. Missing or unmatched peers fail
+          closed. Use narrow proxy peer `/32` or `/128` CIDRs, not builder or
+          client IPs or broad network ranges. Loopback examples apply only when
+          the proxy connects to the backend over same-host loopback.
         '';
-        example = [ "127.0.0.1/32" "10.0.0.0/8" ];
+        example = ["127.0.0.1/32" "::1/128"];
       };
 
       role_mapping = lib.mkOption {
@@ -2524,6 +2634,7 @@ in {
       path = with pkgs;
         [
           evaluatorNix
+          pkgs.crystal-forge.default.niks3
           git
           gnutar
           gzip
@@ -2793,6 +2904,7 @@ in {
 
       path = with pkgs; [
         evaluatorNix
+        pkgs.crystal-forge.default.niks3
         git
         openssh
         nix-fast-build
@@ -2961,6 +3073,7 @@ in {
       after = lib.optional cfg.server.enable "crystal-forge-server.service";
 
       path = with pkgs; [
+        evaluatorNix
         nix-eval-jobs
         nix-fast-build
         coreutils
@@ -2979,7 +3092,6 @@ in {
         gnugrep
         findutils
         vulnix
-        nix
         nixos-rebuild
         git
       ];
@@ -3047,6 +3159,15 @@ in {
     };
 
     assertions = [
+      {
+        # SECURITY: This list identifies the proxy's direct backend peer.
+        # The enclosing cfg.enable gate and server.enable scope exclude
+        # inactive servers; runtime verification still checks the actual peer.
+        assertion =
+          (cfg.server.enable && cfg.server.trust_forwarded_builder_https)
+          -> cfg.server.trustedProxyCidrs != [];
+        message = "services.crystal-forge.server.trust_forwarded_builder_https requires nonempty services.crystal-forge.server.trustedProxyCidrs when services.crystal-forge.enable and services.crystal-forge.server.enable are true. Set narrow CIDRs for the reverse proxy's direct backend socket peer (Traefik peer IP /32 or /128), not builder/client IPs; no automatic or broad CIDR fallback is provided.";
+      }
       {
         assertion = cfg.client.enable -> (cfg.client.private_key != null);
         message = "Crystal Forge client requires a private key file";
