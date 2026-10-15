@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-15 20:24'
+updated_date: '2026-10-15 20:27'
 labels: []
 dependencies: []
 references:
@@ -923,6 +923,10 @@ Launcher failure repair published on TASK-470 as4faa4eaeb97f2d1b7a412991bd0c375d
 Verificationpassed: boundedNixdeveloperCIpolicytestexit0, GitLabCIlintvalid, gitdiff/stagedcheckclean. Verifiedremotewas9f0cb90c0/0beforecommit/push. Newpipeline2952372861 running for exact4faa4eae, https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2952372861. No greenclaim: this addressesremoteFetchNarsbeforeanalysis; knownstrict733lint/195sizefindingsstillremaining. No merge/deploy/threshold changes orprovider/securitymutations. Trackedworktreecleanexceptowneduntrackedtasklock.
 
 Correction: the previous launcher-fix note was garbled (missing spaces). Corrected text: commit 4faa4eaeb97f2d1b7a412991bd0c375d9fc82985 changed .gitlab-ci.yml, packages/ci/test_public_cache_build.py and checks/integration/README.md so complexity-check and coverage-check run `nix run` with `--builders '' --max-jobs 1 --cores 2`. Pipeline 2952372861 result: complexity-check now reaches analysis (both Clippy runs exit 0) and fails on 733 lint findings plus 195 file-size violations. That matches the local strict inventory. coverage-check is skipped because complexity-check failed. All 13 flake checks, cve-processing-test, dashboard-visibility-tests and state-machine-tests pass. Optional web-ui-check (allow_failure) failed. The MR is not merge-ready until the strict findings are remediated.
+
+Strict complexity scope measurement (inventory from commit 9f0cb90c, 536 Rust files). 462,585 of 520,540 lines (about 89%) are in the 195 files over 500 lines. Inline #[cfg(test)] modules are only 128,071 of those lines (28%). Extracting them would bring only 18 of 195 files under 500 lines. 177 files would still hold about 328,000 lines of production code that need responsibility-based splitting. At about 450 lines per module this needs more than 900 new modules. Separately, 733 function lints need real refactoring (429 too_many_lines, 199 cognitive_complexity, 71 too_many_arguments, 32 type_complexity, 2 fn_params_excessive_bools).
+
+History: the original Feb 2026 gate ran `cargo clippy ... || true` and then grepped for lint names, and its shell exit ignored the 500-line clause. If Clippy aborts on a deny-by-default lint, no lint lines are produced and the gate passes. Commit 9f0cb90c fixed three such fatal items. The gate passed on dev in April and May 2026 even though files of 16-20k lines existed, so the findings are long-standing debt and not introduced by MR !331. Whether those past runs actually aborted was not proven. Decision on strategy requested from the user; no remediation batch started.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
