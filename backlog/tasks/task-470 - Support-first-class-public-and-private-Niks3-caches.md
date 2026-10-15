@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-15 02:06'
+updated_date: '2026-10-15 02:28'
 labels: []
 dependencies: []
 references:
@@ -276,6 +276,8 @@ CI-only correction plan authorizedbyuserappropriateinfrastructurefix: constrain 
 Exact-head5ebfa887 pipeline2948634668 ALL13flakechecks passed (boundedlocal args verifiedzero remotedispatch/errors);requiredstandaloneCVE/dashboard/statespassed andscreenshotcommentsucceeded. Newunblockedrequiredcomplexity17185484674 failed: openssl-sys nativecompile101 provenmissingpkg-config,thenanalysiscontinuedbecauseClippy||trueandfrontendcompile jobended137. Signal sender/OOM causeunproven. Coverage17185484676skipped notpass. NativeUI actualfreshCI job17185484663success artifact73,962,131bytes390PNGs;optional fullUI remainsfailedallowtrue16expectedsemanticcontracts2 actual,notinfra/green.
 
 Nextminimal required-metrics repair: inspectpackages/code-metrics/default.nix nativeanalysisenvironment; supplypkg-config/OpenSSL development settings andboundedCargo jobs2 forrealanalysis, preservemetrics/report/thresholdsemantics andpropagateoperationalfailureshonestly whereapplicable withoutapprefactor. Inspectcoverageenvironmentonlyforidenticalprerequisites/repro afterunblocked; do notweakenanalysis/test/coverage assertions or optionalpolicy. RunactualCI-equivalentmetriccommandlocallyserialresourcebounded, recordactualstatus/reportsandanyremaining Clippyerrorsvsfixturefailures; thennormalcommitpush exacthead andmonitorall19requiredjobsto terminal.CIallflake-green doesnotyetmakeMRready whilecomplexityfailed/coverageskipped.
+
+User corrected placement: perform ALL remaining strict remediation on this existing TASK-470 branch/worktree, not a separate implementation branch. Verified local/origin5ebfa8870/0; parent metricsWIP exactlymatched verifiedcheckpoint9f0cb90c (bothtrackeddefault.nixdiffempty anduntrackedtestscriptGitblobhashmatched). PreservedtheseWIP files innamedstashbackup, fast-forwarded TASK-470 to9f0cb90cea4c7c2c5929fcbccd1ed058fa5fa255, normalpushedorigin. MR331nowincludesall16checkpointfiles. No newmergecommit/MRmerge/historyrewrite/deploy. ArchivedTASK487asduplicateplanningandremovedonlyitsverifiedownedlock; no furtherworkinthatchildworktree. Preservebackupbranch/stash; continue734→733lint/196→195sizefindingsunderactiveTASK470 existinglock. No thresholds/suppression/exclusions or evidenceclaims changed.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -911,6 +913,8 @@ Test-only ETXTBSY remediation verified locally at d0246e00 + uncommitted builder
 Verification: nix develop .#sqlx --max-jobs 1 --cores 2 -c env SQLX_OFFLINE=true CARGO_BUILD_JOBS=2 cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib handlers::api::builders::tests::evaluator_ -- --nocapture passed (3 tests, including both affected tests), raw /tmp/opencode/task470-etxtbsy-fixed-focused.log. A broad host lib invocation passed affected tests but failed 9 environment-dependent tests: shell Nix2.34.5 versus required2.34.8 and eight DATABASE_URL connection timeouts; no passing full-host claim. Subsequent authoritative package environment resolves this: sh packages/ci/public-cache-build.sh .#checks.x86_64-linux.niks3-ui --no-link -L --max-jobs 1 --cores 2 exited0; raw /tmp/opencode/task470-etxtbsy-niks3-ui.log. Rebuilt package libtests 1794 passed/0 failed/682 existing ignored in77.63s, then authoritative workflow25 passed1/1 with native Discovery, legacy/retained/replacement raw-state checkpoints and screenshots; VM test script554.94s. Owned-file rustfmt --check through .#sqlx and git diff --check pass. Only builders.rs tracked source diff plus task-owned lock. No commits/pushes/CI retries/triggers/deployments/merges; task remains In Progress.
 
 User explicitly chose Authorize strict remediation for repository-wide complexity failures. Work is isolated as TASK-487 on branch/worktree TASK-487-strict-complexity-remediation, based on this branch's published5ebfa887. First verified partial checkpoint9f0cb90cea4c7c2c5929fcbccd1ed058fa5fa255 pushed to that child branch; NOT integrated into MR331. Original parent metrics WIP preserved. No merge/deploy. FatalClippy blockers removed with tests, CA parser split by real responsibility retaining exactRust/Go root identities. Full native analysis now completes0/0 but strictreportcorrectlyfails733findings/195oversizedfiles (536sources), no suppressions/exclusions/thresholdrelaxation. Requiredcomplexity remains unresolved; coverageunverified. MR331 is NOTready until strictremediation+requiredexactheadCIcomplete. TASK487 notes/artifacts track fullremaininginventory andverified94configunits/14doctests/nativeGoCA/fullisolatedserverregressions.
+
+Branch correction complete: TASK-470 and MR331 head9f0cb90cea4c7c2c5929fcbccd1ed058fa5fa255. Newexact-headpipeline2949074650 running, https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2949074650. Trackedworktreeclean; onlytaskownerlockuntracked. Strictreportremains733selectedlintfindings/195files>500 andcoverageunverified; movingcheckpointdoesNOTmakegatepass. Existingverifiednative/WASM/CA/SQLx tests/evidence retained. Continueimplementation onTASK470 only;notreadyformerge, no deploy/mergeperformed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
