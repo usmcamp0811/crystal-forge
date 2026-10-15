@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-15 18:44'
+updated_date: '2026-10-15 18:48'
 labels: []
 dependencies: []
 references:
@@ -917,6 +917,10 @@ Verification: nix develop .#sqlx --max-jobs 1 --cores 2 -c env SQLX_OFFLINE=true
 User explicitly chose Authorize strict remediation for repository-wide complexity failures. Work is isolated as TASK-487 on branch/worktree TASK-487-strict-complexity-remediation, based on this branch's published5ebfa887. First verified partial checkpoint9f0cb90cea4c7c2c5929fcbccd1ed058fa5fa255 pushed to that child branch; NOT integrated into MR331. Original parent metrics WIP preserved. No merge/deploy. FatalClippy blockers removed with tests, CA parser split by real responsibility retaining exactRust/Go root identities. Full native analysis now completes0/0 but strictreportcorrectlyfails733findings/195oversizedfiles (536sources), no suppressions/exclusions/thresholdrelaxation. Requiredcomplexity remains unresolved; coverageunverified. MR331 is NOTready until strictremediation+requiredexactheadCIcomplete. TASK487 notes/artifacts track fullremaininginventory andverified94configunits/14doctests/nativeGoCA/fullisolatedserverregressions.
 
 Branch correction complete: TASK-470 and MR331 head9f0cb90cea4c7c2c5929fcbccd1ed058fa5fa255. Newexact-headpipeline2949074650 running, https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2949074650. Trackedworktreeclean; onlytaskownerlockuntracked. Strictreportremains733selectedlintfindings/195files>500 andcoverageunverified; movingcheckpointdoesNOTmakegatepass. Existingverifiednative/WASM/CA/SQLx tests/evidence retained. Continueimplementation onTASK470 only;notreadyformerge, no deploy/mergeperformed.
+
+Launcher failure repair published on TASK-470 as4faa4eaeb97f2d1b7a412991bd0c375d9fc82985 (`TASK-470: Build required analysis launchers locally in CI`). Only.gitlab-ci.yml, packages/ci/test_public_cache_build.py, checks/integration/README.md changed. Complexity/coverage nix-run nowuse --builders empty/max-jobs1/cores2;allotherjobmetadata/cache/TLS/signaturepolicies unchanged. Testproxyrecordsrunargv andchecksrealNixlocalsettings+exit17propagationfortwojobs;existingmatrix/legacy/redaction/sourcefallbackproofs retained.
+
+Verificationpassed: boundedNixdeveloperCIpolicytestexit0, GitLabCIlintvalid, gitdiff/stagedcheckclean. Verifiedremotewas9f0cb90c0/0beforecommit/push. Newpipeline2952372861 running for exact4faa4eae, https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2952372861. No greenclaim: this addressesremoteFetchNarsbeforeanalysis; knownstrict733lint/195sizefindingsstillremaining. No merge/deploy/threshold changes orprovider/securitymutations. Trackedworktreecleanexceptowneduntrackedtasklock.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
