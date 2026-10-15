@@ -37,6 +37,19 @@ For the authority boundary between Crystal Forge's packaged option catalog and a
 
 Composite enforcement is described in [Composite policy enforcement](composite-policy-enforcement.md).
 
+Historical artifact deployability does not establish current cache readability.
+Agent delivery resolves completed publication provenance for the exact authorized
+derivation and output path inside the same SERIALIZABLE transaction that claims
+pending delivery. Durable database destination IDs survive rename; deleted IDs
+never resolve through replacement names or URLs. Only currently enabled,
+environment-scoped, publication-backed read sources participate in selection.
+Read authentication, confidential transport, and signed agent capabilities are
+checked before any delivery mutation. If no source is usable, target and cache
+settings are withheld and pending work remains retryable. Source archival alone
+does not invalidate retained lineage; policy authorization and readable source
+selection are separate delivery-time requirements. See the
+[Niks3 operator contract](../caches/niks3-cache.md) for selection and rotation rules.
+
 ## `custom_check`
 
 `custom_check` supports two config shapes.

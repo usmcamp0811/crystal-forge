@@ -28,17 +28,37 @@ Flow:
 1. The server fetches the exact commit into its credentialed bare mirror. It
    exports only the tracked Git tree and ingests that tree with the canonical
    `crystal-forge-source-v1-<commit>` name. It evaluates the resulting immutable
-   store flake in pure mode with lock mutation disabled and IFD set explicitly:
+   store flake in pure mode with lock mutation disabled and IFD set explicitly.
+
+   Before bulk policy evaluation, the server always discovers the complete
+   configuration inventory from that same exact NAR-qualified source. Discovery
+   evaluates `builtins.attrNames (builtins.getFlake <source>).nixosConfigurations`
+   with `nix eval --json --expr`, pure evaluation, and IFD enabled. It performs
+   no additional root Git resolution or revision fallback. The `getFlake`
+   expression preserves the policy evaluator's lock semantics: a CLI flake
+   installable can reconcile an incomplete lock graph even with
+   `--no-write-lock-file`. Discovery must not use that reconciliation as proof
+   that the policy source is valid. Private locked inputs use the flake's
+   protected credentials, including an explicit Nix `netrc-file` setting when
+   present. Discovery does not write `flake.lock` or receive realization options.
+
+   The bulk policy invocation uses:
 
    ```bash
    nix-eval-jobs --expr '<authoritative expression>' \
        --option pure-eval true \
        --option allow-import-from-derivation true \
-       --meta --apply 'derivation: derivation.meta.policies' \
+       --meta \
+       --apply 'derivation: { policies = derivation.meta.policies; configObservationRoot = derivation.meta.crystalForgeConfigRoot or { status = "failed"; code = "root_capture_missing"; }; }' \
        --workers <n> --max-memory-size <MiB>
    ```
 
    The resulting `.drvPath` is the server-authorized build-plan fingerprint. The server does not need `nix build --dry-run` for this identity. The authoritative evaluator does not receive `BuildConfig` realization options such as sandbox, offline mode, substitution policy, max jobs, cores, max-silent-time, or build timeout. Those settings control realization and must not alter evaluation semantics.
+
+   The production apply function preserves policies and the optional Config-root
+   observation in `extraValue`, while returning the unchanged system derivation.
+   A missing Config root records `root_capture_missing`; it does not establish a
+   successful observation or change derivation authorization.
 
 2. The server sends the full commit, lock digest, canonical store name, source
    NAR hash, artifact format, artifact digest and size, evaluator contract,
@@ -88,6 +108,57 @@ and source materialization schema. Server-only worker count, evaluator memory
 limit, outer process timeout, and cache-status reporting are resource or
 diagnostic controls. They can stop an evaluation or add metadata, but they
 cannot change a successful `.drvPath`.
+
+The server's [bulk evaluator resource plan](../evaluation/bulk-evaluator-resource-planning.md)
+resolves one explicit nonzero worker count and per-worker MiB threshold after
+the heavy-Nix locks and before spawn. Automatic memory sizing and independent
+output-idle/overall deadlines are server-only controls. They do not change
+builder re-evaluation, the linked Nix fingerprint, purity, IFD, or source
+identity. An explicit `12288` MiB override with two workers retains the
+24576 MiB configured product. The resource guide distinguishes the packaged
+v2.34.3 restart threshold from version-dependent
+aggregate kill/retry behavior reported in a deployment.
+
+Configuration discovery has its own
+[bounded deadline and admission contract](../evaluation/bulk-evaluator-resource-planning.md#configuration-discovery-deadline).
+Source materialization completes before discovery admission. Discovery acquires
+the PostgreSQL advisory lock before the in-process heavy-Nix permit and finishes
+that scope before bulk admission. Nested admission is forbidden. An unconfirmed
+child retains both locks in quarantine until direct-child reap and process-group
+absence are confirmed, even beyond the discovery deadline.
+
+Legacy commit artifact-cache inventories have no verified source/lock provenance
+and never authorize the expected configuration set. Authoritative evaluation
+always rediscovers names, even when an artifact-cache row is populated. Nix's own
+warm fetch/evaluation cache remains available. Authoritative discovery attempts
+a best-effort display-inventory write with a 250-millisecond ceiling, including
+a valid empty set and preserving cached changed files. Write failure or timeout
+keeps the verified inventory in memory for evaluation. Cancellation checks remain
+authoritative during the write and at handoff; an unavailable final check cannot
+authorize bulk work. Background artifact hydration uses the same exact-source,
+credentialed discovery preflight and current server timeout. Its stored names
+remain display-only. Failed hydration leaves the row unpopulated; the missing-row
+selector does not automatically select that row again.
+
+The server's [adaptive recovery](../evaluation/bulk-evaluator-adaptive-recovery.md)
+reuses the same verified source, revision, policy parser, and snapshot paths.
+Only unresolved configurations enter an isolated child, at most once each.
+Normal fixed overrides remain exact; isolated thresholds use the original
+working-boundary plan, including visible-ancestor `memory.high` and `memory.max`.
+These resource phase changes do not alter source or evaluator authorization.
+
+An outer monitor assesses idle expiry and enforces one overall deadline across
+collection awaits. Fresh complete direct-worker CPU evidence can waive silence,
+not extend the overall deadline. The deadline also covers replacement children,
+small fallback, build-preparation drain, and foreground cleanup. Cancellation
+retains its cooperative two-second cadence, not a response-time guarantee.
+Replacement requires reap and group absence; unconfirmed cleanup retains
+heavy-Nix locks in quarantine. Resource exhaustion fails the commit/attempt
+while preserving only verified exact-attempt completion evidence, not globally
+successful evaluation or an automatic whole-flake retry.
+Quarantined cleanup can hold those locks beyond the monotonic deadline; a
+pending `D`-state member need not exit by that deadline. Cleanup proof covers
+controlled workers in the inherited process group, not an escaped subtree.
 
 A post-claim fingerprint mismatch remains a defense-in-depth check. The server
 releases that job to the queue without consuming retry budget or failing the

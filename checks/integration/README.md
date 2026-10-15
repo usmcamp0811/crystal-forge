@@ -33,11 +33,28 @@ this check makes about server-only state changes.
 nix build .#checks.x86_64-linux.integration --print-build-logs
 ```
 
-Global timeout is 1200 seconds (20 minutes): database plus dashboard plus
-server startup, with overhead. The VM uses a writable Nix store and is
+The driver timeout is 1200 seconds (20 minutes). It starts after prerequisite
+builds and before VM startup; prerequisite builds are outside this budget.
+Driver cleanup can continue after the test timer is released. The VM uses a writable Nix store and is
 seeded with the toplevel system closure, the core server derivation, and the
 agent derivation so the test flake's NixOS configuration can build inside
 the VM without network access.
+
+## Runtime diagnostics
+
+The fixture sets the module's bare log level to `info`. Server and enabled
+SQLx-owning workers override `RUST_LOG` with
+`info,crystal_forge=debug,server=debug,sqlx=warn`. The agent retains `info`.
+Runtime checks verify the exact filter in each process without printing other
+environment values. SQLx DEBUG statements and binds are suppressed; SQLx
+warnings, including slow-query warnings, can still appear.
+
+Each pytest phase emits START and END with monotonic elapsed time, the original
+exit status (or exception), and completed outcome counts. Each test emits actual
+setup/call/teardown outcomes and completion elapsed time. Added progress records
+omit parameter values and failure bodies. These events are not periodic
+heartbeats and do not change test selection, skips, assertions, or timeouts.
+Phase END runs in `finally`; pytest failures retain their original exit status.
 
 ## Out of scope
 
@@ -52,3 +69,21 @@ the VM without network access.
 
 Part of the `.gitlab-ci.yml` `flake-check` matrix (`CHECK_NAME: integration`),
 so it runs on every merge request and on `main`.
+
+CI runs this same attribute through `packages/ci/public-cache-build.sh` with
+`--builders '' --max-jobs 1 --cores 2`. All `flake-check` matrix entries receive
+these local execution arguments, preserving each entry's existing cache policy.
+The required complexity and coverage launchers use the same local limits: their
+report executables must not depend on output retrieval from the failing remote
+builder. Optional Web UI, manual baseline, and separate functional jobs retain
+inherited builder controls. Production builders are unaffected.
+
+Pipeline 2944979038 failed before observed VM execution or assertions: remote
+`QueryValidPaths` closed its socket for integration and Attic publication, and
+remote `FetchNars` reported a missing publication driver for Attic metrics.
+Pipeline 2948588801 passed all three local cases, but remote `QueryValidPaths`
+still failed before assertions for packaging and before the OKF validator.
+These remote execution failures do not prove a server certificate defect.
+The wrapper's substitution fallback retains builders and does not automatically
+retry remote builder errors locally. The scoped arguments select local execution
+without changing TLS verification, signatures, test attributes, or assertions.

@@ -2737,6 +2737,47 @@ pub async fn fetch_cache_destination(id: i32) -> Result<CacheDestination, ApiCli
     fetch_json(&url).await
 }
 
+/// Fetches one request-local provider inventory observation without mutation.
+/// Callers must bound concurrent requests and must not poll indefinitely.
+/// The server owns provider authorization, retained TLS and target policy.
+/// Aborts the browser request after twelve seconds or when the owning future
+/// is cancelled. GET bypasses browser HTTP caches through the shared transport.
+///
+/// # Errors
+/// Returns an error for authentication, missing destinations, transport failures
+/// or malformed responses. Presentation must not display raw error bodies.
+pub async fn fetch_cache_storage_metrics(id: i32) -> Result<CacheStorageMetrics, ApiClientError> {
+    let url = format!("{}/caches/{id}/metrics", base_url());
+    // CONCURRENCY: Resource cancellation must abort the browser fetch, not
+    // leave an old observation pass running beside its replacement.
+    struct AbortOnDrop(web_sys::AbortController);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let controller = web_sys::AbortController::new()
+        .map_err(|_| ApiClientError::Network("Metrics request unavailable".into()))?;
+    let _owner = AbortOnDrop(controller.clone());
+    // The server observation budget is eight seconds. Four additional seconds
+    // cover API transport and response delivery without an indefinite spinner.
+    let timeout = gloo_timers::callback::Timeout::new(12_000, {
+        let controller = controller.clone();
+        move || controller.abort()
+    });
+    let response = send_request_with_signal("GET", &url, None, Some(&controller.signal())).await;
+    timeout.cancel();
+    let (status, text) = response?;
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: "Metrics unavailable".into(),
+        });
+    }
+    serde_json::from_str(&text)
+        .map_err(|_| ApiClientError::Deserialize("Invalid metrics response".into()))
+}
+
 /// Create a new cache destination
 pub async fn create_cache_destination(
     data: &CreateCacheDestination,
@@ -2745,15 +2786,229 @@ pub async fn create_cache_destination(
     send_json_with_csrf("POST", &url, Some(data)).await
 }
 
-/// Test cache destination credentials/configuration
+/// Tests unsaved cache configuration through the existing CSRF transport.
+/// Structured Attic policy rejections remain failed probe results, not success.
+///
+/// # Errors
+/// Returns errors for API authorization, malformed responses, unsupported
+/// rejections or transport failures. Use [`cache_probe_error_message`] for local
+/// allowlisted guidance; callers must not display response bodies.
 pub async fn test_cache_destination_credentials(
     data: &CreateCacheDestination,
 ) -> Result<CacheCredentialTestResult, ApiClientError> {
     let url = format!("{}/caches/test-credentials", base_url());
-    send_json_with_csrf("POST", &url, Some(data)).await
+    send_cache_probe(&url, data).await
 }
 
-/// Update an existing cache destination
+/// Tests a stored destination with the same replacement patch used by Save.
+///
+/// The server resolves omitted credentials by ID. This request does not save
+/// configuration, credentials, environment assignments or usage timestamps.
+/// The request body is an unwrapped [`UpdateCacheDestination`].
+///
+/// # Errors
+/// Returns an error for authorization, missing destinations, invalid overrides,
+/// unsupported target-policy rejection or network failures. Allowlisted Attic
+/// HTTP 400 policy envelopes return failed results. Callers must display a static
+/// failure message from [`cache_probe_error_message`] rather than echo response
+/// bodies or submitted credentials.
+pub async fn test_stored_cache_destination_credentials(
+    id: i32,
+    data: &UpdateCacheDestination,
+) -> Result<CacheCredentialTestResult, ApiClientError> {
+    let url = format!("{}/caches/{id}/test-credentials", base_url());
+    send_cache_probe(&url, data).await
+}
+
+// SECURITY: Only cache-probe responses get this decoder. HTTP API authorization
+// and CSRF errors remain errors even if their bodies imitate Attic evidence.
+async fn send_cache_probe<B: serde::Serialize>(
+    url: &str,
+    data: &B,
+) -> Result<CacheCredentialTestResult, ApiClientError> {
+    let payload = serde_json::to_string(data)
+        .map_err(|_| ApiClientError::Deserialize("Invalid cache probe request".into()))?;
+    let (status, text) = send_request_with_csrf("POST", url, Some(&payload))
+        .await
+        .map_err(|_| ApiClientError::Network(CACHE_PROBE_FAILURE_MESSAGE.into()))?;
+    decode_cache_probe(status, &text)
+}
+
+fn decode_cache_probe(
+    status: u16,
+    text: &str,
+) -> Result<CacheCredentialTestResult, ApiClientError> {
+    if status == 400 {
+        let envelope = serde_json::from_str::<serde_json::Value>(text).ok();
+        let parsed = serde_json::from_str::<CacheCredentialTestResult>(text).ok();
+        if let (Some(envelope), Some(mut result)) = (envelope, parsed) {
+            let null_fields = [
+                "status_code",
+                "cache_access_valid",
+                "token_auth_valid",
+                "write_auth_valid",
+                "details",
+            ];
+            if result.probe_kind == Some(CacheProbeKind::AtticCacheConfig)
+                && result.stage == Some(CacheProbeStage::TargetPolicy)
+                && !result.ok
+                && envelope.get("ok") == Some(&serde_json::Value::Bool(false))
+                && matches!(
+                    result.error,
+                    Some(
+                        CacheProbePolicyError::InvalidCacheTestConfig
+                            | CacheProbePolicyError::LegacyQueryCredentialsUnsupported
+                    )
+                )
+                && null_fields
+                    .iter()
+                    .all(|field| envelope.get(*field) == Some(&serde_json::Value::Null))
+            {
+                result.message.clear();
+                result.tested_url = None;
+                result.diagnostic_code = result
+                    .diagnostic_code
+                    .filter(|code| cache_diagnostic_message(code).is_some());
+                return Ok(result);
+            }
+        }
+    } else if (200..300).contains(&status) {
+        let mut result: CacheCredentialTestResult = serde_json::from_str(text)
+            .map_err(|_| ApiClientError::Deserialize("Invalid cache probe response".into()))?;
+        if result.probe_kind == Some(CacheProbeKind::AtticCacheConfig) {
+            result.message.clear();
+            result.tested_url = None;
+        } else {
+            // SECURITY: Even HTTP 200 failure prose can contain upstream URLs,
+            // PEM or credentials. Retain only locally mapped guidance.
+            result.message = if result.ok {
+                "Cache connection test completed.".into()
+            } else {
+                result.failure_message().into()
+            };
+            result.tested_url = None;
+        }
+        result.diagnostic_code = result
+            .diagnostic_code
+            .filter(|code| cache_diagnostic_message(code).is_some());
+        return Ok(result);
+    }
+    Err(ApiClientError::Status {
+        code: status,
+        // Cache errors stay opaque. Preserve status for auth/CSRF handling,
+        // but do not retain arbitrary server or upstream prose in this API.
+        body: cache_probe_rejection_message(status, text).into(),
+    })
+}
+
+fn cache_probe_rejection_message(status: u16, text: &str) -> &'static str {
+    // Authorization, CSRF and unsupported statuses cannot supply diagnostics.
+    if status == 400 {
+        #[derive(serde::Deserialize)]
+        struct Diagnostic {
+            diagnostic_code: Option<String>,
+        }
+        if let Ok(value) = serde_json::from_str::<Diagnostic>(text)
+            && let Some(message) = value
+                .diagnostic_code
+                .as_deref()
+                .and_then(cache_diagnostic_message)
+        {
+            return message;
+        }
+    }
+    "Cache probe request rejected"
+}
+
+/// Returns static cache-probe error guidance for UI presentation.
+///
+/// Only exact local diagnostic messages produced by the cache decoder are
+/// accepted. Network exceptions, response bodies, URLs, raw status codes and
+/// decoding details never enter the displayed fallback.
+pub fn cache_probe_error_message(error: &ApiClientError) -> &'static str {
+    if let ApiClientError::Status { code: 400, body } = error {
+        for code in CACHE_DIAGNOSTIC_CODES {
+            if let Some(message) = cache_diagnostic_message(code)
+                && body == message
+            {
+                return message;
+            }
+        }
+    }
+    CACHE_PROBE_FAILURE_MESSAGE
+}
+
+const CACHE_DIAGNOSTIC_CODES: [&str; 17] = [
+    "ca_bundle_framing_invalid",
+    "ca_certificate_invalid",
+    "ca_bundle_content_unsupported",
+    "ca_bundle_trust_ambiguous",
+    "ca_bundle_empty",
+    "ca_bundle_too_large",
+    "client_identity_invalid",
+    "client_certificate_invalid",
+    "client_private_key_invalid",
+    "client_identity_mismatch",
+    "tls_verification_failed",
+    "dns_or_connection_failed",
+    "http_response_failed",
+    "invalid_niks3_metadata",
+    "target_policy_rejected",
+    "probe_timeout",
+    "probe_failed",
+];
+
+/// Discovers public Niks3 endpoints and signing keys without saving changes.
+/// Uses only the selected write TLS transport; tokens and read identities are
+/// excluded from [`Niks3DiscoverRequest`].
+///
+/// # Errors
+/// Returns an error for authorization, target-policy, network, or metadata failures.
+pub async fn discover_niks3(data: &Niks3DiscoverRequest) -> Result<Niks3Discovery, ApiClientError> {
+    let url = format!("{}/caches/niks3/discover", base_url());
+    send_cache_discovery(&url, data).await
+}
+
+/// Discovers a stored Niks3 destination through an unwrapped write-transport patch.
+/// Omitted write identity is resolved by ID on the server. No state is persisted.
+/// The caller must project out tokens and read credentials before calling.
+///
+/// # Errors
+/// Returns an opaque authorization, validation, transport or metadata error.
+pub async fn discover_stored_niks3(
+    id: i32,
+    data: &UpdateCacheDestination,
+) -> Result<Niks3Discovery, ApiClientError> {
+    let url = format!("{}/caches/{id}/niks3/discover", base_url());
+    send_cache_discovery(&url, data).await
+}
+
+async fn send_cache_discovery<B: serde::Serialize>(
+    url: &str,
+    data: &B,
+) -> Result<Niks3Discovery, ApiClientError> {
+    let payload = serde_json::to_string(data)
+        .map_err(|_| ApiClientError::Deserialize("Invalid discovery request".into()))?;
+    let (status, text) = send_request_with_csrf("POST", url, Some(&payload))
+        .await
+        .map_err(|_| ApiClientError::Network(CACHE_PROBE_FAILURE_MESSAGE.into()))?;
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: cache_probe_rejection_message(status, &text).into(),
+        });
+    }
+    serde_json::from_str(&text)
+        .map_err(|_| ApiClientError::Deserialize("Invalid discovery response".into()))
+}
+
+/// Updates a cache destination with replacements and explicit credential clears.
+///
+/// Omitted credentials retain server-side values. Authentication mode changes
+/// remove incompatible credentials atomically. The response redacts secrets.
+///
+/// # Errors
+/// Returns an error for authorization, validation, network, or persistence failures.
 pub async fn update_cache_destination(
     id: i32,
     data: &UpdateCacheDestination,
@@ -3630,6 +3885,210 @@ pub async fn delete_policy_mapping(
         mapping_id
     );
     send_empty_with_csrf("DELETE", &url, None::<&()>).await
+}
+
+#[cfg(test)]
+mod cache_probe_tests {
+    use super::*;
+
+    fn policy() -> serde_json::Value {
+        serde_json::json!({
+            "ok": false, "status_code": null, "message": "fixture-untrusted-message",
+            "tested_url": "https://fixture-untrusted-url", "error": "invalid_cache_test_config",
+            "details": null, "probe_kind": "attic_cache_config", "stage": "target_policy",
+            "cache_access_valid": null, "token_auth_valid": null, "write_auth_valid": null
+        })
+    }
+
+    #[test]
+    fn attic_policy_400_is_a_failed_typed_result_without_prose_or_url() {
+        for code in [
+            "invalid_cache_test_config",
+            "legacy_query_credentials_unsupported",
+        ] {
+            let mut value = policy();
+            value["error"] = code.into();
+            let result = decode_cache_probe(400, &value.to_string()).unwrap();
+            assert!(!result.ok);
+            assert_eq!(result.stage, Some(CacheProbeStage::TargetPolicy));
+            assert!(result.message.is_empty());
+            assert!(result.tested_url.is_none());
+            assert!(result.cache_access_valid.is_none());
+            assert!(result.token_auth_valid.is_none());
+            assert!(result.write_auth_valid.is_none());
+        }
+    }
+
+    #[test]
+    fn api_authentication_and_csrf_statuses_never_become_probe_outcomes() {
+        for status in [400, 401, 403, 404, 500] {
+            let value = if status == 400 {
+                serde_json::json!({"error":"forbidden","message":"Admin role required"})
+            } else {
+                policy()
+            };
+            match decode_cache_probe(status, &value.to_string()) {
+                Err(ApiClientError::Status { code, body }) => {
+                    assert_eq!(code, status);
+                    assert_eq!(body, "Cache probe request rejected");
+                }
+                _ => panic!("API authorization or unsupported errors must remain errors"),
+            }
+        }
+    }
+
+    #[test]
+    fn policy_decoder_requires_exact_allowlisted_failed_evidence() {
+        for (field, invalid) in [
+            ("probe_kind", serde_json::json!("unsupported")),
+            ("stage", serde_json::json!("authentication")),
+            ("stage", serde_json::json!("unsupported")),
+            ("error", serde_json::json!("unsupported")),
+            ("ok", serde_json::json!(true)),
+            ("status_code", serde_json::json!(200)),
+            ("cache_access_valid", serde_json::json!(true)),
+            ("token_auth_valid", serde_json::json!(true)),
+            ("write_auth_valid", serde_json::json!(true)),
+            ("details", serde_json::json!({"upstream":"untrusted"})),
+        ] {
+            let mut value = policy();
+            value[field] = invalid;
+            assert!(
+                matches!(
+                    decode_cache_probe(400, &value.to_string()),
+                    Err(ApiClientError::Status { code: 400, .. })
+                ),
+                "reject {field}"
+            );
+        }
+        let mut value = policy();
+        value.as_object_mut().unwrap().remove("details");
+        assert!(decode_cache_probe(400, &value.to_string()).is_err());
+        assert!(decode_cache_probe(400, "not JSON").is_err());
+    }
+
+    #[test]
+    fn successful_responses_drop_untrusted_prose_and_preserve_legacy_evidence() {
+        let mut value = policy();
+        value["ok"] = true.into();
+        value["stage"] = "complete".into();
+        value["status_code"] = 200.into();
+        value["cache_access_valid"] = true.into();
+        value.as_object_mut().unwrap().remove("error");
+        let result = decode_cache_probe(200, &value.to_string()).unwrap();
+        assert!(result.message.is_empty());
+        assert!(result.tested_url.is_none());
+        let legacy = decode_cache_probe(200, r#"{"success":true,"message":"legacy"}"#).unwrap();
+        assert!(legacy.ok);
+        assert_eq!(legacy.message, "Cache connection test completed.");
+        assert!(legacy.probe_kind.is_none());
+    }
+
+    #[test]
+    fn exact_diagnostics_map_locally_for_http_errors_and_failed_200_results() {
+        let mut messages = std::collections::HashSet::new();
+        for code in CACHE_DIAGNOSTIC_CODES {
+            let message = cache_diagnostic_message(code).unwrap();
+            assert!(
+                messages.insert(message),
+                "diagnostics must remain distinguishable"
+            );
+            let payload = serde_json::json!({
+                "ok": false, "diagnostic_code": code,
+                "message": "-----BEGIN PRIVATE KEY----- fixture-sensitive-body",
+                "tested_url": "https://fixture-user:fixture-password@invalid.example/?token=fixture-token",
+                "probe_scope": "write", "write_api_reachable": false,
+                "write_authn_valid": null, "write_authorization_valid": null,
+                "write_auth_valid": null
+            }).to_string();
+            let error = decode_cache_probe(400, &payload).unwrap_err();
+            assert_eq!(cache_probe_error_message(&error), message);
+            assert!(!format!("{error:?}").contains("fixture-"));
+            let result = decode_cache_probe(200, &payload).unwrap();
+            assert!(!result.ok);
+            assert_eq!(result.message, message);
+            assert_eq!(result.failure_message(), message);
+            assert!(result.tested_url.is_none());
+            assert_eq!(result.probe_scope, Some(Niks3ProbeScope::Write));
+            assert_eq!(result.write_api_reachable, Some(false));
+            assert!(result.write_authn_valid.is_none());
+            assert!(result.write_authorization_valid.is_none());
+            assert!(result.write_auth_valid.is_none());
+        }
+    }
+
+    #[test]
+    fn unknown_missing_decorated_and_malformed_diagnostics_fail_closed() {
+        for diagnostic in [
+            serde_json::Value::Null,
+            serde_json::json!("unknown-fixture-secret"),
+            serde_json::json!(" tls_verification_failed"),
+            serde_json::json!("tls_verification_failed\nfixture-secret"),
+            serde_json::json!("TLS_VERIFICATION_FAILED"),
+            serde_json::json!({"code":"tls_verification_failed"}),
+            serde_json::json!(["tls_verification_failed"]),
+        ] {
+            let payload = serde_json::json!({"ok":false, "message":"fixture-secret", "diagnostic_code":diagnostic}).to_string();
+            let error = decode_cache_probe(400, &payload).unwrap_err();
+            assert_eq!(
+                cache_probe_error_message(&error),
+                CACHE_PROBE_FAILURE_MESSAGE
+            );
+            if let Ok(result) = decode_cache_probe(200, &payload) {
+                assert_eq!(result.message, CACHE_PROBE_FAILURE_MESSAGE);
+                assert!(result.diagnostic_code.is_none());
+            }
+        }
+        for payload in [
+            "not JSON fixture-secret",
+            r#"{"message":"fixture-secret"}"#,
+            r#"{"diagnostic_code":17}"#,
+        ] {
+            let error = decode_cache_probe(400, payload).unwrap_err();
+            assert_eq!(
+                cache_probe_error_message(&error),
+                CACHE_PROBE_FAILURE_MESSAGE
+            );
+        }
+        let result = decode_cache_probe(200, r#"{"ok":false,"message":"fixture-secret"}"#).unwrap();
+        assert_eq!(result.message, CACHE_PROBE_FAILURE_MESSAGE);
+        assert!(result.diagnostic_code.is_none());
+    }
+
+    #[test]
+    fn spoofed_codes_on_unsupported_statuses_never_supply_guidance() {
+        for status in [401, 403, 404, 409, 422, 500, 502, 503] {
+            let payload =
+                r#"{"diagnostic_code":"tls_verification_failed","message":"fixture-secret"}"#;
+            let error = decode_cache_probe(status, payload).unwrap_err();
+            assert_eq!(
+                cache_probe_error_message(&error),
+                CACHE_PROBE_FAILURE_MESSAGE
+            );
+        }
+        for error in [
+            ApiClientError::Network("https://fixture-secret.invalid".into()),
+            ApiClientError::Deserialize("fixture-secret".into()),
+            ApiClientError::Status {
+                code: 400,
+                body: "tls_verification_failed fixture-secret".into(),
+            },
+        ] {
+            assert_eq!(
+                cache_probe_error_message(&error),
+                CACHE_PROBE_FAILURE_MESSAGE
+            );
+        }
+    }
+
+    #[test]
+    fn successful_niks3_diagnostics_do_not_promote_untested_authorization() {
+        let result = decode_cache_probe(200, r#"{"ok":true,"message":"fixture-secret","diagnostic_code":"tls_verification_failed","probe_scope":"write","write_api_reachable":true,"write_authn_valid":null,"write_authorization_valid":null}"#).unwrap();
+        assert_eq!(result.message, "Cache connection test completed.");
+        assert_eq!(result.write_api_reachable, Some(true));
+        assert!(result.write_authn_valid.is_none());
+        assert!(result.write_authorization_valid.is_none());
+    }
 }
 
 #[cfg(test)]

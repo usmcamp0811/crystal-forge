@@ -480,14 +480,17 @@ name = "cf-config"
 version = "0.3.0"
 dependencies = [
  "anyhow",
+ "base64 0.22.1",
  "cf-protocol",
  "chrono",
  "config",
  "ed25519-dalek",
  "humantime-serde",
  "num_cpus",
+ "openssl",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tracing",
  "url",
@@ -508,6 +511,7 @@ dependencies = [
 name = "cf-protocol"
 version = "0.3.0"
 dependencies = [
+ "base64 0.21.7",
  "chrono",
  "serde",
  "serde_json",

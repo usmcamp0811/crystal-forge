@@ -52,6 +52,8 @@ impl CompositeAuthorization {
 pub struct TargetDeliveryAuthorization {
     /// Contains the claimed target, or `None` when no target was delivered.
     pub target: Option<String>,
+    /// Contains the exact publication read source only after delivery commits.
+    pub publication_read: Option<crate::queries::cache_publication_reads::PublicationRead>,
     /// Contains the composite-policy decision made while claiming the target.
     pub authorization: CompositeAuthorization,
 }
@@ -448,6 +450,40 @@ pub(crate) async fn fail_eval_passed_attempt_in_tx(
     detail: &str,
     failure_class: &str,
 ) -> Result<()> {
+    fail_eval_passed_attempt_except_completed_in_tx(
+        tx,
+        attempt_id,
+        detail,
+        failure_class,
+        &[],
+        None,
+        None,
+    )
+    .await
+}
+
+/// Fails unfinished evaluation evidence while retaining verified completions.
+///
+/// The caller MUST validate every retained configuration against durable
+/// evidence from this exact attempt while holding the snapshot writer, commit,
+/// and attempt locks. Retention preserves both Pass and policy Fail outcomes;
+/// resource exhaustion in another configuration cannot change their meaning.
+/// Existing Fail and Error outcomes for unfinished configurations remain intact.
+/// A supplied unfinished list restricts errors to selected configurations;
+/// `None` retains the whole-attempt scope used by ordinary failure handling.
+///
+/// # Errors
+///
+/// Returns an error when evidence locks, updates, or aggregate writes fail.
+pub(crate) async fn fail_eval_passed_attempt_except_completed_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    attempt_id: Uuid,
+    detail: &str,
+    failure_class: &str,
+    completed_configurations: &[String],
+    failure_code: Option<&str>,
+    unfinished_configurations: Option<&[String]>,
+) -> Result<()> {
     lock_eval_passed_assessments_for_attempt_in_tx(tx, attempt_id).await?;
     sqlx::query(
         r#"
@@ -455,16 +491,22 @@ pub(crate) async fn fail_eval_passed_attempt_in_tx(
         SET outcome = 'error', detail = $2,
             evidence = evidence || jsonb_build_object(
                 'terminal_outcome', 'error', 'failure_class', $3
-            ),
+            ) || CASE WHEN $5::text IS NULL THEN '{}'::jsonb
+                      ELSE jsonb_build_object('failure_code', $5::text) END,
             evaluated_at = NOW()
         WHERE evaluation_attempt_id = $1
           AND outcome IN ('pass', 'not_checked')
           AND superseded_at IS NULL
+          AND NOT (configuration_name = ANY($4::text[]))
+          AND ($6::text[] IS NULL OR configuration_name = ANY($6::text[]))
         "#,
     )
     .bind(attempt_id)
     .bind(detail)
     .bind(failure_class)
+    .bind(completed_configurations)
+    .bind(failure_code)
+    .bind(unfinished_configurations)
     .execute(&mut **tx)
     .await?;
     let assessment_ids: Vec<Uuid> = sqlx::query_scalar(
@@ -475,7 +517,8 @@ pub(crate) async fn fail_eval_passed_attempt_in_tx(
                 'evaluation_attempt_id', $1,
                 'terminal_outcome', 'error',
                 'failure_class', $3
-            ),
+            ) || CASE WHEN $5::text IS NULL THEN '{}'::jsonb
+                      ELSE jsonb_build_object('failure_code', $5::text) END,
             evaluated_at = NOW()
         FROM composite_policy_assessments assessment
         JOIN derivations derivation ON derivation.id = assessment.derivation_id
@@ -484,12 +527,15 @@ pub(crate) async fn fail_eval_passed_attempt_in_tx(
           AND attempt.id = $1
           AND rule_result.kind = 'eval_passed'
           AND rule_result.outcome IN ('pass', 'not_checked')
+          AND NOT (derivation.derivation_name = ANY($4::text[]))
+          AND ($6::text[] IS NULL OR derivation.derivation_name = ANY($6::text[]))
           AND EXISTS (
               SELECT 1
               FROM composite_eval_attempt_rule_results attempt_result
               WHERE attempt_result.evaluation_attempt_id = attempt.id
                 AND attempt_result.policy_version_id = assessment.policy_version_id
                 AND attempt_result.rule_id = rule_result.rule_id
+                AND NOT (attempt_result.configuration_name = ANY($4::text[]))
           )
         RETURNING assessment.id
         "#,
@@ -497,10 +543,13 @@ pub(crate) async fn fail_eval_passed_attempt_in_tx(
     .bind(attempt_id)
     .bind(detail)
     .bind(failure_class)
+    .bind(completed_configurations)
+    .bind(failure_code)
+    .bind(unfinished_configurations)
     .fetch_all(&mut **tx)
     .await?;
-    // INVARIANT: A later infrastructure failure revokes a per-system Pass.
-    // Recompute in this transaction so deployment cannot consume stale Pass.
+    // INVARIANT: Only unfinished targets lose provisional Pass. Completed
+    // evidence and affected aggregates remain atomic with terminalization.
     recompute_aggregates(tx, &assessment_ids).await?;
     Ok(())
 }
@@ -1983,6 +2032,27 @@ async fn authorize_target_at(
     now: DateTime<Utc>,
     action: AuthorizationAction<'_>,
 ) -> Result<TargetDeliveryAuthorization> {
+    authorize_target_with_read_at(
+        pool,
+        system_id,
+        target,
+        now,
+        action,
+        false,
+        cf_protocol::agent::AgentCapabilities::default(),
+    )
+    .await
+}
+
+async fn authorize_target_with_read_at(
+    pool: &PgPool,
+    system_id: Uuid,
+    target: &str,
+    now: DateTime<Utc>,
+    action: AuthorizationAction<'_>,
+    confidential: bool,
+    capabilities: cf_protocol::agent::AgentCapabilities,
+) -> Result<TargetDeliveryAuthorization> {
     let mut constrained_derivation_id = match &action {
         AuthorizationAction::SetDesired {
             expected_derivation_id,
@@ -2008,18 +2078,20 @@ async fn authorize_target_at(
     .bind(system_id)
     .execute(&mut *tx)
     .await?;
-    let current_desired = sqlx::query_scalar::<_, Option<String>>(
-        "SELECT desired_target FROM systems WHERE id = $1 FOR UPDATE",
-    )
-    .bind(system_id)
-    .fetch_optional(&mut *tx)
-    .await?
-    .context("Composite authorization system was not found")?;
+    let (current_desired, current_environment) =
+        sqlx::query_as::<_, (Option<String>, Option<Uuid>)>(
+            "SELECT desired_target, environment_id FROM systems WHERE id = $1 FOR UPDATE",
+        )
+        .bind(system_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .context("Composite authorization system was not found")?;
     if let AuthorizationAction::ClaimDelivery { expected_target } = action {
         if current_desired.as_deref() != Some(expected_target) {
             tx.commit().await?;
             return Ok(TargetDeliveryAuthorization {
                 target: None,
+                publication_read: None,
                 authorization: CompositeAuthorization {
                     outcome: EnforcementOutcome::NotChecked,
                     assessments: Vec::new(),
@@ -2138,6 +2210,7 @@ async fn authorize_target_at(
                 tx.commit().await?;
                 return Ok(TargetDeliveryAuthorization {
                     target: None,
+                    publication_read: None,
                     authorization: CompositeAuthorization {
                         outcome: EnforcementOutcome::Fail,
                         assessments: Vec::new(),
@@ -2165,6 +2238,7 @@ async fn authorize_target_at(
                 tx.commit().await?;
                 return Ok(TargetDeliveryAuthorization {
                     target: None,
+                    publication_read: None,
                     authorization: CompositeAuthorization {
                         outcome: EnforcementOutcome::Fail,
                         assessments: Vec::new(),
@@ -2192,6 +2266,7 @@ async fn authorize_target_at(
                 tx.commit().await?;
                 return Ok(TargetDeliveryAuthorization {
                     target: None,
+                    publication_read: None,
                     authorization: CompositeAuthorization {
                         outcome: EnforcementOutcome::Fail,
                         assessments: Vec::new(),
@@ -2396,6 +2471,32 @@ async fn authorize_target_at(
             outcome_str(outcome)
         ),
     };
+    // SECURITY: Historical authorization remains valid independently of current
+    // readability. Delivery alone requires exact publication evidence, before
+    // either the upgrade bridge or pending delivered_at can change.
+    let publication_read =
+        if authorization.allowed() && matches!(action, AuthorizationAction::ClaimDelivery { .. }) {
+            let read = crate::queries::cache_publication_reads::resolve_publication_read_tx(
+                &mut tx,
+                exact_target.0,
+                &exact_target.1,
+                current_environment,
+                confidential,
+                capabilities,
+            )
+            .await?;
+            if read.is_none() {
+                tx.commit().await?;
+                return Ok(TargetDeliveryAuthorization {
+                    target: None,
+                    publication_read: None,
+                    authorization,
+                });
+            }
+            read
+        } else {
+            None
+        };
     let mut delivered_target = None;
     if authorization.allowed() {
         match action {
@@ -2474,6 +2575,7 @@ async fn authorize_target_at(
                 {
                     tx.commit().await?;
                     return Ok(TargetDeliveryAuthorization {
+                        publication_read: None,
                         target: None,
                         authorization,
                     });
@@ -2582,6 +2684,11 @@ async fn authorize_target_at(
     }
     tx.commit().await?;
     Ok(TargetDeliveryAuthorization {
+        publication_read: if delivered_target.is_some() {
+            publication_read
+        } else {
+            None
+        },
         target: delivered_target,
         authorization,
     })
@@ -2709,6 +2816,9 @@ pub async fn authorize_and_set_system_target_with_artifact(
 /// Authorizes and claims delivery of the expected desired target atomically.
 ///
 /// A changed desired target or non-passing decision returns no claimed target.
+/// Requires a currently readable exact publication. This legacy entry point
+/// assumes public transport and no Niks3 capability, so it cannot bypass the
+/// publication gate used by authenticated agent delivery.
 ///
 /// # Errors
 ///
@@ -2725,6 +2835,51 @@ pub async fn authorize_and_claim_desired_target(
         expected_target,
         Utc::now(),
         AuthorizationAction::ClaimDelivery { expected_target },
+    )
+    .await
+}
+
+/// Claims an exact desired target and its current evidenced read source.
+///
+/// Capability must come from the verified request body. Confidentiality must
+/// come from verified transport. Both outputs become usable only after the
+/// SERIALIZABLE authorization and pending-claim transaction commits. Conflicts
+/// produce no instructions; callers retry with a new transaction.
+///
+/// # Errors
+/// Returns policy, evidence, database, or serialization errors without consuming
+/// pending work. No network operation occurs while locks are held.
+///
+/// # Examples
+/// ```no_run
+/// # async fn deliver(pool: &sqlx::PgPool, system: uuid::Uuid) -> anyhow::Result<()> {
+/// use crystal_forge::services::composite_enforcement::
+///     authorize_and_claim_desired_target_with_read;
+/// let delivery = authorize_and_claim_desired_target_with_read(
+///     pool, system, "/nix/store/authorized-output", false,
+///     cf_protocol::agent::AgentCapabilities::default(),
+/// ).await?;
+/// if let (Some(target), Some(source)) = (delivery.target, delivery.publication_read) {
+///     let read_settings = source.into_runtime_cache();
+///     // Send the committed target and read settings together.
+/// }
+/// # Ok(()) }
+/// ```
+pub async fn authorize_and_claim_desired_target_with_read(
+    pool: &PgPool,
+    system_id: Uuid,
+    expected_target: &str,
+    confidential: bool,
+    capabilities: cf_protocol::agent::AgentCapabilities,
+) -> Result<TargetDeliveryAuthorization> {
+    authorize_target_with_read_at(
+        pool,
+        system_id,
+        expected_target,
+        Utc::now(),
+        AuthorizationAction::ClaimDelivery { expected_target },
+        confidential,
+        capabilities,
     )
     .await
 }

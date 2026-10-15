@@ -2256,6 +2256,7 @@ mod tests {
             .expect("builder registration should be restored");
 
         let future_schema = cf_protocol::builder::BuilderCapabilities {
+            niks3_cache: false,
             cve_scanning: true,
             cve_scan_schema_version: 2,
             cve_scanner: Some(CveScannerIdentity {

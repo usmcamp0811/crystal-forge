@@ -36,6 +36,18 @@ async function exactTexts(locator) {
   return normalizedTexts(await locator.allTextContents());
 }
 
+async function assertTargetLabel(page) {
+  // ConfigExplorer.jsx uses title-case DOM text and uppercase presentation.
+  // Keep the TARGET concept assertion scoped to the actual identity label.
+  const label = page.locator(".cfgx .cfgx-target").getByText("Target", { exact: true });
+  await label.waitFor({ state: "visible" });
+  const renderedText = await label.evaluate((node) => {
+    const text = node.textContent.trim();
+    return getComputedStyle(node).textTransform === "uppercase" ? text.toUpperCase() : text;
+  });
+  assertEqual(renderedText, "TARGET", "Config Explorer rendered target label");
+}
+
 function assertEqual(actual, expected, label) {
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     throw new Error(`${label}: expected ${JSON.stringify(expected)}, got ${JSON.stringify(actual)}`);
@@ -48,7 +60,7 @@ async function validateSemanticContract(page, capture, contract, theme) {
 
   if (contract.kind === "system-config") {
     const explorer = page.locator(".cfgx");
-    await explorer.getByText("TARGET", { exact: true }).waitFor({ state: "visible" });
+    await assertTargetLabel(page);
     await explorer.getByText("observational", { exact: true }).waitFor({ state: "visible" });
     assertEqual(await exactTexts(explorer.locator(".cfgx-tools .seg button")), ["Browse", "Configured", "Search"], `${capture.name} Explorer modes`);
     assertEqual(await exactTexts(explorer.locator(".cfgx-side-tabs button")), ["Option", "Sources"], `${capture.name} inspector panes`);
@@ -146,7 +158,7 @@ async function driveSystemConfig(page, state) {
   await page.locator('[data-screen-label="SystemDetail"]').waitFor({ state: "visible" });
   await page.getByRole("tab", { name: "Config", selected: true }).waitFor({ state: "visible" });
   const explorer = page.locator(".cfgx");
-  await explorer.getByText("TARGET", { exact: true }).waitFor({ state: "visible" });
+  await assertTargetLabel(page);
   if (state.mode) {
     await explorer.getByRole("button", { name: state.mode, exact: true }).click();
   }
@@ -192,7 +204,8 @@ async function driveState(page, state) {
   else throw new Error(`Unsupported design state: ${state.kind}`);
 
   for (const text of state.expectedText || []) {
-    await page.getByText(text, { exact: true }).first().waitFor({ state: "visible" });
+    if (state.kind === "system-config" && text === "TARGET") await assertTargetLabel(page);
+    else await page.getByText(text, { exact: true }).first().waitFor({ state: "visible" });
   }
 }
 
@@ -201,7 +214,7 @@ async function validateState(page, state) {
     await expectScreen(page, state.screen, state.heading);
   } else if (state.kind === "system-config") {
     await page.getByRole("tab", { name: "Config", selected: true }).waitFor({ state: "visible" });
-    await page.locator(".cfgx").getByText("TARGET", { exact: true }).waitFor({ state: "visible" });
+    await assertTargetLabel(page);
   } else if (state.kind === "flake-pane") {
     await page.waitForFunction(
       ({ flake, pane }) => {
@@ -212,7 +225,8 @@ async function validateState(page, state) {
     );
   }
   for (const text of state.expectedText || []) {
-    await page.getByText(text, { exact: true }).first().waitFor({ state: "visible" });
+    if (state.kind === "system-config" && text === "TARGET") await assertTargetLabel(page);
+    else await page.getByText(text, { exact: true }).first().waitFor({ state: "visible" });
   }
 }
 
@@ -289,9 +303,11 @@ async function main() {
         await context.addInitScript(({ systems, showCoach }) => {
           window.__fx = (key) => key === "systems" ? systems : undefined;
           if (showCoach) {
-            localStorage.removeItem("cf.coach.v1");
+            localStorage.removeItem("cf.coach.ui.v2");
           } else {
-            localStorage.setItem("cf.coach.v1", JSON.stringify({ done: [], panel: "dismissed", calloutHidden: {} }));
+            // SetupCoach merges this presentation record with its v2 defaults.
+            // Dismissed removes the overlay; minimized still renders a pill.
+            localStorage.setItem("cf.coach.ui.v2", JSON.stringify({ panel: "dismissed", track: "setup", calloutHidden: {} }));
           }
         }, { systems: designFixture.systems, showCoach: capture.name === "setup-coach" });
         const page = await context.newPage();
@@ -303,7 +319,12 @@ async function main() {
           await page.goto(`file://${htmlPath}`, { waitUntil: "load", timeout: 90_000 });
           await page.locator(".app .content").waitFor({ state: "visible", timeout: 90_000 });
           if (capture.group === "primary") {
-            await runActions(page, capture.designActions);
+            // Both current sidebars call the Compliance route "Bundles".
+            // Preserve the page/evidence markers and all subsequent actions.
+            const actions = ["compliance", "compliance-evidence"].includes(capture.name)
+              ? capture.designActions.map(action => action.selector === ".nav-item" && action.text === "Compliance" ? { ...action, text: "Bundles" } : action)
+              : capture.designActions;
+            await runActions(page, actions);
           } else {
             await driveState(page, capture.designState);
           }

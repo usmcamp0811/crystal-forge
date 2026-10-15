@@ -104,31 +104,58 @@ This is the most reliable and fastest startup path because:
 - The builder checks the evaluated `.drvPath` against the server's expected value before building — giving a build-plan integrity check (`derivation_mismatch` hard failure).
 - No Git credentials or direct Git remote access needed on the builder.
 
-Cache publication note: remote builders may perform the post-build cache push themselves. If the selected cache destination requires credentials, the server sends credential-bearing cache push config in the signed next-job response only when `server.trust_forwarded_builder_https` is enabled and the request is verified as HTTPS by the trusted reverse proxy.
+Cache publication note: remote builders may perform the post-build cache push
+themselves. Credential-bearing cache push config requires all three conditions:
 
-For NixOS deployments behind an HTTPS-terminating reverse proxy, enable the
-forwarded-HTTPS trust option on the server:
+- `server.trust_forwarded_builder_https = true`.
+- The actual direct socket peer matches `server.trusted_proxy_cidrs`.
+- Exactly one `X-Forwarded-Proto` header has the case-sensitive value `https`.
+
+For a controlled HTTPS proxy on the same host that connects to the backend
+through loopback, use:
 
 ```nix
-services.crystal-forge.server.trust_forwarded_builder_https = true;
+services.crystal-forge.server = {
+  trust_forwarded_builder_https = true;
+  trustedProxyCidrs = [ "127.0.0.1/32" "::1/128" ];
+};
 ```
 
-Only enable this when the proxy is under your control and strips/re-sets
-forwarding headers before proxying to Crystal Forge. The backend service should
-not be directly reachable by builders or untrusted clients over plaintext HTTP.
-The proxy must forward one of the HTTPS indicators recognized by the server,
-such as `X-Forwarded-Proto: https`, `Forwarded: proto=https`, or
-`X-Forwarded-SSL: on`. If this option is left at its secure default of `false`,
-credential-bearing builder cache-push jobs are **not dispatched**. The server
-sends no credentials. Instead, `get_next_job` fails the just-claimed job as a
-transient `[dispatch:cache_config]` failure through `mark_job_failed_with_retry`.
-The automatic retry policy then retries the job with backoff. The server answers
-the builder with HTTP `404 Not Found`, which the builder treats as "no work this
-cycle" (`fail_claimed_job_at_dispatch` in
-`packages/default/crates/cf-server/src/handlers/api/builders.rs`). The server
-never sends credentials over a connection that it has not verified as HTTPS.
-The forwarded-HTTPS indicators that the server recognizes also include
-`X-URL-Scheme: https` (`forwarded_header_asserts_https`).
+This loopback example is conditional on the backend's observed direct peer.
+A remote or container proxy needs its actual backend-facing IP as a narrow
+`/32` or `/128`. Do not allow a broad container subnet or `0.0.0.0/0` or `::/0`.
+The peer is not the public client, builder, `X-Forwarded-For` address, or proxy's
+public endpoint. IPv4 and IPv6 CIDRs match only peers of the same address family.
+
+Traefik or another controlled HTTPS-terminating proxy must strip client-supplied
+forwarding assertions and overwrite `X-Forwarded-Proto` with one `https` value
+for the HTTPS route. Protect the proxy-to-backend connection and block untrusted
+direct access. `Forwarded: proto=https`, `X-Forwarded-SSL: on`, and
+`X-URL-Scheme: https` do not satisfy the cache credential gate. Missing peer
+information, an empty or unmatched allowlist, duplicate values, `HTTPS`, `http`,
+whitespace in the value, and comma chains such as `https,http` fail closed.
+Header names are case-insensitive; the accepted value bytes are exactly `https`.
+
+This boundary applies to existing Attic tokens and S3 access/session keys as
+well as Niks3 write tokens and mTLS private keys. The same gate protects agent
+private mTLS cache reads. Public cache config without credentials does not
+require this gate. The default flag value `false` withholds private material.
+Signed requests establish identity, not confidentiality. The server listener
+uses HTTP; a client HTTPS URL alone cannot establish trusted transport. Terminate
+HTTPS at the controlled proxy and verify the actual backend peer.
+
+The current builder credential gate runs after claim. A failed gate records a
+transient `[dispatch:cache_config]` failure through `mark_job_failed_with_retry`
+and returns HTTP 404 (no work this poll), without sending credentials. A job can
+therefore fail at zero seconds before any build starts. Retry policy controls
+backoff and exhaustion; repairing proxy settings does not automatically revive
+an exhausted job. Verify the loaded settings and requeue failed work after
+repair. See the
+[operator upgrade procedure](../caches/niks3-cache.md#proxy-upgrade-repair-and-loaded-configuration)
+for the NixOS nonempty-CIDR assertion, TOML configuration, actual service-loaded
+configuration inspection, and credential-safe denial diagnostics. Do not log
+tokens, private keys, signed URLs, raw headers, or request bodies to diagnose
+this boundary.
 
 Verified-source evaluator contract version 1 enables Nix
 import-from-derivation (IFD) to preserve the authoritative evaluation behavior.

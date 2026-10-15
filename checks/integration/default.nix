@@ -16,6 +16,9 @@ let
   CF_TEST_SERVER_PORT = 8000;
   GRAFANA_PORT = 3000;
   cacheEncryptionKeyPath = "/run/crystal-forge-test-cache-encryption-key";
+  # Keep domain diagnostics without SQLx statement/bind DEBUG output. The
+  # module's log_level accepts bare levels; compound filters belong to fixtures.
+  fixtureLogFilter = "info,crystal_forge=debug,server=debug,sqlx=warn";
 
   # Components this check actually runs.
   #
@@ -75,6 +78,13 @@ in pkgs.testers.runNixOSTest {
         "d /var/lib/crystal-forge/.cache/nix 0755 crystal-forge crystal-forge -"
         "Z /var/lib/crystal-forge/.cache/nix - crystal-forge crystal-forge -"
       ];
+
+      systemd.services.crystal-forge-server.environment.RUST_LOG =
+        lib.mkForce fixtureLogFilter;
+      systemd.services.crystal-forge-config-inspector.environment.RUST_LOG =
+        lib.mkForce fixtureLogFilter;
+      systemd.services.crystal-forge-hardening.environment.RUST_LOG =
+        lib.mkForce fixtureLogFilter;
 
       # The test key is generated only inside the running VM. Its value never
       # enters the Nix store, test output, or a systemd Environment setting.
@@ -140,7 +150,7 @@ in pkgs.testers.runNixOSTest {
       services.crystal-forge = {
         enable = true;
         local-database = true;
-        log_level = "debug";
+        log_level = "info";
 
         client = {
           enable = true;
@@ -237,6 +247,45 @@ in pkgs.testers.runNixOSTest {
   testScript = ''
     import os
     import pytest
+    import time
+
+    class TestProgress:
+        # Report real pytest events only. Parameter values and failure bodies
+        # are excluded because fixtures can contain credential-bearing values.
+        def __init__(self, phase):
+            self.phase = phase
+            self.started = {}
+            self.outcomes = {}
+            self.counts = {}
+
+        def pytest_runtest_logstart(self, nodeid, location):
+            self.started[nodeid] = time.monotonic()
+            print(f"TEST START phase={self.phase} node={nodeid.split('[', 1)[0]}", flush=True)
+
+        def pytest_runtest_logreport(self, report):
+            self.outcomes.setdefault(report.nodeid, {})[report.when] = report.outcome
+            print(f"TEST REPORT phase={self.phase} node={report.nodeid.split('[', 1)[0]} stage={report.when} outcome={report.outcome} elapsed={report.duration:.3f}s", flush=True)
+
+        def pytest_runtest_logfinish(self, nodeid, location):
+            reports = self.outcomes.pop(nodeid, {})
+            outcome = "failed" if "failed" in reports.values() else (
+                "skipped" if "skipped" in reports.values() else "passed")
+            self.counts[outcome] = self.counts.get(outcome, 0) + 1
+            elapsed = time.monotonic() - self.started.pop(nodeid)
+            print(f"TEST END phase={self.phase} node={nodeid.split('[', 1)[0]} outcome={outcome} elapsed={elapsed:.3f}s", flush=True)
+
+    def run_phase(name, args):
+        started = time.monotonic()
+        progress = TestProgress(name)
+        outcome = "exception"
+        print(f"PHASE START name={name}", flush=True)
+        try:
+            status = pytest.main(args, plugins=[progress])
+            outcome = f"exit={int(status)}"
+            return status
+        finally:
+            elapsed = time.monotonic() - started
+            print(f"PHASE END name={name} outcome={outcome} elapsed={elapsed:.3f}s completed={progress.counts}", flush=True)
 
     os.environ["NIXOS_TEST_DRIVER"] = "1"
     start_all()
@@ -270,7 +319,7 @@ in pkgs.testers.runNixOSTest {
     )
     server.succeed(
       "systemctl show crystal-forge-server.service -p Environment --value"
-      " | grep -F 'PATH=${pkgs.nix-eval-jobs.nix}/bin:'"
+      " | grep -Fq 'PATH=${pkgs.nix-eval-jobs.nix}/bin:'"
     )
     server.wait_for_unit("crystal-forge-hardening.service")
     server.succeed(
@@ -328,7 +377,7 @@ in pkgs.testers.runNixOSTest {
     )
     server.succeed(
       "systemctl show crystal-forge-config-inspector.service -p Environment --value"
-      " | grep -F 'PATH=${pkgs.nix-eval-jobs.nix}/bin:'"
+      " | grep -Fq 'PATH=${pkgs.nix-eval-jobs.nix}/bin:'"
     )
     server.succeed(
       "systemctl show crystal-forge-config-inspector.service -p ExecStart --value"
@@ -346,6 +395,15 @@ in pkgs.testers.runNixOSTest {
       "! systemctl show crystal-forge-config-inspector.service -p Environment --value"
       " | grep -q CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY"
     )
+
+    # Inspect only the expected filter in each running process, never print
+    # Environment or other /proc values (the workers load a private key).
+    for unit in ["crystal-forge-server", "crystal-forge-config-inspector", "crystal-forge-hardening"]:
+        server.succeed(
+            f"pid=$(systemctl show {unit}.service -p MainPID --value); "
+            "grep -zqx 'RUST_LOG=${fixtureLogFilter}' /proc/$pid/environ"
+        )
+        print(f"RUNTIME FILTER unit={unit} matches_expected=true", flush=True)
 
     # Wait for Grafana (needed for -m dashboard tests).
     print("Waiting for Grafana to start...")
@@ -434,7 +492,7 @@ in pkgs.testers.runNixOSTest {
 
     # --- Phase 1: Database migration tests ---
     print("=== Phase 1: Database tests ===")
-    exit_code = pytest.main([
+    exit_code = run_phase("database", [
       "-vvvv", "--tb=short", "-x", "-s",
       "-m", "database", "--pyargs", "cf_test",
     ])
@@ -453,7 +511,7 @@ in pkgs.testers.runNixOSTest {
       "systemctl status crystal-forge-grafana-db-init || true"
     )
 
-    exit_code = pytest.main([
+    exit_code = run_phase("dashboard", [
       "-vvvv", "--tb=short", "-x", "-s",
       "-m", "dashboard", "--pyargs", "cf_test",
     ])
@@ -462,7 +520,7 @@ in pkgs.testers.runNixOSTest {
 
     # --- Phase 3: Server tests ---
     print("=== Phase 3: Server tests ===")
-    exit_code = pytest.main([
+    exit_code = run_phase("server", [
       "-vvvv", "--tb=short", "-x", "-s",
       "-m", "server", "--pyargs", "cf_test",
     ])

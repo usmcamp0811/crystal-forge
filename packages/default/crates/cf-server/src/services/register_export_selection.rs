@@ -305,34 +305,36 @@ async fn select_inner(
     let mut poams = Vec::new();
     let mut poam_ids = HashSet::new();
     let mut offset = 0;
-    while record_type != RegisterRecordType::Acceptances {
-        let page = poam::list_register_tx(
-            &mut tx,
-            &actor,
-            &PoamListQuery {
-                limit: Some(PAGE_SIZE),
-                offset: Some(offset),
-                ..poam_query.clone()
-            },
-            clock,
-        )
-        .await
-        .map_err(poam_error)?;
-        for row in page.items {
-            if !poam_ids.insert(row.summary.id) {
-                return Err(RegisterExportSelectionError::DuplicateIdentity);
+    if record_type != RegisterRecordType::Acceptances {
+        loop {
+            let page = poam::list_register_tx(
+                &mut tx,
+                &actor,
+                &PoamListQuery {
+                    limit: Some(PAGE_SIZE),
+                    offset: Some(offset),
+                    ..poam_query.clone()
+                },
+                clock,
+            )
+            .await
+            .map_err(poam_error)?;
+            for row in page.items {
+                if !poam_ids.insert(row.summary.id) {
+                    return Err(RegisterExportSelectionError::DuplicateIdentity);
+                }
+                poams.push(row);
             }
-            poams.push(row);
+            if poams.len() > MAX_AUTHORIZED_EXPORT_ROWS {
+                return Err(RegisterExportSelectionError::TooManyRows);
+            }
+            if !page.has_more {
+                break;
+            }
+            offset = page
+                .next_offset
+                .ok_or(RegisterExportSelectionError::Internal)?;
         }
-        if poams.len() > MAX_AUTHORIZED_EXPORT_ROWS {
-            return Err(RegisterExportSelectionError::TooManyRows);
-        }
-        if !page.has_more {
-            break;
-        }
-        offset = page
-            .next_offset
-            .ok_or(RegisterExportSelectionError::Internal)?;
     }
     // The context matcher may stop after finding enough matches to fill a page.
     // CONCURRENCY: Probe past its candidate boundary in the same snapshot so
@@ -516,38 +518,40 @@ async fn select_inner(
     let mut acceptances = Vec::new();
     let mut acceptance_ids = HashSet::<(u8, Uuid)>::new();
     let mut offset = 0;
-    while record_type != RegisterRecordType::Plans {
-        let page = acceptance_register::list_tx(
-            &mut tx,
-            actor.user_id,
-            &AcceptanceListQuery {
-                source: acceptance_query.source,
-                status: acceptance_query.status.clone(),
-                environment_id: acceptance_query.environment_id,
-                limit: Some(PAGE_SIZE),
-                offset: Some(offset),
-            },
-        )
-        .await
-        .map_err(acceptance_error)?;
-        for row in page.items {
-            let source = match row.source {
-                AcceptanceSource::PolicyWaiver => 0,
-                AcceptanceSource::CveHost => 1,
-                AcceptanceSource::CveEnvironment => 2,
-            };
-            if !acceptance_ids.insert((source, row.source_id)) {
-                return Err(RegisterExportSelectionError::DuplicateIdentity);
+    if record_type != RegisterRecordType::Plans {
+        loop {
+            let page = acceptance_register::list_tx(
+                &mut tx,
+                actor.user_id,
+                &AcceptanceListQuery {
+                    source: acceptance_query.source,
+                    status: acceptance_query.status.clone(),
+                    environment_id: acceptance_query.environment_id,
+                    limit: Some(PAGE_SIZE),
+                    offset: Some(offset),
+                },
+            )
+            .await
+            .map_err(acceptance_error)?;
+            for row in page.items {
+                let source = match row.source {
+                    AcceptanceSource::PolicyWaiver => 0,
+                    AcceptanceSource::CveHost => 1,
+                    AcceptanceSource::CveEnvironment => 2,
+                };
+                if !acceptance_ids.insert((source, row.source_id)) {
+                    return Err(RegisterExportSelectionError::DuplicateIdentity);
+                }
+                acceptances.push(row);
             }
-            acceptances.push(row);
+            if poams.len() + acceptances.len() > MAX_AUTHORIZED_EXPORT_ROWS {
+                return Err(RegisterExportSelectionError::TooManyRows);
+            }
+            if !page.has_more {
+                break;
+            }
+            offset += PAGE_SIZE;
         }
-        if poams.len() + acceptances.len() > MAX_AUTHORIZED_EXPORT_ROWS {
-            return Err(RegisterExportSelectionError::TooManyRows);
-        }
-        if !page.has_more {
-            break;
-        }
-        offset += PAGE_SIZE;
     }
     let ids: Vec<_> = acceptances.iter().map(|row| row.source_id).collect();
     let acceptance_context = sqlx::query_as::<_, AcceptanceExportContext>(

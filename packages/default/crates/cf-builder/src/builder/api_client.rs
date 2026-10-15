@@ -118,6 +118,150 @@ fn append_logs_outcome_for_status(
 }
 
 const DEFAULT_API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+// The lightweight server metadata probe has a 60-second budget. The extra
+// 30 seconds cover persistence and transit, not another build or upload.
+const BUILD_COMPLETION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
+const COMPLETION_REPORT_BUDGET: std::time::Duration = std::time::Duration::from_secs(600);
+const COMPLETION_REPORT_MAX_ATTEMPTS: u32 = 5;
+// Separate signed requests by at least two seconds to avoid timestamp replay.
+const COMPLETION_REPORT_MIN_BACKOFF: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Identifies a publication failure without retaining server text or URLs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PublicationVerificationCode {
+    /// The cache has not exposed the output path yet.
+    CachePathMissing,
+    /// The configured read credentials were rejected.
+    CacheAuthenticationFailed,
+    /// The cache rate-limited its metadata probe.
+    CacheRateLimited,
+    /// Network access to the cache failed.
+    CacheNetworkError,
+    /// The metadata probe exceeded its deadline.
+    CacheProbeTimeout,
+    /// The server cannot use the configured cache read settings.
+    CacheReadConfigurationInvalid,
+    /// The probe failed without a known transient classification.
+    CacheProbeFailed,
+}
+
+impl PublicationVerificationCode {
+    fn permits_retry(self) -> bool {
+        matches!(
+            self,
+            Self::CachePathMissing
+                | Self::CacheRateLimited
+                | Self::CacheNetworkError
+                | Self::CacheProbeTimeout
+        )
+    }
+}
+
+/// Records server acknowledgement independently from cache publication.
+///
+/// Pending publication is a durable successful build. Callers must not report
+/// a build failure, rebuild, or upload again because publication is pending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BuildCompletionReceipt {
+    /// The server confirmed publication of the reported output.
+    PublicationConfirmed,
+    /// The server accepted completion without required publication.
+    PublicationNotRequired,
+    /// An older server accepted completion without publication status evidence.
+    LegacyAccepted,
+    /// The server completed the build but publication remains unconfirmed.
+    PublicationPending {
+        /// The last acknowledged, allowlisted verification failure.
+        code: PublicationVerificationCode,
+        /// The number of completion requests attempted in this call.
+        attempts: u32,
+    },
+}
+
+impl BuildCompletionReceipt {
+    /// Returns whether an immediate post-build scanner claim is useful.
+    ///
+    /// Cache-backed builds require explicit publication confirmation. Pending
+    /// and legacy acknowledgements leave scan selection to the server.
+    pub fn permits_post_build_scan(self, publication_requested: bool) -> bool {
+        !publication_requested || matches!(self, Self::PublicationConfirmed)
+    }
+}
+
+#[derive(Deserialize)]
+struct CompletionResponse {
+    build_status: Option<String>,
+    status: Option<String>,
+    publication_status: Option<String>,
+    verification_code: Option<PublicationVerificationCode>,
+    retryable: Option<bool>,
+    retry_after_secs: Option<u64>,
+}
+
+enum CompletionAttempt {
+    Accepted(BuildCompletionReceipt),
+    Pending(PublicationVerificationCode, Option<std::time::Duration>),
+    Transient,
+}
+
+fn parse_completion_response(
+    status: reqwest::StatusCode,
+    body: &[u8],
+) -> Result<CompletionAttempt> {
+    if status == reqwest::StatusCode::REQUEST_TIMEOUT
+        || status == reqwest::StatusCode::TOO_MANY_REQUESTS
+        || status.is_server_error()
+    {
+        return Ok(CompletionAttempt::Transient);
+    }
+    if status == reqwest::StatusCode::OK && body.is_empty() {
+        return Ok(CompletionAttempt::Accepted(
+            BuildCompletionReceipt::LegacyAccepted,
+        ));
+    }
+    if !matches!(
+        status,
+        reqwest::StatusCode::OK | reqwest::StatusCode::ACCEPTED
+    ) {
+        anyhow::bail!("Completion report rejected (HTTP {})", status.as_u16());
+    }
+    // SECURITY: Never retain untrusted response bodies, parser errors, URLs, or
+    // credentials in errors or tracing. Only typed allowlisted codes escape.
+    let response: CompletionResponse = serde_json::from_slice(body)
+        .map_err(|_| anyhow::anyhow!("Invalid completion acknowledgement"))?;
+    let build_status = response
+        .build_status
+        .as_deref()
+        .or(response.status.as_deref());
+    if build_status != Some("success") {
+        anyhow::bail!("Invalid completion build status");
+    }
+    match (status, response.publication_status.as_deref()) {
+        (reqwest::StatusCode::OK, Some("confirmed")) => Ok(CompletionAttempt::Accepted(
+            BuildCompletionReceipt::PublicationConfirmed,
+        )),
+        (reqwest::StatusCode::OK, Some("none")) => Ok(CompletionAttempt::Accepted(
+            BuildCompletionReceipt::PublicationNotRequired,
+        )),
+        (reqwest::StatusCode::OK, None) => Ok(CompletionAttempt::Accepted(
+            BuildCompletionReceipt::LegacyAccepted,
+        )),
+        (reqwest::StatusCode::ACCEPTED, Some("pending")) => {
+            let code = response
+                .verification_code
+                .ok_or_else(|| anyhow::anyhow!("Missing publication verification code"))?;
+            let retry = response.retryable == Some(true) && code.permits_retry();
+            Ok(CompletionAttempt::Pending(
+                code,
+                retry.then(|| {
+                    std::time::Duration::from_secs(response.retry_after_secs.unwrap_or(2))
+                }),
+            ))
+        }
+        _ => anyhow::bail!("Invalid completion publication status"),
+    }
+}
 const DERIVATION_ARCHIVE_DOWNLOAD_TIMEOUT: std::time::Duration =
     std::time::Duration::from_secs(30 * 60);
 
@@ -192,6 +336,9 @@ pub struct BuilderApiClient {
     supported_execution_strategies: Vec<RemoteBuildExecutionStrategy>,
     supported_evaluator_contract_versions: Vec<u32>,
     evaluator: Option<EvaluatorFingerprint>,
+    // The process advertisement is reused in every signed poll, independently
+    // of CVE lease selection and optional scanner availability.
+    capabilities: BuilderCapabilities,
 }
 
 impl BuilderApiClient {
@@ -250,7 +397,7 @@ impl BuilderApiClient {
                     config.resolve_retry_interval,
                     config.resolve_retry_max_interval,
                     config.resolve_max_attempts,
-                    capabilities,
+                    capabilities.clone(),
                 )
                 .await?;
                 builder_id
@@ -264,7 +411,7 @@ impl BuilderApiClient {
                     config.resolve_retry_interval,
                     config.resolve_retry_max_interval,
                     config.resolve_max_attempts,
-                    capabilities,
+                    capabilities.clone(),
                 )
                 .await?
             }
@@ -282,6 +429,7 @@ impl BuilderApiClient {
                 .map(|fingerprint| vec![fingerprint.contract_version])
                 .unwrap_or_default(),
             evaluator,
+            capabilities,
         })
     }
 
@@ -712,8 +860,15 @@ impl BuilderApiClient {
 
     /// Get the next available job from the server, including the embedded
     /// derivation build payload so the builder needs no database access.
+    /// Sends the process capabilities in the signed POST. An unsupported cache
+    /// conflict returns no work; the server leaves the candidate unclaimed.
+    ///
+    /// # Errors
+    /// Returns an error for serialization or transport failures, invalid job
+    /// responses, superseded sessions, or other server rejection statuses.
     pub async fn get_next_job(&self) -> Result<Option<NextJobResponse>> {
         let body = serde_json::to_vec(&NextJobRequest {
+            capabilities: self.capabilities.clone(),
             protocol_version: 2,
             supported_execution_strategies: self.supported_execution_strategies.clone(),
             supported_evaluator_contract_versions: self
@@ -793,6 +948,9 @@ impl BuilderApiClient {
             match serde_json::from_slice::<NextJobConflictResponse>(&body)
                 .map(|response| response.reason)
             {
+                Ok(NextJobConflictReason::UnsupportedCacheType) => warn!(
+                    "Selected cache requires a newer builder capability (409 Conflict); no job was claimed"
+                ),
                 Ok(NextJobConflictReason::UnsupportedExecutionStrategy) => warn!(
                     supported_strategies = ?self.supported_execution_strategies,
                     "Server's configured remote execution strategy is not supported by this builder (409 Conflict)"
@@ -1385,57 +1543,163 @@ impl BuilderApiClient {
         Ok(())
     }
 
-    /// Complete a job successfully
+    /// Reports successful build completion and the published destination identity.
+    ///
+    /// Callers must supply a cache reference and destination ID only after a
+    /// successful push. Without a push, the destination ID is omitted even if
+    /// the caller supplied one.
+    /// Retries reporting only, with fresh request signatures and the same
+    /// output, destination, and session. At most five requests run within ten
+    /// minutes; each attempt has a 90-second deadline. Retry delays are at least
+    /// two seconds. Pending publication retries require both a transient code
+    /// and the server's retryable flag. A pending acknowledgement remains a
+    /// successful durable build even if later reporting fails or times out.
+    /// Dropping this future stops reporting; restart recovery is server-owned.
+    /// Cache references remain opaque authorized payloads. Reporting preserves
+    /// their exact bytes and never includes them in errors or tracing.
+    ///
+    /// # Errors
+    ///
+    /// Returns a credential-safe error for serialization, invalid responses,
+    /// rejection, or exhausted transient reporting without a durable receipt.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// # use cf_builder::builder::api_client::BuilderApiClient;
+    /// # async fn report(client: &BuilderApiClient, job_id: uuid::Uuid)
+    /// #     -> anyhow::Result<()> {
+    /// // The build and push already succeeded. Report their exact identity.
+    /// let receipt = client.complete_job(
+    ///     job_id, "/nix/store/output", Some("https://cache.example"), Some(470),
+    /// ).await?;
+    /// if receipt.permits_post_build_scan(true) {
+    ///     // The server confirmed publication; a scan claim can now be useful.
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
     pub async fn complete_job(
         &self,
         job_id: uuid::Uuid,
         output_path: &str,
         cache_reference: Option<&str>,
-    ) -> Result<()> {
-        #[derive(Serialize)]
-        struct CompleteRequest {
-            output_path: String,
-            cache_pushed: bool,
-            cache_reference: Option<String>,
-        }
-
+        cache_destination_id: Option<i32>,
+    ) -> Result<BuildCompletionReceipt> {
         let path = format!(
             "/api/v1/builders/{}/jobs/{}/complete",
             self.builder_id, job_id
         );
-        let url = format!("{}{}", self.server_url, path);
-        let request = CompleteRequest {
-            output_path: output_path.to_string(),
+        let request = cf_protocol::builder::CompleteJobRequest {
+            output_path: Some(output_path.to_string()),
             cache_pushed: cache_reference.is_some(),
             cache_reference: cache_reference.map(ToString::to_string),
+            cache_destination_id: cache_reference.and(cache_destination_id),
         };
-        let body = serde_json::to_vec(&request)?;
-        let (builder_id, signature, timestamp) = self.sign_request("POST", &path, &body);
+        let body = serde_json::to_vec(&request)
+            .map_err(|_| anyhow::anyhow!("Cannot serialize completion report"))?;
+        self.report_completion_request(
+            &path,
+            body,
+            COMPLETION_REPORT_BUDGET,
+            BUILD_COMPLETION_TIMEOUT,
+        )
+        .await
+    }
 
-        let response = self
-            .client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("X-Builder-ID", builder_id)
-            .header("X-Builder-Session-ID", self.builder_session_id.to_string())
-            .header("X-Signature", signature)
-            .header("X-Timestamp", timestamp)
-            .body(body)
-            .send()
-            .await
-            .context("Failed to complete job")?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response
-                .text()
-                .await
-                .unwrap_or_else(|_| "unknown error".to_string());
-            anyhow::bail!("Complete job failed with status {}: {}", status, error_text);
+    // Keep reporting separate from work execution. Explicit deadlines also let
+    // tests exercise stalled responses without a real 90-second probe.
+    async fn report_completion_request(
+        &self,
+        path: &str,
+        body: Vec<u8>,
+        budget: std::time::Duration,
+        attempt_timeout: std::time::Duration,
+    ) -> Result<BuildCompletionReceipt> {
+        let url = format!("{}{}", self.server_url, path);
+        let deadline = tokio::time::Instant::now() + budget;
+        let mut pending_code = None;
+        let mut attempts = 0;
+        let mut last_error = anyhow::anyhow!("Completion reporting budget exhausted");
+        while attempts < COMPLETION_REPORT_MAX_ATTEMPTS && tokio::time::Instant::now() < deadline {
+            attempts += 1;
+            let attempt_deadline = deadline.min(tokio::time::Instant::now() + attempt_timeout);
+            let result = tokio::time::timeout_at(attempt_deadline, async {
+                let (builder_id, signature, timestamp) = self.sign_request("POST", path, &body);
+                let response = match self
+                    .client
+                    .post(&url)
+                    .timeout(attempt_timeout)
+                    .header("Content-Type", "application/json")
+                    .header("X-Builder-ID", builder_id)
+                    .header("X-Builder-Session-ID", self.builder_session_id.to_string())
+                    .header("X-Signature", signature)
+                    .header("X-Timestamp", timestamp)
+                    .body(body.clone())
+                    .send()
+                    .await
+                {
+                    Ok(response) => response,
+                    Err(_) => return Ok(CompletionAttempt::Transient),
+                };
+                let status = response.status();
+                if !matches!(
+                    status,
+                    reqwest::StatusCode::OK | reqwest::StatusCode::ACCEPTED
+                ) {
+                    return parse_completion_response(status, &[]);
+                }
+                let mut response = response;
+                let mut bytes = Vec::new();
+                loop {
+                    let chunk = match response.chunk().await {
+                        Ok(Some(chunk)) => chunk,
+                        Ok(None) => break,
+                        Err(_) => return Ok(CompletionAttempt::Transient),
+                    };
+                    // Completion metadata is small. Bound hostile response buffering.
+                    if bytes.len().saturating_add(chunk.len()) > 16 * 1024 {
+                        anyhow::bail!("Completion acknowledgement exceeds size limit");
+                    }
+                    bytes.extend_from_slice(&chunk);
+                }
+                parse_completion_response(status, &bytes)
+            })
+            .await;
+            let delay = match result {
+                Ok(Ok(CompletionAttempt::Accepted(receipt))) => return Ok(receipt),
+                Ok(Ok(CompletionAttempt::Pending(code, delay))) => {
+                    pending_code = Some(code);
+                    match delay {
+                        Some(delay) => delay.max(COMPLETION_REPORT_MIN_BACKOFF),
+                        None => break,
+                    }
+                }
+                Ok(Ok(CompletionAttempt::Transient)) | Err(_) => {
+                    last_error =
+                        anyhow::anyhow!("Completion report transport or server unavailable");
+                    COMPLETION_REPORT_MIN_BACKOFF.saturating_mul(1 << (attempts - 1))
+                }
+                Ok(Err(error)) => {
+                    last_error = error;
+                    break;
+                }
+            };
+            if attempts == COMPLETION_REPORT_MAX_ATTEMPTS {
+                break;
+            }
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if delay >= remaining {
+                break;
+            }
+            tokio::time::sleep(delay).await;
         }
-
-        info!("Job {} completed successfully", job_id);
-        Ok(())
+        // INVARIANT: A durable success acknowledgement cannot be downgraded by
+        // a later transport error, rejection, or reporting deadline.
+        match pending_code {
+            Some(code) => Ok(BuildCompletionReceipt::PublicationPending { code, attempts }),
+            None => Err(last_error),
+        }
     }
 
     /// Fail a job with an error message
@@ -1778,6 +2042,571 @@ mod tests {
     use std::io::Write;
     use tempfile::NamedTempFile;
 
+    #[tokio::test]
+    async fn niks3_next_job_poll_signs_runtime_capability_without_cve_support() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = key.verifying_key();
+        let client = BuilderApiClient {
+            client: Client::builder().no_proxy().build().unwrap(),
+            server_url: format!("http://{address}"),
+            builder_id: Uuid::new_v4(),
+            builder_session_id: Uuid::new_v4(),
+            signing_key: key,
+            supported_execution_strategies: vec![RemoteBuildExecutionStrategy::ServerDerivation],
+            supported_evaluator_contract_versions: Vec::new(),
+            evaluator: None,
+            capabilities: BuilderCapabilities {
+                niks3_cache: true,
+                ..Default::default()
+            },
+        };
+        let path = format!("/api/v1/builders/{}/next-job", client.builder_id);
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0; 1024];
+                let size = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(size, 0);
+                bytes.extend_from_slice(&chunk[..size]);
+                if let Some(end) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    break end + 4;
+                }
+            };
+            let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+            assert!(headers.starts_with(&format!("POST {path} HTTP/1.1")));
+            let header = |name: &str| {
+                headers
+                    .lines()
+                    .find_map(|line| {
+                        let (key, value) = line.split_once(':')?;
+                        key.eq_ignore_ascii_case(name)
+                            .then(|| value.trim().to_owned())
+                    })
+                    .unwrap()
+            };
+            let length = header("content-length").parse::<usize>().unwrap();
+            while bytes.len() < header_end + length {
+                let mut chunk = [0; 1024];
+                let size = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(size, 0);
+                bytes.extend_from_slice(&chunk[..size]);
+            }
+            let body = &bytes[header_end..header_end + length];
+            let request: NextJobRequest = serde_json::from_slice(body).unwrap();
+            assert!(request.capabilities.niks3_cache);
+            assert!(!request.capabilities.supports_current_cve_schema());
+            let payload = BuilderApiClient::canonical_signature_payload(
+                "POST",
+                &path,
+                &header("x-timestamp"),
+                body,
+            );
+            let signature = ed25519_dalek::Signature::from_slice(
+                &base64::engine::general_purpose::STANDARD
+                    .decode(header("x-signature"))
+                    .unwrap(),
+            )
+            .unwrap();
+            verifying_key.verify_strict(&payload, &signature).unwrap();
+            stream
+                .write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+        assert!(client.get_next_job().await.unwrap().is_none());
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn niks3_completion_signs_destination_id_and_omits_it_without_push() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = signing_key.verifying_key();
+        let job_id = Uuid::new_v4();
+        let client = BuilderApiClient {
+            capabilities: Default::default(),
+            client: Client::builder().no_proxy().build().unwrap(),
+            server_url: format!("http://{address}"),
+            builder_id: Uuid::new_v4(),
+            builder_session_id: Uuid::new_v4(),
+            signing_key,
+            supported_execution_strategies: Vec::new(),
+            supported_evaluator_contract_versions: Vec::new(),
+            evaluator: None,
+        };
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{job_id}/complete",
+            client.builder_id
+        );
+        let server = tokio::spawn(async move {
+            for expected_id in [Some(470), None] {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0; 1024];
+                    let size = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(size, 0);
+                    bytes.extend_from_slice(&chunk[..size]);
+                    if let Some(end) = bytes.windows(4).position(|window| window == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                assert!(headers.starts_with(&format!("POST {path} HTTP/1.1")));
+                let header = |name: &str| {
+                    headers
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case(name).then_some(value.trim())
+                        })
+                        .unwrap()
+                };
+                let length: usize = header("content-length").parse().unwrap();
+                while bytes.len() < header_end + length {
+                    let mut chunk = [0; 1024];
+                    let size = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(size, 0);
+                    bytes.extend_from_slice(&chunk[..size]);
+                }
+                let body = &bytes[header_end..header_end + length];
+                let completion: cf_protocol::builder::CompleteJobRequest =
+                    serde_json::from_slice(body).unwrap();
+                assert_eq!(completion.cache_destination_id, expected_id);
+                assert_eq!(completion.cache_pushed, expected_id.is_some());
+                assert_eq!(completion.cache_reference.is_some(), expected_id.is_some());
+                let signature = base64::engine::general_purpose::STANDARD
+                    .decode(header("x-signature"))
+                    .unwrap();
+                verifying_key
+                    .verify_strict(
+                        &BuilderApiClient::canonical_signature_payload(
+                            "POST",
+                            &path,
+                            header("x-timestamp"),
+                            body,
+                        ),
+                        &Signature::from_slice(&signature).unwrap(),
+                    )
+                    .unwrap();
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+                    .await
+                    .unwrap();
+            }
+        });
+        client
+            .complete_job(
+                job_id,
+                "/nix/store/output",
+                Some("https://read.example.org"),
+                Some(470),
+            )
+            .await
+            .unwrap();
+        client
+            .complete_job(job_id, "/nix/store/output", None, Some(470))
+            .await
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    fn pending_response(code: &str, retryable: bool, delay: u64) -> String {
+        serde_json::json!({
+            "build_status": "success", "publication_status": "pending",
+            "verification_code": code, "retryable": retryable,
+            "retry_after_secs": delay,
+            "error": "untrusted-secret-https://signed.example/?token=private"
+        })
+        .to_string()
+    }
+
+    // A real TCP mock verifies every request's canonical signature and exact
+    // retained identity. It accepts completion reports only, never work APIs.
+    async fn completion_sequence(responses: Vec<(u16, String)>) -> Result<BuildCompletionReceipt> {
+        completion_sequence_with_timeouts(responses, None).await
+    }
+
+    async fn completion_sequence_with_timeouts(
+        responses: Vec<(u16, String)>,
+        limits: Option<(std::time::Duration, std::time::Duration)>,
+    ) -> Result<BuildCompletionReceipt> {
+        completion_sequence_for_reference(responses, limits, "https://read.example.org", Some(470))
+            .await
+    }
+
+    async fn completion_sequence_for_reference(
+        responses: Vec<(u16, String)>,
+        limits: Option<(std::time::Duration, std::time::Duration)>,
+        reference: &'static str,
+        destination_id: Option<i32>,
+    ) -> Result<BuildCompletionReceipt> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let signing_key = SigningKey::generate(&mut rand::thread_rng());
+        let verifying_key = signing_key.verifying_key();
+        let client = BuilderApiClient {
+            client: Client::builder().no_proxy().build().unwrap(),
+            server_url: format!("http://{}", listener.local_addr().unwrap()),
+            builder_id: Uuid::new_v4(),
+            builder_session_id: Uuid::new_v4(),
+            signing_key,
+            supported_execution_strategies: Vec::new(),
+            supported_evaluator_contract_versions: Vec::new(),
+            evaluator: None,
+            capabilities: Default::default(),
+        };
+        let job_id = Uuid::new_v4();
+        let path = format!(
+            "/api/v1/builders/{}/jobs/{job_id}/complete",
+            client.builder_id
+        );
+        let request_path = path.clone();
+        let session = client.builder_session_id.to_string();
+        let builder_id = client.builder_id.to_string();
+        let server = tokio::spawn(async move {
+            let mut previous_body = None;
+            let mut previous_timestamp = None;
+            let mut previous_signature = None;
+            for (status, response) in responses {
+                let (mut stream, _) =
+                    tokio::time::timeout(std::time::Duration::from_secs(40), listener.accept())
+                        .await
+                        .unwrap()
+                        .unwrap();
+                let mut bytes = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0; 1024];
+                    let length = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(length, 0);
+                    bytes.extend_from_slice(&chunk[..length]);
+                    if let Some(end) = bytes.windows(4).position(|value| value == b"\r\n\r\n") {
+                        break end + 4;
+                    }
+                };
+                let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                assert!(headers.starts_with(&format!("POST {path} HTTP/1.1")));
+                let header = |name: &str| {
+                    headers
+                        .lines()
+                        .find_map(|line| {
+                            let (key, value) = line.split_once(':')?;
+                            key.eq_ignore_ascii_case(name)
+                                .then(|| value.trim().to_owned())
+                        })
+                        .unwrap()
+                };
+                let length: usize = header("content-length").parse().unwrap();
+                while bytes.len() < header_end + length {
+                    let mut chunk = [0; 1024];
+                    let length = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(length, 0);
+                    bytes.extend_from_slice(&chunk[..length]);
+                }
+                let body = bytes[header_end..header_end + length].to_vec();
+                let request: cf_protocol::builder::CompleteJobRequest =
+                    serde_json::from_slice(&body).unwrap();
+                assert_eq!(
+                    request.output_path.as_deref(),
+                    Some("/nix/store/authoritative-output")
+                );
+                assert_eq!(request.cache_destination_id, destination_id);
+                // Do not format even synthetic credential-bearing payloads on
+                // assertion failure. Only the equality result is diagnostic.
+                assert!(request.cache_reference.as_deref() == Some(reference));
+                assert!(request.cache_pushed);
+                assert_eq!(header("x-builder-session-id"), session);
+                assert_eq!(header("x-builder-id"), builder_id);
+                let timestamp = header("x-timestamp");
+                let signature = header("x-signature");
+                verifying_key
+                    .verify_strict(
+                        &BuilderApiClient::canonical_signature_payload(
+                            "POST", &path, &timestamp, &body,
+                        ),
+                        &Signature::from_slice(
+                            &base64::engine::general_purpose::STANDARD
+                                .decode(&signature)
+                                .unwrap(),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap();
+                if let Some(previous) = previous_body {
+                    assert!(body == previous);
+                    assert_ne!(Some(&timestamp), previous_timestamp.as_ref());
+                    assert_ne!(Some(&signature), previous_signature.as_ref());
+                    let earlier =
+                        chrono::DateTime::parse_from_rfc3339(previous_timestamp.as_ref().unwrap())
+                            .unwrap();
+                    let current = chrono::DateTime::parse_from_rfc3339(&timestamp).unwrap();
+                    assert!((current - earlier).num_milliseconds() >= 2000);
+                }
+                previous_body = Some(body);
+                previous_timestamp = Some(timestamp);
+                previous_signature = Some(signature);
+                // Status one stalls the response body until the caller drops
+                // its request; zero closes without any acknowledgement.
+                if status == 1 {
+                    stream
+                        .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 1\r\n\r\n")
+                        .await
+                        .unwrap();
+                    assert_eq!(stream.read(&mut [0; 1]).await.unwrap(), 0);
+                } else if status != 0 {
+                    stream.write_all(format!(
+                        "HTTP/1.1 {status} Mock\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response}", response.len()
+                    ).as_bytes()).await.unwrap();
+                }
+            }
+            assert!(
+                tokio::time::timeout(std::time::Duration::from_millis(50), listener.accept())
+                    .await
+                    .is_err()
+            );
+        });
+        let result = match limits {
+            None => {
+                client
+                    .complete_job(
+                        job_id,
+                        "/nix/store/authoritative-output",
+                        Some(reference),
+                        destination_id,
+                    )
+                    .await
+            }
+            Some((budget, attempt_timeout)) => {
+                let body = serde_json::to_vec(&cf_protocol::builder::CompleteJobRequest {
+                    output_path: Some("/nix/store/authoritative-output".into()),
+                    cache_pushed: true,
+                    cache_reference: Some(reference.into()),
+                    cache_destination_id: destination_id,
+                })
+                .unwrap();
+                client
+                    .report_completion_request(&request_path, body, budget, attempt_timeout)
+                    .await
+            }
+        };
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn completion_pending_retries_fresh_signatures_then_confirms() {
+        let receipt = completion_sequence(vec![
+            (202, pending_response("cache_path_missing", true, 0)),
+            (
+                200,
+                r#"{"build_status":"success","publication_status":"confirmed"}"#.into(),
+            ),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(receipt, BuildCompletionReceipt::PublicationConfirmed);
+        assert!(receipt.permits_post_build_scan(true));
+    }
+
+    #[tokio::test]
+    async fn completion_pending_exhaustion_is_durable_success_after_five_requests() {
+        let receipt = completion_sequence(
+            (0..5)
+                .map(|_| (202, pending_response("cache_network_error", true, 0)))
+                .collect(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            receipt,
+            BuildCompletionReceipt::PublicationPending {
+                code: PublicationVerificationCode::CacheNetworkError,
+                attempts: 5,
+            }
+        );
+        assert!(!receipt.permits_post_build_scan(true));
+        assert!(receipt.permits_post_build_scan(false));
+    }
+
+    #[tokio::test]
+    async fn completion_permanent_codes_and_retry_false_do_not_retry() {
+        for (code, retryable) in [
+            ("cache_authentication_failed", true),
+            ("cache_read_configuration_invalid", true),
+            ("cache_probe_failed", true),
+            ("cache_rate_limited", false),
+        ] {
+            let receipt = completion_sequence(vec![(202, pending_response(code, retryable, 0))])
+                .await
+                .unwrap();
+            assert!(matches!(
+                receipt,
+                BuildCompletionReceipt::PublicationPending { attempts: 1, .. }
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_retry_after_beyond_budget_returns_pending_without_waiting() {
+        assert!(matches!(
+            completion_sequence(vec![(
+                202,
+                pending_response("cache_rate_limited", true, u64::MAX)
+            )])
+            .await
+            .unwrap(),
+            BuildCompletionReceipt::PublicationPending { attempts: 1, .. }
+        ));
+    }
+
+    #[tokio::test]
+    async fn completion_transport_retry_preserves_acknowledged_pending_on_rejection() {
+        let receipt = completion_sequence(vec![
+            (0, String::new()),
+            (202, pending_response("cache_probe_timeout", true, 0)),
+            (403, "untrusted-secret".into()),
+        ])
+        .await
+        .unwrap();
+        assert_eq!(
+            receipt,
+            BuildCompletionReceipt::PublicationPending {
+                code: PublicationVerificationCode::CacheProbeTimeout,
+                attempts: 3,
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn completion_errors_never_retain_untrusted_response_text() {
+        for (status, body) in [
+            (401, "untrusted-secret".into()),
+            (409, "untrusted-secret".into()),
+            (202, pending_response("untrusted-secret", true, 0)),
+            (200, "untrusted-secret".into()),
+        ] {
+            let error = completion_sequence(vec![(status, body)]).await.unwrap_err();
+            assert!(!format!("{error:#}").contains("untrusted-secret"));
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_attempt_and_outer_deadlines_cover_stalled_response_bodies() {
+        use std::time::Duration;
+        for limits in [
+            (Duration::from_secs(1), Duration::from_millis(20)),
+            (Duration::from_millis(20), Duration::from_secs(1)),
+        ] {
+            let start = tokio::time::Instant::now();
+            assert!(
+                completion_sequence_with_timeouts(vec![(1, String::new())], Some(limits))
+                    .await
+                    .is_err()
+            );
+            assert!(start.elapsed() < Duration::from_secs(1));
+        }
+        let receipt = completion_sequence_with_timeouts(
+            vec![
+                (202, pending_response("cache_path_missing", true, 0)),
+                (1, String::new()),
+            ],
+            Some((Duration::from_secs(3), Duration::from_millis(100))),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            receipt,
+            BuildCompletionReceipt::PublicationPending {
+                code: PublicationVerificationCode::CachePathMissing,
+                attempts: 2,
+            }
+        );
+        assert_eq!(BUILD_COMPLETION_TIMEOUT, Duration::from_secs(90));
+        assert_eq!(COMPLETION_REPORT_BUDGET, Duration::from_secs(600));
+    }
+
+    #[test]
+    fn completion_response_contract_and_retry_allowlist() {
+        assert!(!BuildCompletionReceipt::LegacyAccepted.permits_post_build_scan(true));
+        assert!(BuildCompletionReceipt::LegacyAccepted.permits_post_build_scan(false));
+        assert!(!BuildCompletionReceipt::PublicationNotRequired.permits_post_build_scan(true));
+        for code in [
+            "cache_path_missing",
+            "cache_rate_limited",
+            "cache_network_error",
+            "cache_probe_timeout",
+        ] {
+            assert!(
+                matches!(parse_completion_response(reqwest::StatusCode::ACCEPTED,
+                pending_response(code, true, 4).as_bytes()).unwrap(), CompletionAttempt::Pending(_, Some(delay)) if delay.as_secs() == 4)
+            );
+        }
+        for body in [
+            r#"{}"#,
+            r#"{"build_status":"failed","publication_status":"pending"}"#,
+            r#"{"build_status":"success","publication_status":"confirmed"}"#,
+        ] {
+            assert!(
+                parse_completion_response(reqwest::StatusCode::ACCEPTED, body.as_bytes()).is_err()
+            );
+        }
+        assert!(matches!(
+            parse_completion_response(reqwest::StatusCode::SERVICE_UNAVAILABLE, b"private")
+                .unwrap(),
+            CompletionAttempt::Transient
+        ));
+        assert!(matches!(
+            parse_completion_response(
+                reqwest::StatusCode::OK,
+                br#"{"build_status":"success","publication_status":"none"}"#
+            )
+            .unwrap(),
+            CompletionAttempt::Accepted(BuildCompletionReceipt::PublicationNotRequired)
+        ));
+    }
+
+    #[tokio::test]
+    async fn completion_preserves_opaque_authorized_references_without_diagnostic_exposure() {
+        for reference in [
+            "https://fixture-user:synthetic-sentinel@cache.example",
+            "https://cache.example?X-Amz-Signature=synthetic-sentinel",
+            "remote:cache-name",
+        ] {
+            let error = completion_sequence_for_reference(
+                vec![(403, reference.into())],
+                None,
+                reference,
+                Some(470),
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.to_string(), "Completion report rejected (HTTP 403)");
+            assert!(!format!("{error:#}").contains("synthetic-sentinel"));
+        }
+    }
+
+    #[tokio::test]
+    async fn completion_preserves_legacy_ssh_username_reference_in_signed_body() {
+        let receipt = completion_sequence_for_reference(
+            vec![(
+                200,
+                r#"{"build_status":"success","publication_status":"confirmed"}"#.into(),
+            )],
+            None,
+            "ssh://nix@cache-host",
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(receipt, BuildCompletionReceipt::PublicationConfirmed);
+    }
+
     #[test]
     fn test_load_valid_private_key() {
         let key = SigningKey::generate(&mut rand::thread_rng());
@@ -1813,6 +2642,7 @@ mod tests {
         let builder_id = Uuid::new_v4();
 
         let client = BuilderApiClient {
+            capabilities: Default::default(),
             client: Client::new(),
             server_url: "http://localhost:8080".to_string(),
             builder_id,
@@ -1897,6 +2727,7 @@ mod tests {
         let client = BuilderApiClient {
             client: Client::new(),
             server_url: format!("http://{addr}"),
+            capabilities: Default::default(),
             builder_id: Uuid::new_v4(),
             builder_session_id: Uuid::new_v4(),
             signing_key: SigningKey::generate(&mut rand::thread_rng()),

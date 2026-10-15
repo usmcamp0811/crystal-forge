@@ -42,7 +42,33 @@ If an attacker compromises a builder host and exfiltrates everything on it, they
 - Other builders' private keys
 - The CF server's internal evaluation state
 
-**Conditional cache credential boundary:** Builders do not receive database, deploy-target, OIDC, or Git credentials. When remote builder-side cache push is enabled, builders may receive narrowly scoped cache push credentials in the signed next-job response. Credential-bearing cache config is only sent when the server is explicitly configured to trust HTTPS forwarded by a reverse proxy and the request is marked as HTTPS by that trusted proxy. Operators must ensure the backend service is not directly reachable over plaintext by builders or untrusted clients.
+**Conditional cache credential boundary:** Builders do not receive database,
+deploy-target, OIDC, or Git credentials. Remote builder-side cache push may use
+narrowly scoped Attic tokens, S3 access/session keys, or Niks3 write tokens and
+mTLS private keys from the signed next-job response. Sending private material
+requires `server.trust_forwarded_builder_https = true`, an actual direct socket
+peer matching `server.trusted_proxy_cidrs`, and exactly one `X-Forwarded-Proto`
+header whose value bytes are `https`. Header names are case-insensitive; the
+value is case-sensitive. Missing peers, empty or unmatched CIDRs, duplicate
+headers, whitespace, and comma chains fail closed. `Forwarded: proto=https` and
+`X-Forwarded-SSL: on` do not satisfy this gate.
+
+The controlled HTTPS proxy must strip client forwarding assertions and overwrite
+`X-Forwarded-Proto`. Protect the proxy-to-backend path and block untrusted direct
+access. Allow only the observed backend-facing proxy IP, normally a `/32` or
+`/128`; the public builder/client IP and `X-Forwarded-For` are not the peer used
+by this check. Loopback CIDRs apply only to same-host loopback connections.
+The server has an HTTP listener; an HTTPS client URL or signature alone does
+not establish confidentiality.
+
+The same transport gate protects agent private mTLS read credentials. With the
+flag disabled or another check unmet, private builder material is withheld and
+private agent cache/target delivery remains unclaimed. Public cache config
+without credentials does not require this gate. Builder transport rejection
+occurs after claim, records a transient cache-config dispatch failure, and
+returns HTTP 404 without private material. See the
+[operator upgrade procedure](../caches/niks3-cache.md#proxy-upgrade-repair-and-loaded-configuration)
+for loaded-config verification and failed-job recovery.
 
 ### 9.2 Malicious Job Claim
 

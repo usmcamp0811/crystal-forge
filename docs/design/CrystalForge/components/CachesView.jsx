@@ -115,7 +115,7 @@ function CacheCard({ cache, onEdit }) {
     warning: { cls:"chip-warning", color:"#fbbf24", label:"warning" },
     error:   { cls:"chip-critical",color:"#f87171", label:"error" },
   }[cache.status] || { cls:"chip-unknown", color:"#6b7280", label:cache.status };
-  const typeIcon = { s3:"download", attic:"download", nix:"link" }[cache.type] || "download";
+  const typeIcon = { s3:"download", attic:"download", nix:"link", niks3:"download" }[cache.type] || "download";
   const pct = cache.storage ? (cache.storage.used / cache.storage.total) * 100 : null;
 
   return (
@@ -142,25 +142,25 @@ function CacheCard({ cache, onEdit }) {
           <span className="chip-dot" style={{ background: status.color }}/>
           {status.label}
         </span>
-        <span className="chip chip-unknown mono">{cache.type}</span>
+        <span className="chip chip-unknown mono">{cache.type === "niks3" ? "Niks3" : cache.type}</span>
+        {cache.enabled === false && <span className="chip chip-unknown">disabled</span>}
       </div>
 
       <div style={{ padding:"12px 16px 0" }}>
-        {cache.storage ? (
+        {(() => { const sv = cacheStorageView(cache); return sv.unavailable ? <div style={{ fontSize:11, color:"var(--cf-text-muted)" }}>Storage unavailable</div> : (
           <>
-            <div style={{ fontSize:11, color:"var(--cf-text-secondary)", marginBottom:4 }}>
-              <span className="mono">{cache.storage.used}/{cache.storage.total} {cache.storage.unit}</span> used
+            <div style={{ fontSize:11, color:"var(--cf-text-secondary)", marginBottom:sv.pct == null ? 0 : 4 }}>
+              <span className="mono">{sv.text}</span>{sv.pct == null ? " stored" : " used"}
             </div>
-            <div style={{ height:5, background:"var(--cf-subtle-bg)", borderRadius:99, overflow:"hidden" }}>
-              <div style={{ width:`${pct}%`, height:"100%", background: pct > 85 ? "#fbbf24" : "#34d399" }}/>
-            </div>
-          </>
-        ) : <div style={{ fontSize:11, color:"var(--cf-text-muted)" }}>No storage data.</div>}
+            {sv.pct != null && <div style={{ height:5, background:"var(--cf-subtle-bg)", borderRadius:99, overflow:"hidden" }}>
+              <div style={{ width:`${sv.pct}%`, height:"100%", background: sv.pct > 85 ? "#fbbf24" : "#34d399" }}/>
+            </div>}
+          </>); })()}
       </div>
 
       <div className="env-card-foot">
         <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>
-          {cache.paths ? cache.paths.toLocaleString() : "—"} paths · {cache.lastPush || "never pushed"}
+          {cachePathsText(cache)} {cache.paths == null ? "paths/objects" : "paths"} · {cache.lastPush || "never pushed"}
         </span>
         <div style={{ display:"flex", gap:4, flexWrap:"wrap", justifyContent:"flex-end" }}>
           {cache.environments.length === 0
@@ -180,7 +180,7 @@ function CacheRow({ cache, onEdit }) {
     error:   { cls:"chip-critical",color:"#f87171", label:"error" },
   }[cache.status] || { cls:"chip-unknown", color:"#6b7280", label:cache.status };
 
-  const typeIcon = { s3:"download", attic:"download", nix:"link" }[cache.type] || "download";
+  const typeIcon = { s3:"download", attic:"download", nix:"link", niks3:"download" }[cache.type] || "download";
 
   return (
     <tr style={{ cursor:"pointer" }} onClick={onEdit}>
@@ -192,7 +192,7 @@ function CacheRow({ cache, onEdit }) {
         </div>
         <div className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{cache.url}</div>
       </td>
-      <td><span className="chip chip-unknown mono" style={{ fontSize:10 }}>{cache.type}</span></td>
+      <td><span className="chip chip-unknown mono" style={{ fontSize:10 }}>{cache.type === "niks3" ? "Niks3" : cache.type}</span>{cache.enabled === false && <span className="chip chip-unknown" style={{ fontSize:10, marginLeft:4 }}>disabled</span>}</td>
       <td>
         <span className={`chip ${status.cls}`} title={cache.statusReason || status.label}>
           <span className="chip-dot" style={{ background: status.color }}/>
@@ -201,23 +201,16 @@ function CacheRow({ cache, onEdit }) {
       </td>
       <td>
         <div style={{ minWidth:120, height:30, display:"flex", flexDirection:"column", justifyContent:"center", gap:3 }}>
-          {cache.storage && (
+          {(() => { const sv = cacheStorageView(cache); return sv.unavailable ? <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>Unavailable</span> : (
             <>
-              <div style={{ fontSize:11, color:"var(--cf-text-secondary)" }}>
-                <span className="mono">{cache.storage.used}/{cache.storage.total} {cache.storage.unit}</span>
-              </div>
-              <div style={{ height:4, background:"var(--cf-subtle-bg)", borderRadius:99, overflow:"hidden" }}>
-                <div style={{
-                  width:`${(cache.storage.used / cache.storage.total) * 100}%`,
-                  height:"100%",
-                  background: cache.storage.used / cache.storage.total > 0.85 ? "#fbbf24" : "#34d399"
-                }}/>
-              </div>
-            </>
-          )}
+              <div style={{ fontSize:11, color:"var(--cf-text-secondary)" }}><span className="mono">{sv.text}</span></div>
+              {sv.pct != null && <div style={{ height:4, background:"var(--cf-subtle-bg)", borderRadius:99, overflow:"hidden" }}>
+                <div style={{ width:`${sv.pct}%`, height:"100%", background: sv.pct > 85 ? "#fbbf24" : "#34d399" }}/>
+              </div>}
+            </>); })()}
         </div>
       </td>
-      <td className="mono" style={{ fontSize:12 }}>{cache.paths ? cache.paths.toLocaleString() : "—"}</td>
+      <td className="mono" style={{ fontSize:12 }}>{cachePathsText(cache)}</td>
       <td style={{ fontSize:12, color:"var(--cf-text-secondary)" }}>{cache.lastPush || "—"}</td>
       <td>
         <div style={{ display:"flex", gap:4, flexWrap:"wrap" }}>
@@ -247,7 +240,7 @@ function CachePanel({ cache, onClose, onEdit, onOpenSystem }) {
     warning: { cls:"chip-warning", color:"#fbbf24", label:"warning" },
     error:   { cls:"chip-critical",color:"#f87171", label:"error" },
   }[cache.status] || { cls:"chip-unknown", color:"#6b7280", label:cache.status };
-  const typeIcon = { s3:"download", attic:"download", nix:"link" }[cache.type] || "download";
+  const typeIcon = { s3:"download", attic:"download", nix:"link", niks3:"download" }[cache.type] || "download";
 
   return (
     <>
@@ -273,34 +266,29 @@ function CachePanel({ cache, onClose, onEdit, onOpenSystem }) {
                 <span className="chip-dot" style={{ background: status.color }}/>
                 {status.label}
               </span>
-              <span className="chip chip-unknown mono">{cache.type}</span>
+              <span className="chip chip-unknown mono">{cache.type === "niks3" ? "Niks3" : cache.type}</span>
+              {cache.enabled === false && <span className="chip chip-unknown">disabled</span>}
             </div>
           </section>
 
           <section className="panel-section">
             <h3>Storage</h3>
-            {cache.storage ? (
+            {(() => { const sv = cacheStorageView(cache); return sv.unavailable ? <div style={{ fontSize:12, color:"var(--cf-text-muted)" }}>Unavailable. This cache type doesn't report storage.</div> : (
               <>
-                <div style={{ fontSize:12, color:"var(--cf-text-secondary)", marginBottom:6 }}>
-                  <span className="mono">{cache.storage.used}/{cache.storage.total} {cache.storage.unit}</span> used
-                </div>
-                <div style={{ height:6, background:"var(--cf-subtle-bg)", borderRadius:99, overflow:"hidden" }}>
-                  <div style={{
-                    width:`${(cache.storage.used / cache.storage.total) * 100}%`,
-                    height:"100%",
-                    background: cache.storage.used / cache.storage.total > 0.85 ? "#fbbf24" : "#34d399"
-                  }}/>
-                </div>
-              </>
-            ) : <div style={{ fontSize:12, color:"var(--cf-text-muted)" }}>No storage data.</div>}
+                <div style={{ fontSize:12, color:"var(--cf-text-secondary)", marginBottom:sv.pct == null ? 0 : 6 }}><span className="mono">{sv.text}</span>{sv.pct == null ? " stored" : " used"}</div>
+                {sv.pct != null && <div style={{ height:6, background:"var(--cf-subtle-bg)", borderRadius:99, overflow:"hidden" }}>
+                  <div style={{ width:`${sv.pct}%`, height:"100%", background: sv.pct > 85 ? "#fbbf24" : "#34d399" }}/>
+                </div>}
+              </>); })()}
           </section>
+          {cache.type === "niks3" && <Niks3Details cache={cache}/>}
 
           <section className="panel-section">
             <h3>Details</h3>
             <dl className="kv-grid">
-              <dt>Paths cached</dt><dd className="mono">{cache.paths ? cache.paths.toLocaleString() : "—"}</dd>
+              <dt>{cache.type === "niks3" ? "Paths / objects" : "Paths cached"}</dt><dd className="mono">{cachePathsText(cache)}</dd>
               <dt>Last push</dt><dd>{cache.lastPush || "—"}</dd>
-              <dt>Auth</dt><dd>{cache.requiresAuth ? (cache.credId || "required") : "not required"}</dd>
+              {cache.type !== "niks3" && <><dt>Auth</dt><dd>{cache.requiresAuth ? (cache.credId || "required") : "not required"}</dd></>}
             </dl>
           </section>
 
@@ -353,6 +341,7 @@ function CacheFormModal({ mode, cache, onClose }) {
   });
   const [testing, setTesting] = React.useState(null);
   const [addCredOpen, setAddCredOpen] = React.useState(false);
+  const [credDraft, setCredDraft] = React.useState(false);
   const set = (k,v) => setForm(p => ({ ...p, [k]: v }));
   const toggleEnv = (env) => set("environments", form.environments.includes(env)
     ? form.environments.filter(e => e !== env)
@@ -365,6 +354,7 @@ function CacheFormModal({ mode, cache, onClose }) {
     { id:"envs",  label:"Environments", icon:"grid" },
   ];
   const typeLabel = form.type === "s3" ? "S3" : form.type === "attic" ? "Attic" : "Nix HTTPS";
+  if (form.type === "niks3") return <Niks3FormModal mode={mode} cache={cache} form={form} onClose={onClose} onType={(t, keep) => setForm(p => ({ ...p, ...keep, type: t }))}/>;
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -375,7 +365,7 @@ function CacheFormModal({ mode, cache, onClose }) {
               <Icon name={isEdit ? "gear" : "plus"} size={15} style={{ color:"var(--cf-brand-purple)", flexShrink:0 }}/>
               <span className="pe-head-title">{isEdit ? (form.name || cache.name) : (form.name || "Add cache destination")}</span>
               <span className="chip chip-info">{typeLabel}</span>
-              {form.requiresAuth && !form.credId && <span className="chip" title="Pick a credential or turn off authentication.">No credential</span>}
+              {form.requiresAuth && !form.credId && <span className="chip" title="Add a credential or turn off authentication.">No credential</span>}
               {!form.url.trim() && <span className="chip" title="A cache URL is required.">No URL</span>}
             </div>
             <span className="pe-head-sub">{isEdit ? "Update binary cache destination." : "Register a new binary cache destination."}</span>
@@ -389,7 +379,7 @@ function CacheFormModal({ mode, cache, onClose }) {
               <Icon name={s.icon} size={13}/>
               <span className="pe-rail-label">{s.label}</span>
               {s.id === "dest" && !form.url.trim() && <span className="pe-rail-badge warn">!</span>}
-              {s.id === "auth" && <span className={`pe-rail-badge${form.requiresAuth && !form.credId ? " warn" : ""}`}>{form.requiresAuth ? (form.credId || "!") : "none"}</span>}
+              {s.id === "auth" && <span className={`pe-rail-badge${form.requiresAuth && !form.credId ? " warn" : ""}`}>{form.requiresAuth ? (form.credId ? "set" : "!") : "none"}</span>}
               {s.id === "envs" && <span className="pe-rail-badge">{form.environments.length}</span>}
             </button>
           ))}
@@ -413,6 +403,7 @@ function CacheFormModal({ mode, cache, onClose }) {
                     { v:"s3",   l:"S3-compatible" },
                     { v:"attic",l:"Attic" },
                     { v:"nix",  l:"Nix HTTPS" },
+                    { v:"niks3", l:"Niks3" },
                   ].map(o => (
                     <button key={o.v} className={form.type === o.v ? "active" : ""} onClick={()=>set("type", o.v)}>{o.l}</button>
                   ))}
@@ -430,7 +421,7 @@ function CacheFormModal({ mode, cache, onClose }) {
             <>
               <div className="pe-sec-head">
                 <h3>Credentials</h3>
-                <p>Saved credentials can be reused across caches. Public read-only substituters need none.</p>
+                <p>Each cache has its own credential. Public read-only substituters need none.</p>
               </div>
               <div className="field">
                 <label className="focus-ring" style={{ display:"flex", gap:9, alignItems:"flex-start", cursor:"pointer", margin:0, textTransform:"none", letterSpacing:0 }}>
@@ -448,24 +439,28 @@ function CacheFormModal({ mode, cache, onClose }) {
               {form.requiresAuth && (
                 <div className="field">
                   <label>Credential</label>
-                  <div style={{ display:"flex", gap:8 }}>
-                    <select className="input focus-ring" value={form.credId} onChange={e=>{
-                      if (e.target.value === "__new__") { setAddCredOpen(true); }
-                      else set("credId",e.target.value);
-                    }} style={{ flex:1 }}>
-                      <option value="">Select a credential…</option>
-                      <option value="aws-prod-role">aws-prod-role (IAM role)</option>
-                      <option value="aws-staging-role">aws-staging-role (IAM role)</option>
-                      <option value="attic-token-dev">attic-token-dev (Attic token)</option>
-                      <option value="__new__">+ Add new credential…</option>
-                    </select>
-                    <button className="btn btn-ghost focus-ring xs" onClick={()=>setTesting("running") || setTimeout(()=>setTesting(Math.random()>0.2?"ok":"fail"),700)} disabled={!form.credId}>
-                      {testing === "running" ? <><Spinner size={11}/> Testing…</>
-                      : testing === "ok"     ? <><Icon name="check" size={11} style={{color:"#34d399"}}/> Connected</>
-                      : testing === "fail"   ? <><Icon name="warn" size={11} style={{color:"#f87171"}}/> Failed</>
-                      : <>Test</>}
-                    </button>
+                  <div className="n3-cred">
+                    <div className="n3-cred-main">
+                      <span className="n3-cred-state">
+                        {credDraft
+                          ? <><Icon name="key" size={12}/> {isEdit && cache.credId ? "Replacement entered" : "Credential entered"} · not saved</>
+                          : form.credId
+                            ? <><Icon name="check" size={12} style={{ color:"#34d399" }}/> Current configured credential <span className="n3-cred-sub">stored encrypted · never shown</span></>
+                            : <><Icon name="warn" size={12} style={{ color:"#fbbf24" }}/> Not configured</>}
+                      </span>
+                      <div style={{ display:"flex", gap:6 }}>
+                        {credDraft && <button className="btn btn-ghost focus-ring xs" onClick={()=>{ setCredDraft(false); set("credId", isEdit && cache.credId ? cache.credId : ""); setTesting(null); }}>Discard</button>}
+                        <button className="btn btn-ghost focus-ring xs" onClick={()=>setAddCredOpen(true)}>{credDraft ? "Edit" : form.credId ? "Replace" : "Add credential"}</button>
+                        <button className="btn btn-ghost focus-ring xs" onClick={()=>{ setTesting("running"); setTimeout(()=>setTesting(Math.random()>0.2?"ok":"fail"),700); }} disabled={!form.credId}>
+                          {testing === "running" ? <><Spinner size={11}/> Testing…</>
+                          : testing === "ok"     ? <><Icon name="check" size={11} style={{color:"#34d399"}}/> Connected</>
+                          : testing === "fail"   ? <><Icon name="warn" size={11} style={{color:"#f87171"}}/> Failed</>
+                          : <>Test</>}
+                        </button>
+                      </div>
+                    </div>
                   </div>
+                  <div className="help">{credDraft && isEdit && cache.credId ? "Test uses the replacement. Cancel discards it; Save persists it. " : ""}Leaving this alone keeps the stored credential.</div>
                 </div>
               )}
             </>
@@ -520,7 +515,7 @@ function CacheFormModal({ mode, cache, onClose }) {
             <span className="pe-foot-dot">·</span>
             {typeLabel}
             <span className="pe-foot-dot">·</span>
-            {form.requiresAuth ? (form.credId || "credential required") : "no auth"}
+            {form.requiresAuth ? (form.credId ? "credential set" : "credential required") : "no auth"}
             <span className="pe-foot-dot">·</span>
             {form.environments.length} env{form.environments.length === 1 ? "" : "s"}
           </span>
@@ -535,9 +530,10 @@ function CacheFormModal({ mode, cache, onClose }) {
       {addCredOpen && (
         <CacheCredModal
           type={form.type}
-          onClose={(newId) => {
+          hasCurrent={!!(isEdit && cache && cache.credId)}
+          onClose={(ok) => {
             setAddCredOpen(false);
-            if (newId) set("credId", newId);
+            if (ok) { setCredDraft(true); set("credId", "__draft__"); setTesting(null); }
           }}
         />
       )}
@@ -545,7 +541,7 @@ function CacheFormModal({ mode, cache, onClose }) {
   );
 }
 
-function CacheCredModal({ type, onClose }) {
+function CacheCredModal({ type, onClose, hasCurrent }) {
   const [kind, setKind] = React.useState(type === "s3" ? "aws-key" : "token");
   const [form, setForm] = React.useState({
     name: "",
@@ -562,15 +558,11 @@ function CacheCredModal({ type, onClose }) {
         <div className="modal-head">
           <h2>
             <Icon name="key" size={14} style={{ marginRight:6, verticalAlign:"text-bottom" }}/>
-            Add credential
+            {hasCurrent ? "Replace credential" : "Add credential"}
           </h2>
-          <p>Saved credentials can be reused across caches. Secrets are encrypted at rest.</p>
+          <p>{hasCurrent ? "The current credential is never shown. Cancel keeps it. " : ""}Secrets are encrypted at rest and not shown again. Nothing is saved until you save the cache.</p>
         </div>
         <div className="modal-body">
-          <div className="field">
-            <label>Name</label>
-            <input className="input focus-ring" value={form.name} onChange={e=>set("name",e.target.value)} placeholder="e.g. aws-prod-role"/>
-          </div>
           <div className="field">
             <label>Type</label>
             <div className="seg">
@@ -611,8 +603,8 @@ function CacheCredModal({ type, onClose }) {
         </div>
         <div className="modal-foot">
           <button className="btn btn-ghost focus-ring" onClick={()=>onClose(null)}>Cancel</button>
-          <button className="btn btn-primary focus-ring" disabled={!form.name} onClick={()=>onClose(`cred-${form.name.toLowerCase().replace(/[^a-z0-9]+/g,'-')}`)}>
-            <Icon name="check" size={13}/> Save credential
+          <button className="btn btn-primary focus-ring" disabled={!(kind === "aws-key" ? form.accessKey.trim() && form.secretKey : kind === "aws-role" ? form.roleArn.trim() : form.token.trim())} onClick={()=>onClose(true)}>
+            <Icon name="check" size={13}/> Use for this cache
           </button>
         </div>
       </div>

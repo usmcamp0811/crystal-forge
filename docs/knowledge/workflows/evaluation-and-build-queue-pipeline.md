@@ -52,13 +52,32 @@ When a commit arrives:
    [Wakeups and polling](../architecture/event-driven-queues.md).
 3. **One commit evaluates at a time.** A database index enforces this.
 4. The server marks the commit `in_progress`.
-5. `nix-eval-jobs` evaluates all systems in parallel.
+5. After the heavy-Nix locks, the server resolves one immutable
+   [bulk evaluator resource plan](../evaluation/bulk-evaluator-resource-planning.md)
+   before spawning `nix-eval-jobs`. Systems evaluate in parallel using its
+   explicit worker count and per-worker memory threshold. The working boundary
+   includes physical memory and finite visible-ancestor `memory.high` / `memory.max`.
+   The [adaptive recovery monitor](../evaluation/bulk-evaluator-adaptive-recovery.md)
+   samples pressure across collection awaits and can isolate only unresolved
+   configurations. Idle expiry is a CPU-evidence assessment checkpoint; one
+   overall deadline covers every child, fallback, preparation, and foreground
+   cleanup. Cancellation polling remains cooperative at two-second eligible
+   loop boundaries. A replacement requires confirmed cleanup; quarantine keeps
+   heavy-Nix lock ownership when group absence is unknown.
 6. For each system that completes:
    - The policy check runs (is Crystal Forge enabled for this system?).
    - If it **passes**, the derivation becomes `dry-run-complete` and gets a
      build job.
    - If it **fails**, the system is marked as policy failed.
 7. When all systems finish, the commit is marked `complete` (or `failed`).
+
+Bounded resource exhaustion marks the commit and attempt `failed`, never
+`complete`. The failure transaction retains only validated exact-current-attempt
+Pass/Fail, snapshot observations, and existing jobs. Unfinished selected work
+receives policy Error with resource evidence; confirmed configuration failures
+remain separate. Exact completed and eligible preparation may be reconciled
+after resource-terminal failure. Cancellation and supersession still block
+admission. Exhausted recovery does not automatically retry the whole flake.
 
 ### Database fields
 

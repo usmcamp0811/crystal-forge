@@ -11,7 +11,12 @@ let
   # INVARIANT: Verified-source builders must execute the Nix CLI linked to the
   # nix-eval-jobs evaluator. Exact evaluator fingerprints are a security
   # boundary, so an unrelated pkgs.nix must not precede this package in PATH.
+  # The CF overlay binds this evaluator and CLI to the same authority-guarded
+  # Nix libraries. The guard remains disabled outside Basic read children.
   evaluatorNix = pkgs.nix-eval-jobs.nix;
+  # Niks3 shells out to Nix and its wrapper prepends that dependency to PATH.
+  # Keep the pinned Niks3 version, but bind its CLI to the evaluator's Nix.
+  niks3 = pkgs.niks3.override { nix = evaluatorNix; };
 
   # ─────────────────────────────────────────────────────────────────────────
   # Source filtering
@@ -234,6 +239,7 @@ let
     CRYSTAL_FORGE_NIXOS_OPTIONS_METADATA = "${nixosOptionsMetadata}/share/crystal-forge/nixos-options.json";
 
     nativeBuildInputs = commonNativeBuildInputs ++ (with pkgs; [
+      makeWrapper
       git # Server tests exercise shallow-clone and first-parent behavior.
       nix
       sqlx-cli
@@ -276,6 +282,12 @@ let
       cargoExtraArgs = "--locked --package cf-server${cargoFeatureArg}";
       cargoBuildExtraArgs = serverCargoBuildExtraArgs;
       cargoTestExtraArgs = "--lib --bins";
+      # Dependency-only Crane artifacts contain no installed server binary.
+      # Wrap only the final component outputs, including the core variant.
+      postFixup = ''
+        wrapProgram "$out/bin/server" \
+          --prefix PATH : ${lib.makeBinPath [ evaluatorNix niks3 pkgs.vulnix ]}
+      '';
       preBuild = ''
         export SRC_HASH="${lib.strings.removeSuffix "\n" serverSrcHash}"
       '';
@@ -368,7 +380,7 @@ let
 
     postFixup = ''
       wrapProgram "$out/bin/builder" \
-        --prefix PATH : ${lib.makeBinPath [ evaluatorNix pkgs.vulnix ]}
+        --prefix PATH : ${lib.makeBinPath [ evaluatorNix niks3 pkgs.vulnix ]}
     '';
 
     # SRC_HASH intentionally not set: cf-builder does not use option_env!("SRC_HASH").
@@ -497,11 +509,12 @@ let
 
   builder = pkgs.writeShellApplication {
     name = "builder";
-    runtimeInputs = [ evaluatorNix pkgs.vulnix ];
+    runtimeInputs = [ evaluatorNix niks3 pkgs.vulnix ];
     text = ''${cf-builder-drv}/bin/builder "$@"'';
   };
 
 in crystal-forge // {
+  inherit niks3 evaluatorNix;
   inherit agent server builder cf-keygen test-agent migrate;
   # Component derivations. Internal consumers such as NixOS module services,
   # checks, and test helpers must reference these directly rather than the
