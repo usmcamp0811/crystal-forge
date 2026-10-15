@@ -136,6 +136,37 @@ quarantine ownership; those are separate coordinator regression contracts.
 
 ## TASK-470 selected library tests
 
+The exact library-test runner selects 59 ignored tests: the 52 TASK-470 tests
+below, the six TASK-484 tests above, and this TASK-487 regression:
+
+```text
+handlers::api::deployment_policies::tests::test_list_deployment_policies_includes_fixture
+```
+
+The TASK-487 test counts migration-seeded policies before it creates a fixture.
+The list response must contain the fixture UUID exactly once, preserve its name,
+type, and enabled flag, and report the baseline count plus one.
+
+The runner also compiles `register_export_selection` and executes these seven
+ignored integration tests individually with `--ignored --exact --test-threads=1`:
+
+```text
+pages_whole_filtered_scope_and_rechecks_reader
+acceptance_only_does_not_apply_unrelated_poam_filters
+policy_export_context_uses_actual_waiver_finding
+exceeds_combined_cap_without_partial_selection
+plan_context_retains_all_linked_systems_in_one_snapshot
+retired_link_in_same_environment_exports_but_moved_out_link_does_not
+scheduled_environment_keeps_both_exact_packages
+```
+
+Each invocation requires its named success line and exactly one passed test with
+zero failures and zero ignored tests. These tests use SQLx-created sandbox
+databases. They cover complete pagination, rechecked reader authorization,
+acceptance-only scope, exact finding context, combined-cap rejection, linked
+system visibility, retained history, and exact scheduled package identities.
+Membership does not establish a passing result for the current source.
+
 The following 52 ignored PostgreSQL tests run with
 `--ignored --exact --test-threads=1`. Each invocation must report exactly one
 passed test and zero ignored tests. The tests include completed CVE publication
@@ -551,7 +582,7 @@ its matching `END` identifies the active target and whether Cargo was compiling
 or executing. The library also has an explicit compilation boundary before its
 selected tests execute. Cargo's normal output reports executed test names.
 
-Each of the 52 ignored and 51 non-ignored TASK-470 tests emits its qualified name,
+Each of the 59 ignored and 83 non-ignored selected library tests emits its qualified name,
 mode, start time, exit status, and elapsed time. Cargo stdout and stderr still
 pass through `tee` to the exact-test guard. `pipefail` preserves failures from
 Cargo or `tee`; success still requires the named `... ok` line and the existing

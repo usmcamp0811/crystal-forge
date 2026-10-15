@@ -1484,14 +1484,13 @@ pub fn SystemDetailView(
     });
 
     use_future(move || async move {
+        #[cfg(target_arch = "wasm32")]
         loop {
             #[cfg(target_arch = "wasm32")]
             {
                 gloo_timers::future::TimeoutFuture::new(4000).await;
                 deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1);
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            break;
         }
     });
 
@@ -1503,6 +1502,7 @@ pub fn SystemDetailView(
         let dep_resource = deployment_progress_resource.clone();
         let mut tick = history_poll_tick.clone();
         use_future(move || async move {
+            #[cfg(target_arch = "wasm32")]
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -1511,8 +1511,6 @@ pub fn SystemDetailView(
                         tick.set(tick() + 1);
                     }
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                break;
             }
         });
     }
@@ -1553,6 +1551,7 @@ pub fn SystemDetailView(
     {
         let active_tab_for_events = active_tab;
         use_future(move || async move {
+            #[cfg(target_arch = "wasm32")]
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -1561,8 +1560,6 @@ pub fn SystemDetailView(
                         agent_events_poll_tick.set(agent_events_poll_tick() + 1);
                     }
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                break;
             }
         });
     }
@@ -1634,6 +1631,7 @@ pub fn SystemDetailView(
         let mut refresh = hardening_refresh;
         use_future(move || async move {
             let mut polls_remaining = HARDENING_ACTIVE_POLL_LIMIT;
+            #[cfg(target_arch = "wasm32")]
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -1658,12 +1656,9 @@ pub fn SystemDetailView(
                         refresh.set(refresh().wrapping_add(1));
                     }
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let _ = (&inventory_resource, &refresh, &mut polls_remaining);
-                    break;
-                }
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            let _ = (&inventory_resource, &refresh, &mut polls_remaining);
         });
     }
 
@@ -5594,6 +5589,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
     // events remain visible as they arrive.
     let tail_for_autoscroll = tail.clone();
     use_future(move || async move {
+        #[cfg(target_arch = "wasm32")]
         loop {
             #[cfg(target_arch = "wasm32")]
             {
@@ -5607,8 +5603,6 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
                     }
                 }
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            break;
         }
     });
 

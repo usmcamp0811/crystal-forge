@@ -178,6 +178,7 @@ fn EvaluationsPage() -> Element {
         let mut history_refresh = history_refresh.clone();
         let mut active_tab = active_tab;
         use_future(move || async move {
+            #[cfg(target_arch = "wasm32")]
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -188,13 +189,9 @@ fn EvaluationsPage() -> Element {
                         history_refresh.set(history_refresh() + 1);
                     }
                 }
-
-                #[cfg(not(target_arch = "wasm32"))]
-                {
-                    let _ = (active_refresh, history_refresh);
-                    break;
-                }
             }
+            #[cfg(not(target_arch = "wasm32"))]
+            let _ = (active_refresh, history_refresh);
         });
     }
 
@@ -2010,6 +2007,7 @@ fn EvalDrawerLogTabQueue(ev: EvalQueueItem, live: bool) -> Element {
     // When live, poll every 2 s to pick up new log lines
     {
         use_future(move || async move {
+            #[cfg(target_arch = "wasm32")]
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -2020,8 +2018,6 @@ fn EvalDrawerLogTabQueue(ev: EvalQueueItem, live: bool) -> Element {
                         break;
                     }
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                break;
             }
         });
     }
@@ -2123,6 +2119,7 @@ fn EvalDrawerLogTabHistory(ev: EvalHistoryItem, live: bool) -> Element {
     // When live (cancelling state), poll every 2 s
     {
         use_future(move || async move {
+            #[cfg(target_arch = "wasm32")]
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -2133,8 +2130,6 @@ fn EvalDrawerLogTabHistory(ev: EvalHistoryItem, live: bool) -> Element {
                         break;
                     }
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                break;
             }
         });
     }
@@ -2806,6 +2801,7 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
     {
         let mut graph_refresh = graph_refresh.clone();
         use_future(move || async move {
+            #[cfg(target_arch = "wasm32")]
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
@@ -2815,9 +2811,6 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                         graph_refresh.set(graph_refresh() + 1);
                     }
                 }
-
-                #[cfg(not(target_arch = "wasm32"))]
-                break;
             }
         });
     }
@@ -2964,14 +2957,13 @@ fn LiveIndicator() -> Element {
 
     {
         use_future(move || async move {
+            #[cfg(target_arch = "wasm32")]
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
                     gloo_timers::future::TimeoutFuture::new(1000).await;
                     secs.set((secs() + 1) % 6);
                 }
-                #[cfg(not(target_arch = "wasm32"))]
-                break;
             }
         });
     }

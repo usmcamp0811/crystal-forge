@@ -745,6 +745,39 @@ SQL
       return "$status"
     }
 
+    # TASK-487 replaces a vacuous list assertion with fixture membership in a
+    # sqlx-created database. The exact guard rejects missing or renamed tests.
+    runExactCacheRegression \
+      handlers::api::deployment_policies::tests::test_list_deployment_policies_includes_fixture \
+      --ignored
+
+    # Exercise both refactored pagination loops and their authorization/cap
+    # contracts against sandbox-owned databases. Require each of the seven
+    # selected integration tests to execute; an empty target cannot pass.
+    runRegressionCommand register_export_selection compile \
+      cargo test --offline --package cf-server --test register_export_selection --no-run
+    for testName in \
+      pages_whole_filtered_scope_and_rechecks_reader \
+      acceptance_only_does_not_apply_unrelated_poam_filters \
+      policy_export_context_uses_actual_waiver_finding \
+      exceeds_combined_cap_without_partial_selection \
+      plan_context_retains_all_linked_systems_in_one_snapshot \
+      retired_link_in_same_environment_exports_but_moved_out_link_does_not \
+      scheduled_environment_keeps_both_exact_packages
+    do
+      testLog="$TMPDIR/task487-register-export-exact-test.log"
+      runRegressionCommand "$testName" ignored \
+        bash -o pipefail -c 'cargo test --offline --package cf-server \
+          --test register_export_selection "$1" \
+          -- --ignored --exact --test-threads=1 --color=never 2>&1 | tee "$2"' \
+          _ "$testName" "$testLog"
+      if ! grep -Fxq "test $testName ... ok" "$testLog" || \
+        ! grep -Fq "test result: ok. 1 passed; 0 failed; 0 ignored;" "$testLog"; then
+        echo "Expected exactly one successful test: $testName" >&2
+        exit 1
+      fi
+    done
+
     # TASK-484 uses sqlx-created databases in this sandbox. Run each test in a
     # separate process because the heavy-Nix semaphore is process-global.
     for testName in \
