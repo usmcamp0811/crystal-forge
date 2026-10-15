@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-15 00:39'
-updated_date: '2026-10-15 01:00'
+updated_date: '2026-10-15 01:01'
 labels: []
 dependencies: []
 references:
@@ -45,6 +45,8 @@ User explicitly authorized strict remediation after TASK-470's newly unblocked r
 6. Run strict analysis, coverage and complete required exact-head CI before declaring parent MR331 ready. Do not merge, deploy, change production credentials/data, or overwrite other agents' work. Do not integrate this child work into TASK-470 until verified and explicitly recorded.
 
 Current bounded pass owns only the ten target-specific polling loops in packages/web-ui/src/views/evaluations.rs and system_detail.rs. Put the wasm32 cfg on each whole loop and retain native no-op captures outside the loop. Preserve browser loop bodies, delays, bounds and hook order. Verify native Clippy and wasm32 compilation with bounded Cargo jobs through the pinned Nix environment. This pass does not complete repository-wide strict remediation.
+
+Initial source-only ownership: services/register_export_selection.rs and the fatal deployment_policies.rs list test. Replace immutable while conditions with if plus loop without changing loop bodies or SQL. Convert the vacuous list test to an isolated sqlx::test using create_test_policy; assert baseline-plus-one count and exact fixture identity despite migration seed data. Preserve public rustdoc contracts. Run light formatting/diff checks only; hand off existing pagination/scope/cap integration regressions and the isolated fixture test to the parent's serial runner. No full server-regressions or concurrent Cargo compilation in this initial batch.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
