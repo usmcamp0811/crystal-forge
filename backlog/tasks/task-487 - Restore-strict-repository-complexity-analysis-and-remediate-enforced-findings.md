@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-15 00:39'
-updated_date: '2026-10-15 02:06'
+updated_date: '2026-10-15 02:27'
 labels: []
 dependencies: []
 references:
@@ -81,4 +81,6 @@ CA responsibility refactor verified:8source/testfilesallunder500lines, publicsig
 Fresh self-contained checkpoint inventory using child launcher: both Clippy exits0 (backend139s679findings/UI1s54cached), STRICTMETRICSexit1/FAILED, notINCOMPLETE. Actualcomplete-native counts733selectedfindings:199cognitive/71args/429lines/32types/2bools/0vec_box. 536trackedRustfiles allincluded;195over500. Previous complete-native734/196 became733/195afterCA. Initial714waspartial, notregressioncomparison. JUnit539cases196failures0errors0skips. Five launcherfixturecases+actualartifactvalidationpassed; rawJSONL0600. Artifacts /tmp/opencode/task487-checkpoint-inventory, log /tmp/opencode/task487-checkpoint-inventory-run.log. WASMlintscopeandcoverageNOTassessed bynativeinventory.
 
 Strict remediation and parent readiness remain incomplete. Nextcoherentbatches: servercompliance/POAM/evaluation snapshots/builders, UI tab/render/state/DTO modules, remainingconfig/protocol/agent/tests. Do not arbitrarysplitfiles,hidelints,lowerthresholds,excludeapplicationtestsorclaimMRready. Requiredcomplexityremainsred andcoverageunverified untilremainingfindingsare remediated andcompleteexact-headCIpasses.
+
+User corrected branch placement: all strict-remediation implementation must be on TASK-470/MR331. Parent TASK-470 worktree was verified at published5ebfa887 with identical owned metrics WIP. Those exact files were preserved in a named stash; TASK-470 then fast-forwarded to this verified checkpoint9f0cb90c and pushed normally. No history rewrite, MR merge, or deployment. This task's remaining implementation scope is consolidated into active TASK-470; this record is archived as duplicate planning, not marked complete. Do not implement further in the TASK-487 branch/worktree. Strict findings remain733/195, parent not merge-ready.
 <!-- SECTION:NOTES:END -->
