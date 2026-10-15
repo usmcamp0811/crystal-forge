@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-15 00:39'
-updated_date: '2026-10-15 01:02'
+updated_date: '2026-10-15 01:05'
 labels: []
 dependencies: []
 references:
@@ -63,4 +63,12 @@ Replaced test_list_deployment_policies_empty with ignored isolated sqlx::test te
 Light verification: nix develop --command rustfmt --edition 2024 --check packages/default/crates/cf-server/src/services/register_export_selection.rs packages/default/crates/cf-server/src/handlers/api/deployment_policies.rs initially exited 1 for fixture chain formatting; corrected with a scoped patch and reran successfully (exit 0). git diff --check passed (exit 0). Reviewed owned-file diff for documentation and behavior preservation. Concurrent UI actor changes in evaluations.rs and system_detail.rs are present; this actor did not edit them.
 
 Parent single-runner handoff: through pinned Nix environment, SQLX_OFFLINE=true CARGO_BUILD_JOBS=2, and verified disposable PostgreSQL only, run cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib handlers::api::deployment_policies::tests::test_list_deployment_policies_includes_fixture -- --ignored --exact --test-threads=1; run cargo test --manifest-path packages/default/Cargo.toml -p cf-server --test register_export_selection -- --ignored --test-threads=1. Existing integration cases cover multiple acceptance pages/rechecked authorization, acceptance-only scope, Plans excluding acceptance rows, cap rejection, linked-context visibility and historical context. Runtime tests and actual fatal-Clippy removal remain pending. No Cargo compilation/full server-regressions started, no commits or pushes, no task-completion claim.
+
+Completed the bounded ten-loop UI fatal-blocker pass in evaluations.rs (five loops) and system_detail.rs (five loops). Each whole loop now has #[cfg(target_arch = "wasm32")]. Removed native-only breaks and retained the two existing native no-op capture expressions outside their loops. Browser loop bodies, delays, termination conditions, poll bounds and hook registration remain unchanged. No suppressions, thresholds, exclusions, public API or backend changes were made by this pass.
+
+Verification passed (exit 0): nix develop --command nix shell --inputs-from . nixpkgs#clippy nixpkgs#rustfmt --command sh -c 'CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/tmp/opencode/task487-ui-native cargo clippy --manifest-path packages/web-ui/Cargo.toml --locked --offline --all-targets --all-features --message-format=short -- -D clippy::never_loop'. Log: /tmp/opencode/task487-ui-native-clippy.log. Native bin and test targets finished with other warnings. The first attempt exceeded the 120-second tool timeout; rerun completed successfully.
+
+Verification passed (exit 0): nix develop --command sh -c 'CARGO_BUILD_JOBS=2 CARGO_TARGET_DIR=/tmp/opencode/task487-ui-wasm cargo check --manifest-path packages/web-ui/Cargo.toml --locked --offline --target wasm32-unknown-unknown --all-features --message-format=short'. Log: /tmp/opencode/task487-ui-wasm-check.log. Formatting check passed: nix develop --command nix shell --inputs-from . nixpkgs#rustfmt --command rustfmt --edition 2024 --check packages/web-ui/src/views/evaluations.rs packages/web-ui/src/views/system_detail.rs. git diff --check passed. Documentation review: no public contracts or polling semantics changed; existing lifecycle comments remain valid.
+
+Concurrent changes appeared in cf-server handlers/api/deployment_policies.rs and services/register_export_selection.rs during verification. This pass did not edit those files. UI changes remain uncommitted in the dedicated TASK-487 worktree. Full strict metrics, coverage and exact-head CI remain outstanding; TASK-487 stays In Progress.
 <!-- SECTION:NOTES:END -->
