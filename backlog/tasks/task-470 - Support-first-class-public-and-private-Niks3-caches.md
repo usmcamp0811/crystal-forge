@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-15 20:27'
+updated_date: '2026-10-15 20:29'
 labels: []
 dependencies: []
 references:
@@ -927,6 +927,10 @@ Correction: the previous launcher-fix note was garbled (missing spaces). Correct
 Strict complexity scope measurement (inventory from commit 9f0cb90c, 536 Rust files). 462,585 of 520,540 lines (about 89%) are in the 195 files over 500 lines. Inline #[cfg(test)] modules are only 128,071 of those lines (28%). Extracting them would bring only 18 of 195 files under 500 lines. 177 files would still hold about 328,000 lines of production code that need responsibility-based splitting. At about 450 lines per module this needs more than 900 new modules. Separately, 733 function lints need real refactoring (429 too_many_lines, 199 cognitive_complexity, 71 too_many_arguments, 32 type_complexity, 2 fn_params_excessive_bools).
 
 History: the original Feb 2026 gate ran `cargo clippy ... || true` and then grepped for lint names, and its shell exit ignored the 500-line clause. If Clippy aborts on a deny-by-default lint, no lint lines are produced and the gate passes. Commit 9f0cb90c fixed three such fatal items. The gate passed on dev in April and May 2026 even though files of 16-20k lines existed, so the findings are long-standing debt and not introduced by MR !331. Whether those past runs actually aborted was not proven. Decision on strategy requested from the user; no remediation batch started.
+
+Decision by the user: split the strict complexity gate out of MR !331. Commit 83a9234b7d88e086e34aa49d82580e7e55c09529 restores packages/code-metrics/default.nix to the origin/dev version and removes packages/code-metrics/test-report.py. The code fixes and the CA bundle split from 9f0cb90c stay. The CI arguments `--builders '' --max-jobs 1 --cores 2` for complexity-check and coverage-check stay. The strict launcher is preserved in commit 9f0cb90c and in branch TASK-487-strict-complexity-remediation, and is tracked in the new Backlog task TASK-487 with the measurements (733 lint findings, 195 files over 500 lines, about 89% of Rust lines).
+
+Known limitation of the restored gate: it is the dev gate. It runs `cargo clippy ... || true` and greps for lint names, so it does not prove complexity compliance. This MR does not claim that the code meets the complexity thresholds. Pipeline 2952683433 for 83a9234b is created and not yet observed; complexity-check and coverage-check results for this head are unknown until it finishes.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
