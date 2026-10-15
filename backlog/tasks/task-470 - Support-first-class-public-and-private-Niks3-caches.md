@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-15 02:28'
+updated_date: '2026-10-15 18:44'
 labels: []
 dependencies: []
 references:
@@ -278,6 +278,8 @@ Exact-head5ebfa887 pipeline2948634668 ALL13flakechecks passed (boundedlocal args
 Nextminimal required-metrics repair: inspectpackages/code-metrics/default.nix nativeanalysisenvironment; supplypkg-config/OpenSSL development settings andboundedCargo jobs2 forrealanalysis, preservemetrics/report/thresholdsemantics andpropagateoperationalfailureshonestly whereapplicable withoutapprefactor. Inspectcoverageenvironmentonlyforidenticalprerequisites/repro afterunblocked; do notweakenanalysis/test/coverage assertions or optionalpolicy. RunactualCI-equivalentmetriccommandlocallyserialresourcebounded, recordactualstatus/reportsandanyremaining Clippyerrorsvsfixturefailures; thennormalcommitpush exacthead andmonitorall19requiredjobsto terminal.CIallflake-green doesnotyetmakeMRready whilecomplexityfailed/coverageskipped.
 
 User corrected placement: perform ALL remaining strict remediation on this existing TASK-470 branch/worktree, not a separate implementation branch. Verified local/origin5ebfa8870/0; parent metricsWIP exactlymatched verifiedcheckpoint9f0cb90c (bothtrackeddefault.nixdiffempty anduntrackedtestscriptGitblobhashmatched). PreservedtheseWIP files innamedstashbackup, fast-forwarded TASK-470 to9f0cb90cea4c7c2c5929fcbccd1ed058fa5fa255, normalpushedorigin. MR331nowincludesall16checkpointfiles. No newmergecommit/MRmerge/historyrewrite/deploy. ArchivedTASK487asduplicateplanningandremovedonlyitsverifiedownedlock; no furtherworkinthatchildworktree. Preservebackupbranch/stash; continue734→733lint/196→195sizefindingsunderactiveTASK470 existinglock. No thresholds/suppression/exclusions or evidenceclaims changed.
+
+User supplied complexity job17188418580 pipeline2949074650 atcurrent9f0cb90c. Terminalerror occursbeforeanalysis: remotefarm builds smallreportlauncher, then gRPCFetchNars cannotretrieve output; missing artifacts aredownstream oflauncherbuildfailure. Nottheearlier137orClippyfindings. MinimalCIrepair: append --builders empty/max-jobs1/cores2 torequiredcomplexity andcoverage nix-run launchercommands only, sameboundedlocalexecutionasflake matrix; keepexistingcache/TLS/signature policies andallotherjobmetadata/optionalpolicies unchanged. ExtendCIargv/effective-setting regression torecordruncommands without runningreportanalysis inunitfixture; realNixcontrol queries ensurelocalboundsandoutsideinheritance. Validatecachedhelpertest+syntaxlint,commitnormalpush470,reportthis removesinfra launcherblockonly; existing733lint/195size violationsstillrequirestrictremediation,no greenclaim.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
