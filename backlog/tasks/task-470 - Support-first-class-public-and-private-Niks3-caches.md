@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-02 22:23'
-updated_date: '2026-10-14 22:35'
+updated_date: '2026-10-15 00:09'
 labels: []
 dependencies: []
 references:
@@ -272,6 +272,10 @@ Verification plan: runexactCIequivalent authoritativeintegration viaexistingpubl
 Exact-head6dc3da1b/pipeline2944979038 terminaltraces exposedinfra boundary, notpytestfail: integration17158170072 remoteQueryValidPaths socketclosed;Atticmetrics17158170080 remoteFetchNars unavailablepublication-driver output;Atticpublication17158170081 remoteQueryValidPaths socketclosed. AllReckless. Completeprivate tracesbytes10963/17137/13433, no cap/SQLxdebug/runtimephaseoutput (didnotreachobservedVM). GenericNixTLShint notspecificcertdiagnosis. Existingpublic-cachewrapper deliberatelypreservesinheritedbuilderselection, so--fallbackforsubstitutiondoesnotrepairthese remote executionerrors.
 
 CI-only correction plan authorizedbyuserappropriateinfrastructurefix: constrain only integration/attic-metrics/attic-publication jobcommandstolocal Nixexecution (--builders empty, max-jobs1, cores2). Sameexactflakechecks/nativeassertions, TLS/signatures/publicsourcefallback unchanged; no productionbuilder/globalsettings or fixturebehavior changes. Preserveallotherjobselection andoptionalUIpolicy. UpdateexactscopedCIargvregressiontest soonlythese3 override inheritedbuilders, verifiesremainingjobsretaincontrols. Validatehelpertests/GitLabsyntax andrepresentativeauthoritativecommand underlocalCIargs. Normalcommitpushnewexacthead thenobserveallrequiredCI/downstreams; optionalfullUIseparatered.No claimhistorical5145s stallsolelylogging orremote builderremoteTLScause beyondobservedQuery/Fetcherrors.
+
+Exact-head5ebfa887 pipeline2948634668 ALL13flakechecks passed (boundedlocal args verifiedzero remotedispatch/errors);requiredstandaloneCVE/dashboard/statespassed andscreenshotcommentsucceeded. Newunblockedrequiredcomplexity17185484674 failed: openssl-sys nativecompile101 provenmissingpkg-config,thenanalysiscontinuedbecauseClippy||trueandfrontendcompile jobended137. Signal sender/OOM causeunproven. Coverage17185484676skipped notpass. NativeUI actualfreshCI job17185484663success artifact73,962,131bytes390PNGs;optional fullUI remainsfailedallowtrue16expectedsemanticcontracts2 actual,notinfra/green.
+
+Nextminimal required-metrics repair: inspectpackages/code-metrics/default.nix nativeanalysisenvironment; supplypkg-config/OpenSSL development settings andboundedCargo jobs2 forrealanalysis, preservemetrics/report/thresholdsemantics andpropagateoperationalfailureshonestly whereapplicable withoutapprefactor. Inspectcoverageenvironmentonlyforidenticalprerequisites/repro afterunblocked; do notweakenanalysis/test/coverage assertions or optionalpolicy. RunactualCI-equivalentmetriccommandlocallyserialresourcebounded, recordactualstatus/reportsandanyremaining Clippyerrorsvsfixturefailures; thennormalcommitpush exacthead andmonitorall19requiredjobsto terminal.CIallflake-green doesnotyetmakeMRready whilecomplexityfailed/coverageskipped.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
