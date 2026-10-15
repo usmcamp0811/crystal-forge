@@ -63,7 +63,7 @@ coverage-check:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - nix run .#coverage.coverage-report
+    - nix run .#coverage.coverage-report --builders '' --max-jobs 1 --cores 2
   artifacts:
     when: always
     expire_in: 30 days
@@ -131,7 +131,7 @@ complexity-check:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - nix run .#code-metrics.complexity-report
+    - nix run .#code-metrics.complexity-report --builders '' --max-jobs 1 --cores 2
   artifacts:
     when: always
     expire_in: 30 days

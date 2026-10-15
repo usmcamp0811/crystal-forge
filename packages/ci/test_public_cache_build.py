@@ -37,7 +37,8 @@ old = yaml.safe_load(subprocess.check_output(
     ["git", "show", "HEAD:.gitlab-ci.yml"], cwd=ROOT, text=True))
 new = yaml.safe_load((ROOT / ".gitlab-ci.yml").read_text())
 LOCAL_CHECKS = set(new["flake-check"]["parallel"]["matrix"][0]["CHECK_NAME"])
-changed = {"flake-check", "web-ui-check", "web-ui-baseline-candidates"}
+changed = {"flake-check", "web-ui-check", "web-ui-baseline-candidates",
+           "complexity-check", "coverage-check"}
 assert old.keys() == new.keys()
 for job in old:
     if job not in changed:
@@ -109,10 +110,11 @@ if os.environ.get('OLD_CLI'):
                       'substituters-extra = https://unknown.invalid/private-marker'])
         print('\\n'.join(lines))
         sys.exit(0)
-if sys.argv[1] == 'build':
+if sys.argv[1] in ('build', 'run'):
     with open(os.environ['ARGV_RECORD'], 'w') as record:
         json.dump(sys.argv[1:], record)
-    sys.exit(int(os.environ.get('BUILD_EXIT', '0')))
+    variable = 'BUILD_EXIT' if sys.argv[1] == 'build' else 'RUN_EXIT'
+    sys.exit(int(os.environ.get(variable, '0')))
 if os.environ.get('BAD_EFFECTIVE') and '--option' in sys.argv:
     print('https://unknown.invalid/private-marker')
     sys.exit(0)
@@ -188,6 +190,25 @@ cores = 4
             effective = subprocess.check_output(
                 [real_nix, *POLICY, "config", "show", setting], env=env)
             assert effective == expected, (job, setting)
+    for job, installable in (("complexity-check", ".#code-metrics.complexity-report"),
+                             ("coverage-check", ".#coverage.coverage-report")):
+        script = new[job]["script"]
+        assert len(script) == 1, job
+        result = subprocess.run(["sh", "-euc", script[0]], cwd=ROOT,
+                                env=env, capture_output=True, text=True)
+        assert result.returncode == 0, job
+        recorded = json.loads((directory / "argv").read_text())
+        assert recorded == ["run", installable, *LOCAL_EXECUTION], job
+        assert "private-marker" not in result.stdout + result.stderr
+        for setting in inherited_controls:
+            effective = subprocess.check_output(
+                [real_nix, *LOCAL_EXECUTION, "config", "show", setting], env=env)
+            expected = {"builders": b"\n", "max-jobs": b"1\n", "cores": b"2\n"}.get(
+                setting, inherited_controls[setting])
+            assert effective == expected, (job, setting)
+        failed = subprocess.run(["sh", "-euc", script[0]], cwd=ROOT,
+                                env=dict(env, RUN_EXIT="17"), capture_output=True, text=True)
+        assert failed.returncode == 17, job
     configured = run(["--check-config"])
     assert configured.returncode == 0
     for setting in ("require-sigs=true", "fallback=true"):
