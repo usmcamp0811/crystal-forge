@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai-agent
 created_date: '2026-10-15 00:39'
-updated_date: '2026-10-15 00:43'
+updated_date: '2026-10-15 01:00'
 labels: []
 dependencies: []
 references:
@@ -43,10 +43,14 @@ User explicitly authorized strict remediation after TASK-470's newly unblocked r
 4. Validate focused regressions and offline/native/WASM compilation through pinned Nix toolchain with two Cargo jobs. Rerun complete strict analysis only after fatal blockers are resolved; record full inventory and any newly reached targets.
 5. Create responsibility-based remediation batches for server compliance/POAM/evaluation snapshots/builders, UI tabs/state/DTOs, config/protocol/agent and tests. No arbitrary chunk splitting or abstractions solely to hide metrics. Keep physical-line and six selected lint clauses unchanged; application code remains inventoried.
 6. Run strict analysis, coverage and complete required exact-head CI before declaring parent MR331 ready. Do not merge, deploy, change production credentials/data, or overwrite other agents' work. Do not integrate this child work into TASK-470 until verified and explicitly recorded.
+
+Current bounded pass owns only the ten target-specific polling loops in packages/web-ui/src/views/evaluations.rs and system_detail.rs. Put the wasm32 cfg on each whole loop and retain native no-op captures outside the loop. Preserve browser loop bodies, delays, bounds and hook order. Verify native Clippy and wasm32 compilation with bounded Cargo jobs through the pinned Nix environment. This pass does not complete repository-wide strict remediation.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 Dedicated worktree created and verified clean at 5ebfa8876e797e4aac1097a3263ecb2e51cdd965. User selected Authorize strict remediation. Scope can take substantially longer than the parent integration repair; no readiness claim. Parent metrics artifacts /tmp/opencode/task470-complexity-repaired remain the partial inventory source, not a passing report.
+
+Resumed existing TASK-487 branch/worktree at 5ebfa887 with matching openai-agent task lock. No tracked changes in the task worktree or dev; dev has existing unrelated untracked lock/session files. No main worktree is registered. The referenced docs/agent/worktrees.md and verification.md paths are absent at this base; inspect available repository tooling instead. This is a target-compilation-only correction with unchanged browser behavior.
 <!-- SECTION:NOTES:END -->
