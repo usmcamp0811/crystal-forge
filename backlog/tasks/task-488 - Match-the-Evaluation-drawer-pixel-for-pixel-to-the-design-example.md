@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 01:53'
+updated_date: '2026-10-16 02:06'
 labels:
   - web-ui
   - design-parity
@@ -32,67 +32,46 @@ ordinal: 510000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-## Problem
-The production Evaluation drawer (`packages/web-ui/src/views/evaluations.rs`: `EvalDrawer`, `EvalDrawerLogTab*`, `EvalDrawerPolicyTab`, `EvalDrawerGraphTab`) has not been compared element by element against the design drawer. Earlier parity work (TASK-345.1, TASK-394, TASK-284) was judged by eye against older snapshots. The existing parity harness (`checks/web-ui/design-parity`) captures only the page-level `/evaluations` route and uses an advisory RMSE score. It never opens the drawer.
+## Goal and approved scope expansion
+Bring the complete Evaluation drawer into functional and visual parity with the checked-in EvalDrawer design, using real evaluation data. The user's detailed specification supersedes this task's original presentation-only restriction and its exclusion of the bundle matrix. Backend API and additive persistence work are now in scope. Do not modify the design to hide gaps or manufacture production results.
 
-## Goal
-With the same viewport, theme, and fixture data, each drawer state in production renders identically to the design example: same geometry, spacing, typography, colors, icons, borders, and state styling. "Identical" is measured by a repeatable element-level and pixel-level comparison, not by eye. Any residual difference must be one that real production data causes or one the design cannot express, and each such difference is written down with its reason.
+## Reference and control semantics
+Reference: docs/design/CrystalForge/components/EvalDrawer.jsx and styles.css. The user describes two screenshots but no attachments are available in this conversation; request them for final exact-target comparison. The source reference defines a control as a distinct evaluated policy identity in the deduplicated union of applicable bundle policy memberships. Use exact policy-version identity, not display labels. Framework requirement satisfaction is a different model: a policy can map to multiple requirements and a requirement can need multiple policies. Do not claim requirement compliance merely from a policy count.
 
-## Scope (design source `docs/design/CrystalForge/components/EvalDrawer.jsx`, 804 lines, plus matching rules in `docs/design/CrystalForge/styles.css`)
-- Drawer shell and header (`EvalDrawer`, lines 3-107): backdrop, width, header, status chip, tab bar, close and cancel actions, live state.
-- Log tab (`EvalLogTab`, lines 108-146), including live and finished states.
-- Policy tab (`EvalPolicyTab`, lines 163-588) except the bundle-grouped matrix: top issues, host health, fail and warn cards, expanded config attribute detail, "View policy definition" link.
-- Graph tab (`EvalGraphTab`, lines 589-657).
-- Force-cancel confirmation (`ConfirmForceCancel`, lines 658-684).
-- Empty, loading, and error states of each tab, desktop light, desktop dark, and a narrow dark viewport.
+## Required behavior
+Implement Bundle/Control column modes, dense defaults, bundle rollups and drilldown, total unique and shared-control metadata, per-system passing/applicable health, consistent bars and unknown/incomplete coverage, descriptive exact-version bundle metadata, distinct row/cell actions, state-preserving filters/sort/mode transitions, large-set horizontal scrolling and sticky identity/header cells. Preserve all existing working actions, loading/error states, report-only semantics, cancellation and retry behavior. Unknown, stale and missing outcomes must never become pass or not-assigned solely because a result is absent.
 
-## Non-Goals
-- Policy-matrix bundle grouping, bundle provenance persistence, or any API or migration change (owned by TASK-466, in progress, uncommitted in its own worktree). The visual parity of the bundle matrix is rechecked after TASK-466 merges.
-- Dependency-graph build counts and scaling (owned by TASK-441).
-- Evaluator, scheduling, deployment-gating, scanning, or CVE behavior.
-- Redesigning the design example. The design is the reference and is not edited.
-- Changing behavior, data flow, or routes to make a screenshot match. Presentational changes only, unless a difference cannot be fixed without one (then file a follow-up task).
+## Backend correctness
+The current flat matrix DTO and mutable derivation results cannot prove historical bundle membership. Capture the actual resolved evaluation plan before evaluator execution, without resolving current catalog state again later. Preserve exact represented attempt, planned system/configuration identity, eligible policy versions, bundle versions and assignment-version provenance, and explicit empty/conflict/unavailable resolution states. Separate applicability from outcome availability. Keep shared-configuration evaluator deduplication and per-system provenance. Read capture and outcomes consistently, validate outcome attempt markers, and retain planned systems with partial or absent results. Existing evaluations without capture remain explicitly legacy/unavailable; never reconstruct historical assignments from today's catalog.
 
-## Architectural Constraints
-- Only `packages/web-ui` view, component, and CSS files change, plus `checks/web-ui` manifests, tests, and baselines.
-- Shared styles go in `packages/web-ui/assets/app.css`. Port the design rules instead of inventing a parallel visual system.
-- Keep rendering code focused on presentation and event wiring. Do not move domain decisions into view markup.
-- Browser/WASM-compatible code only.
-- An intentional visual change that breaks a browser assertion or baseline updates it in the same MR.
+## Architecture and coordination
+Server owns persistence, authorization and evaluation policy semantics; UI uses typed DTOs and pure aggregation/state helpers outside markup. Preserve current authentication, security, evaluator scheduling, deployment gating, scanning and cache behavior. Add new migrations only; current task base's highest migration is 0302, so recheck before selecting a next version. SQLx metadata must match any checked query changes. TASK-466 has overlapping unfinished work and a conflicting 0269 migration in a separate worktree. Inspect it read-only as a reference; do not overwrite that worktree or blindly copy old backend/UI files. TASK-441 owns dependency-graph domain corrections; do not change graph domain semantics to imitate arbitrary reference fanout.
 
-## Method
-1. Serve the design with `docs/design/CrystalForge/serve.sh` using the shared golden fixture. Run production with the task preview and mock execution. Seed production so the same evaluation, systems, policies, and log lines appear as in the fixture.
-2. For each drawer state, capture both apps at the same viewport and device scale factor.
-3. Compare computed styles and bounding boxes per matched element, then compare pixels of the drawer region. Record the result per state.
-4. Fix each difference at its source. Re-run until the report shows no unexplained difference.
+## Verification
+Keep TASK-488's isolated preview and its fixture data available. Backend work must restart the task backend before browser checks. Use pure aggregation/status/state tests, migration-backed snapshot/attempt/history/authorization tests in an isolated disposable test database, UI tests and WASM check, focused authoritative browser interactions and matched-viewport design/production captures. Fixtures demonstrate behavior but do not establish actual persisted bundle provenance. Do not report completion from successful rendering or existing unit tests alone.
 
-## Verification Plan
-- Extend `checks/web-ui/design-parity/manifest.json` (or add a drawer-specific manifest) so that open-drawer states are captured for both design and production.
-- Add a focused browser workflow in `checks/web-ui` that opens the drawer in each tab and asserts the matched element geometry and key computed styles.
-- Run focused checks first: `cargo fmt --check`, `cargo test` and `cargo check --target wasm32-unknown-unknown` in `packages/web-ui` through `nix develop`, then the focused browser workflow. The full `web-ui` suite and `nix flake check` are not needed to preview an edit.
-- Final: the authoritative `web-ui` check (or exact-head CI where the task permits it), plus MR screenshots (design beside production) for every state.
-
-## Impact Areas
-`packages/web-ui/src/views/evaluations.rs`, `packages/web-ui/src/components/eval_log_modal.rs`, `packages/web-ui/assets/app.css`, `checks/web-ui/design-parity/*`, `checks/web-ui/tests/*`, `checks/web-ui/coverage-manifest.json`.
-
-## Risk
-Medium. Presentational only, but the drawer file is about 3,200 lines and TASK-466 and TASK-441 edit the same file and `app.css`. Expect rebase conflicts. Baselines for existing browser steps may need updates. `ImageMagick` is required by the existing harness and is not on the default shell PATH, so run it inside `nix develop`.
-
-## Dependencies
-None blocking. Related and potentially conflicting: TASK-466 (policy-matrix data and CSS), TASK-441 (dependency graph tab), TASK-447 (bundle-scaled policy results), TASK-386 (all-views drift audit, surface 7).
+## Risk and non-goals
+High risk due to evaluation-time persistence and overlapping WIP. No blanket refactor, fabricated bundle membership, requirement-satisfaction redesign, weakened security/checks, edits to applied migrations, shared database access, production deployment, or automatic merge.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A repeatable comparison captures the design drawer and the production drawer at the same viewport, device scale factor, theme, and fixture data for: header and shell, Log (live and finished), Policy (excluding the bundle matrix), Graph, force-cancel confirmation, and each empty, loading, and error state
-- [ ] #2 The comparison records, per state, matched-element bounding boxes and key computed styles (font, size, weight, color, spacing, border, radius) and a pixel comparison of the drawer region
-- [ ] #3 Desktop dark, desktop light, and a narrow dark viewport have no unexplained difference in any in-scope state
-- [ ] #4 Every remaining difference is listed in the task notes with its cause (real production data or a design limitation) and an owner or follow-up task
-- [ ] #5 Styles come from ported design rules in assets/app.css, with no parallel visual system and no inline duplicates
-- [ ] #6 No API, migration, scheduling, or behavior change is introduced; non-presentational gaps are filed as follow-up tasks
-- [ ] #7 A focused browser workflow asserts the matched geometry and key computed styles of each in-scope state and passes in the authoritative web-ui check
-- [ ] #8 Formatting, web-ui unit tests, the WASM check, and git diff --check pass
-- [ ] #9 MR shows design and production screenshots side by side for every in-scope state
+- [ ] #1 Bundle and Control modes both exist and render columns derived from authoritative evaluation-time identities and memberships
+- [ ] #2 Bundle cells show passing/applicable counts with distinct failure warning and unavailable states and drill down to constituent control results
+- [ ] #3 Total unique controls and controls shared by multiple real bundles are computed from exact identities without counting synthetic groups as real bundle overlap
+- [ ] #4 System health counts each applicable control once regardless of overlap; pass counts and bar denominator agree; unknown unassigned and missing results never count as pass
+- [ ] #5 Exact bundle and policy version names and framework metadata come from captured evaluation data rather than names hardcoded from the design
+- [ ] #6 Filters counts worst-first and name sorting survive column-mode transitions; row expansion and bundle-cell drilldown have distinct actions
+- [ ] #7 Dense matrices default to readable bundle columns and support Controls horizontal scrolling with sticky system identification and matrix headers
+- [ ] #8 Planned systems remain visible during partial evaluation; missing results and incomplete applicability are explicitly unavailable rather than falsely clean
+- [ ] #9 Historical catalog or assignment edits cannot change an evaluation's captured memberships; retry reads cannot combine provenance and outcomes from different attempts
+- [ ] #10 Successful empty assignments no-applicable-control bundles legacy unavailable metadata and resolution conflicts are represented truthfully
+- [ ] #11 Drawer header metrics actions top issues filters summaries legend spacing and typography match the design without losing existing actions
+- [ ] #12 Backend tests cover capture atomicity attempt ownership stale results overlap history immutability partial rows authorization and legacy behavior
+- [ ] #13 Pure frontend tests cover aggregation denominator overlap statuses filters sorting focus and mode transitions
+- [ ] #14 Authoritative browser workflows cover bundle/control modes bundle and row drilldown large fixtures loading errors partial results and preserved actions
+- [ ] #15 Matched-viewport design/production comparison includes dark light and narrow states and explicitly reports remaining differences
+- [ ] #16 Changed-file formatting UI unit tests WASM backend checks applicable SQLx metadata and git diff checks pass; unrelated baseline failures are reported
 <!-- AC:END -->
 
 ## Definition of Done
@@ -103,11 +82,12 @@ None blocking. Related and potentially conflicting: TASK-466 (policy-matrix data
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Reuse and verify the task-owned devenv preview; verify fixture login and an actual Evaluation detail drawer before edits.
-2. Capture the unchanged React reference and production drawer with browser-local matched evaluation identities. Record bounding boxes, computed styles, and paired screenshots without masking differences.
-3. Correct presentation in small batches: shell/header/log metrics first, then populated logs, policy details and graph presentation. Keep TASK-466 bundle matrix work untouched.
-4. Extend comparison coverage to lifecycle/loading/error states and authoritative browser integration. Do not label typography-only assertions as pixel parity.
-5. Run changed-file formatting, UI unit tests, WASM check and focused browser checks. Retain precise gaps and leave the live preview running. No commit, push or MR without user authorization.
+1. Audit current resolver/evaluator persistence, matrix API, drawer, source design and TASK-466 WIP read-only. Record control identity and historical/partial-result limitations.
+2. Define and test pure, explicit aggregation semantics and additive DTO contract: unique policy-version controls, per-system applicability and outcome states, bundle memberships, attempt/provenance availability. Do not infer bundle memberships from legacy labels.
+3. Implement new attempt-scoped capture persistence with additive migration and exact resolver provenance; capture before execution under existing attempt/cancellation guards. Preserve resolver merge and evaluator semantics.
+4. Implement consistent snapshot reads and API projection, preserving existing fields and truthful legacy/partial rows. Add isolated DB regressions and exact runner membership.
+5. Wire typed pure model and state transitions into bundle/control drawer components; port source design CSS and preserve all actions. Keep preview current after each coherent batch.
+6. Verify full scenarios and browser interactions using real persisted data; compare same-viewport design and implementation, record every discrepancy and required screenshot gap. Do not commit/push/open MR without authorization.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -146,4 +126,6 @@ First two seed transactions rolled back on the actual live schema's unique idx_c
 Verification exit0: /tmp/opencode/task488/verify-eval-preview.cjs uses real API and browser, not intercepted responses. Confirmed mock execution mode, 5 active, 30 history entries, real logs, 4 policy columns with pass/warn/fail results, and 9 infrastructure graph rows with cached/pending counts. Browser opened active drawer Log/Policy matrix/Dependency graph and Completed history. Separate assertion confirmed failed infrastructure results include nix_eval_failure. Captures: /tmp/opencode/task488/mock-active-queue.png, mock-drawer-log.png, mock-drawer-policy.png, mock-drawer-graph.png, mock-history.png. Inspected queue/history screenshots.
 
 Opening history during verification acknowledged the fixture badge. Removed exactly 10 test-created dismissals for review user c4579ef5-8bc1-4612-a8f9-356cd56281f0 and attention occurrences linked to TASK-488 fixture commits; unrelated dismissals are untouched. Final real API/browser verification exit0 confirms sidebar eval badge10, queue5, history30. Ready screenshot /tmp/opencode/task488/mock-preview-ready.png. Review through forwarded http://localhost:8080/evaluations. UI remains bound 0.0.0.0:8080. Limitations: static presentation snapshots, not a running evaluator/integration proof; fixture policy names do not establish published compliance bundle identities; graph uses current API's system-level closure model, not the design's arbitrary package fanout. Existing no-cache configuration banner remains visible rather than hidden.
+
+User explicitly expanded TASK-488 to full bundle/control functional parity, including backend changes; the former presentation-only and bundle-matrix exclusions no longer apply. TASK-466 worktree remains untouched and locked to its existing record. Backend and frontend research completed read-only: current API lacks stable structured identities, historical bundle capture and separate applicability; current health bar denominator differs from displayed ratio. TASK-466 architecture is useful but skips captured rows without derivations, does not validate outcome attempt markers, reads independently, and mislabels applicable missing outcomes as not_assigned. Do not carry those defects forward. Source design defines controls as deduplicated policy identities, not normalized framework requirements. Two requested screenshots are not attached; final screenshot-specific parity cannot yet be verified.
 <!-- SECTION:NOTES:END -->
