@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 21:01'
+updated_date: '2026-10-16 21:35'
 labels:
   - web-ui
   - design-parity
@@ -261,4 +261,6 @@ Static verification passed: Nix devenv changed14Rust-file rustfmt --edition2024 
 Added but NOT executed tests: views::compliance::evaluation_evidence::tests::{exact_evidence_accepts_unknown_outcomes_without_inventing_results,exact_evidence_rejects_each_mismatched_identity_and_membership}; views::evaluations::policy_adapter::tests::{trim_requires_explicit_greenfield_and_retains_all_greenfield_fallback,indexed_bundle_aggregation_preserves_overlapping_exact_contributions}; views::evaluations::policy_matrix::render_budget_tests::dense_reference_fits_and_large_controls_bound_rendered_cells. Existing registered matrix workflow now covers collapse,503 recovery, explicit multi-bundle evidence, mock label, retry-during-receiver pinned return, System unavailable return, missing contribution rejection and60x256 DOM/page coverage. No new manifest entry needed.
 
 Parent gaps: native tests, WASM/type compilation, browser workflow, actual DOM/performance measurements and screenshots were not run by instruction. Three new modules remain untracked for owner staging. Preview: blocked for this patch runtime verification pending parent rebuild; parent-owned http://localhost:8080/evaluations / API3445 unchanged. Session health, backend freshness and current data mode not reverified here. TASK-488 stays In Progress; no review/completion claim.
+
+Resumed MR334 review verification in the existing TASK-488 branch/worktree/lock. Latest full UI unit log review-ui-unit-tests.log reports 720 passed, 0 failed, 1 ignored. Backend review preview build completed successfully. Verified live process cwd/executable ownership and SQL SHOW data_directory against TASK-488 .devenv/state/postgres before restarting only task API. Replacement API PID619 serves healthy /status from current target/debug/server; migration0305 applied successfully alongside unchanged0303/0304. Preserved preview data; reran guarded task-only imported-dotfiles freeze. Frontend release rebuild running in retained ownership arrangement tmux task488-frontend; do not treat HTTP200 during rebuild as fresh UI evidence. Next: direct registered workflow, real persisted navigation roundtrips, larger-matrix timing and DOM bounds, documentation/check review. Authoritative web-ui VM runs remain CI-only. No commit/push/merge/deploy in this resumed segment.
 <!-- SECTION:NOTES:END -->
