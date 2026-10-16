@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 06:02'
+updated_date: '2026-10-16 14:06'
 labels:
   - web-ui
   - design-parity
@@ -98,6 +98,8 @@ Focused header delegation: limit writes to evaluations.rs and optional new evalu
 Focused live-matrix correctness delegation: only evaluations.rs and coordinated eval-policy-matrix-workflow.js. Key both PolicyTab callsites by commit, react to commit/live props, use component-owned browser five-second polling with cancellation on completion/unmount and retained displayed response during refresh, and key captured presentation state by attempt. Add browser-local matching-attempt unknown-to-pass polling assertions with 12-second assertion bounds and preserved filter/sort/health. Parent owns preview/build/runtime verification; no service/build/DB/commit operations.
 
 Follow-up lifecycle synchronization limited to evaluations.rs and optional pure drawer snapshot helper: subscribe to selected target plus existing queue/history signals; refresh only exact commit identity with nondecreasing attempt number; prefer terminal same-attempt history for authoritative completion fields, otherwise retain terminal queue evidence; allow newer retries to return History->Queue and preserve selection on absent/older candidates. Compare PartialEq before setting. Add identity/isolation/retry/completion/old-attempt/missing unit cases. No extra requests/builds/services/DB/commits; parent retains header/CSS ownership.
+
+Mock persistence continuation (user-approved bounded ownership): modify only mock evaluation code, its server invocation, and a small private mock_persistence module/tests. Pass the owner-supplied expected attempt; lock the commit row and validate attempt/status/cancellation before writing mock derivation outcomes through record_successful_eval_result_in_tx. Persist evaluation_attempt, explicit mock metadata and UUID-keyed [MOCK] details from mock_policy_check. Do not call general persist_evaluated_system or publish config observations/composite assessments/build work. Add ignored migration-backed SQLx regressions for outcomes and cancellation/supersession side-effect isolation. Run only targeted Nix native verification with CARGO_BUILD_JOBS=2 SQLX_OFFLINE=true CARGO_PROFILE_TEST_DEBUG=0; parent owns fixture creation, preview restart and CI browser checks.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
