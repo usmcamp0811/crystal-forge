@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 01:37'
+updated_date: '2026-10-16 01:53'
 labels:
   - web-ui
   - design-parity
@@ -136,4 +136,14 @@ Preview remains available at http://127.0.0.1:8080/evaluations. Task-owned front
 User requested 0.0.0.0:8080. Applied runtime-only devenv process overrides: original web exec with --addr changed to 0.0.0.0; API exec allows exact CORS origin http://10.8.0.177:8080. No repository config or firewall changes. Restarting a single process did not reload its exec override. Restarted only this task's stack; one restart timed out, then verified task-owned manager cwd and stopped it gracefully before evaluating ports with listeners free. Final startup succeeded; frontend PID10773 listens 0.0.0.0:8080 and LAN-address GET returns 200. Existing task database preserved. Runtime-only overrides must be retained when restarting the stack; normal default startup reverts to loopback.
 
 Network preview URL: http://10.8.0.177:8080/evaluations (host sledge). Exact-origin CORS preflight succeeds. Browser login over LAN HTTP remains blocked: login returns HTTP200 with a Secure Set-Cookie, but Chromium stores no cookie on non-loopback plain HTTP. No cookie security was weakened. Need HTTPS for direct network login, or SSH-forward UI8080 and API3445 and browse localhost. Loopback browser preview remains the supported authenticated review path.
+
+User requested persistent mock data for reviewing the evaluation view/sidebar. Verified PostgreSQL through SQL as mcamp: database crystal_forge, port5432, data_directory /home/mcamp/code/crystal-forge/TASK-488-eval-drawer-pixel-parity/.devenv/state/postgres. Seeded only that cluster, in one guarded transaction, using /tmp/opencode/task488/seed-eval-preview.sql. No application or migration source changed for this request.
+
+The built-in seeder does not import evaluation scenarios; its dotfiles registry seed had 500 imported commits being consumed continuously by mock execution. The overlay preserves all 500 original commit JSON rows/archive flags in task488_preview_archive_backup, archives them from the active queue, and retires the one imported in-progress mock row. No imported commit was deleted. Existing golden infrastructure/web-services/edge-gateway/build-farm/lab-nodes flakes were reused. Added 35 clearly labelled TASK-488 preview fixtures: 1 in_progress, 4 pending, 15 complete, 10 failed, 5 cancelled; 310 NixOS policy/closure snapshots without executable derivation/store paths; 560 [MOCK PREVIEW] log lines; branch snapshots and 10 failed-evaluation attention occurrences.
+
+First two seed transactions rolled back on the actual live schema's unique idx_commits_single_in_progress index. Contrary to an earlier exploration inference, its predicate includes BOTH in_progress and cancelling. The successful overlay respects the constraint and shows one running plus four pending. No schema/index was weakened. Queued attempts have available_at seven days ahead, so the mock worker does not consume review fixtures. Use Cancel on the running row to exercise cancelling. Backend startup recovery changes active states, so reapply the guarded overlay after a backend restart.
+
+Verification exit0: /tmp/opencode/task488/verify-eval-preview.cjs uses real API and browser, not intercepted responses. Confirmed mock execution mode, 5 active, 30 history entries, real logs, 4 policy columns with pass/warn/fail results, and 9 infrastructure graph rows with cached/pending counts. Browser opened active drawer Log/Policy matrix/Dependency graph and Completed history. Separate assertion confirmed failed infrastructure results include nix_eval_failure. Captures: /tmp/opencode/task488/mock-active-queue.png, mock-drawer-log.png, mock-drawer-policy.png, mock-drawer-graph.png, mock-history.png. Inspected queue/history screenshots.
+
+Opening history during verification acknowledged the fixture badge. Removed exactly 10 test-created dismissals for review user c4579ef5-8bc1-4612-a8f9-356cd56281f0 and attention occurrences linked to TASK-488 fixture commits; unrelated dismissals are untouched. Final real API/browser verification exit0 confirms sidebar eval badge10, queue5, history30. Ready screenshot /tmp/opencode/task488/mock-preview-ready.png. Review through forwarded http://localhost:8080/evaluations. UI remains bound 0.0.0.0:8080. Limitations: static presentation snapshots, not a running evaluator/integration proof; fixture policy names do not establish published compliance bundle identities; graph uses current API's system-level closure model, not the design's arbitrary package fanout. Existing no-cache configuration banner remains visible rather than hidden.
 <!-- SECTION:NOTES:END -->
