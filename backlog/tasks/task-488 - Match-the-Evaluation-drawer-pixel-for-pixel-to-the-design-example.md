@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 05:38'
+updated_date: '2026-10-16 05:54'
 labels:
   - web-ui
   - design-parity
@@ -94,6 +94,8 @@ Backend delegated implementation: retain the existing task lock/worktree and run
 Check-wiring delegation: in the existing locked TASK-488 worktree, register self-contained 26e-evaluation-policy-bundle-controls with browser-local queue/log fixtures and the existing structured matrix workflow; capture intermediate states and clean drawer/routes. Add the four new ignored capture regressions to the exact-name guarded server runner and document verified membership counts. Limit writes to the six user-owned check files; run only cheap syntax/static consistency checks. Parent owns preview, backend/frontend implementation and VM verification.
 
 Focused header delegation: limit writes to evaluations.rs and optional new evaluations/drawer_header.rs. Reuse parent-owned preview. Add shared expand/restore state, confirmation before existing force-cancel handler, and truthful completed/queued UTC DTG timestamps using escaped RSX. Preserve action ownership and parent policy work. No builds, service operations, database operations or commits; parent owns CSS and runtime verification.
+
+Focused live-matrix correctness delegation: only evaluations.rs and coordinated eval-policy-matrix-workflow.js. Key both PolicyTab callsites by commit, react to commit/live props, use component-owned browser five-second polling with cancellation on completion/unmount and retained displayed response during refresh, and key captured presentation state by attempt. Add browser-local matching-attempt unknown-to-pass polling assertions with 12-second assertion bounds and preserved filter/sort/health. Parent owns preview/build/runtime verification; no service/build/DB/commit operations.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
