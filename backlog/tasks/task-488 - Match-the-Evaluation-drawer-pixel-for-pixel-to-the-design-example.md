@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 00:28'
+updated_date: '2026-10-16 00:39'
 labels:
   - web-ui
   - design-parity
@@ -108,4 +108,8 @@ LOCK: opencode-claude on sledge in /home/mcamp/code/crystal-forge/TASK-488-eval-
 Preflight: branch TASK-488-eval-drawer-pixel-parity was created from the fetched origin/dev at 33de73b013b735304dfac9c69745a074a3e76ebd (merge of TASK-470). Local dev was not used as the base because it is 544 backlog-only commits ahead and 10 behind origin/dev. The new worktree is clean, 0 ahead and 0 behind origin/dev, and its upstream was unset so a bare push cannot target dev. The dev integration worktree is clean except for the owner-preserved untracked TASK-478.lock and session-ses_f927.md. No main worktree is registered. Task selected by the user on 2026-10-16 ("do what needs to be done to get to work on doing a focused pixel for pixel exact matching of the design eval drawer"); this was treated as moving the task to To Do and starting it.
 
 Coordination: TASK-466 (policy-matrix data and CSS) has 17 uncommitted files in /home/mcamp/code/crystal-forge/TASK-466-eval-policy-matrix-bundles, including packages/web-ui/src/views/evaluations.rs and assets/app.css, and a migration numbered 0269 that now collides with origin/dev's 0269_scanning_lifecycle_archive.sql. This task does not touch that worktree. Expect rebase conflicts in evaluations.rs and app.css when TASK-466 lands.
+
+Preview started on 2026-10-16 from /home/mcamp/code/crystal-forge/TASK-488-eval-drawer-pixel-parity with `nix develop .#devenv --command devenv up -d` (log /tmp/opencode/task488/devenv-up.log). `devenv processes list` reports api, postgres, and web as ready with 0 restarts. Process cwd values are inside this worktree: PostgreSQL 17 pid 31192 (data directory .devenv/state/postgres, 127.0.0.1:5432), cf-server-core pid 31379 (0.0.0.0:3445), dx 0.7.3 pid 31569 (127.0.0.1:8080). Browser URL http://127.0.0.1:8080/. GET / returned 200 on :8080 and GET /status returned 200 on :3445. The API seeded the design golden fixture (35 systems, 48 CVEs, 5 builders, 175 system events) with mock execution mode. Local fixture login is the devenv bootstrap admin from devenv.nix (a development fixture credential, not a real one).
+
+Known gaps at preview start: (1) the API listener binds 0.0.0.0:3445 although the generated config says server.host 127.0.0.1; this was observed and not changed, and no firewall change was made. (2) The seed log says build_jobs and hardening seeding were skipped (needs derivations FK), so the evaluation queue, history, log, policy, and graph data for the drawer may not match the design fixture. This must be checked before any pixel comparison. (3) Login, the /evaluations route, and an open drawer have not yet been verified in a browser. (4) ImageMagick (identify, compare) is not on the default PATH; the parity harness needs it inside nix develop.
 <!-- SECTION:NOTES:END -->
