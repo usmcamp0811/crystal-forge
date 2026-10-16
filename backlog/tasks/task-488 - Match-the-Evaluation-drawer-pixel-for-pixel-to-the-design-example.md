@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 00:39'
+updated_date: '2026-10-16 01:02'
 labels:
   - web-ui
   - design-parity
@@ -100,6 +100,16 @@ None blocking. Related and potentially conflicting: TASK-466 (policy-matrix data
 - [ ] #1 Preview URL, review path, backend freshness, and data mode reported at handoff
 <!-- DOD:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Reuse and verify the task-owned devenv preview; verify fixture login and an actual Evaluation detail drawer before edits.
+2. Capture the unchanged React reference and production drawer with browser-local matched evaluation identities. Record bounding boxes, computed styles, and paired screenshots without masking differences.
+3. Correct presentation in small batches: shell/header/log metrics first, then populated logs, policy details and graph presentation. Keep TASK-466 bundle matrix work untouched.
+4. Extend comparison coverage to lifecycle/loading/error states and authoritative browser integration. Do not label typography-only assertions as pixel parity.
+5. Run changed-file formatting, UI unit tests, WASM check and focused browser checks. Retain precise gaps and leave the live preview running. No commit, push or MR without user authorization.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
@@ -112,4 +122,14 @@ Coordination: TASK-466 (policy-matrix data and CSS) has 17 uncommitted files in 
 Preview started on 2026-10-16 from /home/mcamp/code/crystal-forge/TASK-488-eval-drawer-pixel-parity with `nix develop .#devenv --command devenv up -d` (log /tmp/opencode/task488/devenv-up.log). `devenv processes list` reports api, postgres, and web as ready with 0 restarts. Process cwd values are inside this worktree: PostgreSQL 17 pid 31192 (data directory .devenv/state/postgres, 127.0.0.1:5432), cf-server-core pid 31379 (0.0.0.0:3445), dx 0.7.3 pid 31569 (127.0.0.1:8080). Browser URL http://127.0.0.1:8080/. GET / returned 200 on :8080 and GET /status returned 200 on :3445. The API seeded the design golden fixture (35 systems, 48 CVEs, 5 builders, 175 system events) with mock execution mode. Local fixture login is the devenv bootstrap admin from devenv.nix (a development fixture credential, not a real one).
 
 Known gaps at preview start: (1) the API listener binds 0.0.0.0:3445 although the generated config says server.host 127.0.0.1; this was observed and not changed, and no firewall change was made. (2) The seed log says build_jobs and hardening seeding were skipped (needs derivations FK), so the evaluation queue, history, log, policy, and graph data for the drawer may not match the design fixture. This must be checked before any pixel comparison. (3) Login, the /evaluations route, and an open drawer have not yet been verified in a browser. (4) ImageMagick (identify, compare) is not on the default PATH; the parity harness needs it inside nix develop.
+
+First implementation batch: added drawer-scoped header typography/spacing, 11px monospace identity metadata, design evaluation glyph, design 12.5px timestamp typography, native tab font metrics and 11px/1.55 log metrics. Existing cancellation, retry, polling and policy state logic is unchanged. Only evaluations.rs, icon.rs, app.css plus the new capture-eval-drawer-shell.cjs and eval-drawer.md are changed. No commit or push.
+
+Browser baseline verified local fixture login HTTP 200 and real Completed evaluation drawer. Reference is the repository app's Nix-built offline design at /nix/store/97akjbrnqsvrmg868cf6m1z61x6bvk5i-cf-design-example-offline. New comparison mounts the unchanged reference component with matched queue identity and intercepts only production queue/log responses in an isolated browser context. It closes Coach using its real accessible button when present; asynchronous saved preference can remove Coach, so the normal interaction is retried for that race. No force clicks or hidden screenshot differences.
+
+Focused browser command: NODE_PATH=/nix/store/fg778x0631ld4xd8fim2kbvxll5715xp-playwright-test-1.59.1/lib/node_modules PLAYWRIGHT_BROWSERS_PATH=/nix/store/f0rap655j6wmqbfvqdw445kwcxkxwf7n-playwright-browsers /nix/store/l07gdbxylzfl8pbx9pxy6fyg95w4hjwy-nodejs-24.19.0/bin/node checks/web-ui/design-parity/capture-eval-drawer-shell.cjs /nix/store/97akjbrnqsvrmg868cf6m1z61x6bvk5i-cf-design-example-offline /tmp/opencode/task488/shell-first-pass. Actual exit 0: desktop dark, desktop light, 720px dark all pass selected typography, metadata color and header/tab height assertions. Paired screenshots and JSON measurements are saved there. This does NOT verify full pixel parity or authoritative VM coverage.
+
+Verification: changed-file `rustfmt --edition 2024 --check .../icon.rs .../evaluations.rs` passed through nix develop. Initial cargo test --lib command was invalid because web-ui is a binary target; corrected `CARGO_BUILD_JOBS=2 cargo test --manifest-path packages/web-ui/Cargo.toml` passed 677 tests, 0 failed, 1 ignored. Subsequent `CARGO_BUILD_JOBS=2 cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed. Combined command actual exit 0; retained output /home/mcamp/.local/share/opencode/tool-output/tool_14237dab6001kYEX6qvhQErToO. Package-wide cargo fmt check fails on pre-existing caches.rs/cves.rs/poams.rs formatting; those files are untouched (existing TASK-371.1 tracks formatting drift). git diff --check passed.
+
+Preview remains available at http://127.0.0.1:8080/evaluations. Task-owned frontend was restarted using devenv processes restart web and the new glyph/styles were verified in browser. Backend and database were not restarted. Remaining visual differences include timestamps/DTG rendering, status wording, action availability and missing expand/confirmation controls, development chrome offsets, log toolbar metrics and empty-state differences. Policy/graph comparison, populated log fixtures, pixel-diff reporting and authoritative browser integration are still pending. TASK-488 remains In Progress.
 <!-- SECTION:NOTES:END -->
