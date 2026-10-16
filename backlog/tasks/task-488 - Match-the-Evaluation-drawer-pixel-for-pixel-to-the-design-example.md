@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 05:57'
+updated_date: '2026-10-16 05:59'
 labels:
   - web-ui
   - design-parity
@@ -96,6 +96,8 @@ Check-wiring delegation: in the existing locked TASK-488 worktree, register self
 Focused header delegation: limit writes to evaluations.rs and optional new evaluations/drawer_header.rs. Reuse parent-owned preview. Add shared expand/restore state, confirmation before existing force-cancel handler, and truthful completed/queued UTC DTG timestamps using escaped RSX. Preserve action ownership and parent policy work. No builds, service operations, database operations or commits; parent owns CSS and runtime verification.
 
 Focused live-matrix correctness delegation: only evaluations.rs and coordinated eval-policy-matrix-workflow.js. Key both PolicyTab callsites by commit, react to commit/live props, use component-owned browser five-second polling with cancellation on completion/unmount and retained displayed response during refresh, and key captured presentation state by attempt. Add browser-local matching-attempt unknown-to-pass polling assertions with 12-second assertion bounds and preserved filter/sort/health. Parent owns preview/build/runtime verification; no service/build/DB/commit operations.
+
+Follow-up lifecycle synchronization limited to evaluations.rs and optional pure drawer snapshot helper: subscribe to selected target plus existing queue/history signals; refresh only exact commit identity with nondecreasing attempt number; prefer terminal same-attempt history for authoritative completion fields, otherwise retain terminal queue evidence; allow newer retries to return History->Queue and preserve selection on absent/older candidates. Compare PartialEq before setting. Add identity/isolation/retry/completion/old-attempt/missing unit cases. No extra requests/builds/services/DB/commits; parent retains header/CSS ownership.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
