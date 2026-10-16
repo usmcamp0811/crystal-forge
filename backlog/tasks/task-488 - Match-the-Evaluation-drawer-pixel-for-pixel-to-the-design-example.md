@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 02:12'
+updated_date: '2026-10-16 03:41'
 labels:
   - web-ui
   - design-parity
@@ -90,6 +90,8 @@ High risk due to evaluation-time persistence and overlapping WIP. No blanket ref
 6. Verify full scenarios and browser interactions using real persisted data; compare same-viewport design and implementation, record every discrepancy and required screenshot gap. Do not commit/push/open MR without authorization.
 
 Backend delegated implementation: retain the existing task lock/worktree and running preview. Add 0303 JSONB first-write attempt capture; resolve and load eligible policies in a caller-owned repeatable-read transaction; retain per-system resolution and exact authoritative bundle/assignment version provenance before execution. Add typed additive matrix DTO and repeatable-read outcome projection with attempt-marker validation, pure status tests and disposable-DB regression tests. No frontend edits, service operations, builds, commits or pushes; owner coordinates verification and backend restart.
+
+Check-wiring delegation: in the existing locked TASK-488 worktree, register self-contained 26e-evaluation-policy-bundle-controls with browser-local queue/log fixtures and the existing structured matrix workflow; capture intermediate states and clean drawer/routes. Add the four new ignored capture regressions to the exact-name guarded server runner and document verified membership counts. Limit writes to the six user-owned check files; run only cheap syntax/static consistency checks. Parent owns preview, backend/frontend implementation and VM verification.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
