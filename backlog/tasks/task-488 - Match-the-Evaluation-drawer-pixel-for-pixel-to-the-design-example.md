@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 14:48'
+updated_date: '2026-10-16 14:49'
 labels:
   - web-ui
   - design-parity
@@ -102,6 +102,8 @@ Follow-up lifecycle synchronization limited to evaluations.rs and optional pure 
 Mock persistence continuation (user-approved bounded ownership): modify only mock evaluation code, its server invocation, and a small private mock_persistence module/tests. Pass the owner-supplied expected attempt; lock the commit row and validate attempt/status/cancellation before writing mock derivation outcomes through record_successful_eval_result_in_tx. Persist evaluation_attempt, explicit mock metadata and UUID-keyed [MOCK] details from mock_policy_check. Do not call general persist_evaluated_system or publish config observations/composite assessments/build work. Add ignored migration-backed SQLx regressions for outcomes and cancellation/supersession side-effect isolation. Run only targeted Nix native verification with CARGO_BUILD_JOBS=2 SQLX_OFFLINE=true CARGO_PROFILE_TEST_DEBUG=0; parent owns fixture creation, preview restart and CI browser checks.
 
 User-approved mock-data boundary: add an additive isolated mock-outcome table and mock-only writer/read path instead of recording executable derivations. No fake expected output paths, runnable derivations, observation work, or build enqueue. Preserve normal evaluator/build behavior. Generate real fixture policy versions, bundles and assignments through their public lifecycle APIs; run a new normal mock evaluation so the existing resolver captures its memberships. Existing flat fixture histories stay legacy/unavailable. Leave authoritative web-ui VM checks to CI per the user's instruction; use targeted native/SQLx and direct preview browser verification locally.
+
+User-approved replacement: isolate mock outcomes in additive migration0304 (verified0303 highest), keyed exact attempt UUID/config with commit+attempt ownership FK and immutable first-write policy JSON. Remove mock derivation writer and fake native artifacts. Read exact represented mock outcomes alongside real outcomes in matrix RR snapshot, reject dual-current ambiguity, retain flat agent compatibility. Add reusable mock-only counts view overriding queue/history counts only for mock lineage and current represented attempt (queued retry has zero old mock counts). Adapt existing two registered ignored SQLx tests and add projection/count regressions as needed; parent registers any new names. No preview DB/services/UI/scripts/commits/pushes; targeted Nix tests/check only.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
