@@ -1,9 +1,11 @@
 ---
 id: TASK-488
 title: Match the Evaluation drawer pixel-for-pixel to the design example
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - opencode-claude
 created_date: '2026-10-16 00:27'
+updated_date: '2026-10-16 00:28'
 labels:
   - web-ui
   - design-parity
@@ -97,3 +99,13 @@ None blocking. Related and potentially conflicting: TASK-466 (policy-matrix data
 <!-- DOD:BEGIN -->
 - [ ] #1 Preview URL, review path, backend freshness, and data mode reported at handoff
 <!-- DOD:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: opencode-claude on sledge in /home/mcamp/code/crystal-forge/TASK-488-eval-drawer-pixel-parity
+
+Preflight: branch TASK-488-eval-drawer-pixel-parity was created from the fetched origin/dev at 33de73b013b735304dfac9c69745a074a3e76ebd (merge of TASK-470). Local dev was not used as the base because it is 544 backlog-only commits ahead and 10 behind origin/dev. The new worktree is clean, 0 ahead and 0 behind origin/dev, and its upstream was unset so a bare push cannot target dev. The dev integration worktree is clean except for the owner-preserved untracked TASK-478.lock and session-ses_f927.md. No main worktree is registered. Task selected by the user on 2026-10-16 ("do what needs to be done to get to work on doing a focused pixel for pixel exact matching of the design eval drawer"); this was treated as moving the task to To Do and starting it.
+
+Coordination: TASK-466 (policy-matrix data and CSS) has 17 uncommitted files in /home/mcamp/code/crystal-forge/TASK-466-eval-policy-matrix-bundles, including packages/web-ui/src/views/evaluations.rs and assets/app.css, and a migration numbered 0269 that now collides with origin/dev's 0269_scanning_lifecycle_archive.sql. This task does not touch that worktree. Expect rebase conflicts in evaluations.rs and app.css when TASK-466 lands.
+<!-- SECTION:NOTES:END -->
