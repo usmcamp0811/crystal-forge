@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 20:40'
+updated_date: '2026-10-16 20:43'
 labels:
   - web-ui
   - design-parity
@@ -100,6 +100,8 @@ MR334 explicit review-fix continuation at 3bf1c002, existing task lock/worktree 
 MR334 delegated backend display/lifecycle continuation: retain existing lock/worktree. Add migration0305 dedicated operator classification with nullable greenfield, actor and timestamp; scoped CSRF-protected operator/admin PUT in a new systems child module with transactional current-environment authorization and atomic audit. Capture explicit classification and exact-version safe display metadata in existing loader RR transaction; no inference, executable config, control count or policy behavior changes. Preserve docs YAML frontmatter. Only static rustfmt/diff checks; parent owns builds and isolated SQLx execution. Pinned reader constructors require parent-coordinated default field additions.
 
 MR334 pinned-attempt backend delegation: retain existing task lock/worktree and auth/counter changes. Add optional UUID selection to the common read-only REPEATABLE READ reader, requiring commit ownership with no latest fallback. Project transient exact commit SHA and attempt lifecycle context without global errors or payload mutation; initialize capture context to None and reject projected captures. Add authenticated pinned route and migration-backed historical/mock/native/scope regressions. Adapt backend constructors for new display/context fields. Static Nix rustfmt/diff checks only; parent owns builds, services, database execution and preview.
+
+Frontend-only MR334 continuation under the existing parent lock/worktree: mirror pinned-attempt/context/display/count contracts; add shared typed evaluation handoff and in-memory return state; consume exact evaluation evidence inside Compliance and exact Config commit inside SystemDetail with return actions; preserve matrix presentation across request failures; show non-pass-first collapsible captured details and each contributing bundle; index adaptation/aggregation and bound matrix row DOM with global filtering. Writes restricted to packages/web-ui/src/** and focused matrix workflow. Parent owns preview services/builds/runtime verification; this delegation runs formatting and static checks only.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
