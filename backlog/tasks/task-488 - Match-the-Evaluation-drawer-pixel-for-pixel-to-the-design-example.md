@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 17:12'
+updated_date: '2026-10-16 19:10'
 labels:
   - web-ui
   - design-parity
@@ -94,6 +94,8 @@ High risk due to evaluation-time persistence and overlapping WIP. No blanket ref
 8. Continue matched-viewport visual review and explicitly record remaining differences; do not declare full design parity merely from passing tests. No commit, push, MR or merge without user authorization.
 
 Blocking regression follow-up (backend-only): stamp exact-attempt confirmed Nix failure evidence on the synthetic helper's returned derivation ID in the existing finalizer transaction; validate explicit failure flag/error for flat compatibility while leaving structured controls unknown and preserving irreversible build state. Limit writes to evaluate_with_policies.rs and queries/eval_policy_plans.rs. Add production-finalizer SQLx regressions for current failure, retry masking, preserved build state and cancellation. Parent runs native/SQLx verification; no builds, services, preview database, VM or commits in this continuation.
+
+MR334 explicit review-fix continuation at 3bf1c002, existing task lock/worktree retained. Owned writes only handlers/api/commits.rs, queries/eval_policy_plans.rs, queries/commits.rs, api/models.rs and new scoped read/test helpers. P1: authenticate actual user/roles at handler; authorize commit and project captured/legacy identities and all derived metadata against current systems and user_environment_memberships in the same read-only REPEATABLE READ transaction as evidence. Admin retains full projection; missing/foreign commit returns nondisclosing 404; deleted/moved-out systems fail closed. P2: latest represented attempt gates native and mock counters; add default-false policy_counts_available wire flag while retaining integer counters. Add isolated SQLx regressions for mixed-scope authorization/revocation/deletion/moves and native retry/partial/legacy counts. Run changed-file rustfmt and static diff checks only; parent owns compilation, disposable SQLx database execution and frontend consumption. No services, preview/database operations, migrations, commits or pushes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
