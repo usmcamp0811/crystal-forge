@@ -40,6 +40,8 @@ pub(super) struct MatrixRow {
     pub(super) common_summary: Summary,
     /// States whether absent bundle contexts prove nonassignment.
     pub(super) bundle_metadata_complete: bool,
+    /// Precomputed per-bundle counts; rendering does not rescan policy bindings.
+    bundle_summaries: HashMap<String, Summary>,
 }
 
 impl MatrixRow {
@@ -91,6 +93,18 @@ impl MatrixRow {
     /// metadata retains known policy contributions without asserting assignment.
     /// The renderer must show that context uncertainty separately from counts.
     pub(super) fn bundle_summary(&self, bundle: &Bundle) -> Summary {
+        self.bundle_summaries
+            .get(&bundle.id)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Computes a bundle once using an indexed exact-version binding lookup.
+    fn calculate_bundle_summary(
+        &self,
+        bundle: &Bundle,
+        bindings: &HashMap<String, &EvalPolicyBinding>,
+    ) -> Summary {
         if self.bundle_applicability(bundle) == BundleApplicability::NotAssigned {
             return Summary::default();
         }
@@ -98,11 +112,7 @@ impl MatrixRow {
             .control_ids
             .iter()
             .map(|id| {
-                let binding = self
-                    .source
-                    .policies
-                    .iter()
-                    .find(|p| p.policy_version_id.to_string() == *id);
+                let binding = bindings.get(id);
                 let belongs = binding.is_some_and(|p| {
                     if bundle.synthetic {
                         p.memberships.is_empty()
@@ -153,29 +163,39 @@ pub(super) fn captured(snapshot: &EvalPolicyMatrixSnapshot) -> Option<Matrix> {
         .iter()
         .map(|p| p.policy_version_id.to_string())
         .collect();
+    let mut positions = HashMap::new();
+    for (position, control) in snapshot.columns.iter().enumerate() {
+        positions
+            .entry(control.policy_version_id)
+            .or_insert(position);
+    }
+    let mut contributions: HashMap<uuid::Uuid, HashSet<String>> = HashMap::new();
+    let mut unbundled_ids = HashSet::new();
+    for policy in snapshot.rows.iter().flat_map(|row| &row.policies) {
+        let id = policy.policy_version_id.to_string();
+        if policy.memberships.is_empty() {
+            unbundled_ids.insert(id.clone());
+        }
+        for membership in &policy.memberships {
+            contributions
+                .entry(membership.bundle_version_id)
+                .or_default()
+                .insert(id.clone());
+        }
+    }
     let mut bundle_ids = HashSet::new();
     let mut bundles: Vec<_> = snapshot
         .bundles
         .iter()
         .filter(|b| bundle_ids.insert(b.bundle_version_id))
         .map(|b| {
-            let members: HashSet<_> = snapshot
-                .rows
-                .iter()
-                .flat_map(|r| &r.policies)
-                .filter(|p| {
-                    p.memberships
-                        .iter()
-                        .any(|m| m.bundle_version_id == b.bundle_version_id)
-                })
-                .map(|p| p.policy_version_id.to_string())
-                .collect();
+            let members = contributions.get(&b.bundle_version_id);
             Bundle {
                 id: b.bundle_version_id.to_string(),
                 synthetic: false,
                 control_ids: ids
                     .iter()
-                    .filter(|id| members.contains(*id))
+                    .filter(|id| members.is_some_and(|members| members.contains(*id)))
                     .cloned()
                     .collect(),
             }
@@ -184,12 +204,7 @@ pub(super) fn captured(snapshot: &EvalPolicyMatrixSnapshot) -> Option<Matrix> {
     let unbundled: Vec<_> = ids
         .iter()
         .filter(|id| {
-            snapshot
-                .rows
-                .iter()
-                .flat_map(|r| &r.policies)
-                .any(|p| p.policy_version_id.to_string() == **id && p.memberships.is_empty())
-                || !bundles.iter().any(|b| b.control_ids.contains(id))
+            unbundled_ids.contains(*id) || !bundles.iter().any(|b| b.control_ids.contains(id))
         })
         .cloned()
         .collect();
@@ -206,17 +221,16 @@ pub(super) fn captured(snapshot: &EvalPolicyMatrixSnapshot) -> Option<Matrix> {
         .enumerate()
         .map(|(index, source)| {
             let mut details = HashMap::new();
+            let bindings: HashMap<_, _> = source
+                .policies
+                .iter()
+                .map(|binding| (binding.policy_version_id, binding))
+                .collect();
             let outcomes: HashMap<_, _> = controls
                 .iter()
                 .map(|p| {
-                    let bound = source
-                        .policies
-                        .iter()
-                        .find(|b| b.policy_version_id == p.policy_version_id);
-                    let position = snapshot
-                        .columns
-                        .iter()
-                        .position(|c| c.policy_version_id == p.policy_version_id);
+                    let bound = bindings.get(&p.policy_version_id).copied();
+                    let position = positions.get(&p.policy_version_id).copied();
                     let cell = position
                         .and_then(|i| source.cells.get(i))
                         .copied()
@@ -250,7 +264,7 @@ pub(super) fn captured(snapshot: &EvalPolicyMatrixSnapshot) -> Option<Matrix> {
                     (p.policy_version_id.to_string(), outcome)
                 })
                 .collect();
-            MatrixRow {
+            let mut row = MatrixRow {
                 key: format!(
                     "{}:{}:{index}",
                     source
@@ -264,7 +278,23 @@ pub(super) fn captured(snapshot: &EvalPolicyMatrixSnapshot) -> Option<Matrix> {
                 bundle_metadata_complete: snapshot.empty_bundle_metadata_complete,
                 outcomes,
                 details,
-            }
+                bundle_summaries: HashMap::new(),
+            };
+            let bindings = source
+                .policies
+                .iter()
+                .map(|binding| (binding.policy_version_id.to_string(), binding))
+                .collect();
+            row.bundle_summaries = bundles
+                .iter()
+                .map(|bundle| {
+                    (
+                        bundle.id.clone(),
+                        row.calculate_bundle_summary(bundle, &bindings),
+                    )
+                })
+                .collect();
+            row
         })
         .collect();
     Some(Matrix {
@@ -277,6 +307,21 @@ pub(super) fn captured(snapshot: &EvalPolicyMatrixSnapshot) -> Option<Matrix> {
 /// Returns whether an outcome needs attention, including unavailable evidence.
 pub(super) fn nonpass(outcome: Outcome) -> bool {
     matches!(outcome, Outcome::Fail | Outcome::Warning | Outcome::Unknown)
+}
+
+/// Selects trim evidence without excluding unknown or all-greenfield rows.
+/// Health and bundle summaries must continue to use the original row set.
+pub(super) fn trim_baseline(rows: Vec<&MatrixRow>) -> Vec<&MatrixRow> {
+    let established: Vec<_> = rows
+        .iter()
+        .copied()
+        .filter(|row| row.source.greenfield != Some(true))
+        .collect();
+    if established.is_empty() {
+        rows
+    } else {
+        established
+    }
 }
 
 #[cfg(test)]
@@ -333,6 +378,32 @@ mod tests {
         assert_eq!(row.health(), RowHealth::Unavailable);
         assert_eq!(row.bundle_summary(&matrix.bundles[0]).passed, 1);
         assert_eq!(row.bundle_summary(&matrix.bundles[1]).passed, 1);
+    }
+
+    #[test]
+    fn trim_requires_explicit_greenfield_and_retains_all_greenfield_fallback() {
+        let mut snapshot = fixture();
+        snapshot.rows.push(snapshot.rows[0].clone());
+        snapshot.rows[0].greenfield = Some(true);
+        snapshot.rows[1].greenfield = None;
+        let matrix = captured(&snapshot).unwrap();
+        let baseline = trim_baseline(matrix.rows.iter().collect());
+        assert_eq!(baseline.len(), 1);
+        assert_eq!(baseline[0].source.greenfield, None);
+        snapshot.rows[1].greenfield = Some(true);
+        let all = captured(&snapshot).unwrap();
+        assert_eq!(trim_baseline(all.rows.iter().collect()).len(), 2);
+        assert_eq!(all.rows[0].common_summary.applicable, 2);
+    }
+
+    #[test]
+    fn indexed_bundle_aggregation_preserves_overlapping_exact_contributions() {
+        let matrix = captured(&fixture()).unwrap();
+        let row = &matrix.rows[0];
+        assert_eq!(row.bundle_summaries.len(), matrix.bundles.len());
+        assert_eq!(row.bundle_summary(&matrix.bundles[0]).passed, 1);
+        assert_eq!(row.bundle_summary(&matrix.bundles[1]).passed, 1);
+        assert_eq!(row.common_summary.passed, 1);
     }
 
     #[test]

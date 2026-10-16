@@ -20,6 +20,8 @@ use tracing::{debug, error, info, warn};
 #[cfg(test)]
 mod partial_resource_failure_tests;
 
+mod policy_counts;
+
 const EVAL_QUEUE_ADVISORY_LOCK_KEY: i64 = 1_600_001;
 
 pub async fn insert_commit(
@@ -1947,6 +1949,9 @@ pub struct EvalQueueRow {
     /// `None` when legacy records cannot be attributed; excludes closure counts,
     /// outputs, isolated mock outcomes, and records marked for other attempts.
     pub derivation_count: Option<i64>,
+    /// True when counters have unambiguous represented-attempt attribution.
+    /// False makes integer counters unavailable; true does not imply completion.
+    pub policy_counts_available: bool,
     pub passed_count: i64,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
@@ -1972,9 +1977,10 @@ pub async fn list_eval_queue(pool: &PgPool, params: &EvalQueueParams) -> Result<
 
 /// Returns evaluation queue rows visible to the supplied user scope.
 ///
-/// Mock counts use only isolated evidence for the represented attempt. Queued
-/// retries cannot inherit earlier mock counts. Rows without mock overrides keep
-/// the native derivation-count semantics.
+/// Native and isolated mock counts use only the latest represented attempt.
+/// Queued retries cannot inherit earlier outcomes. `policy_counts_available`
+/// is false for unattributable legacy or ambiguous current carriers; integer
+/// counters then expose only known evidence and must not imply passing coverage.
 /// `derivation_count` instead counts only records whose numeric attempt marker
 /// matches the latest attempt row, including a queued retry not yet started.
 /// Unattributable legacy records make that count unavailable, not zero.
@@ -2053,7 +2059,7 @@ pub async fn list_eval_queue_for_user(
     .await?;
 
     let rows = sqlx::query_as::<_, EvalQueueRow>(
-        r#"
+        &format!(r#"
         WITH domain AS (
         SELECT
             c.id AS commit_id,
@@ -2078,30 +2084,8 @@ pub async fn list_eval_queue_for_user(
                 THEN NULL
                 ELSE COUNT(*) FILTER (WHERE d.policy_results->'evaluation_attempt' = to_jsonb(ea.attempt_number))
              END FROM derivations d WHERE d.commit_id = c.id) AS derivation_count,
-            COALESCE(mc.passed_count, (
-                SELECT COUNT(*)::bigint
-                FROM derivations d
-                WHERE d.commit_id = c.id
-                  AND d.cf_agent_enabled IS TRUE
-                  AND d.policy_requirements_met IS TRUE
-                  AND d.status_id <> 6
-            ), 0) AS passed_count,
-            COALESCE(mc.policy_failed_count, (
-                SELECT COUNT(*)::bigint
-                FROM derivations d
-                WHERE d.commit_id = c.id
-                  AND d.status_id <> 6
-                  AND (
-                    d.cf_agent_enabled IS FALSE
-                    OR d.policy_requirements_met IS FALSE
-                  )
-            ), 0) AS policy_failed_count,
-            COALESCE(mc.eval_failed_count, (
-                SELECT COUNT(*)::bigint
-                FROM derivations d
-                WHERE d.commit_id = c.id
-                  AND d.status_id = 6
-            ), 0) AS eval_failed_count,
+            pc.passed_count, pc.policy_failed_count, pc.eval_failed_count,
+            pc.policy_counts_available,
             COALESCE(ea.attempt_number, 1) AS attempt_number,
             ea.parent_attempt_id,
             ea.root_attempt_id,
@@ -2115,14 +2099,13 @@ pub async fn list_eval_queue_for_user(
           ON latest_snapshot.flake_id = c.flake_id
          AND latest_snapshot.position = 0
         LEFT JOIN LATERAL (
-            SELECT attempt_number, parent_attempt_id, root_attempt_id, available_at
+            SELECT id, attempt_number, parent_attempt_id, root_attempt_id, available_at
             FROM evaluation_attempts
             WHERE commit_id = c.id
             ORDER BY attempt_number DESC, created_at DESC
             LIMIT 1
         ) ea ON TRUE
-        LEFT JOIN view_evaluation_mock_counts mc ON mc.commit_id = c.id
-            AND mc.attempt_number = ea.attempt_number
+        {policy_counts_join}
         WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'cancelling', 'complete', 'failed', 'cancelled')
           AND c.source_archived = false
           AND ($5::uuid IS NULL OR EXISTS (
@@ -2152,7 +2135,7 @@ pub async fn list_eval_queue_for_user(
             committed_at DESC,
             commit_id DESC
         LIMIT $6
-        "#,
+        "#, policy_counts_join = policy_counts::JOIN),
     )
     .bind(if status_filter.is_empty() { None } else { Some(status_filter) })
     .bind(params.flake.as_deref())
@@ -2608,8 +2591,9 @@ pub async fn cleanup_partial_derivations_for_commit(pool: &PgPool, commit_id: i3
 ///
 /// Results are ordered by `evaluation_completed_at DESC` so the most
 /// recently finished eval appears first.
-/// Mock counts use isolated evidence for the represented attempt; native rows
-/// without a mock override retain their existing derivation-count semantics.
+/// Native and isolated mock counts share latest-attempt attribution rules with
+/// the queue. `policy_counts_available` distinguishes legacy or ambiguous
+/// evidence from known counts without claiming that evaluation is complete.
 /// `derivation_count` counts persisted records marked for the latest represented
 /// attempt, excluding stale attempts and isolated mock outcomes. Unattributable
 /// legacy records make that count unavailable, not zero.
@@ -2644,6 +2628,7 @@ pub async fn list_eval_history(
         evaluation_error_message: Option<String>,
         system_count: i64,
         derivation_count: Option<i64>,
+        policy_counts_available: bool,
         passed_count: i64,
         policy_failed_count: i64,
         eval_failed_count: i64,
@@ -2687,7 +2672,7 @@ pub async fn list_eval_history(
     .await?;
 
     let rows = sqlx::query_as::<_, HistoryRow>(
-        r#"
+        &format!(r#"
         WITH domain AS (
         SELECT
             c.id                            AS commit_id,
@@ -2717,26 +2702,8 @@ pub async fn list_eval_history(
                 THEN NULL
                 ELSE COUNT(*) FILTER (WHERE d.policy_results->'evaluation_attempt' = to_jsonb(ea.attempt_number))
              END FROM derivations d WHERE d.commit_id = c.id) AS derivation_count,
-            COALESCE(mc.passed_count, (
-                SELECT COUNT(*)::BIGINT FROM derivations d
-                WHERE d.commit_id = c.id
-                  AND d.cf_agent_enabled IS TRUE
-                  AND d.policy_requirements_met IS TRUE
-                  AND d.status_id <> 6
-            ), 0)                           AS passed_count,
-            COALESCE(mc.policy_failed_count, (
-                SELECT COUNT(*)::BIGINT FROM derivations d
-                WHERE d.commit_id = c.id
-                  AND d.status_id <> 6
-                  AND (
-                    d.cf_agent_enabled IS FALSE
-                    OR d.policy_requirements_met IS FALSE
-                  )
-            ), 0)                           AS policy_failed_count,
-            COALESCE(mc.eval_failed_count, (
-                SELECT COUNT(*)::BIGINT FROM derivations d
-                WHERE d.commit_id = c.id AND d.status_id = 6
-            ), 0)                           AS eval_failed_count,
+            pc.passed_count, pc.policy_failed_count, pc.eval_failed_count,
+            pc.policy_counts_available,
             concat_ws(
                 ':',
                 'eval',
@@ -2758,14 +2725,13 @@ pub async fn list_eval_history(
           ON latest_snapshot.flake_id = c.flake_id
          AND latest_snapshot.position = 0
         LEFT JOIN LATERAL (
-            SELECT attempt_number, parent_attempt_id, root_attempt_id
+            SELECT id, attempt_number, parent_attempt_id, root_attempt_id
             FROM evaluation_attempts
             WHERE commit_id = c.id
             ORDER BY attempt_number DESC, created_at DESC
             LIMIT 1
         ) ea ON TRUE
-        LEFT JOIN view_evaluation_mock_counts mc ON mc.commit_id = c.id
-            AND mc.attempt_number = ea.attempt_number
+        {policy_counts_join}
         WHERE c.evaluation_status IN ('complete', 'failed', 'cancelled')
         ), filtered AS (
             SELECT * FROM domain
@@ -2780,7 +2746,7 @@ pub async fn list_eval_history(
         FROM filtered
         ORDER BY evaluation_completed_at DESC NULLS LAST, commit_id DESC
         LIMIT $5 OFFSET $6
-        "#,
+        "#, policy_counts_join = policy_counts::JOIN),
     )
     .bind(params.status.as_deref())
     .bind(params.flake.as_deref())
@@ -2812,6 +2778,7 @@ pub async fn list_eval_history(
             evaluation_error_message: r.evaluation_error_message,
             system_count: r.system_count,
             derivation_count: r.derivation_count,
+            policy_counts_available: r.policy_counts_available,
             passed_count: r.passed_count,
             policy_failed_count: r.policy_failed_count,
             eval_failed_count: r.eval_failed_count,
@@ -2945,7 +2912,7 @@ pub async fn fetch_eval_dependency_breakdown(
 mod tests {
     use super::{fetch_eval_policy_matrix, validate_eval_queue_reorder_payload};
 
-    async fn derivation_count_commit(pool: &PgPool) -> i32 {
+    pub(super) async fn derivation_count_commit(pool: &PgPool) -> i32 {
         let flake = insert_throwaway_flake(pool).await;
         let commit: i32 = sqlx::query_scalar(
             "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp,

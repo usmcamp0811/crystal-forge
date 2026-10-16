@@ -1,6 +1,7 @@
 # Runbook
 
 * [Web UI check runbook](web-ui-check.md) - Runbook for the web-ui Nix check and the host-side web-ui-test loop, covering layout, phases and gates, visual baselines, design-parity evidence, adding coverage, debugging, CI integration, and known issues.
+* [Evaluation drawer comparison](../../../checks/web-ui/design-parity/eval-drawer.md) - Retained runbook for the task-owned drawer shell comparison and structured matrix browser workflow; open for fixture inputs, commands, assertions, and visual acceptance limits.
 
 # Testing Guide
 

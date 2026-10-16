@@ -346,8 +346,7 @@ mod tests {
     #[ignore = "requires isolated migration-backed PostgreSQL"]
     async fn isolated_mock_counts_match_queue_history_and_exclude_queued_retry(pool: PgPool) {
         let commit = active_commit(&pool).await;
-        // Native-only metrics retain their old counting behavior. These
-        // manually inserted legacy carriers have no current-attempt marker.
+        // Markerless native carriers cannot establish current-attempt counts.
         sqlx::query(
             "INSERT INTO derivations (commit_id, derivation_name, derivation_type,
                      status_id, cf_agent_enabled, policy_requirements_met)
@@ -358,7 +357,7 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        assert_eq!(queue_counts(&pool, commit).await, (1, 0, 1));
+        assert_eq!(queue_counts(&pool, commit).await, (0, 0, 0));
         persist_outcome(
             &pool,
             commit,
@@ -425,8 +424,8 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(queue_counts(&pool, commit).await, (0, 0, 0));
-        // Starting a native retry with no mock evidence restores native-only
-        // metrics; old isolated mock evidence never contributes to that retry.
+        // Starting a native retry cannot restore markerless legacy counters or
+        // inherit the earlier attempt's isolated mock evidence.
         sqlx::query(
             "UPDATE evaluation_attempts SET status = 'in_progress'
                      WHERE commit_id = $1 AND attempt_number = 8",
@@ -443,6 +442,6 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        assert_eq!(queue_counts(&pool, commit).await, (1, 0, 1));
+        assert_eq!(queue_counts(&pool, commit).await, (0, 0, 0));
     }
 }

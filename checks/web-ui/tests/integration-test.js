@@ -21400,8 +21400,11 @@ security.audit.enable = true;</fixtext>
         await runEvalPolicyMatrixWorkflow(page, commitId,
           state => captureWorkflowState(page, stepName, state));
         await drawer.getByRole("button", { name: "Close", exact: true }).click();
+        await expect(drawer).toBeHidden();
         item.evaluation_status = "cancelling";
-        await page.reload({ timeout: LOAD_TIMEOUT });
+        // Evidence return uses a commit deep link, which intentionally opens its
+        // drawer on load. Start this independent latest-action case at the list.
+        await page.goto(`${baseUrl}/evaluations`, { timeout: LOAD_TIMEOUT });
         await page.getByRole("row").filter({ hasText: item.commit_hash.slice(0, 12) }).click();
         await drawer.getByRole("button", { name: "Force-cancel", exact: true }).click();
         const confirm = page.getByRole("alertdialog", { name: "Force-cancel evaluation?", exact: true });

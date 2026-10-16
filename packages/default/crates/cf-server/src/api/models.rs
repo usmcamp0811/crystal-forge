@@ -2342,6 +2342,12 @@ pub struct EvalQueueItem {
     /// attributed to an attempt. Isolated mock outcomes are not derivations.
     #[serde(default)]
     pub derivation_count: Option<i64>,
+    /// True when policy counters have unambiguous represented-attempt
+    /// attribution. False means unavailable, not passing. True permits partial
+    /// known counts and does not assert complete coverage. Older payloads default
+    /// to unavailable because they did not guarantee attempt attribution.
+    #[serde(default)]
+    pub policy_counts_available: bool,
     pub passed_count: i64,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
@@ -2406,6 +2412,12 @@ pub struct EvalHistoryItem {
     /// attributed to an attempt. Isolated mock outcomes are not derivations.
     #[serde(default)]
     pub derivation_count: Option<i64>,
+    /// True when policy counters have unambiguous represented-attempt
+    /// attribution. False means unavailable, not passing. True permits partial
+    /// known counts and does not assert complete coverage. Older payloads default
+    /// to unavailable because they did not guarantee attempt attribution.
+    #[serde(default)]
+    pub policy_counts_available: bool,
     pub passed_count: i64,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,

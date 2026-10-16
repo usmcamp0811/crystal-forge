@@ -44,6 +44,7 @@ The canonical knowledge corpus for Crystal Forge, following the Open Knowledge F
 
 ## Evaluation
 * [evaluation/](evaluation/index.md) - Fast evaluation loop, flake snapshots, config inspector, and evaluation-flake isolation. Open when optimizing evaluation performance or debugging eval failures.
+* [Evaluation policy matrix capture](evaluation-policy-matrix.md) - Open when implementing or reviewing captured policy memberships, exact-attempt outcomes, isolated mock evidence, and derivation record counts.
 
 ## Historical
 * [historical/](historical/index.md) - Superseded designs and post-task follow-ups preserved for context. Open only for historical research; not current guidance.

@@ -4,6 +4,8 @@
 //! data. Route query state controls presentation only; server APIs enforce
 //! visibility, mutation authority, and immutable version identity.
 
+mod evaluation_evidence;
+
 use std::collections::HashMap;
 
 use dioxus::prelude::*;
@@ -178,6 +180,22 @@ fn compliance_target_from_state(
 /// server APIs; evidence and POA&M identity always come from server responses.
 #[component]
 pub fn ComplianceView(
+    bundle: String,
+    version: String,
+    system: String,
+    policy: String,
+    poam: String,
+    view: String,
+) -> Element {
+    if view == "evaluation-evidence" {
+        rsx! { evaluation_evidence::EvaluationEvidenceDrawer { bundle, version, system, policy } }
+    } else {
+        rsx! { ComplianceCatalogView { bundle, version, system, policy, poam, view } }
+    }
+}
+
+#[component]
+fn ComplianceCatalogView(
     bundle: String,
     version: String,
     system: String,

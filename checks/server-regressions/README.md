@@ -156,13 +156,75 @@ bundles without assignment UUIDs. The separate browser-local matrix fixture
 tests presentation; it does not prove persisted capture. Runner membership does
 not establish a passing result for the current worktree.
 
+### MR334 review regressions
+
+The runner adds these 16 ignored, migration-backed SQLx tests since `3bf1c002`.
+Each qualified name uses the same exact-success guard described above. The
+existing 73 ignored and 83 non-ignored library selections retain their names and
+relative execution order.
+
+```text
+queries::eval_policy_plans::scoped_read_tests::mixed_flake_projects_all_metadata_and_shared_configuration
+queries::eval_policy_plans::scoped_read_tests::foreign_missing_and_removed_membership_are_nondisclosing
+queries::eval_policy_plans::scoped_read_tests::deleted_moved_and_reconfigured_hosts_fail_closed
+queries::eval_policy_plans::scoped_read_tests::authorization_and_evidence_share_repeatable_read_snapshot
+queries::eval_policy_plans::scoped_read_tests::legacy_configuration_names_cannot_grant_historical_host_access
+queries::eval_policy_plans::scoped_read_tests::pinned_reads_preserve_scope_and_revoke_historical_access
+queries::commits::policy_counts::tests::native_ten_passes_then_queued_retry_has_zero_current_counts
+queries::commits::policy_counts::tests::current_partial_native_and_mock_counts_exclude_stale_and_pending
+queries::commits::policy_counts::tests::markerless_legacy_counts_are_unavailable_not_passing
+handlers::api::systems::evaluation_lifecycle::tests::lifecycle_mutation_scopes_authority_audits_and_cleans_up
+handlers::api::systems::evaluation_lifecycle::tests::lifecycle_handler_enforces_auth_csrf_and_nondisclosing_scope
+handlers::api::systems::evaluation_lifecycle::tests::lifecycle_audit_failure_rolls_back_classification
+server::policy_capture_tests::capture_display_metadata_and_classification_share_repeatable_read_snapshot
+queries::eval_policy_plans::pinned_read_tests::pin_belongs_to_commit_and_never_falls_back_to_new_retry
+queries::eval_policy_plans::pinned_read_tests::historical_mock_values_survive_retry_while_stale_native_is_unknown
+queries::eval_policy_plans::pinned_read_tests::pinned_native_failure_is_preserved_until_its_marker_is_overwritten
+```
+
+- **Current scope:** Mixed-environment and shared-configuration reads project
+  rows, columns, bundles, memberships, details, flat evidence, and mock presence
+  together. Foreign or missing commits and revoked membership do not disclose
+  evidence. Deleted, moved, or reconfigured hosts fail closed. Legacy configuration
+  names cannot grant historical host access. Authorization and evidence use one
+  read-only REPEATABLE READ snapshot; a fresh read observes revocation.
+- **Current counters and native-unavailable evidence:** Queue and history use the
+  represented attempt. A queued retry has zero current counts; partial current
+  native and mock outcomes exclude stale and pending rows. Dual current carriers
+  make availability false. Markerless or malformed legacy evidence cannot become
+  passing counts. The existing guarded native-finalizer and mock-projection tests
+  also retain Unknown controls and withhold stale or malformed native diagnostics.
+  Unavailable native evidence is not proof of a pass or an absent assignment.
+- **Operator Greenfield classification:** Lifecycle mutations require operator or
+  admin authority, current environment scope, and CSRF protection. Tests cover
+  explicit true, false, and null classification, actor/timestamp persistence,
+  atomic audit, denied callers, moves, revocation, admin access to unscoped hosts,
+  deletion cleanup, and rollback when audit insertion fails. Classification is
+  operator data; names and missing deployment state do not infer Greenfield.
+- **Capture metadata:** The new loader test reads classification, exact-version
+  descriptions, safe source identifiers, and trusted requirement mappings from
+  one REPEATABLE READ snapshot while concurrent operator/catalog edits occur.
+  It excludes suggested mappings and executable or secret metadata. The existing
+  loader test also preserves captured classification and display metadata after
+  current catalog/classification edits.
+- **Pinned contexts:** Pins belong to the requested commit and never fall back to
+  a newer retry. Responses project exact commit SHA, attempt UUID/number, status,
+  and start/completion timestamps without changing the stored capture. Historical
+  mock outcomes survive retry; overwritten native markers leave old controls
+  Unknown and hide retry diagnostics. Exact old native failure evidence remains
+  visible only while its marker survives. The scoped pin test rechecks current
+  membership and withholds foreign metadata and commit-global errors.
+
+These declarations describe registered coverage. Parent-owned targeted runs are
+separate evidence; registration does not establish an exact-head CI pass.
+
 ## TASK-470 selected library tests
 
-The exact library-test runner selects 73 ignored tests: the 62 tests in the
+The exact library-test runner selects 89 ignored tests: the 62 tests in the
 TASK-470 extra library list below (including four TASK-488 isolated mock tests
 and four derivation-count tests, plus two native-finalizer tests),
-the six TASK-484 tests and four TASK-488 capture tests above, and this TASK-487
-regression:
+the six TASK-484 tests, four original TASK-488 capture tests, 16 MR334 review
+tests above, and this TASK-487 regression:
 
 ```text
 handlers::api::deployment_policies::tests::test_list_deployment_policies_includes_fixture
@@ -666,7 +728,7 @@ its matching `END` identifies the active target and whether Cargo was compiling
 or executing. The library also has an explicit compilation boundary before its
 selected tests execute. Cargo's normal output reports executed test names.
 
-Each of the 73 ignored and 83 non-ignored selected library tests emits its qualified name,
+Each of the 89 ignored and 83 non-ignored selected library tests emits its qualified name,
 mode, start time, exit status, and elapsed time. Cargo stdout and stderr still
 pass through `tee` to the exact-test guard. `pipefail` preserves failures from
 Cargo or `tee`; success still requires the named `... ok` line and the existing

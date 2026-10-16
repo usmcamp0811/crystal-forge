@@ -21,6 +21,10 @@ pub(super) fn new_snapshot() -> EvalPolicyMatrixSnapshot {
     EvalPolicyMatrixSnapshot {
         evaluation_attempt_id: None,
         attempt_number: 0,
+        commit_sha: None,
+        attempt_status: None,
+        started_at: None,
+        completed_at: None,
         mock_evidence: false,
         provenance: EvalMatrixProvenance::Captured,
         columns: Vec::new(),
@@ -31,14 +35,19 @@ pub(super) fn new_snapshot() -> EvalPolicyMatrixSnapshot {
 }
 
 /// Records every planned system, including empty and unresolved policy sets.
+///
+/// Copies only the explicit classification joined by the loader in its RR
+/// transaction. Names, outcomes, and missing deployment state provide no
+/// classification authority. Shared configurations retain per-system values.
 pub(super) fn initialize_rows(
     capture: &mut EvalPolicyMatrixSnapshot,
-    systems: &[(Uuid, String, String)],
+    systems: &[(Uuid, String, String, Option<bool>)],
     outcomes: &HashMap<(Option<Uuid>, Uuid), ResolutionOutcome>,
 ) {
     capture.rows = systems
         .iter()
-        .map(|(id, config, name)| EvalMatrixRow {
+        .map(|(id, config, name, greenfield)| EvalMatrixRow {
+            greenfield: *greenfield,
             system_id: Some(*id),
             system_name: name.clone(),
             configuration_name: config.clone(),
@@ -104,7 +113,8 @@ pub(super) async fn load_records(
 /// These maps avoid per-system metadata queries. They never cache mutable
 /// catalog pointers across transactions.
 pub(super) struct CaptureMetadata {
-    policies: HashMap<Uuid, EvalPolicyColumn>,
+    /// Exact-version display labels from this loader transaction only.
+    pub(super) policies: HashMap<Uuid, EvalPolicyColumn>,
     bundles: HashMap<Uuid, EvalBundleColumn>,
     assignments: HashMap<Uuid, (Uuid, Uuid)>,
 }
@@ -118,24 +128,62 @@ pub(super) async fn load_metadata(
     policies: &[Uuid],
     contexts: &HashMap<(Option<Uuid>, Uuid), Vec<ResolvedBundleContext>>,
 ) -> Result<CaptureMetadata> {
-    let policies = sqlx::query_as::<_, (Uuid, Uuid, String, String)>(
-        "SELECT id, policy_id, name, version FROM deployment_policy_versions WHERE id = ANY($1)",
+    let mapped_ids = sqlx::query_as::<_, (Uuid, String)>(
+        "SELECT m.policy_version_id, r.external_id
+         FROM policy_requirement_mappings m
+         JOIN compliance_requirement_versions r ON r.id = m.requirement_version_id
+         WHERE m.policy_version_id = ANY($1) AND m.trust_state = 'trusted'
+         ORDER BY m.policy_version_id, r.external_id",
+    )
+    .bind(policies)
+    .fetch_all(&mut **tx)
+    .await?;
+    let mut requirement_ids: HashMap<Uuid, Vec<String>> = HashMap::new();
+    for (id, external_id) in mapped_ids {
+        requirement_ids.entry(id).or_default().push(external_id);
+    }
+    let policies = sqlx::query_as::<
+        _,
+        (
+            Uuid,
+            Uuid,
+            String,
+            String,
+            Option<String>,
+            serde_json::Value,
+        ),
+    >(
+        "SELECT id, policy_id, name, version, description, compliance_metadata
+         FROM deployment_policy_versions WHERE id = ANY($1)",
     )
     .bind(policies)
     .fetch_all(&mut **tx)
     .await?
     .into_iter()
-    .map(|(policy_version_id, policy_id, name, version)| {
-        (
-            policy_version_id,
-            EvalPolicyColumn {
+    .map(
+        |(policy_version_id, policy_id, name, version, description, metadata)| {
+            (
                 policy_version_id,
-                policy_id,
-                name,
-                version,
-            },
-        )
-    })
+                EvalPolicyColumn {
+                    policy_version_id,
+                    policy_id,
+                    name,
+                    version,
+                    identifiers: display_identifiers(
+                        &metadata,
+                        requirement_ids
+                            .remove(&policy_version_id)
+                            .unwrap_or_default(),
+                    ),
+                    description,
+                    // No canonical display-only assertion/path exists. Executable
+                    // config and XCCDF check/fix bodies must not fill this gap.
+                    assertion: None,
+                    attribute_path: None,
+                },
+            )
+        },
+    )
     .collect();
     // Use identities exported by the resolver's authoritative query. Do not
     // resolve assignment pointers again or derive contexts from policy unions.
@@ -185,6 +233,37 @@ pub(super) async fn load_metadata(
         bundles,
         assignments,
     })
+}
+
+// SECURITY: This whitelist follows XCCDF ImportedPolicy::build_compliance_metadata
+// and the policy CRUD classification metadata. Never serialize generic metadata,
+// identifiers objects, checks, fixes, config, expressions, or opaque source XML.
+// Mapped labels come only from trusted exact-version requirement external IDs in
+// the loader's RR snapshot. They label this policy; they are not extra controls.
+fn display_identifiers(metadata: &serde_json::Value, mapped: Vec<String>) -> Vec<String> {
+    let mut ids: BTreeSet<String> = mapped
+        .into_iter()
+        .filter(|id| !id.trim().is_empty())
+        .collect();
+    for key in ["source_rule_id", "source_group_id", "cis_section"] {
+        if let Some(value) = metadata.get(key).and_then(serde_json::Value::as_str) {
+            if !value.trim().is_empty() {
+                ids.insert(value.to_owned());
+            }
+        }
+    }
+    for key in ["srg_ids", "cci_ids"] {
+        if let Some(values) = metadata.get(key).and_then(serde_json::Value::as_array) {
+            ids.extend(
+                values
+                    .iter()
+                    .filter_map(serde_json::Value::as_str)
+                    .filter(|id| !id.trim().is_empty())
+                    .map(str::to_owned),
+            );
+        }
+    }
+    ids.into_iter().collect()
 }
 
 /// Records complete per-system applicability independently of eligible controls.
@@ -358,6 +437,40 @@ mod tests {
     };
 
     #[test]
+    fn display_metadata_whitelist_excludes_executable_and_arbitrary_payloads() {
+        let ids = display_identifiers(
+            &serde_json::json!({
+                "source_rule_id": "SV-123r1_rule", "source_group_id": "V-123",
+                "cis_section": "5.2.3", "srg_ids": ["SRG-OS-123", 7],
+                "cci_ids": ["CCI-000001", ""],
+                "name": "made-up-ID", "identifiers": [{"value": "unreviewed"}],
+                "expression": "secret-expression", "assertion": "unsafe-source",
+                "attribute_path": "config.secret", "checks": [{"content": "secret-check"}],
+                "config": {"secret": "secret-config"}, "overlays": ["secret-overlay"]
+            }),
+            vec!["REQ-1".into(), "V-123".into()],
+        );
+        assert_eq!(
+            ids,
+            vec![
+                "5.2.3",
+                "CCI-000001",
+                "REQ-1",
+                "SRG-OS-123",
+                "SV-123r1_rule",
+                "V-123"
+            ]
+        );
+        assert!(
+            display_identifiers(
+                &serde_json::json!({"source_rule_id": [], "srg_ids": "bad-type"}),
+                vec![]
+            )
+            .is_empty()
+        );
+    }
+
+    #[test]
     fn authoritative_overlap_uses_version_metadata_and_omits_superseded_sources_and_config() {
         let policy_id = Uuid::new_v4();
         let version = Uuid::new_v4();
@@ -401,6 +514,10 @@ mod tests {
                     policy_id,
                     name: "Exact version name".into(),
                     version: "1".into(),
+                    identifiers: vec![],
+                    description: None,
+                    assertion: None,
+                    attribute_path: None,
                 },
             )]),
             bundles: bundle_ids
@@ -425,6 +542,7 @@ mod tests {
         };
         let mut capture = new_snapshot();
         capture.rows.push(EvalMatrixRow {
+            greenfield: None,
             system_id: Some(system),
             system_name: "host".into(),
             configuration_name: "configuration".into(),
@@ -461,10 +579,10 @@ mod tests {
             Uuid::new_v4(),
         ];
         let systems = vec![
-            (ids[0], "empty".into(), "empty-host".into()),
-            (ids[1], "shared".into(), "conflict-host".into()),
-            (ids[2], "shared".into(), "skipped-host".into()),
-            (ids[3], "missing".into(), "missing-host".into()),
+            (ids[0], "empty".into(), "empty-host".into(), Some(true)),
+            (ids[1], "shared".into(), "conflict-host".into(), Some(false)),
+            (ids[2], "shared".into(), "skipped-host".into(), None),
+            (ids[3], "missing".into(), "missing-host".into(), None),
         ];
         let empty = |id| {
             ResolutionOutcome::Resolved(EffectivePolicySet {
@@ -499,6 +617,14 @@ mod tests {
             ]
         );
         assert!(!capture.empty_bundle_metadata_complete);
+        assert_eq!(
+            capture
+                .rows
+                .iter()
+                .map(|r| r.greenfield)
+                .collect::<Vec<_>>(),
+            vec![Some(true), Some(false), None, None]
+        );
         assert!(capture.rows.iter().all(|r| r.policies.is_empty()));
     }
 }

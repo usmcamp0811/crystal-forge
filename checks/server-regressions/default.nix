@@ -789,6 +789,29 @@ SQL
       runExactCacheRegression "$testName" --ignored
     done
 
+    # MR334 review regressions use the declared module paths, including child
+    # test modules. Keep each isolated SQLx case behind the exact-success guard.
+    for testName in \
+      queries::eval_policy_plans::scoped_read_tests::mixed_flake_projects_all_metadata_and_shared_configuration \
+      queries::eval_policy_plans::scoped_read_tests::foreign_missing_and_removed_membership_are_nondisclosing \
+      queries::eval_policy_plans::scoped_read_tests::deleted_moved_and_reconfigured_hosts_fail_closed \
+      queries::eval_policy_plans::scoped_read_tests::authorization_and_evidence_share_repeatable_read_snapshot \
+      queries::eval_policy_plans::scoped_read_tests::legacy_configuration_names_cannot_grant_historical_host_access \
+      queries::eval_policy_plans::scoped_read_tests::pinned_reads_preserve_scope_and_revoke_historical_access \
+      queries::commits::policy_counts::tests::native_ten_passes_then_queued_retry_has_zero_current_counts \
+      queries::commits::policy_counts::tests::current_partial_native_and_mock_counts_exclude_stale_and_pending \
+      queries::commits::policy_counts::tests::markerless_legacy_counts_are_unavailable_not_passing \
+      handlers::api::systems::evaluation_lifecycle::tests::lifecycle_mutation_scopes_authority_audits_and_cleans_up \
+      handlers::api::systems::evaluation_lifecycle::tests::lifecycle_handler_enforces_auth_csrf_and_nondisclosing_scope \
+      handlers::api::systems::evaluation_lifecycle::tests::lifecycle_audit_failure_rolls_back_classification \
+      server::policy_capture_tests::capture_display_metadata_and_classification_share_repeatable_read_snapshot \
+      queries::eval_policy_plans::pinned_read_tests::pin_belongs_to_commit_and_never_falls_back_to_new_retry \
+      queries::eval_policy_plans::pinned_read_tests::historical_mock_values_survive_retry_while_stale_native_is_unknown \
+      queries::eval_policy_plans::pinned_read_tests::pinned_native_failure_is_preserved_until_its_marker_is_overwritten
+    do
+      runExactCacheRegression "$testName" --ignored
+    done
+
     # TASK-484 uses sqlx-created databases in this sandbox. Run each test in a
     # separate process because the heavy-Nix semaphore is process-global.
     for testName in \

@@ -10,7 +10,34 @@
 //! caller handles transport, resolution, stale-attempt, and row errors upstream;
 //! unavailable applicability must not be presented as a successful empty plan.
 
+pub(super) use crate::state::evaluation_drawer::{ColumnMode, ColumnState, RowFilter, RowSort};
 use std::collections::{HashMap, HashSet};
+
+/// Targets an 8192-cell body budget, capped at 100 systems.
+///
+/// The two identity/health columns consume the same budget as control columns.
+/// A 60-system/128-control fixture therefore retains every system on one page.
+/// Pagination changes rendering only; aggregation and trimming use all rows.
+/// At least one system remains visible if a single row exceeds the budget;
+/// horizontal scrolling retains all actual control columns in that case.
+pub(super) fn rows_per_page(visible_columns: usize) -> usize {
+    (8192 / visible_columns.saturating_add(2)).clamp(1, 100)
+}
+
+#[cfg(test)]
+mod render_budget_tests {
+    use super::rows_per_page;
+
+    #[test]
+    fn dense_reference_fits_and_large_controls_bound_rendered_cells() {
+        assert!(rows_per_page(128) >= 60);
+        for columns in [6, 128, 256, 512, 1024, 4096] {
+            let rows = rows_per_page(columns);
+            assert!((1..=100).contains(&rows));
+            assert!(rows * (columns + 2) <= 8192);
+        }
+    }
+}
 
 /// Identifies an exact policy version independently of its display label.
 pub(super) type ControlId = String;
@@ -178,22 +205,6 @@ pub(super) fn worst_first_key(summary: &Summary, resolved: bool) -> (usize, usiz
     )
 }
 
-/// Selects rows by their mutually exclusive [`RowHealth`] classification.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum RowFilter {
-    /// Includes every row whose upstream data is ready for classification.
-    #[default]
-    All,
-    /// Includes rows with known failing controls.
-    Failing,
-    /// Includes warning rows without known failures.
-    Warning,
-    /// Includes only fully passing, nonempty rows.
-    Clean,
-    /// Includes empty rows and incomplete rows without known issues.
-    Unavailable,
-}
-
 impl RowFilter {
     /// Returns whether a summary belongs to this filter; `All` always matches.
     pub(super) fn matches(self, summary: &Summary) -> bool {
@@ -205,84 +216,6 @@ impl RowFilter {
                 | (Self::Clean, RowHealth::Clean)
                 | (Self::Unavailable, RowHealth::Unavailable)
         )
-    }
-}
-
-/// Selects the unit represented by matrix columns.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum ColumnMode {
-    /// Shows one rollup column per captured bundle or synthetic group.
-    Bundles,
-    /// Shows exact policy-version controls, optionally within a focused bundle.
-    Controls,
-}
-
-/// Records the row ordering choice independently of column presentation.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(super) enum RowSort {
-    /// Requests issue-first ordering from the consuming view.
-    #[default]
-    WorstFirst,
-    /// Requests system-name ordering from the consuming view.
-    Name,
-}
-
-/// Stores matrix choices across mode changes and bundle drilldown.
-///
-/// Initialize once per matrix, not on each render or filter update. A focus is
-/// a bundle identity, not an index or label. The caller validates that identity
-/// against the displayed capture before selecting focused controls.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) struct ColumnState {
-    /// Current rollup or individual-control presentation.
-    pub(super) mode: ColumnMode,
-    /// Selected row filter, preserved by column transitions.
-    pub(super) filter: RowFilter,
-    /// Selected row ordering, preserved by column transitions.
-    pub(super) sort: RowSort,
-    /// Exact bundle identity selected for control drilldown, if any.
-    pub(super) focused_bundle: Option<String>,
-    /// Whether the view should trim its initial column presentation.
-    pub(super) trim: bool,
-}
-
-impl ColumnState {
-    /// Creates readable defaults from the number of distinct represented controls.
-    ///
-    /// The design's dense threshold is strictly greater than 14 controls.
-    /// Dense matrices start in trimmed bundle mode; smaller matrices start in
-    /// untrimmed control mode. This count must be deduplicated by the caller.
-    pub(super) fn new(unique_control_count: usize) -> Self {
-        let dense = unique_control_count > 14;
-        Self {
-            mode: if dense {
-                ColumnMode::Bundles
-            } else {
-                ColumnMode::Controls
-            },
-            filter: RowFilter::All,
-            sort: RowSort::WorstFirst,
-            focused_bundle: None,
-            trim: dense,
-        }
-    }
-
-    /// Changes column mode while preserving filter, sort, and trim choices.
-    ///
-    /// Selecting either mode explicitly leaves drilldown and shows that mode's
-    /// full identity set. Use [`Self::focus_bundle`] for scoped control columns.
-    pub(super) fn set_mode(&mut self, mode: ColumnMode) {
-        self.mode = mode;
-        self.focused_bundle = None;
-    }
-
-    /// Opens a bundle's controls while preserving filter, sort, and trim choices.
-    ///
-    /// The caller supplies an exact captured bundle identity. This transition
-    /// does not expand a system row or mutate any evaluation outcome.
-    pub(super) fn focus_bundle(&mut self, bundle_id: &str) {
-        self.mode = ColumnMode::Controls;
-        self.focused_bundle = Some(bundle_id.to_owned());
     }
 }
 

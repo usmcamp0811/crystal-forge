@@ -1,3 +1,6 @@
+/// Provides the scoped, audited display-only evaluation lifecycle mutation.
+pub mod evaluation_lifecycle;
+
 use axum::{
     Json,
     extract::{Path, Query, State},

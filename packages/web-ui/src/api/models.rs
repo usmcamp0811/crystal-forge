@@ -4676,6 +4676,10 @@ pub struct EvalQueueItem {
     #[serde(default)]
     pub derivation_count: Option<i64>,
     pub passed_count: i64,
+    /// Known attempt-scoped counts are available, possibly with partial coverage.
+    /// False means unavailable, not zero passing or complete coverage.
+    #[serde(default)]
+    pub policy_counts_available: bool,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
     /// 1-indexed attempt number within this evaluation's retry lineage.
@@ -4714,6 +4718,10 @@ pub struct EvalHistoryItem {
     #[serde(default)]
     pub derivation_count: Option<i64>,
     pub passed_count: i64,
+    /// Known attempt-scoped counts are available, possibly with partial coverage.
+    /// False means unavailable, not zero passing or complete coverage.
+    #[serde(default)]
+    pub policy_counts_available: bool,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
     pub alert_occurrence_id: String,

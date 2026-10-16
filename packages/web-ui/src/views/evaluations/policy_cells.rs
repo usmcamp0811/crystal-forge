@@ -5,7 +5,7 @@ use super::policy_matrix::{Outcome, Summary};
 use super::{policy_cell_class_suffix, policy_cell_glyph};
 use crate::api::models::EvalPolicyMatrixResponse;
 use crate::api::models::eval_policy_matrix::{
-    EvalBundleColumn, EvalBundleSource, EvalPolicyColumn,
+    EvalBundleColumn, EvalBundleSource, EvalPolicyColumn, EvalPolicyMatrixSnapshot,
 };
 use dioxus::prelude::*;
 
@@ -140,7 +140,36 @@ pub(super) fn RowDetails(
     controls: Vec<EvalPolicyColumn>,
     bundles: Vec<EvalBundleColumn>,
     on_open_policy: EventHandler<String>,
+    snapshot: EvalPolicyMatrixSnapshot,
+    mut finding: Signal<Option<String>>,
 ) -> Element {
+    let restoring_passed = controls.iter().any(|control| {
+        let id = control.policy_version_id.to_string();
+        finding.peek().as_ref() == Some(&format!("{}:{id}", row.key))
+            && row.outcomes.get(&id) == Some(&Outcome::Pass)
+    });
+    let mut show_passed = use_signal(|| restoring_passed);
+    let mut controls = controls;
+    controls.sort_by_key(|control| {
+        match row
+            .outcomes
+            .get(&control.policy_version_id.to_string())
+            .copied()
+            .unwrap_or(Outcome::Unknown)
+        {
+            Outcome::Fail => 0,
+            Outcome::Warning => 1,
+            Outcome::Unknown => 2,
+            Outcome::NotAssigned => 3,
+            Outcome::Pass => 4,
+        }
+    });
+    let bindings: std::collections::HashMap<_, _> = row
+        .source
+        .policies
+        .iter()
+        .map(|binding| (binding.policy_version_id, binding))
+        .collect();
     let mut seen = std::collections::HashSet::new();
     let contexts: Vec<_> = row
         .source
@@ -151,6 +180,8 @@ pub(super) fn RowDetails(
     rsx! {
         div { class: "pm-expand pm-captured-details",
             p { "Configuration: ", code { "{row.source.configuration_name}" } }
+            p { "Operator classification: ", match row.source.greenfield { Some(true) => "Greenfield", Some(false) => "Not greenfield", None => "Unknown" } }
+            super::evidence_navigation::OpenSystem { snapshot: snapshot.clone(), system_id: row.source.system_id }
             if !row.resolved() {
                 p { class: "pm-provenance-note", "Applicability is incomplete: {row.source.resolution:?}. Counts are known evidence, not a complete applicability claim." }
             } else if row.common_summary.applicable == 0 {
@@ -179,27 +210,42 @@ pub(super) fn RowDetails(
                     }
                 }
             }
-            for control in controls {
+            button { class: "btn btn-ghost xs focus-ring", aria_expanded: show_passed(), onclick: move |_| show_passed.toggle(), if show_passed() { "Hide passed controls" } else { "Show passed controls" } }
+            for control in controls.iter().filter(|control| show_passed() || row.outcomes.get(&control.policy_version_id.to_string()) != Some(&Outcome::Pass)) {
                 {
                     let id = control.policy_version_id.to_string();
                     let outcome = row.outcomes.get(&id).copied().unwrap_or(Outcome::Unknown);
                     let (label, class) = outcome_label(outcome);
-                    let binding = row.source.policies.iter().find(|p| p.policy_version_id == control.policy_version_id);
+                    let binding = bindings.get(&control.policy_version_id).copied();
                     let report_only = binding.is_some_and(|b| b.report_only);
                     let executable = binding.is_none_or(|b| b.executable);
                     // The existing drawer callback focuses the registry by name.
                     // Keep the captured version visible; navigation does not
                     // claim to open an immutable historical version.
                     let policy_name = control.name.clone();
+                    let card_key = format!("{}:{id}", row.key);
+                    let open = finding.read().as_ref() == Some(&card_key);
+                    let mut seen_memberships = std::collections::HashSet::new();
+                    let contributions: Vec<_> = binding.into_iter().flat_map(|b| &b.memberships).filter(|m| seen_memberships.insert(m.bundle_version_id)).filter_map(|m| bundles.iter().find(|b| b.bundle_version_id == m.bundle_version_id)).cloned().collect();
                     rsx! {
                         div { key: "{id}", class: "pm-captured-detail",
                             span { class, "{label}" }
-                            button { class: "btn btn-ghost xs focus-ring mono", title: "Find this policy name in the registry", onclick: move |_| on_open_policy.call(policy_name.clone()), "{control.name} · {control.version}" }
+                            button { class: "btn btn-ghost xs focus-ring mono", aria_expanded: open, onclick: move |_| finding.set(if open { None } else { Some(card_key.clone()) }), "{control.name} · {control.version}" }
                             if report_only { span { "Report only" } }
                             if !executable { span { "Implementation skipped — evidence unavailable" } }
                             if outcome == Outcome::Unknown { span { "No trustworthy matching-attempt outcome is available." } }
+                            if open {
+                            button { class: "btn btn-ghost xs focus-ring", title: "Find this policy name in the current registry", onclick: move |_| on_open_policy.call(policy_name.clone()), "Policy registry" }
+                                if !control.identifiers.is_empty() { p { {format!("Captured identifiers: {}", control.identifiers.join(", "))} } }
+                            if let Some(description) = &control.description { p { "{description}" } }
+                            if let Some(assertion) = &control.assertion { pre { "{assertion}" } }
+                            if let Some(path) = &control.attribute_path { code { "{path}" } }
                             if let Some(detail) = row.details.get(&id) {
                                 p { class: "mono", style: "flex-basis: 100%; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0;", "{detail}" }
+                            }
+                            for bundle in contributions {
+                                super::evidence_navigation::OpenEvidence { snapshot: snapshot.clone(), system_id: row.source.system_id, policy: control.clone(), bundle }
+                            }
                             }
                         }
                     }

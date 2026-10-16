@@ -10,6 +10,18 @@ pub struct EvalPolicyMatrixSnapshot {
     pub evaluation_attempt_id: Option<Uuid>,
     /// Numbers the represented queue/history attempt.
     pub attempt_number: i32,
+    /// Full server-validated commit SHA; absent on older servers.
+    #[serde(default)]
+    pub commit_sha: Option<String>,
+    /// Exact represented attempt lifecycle state.
+    #[serde(default)]
+    pub attempt_status: Option<String>,
+    /// Actual attempt start time, when retained.
+    #[serde(default)]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Actual attempt completion time, when retained.
+    #[serde(default)]
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
     /// States whether the represented attempt has isolated mock outcomes.
     /// This flag is independent of captured membership provenance and current
     /// server mode. False does not prove native evaluation; older APIs omit it.
@@ -49,6 +61,18 @@ pub struct EvalPolicyColumn {
     pub name: String,
     /// Contains the captured version label.
     pub version: String,
+    /// Captured safe external control identifiers.
+    #[serde(default)]
+    pub identifiers: Vec<String>,
+    /// Captured description; never reconstructed from the current catalog.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Actual captured assertion text, when available.
+    #[serde(default)]
+    pub assertion: Option<String>,
+    /// Actual captured attribute path, when available.
+    #[serde(default)]
+    pub attribute_path: Option<String>,
 }
 
 /// Describes an exact captured bundle version.
@@ -73,6 +97,9 @@ pub struct EvalBundleColumn {
 pub struct EvalMatrixRow {
     /// Identifies the historical system, absent on legacy rows.
     pub system_id: Option<Uuid>,
+    /// Explicit operator classification. Unknown is never treated as greenfield.
+    #[serde(default)]
+    pub greenfield: Option<bool>,
     /// Contains the captured system name.
     pub system_name: String,
     /// Keys the evaluator configuration and compatibility evidence.

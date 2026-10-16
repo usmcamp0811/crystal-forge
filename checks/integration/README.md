@@ -73,10 +73,11 @@ so it runs on every merge request and on `main`.
 CI runs this same attribute through `packages/ci/public-cache-build.sh` with
 `--builders '' --max-jobs 1 --cores 2`. All `flake-check` matrix entries receive
 these local execution arguments, preserving each entry's existing cache policy.
-The required complexity and coverage launchers use the same local limits: their
-report executables must not depend on output retrieval from the failing remote
-builder. Optional Web UI, manual baseline, and separate functional jobs retain
-inherited builder controls. Production builders are unaffected.
+The required complexity and coverage launchers and the optional `web-ui-check`
+job use the same local limits. Their execution must not depend on output retrieval
+from the failing remote builder. The Web UI job retains its public-cache wrapper;
+the manual baseline and separate functional jobs retain inherited builder controls.
+These limits apply only to the named CI commands. Production builders are unaffected.
 
 Pipeline 2944979038 failed before observed VM execution or assertions: remote
 `QueryValidPaths` closed its socket for integration and Attic publication, and

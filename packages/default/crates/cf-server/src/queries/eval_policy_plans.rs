@@ -11,6 +11,14 @@ use uuid::Uuid;
 use crate::api::eval_policy_matrix::*;
 use crate::queries::commits::EvalPolicySystemRow;
 
+mod scoped_read;
+
+#[cfg(test)]
+mod scoped_read_tests;
+
+#[cfg(test)]
+mod pinned_read_tests;
+
 /// Locks current attempt ownership before resolving and capturing its plan.
 ///
 /// # Errors
@@ -51,7 +59,7 @@ pub(crate) async fn lock_attempt(
 ///
 /// # Errors
 /// Returns an error for a missing attempt identity, duplicate plan, or SQL error.
-/// It also rejects read-projected cells, details, or mock evidence in a capture.
+/// It also rejects read-projected context, cells, details, or mock evidence.
 pub(crate) async fn insert_plan(
     tx: &mut Transaction<'_, Postgres>,
     commit_id: i32,
@@ -60,6 +68,13 @@ pub(crate) async fn insert_plan(
     let id = plan
         .evaluation_attempt_id
         .context("plan requires attempt identity")?;
+    ensure!(
+        plan.commit_sha.is_none()
+            && plan.attempt_status.is_none()
+            && plan.started_at.is_none()
+            && plan.completed_at.is_none(),
+        "capture payload cannot contain read-projected attempt context"
+    );
     ensure!(
         !plan.mock_evidence,
         "capture payload cannot contain read-projected mock evidence"
@@ -85,6 +100,9 @@ pub(crate) async fn insert_plan(
 
 /// Reads legacy fields, captured provenance, and outcomes from one MVCC snapshot.
 ///
+/// Returns the unrestricted administrator projection. HTTP callers MUST verify
+/// administrator access or use [`fetch_matrix_for_user`] with the current user.
+///
 /// Exact-attempt isolated mock outcomes replace stale or markerless native
 /// rows for the same configuration. If both sources have valid current-attempt
 /// evidence, the configuration is unknown in structured and flat projections.
@@ -96,8 +114,8 @@ pub(crate) async fn insert_plan(
 /// do not establish individual control outcomes; structured cells stay unknown.
 ///
 /// # Errors
-/// Returns an error for SQL failures or an invalid persisted plan. Missing plans
-/// produce explicit unavailable provenance without consulting catalog tables.
+/// Returns an error for a missing commit, SQL failure, or invalid persisted plan.
+/// Missing plans produce explicit unavailable provenance without catalog reads.
 ///
 /// # Examples
 ///
@@ -113,25 +131,115 @@ pub async fn fetch_matrix(
     pool: &PgPool,
     commit_id: i32,
 ) -> Result<(Vec<EvalPolicySystemRow>, EvalPolicyMatrixSnapshot)> {
+    fetch_matrix_for_user(pool, commit_id, None)
+        .await?
+        .context("evaluation commit not found")
+}
+
+/// Returns a matrix restricted to the caller's current system environments.
+///
+/// `None` user scope is reserved for authenticated administrators. A missing or
+/// inaccessible commit returns `None` without distinguishing the two cases.
+/// Captured system UUIDs must still exist on the commit's flake with the same
+/// configuration and a current environment membership. Historical assignments
+/// never grant access. Authorization and evidence share one repeatable-read
+/// snapshot, including membership revocation and system moves.
+///
+/// # Errors
+/// Returns SQL errors or invalid persisted plan errors for accessible commits.
+///
+/// # Examples
+///
+/// ```no_run
+/// # async fn inspect(pool: &sqlx::PgPool, user: uuid::Uuid) -> anyhow::Result<()> {
+/// let visible = crystal_forge::queries::eval_policy_plans::fetch_matrix_for_user(
+///     pool, 42, Some(user),
+/// ).await?;
+/// if let Some((_, matrix)) = visible {
+///     assert!(matrix.rows.iter().all(|row| row.system_id.is_some()));
+/// }
+/// # Ok(())
+/// # }
+/// ```
+pub async fn fetch_matrix_for_user(
+    pool: &PgPool,
+    commit_id: i32,
+    user_id: Option<Uuid>,
+) -> Result<Option<(Vec<EvalPolicySystemRow>, EvalPolicyMatrixSnapshot)>> {
+    fetch_matrix_selected(pool, commit_id, user_id, None).await
+}
+
+/// Returns the caller's current-environment projection of one exact attempt.
+///
+/// The UUID must belong to `commit_id`. Missing, foreign, and inaccessible
+/// selections return None without falling back to the latest attempt. None user
+/// scope is reserved for administrators and unrestricted internal callers.
+/// Authorization, context, metadata, and evidence share one repeatable read.
+/// Mutable native outcomes no longer marked for this attempt remain unknown;
+/// isolated mock outcomes are retained under their exact attempt UUID.
+///
+/// # Errors
+/// Returns SQL errors or invalid persisted plan errors for accessible commits.
+///
+/// # Examples
+/// ```no_run
+/// # async fn inspect(pool: &sqlx::PgPool, user: uuid::Uuid, attempt: uuid::Uuid) -> anyhow::Result<()> {
+/// let selected = crystal_forge::queries::eval_policy_plans::fetch_matrix_for_user_at_attempt(
+///     pool, 42, Some(user), attempt,
+/// ).await?;
+/// assert!(selected.is_none_or(|(_, matrix)| matrix.evaluation_attempt_id == Some(attempt)));
+/// # Ok(())
+/// # }
+/// ```
+pub async fn fetch_matrix_for_user_at_attempt(
+    pool: &PgPool,
+    commit_id: i32,
+    user_id: Option<Uuid>,
+    attempt_id: Uuid,
+) -> Result<Option<(Vec<EvalPolicySystemRow>, EvalPolicyMatrixSnapshot)>> {
+    fetch_matrix_selected(pool, commit_id, user_id, Some(attempt_id)).await
+}
+
+async fn fetch_matrix_selected(
+    pool: &PgPool,
+    commit_id: i32,
+    user_id: Option<Uuid>,
+    pin: Option<Uuid>,
+) -> Result<Option<(Vec<EvalPolicySystemRow>, EvalPolicyMatrixSnapshot)>> {
     let mut tx = pool.begin().await?;
     sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
         .execute(&mut *tx)
         .await?;
-    let attempts = sqlx::query_as::<_, (i32, Option<Uuid>)>(
-        "SELECT COALESCE(a.attempt_number, c.evaluation_attempt_count, 0), a.id FROM commits c
+    let Some(scope) = scoped_read::authorize(&mut tx, commit_id, user_id).await? else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    let context = sqlx::query_as::<_, (i32, Option<Uuid>, String, Option<String>, Option<chrono::DateTime<chrono::Utc>>, Option<chrono::DateTime<chrono::Utc>>)>(
+        "SELECT COALESCE(a.attempt_number, c.evaluation_attempt_count, 0), a.id,
+             c.git_commit_hash,
+             CASE WHEN a.attempt_number = (SELECT MAX(latest.attempt_number)
+                        FROM evaluation_attempts latest WHERE latest.commit_id = c.id)
+                        AND a.attempt_number = c.evaluation_attempt_count
+                        AND a.status = 'in_progress'
+                        AND (c.evaluation_status = 'cancelling' OR
+                            (c.evaluation_status = 'in_progress' AND COALESCE(c.cancellation_requested, FALSE)))
+                  THEN 'cancelling' ELSE a.status END,
+             a.started_at, a.completed_at FROM commits c
          LEFT JOIN evaluation_attempts a ON a.commit_id = c.id
-              AND a.attempt_number = (SELECT MAX(latest.attempt_number)
-                  FROM evaluation_attempts latest WHERE latest.commit_id = c.id)
-         WHERE c.id = $1",
+              AND (($2::uuid IS NOT NULL AND a.id = $2)
+                   OR ($2::uuid IS NULL AND a.attempt_number = (SELECT MAX(latest.attempt_number)
+                       FROM evaluation_attempts latest WHERE latest.commit_id = c.id)))
+         WHERE c.id = $1 AND ($2::uuid IS NULL OR a.id IS NOT NULL)",
     )
     .bind(commit_id)
-    .fetch_all(&mut *tx)
+    .bind(pin)
+    .fetch_optional(&mut *tx)
     .await?;
-    ensure!(
-        attempts.len() <= 1,
-        "ambiguous represented evaluation attempt"
-    );
-    let attempt = attempts.into_iter().next().unwrap_or((0, None));
+    let Some(context) = context else {
+        tx.commit().await?;
+        return Ok(None);
+    };
+    let attempt = (context.0, context.1);
     let payload = sqlx::query_scalar::<_, Value>(
         "SELECT payload FROM evaluation_policy_plans
          WHERE commit_id = $1 AND attempt_number = $2 AND evaluation_attempt_id = $3",
@@ -171,7 +279,10 @@ pub async fn fetch_matrix(
     .bind(attempt.1)
     .fetch_all(&mut *tx)
     .await?;
-    let mock_evidence = !mock_rows.is_empty();
+    let mock_configurations: std::collections::HashSet<_> = mock_rows
+        .iter()
+        .map(|row| row.system_name.clone())
+        .collect();
     rows = merge_mock_outcomes(rows, mock_rows, attempt.0);
     let mut plan = match payload {
         Some(value) => {
@@ -184,15 +295,35 @@ pub async fn fetch_matrix(
         }
         None => legacy_snapshot(attempt.0, attempt.1, &rows),
     };
+    // Context comes only from the selected commit/attempt in this transaction.
+    // Never copy the commit-wide error: it can describe a hidden environment.
+    plan.commit_sha = Some(context.2);
+    plan.attempt_status = context.3;
+    plan.started_at = context.4;
+    plan.completed_at = context.5;
     // This transient flag describes durable outcome evidence, not the loader's
     // pre-execution plan. Never write the projected snapshot back to storage.
-    plan.mock_evidence = mock_evidence;
+    if let Some(scope) = &scope {
+        scoped_read::project(scope, &mut plan, &mut rows);
+    }
+    plan.mock_evidence = if scope.is_none() {
+        !mock_configurations.is_empty()
+    } else {
+        plan.rows
+            .iter()
+            .any(|row| mock_configurations.contains(&row.configuration_name))
+    };
     project_outcomes(&mut plan, &rows);
+    if scope.is_some() {
+        scoped_read::project_flat(&plan, &mut rows);
+    }
     // COMPATIBILITY: Flat fields remain available, but must not display
     // another attempt's mutable derivation evidence alongside this plan.
-    // Markerless legacy documents retain their existing evidence projection.
+    // Markerless legacy documents retain their existing latest projection;
+    // pinned reads cannot attribute those documents to the selected UUID.
     for row in &mut rows {
-        if plan.provenance == EvalMatrixProvenance::Captured
+        if pin.is_some()
+            || plan.provenance == EvalMatrixProvenance::Captured
             || row.policy_results.get("evaluation_attempt").is_some()
         {
             if row
@@ -210,7 +341,7 @@ pub async fn fetch_matrix(
         }
     }
     tx.commit().await?;
-    Ok((rows, plan))
+    Ok(Some((rows, plan)))
 }
 
 // A preserved build status describes an irreversible artifact, not the latest
@@ -289,6 +420,10 @@ fn legacy_snapshot(
     EvalPolicyMatrixSnapshot {
         evaluation_attempt_id: id,
         attempt_number: number,
+        commit_sha: None,
+        attempt_status: None,
+        started_at: None,
+        completed_at: None,
         mock_evidence: false,
         provenance: EvalMatrixProvenance::LegacyUnavailable,
         columns: Vec::new(),
@@ -297,6 +432,7 @@ fn legacy_snapshot(
         rows: rows
             .iter()
             .map(|r| EvalMatrixRow {
+                greenfield: None,
                 system_id: None,
                 system_name: r.system_name.clone(),
                 configuration_name: r.system_name.clone(),
@@ -657,7 +793,7 @@ mod tests {
         );
     }
 
-    fn plan() -> EvalPolicyMatrixSnapshot {
+    pub(super) fn plan() -> EvalPolicyMatrixSnapshot {
         let policy = Uuid::new_v4();
         let bundles = [Uuid::new_v4(), Uuid::new_v4()];
         let mut binding = binding(policy, false);
@@ -673,6 +809,10 @@ mod tests {
         EvalPolicyMatrixSnapshot {
             evaluation_attempt_id: Some(Uuid::new_v4()),
             attempt_number: 2,
+            commit_sha: None,
+            attempt_status: None,
+            started_at: None,
+            completed_at: None,
             mock_evidence: false,
             provenance: EvalMatrixProvenance::Captured,
             empty_bundle_metadata_complete: false,
@@ -681,6 +821,10 @@ mod tests {
                 policy_id: Uuid::new_v4(),
                 name: "Version-owned name".into(),
                 version: "1".into(),
+                identifiers: Vec::new(),
+                description: None,
+                assertion: None,
+                attribute_path: None,
             }],
             bundles: bundles
                 .iter()
@@ -696,6 +840,7 @@ mod tests {
             rows: ["shared", "no-result"]
                 .iter()
                 .map(|name| EvalMatrixRow {
+                    greenfield: None,
                     system_id: Some(Uuid::new_v4()),
                     system_name: format!("host-{name}"),
                     configuration_name: (*name).into(),
@@ -852,13 +997,14 @@ mod tests {
         assert!(plan.rows[0].policies.is_empty());
     }
 
-    async fn commit(pool: &PgPool) -> (i32, Uuid, i32) {
-        let flake: i32 = sqlx::query_scalar("INSERT INTO flakes (name, repo_url) VALUES ($1, $2) RETURNING id")
-            .bind(Uuid::new_v4().to_string())
-            .bind(format!("https://example.invalid/plan/{}", Uuid::new_v4()))
-            .fetch_one(pool)
-            .await
-            .unwrap();
+    pub(super) async fn commit(pool: &PgPool) -> (i32, Uuid, i32) {
+        let flake: i32 =
+            sqlx::query_scalar("INSERT INTO flakes (name, repo_url) VALUES ($1, $2) RETURNING id")
+                .bind(Uuid::new_v4().to_string())
+                .bind(format!("https://example.invalid/plan/{}", Uuid::new_v4()))
+                .fetch_one(pool)
+                .await
+                .unwrap();
         let commit: i32 = sqlx::query_scalar("INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, NOW()) RETURNING id")
             .bind(flake)
             .bind(Uuid::new_v4().to_string())
@@ -1278,6 +1424,18 @@ mod tests {
         assert!(insert_plan(&mut tx, commit, &projected).await.is_err());
         tx.rollback().await.unwrap();
         projected.mock_evidence = false;
+        for field in ["commit_sha", "attempt_status", "started_at", "completed_at"] {
+            let mut value = serde_json::to_value(&plan).unwrap();
+            value[field] = if matches!(field, "started_at" | "completed_at") {
+                json!("2026-10-16T00:00:00Z")
+            } else {
+                json!("projected context")
+            };
+            let context: EvalPolicyMatrixSnapshot = serde_json::from_value(value).unwrap();
+            let mut tx = pool.begin().await.unwrap();
+            assert!(insert_plan(&mut tx, commit, &context).await.is_err());
+            tx.rollback().await.unwrap();
+        }
         projected.rows[0]
             .details
             .push(Some("read-only evidence".into()));

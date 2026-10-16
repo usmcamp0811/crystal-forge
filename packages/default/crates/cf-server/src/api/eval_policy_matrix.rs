@@ -3,6 +3,7 @@
 //! A control is an exact policy version, not a framework requirement. Bundle
 //! membership exists only in per-system authoritative resolver contributions.
 
+use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -11,13 +12,31 @@ use uuid::Uuid;
 pub struct EvalPolicyMatrixSnapshot {
     /// Identifies the immutable evaluation attempt, when recorded.
     pub evaluation_attempt_id: Option<Uuid>,
-    /// Names the latest queue/history attempt in the same read snapshot.
+    /// Names the selected queue/history attempt in the same read snapshot.
     /// A queued retry can exceed the commit's started-attempt counter.
     pub attempt_number: i32,
-    /// True when the represented attempt has isolated mock outcome records.
-    /// Computed at read time, including mixed or ambiguous evidence and legacy
-    /// attempts without a captured plan. False means no mock evidence was found;
-    /// it does not prove native evaluation. Captures initialize this to false.
+    /// Exact commit SHA projected at read time; captures initialize None.
+    #[serde(default)]
+    pub commit_sha: Option<String>,
+    /// Selected attempt's persisted status, with cancelling for the current
+    /// latest attempt when commit cancellation is in progress. The wire value
+    /// queued is the attempt state that the UI presents as Pending.
+    /// Absent when no attempt exists; captures initialize None.
+    #[serde(default)]
+    pub attempt_status: Option<String>,
+    /// Selected attempt's actual start time; queued attempts can have None.
+    /// This read-time context is not part of the immutable capture.
+    #[serde(default)]
+    pub started_at: Option<DateTime<Utc>>,
+    /// Selected attempt's actual completion time, without inferred timestamps.
+    /// This read-time context is not part of the immutable capture.
+    #[serde(default)]
+    pub completed_at: Option<DateTime<Utc>>,
+    /// True when visible evidence includes isolated mock outcome records.
+    /// Unrestricted reads include legacy attempts without a captured plan.
+    /// Restricted reads require an authorized retained captured row, including
+    /// mixed or ambiguous evidence. False does not exclude hidden mock records
+    /// or prove native evaluation. Captures initialize this to false.
     #[serde(default)]
     pub mock_evidence: bool,
     /// Distinguishes recorded provenance from pre-capture evaluations.
@@ -54,6 +73,21 @@ pub struct EvalPolicyColumn {
     pub name: String,
     /// Version label copied at capture.
     pub version: String,
+    /// Declared identifiers and trusted exact-version requirement external IDs.
+    /// These labels do not add controls or assert requirement compliance.
+    #[serde(default)]
+    pub identifiers: Vec<String>,
+    /// Human-readable description from the exact policy version.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Safe declarative assertion text, when an authoritative display source exists.
+    /// Current capture has no such source and records None, never Nix expressions.
+    #[serde(default)]
+    pub assertion: Option<String>,
+    /// Declared option path, when an authoritative display source exists.
+    /// Current capture records None rather than inspecting executable config.
+    #[serde(default)]
+    pub attribute_path: Option<String>,
 }
 
 /// Identifies an exact bundle version without configuration or source payloads.
@@ -76,6 +110,12 @@ pub struct EvalBundleColumn {
 /// Records a planned system independently of its shared evaluator configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalMatrixRow {
+    /// Explicit operator classification at capture: true is greenfield, false
+    /// is established, and None is unknown. Used only for display annotation;
+    /// never changes applicability, outcomes, counts, or deployment policy.
+    /// Earlier captures remain unknown and are never enriched from current data.
+    #[serde(default)]
+    pub greenfield: Option<bool>,
     /// Historical system identity; absent for legacy derivation-only rows.
     pub system_id: Option<Uuid>,
     /// Hostname at capture, or configuration name for legacy rows.
@@ -169,4 +209,33 @@ pub enum EvalMatrixCell {
     Unknown,
     /// Successful complete resolution explicitly excludes this policy version.
     NotAssigned,
+}
+
+#[cfg(test)]
+mod display_contract_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn earlier_capture_display_fields_are_explicitly_unknown() {
+        let column: EvalPolicyColumn = serde_json::from_value(json!({
+            "policy_version_id": Uuid::new_v4(), "policy_id": Uuid::new_v4(),
+            "name": "V-12345 is a name, not an identifier", "version": "1"
+        }))
+        .unwrap();
+        assert!(column.identifiers.is_empty());
+        assert!(column.description.is_none());
+        assert!(column.assertion.is_none());
+        assert!(column.attribute_path.is_none());
+        let row: EvalMatrixRow = serde_json::from_value(json!({
+            "system_id": null, "system_name": "greenfield", "configuration_name": "new",
+            "resolution": "resolved", "evaluation_digest": null, "policies": [], "cells": []
+        }))
+        .unwrap();
+        assert_eq!(row.greenfield, None);
+        assert_eq!(
+            serde_json::to_value(row).unwrap()["greenfield"],
+            json!(null)
+        );
+    }
 }

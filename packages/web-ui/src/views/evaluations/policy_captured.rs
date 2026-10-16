@@ -1,7 +1,7 @@
-//! Composes the captured bundle/control matrix and local presentation choices.
+//! Composes the captured matrix from owner-held presentation choices.
 //!
 //! Transport, loading, cancellation, and retries remain in the drawer owner.
-//! All interactions here change local presentation only.
+//! Exact-context links use typed receiver handoffs without mutating evidence.
 
 use super::policy_adapter::{captured, nonpass};
 use super::policy_cells::{
@@ -20,14 +20,21 @@ pub(super) fn CapturedMatrix(
     snapshot: EvalPolicyMatrixSnapshot,
     compatibility: EvalPolicyMatrixResponse,
     on_open_policy: EventHandler<String>,
+    mut state: Signal<ColumnState>,
+    mut expanded: Signal<Option<String>>,
+    mut issue: Signal<Option<String>>,
+    finding: Signal<Option<String>>,
+    mut page: Signal<usize>,
 ) -> Element {
-    let Some(matrix) = captured(&snapshot) else {
+    let snapshot_for_memo = snapshot.clone();
+    let adapted = use_memo(use_reactive(&snapshot_for_memo, move |snapshot| {
+        captured(&snapshot)
+    }));
+    let adapted = adapted.read();
+    let Some(matrix) = adapted.as_ref() else {
         return rsx! {};
     };
     let count = matrix.controls.len();
-    let mut state = use_signal(move || ColumnState::new(count));
-    let mut expanded = use_signal(|| None::<String>);
-    let mut issue = use_signal(|| None::<String>);
     let choices = state.read().clone();
     let matches_filter = |health| match choices.filter {
         RowFilter::All => true,
@@ -73,8 +80,10 @@ pub(super) fn CapturedMatrix(
     let baseline = if rows.is_empty() {
         matrix.rows.iter().collect::<Vec<_>>()
     } else {
-        rows.clone()
+        super::policy_adapter::trim_baseline(rows.clone())
     };
+    // Only an explicit operator classification can remove rows from trimming.
+    // Unknown classifications remain. All-greenfield selections retain all rows.
     let mut controls: Vec<_> = scoped
         .iter()
         .copied()
@@ -119,6 +128,10 @@ pub(super) fn CapturedMatrix(
     } else {
         controls.len()
     };
+    let page_size = super::policy_matrix::rows_per_page(columns);
+    let pages = rows.len().div_ceil(page_size).max(1);
+    let current_page = page().min(pages - 1);
+    let visible_rows = rows.iter().skip(current_page * page_size).take(page_size);
     let real_bundles = matrix.bundles.iter().filter(|b| !b.synthetic).count();
     let shared = model::shared_control_count(&matrix.bundles);
     let bundle_label = |id: &str| {
@@ -272,7 +285,7 @@ pub(super) fn CapturedMatrix(
                         }
                     } }
                     tbody {
-                        for row in &rows {
+                        for row in visible_rows {
                             {
                                 let key = row.key.clone();
                                 let is_expanded = expanded.read().as_ref() == Some(&key);
@@ -323,7 +336,7 @@ pub(super) fn CapturedMatrix(
                                     }
                                     if is_expanded {
                                         tr { class: "pm-expand-row", td { colspan: columns + 2,
-                                            RowDetails { row: (**row).clone(), controls: matrix.controls.clone(), bundles: snapshot.bundles.clone(), on_open_policy }
+                                             RowDetails { row: (**row).clone(), controls: matrix.controls.clone(), bundles: snapshot.bundles.clone(), on_open_policy, snapshot: snapshot.clone(), finding }
                                         } }
                                     }
                                 }
@@ -331,6 +344,13 @@ pub(super) fn CapturedMatrix(
                         }
                         if rows.is_empty() { tr { td { colspan: columns + 2, class: "pm-empty", "No planned systems match this filter." } } }
                     }
+                }
+            }
+            if pages > 1 {
+                nav { aria_label: "Matrix system pages",
+                    button { class: "btn btn-ghost xs focus-ring", disabled: current_page == 0, onclick: move |_| page.set(current_page.saturating_sub(1)), "Previous systems" }
+                    span { role: "status", "Page {current_page + 1} of {pages} · {rows.len()} matching systems" }
+                    button { class: "btn btn-ghost xs focus-ring", disabled: current_page + 1 >= pages, onclick: move |_| page.set(current_page + 1), "Next systems" }
                 }
             }
             div { class: "pm-legend",

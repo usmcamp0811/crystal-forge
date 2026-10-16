@@ -247,7 +247,7 @@ web-ui-check:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.web-ui" -L --show-trace
+    - sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.web-ui" -L --show-trace --builders '' --max-jobs 1 --cores 2
     - mkdir -p web-ui-screenshots
     - |
       STORE_PATH=$(readlink -f result)

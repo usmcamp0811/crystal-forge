@@ -884,10 +884,12 @@ async fn load_policies_for_eval_in_tx(
 ) -> anyhow::Result<PoliciesByConfiguration> {
     use std::collections::{BTreeMap, BTreeSet};
 
-    let system_rows = sqlx::query_as::<_, (uuid::Uuid, String, String)>(
+    let system_rows = sqlx::query_as::<_, (uuid::Uuid, String, String, Option<bool>)>(
         r#"
-        SELECT s.id, COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname), s.hostname
+        SELECT s.id, COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname), s.hostname,
+               lifecycle.greenfield
         FROM systems s
+        LEFT JOIN system_evaluation_lifecycle lifecycle ON lifecycle.system_id = s.id
         WHERE s.flake_id = $1 AND s.is_active = TRUE
         ORDER BY 2, 1
         "#,
@@ -903,7 +905,7 @@ async fn load_policies_for_eval_in_tx(
 
     // Batch-resolve all systems in one transaction (~10 queries total),
     // replacing the previous per-system N+1 loop of full resolver invocations.
-    let system_id_vec: Vec<uuid::Uuid> = system_rows.iter().map(|(id, _, _)| *id).collect();
+    let system_id_vec: Vec<uuid::Uuid> = system_rows.iter().map(|(id, _, _, _)| *id).collect();
     let mut bundle_contexts = std::collections::HashMap::new();
     let batch_outcomes = resolve_systems_effective_policies_and_contexts_in_tx(
         tx,
@@ -916,7 +918,7 @@ async fn load_policies_for_eval_in_tx(
     .context("Batch policy resolution for evaluation failed")?;
 
     policy_capture::initialize_rows(capture, &system_rows, &batch_outcomes);
-    for (system_id, config_name, _) in system_rows {
+    for (system_id, config_name, _, _) in system_rows {
         if invalid_configurations.contains(&config_name) {
             continue;
         }

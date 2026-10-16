@@ -11,6 +11,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 use tokio::time::{Duration, interval};
+use uuid::Uuid;
 
 use crate::api::models::{
     ApiError, CancelEvalOutcome, EvalDependencyGraphResponse, EvalDependencyPackageRow,
@@ -111,6 +112,7 @@ pub async fn list_eval_queue(
             systems: row.systems,
             system_count: row.system_count,
             derivation_count: row.derivation_count,
+            policy_counts_available: row.policy_counts_available,
             passed_count: row.passed_count,
             policy_failed_count: row.policy_failed_count,
             eval_failed_count: row.eval_failed_count,
@@ -342,6 +344,9 @@ pub async fn get_eval_logs_history(
 ///
 /// # Responses
 /// Returns 403 before reading provenance when viewer authorization fails.
+/// Returns 404 for both missing commits and commits outside current environment
+/// membership. Nonadmin responses include only currently authorized hosts and
+/// metadata reachable from those hosts in the same repeatable-read snapshot.
 /// Returns 500 for database errors or invalid captured plans. Otherwise returns
 /// 200 with the legacy fields and attempt-scoped matrix, including unavailable
 /// provenance when no capture exists.
@@ -350,25 +355,70 @@ pub async fn get_eval_policy_matrix(
     State(state): State<CFState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if require_viewer_or_above(&state.pool, &headers)
-        .await
-        .is_none()
-    {
+    eval_policy_matrix_response(commit_id, None, state, headers).await
+}
+
+/// Returns policy evidence for the exact attempt UUID belonging to the commit.
+///
+/// # Responses
+/// Returns 403 when viewer authentication fails. Missing, foreign, and
+/// inaccessible selections return the same 404. Returns 500 for read errors,
+/// otherwise 200 with the same matrix envelope as the latest endpoint.
+pub async fn get_eval_policy_matrix_at_attempt(
+    Path((commit_id, attempt_id)): Path<(i32, Uuid)>,
+    State(state): State<CFState>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    eval_policy_matrix_response(commit_id, Some(attempt_id), state, headers).await
+}
+
+async fn eval_policy_matrix_response(
+    commit_id: i32,
+    attempt_id: Option<Uuid>,
+    state: CFState,
+    headers: HeaderMap,
+) -> axum::response::Response {
+    let Some((user_id, roles)) =
+        crate::handlers::api::rbac::authenticated_user_roles(&state.pool, &headers).await
+    else {
+        return StatusCode::FORBIDDEN.into_response();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return StatusCode::FORBIDDEN.into_response();
     }
+    let visibility_user = (!crate::handlers::api::rbac::has_admin_role(&roles)).then_some(user_id);
 
-    let (rows, matrix) =
-        match crate::queries::eval_policy_plans::fetch_matrix(&state.pool, commit_id).await {
-            Ok(rows) => rows,
-            Err(e) => {
-                tracing::error!(
-                    "Failed to fetch eval policy matrix for commit {}: {}",
-                    commit_id,
-                    e
-                );
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        };
+    let selected = match attempt_id {
+        Some(attempt_id) => {
+            crate::queries::eval_policy_plans::fetch_matrix_for_user_at_attempt(
+                &state.pool,
+                commit_id,
+                visibility_user,
+                attempt_id,
+            )
+            .await
+        }
+        None => {
+            crate::queries::eval_policy_plans::fetch_matrix_for_user(
+                &state.pool,
+                commit_id,
+                visibility_user,
+            )
+            .await
+        }
+    };
+    let (rows, matrix) = match selected {
+        Ok(Some(rows)) => rows,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!(
+                "Failed to fetch eval policy matrix for commit {}: {}",
+                commit_id,
+                e
+            );
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
 
     let mut body = build_eval_policy_matrix_response(commit_id, rows);
     body.matrix = Some(matrix);
@@ -914,6 +964,18 @@ mod tests {
         let response = get_eval_policy_matrix(Path(42), State(test_state()), HeaderMap::new())
             .await
             .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn pinned_policy_matrix_requires_authentication_before_reading_provenance() {
+        let response = get_eval_policy_matrix_at_attempt(
+            Path((42, Uuid::new_v4())),
+            State(test_state()),
+            HeaderMap::new(),
+        )
+        .await
+        .into_response();
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 

@@ -34,6 +34,10 @@ async fn policy(pool: &PgPool, name: &str, enabled: bool) -> (Uuid, Uuid) {
     .fetch_one(pool)
     .await
     .unwrap();
+    sqlx::query("UPDATE deployment_policy_versions SET description='Exact version description', compliance_metadata=$2 WHERE id=$1")
+        .bind(version)
+        .bind(json!({"source_rule_id":"SV-123r1_rule", "source_group_id":"V-123", "config":{"secret":"never-copy"}, "assertion":"never-copy-expression"}))
+        .execute(pool).await.unwrap();
     let mut tx = pool.begin().await.unwrap();
     sqlx::query("UPDATE deployment_policies SET current_draft_version_id = NULL WHERE id = $1")
         .bind(id)
@@ -180,6 +184,12 @@ async fn real_loader_captures_overlap_empty_contexts_and_immutable_history(pool:
     let env = environment(&pool).await;
     let alpha = system(&pool, flake, env, "alpha").await;
     let beta = system(&pool, flake, env, "beta").await;
+    let actor = crate::queries::users::insert_user(&pool, "capture-actor@example.invalid", None)
+        .await
+        .unwrap()
+        .id;
+    sqlx::query("INSERT INTO system_evaluation_lifecycle(system_id,greenfield,classified_by) VALUES($1,true,$2),($3,false,$2)")
+        .bind(alpha).bind(actor).bind(beta).execute(&pool).await.unwrap();
     let (policy_id, policy_version) = policy(&pool, "Exact policy version", true).await;
     let (_, disabled_version) = policy(&pool, "Disabled check", false).await;
     let first = bundle(&pool, "First bundle", &[policy_version]).await;
@@ -239,6 +249,21 @@ async fn real_loader_captures_overlap_empty_contexts_and_immutable_history(pool:
     assert_eq!(captured.columns.len(), 1);
     assert_eq!(captured.columns[0].policy_version_id, policy_version);
     assert_eq!(captured.columns[0].policy_id, policy_id);
+    assert_eq!(
+        captured.columns[0].description.as_deref(),
+        Some("Exact version description")
+    );
+    assert_eq!(
+        captured.columns[0].identifiers,
+        vec!["SV-123r1_rule", "V-123"]
+    );
+    assert!(captured.columns[0].assertion.is_none());
+    assert!(captured.columns[0].attribute_path.is_none());
+    assert!(
+        !serde_json::to_string(&captured)
+            .unwrap()
+            .contains("never-copy")
+    );
     assert_eq!(captured.bundles.len(), 4);
     let alpha_row = captured
         .rows
@@ -251,6 +276,8 @@ async fn real_loader_captures_overlap_empty_contexts_and_immutable_history(pool:
         .find(|r| r.system_id == Some(beta))
         .unwrap();
     assert_eq!(alpha_row.assigned_bundles.len(), 3);
+    assert_eq!(alpha_row.greenfield, Some(true));
+    assert_eq!(beta_row.greenfield, Some(false));
     assert_eq!(beta_row.assigned_bundles.len(), 2);
     assert!(beta_row.policies.is_empty());
     assert_eq!(beta_row.resolution, EvalMatrixResolution::Resolved);
@@ -279,6 +306,11 @@ async fn real_loader_captures_overlap_empty_contexts_and_immutable_history(pool:
 
     // Create mutable successor drafts through the normal pointer model, then
     // change today's labels, framework, enabled state, and assignment activity.
+    sqlx::query("UPDATE system_evaluation_lifecycle SET greenfield=NULL WHERE system_id=$1")
+        .bind(alpha)
+        .execute(&pool)
+        .await
+        .unwrap();
     let draft: Uuid = sqlx::query_scalar(
         "INSERT INTO deployment_policy_versions (policy_id, version, name, policy_type, config, semantic_digest)
          SELECT policy_id, '0.2.0', name, policy_type, config, 'pending'
@@ -295,7 +327,7 @@ async fn real_loader_captures_overlap_empty_contexts_and_immutable_history(pool:
         .await
         .unwrap();
     sqlx::query(
-        "UPDATE deployment_policies SET name = 'Today policy label', enabled = FALSE WHERE id = $1",
+        "UPDATE deployment_policies SET name = 'Today policy label', description='Today description', enabled = FALSE WHERE id = $1",
     )
     .bind(policy_id)
     .execute(&pool)
@@ -388,7 +420,7 @@ async fn real_virtual_baseline_capture_preserves_bundle_without_assignment_uuids
     let mut capture = policy_capture::new_snapshot();
     policy_capture::initialize_rows(
         &mut capture,
-        &[(system, "virtual".into(), "virtual-host".into())],
+        &[(system, "virtual".into(), "virtual-host".into(), None)],
         &outcomes,
     );
     let metadata = policy_capture::load_metadata(&mut tx, &[policy], &contexts)
@@ -417,4 +449,86 @@ async fn real_virtual_baseline_capture_preserves_bundle_without_assignment_uuids
         assert!(membership.assignment_id.is_none() && membership.assignment_version_id.is_none());
     }
     tx.rollback().await.unwrap();
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires authoritative server-regressions sandbox PostgreSQL"]
+async fn capture_display_metadata_and_classification_share_repeatable_read_snapshot(pool: PgPool) {
+    let flake = flake(&pool).await;
+    let env = environment(&pool).await;
+    let system = system(&pool, flake, env, "greenfield-is-only-a-name").await;
+    let actor = crate::queries::users::insert_user(&pool, "rr-capture@example.invalid", None)
+        .await
+        .unwrap()
+        .id;
+    let lineage: Uuid = sqlx::query_scalar("INSERT INTO deployment_policies(name,policy_type,config) VALUES('Name is not REQ-FAKE','custom_check','{}') RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+    let policy: Uuid =
+        sqlx::query_scalar("SELECT current_draft_version_id FROM deployment_policies WHERE id=$1")
+            .bind(lineage)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    sqlx::query("UPDATE deployment_policy_versions SET description='Version description before', compliance_metadata=$2 WHERE id=$1")
+        .bind(policy).bind(json!({"source_rule_id":"RULE-before", "assertion":"secret", "checks":[{"content":"secret"}]}))
+        .execute(&pool).await.unwrap();
+    let framework: Uuid = sqlx::query_scalar("INSERT INTO compliance_frameworks(name,canonical_source_key) VALUES('Capture framework','capture-rr') RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+    let release: Uuid = sqlx::query_scalar("INSERT INTO compliance_framework_versions(framework_id,version,canonical_release_key) VALUES($1,'v1','v1') RETURNING id")
+        .bind(framework).fetch_one(&pool).await.unwrap();
+    for (external_id, trust) in [("REQ-trusted", "trusted"), ("REQ-suggested", "suggested")] {
+        let requirement: Uuid = sqlx::query_scalar("INSERT INTO compliance_requirements(framework_id,canonical_requirement_key) VALUES($1,$2) RETURNING id")
+            .bind(framework).bind(external_id).fetch_one(&pool).await.unwrap();
+        let version: Uuid = sqlx::query_scalar("INSERT INTO compliance_requirement_versions(requirement_id,framework_version_id,external_id,kind) VALUES($1,$2,$3,'control') RETURNING id")
+            .bind(requirement).bind(release).bind(external_id).fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO policy_requirement_mappings(policy_version_id,requirement_version_id,relationship,coverage,trust_state) VALUES($1,$2,'supports','partial',$3)")
+            .bind(policy).bind(version).bind(trust).execute(&pool).await.unwrap();
+    }
+    let mut tx = pool.begin().await.unwrap();
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await
+        .unwrap();
+    // Establish the loader snapshot before concurrent operator/catalog edits.
+    // No classification row exists: the name and absence of deployment state
+    // must not invent an established or greenfield classification.
+    let rows: Vec<(Uuid, String, String, Option<bool>)> = sqlx::query_as(
+        "SELECT s.id,s.system_configuration_name,s.hostname,l.greenfield FROM systems s LEFT JOIN system_evaluation_lifecycle l ON l.system_id=s.id WHERE s.id=$1")
+        .bind(system).fetch_all(&mut *tx).await.unwrap();
+    sqlx::query("INSERT INTO system_evaluation_lifecycle(system_id,greenfield,classified_by) VALUES($1,true,$2)")
+        .bind(system).bind(actor).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE deployment_policy_versions SET description='Version description after',compliance_metadata='{}' WHERE id=$1")
+        .bind(policy).execute(&pool).await.unwrap();
+    sqlx::query(
+        "UPDATE policy_requirement_mappings SET trust_state='suggested' WHERE policy_version_id=$1",
+    )
+    .bind(policy)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let metadata = policy_capture::load_metadata(&mut tx, &[policy], &HashMap::new())
+        .await
+        .unwrap();
+    let mut capture = policy_capture::new_snapshot();
+    policy_capture::initialize_rows(&mut capture, &rows, &HashMap::new());
+    assert_eq!(capture.rows[0].greenfield, None);
+    let column = &metadata.policies[&policy];
+    assert_eq!(
+        column.description.as_deref(),
+        Some("Version description before")
+    );
+    assert_eq!(column.identifiers, vec!["REQ-trusted", "RULE-before"]);
+    assert!(column.assertion.is_none() && column.attribute_path.is_none());
+    assert!(!serde_json::to_string(column).unwrap().contains("secret"));
+    tx.commit().await.unwrap();
+    let mut fresh = pool.begin().await.unwrap();
+    let today = policy_capture::load_metadata(&mut fresh, &[policy], &HashMap::new())
+        .await
+        .unwrap();
+    assert_eq!(
+        today.policies[&policy].description.as_deref(),
+        Some("Version description after")
+    );
+    assert!(today.policies[&policy].identifiers.is_empty());
+    fresh.rollback().await.unwrap();
 }
