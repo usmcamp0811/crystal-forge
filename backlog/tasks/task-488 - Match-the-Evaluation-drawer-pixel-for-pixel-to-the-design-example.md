@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 15:01'
+updated_date: '2026-10-16 15:20'
 labels:
   - web-ui
   - design-parity
@@ -104,6 +104,8 @@ Mock persistence continuation (user-approved bounded ownership): modify only moc
 User-approved mock-data boundary: add an additive isolated mock-outcome table and mock-only writer/read path instead of recording executable derivations. No fake expected output paths, runnable derivations, observation work, or build enqueue. Preserve normal evaluator/build behavior. Generate real fixture policy versions, bundles and assignments through their public lifecycle APIs; run a new normal mock evaluation so the existing resolver captures its memberships. Existing flat fixture histories stay legacy/unavailable. Leave authoritative web-ui VM checks to CI per the user's instruction; use targeted native/SQLx and direct preview browser verification locally.
 
 User-approved replacement: isolate mock outcomes in additive migration0304 (verified0303 highest), keyed exact attempt UUID/config with commit+attempt ownership FK and immutable first-write policy JSON. Remove mock derivation writer and fake native artifacts. Read exact represented mock outcomes alongside real outcomes in matrix RR snapshot, reject dual-current ambiguity, retain flat agent compatibility. Add reusable mock-only counts view overriding queue/history counts only for mock lineage and current represented attempt (queued retry has zero old mock counts). Adapt existing two registered ignored SQLx tests and add projection/count regressions as needed; parent registers any new names. No preview DB/services/UI/scripts/commits/pushes; targeted Nix tests/check only.
+
+Focused derivation-count delegation: add serde-default nullable derivation_count to server/UI queue/history DTOs and row projections. Count persisted derivation records only when policy_results.evaluation_attempt matches latest represented evaluation_attempts.attempt_number; return NULL for unattributable legacy records, exclude stale marked records, and return zero for no current records including isolated mocks/queued retries. Replace both drawer estimates with reported count or em dash and unit tooltip. Add ignored migration-backed queue/history read regressions and update affected literal constructors only. No schema, build behavior, services, DB access, web-ui VM, commits or pushes; bounded Nix native compilation/tests with jobs=2, parent owns runtime/DB verification.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
