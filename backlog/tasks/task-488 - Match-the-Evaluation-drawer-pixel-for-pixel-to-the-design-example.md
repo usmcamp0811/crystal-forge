@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 15:45'
+updated_date: '2026-10-16 15:46'
 labels:
   - web-ui
   - design-parity
@@ -108,6 +108,8 @@ User-approved replacement: isolate mock outcomes in additive migration0304 (veri
 Focused derivation-count delegation: add serde-default nullable derivation_count to server/UI queue/history DTOs and row projections. Count persisted derivation records only when policy_results.evaluation_attempt matches latest represented evaluation_attempts.attempt_number; return NULL for unattributable legacy records, exclude stale marked records, and return zero for no current records including isolated mocks/queued retries. Replace both drawer estimates with reported count or em dash and unit tooltip. Add ignored migration-backed queue/history read regressions and update affected literal constructors only. No schema, build behavior, services, DB access, web-ui VM, commits or pushes; bounded Nix native compilation/tests with jobs=2, parent owns runtime/DB verification.
 
 Narrow backend integrity follow-up: add serde-default mock_evidence boolean to backend EvalPolicyMatrixSnapshot, false in capture/legacy constructors, recomputed in fetch_matrix from exact represented-attempt isolated rows within RR before merge (true even ambiguity/legacy without plan). Reject read-projected true flag at capture insertion. Extend old-JSON default/pure tests and existing ignored SQLx projection cases for true/native false/retry false and unchanged immutable payload. No migrations, frontend, real evaluator/build, source/config changes, DB/services/VM/commits. Run small targeted native tests/compile through Nix jobs2 only.
+
+Narrow frontend mock-evidence delegation: reuse existing task lock/worktree and parent-owned preview. Mirror serde-default mock_evidence in policy_wire.rs; render exact simulated-outcomes note in EvalDrawerPolicyTab before captured/legacy branch from response flag alone. Update frontend fixtures and pure DTO compatibility cases for missing=false, explicit true with both provenance values, and explicit false. No CSS/card/count/state changes, builds, services, DB, VM, or commits. Run only cheap changed-file formatting and whitespace checks; parent owns rebuild/runtime verification.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
