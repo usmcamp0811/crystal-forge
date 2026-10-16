@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 16:53'
+updated_date: '2026-10-16 17:12'
 labels:
   - web-ui
   - design-parity
@@ -19,6 +19,8 @@ references:
   - TASK-441
   - TASK-447
   - TASK-386
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/334'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2956388094'
 documentation:
   - docs/design/CrystalForge/components/EvalDrawer.jsx
   - docs/design/CrystalForge/styles.css
@@ -201,4 +203,14 @@ Review path through existing SSH tunnel: http://localhost:8080/evaluations -> Co
 Blocking native-failure regression fix implemented only in packages/default/crates/cf-server/src/models/evaluate_with_policies.rs and queries/eval_policy_plans.rs. Finalizer matches all three actual SyntheticFailureWrite variants to their returned ID, then writes {evaluation_attempt: expected_attempt, evaluation_failure: true, evaluation_failure_error: cf.error} in the existing locked transaction. It does not change status or paths after helper. Reader validates exact integer attempt, boolean true and nonblank string diagnostic before projecting eval_failed/error_message (including preserved build state); invalid/stale failure documents clear evidence and diagnostic. Existing flat compatibility handler consequently receives eval_failed + actual error for nix_eval_failure. Structured applicable controls remain unknown; no DTO/new public field or frontend changes. Source contracts updated.
 Added SQLx tests (not compiled/executed in this continuation): queries::eval_policy_plans::tests::confirmed_native_finalizer_failure_is_attempt_owned_and_preserves_build; queries::eval_policy_plans::tests::confirmed_native_finalizer_cancellation_writes_no_failure_evidence. First invokes real finalizer across inserted/status3/status10 cases, checks exact stamp and status/path invariants, real fetch_matrix compatibility inputs and unknown control cells, malformed/stale evidence masking and queued retry isolation. Second compares full derivation JSON before/after cancellation for absent/existing rows and asserts no configuration snapshots. Added pure test queries::eval_policy_plans::tests::native_failure_projection_rejects_stale_or_malformed_diagnostics. Compatibility handler mapping itself is existing code and was inspected, not invoked by the new tests.
 Verification actually run: nix develop .#devenv --command rustfmt --edition 2024 --check --config skip_children=true packages/default/crates/cf-server/src/models/evaluate_with_policies.rs packages/default/crates/cf-server/src/queries/eval_policy_plans.rs exited0 after formatting corrections; scoped git diff --check exited0. No builds, native test execution, DB connections, services, preview operations, web-ui VM, commits or pushes. Parent owns isolated SQLx execution and any CI registration. TASK-488 remains In Progress with parent lock. Preview freshness/health not rechecked; parent owns preview.
+
+User authorized commit, push and MR. Committed all 37 intended TASK-488 source/test/documentation files as 3bf1c0026170fc7dbbf3ecd9e711b00e0ab1ef96 (`TASK-488: Add captured bundle/control evaluation matrix`) and pushed normally to origin/TASK-488-eval-drawer-pixel-parity. Remote tracking verified 0 ahead/0 behind. Only the untracked task lock remains; no runtime artifacts, credentials, screenshots or unrelated work were committed.
+
+Final read-only review found a real Nix failure-attribution regression: captured readers masked current markerless confirmed failures. Fixed by stamping exact-attempt failure metadata inside the existing real finalization transaction and validating it during projection, preserving irreversible build state and cancellation behavior. Added two ignored real-finalizer regressions plus a pure stale/malformed diagnostic regression. Initial DB run failed on duplicate fixture repository URLs; unique URLs fixed the fixture without weakening assertions. Corrected real-finalizer tests passed 2/2, and the complete targeted matrix projection group passed 16/16 including ignored SQLx cases. CI ignored exact membership is now 73; original 83 non-ignored entries remain unchanged.
+
+Opened Draft MR !334 against dev: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/334. Uploaded four actual persisted-preview screenshots (dark/light bundles, control detail, narrow) through GitLab project uploads and embedded them in the MR. Description records migrations, mock isolation, exact local evidence, current preview path, remaining visual/behavior limitations and no merge authorization. Draft remains pending required CI and final visual acceptance; task remains In Progress rather than claiming Review/Done.
+
+Exact-head MR pipeline 2956388094 was observed running for SHA3bf1c0026170fc7dbbf3ecd9e711b00e0ab1ef96: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2956388094. No green-CI claim and no local web-ui VM runs after the user's CI-only instruction.
+
+Preview left ready through SSH forwarding at http://localhost:8080/evaluations -> Completed -> search21057a692520 -> infrastructure -> Policy matrix. Built the final native backend with --locked and refreshed only the verified task API process; current listener PID7663, frontend PID11972 at that verification, PostgreSQL/data remain task-owned and preserved. Real browser verification after refresh passed again without interception (/tmp/opencode/task488/mr334-preview-verified.log). Repo remains tracked-clean except task lock. No merge, production deployment or worktree removal performed.
 <!-- SECTION:NOTES:END -->
