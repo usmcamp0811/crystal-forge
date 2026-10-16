@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 02:06'
+updated_date: '2026-10-16 02:12'
 labels:
   - web-ui
   - design-parity
@@ -88,6 +88,8 @@ High risk due to evaluation-time persistence and overlapping WIP. No blanket ref
 4. Implement consistent snapshot reads and API projection, preserving existing fields and truthful legacy/partial rows. Add isolated DB regressions and exact runner membership.
 5. Wire typed pure model and state transitions into bundle/control drawer components; port source design CSS and preserve all actions. Keep preview current after each coherent batch.
 6. Verify full scenarios and browser interactions using real persisted data; compare same-viewport design and implementation, record every discrepancy and required screenshot gap. Do not commit/push/open MR without authorization.
+
+Backend delegated implementation: retain the existing task lock/worktree and running preview. Add 0303 JSONB first-write attempt capture; resolve and load eligible policies in a caller-owned repeatable-read transaction; retain per-system resolution and exact authoritative bundle/assignment version provenance before execution. Add typed additive matrix DTO and repeatable-read outcome projection with attempt-marker validation, pure status tests and disposable-DB regression tests. No frontend edits, service operations, builds, commits or pushes; owner coordinates verification and backend restart.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
