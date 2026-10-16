@@ -134,10 +134,35 @@ The Python fixture's timeout cleanup sends `killpg(SIGKILL)` and waits for the
 direct child. That fixture does not assert process-group absence or prove Rust
 quarantine ownership; those are separate coordinator regression contracts.
 
+## TASK-488 evaluation policy capture tests
+
+These four ignored, migration-backed tests use SQLx-created sandbox databases.
+The exact library-test runner invokes each qualified name with
+`--ignored --exact --test-threads=1`. The guard requires its named success line
+and exactly one passed test with zero failures and zero ignored tests. Missing
+or renamed tests fail the check.
+
+```text
+queries::eval_policy_plans::tests::capture_is_atomic_first_write_immutable_and_retains_partial_rows
+queries::eval_policy_plans::tests::capture_rejects_wrong_attempt_owner_and_retry_cannot_read_old_plan
+server::policy_capture_tests::real_loader_captures_overlap_empty_contexts_and_immutable_history
+server::policy_capture_tests::real_virtual_baseline_capture_preserves_bundle_without_assignment_uuids
+```
+
+The query tests cover atomic first-write capture, immutable history, partial
+rows, attempt ownership and retry isolation. The loader tests exercise resolved
+overlap, empty contexts and historical membership, including virtual baseline
+bundles without assignment UUIDs. The separate browser-local matrix fixture
+tests presentation; it does not prove persisted capture. Runner membership does
+not establish a passing result for the current worktree.
+
 ## TASK-470 selected library tests
 
-The exact library-test runner selects 59 ignored tests: the 52 TASK-470 tests
-below, the six TASK-484 tests above, and this TASK-487 regression:
+The exact library-test runner selects 73 ignored tests: the 62 tests in the
+TASK-470 extra library list below (including four TASK-488 isolated mock tests
+and four derivation-count tests, plus two native-finalizer tests),
+the six TASK-484 tests and four TASK-488 capture tests above, and this TASK-487
+regression:
 
 ```text
 handlers::api::deployment_policies::tests::test_list_deployment_policies_includes_fixture
@@ -167,12 +192,22 @@ acceptance-only scope, exact finding context, combined-cap rejection, linked
 system visibility, retained history, and exact scheduled package identities.
 Membership does not establish a passing result for the current source.
 
-The following 52 ignored PostgreSQL tests run with
+The following 62 ignored PostgreSQL tests run with
 `--ignored --exact --test-threads=1`. Each invocation must report exactly one
 passed test and zero ignored tests. The tests include completed CVE publication
 provenance and malformed signing-key rejection across all Niks3 auth modes.
 
 ```text
+models::evaluate_with_policies::mock_persistence::tests::mock_persistence_records_attempt_outcomes_without_production_work
+models::evaluate_with_policies::mock_persistence::tests::mock_persistence_cancelled_or_superseded_attempts_write_nothing
+models::evaluate_with_policies::mock_persistence::tests::isolated_mock_counts_match_queue_history_and_exclude_queued_retry
+queries::eval_policy_plans::tests::isolated_mock_projection_matches_attempt_and_rejects_ambiguous_native
+queries::eval_policy_plans::tests::confirmed_native_finalizer_failure_is_attempt_owned_and_preserves_build
+queries::eval_policy_plans::tests::confirmed_native_finalizer_cancellation_writes_no_failure_evidence
+queries::commits::tests::derivation_count_isolated_current_mock_has_zero_records
+queries::commits::tests::derivation_count_excludes_stale_native_and_queued_retry
+queries::commits::tests::derivation_count_counts_current_native_records_not_groups
+queries::commits::tests::derivation_count_markerless_legacy_is_unavailable
 queries::commits::partial_resource_failure_tests::partial_resource_failure_retains_rejected_completion_with_preserved_build_history
 queries::commits::partial_resource_failure_tests::partial_resource_failure_reconciles_committed_but_unacknowledged_completion
 queries::commits::partial_resource_failure_tests::partial_resource_failure_ignores_never_committed_completion_candidate
@@ -226,6 +261,55 @@ builder::cve_worker::tests::materialization_completed_provenance_identity_and_el
 handlers::api::caches::tests::niks3_api_create_rejects_malformed_keys_in_all_auth_modes
 handlers::api::caches::tests::niks3_api_update_rejects_malformed_keys_in_all_auth_modes
 ```
+
+The four TASK-488 isolated mock tests use migration-backed disposable SQLx
+databases. The original two persistence tests verify exact-attempt outcomes and
+UUID-keyed policy details in `evaluation_mock_outcomes`, not the generic
+derivation writer. Repeated writes preserve first-write evidence; updates and
+invalid attempt ownership or markers are rejected. Cancelled or superseded
+attempts write no mock outcomes. Mock persistence creates no derivations,
+buildable rows, build jobs, configuration-observation requests or observations,
+or composite assessments; both tests assert unchanged counts for these rows.
+
+The queue/history test verifies matching isolated mock counts, exclusion of old
+mock evidence from a queued retry, and native-only counting when a native retry
+starts. The projection test verifies exact-attempt mock evidence, rejects invalid
+markers, preserves Unknown for missing results, and withholds outcomes and global
+evidence when current native and mock evidence are ambiguous. A queued retry does
+not inherit old mock results. These two tests insert native derivation fixtures
+explicitly to exercise coexistence and ambiguity.
+
+The three mock persistence tests are declared in `models/mock_persistence.rs`,
+loaded by `#[path = "mock_persistence.rs"]` and `mod mock_persistence;` inside
+`models::evaluate_with_policies`. The projection test is declared in the `tests`
+module of `queries/eval_policy_plans.rs`. The qualified names above follow these
+module declarations. Membership does not establish a passing result for the
+current source.
+
+The four derivation-count tests are declared in `queries::commits::tests` with
+ignored, migration-backed SQLx test attributes. Queue and history counts report
+zero persisted derivation records for isolated current mock outcomes, exclude
+stale native records, and count current native records across statuses rather
+than result groups. A queued retry does not inherit the previous attempt's count.
+Markerless or malformed legacy markers make the count unavailable even when a
+known current record exists. These declarations describe coverage; membership
+does not establish a passing result for the current source.
+
+The two native-finalizer tests are declared in `queries::eval_policy_plans::tests`
+with ignored, migration-backed SQLx test attributes. They invoke the real
+`finalize_evaluation_attempt` with confirmed Nix failures. The failure test covers
+new derivations, resettable evaluation rows, and irreversible build state. It
+checks the exact-attempt failure marker and diagnostic, flat `eval_failed`
+projection, and structured controls that remain Unknown without policy details.
+Irreversible build status and derivation/store paths survive the failure stamp.
+Malformed failure flags or diagnostics and stale attempt markers are masked;
+a queued retry also hides the previous failure diagnostic and policy evidence.
+The cancellation test compares complete derivation rows before and after the
+finalizer for both absent and existing derivations. Cancellation writes no
+failure evidence, preserves existing rows, and creates no evaluation snapshots.
+Each fixture flake has a distinct repository URL so independent scenarios do
+not collide with the uniqueness constraint. Execute the qualified cases through
+the guarded runner; registration alone does not establish a passing result.
 
 The partial resource-failure tests use migration-backed disposable SQLx databases.
 They preserve exact completed derivation, build-job, assessment, and rule rows;
@@ -582,7 +666,7 @@ its matching `END` identifies the active target and whether Cargo was compiling
 or executing. The library also has an explicit compilation boundary before its
 selected tests execute. Cargo's normal output reports executed test names.
 
-Each of the 59 ignored and 83 non-ignored selected library tests emits its qualified name,
+Each of the 73 ignored and 83 non-ignored selected library tests emits its qualified name,
 mode, start time, exit status, and elapsed time. Cargo stdout and stderr still
 pass through `tee` to the exact-test guard. `pipefail` preserves failures from
 Cargo or `tee`; success still requires the named `... ok` line and the existing

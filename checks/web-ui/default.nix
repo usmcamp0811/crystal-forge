@@ -668,9 +668,10 @@ in pkgs.testers.runNixOSTest {
     # Main Crystal Forge server with all services enabled
     machine = {
       imports = [ inputs.self.nixosModules.crystal-forge ];
-      virtualisation.sharedDirectories.atticObserver = lib.mkIf runNativeCacheFixtures atticObserverShare;
-      virtualisation.sharedDirectories.niks3Observer = lib.mkIf runNativeCacheFixtures niks3ObserverShare;
-      environment.etc."cache-fixture-production-pki".source = lib.mkIf runNativeCacheFixtures productionPki;
+      virtualisation.sharedDirectories = lib.optionalAttrs runNativeCacheFixtures {
+        atticObserver = atticObserverShare;
+        niks3Observer = niks3ObserverShare;
+      };
 
       virtualisation.memorySize = 20480; # 20GB for everything
       virtualisation.cores = 4;
@@ -713,10 +714,14 @@ in pkgs.testers.runNixOSTest {
         TEMP = "/tmp";
       };
 
+      # Omit the optional entry itself: a conditional source leaves an etc
+      # entry with no source for focused non-cache workflows.
       environment.etc = {
         "server.key".source = "${keyPath}/agent.key";
         "server.pub".source = "${pubPath}/agent.pub";
         "cache-fixture-credentials".source = cacheCredentials;
+      } // lib.optionalAttrs runNativeCacheFixtures {
+        "cache-fixture-production-pki".source = productionPki;
       };
       security.pki.certificateFiles = ["${cacheCredentials}/ca.crt" "${productionPki}/s3-ca.crt"];
 
@@ -1460,6 +1465,7 @@ in pkgs.testers.runNixOSTest {
       "25-caches-modal-attic",
       "26c-evaluations-latest-per-flake-populated",
       "26d-evaluations-latest-combined-filters-empty-clear",
+      "26e-evaluation-policy-bundle-controls",
       "29g-poam-failed-evidence-create",
       "29h-poam-link-compatible-findings",
       "29i-poam-detail-edits-milestones-conflicts",

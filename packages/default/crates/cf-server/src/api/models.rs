@@ -2337,6 +2337,11 @@ pub struct EvalQueueItem {
     pub queue_position: i64,
     pub systems: Vec<String>,
     pub system_count: i64,
+    /// Counts persisted derivation records for the represented attempt, not
+    /// closure packages or outputs. `None` means legacy records cannot be
+    /// attributed to an attempt. Isolated mock outcomes are not derivations.
+    #[serde(default)]
+    pub derivation_count: Option<i64>,
     pub passed_count: i64,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
@@ -2396,6 +2401,11 @@ pub struct EvalHistoryItem {
     pub evaluation_duration_ms: Option<i64>,
     pub evaluation_error_message: Option<String>,
     pub system_count: i64,
+    /// Counts persisted derivation records for the represented attempt, not
+    /// closure packages or outputs. `None` means legacy records cannot be
+    /// attributed to an attempt. Isolated mock outcomes are not derivations.
+    #[serde(default)]
+    pub derivation_count: Option<i64>,
     pub passed_count: i64,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
@@ -2460,9 +2470,15 @@ pub struct EvalHistoryParams {
 /// Per-system policy matrix for a single commit evaluation.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalPolicyMatrixResponse {
+    /// Identifies the evaluated commit.
     pub commit_id: i32,
+    /// Legacy display labels, retained for existing clients.
     pub policies: Vec<String>,
+    /// Legacy derivation-result projection, retained for existing clients.
     pub systems: Vec<EvalPolicySystemRow>,
+    /// Attempt-scoped provenance and outcomes; absent in older server responses.
+    #[serde(default)]
+    pub matrix: Option<super::eval_policy_matrix::EvalPolicyMatrixSnapshot>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

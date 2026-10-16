@@ -1362,11 +1362,61 @@ async fn resolve_systems_effective_policies_batch(
     Ok(result)
 }
 
+/// Resolves a batch through the caller's snapshot without committing it.
+///
+/// The evaluation loader keeps this snapshot open through first-write capture.
+///
+/// # Errors
+/// Returns an error when policy inputs cannot be loaded or decoded.
 async fn resolve_systems_effective_policies_batch_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     system_ids: &[Uuid],
     bundle_version_requests: Option<&std::collections::HashMap<Uuid, Vec<Uuid>>>,
     ignore_non_evaluation_conflicts: bool,
+) -> Result<std::collections::HashMap<(Option<Uuid>, Uuid), ResolutionOutcome>> {
+    resolve_systems_effective_policies_and_contexts_in_tx(
+        tx,
+        system_ids,
+        bundle_version_requests,
+        ignore_non_evaluation_conflicts,
+        &mut std::collections::HashMap::new(),
+    )
+    .await
+}
+
+/// Identifies one applicable bundle context before policy exclusions or merging.
+///
+/// Empty bundles and bundles with no executable policies still have a context.
+/// Virtual baselines have neither assignment identity; persisted assignments
+/// always have both. Context presence does not assert successful resolution or
+/// that a superseded policy version supplied effective execution semantics.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedBundleContext {
+    /// Identifies the exact bundle version selected for this system.
+    pub bundle_version_id: Uuid,
+    /// Identifies a persisted assignment lineage, absent for virtual baselines.
+    pub assignment_id: Option<Uuid>,
+    /// Identifies its immutable snapshot, absent for virtual baselines.
+    pub assignment_version_id: Option<Uuid>,
+    /// Distinguishes the resolver's virtual context from a persisted assignment.
+    pub virtual_baseline: bool,
+}
+
+/// Resolves policies and exports the exact applicable contexts from the same inputs.
+///
+/// Contexts come from the authoritative assignment query and virtual-work-item
+/// construction, not a second applicability query or surviving policy union.
+/// The caller must supply an empty context map. Results include contexts for
+/// conflicts so consumers cannot mistake skipped gates for nonassignment.
+///
+/// # Errors
+/// Returns an error when policy inputs cannot be loaded or decoded.
+pub(crate) async fn resolve_systems_effective_policies_and_contexts_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_ids: &[Uuid],
+    bundle_version_requests: Option<&std::collections::HashMap<Uuid, Vec<Uuid>>>,
+    ignore_non_evaluation_conflicts: bool,
+    contexts: &mut std::collections::HashMap<(Option<Uuid>, Uuid), Vec<ResolvedBundleContext>>,
 ) -> Result<std::collections::HashMap<(Option<Uuid>, Uuid), ResolutionOutcome>> {
     if system_ids.is_empty() {
         return Ok(std::collections::HashMap::new());
@@ -1850,6 +1900,26 @@ async fn resolve_systems_effective_policies_batch_in_tx(
                     .unwrap_or_default(),
             ));
         }
+    }
+
+    // Export contexts before exclusions, eligibility, and merge can erase every
+    // policy. This observes the work items without changing resolution inputs.
+    for (requested, system, assignments) in &work_items {
+        contexts.insert(
+            (*requested, *system),
+            assignments
+                .iter()
+                .map(|(assignment, version, _, bundle, scope, _, _, _)| {
+                    let virtual_baseline = scope == "virtual_baseline";
+                    ResolvedBundleContext {
+                        bundle_version_id: *bundle,
+                        assignment_id: (!virtual_baseline).then_some(*assignment),
+                        assignment_version_id: (!virtual_baseline).then_some(*version),
+                        virtual_baseline,
+                    }
+                })
+                .collect(),
+        );
     }
 
     let mut results = std::collections::HashMap::new();

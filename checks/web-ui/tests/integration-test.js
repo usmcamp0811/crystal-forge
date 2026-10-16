@@ -21342,6 +21342,93 @@ security.audit.enable = true;</fixtext>
     },
   },
   {
+    name: "26e-evaluation-policy-bundle-controls",
+    description: "Dense evaluation matrix bundle/control modes, overlap, health, drilldown and preserved state",
+    action: async (page) => {
+      const { expect } = require("@playwright/test");
+      const { denseMatrix, runEvalPolicyMatrixWorkflow } = require("./eval-policy-matrix-workflow.js");
+      const stepName = "26e-evaluation-policy-bundle-controls";
+      const commitId = 488;
+      const now = "2026-10-15T12:00:00Z";
+      const systems = denseMatrix(commitId).matrix.rows.map(row => row.system_name);
+      // Browser-local fixtures keep this workflow independent of seeded commits
+      // and safe for the host runner's existing authenticated context.
+      const item = {
+        commit_id: commitId, flake_id: 488, flake_name: "TASK-488 matrix fixture",
+        branch: "main", commit_hash: "0488048804880488048804880488048804880488",
+        commit_message: "[FIXTURE] Dense evaluation policy matrix", author: "Fixture Bot",
+        committed_at: now, enqueued_at: now, is_latest_per_flake: true,
+        evaluation_status: "in_progress", queue_position: 1, systems,
+        system_count: systems.length, passed_count: 56, policy_failed_count: 1,
+        eval_failed_count: 0, attempt_number: 1,
+      };
+      const queueEndpoint = "**/api/v1/commits/eval-queue**";
+      const logEndpoint = `**/api/v1/commits/${commitId}/eval/logs*`;
+      const forceEndpoint = `**/api/v1/commits/${commitId}/force-cancel-evaluation`;
+      let forceRequests = 0;
+      const forceRoute = route => {
+        forceRequests += 1;
+        return route.fulfill({ status: 204 });
+      };
+      const queueRoute = route => route.fulfill({ json: {
+        active_count: 1, completed_count: 0, successful_count: 0, failed_count: 0,
+        domain_total: 1, filtered_total: 1, execution_mode: "mock",
+        timestamp: now, items: [item],
+      } });
+      const logRoute = route => route.fulfill({ json: [] });
+      const drawer = page.getByRole("dialog", { name: "Evaluation detail", exact: true });
+      await page.route(queueEndpoint, queueRoute);
+      await page.route(logEndpoint, logRoute);
+      await page.route(forceEndpoint, forceRoute);
+      try {
+        await page.goto(`${baseUrl}/evaluations`, { timeout: LOAD_TIMEOUT });
+        const coach = page.getByRole("complementary", { name: "Crystal Forge Coach", exact: true });
+        // Saved Coach preferences can arrive between the visibility check and
+        // click. Retry normal user interaction without bypassing hit testing.
+        await expect(async () => {
+          if (await coach.isVisible()) {
+            await coach.getByRole("button", { name: "Close Crystal Forge Coach", exact: true }).click({ timeout: 1000 });
+          }
+          await page.getByRole("row").filter({ hasText: item.commit_hash.slice(0, 12) }).click({ timeout: 1000 });
+        }).toPass({ timeout: LOAD_TIMEOUT });
+        await expect(drawer).toBeVisible();
+        await drawer.getByRole("button", { name: "Expand", exact: true }).click();
+        await expect(drawer.getByRole("button", { name: "Restore", exact: true })).toBeVisible();
+        await expect.poll(async () => (await drawer.boundingBox()).width)
+          .toBe(Math.min(1360, page.viewportSize().width));
+        await drawer.getByRole("button", { name: "Restore", exact: true }).click();
+        await runEvalPolicyMatrixWorkflow(page, commitId,
+          state => captureWorkflowState(page, stepName, state));
+        await drawer.getByRole("button", { name: "Close", exact: true }).click();
+        item.evaluation_status = "cancelling";
+        await page.reload({ timeout: LOAD_TIMEOUT });
+        await page.getByRole("row").filter({ hasText: item.commit_hash.slice(0, 12) }).click();
+        await drawer.getByRole("button", { name: "Force-cancel", exact: true }).click();
+        const confirm = page.getByRole("alertdialog", { name: "Force-cancel evaluation?", exact: true });
+        await expect(confirm).toBeVisible();
+        expect(forceRequests).toBe(0);
+        await confirm.getByRole("button", { name: "Keep running", exact: true }).click();
+        await expect(confirm).toBeHidden();
+        expect(forceRequests).toBe(0);
+        await drawer.getByRole("button", { name: "Force-cancel", exact: true }).click();
+        await confirm.getByRole("button", { name: "Force-cancel", exact: true }).click();
+        await expect.poll(() => forceRequests).toBe(1);
+      } finally {
+        // Unmount the matrix/log pollers before removing only our own routes.
+        try {
+          if (await drawer.isVisible()) {
+            await drawer.getByRole("button", { name: "Close", exact: true }).click();
+            await expect(drawer).toBeHidden();
+          }
+        } finally {
+          await page.unroute(logEndpoint, logRoute);
+          await page.unroute(queueEndpoint, queueRoute);
+          await page.unroute(forceEndpoint, forceRoute);
+        }
+      }
+    },
+  },
+  {
     name: "12i-system-detail-generation-metric",
     description: "System detail shows API-provided generation in overview metrics",
     action: async (page) => {

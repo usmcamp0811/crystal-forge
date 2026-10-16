@@ -1943,6 +1943,10 @@ pub struct EvalQueueRow {
     pub queue_position: i64,
     pub systems: Vec<String>,
     pub system_count: i64,
+    /// Counts persisted records marked for the represented attempt. Returns
+    /// `None` when legacy records cannot be attributed; excludes closure counts,
+    /// outputs, isolated mock outcomes, and records marked for other attempts.
+    pub derivation_count: Option<i64>,
     pub passed_count: i64,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
@@ -1966,6 +1970,17 @@ pub async fn list_eval_queue(pool: &PgPool, params: &EvalQueueParams) -> Result<
     list_eval_queue_for_user(pool, params, None).await
 }
 
+/// Returns evaluation queue rows visible to the supplied user scope.
+///
+/// Mock counts use only isolated evidence for the represented attempt. Queued
+/// retries cannot inherit earlier mock counts. Rows without mock overrides keep
+/// the native derivation-count semantics.
+/// `derivation_count` instead counts only records whose numeric attempt marker
+/// matches the latest attempt row, including a queued retry not yet started.
+/// Unattributable legacy records make that count unavailable, not zero.
+///
+/// # Errors
+/// Returns database query failures.
 pub async fn list_eval_queue_for_user(
     pool: &PgPool,
     params: &EvalQueueParams,
@@ -2054,7 +2069,16 @@ pub async fn list_eval_queue_for_user(
             COALESCE(c.eval_queue_position, 9223372036854775807) AS queue_position,
             COALESCE(cac.nixos_configurations, ARRAY[]::text[]) AS systems,
             COALESCE(CARDINALITY(cac.nixos_configurations), 0)::bigint AS system_count,
-            COALESCE((
+            (SELECT CASE
+                -- Unmarked or malformed legacy records cannot prove ownership.
+                -- Compare JSON values without casting untrusted marker text.
+                WHEN COUNT(*) FILTER (WHERE ea.attempt_number IS NULL
+                    OR jsonb_typeof(d.policy_results->'evaluation_attempt') IS DISTINCT FROM 'number'
+                    OR (d.policy_results->>'evaluation_attempt') !~ '^[1-9][0-9]*$') > 0
+                THEN NULL
+                ELSE COUNT(*) FILTER (WHERE d.policy_results->'evaluation_attempt' = to_jsonb(ea.attempt_number))
+             END FROM derivations d WHERE d.commit_id = c.id) AS derivation_count,
+            COALESCE(mc.passed_count, (
                 SELECT COUNT(*)::bigint
                 FROM derivations d
                 WHERE d.commit_id = c.id
@@ -2062,7 +2086,7 @@ pub async fn list_eval_queue_for_user(
                   AND d.policy_requirements_met IS TRUE
                   AND d.status_id <> 6
             ), 0) AS passed_count,
-            COALESCE((
+            COALESCE(mc.policy_failed_count, (
                 SELECT COUNT(*)::bigint
                 FROM derivations d
                 WHERE d.commit_id = c.id
@@ -2072,7 +2096,7 @@ pub async fn list_eval_queue_for_user(
                     OR d.policy_requirements_met IS FALSE
                   )
             ), 0) AS policy_failed_count,
-            COALESCE((
+            COALESCE(mc.eval_failed_count, (
                 SELECT COUNT(*)::bigint
                 FROM derivations d
                 WHERE d.commit_id = c.id
@@ -2097,6 +2121,8 @@ pub async fn list_eval_queue_for_user(
             ORDER BY attempt_number DESC, created_at DESC
             LIMIT 1
         ) ea ON TRUE
+        LEFT JOIN view_evaluation_mock_counts mc ON mc.commit_id = c.id
+            AND mc.attempt_number = ea.attempt_number
         WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'cancelling', 'complete', 'failed', 'cancelled')
           AND c.source_archived = false
           AND ($5::uuid IS NULL OR EXISTS (
@@ -2578,10 +2604,18 @@ pub async fn cleanup_partial_derivations_for_commit(pool: &PgPool, commit_id: i3
     Ok(())
 }
 
-/// Paginated query for evaluation history (complete, failed, cancelled).
+/// Returns paginated evaluation history (complete, failed, cancelled).
 ///
 /// Results are ordered by `evaluation_completed_at DESC` so the most
 /// recently finished eval appears first.
+/// Mock counts use isolated evidence for the represented attempt; native rows
+/// without a mock override retain their existing derivation-count semantics.
+/// `derivation_count` counts persisted records marked for the latest represented
+/// attempt, excluding stale attempts and isolated mock outcomes. Unattributable
+/// legacy records make that count unavailable, not zero.
+///
+/// # Errors
+/// Returns pagination overflow or database query failures.
 pub async fn list_eval_history(
     pool: &PgPool,
     params: &EvalHistoryParams,
@@ -2609,6 +2643,7 @@ pub async fn list_eval_history(
         evaluation_duration_ms: Option<i64>,
         evaluation_error_message: Option<String>,
         system_count: i64,
+        derivation_count: Option<i64>,
         passed_count: i64,
         policy_failed_count: i64,
         eval_failed_count: i64,
@@ -2674,14 +2709,22 @@ pub async fn list_eval_history(
             END                             AS evaluation_duration_ms,
             c.evaluation_error_message,
             COALESCE(CARDINALITY(cac.nixos_configurations), 0)::BIGINT AS system_count,
-            COALESCE((
+            (SELECT CASE
+                -- Keep attribution identical to the queue projection above.
+                WHEN COUNT(*) FILTER (WHERE ea.attempt_number IS NULL
+                    OR jsonb_typeof(d.policy_results->'evaluation_attempt') IS DISTINCT FROM 'number'
+                    OR (d.policy_results->>'evaluation_attempt') !~ '^[1-9][0-9]*$') > 0
+                THEN NULL
+                ELSE COUNT(*) FILTER (WHERE d.policy_results->'evaluation_attempt' = to_jsonb(ea.attempt_number))
+             END FROM derivations d WHERE d.commit_id = c.id) AS derivation_count,
+            COALESCE(mc.passed_count, (
                 SELECT COUNT(*)::BIGINT FROM derivations d
                 WHERE d.commit_id = c.id
                   AND d.cf_agent_enabled IS TRUE
                   AND d.policy_requirements_met IS TRUE
                   AND d.status_id <> 6
             ), 0)                           AS passed_count,
-            COALESCE((
+            COALESCE(mc.policy_failed_count, (
                 SELECT COUNT(*)::BIGINT FROM derivations d
                 WHERE d.commit_id = c.id
                   AND d.status_id <> 6
@@ -2690,7 +2733,7 @@ pub async fn list_eval_history(
                     OR d.policy_requirements_met IS FALSE
                   )
             ), 0)                           AS policy_failed_count,
-            COALESCE((
+            COALESCE(mc.eval_failed_count, (
                 SELECT COUNT(*)::BIGINT FROM derivations d
                 WHERE d.commit_id = c.id AND d.status_id = 6
             ), 0)                           AS eval_failed_count,
@@ -2721,6 +2764,8 @@ pub async fn list_eval_history(
             ORDER BY attempt_number DESC, created_at DESC
             LIMIT 1
         ) ea ON TRUE
+        LEFT JOIN view_evaluation_mock_counts mc ON mc.commit_id = c.id
+            AND mc.attempt_number = ea.attempt_number
         WHERE c.evaluation_status IN ('complete', 'failed', 'cancelled')
         ), filtered AS (
             SELECT * FROM domain
@@ -2766,6 +2811,7 @@ pub async fn list_eval_history(
             evaluation_duration_ms: r.evaluation_duration_ms,
             evaluation_error_message: r.evaluation_error_message,
             system_count: r.system_count,
+            derivation_count: r.derivation_count,
             passed_count: r.passed_count,
             policy_failed_count: r.policy_failed_count,
             eval_failed_count: r.eval_failed_count,
@@ -2898,6 +2944,160 @@ pub async fn fetch_eval_dependency_breakdown(
 #[cfg(test)]
 mod tests {
     use super::{fetch_eval_policy_matrix, validate_eval_queue_reorder_payload};
+
+    async fn derivation_count_commit(pool: &PgPool) -> i32 {
+        let flake = insert_throwaway_flake(pool).await;
+        let commit: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp,
+                 evaluation_status, evaluation_attempt_count, evaluation_completed_at)
+             VALUES ($1, $2, NOW(), 'complete', 7, NOW()) RETURNING id",
+        )
+        .bind(flake)
+        .bind(uuid::Uuid::new_v4().to_string())
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "UPDATE evaluation_attempts SET attempt_number = 7, status = 'complete'
+             WHERE commit_id = $1",
+        )
+        .bind(commit)
+        .execute(pool)
+        .await
+        .unwrap();
+        commit
+    }
+
+    async fn assert_derivation_counts(pool: &PgPool, commit: i32, expected: Option<i64>) {
+        let queue = super::list_eval_queue(pool, &crate::api::models::EvalQueueParams::default())
+            .await
+            .unwrap();
+        let row = queue
+            .rows
+            .iter()
+            .find(|row| row.commit_id == commit)
+            .unwrap();
+        assert_eq!(row.attempt_number, 7);
+        assert_eq!(
+            row.derivation_count, expected,
+            "queue persisted-record count"
+        );
+        let history =
+            super::list_eval_history(pool, &crate::api::models::EvalHistoryParams::default())
+                .await
+                .unwrap();
+        let row = history
+            .items
+            .iter()
+            .find(|row| row.commit_id == commit)
+            .unwrap();
+        assert_eq!(row.attempt_number, 7);
+        assert_eq!(
+            row.derivation_count, expected,
+            "history persisted-record count"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn derivation_count_isolated_current_mock_has_zero_records(pool: PgPool) {
+        let commit = derivation_count_commit(&pool).await;
+        sqlx::query(
+            "INSERT INTO evaluation_mock_outcomes
+                (evaluation_attempt_id, commit_id, attempt_number, configuration_name,
+                 policy_results, cf_agent_enabled, policy_requirements_met)
+             SELECT id, commit_id, attempt_number, 'mock-host',
+                    '{\"evaluation_attempt\":7,\"execution_mode\":\"mock\"}'::jsonb, TRUE, TRUE
+             FROM evaluation_attempts WHERE commit_id = $1",
+        )
+        .bind(commit)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_derivation_counts(&pool, commit, Some(0)).await;
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn derivation_count_excludes_stale_native_and_queued_retry(pool: PgPool) {
+        let commit = derivation_count_commit(&pool).await;
+        sqlx::query(
+            "INSERT INTO derivations (commit_id, derivation_name, derivation_type, status_id, policy_results)
+             VALUES ($1, 'older-host', 'nixos', 5, '{\"evaluation_attempt\":1}')",
+        )
+        .bind(commit)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_derivation_counts(&pool, commit, Some(0)).await;
+        // Queueing does not advance the started counter. The count must follow
+        // the represented attempt row, not commits.evaluation_attempt_count.
+        sqlx::query("UPDATE derivations SET policy_results = '{\"evaluation_attempt\":7}' WHERE commit_id = $1")
+            .bind(commit).execute(&pool).await.unwrap();
+        assert_derivation_counts(&pool, commit, Some(1)).await;
+        sqlx::query("INSERT INTO evaluation_attempts (commit_id, attempt_number, status) VALUES ($1, 8, 'queued')")
+            .bind(commit).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE commits SET evaluation_status = 'pending' WHERE id = $1")
+            .bind(commit)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let queue = super::list_eval_queue(&pool, &crate::api::models::EvalQueueParams::default())
+            .await
+            .unwrap();
+        let row = queue
+            .rows
+            .iter()
+            .find(|row| row.commit_id == commit)
+            .unwrap();
+        assert_eq!(row.attempt_number, 8);
+        assert_eq!(row.derivation_count, Some(0));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn derivation_count_counts_current_native_records_not_groups(pool: PgPool) {
+        let commit = derivation_count_commit(&pool).await;
+        sqlx::query(
+            "INSERT INTO derivations (commit_id, derivation_name, derivation_type, status_id, policy_results)
+             VALUES ($1, 'current-pass', 'nixos', 5, '{\"evaluation_attempt\":7}'),
+                    ($1, 'current-error', 'nixos', 6, '{\"evaluation_attempt\":7}'),
+                    ($1, 'current-pending', 'nixos', 3, '{\"evaluation_attempt\":7}'),
+                    ($1, 'older-host', 'nixos', 5, '{\"evaluation_attempt\":6}')",
+        )
+        .bind(commit)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_derivation_counts(&pool, commit, Some(3)).await;
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn derivation_count_markerless_legacy_is_unavailable(pool: PgPool) {
+        let commit = derivation_count_commit(&pool).await;
+        sqlx::query(
+            "INSERT INTO derivations (commit_id, derivation_name, derivation_type, status_id, policy_results)
+             VALUES ($1, 'legacy-host', 'nixos', 5, '{}'),
+                    ($1, 'current-host', 'nixos', 5, '{\"evaluation_attempt\":7}')",
+        )
+        .bind(commit)
+        .execute(&pool)
+        .await
+        .unwrap();
+        // A known current record does not establish ownership of legacy rows.
+        // Malformed/string markers must neither count nor fail the SQL read.
+        for marker in [
+            serde_json::json!({}),
+            serde_json::json!({"evaluation_attempt": null}),
+            serde_json::json!({"evaluation_attempt": "7"}),
+            serde_json::json!({"evaluation_attempt": 7.5}),
+        ] {
+            sqlx::query("UPDATE derivations SET policy_results = $2 WHERE commit_id = $1 AND derivation_name = 'legacy-host'")
+                .bind(commit).bind(marker).execute(&pool).await.unwrap();
+            assert_derivation_counts(&pool, commit, None).await;
+        }
+    }
 
     #[test]
     fn reorder_validation_rejects_duplicates() {

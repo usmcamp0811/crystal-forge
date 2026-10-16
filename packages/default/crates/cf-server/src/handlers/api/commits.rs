@@ -110,6 +110,7 @@ pub async fn list_eval_queue(
             queue_position: row.queue_position,
             systems: row.systems,
             system_count: row.system_count,
+            derivation_count: row.derivation_count,
             passed_count: row.passed_count,
             policy_failed_count: row.policy_failed_count,
             eval_failed_count: row.eval_failed_count,
@@ -338,6 +339,12 @@ pub async fn get_eval_logs_history(
 
 /// Fetch policy matrix data for a commit evaluation.
 /// GET /api/v1/commits/:commit_id/eval/policy-matrix
+///
+/// # Responses
+/// Returns 403 before reading provenance when viewer authorization fails.
+/// Returns 500 for database errors or invalid captured plans. Otherwise returns
+/// 200 with the legacy fields and attempt-scoped matrix, including unavailable
+/// provenance when no capture exists.
 pub async fn get_eval_policy_matrix(
     Path(commit_id): Path<i32>,
     State(state): State<CFState>,
@@ -350,20 +357,21 @@ pub async fn get_eval_policy_matrix(
         return StatusCode::FORBIDDEN.into_response();
     }
 
-    let rows = match crate::queries::commits::fetch_eval_policy_matrix(&state.pool, commit_id).await
-    {
-        Ok(rows) => rows,
-        Err(e) => {
-            tracing::error!(
-                "Failed to fetch eval policy matrix for commit {}: {}",
-                commit_id,
-                e
-            );
-            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-        }
-    };
+    let (rows, matrix) =
+        match crate::queries::eval_policy_plans::fetch_matrix(&state.pool, commit_id).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::error!(
+                    "Failed to fetch eval policy matrix for commit {}: {}",
+                    commit_id,
+                    e
+                );
+                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+            }
+        };
 
-    let body = build_eval_policy_matrix_response(commit_id, rows);
+    let mut body = build_eval_policy_matrix_response(commit_id, rows);
+    body.matrix = Some(matrix);
 
     Json(body).into_response()
 }
@@ -519,8 +527,11 @@ fn build_eval_policy_matrix_response(
                 let Some(policy_result) =
                     assigned_results.and_then(|assigned| assigned.get(policy_id))
                 else {
-                    results.push("not_assigned".to_string());
-                    details.push(None);
+                    // Result absence cannot establish historical applicability.
+                    results.push("legacy_unknown".to_string());
+                    details.push(Some(
+                        "Policy applicability or result unavailable".to_string(),
+                    ));
                     continue;
                 };
 
@@ -541,6 +552,7 @@ fn build_eval_policy_matrix_response(
         commit_id,
         policies: policy_labels,
         systems,
+        matrix: None,
     }
 }
 
@@ -894,6 +906,15 @@ mod tests {
             std::sync::Arc::new(crate::queue::QueueNotifier::new()),
             crate::server::jobs::BackgroundJobRegistry::new(),
         )
+    }
+
+    #[tokio::test]
+    async fn policy_matrix_requires_authentication_before_reading_provenance() {
+        // No token means RBAC returns before the lazy pool can connect.
+        let response = get_eval_policy_matrix(Path(42), State(test_state()), HeaderMap::new())
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 
     #[tokio::test]

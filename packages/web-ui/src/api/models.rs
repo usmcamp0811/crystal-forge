@@ -4670,6 +4670,11 @@ pub struct EvalQueueItem {
     pub queue_position: i64,
     pub systems: Vec<String>,
     pub system_count: i64,
+    /// Counts persisted derivation records for this attempt, not closure
+    /// packages or outputs. `None` means unavailable or unattributable legacy
+    /// records. Isolated mock outcomes do not contribute to this count.
+    #[serde(default)]
+    pub derivation_count: Option<i64>,
     pub passed_count: i64,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
@@ -4703,6 +4708,11 @@ pub struct EvalHistoryItem {
     pub evaluation_duration_ms: Option<i64>,
     pub evaluation_error_message: Option<String>,
     pub system_count: i64,
+    /// Counts persisted derivation records for this attempt, not closure
+    /// packages or outputs. `None` means unavailable or unattributable legacy
+    /// records. Isolated mock outcomes do not contribute to this count.
+    #[serde(default)]
+    pub derivation_count: Option<i64>,
     pub passed_count: i64,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
@@ -4732,11 +4742,22 @@ pub struct EvalLogEntry {
     pub message: String,
 }
 
+/// Typed evaluation-time matrix wire contract, shared by matrix presentation.
+#[path = "../views/evaluations/policy_wire.rs"]
+pub mod eval_policy_matrix;
+
+/// Returns flat compatibility evidence and optional captured provenance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalPolicyMatrixResponse {
+    /// Identifies the evaluated commit.
     pub commit_id: i32,
+    /// Names compatibility checks, including the global platform check.
     pub policies: Vec<String>,
+    /// Contains compatibility results by evaluator configuration.
     pub systems: Vec<EvalPolicySystemRow>,
+    /// Contains attempt-scoped provenance; older servers can omit this field.
+    #[serde(default)]
+    pub matrix: Option<eval_policy_matrix::EvalPolicyMatrixSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

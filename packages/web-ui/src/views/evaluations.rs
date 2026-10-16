@@ -1,4 +1,13 @@
-//! Evaluations view - rebuilt to match JSX mockup design exactly.
+//! Displays evaluation queues, history, and persisted evaluation evidence.
+
+mod drawer_header;
+mod drawer_snapshot;
+mod policy_adapter;
+mod policy_captured;
+mod policy_cells;
+mod policy_matrix;
+#[cfg(test)]
+mod policy_sort_tests;
 
 use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
@@ -124,6 +133,20 @@ fn EvaluationsPage() -> Element {
     let mut history_items_acc: Signal<Vec<EvalHistoryItem>> = use_signal(Vec::new);
     let mut history_total_acc = use_signal(|| 0_i64);
     let mut history_domain_total = use_signal(|| 0_i64);
+
+    use_effect(move || {
+        let selected = drawer_target();
+        let queue = queue_items.read();
+        let history = history_items_acc.read();
+        if let Some(current) = selected.as_ref() {
+            let updated = drawer_snapshot::refresh(current, &queue, &history);
+            // The effect also subscribes to selection changes. Only publish a
+            // changed snapshot so its own write cannot sustain a rerender loop.
+            if &updated != current {
+                drawer_target.set(Some(updated));
+            }
+        }
+    });
 
     use_effect(move || {
         let _ = (search_query(), latest_filter().enabled());
@@ -1700,6 +1723,11 @@ fn EvalDrawer(
     on_open_policy: EventHandler<String>,
 ) -> Element {
     let mut drawer_tab = use_signal(|| String::from("log"));
+    let maximized = use_signal(|| false);
+    // Bind confirmation to the selected commit, so polling or navigation cannot
+    // transfer confirmation to a different evaluation.
+    let mut force_cancel_target = use_signal(|| None::<i32>);
+    let mut force_cancel_busy = use_signal(|| false);
 
     match target {
         EvalDrawerTarget::Queue(ev) => {
@@ -1715,17 +1743,17 @@ fn EvalDrawer(
                     onclick: close_click,
                 }
                 aside {
-                    class: "fl-tray",
+                    class: if maximized() { "fl-tray ed-drawer fl-tray-max" } else { "fl-tray ed-drawer" },
                     role: "dialog",
                     "aria-label": "Evaluation detail",
                     header {
                         class: "fl-tray-head",
                         div {
                             style: "display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;",
-                            Icon { name: IconName::Terminal, size: 18 }
+                            span { class: "ed-identity-icon", Icon { name: IconName::Evaluation, size: 18 } }
                             div { style: "min-width: 0;",
-                            h2 {
-                                "{ev.flake_name}"
+                            h2 { class: "ed-identity-title",
+                                span { class: "ed-flake-name", "{ev.flake_name}" }
                                 span { class: "chip chip-unknown", style: "font-size: 10px;", "{ev.branch}" }
                                 span {
                                     class: "chip {status_meta.cls}",
@@ -1735,7 +1763,7 @@ fn EvalDrawer(
                                 }
                             }
                             div {
-                                class: "fqdn",
+                                class: "mono ed-identity-meta",
                                 "{ev.commit_hash} · {ev.commit_id}"
                                 if ev.attempt_number > 1 {
                                     span {
@@ -1772,32 +1800,26 @@ fn EvalDrawer(
                                 button {
                                     class: "btn btn-ghost focus-ring xs",
                                     style: "color: #f87171;",
-                                    onclick: move |_| {
-                                        let mut refresh_sig = refresh.clone();
-                                        let mut toast = toast_msg.clone();
-                                        let commit_id = ev.commit_id;
-                                        spawn(async move {
-                                            if let Err(e) = force_cancel_commit_evaluation(commit_id).await {
-                                                toast.set(Some(format!("Force cancel failed: {}", e)));
-                                            } else {
-                                                refresh_sig.set(refresh_sig() + 1);
-                                            }
-                                        });
-                                    },
+                                    disabled: force_cancel_busy(),
+                                    onclick: move |_| force_cancel_target.set(Some(ev.commit_id)),
                                     "Force-cancel"
                                 }
                             }
+                            drawer_header::ExpandButton { maximized }
                             button {
                                 class: "btn-icon focus-ring",
                                 onclick: close_click,
-                                title: "Close",
+                                 title: "Close",
+                                 aria_label: "Close",
                                 Icon { name: IconName::X, size: 16 }
                             }
                         }
                     }
                     div {
                         class: "ed-stats",
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Started" } div { class: "ed-stat-val", style: "font-size: 13px; font-weight: 600;", "{format_relative_time(ev.committed_at)}" } }
+                        // The DTO has no actual start time. Queue time must not
+                        // be presented as evaluation start or commit time.
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Queued" } div { class: "ed-stat-val ed-stat-time", drawer_header::Timestamp { timestamp: ev.enqueued_at } } }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val mono", "—" } }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
                         div {
@@ -1814,7 +1836,7 @@ fn EvalDrawer(
                                 }
                             }
                         }
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{ev.system_count * 18}" } }
+                        div { class: "ed-stat", title: "Persisted derivation records for this attempt, not closure packages or outputs. — means unavailable.", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{format_derivation_count(ev.derivation_count)}" } }
                     }
                     div {
                         class: "sd-tabs",
@@ -1822,7 +1844,7 @@ fn EvalDrawer(
                         button {
                             class: if drawer_tab() == "log" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
                             onclick: move |_| drawer_tab.set("log".to_string()),
-                            Icon { name: IconName::Terminal, size: 12 }
+                            Icon { name: IconName::EvaluationLog, size: 12 }
                             " Log"
                             if is_live { span { class: "ed-pulse" } }
                         }
@@ -1835,7 +1857,7 @@ fn EvalDrawer(
                         button {
                             class: if drawer_tab() == "graph" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
                             onclick: move |_| drawer_tab.set("graph".to_string()),
-                            Icon { name: IconName::Git, size: 12 }
+                            Icon { name: IconName::EvaluationGraph, size: 12 }
                             " Dependency graph"
                         }
                     }
@@ -1845,7 +1867,9 @@ fn EvalDrawer(
                             EvalDrawerLogTabQueue { ev: ev.clone(), live: is_live }
                         } else if drawer_tab() == "policy" {
                             EvalDrawerPolicyTab {
+                                key: "{ev.commit_id}",
                                 commit_id: ev.commit_id,
+                                live: is_live,
                                 on_open_policy: on_open_policy,
                             }
                         } else {
@@ -1855,10 +1879,36 @@ fn EvalDrawer(
                         }
                     }
                 }
+                if can_force_cancel && force_cancel_target() == Some(ev.commit_id) {
+                    drawer_header::ConfirmForceCancel {
+                        commit_id: ev.commit_id,
+                        on_cancel: move |_| force_cancel_target.set(None),
+                        on_confirm: move |_| {
+                            if *force_cancel_busy.peek() || *force_cancel_target.peek() != Some(ev.commit_id) {
+                                return;
+                            }
+                            force_cancel_target.set(None);
+                            force_cancel_busy.set(true);
+                            let mut refresh_sig = refresh.clone();
+                            let mut toast = toast_msg.clone();
+                            let commit_id = ev.commit_id;
+                            spawn(async move {
+                                if let Err(e) = force_cancel_commit_evaluation(commit_id).await {
+                                    toast.set(Some(format!("Force cancel failed: {}", e)));
+                                } else {
+                                    refresh_sig.set(refresh_sig() + 1);
+                                }
+                                force_cancel_busy.set(false);
+                            });
+                        },
+                    }
+                }
             }
         }
         EvalDrawerTarget::History(ev) => {
             let status_meta = eval_status_meta(&ev.evaluation_status);
+            let (time_label, timestamp) =
+                drawer_header::history_timestamp(ev.evaluation_completed_at, ev.enqueued_at);
             let is_live = matches!(
                 ev.evaluation_status.as_str(),
                 "pending" | "in_progress" | "cancelling"
@@ -1871,17 +1921,17 @@ fn EvalDrawer(
                     onclick: close_click,
                 }
                 aside {
-                    class: "fl-tray",
+                    class: if maximized() { "fl-tray ed-drawer fl-tray-max" } else { "fl-tray ed-drawer" },
                     role: "dialog",
                     "aria-label": "Evaluation detail",
                     header {
                         class: "fl-tray-head",
                         div {
                             style: "display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;",
-                            Icon { name: IconName::Terminal, size: 18 }
+                            span { class: "ed-identity-icon", Icon { name: IconName::Evaluation, size: 18 } }
                             div { style: "min-width: 0;",
-                            h2 {
-                                "{ev.flake_name}"
+                            h2 { class: "ed-identity-title",
+                                span { class: "ed-flake-name", "{ev.flake_name}" }
                                 span { class: "chip chip-unknown", style: "font-size: 10px;", "{ev.branch}" }
                                 span {
                                     class: "chip {status_meta.cls}",
@@ -1891,7 +1941,7 @@ fn EvalDrawer(
                                 }
                             }
                             div {
-                                class: "fqdn",
+                                class: "mono ed-identity-meta",
                                 "{ev.commit_hash} · {ev.commit_id}"
                                 if ev.attempt_number > 1 {
                                     span {
@@ -1904,16 +1954,27 @@ fn EvalDrawer(
                             }
                             }
                         }
+                        div { style: "display: flex; gap: 6px; align-items: center;",
+                        drawer_header::ExpandButton { maximized }
                         button {
                             class: "btn-icon focus-ring",
                             onclick: close_click,
-                            title: "Close",
+                             title: "Close",
+                             aria_label: "Close",
                             Icon { name: IconName::X, size: 16 }
+                        }
                         }
                     }
                     div {
                         class: "ed-stats",
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Started" } div { class: "ed-stat-val", style: "font-size: 13px; font-weight: 600;", "{format_relative_time(ev.committed_at)}" } }
+                        // Completion is authoritative when present. The DTO has
+                        // no start time; older rows fall back to queued time.
+                        div { class: "ed-stat",
+                            div { class: "ed-stat-label", "{time_label}" }
+                            div { class: "ed-stat-val ed-stat-time",
+                                drawer_header::Timestamp { timestamp }
+                            }
+                        }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val mono", "{format_eval_duration(&ev)}" } }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
                         div {
@@ -1930,7 +1991,7 @@ fn EvalDrawer(
                                 }
                             }
                         }
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{ev.system_count * 18}" } }
+                        div { class: "ed-stat", title: "Persisted derivation records for this attempt, not closure packages or outputs. — means unavailable.", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{format_derivation_count(ev.derivation_count)}" } }
                     }
                     div {
                         class: "sd-tabs",
@@ -1938,7 +1999,7 @@ fn EvalDrawer(
                         button {
                             class: if drawer_tab() == "log" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
                             onclick: move |_| drawer_tab.set("log".to_string()),
-                            Icon { name: IconName::Terminal, size: 12 }
+                            Icon { name: IconName::EvaluationLog, size: 12 }
                             " Log"
                             if is_live { span { class: "ed-pulse" } }
                         }
@@ -1951,7 +2012,7 @@ fn EvalDrawer(
                         button {
                             class: if drawer_tab() == "graph" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
                             onclick: move |_| drawer_tab.set("graph".to_string()),
-                            Icon { name: IconName::Git, size: 12 }
+                            Icon { name: IconName::EvaluationGraph, size: 12 }
                             " Dependency graph"
                         }
                     }
@@ -1961,7 +2022,9 @@ fn EvalDrawer(
                             EvalDrawerLogTabHistory { ev: ev.clone(), live: is_live }
                         } else if drawer_tab() == "policy" {
                             EvalDrawerPolicyTab {
+                                key: "{ev.commit_id}",
                                 commit_id: ev.commit_id,
+                                live: is_live,
                                 on_open_policy: on_open_policy,
                             }
                         } else {
@@ -2301,11 +2364,47 @@ fn policy_cell_class_suffix(raw: &str) -> &'static str {
     }
 }
 
+/// Renders the selected commit's matrix and refreshes live partial outcomes.
+///
+/// The keyed tab owns the request and browser timer. Reactive commit/live changes
+/// cancel the previous resource future. Setting live to false triggers one final
+/// fetch; unmount drops request futures and timers. Live failures remain visible
+/// and retry after five seconds. Historical failures retry when reopened.
 #[component]
-fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> Element {
-    let policy_resource =
-        use_resource(move || async move { fetch_eval_policy_matrix(commit_id).await });
-    let policy_snapshot = policy_resource.read();
+fn EvalDrawerPolicyTab(
+    commit_id: i32,
+    on_open_policy: EventHandler<String>,
+    #[props(default)] live: bool,
+) -> Element {
+    // Keep the displayed response outside Resource: restarting a resource can
+    // clear its value and unmount CapturedMatrix, losing presentation choices.
+    // Publish only completed requests, including errors; never mask an explicit
+    // failure with cached successful data. Key the cache as well as the tab so
+    // even a reused component cannot display a previous commit during a fetch.
+    let mut displayed = use_signal(|| None);
+    let _policy_resource = use_resource(use_reactive(
+        &(commit_id, live),
+        move |(commit_id, live)| async move {
+            loop {
+                displayed.set(Some((commit_id, fetch_eval_policy_matrix(commit_id).await)));
+                if !live {
+                    break;
+                }
+                // Browser-only polling avoids native timers in WASM. A delay
+                // after each response prevents overlapping requests and bounds
+                // retries even when the endpoint fails immediately.
+                #[cfg(target_arch = "wasm32")]
+                TimeoutFuture::new(5_000).await;
+                #[cfg(not(target_arch = "wasm32"))]
+                break;
+            }
+        },
+    ));
+    let displayed = displayed.read();
+    let policy_snapshot = displayed
+        .as_ref()
+        .filter(|(id, _)| *id == commit_id)
+        .map(|(_, response)| response);
 
     // Interactive state: filter, sort, expanded row, policy filter (matches JSX)
     let mut filter_state = use_signal(|| "all".to_string());
@@ -2317,12 +2416,24 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
     rsx! {
         div {
             style: "flex: 1; overflow: hidden; display: flex; flex-direction: column;",
-            match &*policy_snapshot {
+            if policy_snapshot.is_some_and(|response| response.as_ref().is_ok_and(|data| data.matrix.as_ref().is_some_and(|matrix| matrix.mock_evidence))) {
+                div { class: "pm-provenance-note", role: "note",
+                    "Mock evaluation — simulated outcomes, not compliance evidence."
+                }
+            }
+            match policy_snapshot {
                 None => rsx! {
                     div { style: "color: var(--cf-text-muted); font-size: 12px; padding: 14px;", "Loading policy matrix..." }
                 },
                 Some(Err(_)) => rsx! {
                     div { style: "color: #f87171; font-size: 12px; padding: 14px;", "Failed to load policy matrix" }
+                },
+                Some(Ok(data)) if data.matrix.as_ref().is_some_and(|matrix| matrix.provenance == crate::api::models::eval_policy_matrix::EvalMatrixProvenance::Captured) => rsx! {
+                    if let Some(snapshot) = &data.matrix {
+                        // A new captured attempt intentionally resets local
+                        // choices; successful refreshes of that attempt do not.
+                        policy_captured::CapturedMatrix { key: "{snapshot.evaluation_attempt_id:?}:{snapshot.attempt_number}", snapshot: snapshot.clone(), compatibility: data.clone(), on_open_policy }
+                    }
                 },
                 Some(Ok(data)) => {
                     let policies = &data.policies;
@@ -2346,6 +2457,16 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                         pass: usize,
                         evaluated: usize,
                         legacy_unknown: usize,
+                    }
+
+                    impl AnnotatedRow {
+                        // Missing legacy coverage and empty applicability are
+                        // never sufficient evidence for a clean system.
+                        fn is_clean(&self) -> bool {
+                            policy_matrix::legacy_row_is_clean(
+                                self.pass, self.fail, self.warn, self.legacy_unknown,
+                            )
+                        }
                     }
 
                     let annotated: Vec<AnnotatedRow> = base_rows.iter().map(|r| {
@@ -2378,7 +2499,7 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                             // there are no legacy_unknown cells requiring
                             // re-evaluation — a system with unknown history
                             // must never be reported as clean.
-                            "clean" => result.retain(|r| r.fail == 0 && r.warn == 0 && r.legacy_unknown == 0),
+                            "clean" => result.retain(|r| r.is_clean()),
                             _ => {}
                         }
                         if let Some(ref policy_name) = pf {
@@ -2434,11 +2555,14 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                     // Counts for filter badges
                     let count_fail = annotated.iter().filter(|r| r.fail > 0).count();
                     let count_warn = annotated.iter().filter(|r| r.fail == 0 && r.warn > 0).count();
-                    let count_clean = annotated.iter().filter(|r| r.fail == 0 && r.warn == 0 && r.legacy_unknown == 0).count();
+                    let count_clean = annotated.iter().filter(|r| r.is_clean()).count();
 
                     let cell_glyph = policy_cell_glyph;
 
                     rsx! {
+                        div { class: "pm-provenance-note", role: "note",
+                            "Historical bundle provenance unavailable. These are flat compatibility results; bundle memberships and complete historical applicability cannot be reconstructed from check names."
+                        }
                         // Top issues callout (matching JSX)
                         if !top_issues_sorted.is_empty() {
                             div {
@@ -2455,7 +2579,7 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                                             pf.set(Some(name.clone()));
                                         }
                                     };
-                                    let counts = format!("{}+{}+{}", iss.fail, iss.warn, iss.pass);
+                                    let counts = format!("{}/{} fail", iss.fail, iss.total);
                                     rsx! {
                                         button {
                                             key: "{iss.name}",
@@ -2600,17 +2724,21 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                                                         div { class: "pm-health",
                                                             div { class: "pm-health-bar",
                                                                 if row.fail > 0 {
-                                                                    div { style: "width: {(row.fail as f64 / policies.len() as f64) * 100.0}%; background: #f87171;" }
+                                                                    div { style: "width: {(row.fail as f64 / row.evaluated.max(1) as f64) * 100.0}%; background: #f87171;" }
                                                                 }
                                                                 if row.warn > 0 {
-                                                                    div { style: "width: {(row.warn as f64 / policies.len() as f64) * 100.0}%; background: #f59e0b;" }
+                                                                    div { style: "width: {(row.warn as f64 / row.evaluated.max(1) as f64) * 100.0}%; background: #f59e0b;" }
                                                                 }
                                                                 if row.pass > 0 {
-                                                                    div { style: "width: {(row.pass as f64 / policies.len() as f64) * 100.0}%; background: #34d399;" }
+                                                                    div { style: "width: {(row.pass as f64 / row.evaluated.max(1) as f64) * 100.0}%; background: #34d399;" }
                                                                 }
                                                             }
                                                             span { class: "mono pm-health-num", style: "color: {health_color};",
-                                                                "{row.pass}/{row.evaluated}"
+                                                                if row.evaluated == 0 {
+                                                                    if row.legacy_unknown > 0 { "Unknown" } else { "N/A" }
+                                                                } else {
+                                                                    "{row.pass}/{row.evaluated}"
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -2732,12 +2860,16 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                                                                                }
                                                                            })}
 
-                                                                        if row.fail == 0 && row.warn == 0 && row.legacy_unknown == 0 {
+                                                                         if row.is_clean() {
                                                                             div { style: "font-size: 12px; color: #34d399; display: flex; align-items: center; gap: 8px;",
                                                                                 Icon { name: IconName::Check, size: 14 }
-                                                                                " All policies pass for this system."
-                                                                            }
-                                                                        }
+                                                                                 " All policies pass for this system."
+                                                                             }
+                                                                         } else if row.evaluated == 0 && row.legacy_unknown == 0 {
+                                                                             div { style: "font-size: 12px; color: var(--cf-text-muted);",
+                                                                                 "No applicable controls for this system."
+                                                                             }
+                                                                         }
                                                                     }
                                                                 }
                                                             }
@@ -2880,7 +3012,7 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                         }
 
                         if data.packages.is_empty() {
-                            div { style: "color: var(--cf-text-muted); font-size: 12px;", "No systems recorded for this commit yet." }
+                            div { style: "color: var(--cf-text-muted); font-size: 12px;", "Dependency inventory is unavailable for this evaluation." }
                         } else {
                             div { class: "ed-graph-list",
                                 for pkg in data.packages.iter() {
@@ -3057,6 +3189,18 @@ fn format_relative_time(dt: chrono::DateTime<chrono::Utc>) -> String {
     } else {
         format!("{}d ago", secs / 86400)
     }
+}
+
+/// Formats the server-reported record count without estimating missing data.
+fn format_derivation_count(count: Option<i64>) -> String {
+    count.map_or_else(|| "—".to_string(), |count| count.to_string())
+}
+
+#[test]
+fn derivation_count_formatter_preserves_zero_and_unknown() {
+    assert_eq!(format_derivation_count(None), "—");
+    assert_eq!(format_derivation_count(Some(0)), "0");
+    assert_eq!(format_derivation_count(Some(37)), "37");
 }
 
 fn format_eval_completed_at(item: &EvalHistoryItem) -> String {

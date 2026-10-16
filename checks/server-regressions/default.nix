@@ -778,6 +778,17 @@ SQL
       fi
     done
 
+    # TASK-488 captures the real resolved plan and reads exact-attempt outcomes
+    # in sqlx-created sandbox databases. Keep the missing/renamed-test guard.
+    for testName in \
+      queries::eval_policy_plans::tests::capture_is_atomic_first_write_immutable_and_retains_partial_rows \
+      queries::eval_policy_plans::tests::capture_rejects_wrong_attempt_owner_and_retry_cannot_read_old_plan \
+      server::policy_capture_tests::real_loader_captures_overlap_empty_contexts_and_immutable_history \
+      server::policy_capture_tests::real_virtual_baseline_capture_preserves_bundle_without_assignment_uuids
+    do
+      runExactCacheRegression "$testName" --ignored
+    done
+
     # TASK-484 uses sqlx-created databases in this sandbox. Run each test in a
     # separate process because the heavy-Nix semaphore is process-global.
     for testName in \
@@ -792,6 +803,16 @@ SQL
     done
 
     for testName in \
+      models::evaluate_with_policies::mock_persistence::tests::mock_persistence_records_attempt_outcomes_without_production_work \
+      models::evaluate_with_policies::mock_persistence::tests::mock_persistence_cancelled_or_superseded_attempts_write_nothing \
+      models::evaluate_with_policies::mock_persistence::tests::isolated_mock_counts_match_queue_history_and_exclude_queued_retry \
+      queries::eval_policy_plans::tests::isolated_mock_projection_matches_attempt_and_rejects_ambiguous_native \
+      queries::eval_policy_plans::tests::confirmed_native_finalizer_failure_is_attempt_owned_and_preserves_build \
+      queries::eval_policy_plans::tests::confirmed_native_finalizer_cancellation_writes_no_failure_evidence \
+      queries::commits::tests::derivation_count_isolated_current_mock_has_zero_records \
+      queries::commits::tests::derivation_count_excludes_stale_native_and_queued_retry \
+      queries::commits::tests::derivation_count_counts_current_native_records_not_groups \
+      queries::commits::tests::derivation_count_markerless_legacy_is_unavailable \
       queries::commits::partial_resource_failure_tests::partial_resource_failure_retains_rejected_completion_with_preserved_build_history \
       queries::commits::partial_resource_failure_tests::partial_resource_failure_reconciles_committed_but_unacknowledged_completion \
       queries::commits::partial_resource_failure_tests::partial_resource_failure_ignores_never_committed_completion_candidate \
