@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 01:02'
+updated_date: '2026-10-16 01:37'
 labels:
   - web-ui
   - design-parity
@@ -132,4 +132,8 @@ Focused browser command: NODE_PATH=/nix/store/fg778x0631ld4xd8fim2kbvxll5715xp-p
 Verification: changed-file `rustfmt --edition 2024 --check .../icon.rs .../evaluations.rs` passed through nix develop. Initial cargo test --lib command was invalid because web-ui is a binary target; corrected `CARGO_BUILD_JOBS=2 cargo test --manifest-path packages/web-ui/Cargo.toml` passed 677 tests, 0 failed, 1 ignored. Subsequent `CARGO_BUILD_JOBS=2 cargo check --manifest-path packages/web-ui/Cargo.toml --target wasm32-unknown-unknown` passed. Combined command actual exit 0; retained output /home/mcamp/.local/share/opencode/tool-output/tool_14237dab6001kYEX6qvhQErToO. Package-wide cargo fmt check fails on pre-existing caches.rs/cves.rs/poams.rs formatting; those files are untouched (existing TASK-371.1 tracks formatting drift). git diff --check passed.
 
 Preview remains available at http://127.0.0.1:8080/evaluations. Task-owned frontend was restarted using devenv processes restart web and the new glyph/styles were verified in browser. Backend and database were not restarted. Remaining visual differences include timestamps/DTG rendering, status wording, action availability and missing expand/confirmation controls, development chrome offsets, log toolbar metrics and empty-state differences. Policy/graph comparison, populated log fixtures, pixel-diff reporting and authoritative browser integration are still pending. TASK-488 remains In Progress.
+
+User requested 0.0.0.0:8080. Applied runtime-only devenv process overrides: original web exec with --addr changed to 0.0.0.0; API exec allows exact CORS origin http://10.8.0.177:8080. No repository config or firewall changes. Restarting a single process did not reload its exec override. Restarted only this task's stack; one restart timed out, then verified task-owned manager cwd and stopped it gracefully before evaluating ports with listeners free. Final startup succeeded; frontend PID10773 listens 0.0.0.0:8080 and LAN-address GET returns 200. Existing task database preserved. Runtime-only overrides must be retained when restarting the stack; normal default startup reverts to loopback.
+
+Network preview URL: http://10.8.0.177:8080/evaluations (host sledge). Exact-origin CORS preflight succeeds. Browser login over LAN HTTP remains blocked: login returns HTTP200 with a Secure Set-Cookie, but Chromium stores no cookie on non-loopback plain HTTP. No cookie security was weakened. Need HTTPS for direct network login, or SSH-forward UI8080 and API3445 and browse localhost. Loopback browser preview remains the supported authenticated review path.
 <!-- SECTION:NOTES:END -->
