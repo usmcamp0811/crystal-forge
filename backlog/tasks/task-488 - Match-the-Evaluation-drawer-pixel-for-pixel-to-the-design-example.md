@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-16 16:35'
+updated_date: '2026-10-16 16:51'
 labels:
   - web-ui
   - design-parity
@@ -90,6 +90,8 @@ High risk due to evaluation-time persistence and overlapping WIP. No blanket ref
 6. Use truthful backend header counts and unavailable markers; do not estimate derivations from system count. Keep unknown, unassigned, warning, failure and no-applicable-control states distinct.
 7. Verify with targeted native/SQLx tests and direct actual-preview browser inspection. Authoritative web-ui VM checks are CI-only per the user's instruction. Keep exact local evidence in task notes.
 8. Continue matched-viewport visual review and explicitly record remaining differences; do not declare full design parity merely from passing tests. No commit, push, MR or merge without user authorization.
+
+Blocking regression follow-up (backend-only): stamp exact-attempt confirmed Nix failure evidence on the synthetic helper's returned derivation ID in the existing finalizer transaction; validate explicit failure flag/error for flat compatibility while leaving structured controls unknown and preserving irreversible build state. Limit writes to evaluate_with_policies.rs and queries/eval_policy_plans.rs. Add production-finalizer SQLx regressions for current failure, retry masking, preserved build state and cancellation. Parent runs native/SQLx verification; no builds, services, preview database, VM or commits in this continuation.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
