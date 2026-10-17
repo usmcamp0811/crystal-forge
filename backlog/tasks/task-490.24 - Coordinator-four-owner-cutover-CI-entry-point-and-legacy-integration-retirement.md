@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-17 17:19'
+updated_date: '2026-10-17 17:29'
 labels:
   - testing
   - integration
@@ -46,7 +46,7 @@ Coordinator writer task, not a Luna packet. Owns checks/integration-{access,deli
 
 Why: final inventory is exactly four native integration owners. Legacy checks/CI stay until passing replacements or explicit owner-approved scope change. This final cutover requirement does not prohibit discoverable meaningful WIP during foundation/child work.
 
-Corrected architecture: owner default.nix uses native Snowfall signature { lib, inputs, pkgs, ... }, explicit scenario attrsets (Access coordinator-owned), and normal pkgs.linkFarm aggregate of ALL registered gates. Shared entry: lib.crystal-forge.makeIntegrationTestHarness { pkgs } from lib/integration-test. Scripts/fixtures/assets stay within each owning checks/integration-<owner>/ directory. No root tests/, legacyPackages.integration, mkOwner or custom discovery; no complete=true export switch. Only Access exists now. Add Delivery/Assurance/Upgrade default.nix only with meaningful scenarios, never placeholders; do not defer all owner creation to final completion.
+Corrected architecture: owner default.nix uses native Snowfall signature { lib, inputs, pkgs, ... }, explicit scenario attrsets (Access coordinator-owned), and normal pkgs.linkFarm aggregate of ALL registered gates. Shared entry: lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs } from lib/integration-test. Scripts/fixtures/assets stay within each owning checks/integration-<owner>/ directory. No root tests/, legacyPackages.integration, mkOwner or custom discovery; no complete=true export switch. Only Access exists now. Add Delivery/Assurance/Upgrade default.nix only with meaningful scenarios, never placeholders; do not defer all owner creation to final completion.
 
 Scope: integrate and explicitly register required child scenarios, ensuring every registered gate is a dependency of normal owner build and every failure propagates. Verify nix eval .#checks.x86_64-linux --apply builtins.attrNames identifies exactly the four integration names at final cutover plus classified non-integration checks. Put four-name allowlist comparison at start of existing integration CI entry point, no new validation service. Execute each complete required owner set and record normal runtime/peak resources. Retire legacy registration/job only after passing mapped replacement or explicit owner-approved scope change. Canonical scenario fixtures including STIG XML live under checks/integration-assurance/fixtures/; coordinate legacy fixture preservation/removal without cross-child writes. Update docs/knowledge/testing/flake-checks.md, web-ui-check.md, coverage map, contract implementation_status and directly affected verification/agent links. Final cutover blocked by any required failing replacement, including product defects, unless owner changes scope. No product fixes; TASK-490 test-only restrictions apply.
 
