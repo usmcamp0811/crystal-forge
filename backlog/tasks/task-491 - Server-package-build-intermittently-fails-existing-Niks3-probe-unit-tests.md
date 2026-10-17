@@ -23,14 +23,11 @@ ordinal: 537000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Problem: production cf-server-drv at application baseline 33de73b013b735304dfac9c69745a074a3e76ebd failed its normal Crane check phase in two builds, preventing TASK-490.1's real VM slice from starting. No overhaul code changes production sources or package selection. Desired outcome: determine why the existing process-probe tests fail in the normal package check environment and make the production package build reliable without disabling assertions.
+The production `cf-server-drv` check phase intermittently failed two otherwise valid Niks3 probe tests. The cause was test-process interference: the Linux raw-fork regression holds an inherited executable writer while it waits at a barrier; unrelated tests running on other harness threads can have executable fixture writers open at fork time. The child inherits those descriptors even when they carry FD_CLOEXEC. A concurrent exec then fails with ETXTBSY, which the production probe maps to Process or Configuration rather than the scripted provider result.
 
-Observed command (before organization correction): nix build .#integration.access.scenarios.lifecycle-local-bootstrap -L --out-link /tmp/opencode/task490/slice-result. The corrected equivalent is nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L. Both depend on unchanged /nix/store/9pihfg4v8mp6rb4qnp148acv5cqsrb43-cf-server-0.3.0.drv, output /nix/store/7chrsgk02f37jymvb4q4dxcxkh40xy07-cf-server-0.3.0.
+The bounded test-only repair runs the raw-fork regression in an exact-filtered child invocation of the current unit-test binary. It preserves the inherited-writer proof, ETXTBSY assertion, and child cleanup/reaping. No production behavior or package configuration changes.
 
-Attempt 1: handlers::api::builders::tests::niks3_probe_failure_never_polls_success_transition failed at crates/cf-server/src/handlers/api/builders.rs:7275: expected RateLimited, actual Process. 1793 passed, 1 failed, 682 ignored. Package builder exit 101; Nix command exit 1.
-Attempt 2: the prior test passed, but handlers::api::builders::tests::niks3_basic_probe_applies_guard_to_path_info_only failed at builders.rs:7076: Result::unwrap on Err(Configuration). Same totals and exit statuses.
-
-Evidence on sledge: /tmp/opencode/task490/slice-run1.log and slice-run2.log. Retain nix log /nix/store/9pihfg4v8mp6rb4qnp148acv5cqsrb43-cf-server-0.3.0.drv for the last attempt. Root cause (environment, concurrency, or product code) is not established. No VM ran and no auth defect was reproduced. Do not weaken or bypass the package check phase. Test-only overhaul does not authorize fixing cf-server production or unit-test sources here. Linked blocked work: TASK-490.1.
+Controlled reproduction, exact verification commands, results, and log paths are recorded in implementation notes. The normal production server package build passed. TASK-491 is in Review at MR !336. This resolves only the server package prerequisite; no Access VM or integration-owner pass is implied.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -74,4 +71,6 @@ Verification on commit af39284bdf16d56402f01a64c916f17948e43b02:
 - `git diff --check` passed.
 
 One non-gating diagnostic attempt, `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib > /tmp/opencode/task491-full-lib-after.log 2>&1; printf "exit=%s\\n" "$?"'`, failed eight unrelated `queries::cve_scans_tests` with PoolTimedOut because this shell had no disposable DATABASE_URL. The normal Nix package build above passed in its package environment. MR !336: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/336. This fix resolves only the package prerequisite; no Access VM or integration owner result is implied.
+
+MR !336 is open from TASK-491-isolate-fork-fixture to dev. Commit af39284bdf16d56402f01a64c916f17948e43b02 contains the test-only isolation fix. Task moved to Review after both acceptance criteria passed. Removing the TASK-491 lock for review; no merge or deployment is authorized or performed.
 <!-- SECTION:NOTES:END -->
