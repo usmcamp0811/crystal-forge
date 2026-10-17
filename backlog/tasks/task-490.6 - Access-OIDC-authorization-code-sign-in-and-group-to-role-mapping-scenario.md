@@ -4,7 +4,7 @@ title: 'Access: OIDC authorization-code sign-in and group-to-role mapping scenar
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-17 17:15'
+updated_date: '2026-10-17 17:26'
 labels:
   - testing
   - integration
@@ -24,7 +24,7 @@ Owning check: integration-access. Contract ID: access.lifecycle.oidc. Exclusive 
 
 Scope: real browser authorization-code flow against a local services-role OIDC provider. Callback creates user_sessions with auth_source oidc and external_identities. bootstrapAdminGroup and admin-created group mappings yield authored role/environment scope; an unmapped user gets no role. Sign-out invalidates the session. Configure through services.crystal-forge.server.auth_mode = "oidc" and server.oidc.* only. Non-goals: external providers and token-refresh timing. TASK-490 test-only scope applies.
 
-Organization: checks/integration-access/default.nix is native Snowfall { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios, and normal pkgs.linkFarm aggregate of ALL registered gates. Shared helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }. Owner-local scripts/fixtures/assets; no root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns owner default.nix, shared lib and CI/docs; explicit registration required. Meaningful WIP may be discoverable; only Access exists now, no placeholders.
+Organization: checks/integration-access/default.nix is native Snowfall { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios, and normal pkgs.linkFarm aggregate of ALL registered gates. Shared helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }. Owner-local scripts/fixtures/assets; no root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns owner default.nix, shared lib and CI/docs; explicit registration required. Meaningful WIP may be discoverable; only Access exists now, no placeholders.
 
 Prerequisite: TASK-490.7 provides OIDC provider and browser-trusted redirect origin. Read cf-server handlers/api/auth_oidc*.rs, auth/dev_mode.rs, admin.rs oidc-mappings, docs/knowledge/security/oidc-role-mapping.md, operations/authentication-modes-and-oidc-configuration.md and legacy checks/oidc-auth/realm-crystal-forge.json as adaptation evidence. As-built D1 is not accepted authority; uncertain cases are blocked pending owner decision.
 
