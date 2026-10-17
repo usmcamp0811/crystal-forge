@@ -4,6 +4,7 @@ title: 'Upgrade: real supported old-version transition and continuity scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
+updated_date: '2026-10-17 17:19'
 labels:
   - testing
   - integration
@@ -19,11 +20,17 @@ ordinal: 535000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-upgrade. Contract ID: upgrade.continuity. Exclusive write paths: tests/integration/upgrade/scenarios/continuity.{nix,py,cjs} and the pinned old-version input wiring that the coordinator approves.
+Owning check: integration-upgrade. Contract ID: upgrade.continuity. Exclusive scenario writes: checks/integration-upgrade/scenarios/continuity.{nix,py,cjs}; scenario fixtures/assets under that owner. Pinned old-version input wiring requires coordinator approval and coordinator-owned shared/flake changes; child cannot edit those paths unilaterally.
 
-BLOCKED: owner decision D2 (coverage map, Upgrade section). No document defines the supported upgrade source or the agent/builder compatibility window. Tags v0.3.1, v0.3.0, v0.2.x exist; all crates report 0.3.0; a tag alone is not a support promise. The owner must name: (a) the oldest supported server release for in-place upgrade; (b) whether agents and builders from that release must keep working against the current server, and for how long; (c) the pinned source (tag/commit) to build that release. Adding the old release as a pinned flake input or fetch must not change any current application dependency.
+BLOCKED D2: no accepted support decision names oldest supported in-place source server release, whether old agents/builders must operate with current server and for how long, or exact pinned source tag/commit. Existing v0.3.1/v0.3.0/v0.2.x tags and crate version 0.3.0 are not support promises. Owner must decide all three. Old-source flake input/fetch must not change current application dependencies. As-built D1 is evidence, not authority; other uncertain expectations also remain blocked pending owner decision.
 
-SCOPE once unblocked: the old package (built from its own pinned source, using its own migrations) creates users and credentials, history (evaluations, builds, deployments), and in-flight work (queued build, pending deployment) through its own API/UI; the current package then starts through the normal module on the same PostgreSQL data directory and migrations apply; the same users sign in with their old passwords; history identities are unchanged; in-flight work recovers to the specified state; one representative new operation (evaluate + build) completes; within the declared window, the old agent/builder still operates against the new server. Prohibited substitutes: same-version restart, synthetic old schema, current-version seeded data. Non-goals: current-version restart recovery (Delivery 490.15); migration-prefix rehearsals in server-regressions (kept as non-integration).
+Scope once unblocked: build actual old package from its own pinned source/migrations. Through old API/UI create users/credentials, evaluation/build/deployment history, queued build and pending deployment. Current package starts normally on same PostgreSQL data directory and applies migrations. Existing passwords still sign in, exact history identities persist, in-flight work reaches specified states, representative new evaluate/build completes. Old agents/builders continue within the declared compatibility window. No same-version restart substitute, synthetic old schema or current-version seeded data. Non-goals: current-version recovery (490.15), retained non-integration server-regressions migration-prefix rehearsals. TASK-490 test-only scope applies.
+
+Organization: native checks/integration-upgrade/default.nix uses { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Shared helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; child files disjoint and integration requires explicit registration. Meaningful WIP may be discoverable; only Access exists now; Upgrade default.nix only with meaningful scenario after blockers, no placeholder.
+
+Prerequisite TASK-490.7 plus D2 decision. Candidate, NOT verified: nix build .#checks.x86_64-linux.integration-upgrade.scenarios.continuity -L; append .run for evidence; aggregate nix build .#checks.x86_64-linux.integration-upgrade -L. Completion requires explicit registration, real VM execution and exact old/current revisions, commands, outcomes and evidence; keep correct failing assertions and linked Backlog product bugs.
+
+READINESS: foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s), accepted D2, implemented interfaces/fixtures/registration and verified commands required before To Do. No foundation hash is invented; no delegation or executed slice is claimed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -34,3 +41,9 @@ SCOPE once unblocked: the old package (built from its own pinned source, using i
 - [ ] #4 Old agents/builders within the declared window remain usable
 - [ ] #5 Executed in real VMs with recorded evidence
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-17 organization correction: native Upgrade owner-local layout, coordinator-owned registration/shared/CI/docs and input wiring. D2 remains unresolved, as does actual foundation dependency commit. Foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands plus owner support decision required before To Do. No Luna delegation or executed slice is claimed.
+<!-- SECTION:NOTES:END -->
