@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-17 17:15'
+updated_date: '2026-10-17 17:25'
 labels:
   - testing
   - integration
@@ -31,7 +31,7 @@ Owning check: integration-access. Contract IDs: access.shell, access.configurati
 
 Exclusive writes: checks/integration-access/scenarios/shell-navigation.{nix,py,cjs} and configuration-preferences.{nix,py,cjs}. Non-goals: event notification delivery (490.5), dashboard domain values (Delivery/Assurance), all viewport/theme combinations, production changes. All other paths remain read-only under TASK-490 test-only scope.
 
-Corrected organization: native checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios, and pkgs.linkFarm for ALL registered gates. Helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }. Owner-local scripts/fixtures/assets; no root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix, shared lib, CI/docs and explicit child registration. Meaningful WIP can be discoverable; only Access exists now and no placeholder owners are added.
+Corrected organization: native checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios, and pkgs.linkFarm for ALL registered gates. Helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }. Owner-local scripts/fixtures/assets; no root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix, shared lib, CI/docs and explicit child registration. Meaningful WIP can be discoverable; only Access exists now and no placeholder owners are added.
 
 Authority review: docs/knowledge/ui/frontend-navigation-and-shared-patterns.md, design-system-accessibility-responsive-motion.md, alerts-and-notifications-decision.md (preferences only) are as-built evidence, not accepted D1 authority. Approved presentation references remain docs/design/CrystalForge/components/Shell.jsx and ProfileView.jsx, read-only. Uncertain expected behavior remains blocked pending owner decision; no Authority: as-built header.
 
@@ -43,7 +43,7 @@ shell-navigation: unauthenticated protected route -> /login; signed-in navigatio
 
 configuration-preferences: user A changes profile and notification preferences through /profile; DB rows and reload agree; user B unchanged. Invalid input, if exposed by UI, retains draft and persists nothing according to accepted requirements. Missing approved visual states remain blocked with component, condition and missing fact.
 
-Candidate commands, NOT verified: nix build .#checks.x86_64-linux.integration-access.scenarios.shell-navigation -L and configuration-preferences; append .run for evidence. Coordinator aggregate: nix build .#checks.x86_64-linux.integration-access -L. At most two VM tests concurrently. Explicit registration and real VM execution required, with exact commands/revision/outcomes/evidence in notes. Expectations derive from authored facts/accepted requirements, never CF responses. Preserve correct failing assertions, link Backlog product bugs and escalate interface/authority gaps; no product fixes.
+Candidate commands, NOT verified: nix build .#checks.x86_64-linux.integration-access.scenarios.shell-navigation -L and configuration-preferences; append .run for evidence. Coordinator aggregate: nix build .#checks.x86_64-linux.integration-access -L. Run one VM test at a time until measured capacity supports a higher limit. Explicit registration and real VM execution required, with exact commands/revision/outcomes/evidence in notes. Expectations derive from authored facts/accepted requirements, never CF responses. Preserve correct failing assertions, link Backlog product bugs and escalate interface/authority gaps; no product fixes.
 
 READINESS: foundation dependency commit unresolved; two existing Rust package tests block foundation and no VM execution occurred. Backlog, not ready. Future packet requires actual dependency commit(s), implemented signatures/fixtures/registration and verified commands before To Do. No delegation or executed slice is claimed.
 <!-- SECTION:DESCRIPTION:END -->
