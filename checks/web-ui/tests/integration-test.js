@@ -21099,11 +21099,13 @@ security.audit.enable = true;</fixtext>
   },
   {
     name: "26b-evaluations-history",
-    description: "Evaluations page — History tab with completed/failed/cancelled rows (TASK-273)",
+    description: "Completed evaluations — manual Shift-click selection, poll stability, filter pruning and ordinary-click drawer",
     action: async (page) => {
+      const { expect } = require("@playwright/test");
+      let historyRequestCount = 0;
       const evalQueueMock = {
         active_count: 0,
-        completed_count: 15,
+        completed_count: 3,
         failed_count: 0,
         domain_total: 0,
         filtered_total: 0,
@@ -21113,8 +21115,8 @@ security.audit.enable = true;</fixtext>
       };
 
       const evalHistoryMock = {
-        total_count: 15,
-        domain_total: 15,
+        total_count: 3,
+        domain_total: 3,
         page: 1,
         limit: 50,
         items: [
@@ -21189,52 +21191,118 @@ security.audit.enable = true;</fixtext>
       });
       await page.route("**/api/v1/commits/eval-history**", async (route) => {
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(evalHistoryMock) });
+        historyRequestCount += 1;
       });
+      const logsEndpoint = "**/api/v1/commits/999/eval/logs*";
+      await page.route(logsEndpoint, route => route.fulfill({ json: [] }));
 
-      await page.goto(`${baseUrl}/evaluations`, { timeout: LOAD_TIMEOUT });
-      await page.waitForTimeout(2000);
+      const drawer = page.getByRole("dialog", { name: "Evaluation detail", exact: true });
+      try {
+        await page.goto(`${baseUrl}/evaluations`, { timeout: LOAD_TIMEOUT });
+        const coach = page.getByRole("complementary", { name: "Crystal Forge Coach", exact: true });
+        await expect(async () => {
+          if (await coach.isVisible()) {
+            await coach.getByRole("button", { name: "Close Crystal Forge Coach", exact: true }).click({ timeout: 1000 });
+          }
+          await page.getByRole("button", { name: /^Completed\b/ }).click({ timeout: 1000 });
+        }).toPass({ timeout: LOAD_TIMEOUT });
 
-      // Click the History tab
-      const historyTab = page.getByRole("button", { name: /History/i }).first();
-      await historyTab.waitFor({ timeout: 5000 });
-      await historyTab.click();
-      await page.waitForTimeout(1500);
+        // Other scenarios can leave saved filters in this authenticated context.
+        const search = page.getByPlaceholder("Search completed…", { exact: true });
+        await search.fill("");
+        await page.getByRole("button", { name: "all", exact: true }).click();
+        await page.getByRole("combobox").filter({ has: page.getByRole("option", { name: "All flakes", exact: true }) }).selectOption("all");
+        const latest = page.getByRole("button", { name: "Latest per flake", exact: true });
+        if (await latest.getAttribute("aria-pressed") === "true") await latest.click();
+        await expect(latest).toHaveAttribute("aria-pressed", "false");
 
-      // Assert history table is visible with status chips
-      const completeChip = page.getByText("complete").first();
-      await completeChip.waitFor({ timeout: 5000 });
+        const table = page.getByRole("table").filter({ has: page.getByRole("columnheader", { name: "Flake · commit", exact: true }) });
+        const rows = table.locator("tbody tr");
+        const completeRow = rows.filter({ hasText: "ff1a2b3c4d5e" });
+        const failedRow = rows.filter({ hasText: "ee2b3c4d5e6f" });
+        const cancelledRow = rows.filter({ hasText: "dd3c4d5e6f7a" });
+        const bulk = page.locator(".ed-bulkbar");
+        // These class assertions verify the selection styling contract, while
+        // aria-selected verifies the same state independently of attention/focus.
+        const assertSelection = async selectedRows => {
+          await expect(table.locator("tbody tr.row-checked")).toHaveCount(selectedRows.length);
+          await expect(table.locator('tbody tr[aria-selected="true"]')).toHaveCount(selectedRows.length);
+          for (const row of [completeRow, failedRow, cancelledRow]) {
+            if (await row.count() === 0) continue;
+            const selected = selectedRows.includes(row);
+            await expect(row).toHaveAttribute("aria-selected", String(selected));
+            if (selected) await expect(row).toHaveClass(/\brow-checked\b/);
+            else await expect(row).not.toHaveClass(/\brow-checked\b/);
+          }
+          if (selectedRows.length) await expect(bulk).toHaveText(new RegExp(`\\b${selectedRows.length} selected\\b`));
+          else await expect(bulk).toHaveCount(0);
+        };
+        // The identity cell is deliberately outside the row's action cell.
+        const shiftClick = row => row.getByRole("cell").filter({ hasText: /(?:ff1a2b3c4d5e|ee2b3c4d5e6f|dd3c4d5e6f7a)/ }).click({ modifiers: ["Shift"] });
+        await expect(rows).toHaveCount(3);
+        await assertSelection([]);
+        await expect(failedRow.getByRole("button", { name: "Retry evaluation", exact: true })).toBeVisible();
 
-      // Assert Re-evaluate button appears for failed row
-      const reEvalBtn = page.getByRole("button", { name: /Re-evaluate/i }).first();
-      await reEvalBtn.waitFor({ timeout: 5000 });
+        await shiftClick(completeRow);
+        await assertSelection([completeRow]);
+        await expect(drawer).toBeHidden();
+        await expect(bulk.getByRole("button", { name: "Download logs", exact: true })).toBeVisible();
+        await expect(bulk.getByRole("button", { name: "Compare", exact: true })).toBeDisabled();
+        await shiftClick(completeRow);
+        await assertSelection([]);
+        await shiftClick(completeRow);
+        await shiftClick(cancelledRow);
+        await assertSelection([completeRow, cancelledRow]);
+        // Compare enablement is existing behavior; execution is outside this fix.
+        await expect(bulk.getByRole("button", { name: "Compare", exact: true })).toBeEnabled();
+        await expect(drawer).toBeHidden();
 
-      // Select one history row and verify bulk action bar appears
-      const firstRowCheckbox = page.locator(".sys-table tbody .ed-checkbox").first();
-      await firstRowCheckbox.waitFor({ timeout: 5000 });
-      await firstRowCheckbox.click();
+        await bulk.getByRole("button", { name: "Clear", exact: true }).click();
+        await assertSelection([]);
+        const requestsAfterClear = historyRequestCount;
+        await expect.poll(() => historyRequestCount, { timeout: 12000 }).toBeGreaterThan(requestsAfterClear);
+        await assertSelection([]);
 
-      const bulkSelected = page.getByText(/1 selected/i).first();
-      await bulkSelected.waitFor({ timeout: 5000 });
-      await page.getByRole("button", { name: /Download logs/i }).first().waitFor({ timeout: 5000 });
+        await page.getByRole("button", { name: "failed", exact: true }).click();
+        await expect(rows).toHaveCount(1);
+        await expect(failedRow).toBeVisible();
+        await assertSelection([]);
+        await page.getByRole("button", { name: "all", exact: true }).click();
+        await expect(rows).toHaveCount(3);
+        await assertSelection([]);
 
-      const compareBtn = page.getByRole("button", { name: /^Compare$/i }).first();
-      await compareBtn.waitFor({ timeout: 5000 });
-      await assertDisabled(compareBtn, "Expected Compare to stay disabled with only one selected history row");
+        const flakeFilter = page.getByRole("combobox").filter({ has: page.getByRole("option", { name: "All flakes", exact: true }) });
+        await flakeFilter.selectOption("workstations");
+        await expect(rows).toHaveCount(1);
+        await assertSelection([]);
+        await flakeFilter.selectOption("all");
+        await expect(rows).toHaveCount(3);
+        await assertSelection([]);
 
-      // Select a second row from the same flake and verify Compare is enabled
-      const thirdRowCheckbox = page.locator(".sys-table tbody .ed-checkbox").nth(2);
-      await thirdRowCheckbox.waitFor({ timeout: 5000 });
-      await thirdRowCheckbox.click();
-      await page.getByText(/2 selected/i).first().waitFor({ timeout: 5000 });
-      await assertEnabled(compareBtn, "Expected Compare to be enabled for two selected rows from the same flake");
+        await shiftClick(completeRow);
+        await shiftClick(failedRow);
+        await assertSelection([completeRow, failedRow]);
+        await search.fill("infrastructure");
+        await expect(rows).toHaveCount(2);
+        await assertSelection([completeRow]);
+        await search.fill("");
+        await expect(rows).toHaveCount(3);
+        await assertSelection([completeRow]);
 
-      // Clicking a history row opens the evaluation detail drawer
-      const historyRow = page.locator(".sys-table tbody tr").first();
-      await historyRow.click();
-      await page.locator("aside.side-panel[role='dialog']").first().waitFor({ timeout: 5000 });
-
-      await page.unroute("**/api/v1/commits/eval-queue**");
-      await page.unroute("**/api/v1/commits/eval-history**");
+        await completeRow.getByRole("cell").filter({ hasText: "ff1a2b3c4d5e" }).click();
+        await expect(drawer).toBeVisible();
+        await assertSelection([completeRow]);
+        await drawer.getByRole("button", { name: "Close", exact: true }).click();
+        await expect(drawer).toBeHidden();
+      } finally {
+        if (await drawer.isVisible()) {
+          await drawer.getByRole("button", { name: "Close", exact: true }).click();
+          await expect(drawer).toBeHidden();
+        }
+        await page.unroute("**/api/v1/commits/eval-queue**");
+        await page.unroute("**/api/v1/commits/eval-history**");
+        await page.unroute(logsEndpoint);
+      }
     },
   },
   {

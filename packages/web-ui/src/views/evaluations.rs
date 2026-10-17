@@ -499,9 +499,11 @@ fn EvaluationsPage(
     let mut latest_filter = use_signal(LatestFilterState::default);
     let mut search_query = use_signal(String::new);
     let mut drawer_target = use_signal(|| None::<EvalDrawerTarget>);
+    // Selection is explicit. Refreshes and filters may prune selected rows but
+    // must never select new rows or restore a cleared selection.
     let mut history_selected_ids = use_signal(std::collections::HashSet::<i32>::new);
     // Keyboard navigation: index into the currently visible list (queue or history).
-    // Start at 0 so the first row is auto-selected when the page loads (matching JSX).
+    // Keyboard focus is separate from bulk selection.
     let mut focused_index: Signal<Option<usize>> = use_signal(|| None);
 
     // Active queue multi-select (bulk cancel)
@@ -514,7 +516,6 @@ fn EvaluationsPage(
     let mut history_fetch_limit = use_signal(|| 50_i64);
     let mut history_status_filter = use_signal(|| String::from("all"));
     let mut history_flake_filter = use_signal(|| String::from("all"));
-    let mut history_select_all_loaded = use_signal(|| true);
     let mut history_ack_cursor = use_signal(|| None::<String>);
     let mut evals_ack_sent = use_signal(|| false);
     // Accumulated history items across the current page-1 fetch window.
@@ -813,28 +814,6 @@ fn EvaluationsPage(
         latest_filter().enabled(),
     );
     let hist_paging = use_infinite_scroll(hist_reset_key, 20);
-
-    use_effect(move || {
-        if let Some(Ok(page_data)) = &*history_resource.read() {
-            history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
-            if history_select_all_loaded() {
-                let search = search_query().trim().to_lowercase();
-                let status = history_status_filter();
-                let flake = history_flake_filter();
-                let ids = page_data
-                    .items
-                    .iter()
-                    .filter(|item| history_item_matches_filters(item, &status, &flake, &search))
-                    .filter(|item| {
-                        marker_matches(latest_filter().enabled(), item.is_latest_per_flake)
-                    })
-                    .take(hist_paging.count())
-                    .map(|item| item.commit_id)
-                    .collect::<std::collections::HashSet<_>>();
-                history_selected_ids.set(ids);
-            }
-        }
-    });
 
     // Grow the server fetch limit for history, reactive because all signal
     // reads are inside the closure (review finding #1).
@@ -1415,7 +1394,6 @@ fn EvaluationsPage(
                                         let selected_ids = selected_history_rows.iter().map(|item| item.commit_id).collect::<Vec<_>>();
                                         let mut refresh_sig = history_refresh.clone();
                                         let mut selected_sig = history_selected_ids.clone();
-                                        let mut select_all_sig = history_select_all_loaded.clone();
                                         let mut toast = toast_msg.clone();
                                         spawn(async move {
                                             let mut success = 0u32;
@@ -1429,9 +1407,6 @@ fn EvaluationsPage(
                                             if success > 0 {
                                                 toast.set(Some(format!("Re-queued {} evaluation{}", success, if success == 1 { "" } else { "s" })));
                                                 selected_sig.set(failed.into_iter().collect());
-                                                // Disable auto-select so the next poll doesn't repopulate
-                                                // the selection with successful rows (review finding #3).
-                                                select_all_sig.set(false);
                                             } else {
                                                 toast.set(Some("Re-evaluate failed — see server logs".to_string()));
                                             }
@@ -1473,7 +1448,6 @@ fn EvaluationsPage(
                             history_status_filter: history_status_filter,
                             history_flake_filter: history_flake_filter,
                             history_fetch_limit: history_fetch_limit,
-                            history_select_all_loaded: history_select_all_loaded,
                             refresh: history_refresh,
                             history_selected_ids: history_selected_ids,
                             drawer_target: drawer_target,
@@ -1855,7 +1829,6 @@ fn EvalHistory(
     mut history_status_filter: Signal<String>,
     mut history_flake_filter: Signal<String>,
     mut history_fetch_limit: Signal<i64>,
-    mut history_select_all_loaded: Signal<bool>,
     mut refresh: Signal<u64>,
     mut history_selected_ids: Signal<std::collections::HashSet<i32>>,
     mut drawer_target: Signal<Option<EvalDrawerTarget>>,
@@ -1899,7 +1872,6 @@ fn EvalHistory(
                                     onclick: move |_| {
                                         history_status_filter.set(value_str.clone());
                                         history_fetch_limit.set(50);
-                                        history_select_all_loaded.set(true);
                                         refresh.set(refresh() + 1);
                                     },
                                     "{label}"
@@ -1916,7 +1888,6 @@ fn EvalHistory(
                     onchange: move |evt| {
                         history_flake_filter.set(evt.value().clone());
                         history_fetch_limit.set(50);
-                        history_select_all_loaded.set(true);
                         refresh.set(refresh() + 1);
                     },
                     option { value: "all", "All flakes" }
@@ -1969,11 +1940,6 @@ fn EvalHistory(
                             .collect::<Vec<_>>();
                         let paged_items: Vec<EvalHistoryItem> = all_loaded.iter().take(hist_paging.count()).cloned().collect();
                         let hist_has_more = hist_paging.count() < all_loaded.len() || hist_server_has_more;
-                        // Select-all operates on all loaded rows (not just the visible page)
-                        // so check/uncheck is symmetric and consistent (fixes review finding #5).
-                        let all_loaded_ids: Vec<i32> = paged_items.iter().map(|item| item.commit_id).collect();
-                        let all_checked = !all_loaded_ids.is_empty()
-                            && all_loaded_ids.iter().all(|id| history_selected_ids.read().contains(id));
                         rsx! {
                     table {
                         class: "sys-table",
@@ -1997,6 +1963,7 @@ fn EvalHistory(
                                     let status_meta = eval_status_meta(&ev.evaluation_status);
                                     let ev_for_row = ev.clone();
                                     let is_focused = focused_index() == Some(row_i);
+                                    let is_selected = history_selected_ids.read().contains(&commit_id);
 
                                     let is_failed = ev.evaluation_status == "failed";
                                     // Resolve the same way dismiss_attention_item
@@ -2015,7 +1982,12 @@ fn EvalHistory(
                                     let eval_key = occurrence_id_for_subject("evals", &commit_id_str)
                                         .unwrap_or(commit_id_str);
                                     let row_class = attention_row_class(
-                                        if is_focused { "kbd-focused" } else { "" },
+                                        match (is_focused, is_selected) {
+                                            (true, true) => "kbd-focused row-checked",
+                                            (true, false) => "kbd-focused",
+                                            (false, true) => "row-checked",
+                                            (false, false) => "",
+                                        },
                                         "evals",
                                         &eval_key,
                                         is_failed,
@@ -2026,6 +1998,7 @@ fn EvalHistory(
                                         tr {
                                             key: "{commit_id}",
                                             class: "{row_class}",
+                                            aria_selected: is_selected,
                                             style: "cursor: pointer;",
                                             onclick: move |evt| {
                                                 // Shift-click toggles selection (design: no checkboxes,
@@ -2038,7 +2011,6 @@ fn EvalHistory(
                                                         next.insert(commit_id);
                                                     }
                                                     history_selected_ids.set(next);
-                                                    history_select_all_loaded.set(false);
                                                 } else {
                                                     if is_failed {
                                                         dismiss_attention_item(
