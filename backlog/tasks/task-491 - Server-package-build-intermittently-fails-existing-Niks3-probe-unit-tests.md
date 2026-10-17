@@ -1,9 +1,11 @@
 ---
 id: TASK-491
 title: Server package build intermittently fails existing Niks3 probe unit tests
-status: Backlog
-assignee: []
+status: In Progress
+assignee:
+  - claude-opus-5-5
 created_date: '2026-10-17 17:21'
+updated_date: '2026-10-17 18:17'
 labels:
   - testing
   - build-blocker
@@ -35,3 +37,11 @@ Evidence on sledge: /tmp/opencode/task490/slice-run1.log and slice-run2.log. Ret
 - [ ] #1 Root cause of the two observed package-check failures is established with reproducible evidence
 - [ ] #2 Normal production cf-server-drv builds without skips, weakened assertions, or disabled checks
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-opus-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-491-isolate-fork-fixture
+
+Preflight 2026-10-17: dedicated branch/worktree TASK-491-isolate-fork-fixture created clean from origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd. TASK-491 had no lock and no dependencies. The dev worktree is not clean (pre-existing TASK-490.13 staged edit, .locks/TASK-478.lock, .locks/TASK-490.lock, .locks/TASK-490.1.lock, session-ses_f927.md); preserved. No main branch/worktree found. No changes will be made there. Scope is only relevant cf-server #[cfg(test)] fixture/isolation code and TASK-491 records. Plan: inspect specified helpers/tests and package test phase; establish FD-inheritance interference via direct controlled evidence; apply minimal isolated repair preserving raw-fork proof and cleanup/reaping; run focused tests in normal parallel execution plus Nix package cf-server-drv normal check. Record failures exactly; commit the fix and return tested prerequisite without touching TASK-490.1.
+<!-- SECTION:NOTES:END -->
