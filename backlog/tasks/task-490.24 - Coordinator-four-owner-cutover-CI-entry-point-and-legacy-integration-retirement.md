@@ -12,6 +12,7 @@ labels:
   - integration
   - coordinator
 dependencies:
+  - TASK-490.1
   - TASK-490.2
   - TASK-490.3
   - TASK-490.4
@@ -33,6 +34,12 @@ dependencies:
   - TASK-490.21
   - TASK-490.22
   - TASK-490.23
+  - TASK-490.7
+  - TASK-490.25
+  - TASK-490.26
+  - TASK-490.27
+  - TASK-490.28
+  - TASK-490.29
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -54,7 +61,7 @@ Candidates, NOT verified: nix build .#checks.x86_64-linux.integration-access -L,
 
 Authority: D1/as-built docs are implementation evidence, not accepted authority. Uncertain obligations remain blocked pending explicit owner decision. Upgrade D2 must be resolved before its replacement can pass.
 
-READINESS: all predecessor children remain Backlog, none ready. Actual foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. TASK-490.20/.21 additionally need finer splitting of triage versus policy waiver/acceptance versus closure, without scope expansion now. Actual dependency commit(s), resolved packet blockers, concrete registration and verified commands are required before To Do. No delegation or executed slice is claimed.
+READINESS: all child packets remain Backlog, none ready. Product blockers TASK-490.25/.26 were exposed by the first Access VM execution. The combined test-source branch contains TASK-491 commit a6c8922650bf7f0ff643d181422c0092cfc43242; the Access startup assertion still fails before migrations. Assurance packets .20/.21 were narrowed and .27/.28/.29 separate triage, waiver, acceptance-register and verification/closure starting states. Child scenario runs cannot reuse live data or outputs from other scenarios. Product defects, accepted authority, complete owner scenario registrations and passing full owner runs are required before cutover. No Luna delegation or executed owner is claimed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -71,4 +78,6 @@ READINESS: all predecessor children remain Backlog, none ready. Actual foundatio
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction replaces old registration/layout/commands and incomplete-unexported rule. Coordinator writer, not Luna. Only Access exists now; remaining native owner default.nix files require meaningful scenarios, no placeholders. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. All children Backlog, none ready. Future packets need actual dependency commit(s) and verified commands before To Do. TASK-490.20/.21 finer splitting remains a dispatch blocker without scope expansion now. D1/as-built is not authority; uncertain cases await owner decision. No delegation or executed slice is claimed.
+
+Foundation execution update: TASK-491 dependency `af39284bdf16d56402f01a64c916f17948e43b02` was integrated as `a6c8922650bf7f0ff643d181422c0092cfc43242`. Focused Access VM command ran and failed on documented module configuration defects TASK-490.25/.26; exact result and redacted generated config are in docs/knowledge/testing/integration-coverage-map.md. Do not mark any child ready or retire legacy CI. No app fix/merge/deploy.
 <!-- SECTION:NOTES:END -->

@@ -12,10 +12,23 @@ startup migrations and local setup, registers the first administrator in
 the browser, signs in, reloads, and reads persisted identity and session
 state. Wrong-password rejection must not create a session.
 
-The scenario has **not executed**. The unchanged production server package
-failed its unit-test phase in two attempts (TASK-491), before VM startup.
-Evaluation alone is not integration proof. The local-mode module wiring is
-also a source-reading concern, not a reproduced product defect.
+The scenario executed but **failed** at server startup. It records the
+redacted module-generated configuration and server/PostgreSQL journals in
+the evidence output. The default PostgreSQL socket path is formatted as a
+URI with no host, so the server exits before migrations or auth routes.
+The generated configuration also omits `auth_mode` and the unit has no
+`AUTH_MODE`; the local-auth request is not reached. Keep the startup and
+local-mode assertions. Do not add an `AUTH_MODE` test override. Product
+defects are tracked by TASK-490.25 and TASK-490.26. TASK-491 resolves only
+the Rust package-check failure; see MR !336.
+
+Failure evidence from tested source
+`a6c8922650bf7f0ff643d181422c0092cfc43242-dirty`:
+`/nix/store/yfc7pkz5zm8k29b82zzfhm2i8f1gn348-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`.
+`result.json` records failure in `fresh-startup-applies-migrations`;
+`journals/controller/generated-config-summary.txt` records the generated
+database host and missing auth mode; `journals/controller/crystal-forge.journal`
+records `both host and hostaddr are missing`.
 
 ## Commands
 

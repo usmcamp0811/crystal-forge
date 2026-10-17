@@ -1,6 +1,6 @@
 ---
 id: TASK-490.20
-title: 'Assurance: finding triage and waiver/acceptance scenario'
+title: 'Assurance: real finding triage and batch-triage persistence scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
@@ -20,32 +20,29 @@ ordinal: 532000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-assurance. Contract ID: assurance.remediation.triage. Exclusive writes currently scoped to checks/integration-assurance/scenarios/remediation-triage.{nix,py,cjs}. Existing CVE triage/waiver proofs (16-cves, 12h) are mocked or Rust authorization tests.
+Owning check: integration-assurance. Contract ID: assurance.remediation.triage. Exclusive scenario writes: checks/integration-assurance/scenarios/remediation-triage.{nix,py,cjs}.
 
-Preserved scope: start from real TASK-490.16 scan evidence. System/fleet triage with justification persists actor and exact scope; batch affects exactly selected findings. Finding waiver creation/review Accepted|Rejected/expiry/revocation follows WaiverDecision and never marks remediation. Acceptance register renew/convert persists. Viewer triage returns 403 with no change. Non-goals: POA&M lifecycle (490.21), exports (490.22). TASK-490 test-only scope applies.
+Start from real scan-produced findings created as setup in this scenario's own fresh VM. Single/fleet triage and batch triage persist actor, exact scope, status and justification; the unselected findings remain unchanged. Viewer is denied with no row change. Browser navigation reaches the exact CVE/system identity. No finding waiver or acceptance-register lifecycle here; those are TASK-490.27 and .28. POA&M plan creation is TASK-490.21; verification/closure is TASK-490.29.
 
-NOT DISPATCH READY: TASK-490.20/.21 still need finer splitting between finding triage, policy waiver/acceptance and closure/verification. The current separation from POA&M is insufficient. Record the refinement blocker now; do not expand scope or create new slices in this correction. TASK-490.16 integration alone does not make this task ready.
+Read-only production sources: cf-server api/cves.rs triage/batch/justification, related queries/models and routes; web UI CVE views and triage dialogs. Read the owner-approved cve-poam-evidence-continuity spec only for its stated scope; D1/as-built docs are not accepted authority. Any uncertain behavior is blocked pending an owner decision.
 
-Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; child files stay disjoint and integration requires explicit registration. Meaningful WIP may be discoverable; only Access exists now, other owners require meaningful scenarios, no placeholders.
+Shared helper `lib.crystal-forge.makeIntegrationTestHarness {pkgs,inputs}` and `checks/integration-assurance/default.nix` registration are coordinator-owned. Writes are restricted to this scenario's files and owner-local triage fixtures. Each run has a fresh database/VM: TASK-490.16 runtime scan rows/receipts cannot be reused. Create scan evidence as real setup in this scenario; do not seed findings.
 
-Read-only source: cf-server api/cves.rs triage/batch/justification, poam.rs finding-waivers, acceptance_register.rs, models/poam.rs WaiverDecision; owner-approved docs/design/CrystalForge cve-poam-evidence-continuity-design-spec.md; docs/knowledge/cves/fleet-cve-triage*; CveBatchTriage.jsx/PoamViews.jsx. As-built D1 is evidence, not accepted authority; uncertain policy/waiver semantics blocked pending owner decision.
-
-Candidate only, NOT verified or dispatch authorization: nix build .#checks.x86_64-linux.integration-assurance.scenarios.remediation-triage -L; append .run for evidence; aggregate nix build .#checks.x86_64-linux.integration-assurance -L. Final packet boundaries/commands must be reverified after refinement. Completion requires explicit registration, real VM execution and revision/commands/outcomes/evidence; independent expectations and retained correct failing assertions with linked Backlog bugs.
-
-READINESS: foundation dependency commit unresolved; two existing Rust package tests block foundation; no VM execution. Remain Backlog. Finer splitting, actual dependency commit(s), implemented interfaces/fixtures/registration and verified commands are required before To Do. No delegation or executed slice is claimed.
+Candidate command, not verified: `nix build .#checks.x86_64-linux.integration-assurance.scenarios.remediation-triage -L`; `.run` for evidence; coordinator owns the full Assurance check. Remain Backlog: foundation VM run fails on TASK-490.25/.26 and exact command/authority remain unverified.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Triage and batch triage persist with actor and exact scope
-- [ ] #2 Waiver decisions follow their lifecycle and never mark remediation
-- [ ] #3 Acceptances renew and convert per the register
-- [ ] #4 Unauthorized triage is rejected with no change
-- [ ] #5 Executed in real VMs with recorded evidence
+- [ ] #2 Batch triage affects exactly the authored selected set; unselected findings are unchanged
+- [ ] #3 Viewer triage is rejected with no database side effect
+- [ ] #4 Browser navigation reaches and displays the exact finding/system identity
+- [ ] #5 Scenario is registered in and included by the complete Assurance owner
+- [ ] #6 Executed in a real VM with exact command, revision, outcome and evidence
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-10-17 organization correction replaces old layout/commands. Additional dispatch blocker: TASK-490.20/.21 need finer splitting of triage versus policy waiver/acceptance versus closure/verification. Scope preserved, not expanded or split now. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
+2026-10-17 organization correction and later packet decomposition: triage only; finding waiver TASK-490.27, acceptance register TASK-490.28, POA&M plan TASK-490.21, and verification/closure TASK-490.29. Runtime findings must be generated within this scenario's fresh VM. TASK-490.25/.26 currently block foundation startup; no packet is ready.
 <!-- SECTION:NOTES:END -->
