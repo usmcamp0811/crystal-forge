@@ -22,6 +22,29 @@ Forge server inside a NixOS VM: build verification, manifest-driven Playwright
 steps with semantic assertions, screenshots, and visual regression against
 approved baselines.
 
+> **Transition:** under the [integration test maintenance contract](integration-test-contract.md),
+> browser workflows move into the four integration owners. This check remains
+> a required legacy gate. Legacy checks and CI selection remain unchanged until
+> all required owner scenarios pass, as recorded in the
+> [coverage map](integration-coverage-map.md#legacy-retirement-map). Do not add new workflows here;
+> add them to the owning scenario instead.
+
+Only `integration-access` is currently discoverable. Its coordinator-owned
+`checks/integration-access/default.nix` explicitly registers scenarios; the
+normal `pkgs.linkFarm` check builds all registered gates. Meaningful WIP checks
+may be discoverable without a completeness flag. Shared helpers live in
+`lib/integration-test/`, exported through Snowfall as
+`lib.crystal-forge.makeIntegrationTestHarness {pkgs}`. Future Delivery,
+Assurance, and Upgrade scenarios, fixtures, and assets belong beneath
+`checks/integration-{delivery,assurance,upgrade}/`; do not create placeholder
+`default.nix` files or custom discovery.
+
+The focused Access gate is
+`nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`;
+append `.run` to the scenario attribute for evidence only. Bootstrap execution
+remains unverified: two package-build attempts failed in different existing
+Rust tests before any scenario VM executed. No product defect was reproduced.
+
 ## Layout
 
 | Path | Purpose |
@@ -331,6 +354,9 @@ review, approve, and commit every final and intermediate themed capture before
 the normal gate can pass.
 
 ## Adding a route/state to coverage
+
+New route/state workflows belong in the owning integration scenario. For
+maintenance of existing legacy coverage, keep these files aligned:
 
 1. Add a step to `tests/integration-test.js`: navigate, run semantic
    assertions (`assertVisible` etc.) for the critical content, interact if

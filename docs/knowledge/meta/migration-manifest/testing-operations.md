@@ -18,6 +18,7 @@ tags:
 | `TESTING.md` | [historical/multi-builder-api-testing-guide.md](../../historical/multi-builder-api-testing-guide.md) | moved | complete |
 | `docs/mock-execution-mode.md` | [operations/mock-execution-mode.md](../../operations/mock-execution-mode.md) | moved | complete |
 | `checks/integration/README.md` | retained in place; see [integration section](../../testing/flake-checks.md#integration) | retained | complete |
+| `checks/integration-access/README.md` | new TASK-490.1 runbook retained beside the native check; see [coverage map](../../testing/integration-coverage-map.md) | retained | complete |
 | `checks/builder-evaluator-packaging/README.md` | retained in place; see [builder-evaluator-packaging section](../../testing/flake-checks.md#builder-evaluator-packaging) | retained | complete |
 | `checks/niks3-cache/README.md` | retained in place; see [niks3-cache section](../../testing/flake-checks.md#niks3-cache) | retained | complete |
 | `checks/niks3-write-probe/README.md` | retained in place at [the native write-probe runbook](../../../../checks/niks3-write-probe/README.md) | retained | complete |

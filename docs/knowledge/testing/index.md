@@ -5,6 +5,8 @@
 # Testing Guide
 
 * [Crystal Forge flake checks catalog](flake-checks.md) - Catalogs the current Nix flake-check matrix, standalone Web UI job, documentation and schema checks, and the cf-test-suite scenario runner; states what each verifies, how to run it, and where its README lives.
+* [Crystal Forge integration coverage and retirement map](integration-coverage-map.md) - Maps every accepted integration obligation to its single owner check, scenario, independent expected result, evidence, and status; documents the shared harness interface; and gives a retirement disposition for every legacy check directory and CI job.
+* [Crystal Forge integration test maintenance contract](integration-test-contract.md) - Defines the four integration check owners and the rules for maintaining their coverage when approved product requirements, UI designs, or implementation change.
 * [Crystal Forge testing plan](test-plan.md) - Defines the test levels, pytest markers, scenario system, coverage targets, and maintenance goals for Crystal Forge, with open questions and next steps; open it to learn the intended test strategy.
 * [Design golden fixtures contract](design-golden-fixtures.md) - Pointer and status record for the design handoff's golden fixtures README, which defines the deterministic crystal-forge.fixtures.json snapshot that the design example, the fixture seeder, and the screenshot checks share.
 * [Evaluation snapshot verification expectations](evaluation-snapshot-verification-expectations.md) - Lists the targeted evidence required for any change to evaluation and flake snapshot architecture, covering PRIMARY isolation, redaction, bounds, identity, non-disclosure, deployment queue behavior, API behavior, and compatibility.
