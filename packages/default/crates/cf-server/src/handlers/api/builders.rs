@@ -7716,6 +7716,35 @@ exec sleep 30
     #[cfg(target_os = "linux")]
     #[tokio::test]
     async fn evaluator_fixture_reproduces_inherited_cloexec_writer() {
+        const ISOLATED_FORK_TEST: &str = "CF_ISOLATED_FORK_FIXTURE_TEST";
+
+        // CONCURRENCY: Run the raw-fork proof in a fresh, single-test process.
+        // The normal Rust harness runs unrelated tests on threads in this
+        // process. Their open executable-fixture writers are inherited by a
+        // fork even when those descriptors have FD_CLOEXEC set, and can make
+        // an unrelated probe fail with ETXTBSY while this child waits at its
+        // barrier. `--exact` excludes those tests from the subprocess; exec
+        // closes their CLOEXEC descriptors before this test performs its fork.
+        // `status` waits for and reaps the subprocess on both success and test
+        // failure. The environment guard prevents recursive re-spawning.
+        if std::env::var_os(ISOLATED_FORK_TEST).is_none() {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("unit-test executable path should be available"),
+            )
+            .args([
+                "--exact",
+                "handlers::api::builders::tests::evaluator_fixture_reproduces_inherited_cloexec_writer",
+            ])
+            .env(ISOLATED_FORK_TEST, "1")
+            .status()
+            .expect("isolated fork-regression test process should start");
+            assert!(
+                status.success(),
+                "isolated fork-regression test failed: {status}"
+            );
+            return;
+        }
+
         use std::io::{Read, Write};
         use std::os::fd::AsRawFd;
         use std::os::unix::net::UnixStream;
