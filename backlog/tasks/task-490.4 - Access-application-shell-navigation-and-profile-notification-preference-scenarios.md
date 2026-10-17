@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:35'
+updated_date: '2026-10-17 17:15'
 labels:
   - testing
   - integration
@@ -26,38 +27,39 @@ ordinal: 516000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-access. Contract IDs: access.shell, access.configuration.preferences.
+Owning check: integration-access. Contract IDs: access.shell, access.configuration.preferences. Existing steps 07-11a, 09g-09i, 17 and 31 are mocked. Prove real shell/navigation and per-user persistence; first design-reference comparison belongs here because Shell.jsx is approved.
 
-WHY: shell navigation, preferences, and notification preferences are proven only by mocked steps (07-11a, 09g-09i, 17, 31). The first real use of the design-reference comparison (ctx.visual.compare) also belongs here because Shell.jsx is an approved shared reference.
+Exclusive writes: checks/integration-access/scenarios/shell-navigation.{nix,py,cjs} and configuration-preferences.{nix,py,cjs}. Non-goals: event notification delivery (490.5), dashboard domain values (Delivery/Assurance), all viewport/theme combinations, production changes. All other paths remain read-only under TASK-490 test-only scope.
 
-OBJECTIVE: two scenarios under tests/integration/access/scenarios/: `shell-navigation` and `configuration-preferences`. Test-only.
+Corrected organization: native checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios, and pkgs.linkFarm for ALL registered gates. Helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }. Owner-local scripts/fixtures/assets; no root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix, shared lib, CI/docs and explicit child registration. Meaningful WIP can be discoverable; only Access exists now and no placeholder owners are added.
 
-NON-GOALS: notification delivery from domain events (TASK-490.5); domain values shown on the dashboard (owned by Delivery/Assurance); every viewport x theme product; production changes.
+Authority review: docs/knowledge/ui/frontend-navigation-and-shared-patterns.md, design-system-accessibility-responsive-motion.md, alerts-and-notifications-decision.md (preferences only) are as-built evidence, not accepted D1 authority. Approved presentation references remain docs/design/CrystalForge/components/Shell.jsx and ProfileView.jsx, read-only. Uncertain expected behavior remains blocked pending owner decision; no Authority: as-built header.
 
-BASE: foundation commit in implementation notes (FOUNDATION_COMMIT). Pattern: access/scenarios/lifecycle-local-bootstrap.
+Read-only source: web-ui routes.rs Route/AppShell/NotFoundView, components/layout/app_shell.rs and sidebar.rs (Expand sidebar, Collapse sidebar, mobile Close menu), profile.rs; cf-server handlers/api/user_preferences.rs get/patch/initialize and user_notifications.rs notification preferences; models/user_notifications.rs InApp|Email|Both.
 
-AUTHORITY: docs/knowledge/ui/frontend-navigation-and-shared-patterns.md; docs/knowledge/ui/design-system-accessibility-responsive-motion.md; docs/knowledge/ui/alerts-and-notifications-decision.md (preferences only). Approved design: docs/design/CrystalForge/components/Shell.jsx and ProfileView.jsx. As-built docs: `Authority: as-built (D1)`.
+Verify concrete foundation interfaces before dispatch. Pattern: checks/integration-access/scenarios/lifecycle-local-bootstrap. Required browser controller, narrow run_browser viewport and ctx.visual.compare(name, {view, theme, referenceSelector, actualSelector, maxDifferentRatio}). Justify the threshold in the spec; never raise it to pass. visual.compare has not run in an executed scenario: harness faults stop this case and go to coordinator, no workaround. Facts: u1 admin and u2 second user via localUserFromDesign.
 
-PRODUCTION SOURCE TO READ (read-only): packages/web-ui/src/routes.rs (Route enum, AppShell layout, NotFoundView); components/layout/app_shell.rs and sidebar.rs (nav, collapse button aria-labels "Expand sidebar"/"Collapse sidebar", mobile "Close menu"); views/profile.rs; cf-server src/handlers/api/user_preferences.rs (get_preferences, patch_preferences, initialize_preferences; /api/v1/user/preferences) and user_notifications.rs (get/patch_notification_preferences; /api/v1/user/notification-preferences; NotificationDeliveryChannel InApp|Email|Both in src/models/user_notifications.rs).
+shell-navigation: unauthenticated protected route -> /login; signed-in navigation reaches every AppShell route and page heading; unknown route has NotFound and return path; sidebar collapse persists according to accepted requirements. Keyboard Tab reaches primary navigation, Enter activates; narrow viewport mobile menu and Close menu work. Compare desktop dark shell chrome with Shell.jsx using justified threshold and preserve reference/actual/diff images.
 
-WRITABLE (exclusive): tests/integration/access/scenarios/shell-navigation.{nix,py,cjs}, tests/integration/access/scenarios/configuration-preferences.{nix,py,cjs}. READ-ONLY: all other paths.
+configuration-preferences: user A changes profile and notification preferences through /profile; DB rows and reload agree; user B unchanged. Invalid input, if exposed by UI, retains draft and persists nothing according to accepted requirements. Missing approved visual states remain blocked with component, condition and missing fact.
 
-HARNESS: controller { browser = true; }; desktop and narrow viewports via run_browser(node, spec, viewport="narrow"); ctx.visual.compare(name, {view, theme, referenceSelector, actualSelector, maxDifferentRatio}) renders the approved design from the same pinned profile. You MUST state and justify maxDifferentRatio in the spec; do not raise it to pass. visual.compare has not yet run in an executed scenario: if it misbehaves (harness bug), stop and escalate to the coordinator rather than working around it. Facts: admin u1 and a second user u2 via harness.facts.localUserFromDesign.
+Candidate commands, NOT verified: nix build .#checks.x86_64-linux.integration-access.scenarios.shell-navigation -L and configuration-preferences; append .run for evidence. Coordinator aggregate: nix build .#checks.x86_64-linux.integration-access -L. At most two VM tests concurrently. Explicit registration and real VM execution required, with exact commands/revision/outcomes/evidence in notes. Expectations derive from authored facts/accepted requirements, never CF responses. Preserve correct failing assertions, link Backlog product bugs and escalate interface/authority gaps; no product fixes.
 
-SCENARIO shell-navigation (actor: admin; unauthenticated visitor): unauthenticated visit to a protected route redirects to /login; signed-in navigation reaches every route listed in routes.rs AppShell and each renders its page heading; unknown route shows NotFound with a return path; sidebar collapse persists per the documented behavior; keyboard: Tab reaches the primary navigation and Enter activates it; narrow viewport uses the mobile menu with a working "Close menu"; one visual comparison of the shell chrome against Shell.jsx (desktop, dark) with a stated threshold.
-SCENARIO configuration-preferences (actors: two users): user A changes profile preferences and notification preferences through /profile; DB rows and reload show the change; user B's preferences are unchanged; invalid input (if the UI allows it) keeps the draft and persists nothing.
-
-COMMANDS: nix build .#integration.access.scenarios.shell-navigation -L ; nix build .#integration.access.scenarios.configuration-preferences -L ; .run for evidence. At most two VM tests concurrently. Coordinator runs .#integration.access.all.
-
-COMPLETION, PRODUCT DEFECT, ESCALATION: same rules as TASK-490.2. A required visual state without an approved design state is recorded as blocked: design gap (component, condition, missing fact).
+READINESS: foundation dependency commit unresolved; two existing Rust package tests block foundation and no VM execution occurred. Backlog, not ready. Future packet requires actual dependency commit(s), implemented signatures/fixtures/registration and verified commands before To Do. No delegation or executed slice is claimed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 shell-navigation and configuration-preferences exist only under tests/integration/access/scenarios/ and are discovered
-- [ ] #2 Every AppShell route in routes.rs is reached through navigation and renders; unknown routes show NotFound; unauthenticated access redirects to /login
-- [ ] #3 Keyboard and narrow-viewport navigation work as documented
-- [ ] #4 At least one visual comparison against Shell.jsx runs with an explicitly justified threshold and preserved reference/actual/diff images
-- [ ] #5 Preference changes persist per user through reload and do not affect another user
-- [ ] #6 Both scenarios executed in real VMs with commands, revision, outcomes, and evidence paths in task notes
+- [ ] #1 Both scenarios exist only under checks/integration-access/scenarios/ and are explicitly registered by the coordinator in the normal pkgs.linkFarm aggregate
+- [ ] #2 Every AppShell route is reached through navigation and renders its heading; unknown routes show NotFound and protected routes redirect unauthenticated users to /login
+- [ ] #3 Keyboard, sidebar and narrow-viewport navigation satisfy accepted requirements; uncertain cases remain blocked pending owner decision
+- [ ] #4 At least one Shell.jsx visual comparison runs with a justified threshold and preserved reference/actual/diff images
+- [ ] #5 Profile and notification preferences persist per user through reload without affecting another user
+- [ ] #6 Both scenarios execute in real VMs with exact commands, revision, outcomes and .run evidence recorded after actual dependency commits and verified packet commands exist
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-17 organization correction replaces prior layout, commands and D1 authority instructions. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s), implemented helpers and verified commands are required before To Do. No Luna delegation or executed slice is claimed. Coordinator owns owner default.nix, shared lib and CI/docs; scenario files stay disjoint.
+<!-- SECTION:NOTES:END -->
