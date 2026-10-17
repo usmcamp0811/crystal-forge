@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-17 14:57'
+updated_date: '2026-10-17 15:46'
 labels:
   - web-ui
   - design-parity
@@ -118,6 +118,12 @@ Integration follow-up from authenticated performance inspection: the environment
 User-requested continuation: remove the visible 'known' text beside Policy count pills in the Evaluation table. Parent will remove only the decorative span from shared PolicyCounts in packages/web-ui/src/views/evaluations.rs, preserving tooltip, counters, availability and authorization. Retain existing In Progress lock/worktree /home/mcamp/code/crystal-forge/TASK-488-eval-drawer-pixel-parity and same-named branch at reported HEAD 0c180049. Parent reports owned preview PIDs 21950/8633 on localhost:8080/:3445 verified HTTP 200 before UI edits. Verify targeted UI tests/WASM or current preview and inspect the table. This backlog-only handoff changes no code, services, database, Git, MR, status or acceptance criteria.
 
 Latest user correction explicitly supersedes the previous UI appended-unmanaged-row plan. In the existing locked worktree at 0c180049, restrict Policy matrix presentation, shared-context counts, and membership contributions to captured rows with system_id Some; retain mapped planned rows with missing/excluded evidence as Unknown. Preserve immutable full inventory, header configuration counters, backend/API and flat compatibility, historical UUID identity, authorization, and distinct per-host shared-configuration contexts. Remove the visible Config suffix. Writes are limited to policy_adapter.rs, policy_captured.rs, eval-policy-matrix-workflow.js, and evaluation-policy-matrix.md; preserve the parent's evaluations.rs edit. Update targeted adapter/browser assertions and documentation, then run changed-file static formatting, JavaScript syntax, and diff checks only. Parent owns builds, runtime/browser verification and the existing preview.
+
+Sparse captured-bundle selector follow-up (user-directed backlog-only handoff): The user reports that the deployed Evaluation matrix is missing Columns / Bundles / Controls while the localhost three-bundle fixture shows them. Reported source inspection found policy_captured.rs:152 hides the strategy selector unless matrix.bundles.len() > 1 or controls > 14. The previous 8c30 row-filter diff does not directly change that gate. The deployed API capture is unavailable, so the actual deployed-server root cause remains unverified.
+
+Parent implementation plan: Make the minimal UI condition change so any real captured bundle keeps the selector available, including one bundle with one or two controls and an empty bundle. Retain existing dense control-only behavior, the tracked-row filter, historical metadata, and authorization. Update one sparse browser regression and the affected documentation. Per user preference, run only the focused preview browser case and formatting check; do not run the full suite or VM.
+
+Ownership and reported starting state: Parent owns UI edits and rebuild. Existing preview was reported verified before edits: owned web PID 17240 on port 8080 and API PID 8633 on port 3445, HTTP 200. Task branch reported HEAD 8c30c5cb; retain the existing lock and In Progress status. These runtime/Git facts are supplied handoff context, not independently reverified in this backlog-only operation. Prior user authorization to fix, commit, and push remains context for the parent; it does not authorize all checks. This operation changes only the task plan and performs no source, Git, services, database, or MR operations.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
