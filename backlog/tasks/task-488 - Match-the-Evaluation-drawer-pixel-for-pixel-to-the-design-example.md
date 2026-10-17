@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-17 16:10'
+updated_date: '2026-10-17 16:16'
 labels:
   - web-ui
   - design-parity
@@ -126,6 +126,10 @@ Parent implementation plan: Make the minimal UI condition change so any real cap
 Ownership and reported starting state: Parent owns UI edits and rebuild. Existing preview was reported verified before edits: owned web PID 17240 on port 8080 and API PID 8633 on port 3445, HTTP 200. Task branch reported HEAD 8c30c5cb; retain the existing lock and In Progress status. These runtime/Git facts are supplied handoff context, not independently reverified in this backlog-only operation. Prior user authorization to fix, commit, and push remains context for the parent; it does not authorize all checks. This operation changes only the task plan and performs no source, Git, services, database, or MR operations.
 
 Completed Evaluation multi-select correction in the existing locked worktree at reported HEAD 0f25bcdf: parent removes the hidden auto-select mode entirely (default true, response effect, and filter re-enable), retains manual Shift-click toggles only, adds row-checked and aria-selected while preserving focus/attention classes, and preserves ordinary-click drawer behavior. Existing retain_visible must prune selection when rows filter or paginate out. No checkbox restoration, range selection, new Compare behavior, or export feature. Preserve tracked-only matrix and sparse selector corrections. Delegated writes are limited to checks/web-ui/tests/integration-test.js scenario 26b-evaluations-history: use Completed and non-action-cell Shift-clicks; verify empty initial selection, exact checked/ARIA states and counts, toggle-off/addition, Clear surviving a counted history poll, status filters never selecting rows, search pruning without restoration, and ordinary-click drawer opening/closing. Keep existing Compare enablement semantics without claiming execution. No re-evaluation action requests. Parent owns focused 26b browser execution and preview compilation only, without the full suite; delegated verification is pinned Node syntax check only. Parent retains preview ownership (reported frontend PID3485/API8633, localhost8080/3445 ready before edits). No delegated builds, browser, services, database, Git or MR operations.
+
+User-directed expanded Policy matrix correction: remove the undesigned visible row text 'Configuration: chesty / Operator classification: Unknown / Assigned bundles: Demo Bundle 0.1.0-draft (assignment)'. Parent will remove only the pm-expand-meta block and its unused contexts display builder in policy_cells.rs. Preserve captured configuration, classification and bundle data; controls, result cards, evidence buttons, Open System, gating and trim behavior remain intact. Add focused browser absence assertions and a minimal documentation clarification.
+
+Parent retains the existing In Progress task lock and dedicated worktree at reported HEAD 852b9c4c. Parent reports preview PID7607, web8080/API8633/mock3445, with listeners verified before edits; these are supplied context, not independently verified here. Parent owns the frontend-only rebuild and one actual persisted expanded-row browser case. Per user preference, do not run the full suite or VM. Continue the fix, commit and push under the parent's standing instruction. This handoff appends only the task plan via MCP; it performs no source, Git, service, database, MR, status or acceptance-criteria operations.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
