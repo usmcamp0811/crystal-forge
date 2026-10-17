@@ -4,6 +4,7 @@ title: 'Assurance: acceptance-register renewal, conversion, and scope scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 20:31'
+updated_date: '2026-10-17 20:33'
 labels:
   - testing
   - integration
@@ -50,3 +51,9 @@ Completion: exact starting acceptance source, actor authority, expected scope, f
 - [ ] #5 Unauthorized actions fail without side effects and browser return navigation preserves source identity
 - [ ] #6 Scenario is registered and executed in the complete Assurance owner with exact commands, revision, results, and evidence
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Isolation clarification: TASK-490.27/.21 can provide source semantics and code prerequisites only. Their runtime acceptance/waiver/POA&M rows are not shared. In this scenario, generate an actual source-owned acceptance in the same fresh VM through its supported producer flow before testing register list/renew/convert. Do not seed acceptance records. Remain Backlog until a tested foundation and accepted source/renew/convert authority exist.
+<!-- SECTION:NOTES:END -->
