@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-17 17:18'
+updated_date: '2026-10-17 17:27'
 labels:
   - testing
   - integration
@@ -26,7 +26,7 @@ Owning check: integration-assurance. Contract ID: assurance.policy.enforcement. 
 
 Scope: admin creates/publishes version with one or two authored-fixture-violable composite rule kinds (e.g. packages_absent and nixos_option), assigns versioned environment/system scope. Evaluating violating commit produces expected failed evidence. Enforce blocks real deployment and leaves target unchanged; ReportOnly records violation and permits deployment. New policy version never rewrites old-version evidence. Non-goals: every rule kind (Rust/unit tests), STIG import (490.19). TASK-490 test-only restrictions apply.
 
-Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned registrations and normal pkgs.linkFarm aggregate of ALL registered gates. Shared helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; child files stay disjoint, integration requires explicit registration. Meaningful WIP may be discoverable; only Access exists now; add other owners only with meaningful scenarios, no placeholders.
+Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned registrations and normal pkgs.linkFarm aggregate of ALL registered gates. Shared helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; child files stay disjoint, integration requires explicit registration. Meaningful WIP may be discoverable; only Access exists now; add other owners only with meaningful scenarios, no placeholders.
 
 Prerequisite: TASK-490.14 integrated. Read cf-server models/deployment_policies.rs DeploymentPolicy/CompositeRuleKind/AssignedPolicyEnforcementMode, compliance/resolver.rs AssignmentMode/AssignmentTarget, api/compliance.rs assignments/policy-version publish/trust, deployment_policies.rs and deployments.rs; docs/knowledge/compliance/assignments-and-report-only-enforcement.md; PoliciesView.jsx/PolicyEditor.jsx. As-built D1 is evidence, not accepted authority; uncertain cases blocked pending owner decision.
 
