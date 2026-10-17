@@ -629,7 +629,9 @@ or viewport change. Bundle cells show compact `passed/applicable`, `N/A`, or
 
 The toolbar has three levels: Top Issues (only when real failed controls exist),
 row filters with the Bundles/Controls selector, then the control summary, column
-options, and sort. Expanded rows list failed, warning, and unknown controls first
+options, and sort. The selector remains available whenever a real captured bundle
+exists, including a single bundle with few or no eligible controls. Expanded rows
+list failed, warning, and unknown controls first
 as collapsible cards. Passed and not-assigned controls stay behind an explicit
 toggle. An open card shows captured assertion and attribute path when present,
 plus the saved outcome detail, enforcement mode, exact version and lineage

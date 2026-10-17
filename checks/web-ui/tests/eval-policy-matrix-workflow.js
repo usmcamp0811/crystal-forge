@@ -471,12 +471,15 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
       await reopen();
       await expect(drawer.getByRole('columnheader')).toHaveCount(count+2);
       await expect(drawer.getByRole('columnheader',{name:/Fixture policy 000/})).toBeVisible();
-      await expect(drawer.getByRole('button',{name:/^(Bundles|Controls)\s+\d+$/})).toHaveCount(0);
-      await expect(drawer.getByRole('button',{name:'Failing only',exact:true})).toHaveCount(0);
-      await expect(drawer.locator('.pm-controls-line')).toHaveCount(1);
-      const filterLine=drawer.locator('.pm-controls-line').filter({has:page.getByRole('button',{name:/^All\s+12$/})});
-      await expect(filterLine.getByRole('button',{name:'Name',exact:true})).toBeVisible();
-      await filterLine.getByRole('button',{name:'Name',exact:true}).click();
+      await expect(drawer.getByRole('button',{name:/^Bundles\s+1$/})).toBeVisible();
+      await expect(drawer.getByRole('button',{name:new RegExp(`^Controls\\s+${count}$`)})).toBeVisible();
+      await drawer.getByRole('button',{name:/^Bundles\s+1$/}).click();
+      await expect(drawer.getByRole('columnheader')).toHaveCount(3);
+      await drawer.getByRole('button',{name:new RegExp(`^Controls\\s+${count}$`)}).click();
+      await expect(drawer.getByRole('columnheader')).toHaveCount(count+2);
+      await expect(drawer.getByRole('button',{name:'Failing only',exact:true})).toBeVisible();
+      await expect(drawer.locator('.pm-controls-line')).toHaveCount(2);
+      await drawer.getByRole('button',{name:'Name',exact:true}).click();
       await assertNames(expectedNames.slice(4,16));
       const sparseControls=await drawer.getByRole('table').evaluate(table=>{
         const heads=table.querySelectorAll('thead th');

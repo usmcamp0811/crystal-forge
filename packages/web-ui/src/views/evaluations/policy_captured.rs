@@ -149,7 +149,10 @@ pub(super) fn CapturedMatrix(
         .collect();
     issues.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.name.cmp(&b.0.name)));
     let bundle_mode = choices.mode == ColumnMode::Bundles;
-    let column_strategy = matrix.bundles.len() > 1 || count > 14;
+    let real_bundles = matrix.bundles.iter().filter(|b| !b.synthetic).count();
+    // A single captured bundle still offers a roll-up and individual controls.
+    // Do not hide that choice merely because the bundle has few controls.
+    let column_strategy = real_bundles > 0 || count > 14;
     let columns = if bundle_mode {
         matrix.bundles.len()
     } else {
@@ -160,7 +163,6 @@ pub(super) fn CapturedMatrix(
     let pages = rows.len().div_ceil(page_size).max(1);
     let current_page = page().min(pages - 1);
     let visible_rows = rows.iter().skip(current_page * page_size).take(page_size);
-    let real_bundles = matrix.bundles.iter().filter(|b| !b.synthetic).count();
     let shared = model::shared_control_count(&matrix.bundles);
     let bundle_label = |id: &str| {
         snapshot
