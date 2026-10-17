@@ -1,11 +1,11 @@
 ---
 id: TASK-491
 title: Server package build intermittently fails existing Niks3 probe unit tests
-status: In Progress
+status: Review
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 17:21'
-updated_date: '2026-10-17 18:25'
+updated_date: '2026-10-17 18:37'
 labels:
   - testing
   - build-blocker
@@ -14,6 +14,7 @@ references:
   - TASK-490.1
   - packages/default/default.nix
   - packages/default/crates/cf-server/src/handlers/api/builders.rs
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/336'
 priority: high
 type: bug
 ordinal: 537000
@@ -34,8 +35,8 @@ Evidence on sledge: /tmp/opencode/task490/slice-run1.log and slice-run2.log. Ret
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Root cause of the two observed package-check failures is established with reproducible evidence
-- [ ] #2 Normal production cf-server-drv builds without skips, weakened assertions, or disabled checks
+- [x] #1 Root cause of the two observed package-check failures is established with reproducible evidence
+- [x] #2 Normal production cf-server-drv builds without skips, weakened assertions, or disabled checks
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -61,4 +62,16 @@ Controlled reproduction outside the repository: compiled and ran `/tmp/opencode/
 Error mapping confirmed: `probe_nix_read_features` launch failure becomes a static anyhow error and `probe_cache_read` maps it to CacheProbeFailure::Configuration; `wait_cache_verification_command` maps process spawn errors to Process, explaining why transient ETXTBSY can masquerade as both observed results, including instead of intended provider RateLimited. No production functions will be changed.
 
 Pre-fix targeted run: `SQLX_OFFLINE=true nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib niks3_'` completed 87 passed / 0 failed / 31 ignored in normal Rust harness parallelism. It did not include the `evaluator_fixture...` test by name and was not expected to deterministically reproduce the race.
+
+Confirmed cause: evaluator_fixture_reproduces_inherited_cloexec_writer deliberately raw-forks a child that retains an inherited writable executable descriptor while it waits on the barrier. FD_CLOEXEC does not close the descriptor at fork. Other parallel test threads create executable fixtures; the raw-fork child can inherit their writer, so closing the parent descriptor leaves ETXTBSY until the barrier releases. `nix develop -c bash -c 'cc /tmp/opencode/task491/etxtbsy-repro.c -o /tmp/opencode/task491/etxtbsy-repro && /tmp/opencode/task491/etxtbsy-repro'` confirmed this controlled case with exit 0 and ETXTBSY observed. `probe_nix_read_features` maps spawn failure to Configuration; `wait_cache_verification_command` maps spawn failure to Process, which accounts for both original mismatches.
+
+Repair is test-only: `packages/default/crates/cf-server/src/handlers/api/builders.rs` wraps the raw-fork regression in a fresh invocation of the current unit-test binary with `--exact` and an environment recursion guard. Parent `Command::status()` waits/reaps; the existing `InheritedWriter` Drop still releases/reaps the forked child on failures. The raw-fork inherited-writer proof and ETXTBSY assertion are unchanged.
+
+Verification on commit af39284bdf16d56402f01a64c916f17948e43b02:
+- `nix develop -c rustfmt --edition 2024 --check packages/default/crates/cf-server/src/handlers/api/builders.rs` passed.
+- `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib handlers::api::builders::tests:: > /tmp/opencode/task491-builders-after.log 2>&1; printf "exit=%s\\n" "$?"'` exit 0: 74 passed, 0 failed, 1 ignored under normal Rust test parallelism; nested exact regression 1 passed.
+- `nix build .#packages.x86_64-linux.server --no-link -L --show-trace` exit 0 with normal package checks. The existing flake output maps to `pkgs.crystal-forge.default.server` (aggregate); its dependency `/nix/store/9m1dmm43m9r0afy3ci0ljqphlyibzgyi-cf-server-0.3.0.drv` is the production `cf-server-drv` and ran the ordinary test phase: 1794 passed, 0 failed, 682 ignored; all bin test targets passed.
+- `git diff --check` passed.
+
+One non-gating diagnostic attempt, `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib > /tmp/opencode/task491-full-lib-after.log 2>&1; printf "exit=%s\\n" "$?"'`, failed eight unrelated `queries::cve_scans_tests` with PoolTimedOut because this shell had no disposable DATABASE_URL. The normal Nix package build above passed in its package environment. MR !336: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/336. This fix resolves only the package prerequisite; no Access VM or integration owner result is implied.
 <!-- SECTION:NOTES:END -->
