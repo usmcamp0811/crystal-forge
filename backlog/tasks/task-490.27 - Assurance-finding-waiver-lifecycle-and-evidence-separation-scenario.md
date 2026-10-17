@@ -4,6 +4,7 @@ title: 'Assurance: finding-waiver lifecycle and evidence separation scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 20:31'
+updated_date: '2026-10-17 20:33'
 labels:
   - testing
   - integration
@@ -49,3 +50,9 @@ Completion: approved actor/authority/UI expectations recorded; scenario explicit
 - [ ] #5 The required UI state is covered only when an approved design state exists; otherwise the case is marked blocked
 - [ ] #6 Scenario is registered and executed in the complete Assurance owner at a recorded tested commit
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Isolation clarification: TASK-490.16 is a code/setup dependency only; its VM, scan rows, receipts, or outputs cannot be reused. This scenario must produce the real scan finding it needs in its own fresh VM as setup, without asserting the complete scan contract a second time and without seeding the finding/waiver. Remain Backlog until a passing/tested foundation dependency and accepted waiver authority exist.
+<!-- SECTION:NOTES:END -->
