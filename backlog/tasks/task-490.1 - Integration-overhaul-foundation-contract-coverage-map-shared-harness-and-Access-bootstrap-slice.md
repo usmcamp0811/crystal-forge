@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-17 17:24'
+updated_date: '2026-10-17 17:37'
 labels:
   - testing
   - integration
@@ -46,12 +46,12 @@ READINESS: In Progress, blocked pending package build by two existing Rust packa
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Contract is adopted at docs/knowledge/testing/integration-test-contract.md with implementation_status partial, adopted-versus-implemented distinction, and affected AGENTS.md/agent verification links; D1 is not authority
+- [x] #1 Contract is adopted at docs/knowledge/testing/integration-test-contract.md with implementation_status partial, adopted-versus-implemented distinction, and affected AGENTS.md/agent verification links; D1 is not authority
 - [ ] #2 Coverage map records accepted obligation ID, owner, scenario, independent expected result, evidence and status, plus retirement disposition for every legacy check and CI job
 - [ ] #3 lib/integration-test exposes lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs } with documented concrete roles, production package selection, facts/receipts, bounded waits, fault injection, pinned rendering and failure artifacts
-- [ ] #4 checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicitly registers lifecycle-local-bootstrap and aggregates ALL registered gates with pkgs.linkFarm; scripts/fixtures/assets stay owner-local
+- [x] #4 checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicitly registers lifecycle-local-bootstrap and aggregates ALL registered gates with pkgs.linkFarm; scripts/fixtures/assets stay owner-local
 - [ ] #5 Focused checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap executes in a real VM with baseline updating disabled and failure propagation; exact command, revision, outcome and .run evidence are recorded, including linked defects where applicable
-- [ ] #6 Native discovery exposes meaningful Access WIP without requiring completion; no root tests/, legacyPackages.integration, mkOwner, custom discovery or placeholder Delivery/Assurance/Upgrade owners are added; legacy checks remain until cutover
+- [x] #6 Native discovery exposes meaningful Access WIP without requiring completion; no root tests/, legacyPackages.integration, mkOwner, custom discovery or placeholder Delivery/Assurance/Upgrade owners are added; legacy checks remain until cutover
 - [ ] #7 Future bounded child packets record actual foundation/dependency commit(s), implemented interfaces, disjoint paths, fixtures, explicit coordinator registration and verified commands before To Do; until then all children remain Backlog
 <!-- AC:END -->
 
@@ -67,4 +67,10 @@ Task status correction: foundation remains In Progress under the existing lock a
 LOCK: claude-opus-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation
 
 Run one VM test at a time until measured capacity supports a higher limit. Foundation remains In Progress, blocked pending package build; dependent children remain Backlog. No foundation readiness or verification is claimed.
+
+Native Snowfall correction verification (2026-10-17): nix eval --json .#checks.x86_64-linux --apply builtins.attrNames succeeded: 27 attributes, exactly the prior 26 plus integration-access. nix eval --raw .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap.drvPath and the normal owner .drvPath succeeded. nix build .#checks.x86_64-linux.integration-access --dry-run --no-link succeeded and resolves the unchanged cf-server package derivation /nix/store/9pihfg4v8mp6rb4qnp148acv5cqsrb43-cf-server-0.3.0.drv (previous two failures recorded in TASK-491). Dry run does not execute a VM. No third blind retry or disabled package test was used.
+
+Static verification succeeded via nix develop: node --check on lib/integration-test/browser/cf-browser.cjs and checks/integration-access/scenarios/lifecycle-local-bootstrap.cjs; Python ast.parse for lib/integration-test/driver.py and checks/integration-access/scenarios/lifecycle-local-bootstrap.py. Documentation validation passed (58 tests, 191 concepts, 216 Mermaid blocks); final rerun follows final edits. git diff --check passed. flake.nix exactly matches base again. Removed only overhaul-owned empty root tests directories. Production packages/modules/migrations/SQLx/UI/design and existing CI gates unchanged.
+
+BLOCKED: TASK-491 prevents real VM execution of the foundation slice. Bootstrap/session behavior remains unverified. No children are ready; all Luna packets need recorded tested dependency commits and executable interface evidence before To Do. No Luna delegation occurred. Foundation is In Progress, not Review/Done.
 <!-- SECTION:NOTES:END -->
