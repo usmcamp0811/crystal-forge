@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-17 17:52'
+updated_date: '2026-10-17 17:59'
 labels:
   - web-ui
   - design-parity
@@ -142,6 +142,14 @@ Backend continuation after applicable approval: convert the full receiver call g
 UI continuation: dismiss ordinary evidence through a validated return target and show readable exact captured-bundle context. Apply initial defaults at the first usable captured matrix, including an empty-to-dense transition, while preserving explicit user choices. Make Completed history configuration-name search authoritative and query-keyed without duplicate predicates. Use a dialog focus helper across ordinary, pinned and evidence flows; verify keyboard navigation and consistency with the visible list. Exercise successful persisted SystemConfig navigation with a real fixture, not a nonexistent UUID.
 
 Before Review or merge: complete isolated native/SQLx and focused UI workflows, current exact-head CI, and matched design/render comparisons for narrow/maximized and light/dark states. Publish an accurate acceptance checklist/reference in the MR handoff because the reviewer could not find the full local TASK-488 acceptance record. Preserve all existing 16 acceptance criteria and their check states.
+
+User-approved recovery successor constraints (recorded before implementation delegations; supersedes the prior unapproved finite recovery allowance/hard-cap proposal): Do not introduce a recovery limit, run budget, settings, or checkpoint subsystem. Recover only an interrupted active exact owner. Create a successor for the same commit/Git SHA with a fresh attempt UUID and next attempt number, parent set to the interrupted source, and existing root semantics preserved. Use the normal new-attempt loader and fresh policy capture. Terminalize the source through a valid lifecycle transition with a server-interruption reason. Preserve the source plan, inventory, completed outcomes, history, and timestamps; never attribute old evidence to the successor. Copy automatic_retry_count unchanged, without increment or reset. An actual eligible failure consumes the existing automatic retry budget; manual re-evaluation retains the existing reset behavior.
+
+Recovery persistence and eligibility: Use established locks, exact-source validation, existing lineage and uniqueness constraints for atomic, idempotent recovery. Recheck current constraints before adding schema; add only a necessary forward migration. Never recover cancellation-requested, cancelling, cancelled, terminal, or no-active-owner cases. Leave existing queued children and delayed backoff unchanged. A later distinct interruption can create its own successor. Parent reserves migration0309 for attempt-owned persisted logs if needed. Do not edit applied030x migrations. Recovery may use0310 only if a schema change proves necessary and after coordinating migration ownership.
+
+Required focused recovery verification: Add migration-backed SQLx cases inside the existing Snowfall checks for fresh capture and partial source outcomes, zero and exhausted retry budgets, repeated and concurrent recovery, rollback, cancellation, existing queued child, later distinct interruption, and the exact max_retries=1 sequence: initial count0 -> recovery count0 -> actual eligible failure retry count1 -> recovery count1 -> actual eligible failure with no retry -> manual re-evaluation count0. These are planned checks, not executed evidence.
+
+Delegation plan, recorded before any implementation delegation: assign separate owners to (1) attempt-owned streaming across every producer backend, including stderr, cleanup and subscriptions; (2) receiver connection/transaction call graph; (3) recovery queries and focused SQLx cases under the approved constraints above; (4) cancellable write helper and mandatory inventory work; (5) UI behavior fixes; and (6) browser regressions. Parent coordinates interfaces, migration numbering, integration and verification. Continue the other review-fix plans already recorded, except where the approved recovery constraints explicitly supersede the earlier proposal. This entry records ownership boundaries only; it does not start delegation or implementation.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -379,4 +387,6 @@ Reported preview/worktree context, not independently reverified in this backlog-
 Reported GitLab state: parent verified MR334 initially opened with draft=false, then successfully ran `glab mr update 334 --draft`; MR is now Draft and held, with no merge or deployment. Pipeline2958746451 was still running at handoff: server job17256764575 running, web job17256764585 pending. These are supplied point-in-time facts, not current MCP verification.
 
 Unresolved verification gate: prior server failure at852b9c4c was `unlinked_environment_host_state_publication_precedes_cve_poam_closure` in an unchanged file. Cause remains unproven; do not excuse it as a baseline failure. Obtain and inspect current exact-head CI results. No code changes or tests were executed during this review triage. The complete 16-item acceptance record is in the local dev backlog task; publish its accurate checklist/reference in the later MR handoff.
+
+Backlog-only user-approved recovery and delegation handoff: read the Backlog overview and execution guide, then appended the plan before implementation delegations. The explicit approved recovery constraints supersede the previous proposed hard cap and separate recovery allowance. No implementation or tests have been verified in this operation. Existing implementation/test claims elsewhere in the task are historical context, not new verification. Status, acceptance criteria, source, Git, services, database, and MR remain unchanged.
 <!-- SECTION:NOTES:END -->
