@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 20:28'
+updated_date: '2026-10-17 23:57'
 labels:
   - bug
   - nixos
@@ -39,3 +40,9 @@ Test-only overhaul must not fix production code. Keep the Access scenario's star
 - [ ] #2 Fresh database migrations complete and server readiness is observable through the normal NixOS module
 - [ ] #3 A regression test proves the socket host is transported as a socket path rather than an authority URI host
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Final clean combined source commit 39a6a54b651a8b77fc3416b73195e363a782fa2e reproduces the same result. Evidence output is /nix/store/vcfbia521bjad2a85yca3h3n9i4m4ikf-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt and crystal-forge.journal lines 72-79. Test remains failing, no production fix.
+<!-- SECTION:NOTES:END -->
