@@ -22,9 +22,9 @@ local-mode assertions. Do not add an `AUTH_MODE` test override. Product
 defects are tracked by TASK-490.25 and TASK-490.26. TASK-491 resolves only
 the Rust package-check failure; see MR !336.
 
-Failure evidence from tested source
-`a6c8922650bf7f0ff643d181422c0092cfc43242-dirty`:
-`/nix/store/yfc7pkz5zm8k29b82zzfhm2i8f1gn348-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`.
+Failure evidence from tested commit
+`39a6a54b651a8b77fc3416b73195e363a782fa2e`:
+`/nix/store/vcfbia521bjad2a85yca3h3n9i4m4ikf-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`.
 `result.json` records failure in `fresh-startup-applies-migrations`;
 `journals/controller/generated-config-summary.txt` records the generated
 database host and missing auth mode; `journals/controller/crystal-forge.journal`
