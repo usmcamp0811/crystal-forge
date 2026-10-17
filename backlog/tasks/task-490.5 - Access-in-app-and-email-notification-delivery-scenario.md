@@ -4,7 +4,7 @@ title: 'Access: in-app and email notification delivery scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-17 17:26'
+updated_date: '2026-10-17 20:33'
 labels:
   - testing
   - integration
@@ -46,4 +46,6 @@ READINESS: actual foundation commit unresolved; foundation blocked by two existi
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction: native owner-local layout and explicit coordinator registration replace prior paths. Foundation dependency commit unresolved; blocked by two existing Rust package tests, no VM execution. Backlog, not ready; future packet needs actual dependency commit(s) and verified commands before To Do. No Luna delegation or executed slice is claimed.
+
+Isolation correction: TASK-490.11's failing-build runtime output cannot be reused. This scenario must run its own real failing build/event as setup in its own fresh VM/database, or consume only immutable fixture definitions/helpers from the integrated dependency. A task dependency never supplies another scenario's database, VM, session or output. Foundation dependency remains untested for successful server startup; remain Backlog.
 <!-- SECTION:NOTES:END -->
