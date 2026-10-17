@@ -4,7 +4,7 @@ title: 'Delivery: builder execution strategies and transport authorization scena
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:37'
-updated_date: '2026-10-17 17:16'
+updated_date: '2026-10-17 17:26'
 labels:
   - testing
   - integration
@@ -24,7 +24,7 @@ Owning check: integration-delivery. Contract ID: delivery.build.strategies. Excl
 
 Scope: builderA uses ServerDerivation, builderB uses SourceReEvaluateVerified; source delivery is ServerBundledArchive only. Both build per-run fresh outputs independently absent beforehand (assert_store_absent). Server accepts completion only from the authorized builder session; wrong key or revoked session is rejected with no job-state change. Derivation/source archive downloads require job authorization. Builds UI shows exact job/builder/output. Non-goals: scheduling/cancel (490.11), publication (490.12). TASK-490 test-only scope applies.
 
-Organization: checks/integration-delivery/default.nix is native Snowfall { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Shared helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }; owner-local scripts/fixtures/assets. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns owner default.nix, shared lib and CI/docs; child integration requires explicit registration and disjoint files. Meaningful WIP may be discoverable; only Access exists now; other owners require meaningful scenarios, no placeholders.
+Organization: checks/integration-delivery/default.nix is native Snowfall { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Shared helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; owner-local scripts/fixtures/assets. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns owner default.nix, shared lib and CI/docs; child integration requires explicit registration and disjoint files. Meaningful WIP may be discoverable; only Access exists now; other owners require meaningful scenarios, no placeholders.
 
 Prerequisite: TASK-490.7 integrated. Read cf-protocol src/builder.rs RemoteBuildExecutionStrategy/SourceInputDeliveryMode/NextJobRequest, cf-server handlers/api/builders.rs session/next-job/jobs routes, cf-builder; docs/knowledge/builders/verified-source-evaluator-contract.md, api/builder-job-lifecycle-api.md, security/builder-request-authentication-and-data-in-transit.md; BuildsView.jsx/BuildersView.jsx. As-built D1 is evidence, not authority; uncertain behavior remains blocked pending owner decision.
 
