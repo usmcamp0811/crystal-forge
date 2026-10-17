@@ -4,7 +4,7 @@ title: 'Access: in-app and email notification delivery scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-17 16:39'
+updated_date: '2026-10-17 17:15'
 labels:
   - testing
   - integration
@@ -21,13 +21,17 @@ ordinal: 517000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-access. Contract ID: access.configuration.notifications. Scenario: tests/integration/access/scenarios/configuration-notifications.{nix,py,cjs} (exclusive write path).
+Owning check: integration-access. Contract ID: access.configuration.notifications. Exclusive writes: checks/integration-access/scenarios/configuration-notifications.{nix,py,cjs}. Existing bell-feed coverage (09g-09i) is mocked; notifications must originate in a real domain event, not seeded rows.
 
-WHY: notification delivery is proven only by mocked bell-feed steps (09g-09i). A notification must come from a real domain event, not a seeded row.
+Scope: a real BuildFailures (or DeployFailures) event from the Delivery fixture creates an in-app notification for a subscribed user and none for an unsubscribed user. Read, read-all, dismiss and delete persist. Enable server.notificationEmail toward the services-role local receiver: exactly the subscribed user's message arrives; email disabled produces none. Non-goals: digest timing and external providers. TASK-490 test-only restrictions apply.
 
-SCOPE: a real BuildFailures (or DeployFailures) event produced through the Delivery fixture creates an in-app notification for a subscribed user and none for an unsubscribed user; read, read-all, dismiss, and delete persist; with server.notificationEmail enabled toward the local receiver on the services role, exactly the subscribed user's message arrives; with email disabled, none arrives. Non-goals: digest schedule timing; external providers.
+Organization: native checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios and pkgs.linkFarm aggregating ALL registered gates. Shared helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }. Scripts/fixtures/assets stay owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns owner default.nix, shared lib and CI/docs; child integration needs explicit registration. Meaningful WIP may be discoverable; only Access exists now, no placeholder owners.
 
-READY WHEN: TASK-490.7 provides the services role with a notification receiver and the builder role, and TASK-490.11 provides a real failing-build fixture. Then the coordinator adds the base commit and moves this to To Do. Source to read then: cf-server src/handlers/api/user_notifications.rs, src/models/user_notifications.rs, notification email worker, modules/nixos/crystal-forge server.notificationEmail.* options; docs/knowledge/ui/alerts-and-notifications-decision.md.
+Prerequisites: TASK-490.7 services role/receiver/builder and TASK-490.11 real failing-build fixture. Read cf-server handlers/api/user_notifications.rs, models/user_notifications.rs, notification email worker, modules/nixos/crystal-forge server.notificationEmail.* and docs/knowledge/ui/alerts-and-notifications-decision.md. As-built docs are evidence, not accepted D1 authority; uncertain cases stay blocked pending owner decision.
+
+Candidate, NOT verified: nix build .#checks.x86_64-linux.integration-access.scenarios.configuration-notifications -L; append .run for evidence. Coordinator aggregate: nix build .#checks.x86_64-linux.integration-access -L. Future packet must verify exact commands/interfaces on actual dependency commit(s). Completion requires real VM execution, independent authored expectations and notes with revision, commands, outcomes, evidence paths. Preserve correct failing assertions and linked Backlog bugs; escalate shared-interface/authority gaps without product fixes.
+
+READINESS: actual foundation commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Remain Backlog until actual dependency commits, fixtures, registration and verified commands exist before To Do. No delegation or executed slice is claimed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -37,3 +41,9 @@ READY WHEN: TASK-490.7 provides the services role with a notification receiver a
 - [ ] #3 Email reaches the local receiver only when enabled and only for subscribed users
 - [ ] #4 Executed in a real VM topology with recorded evidence
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-17 organization correction: native owner-local layout and explicit coordinator registration replace prior paths. Foundation dependency commit unresolved; blocked by two existing Rust package tests, no VM execution. Backlog, not ready; future packet needs actual dependency commit(s) and verified commands before To Do. No Luna delegation or executed slice is claimed.
+<!-- SECTION:NOTES:END -->
