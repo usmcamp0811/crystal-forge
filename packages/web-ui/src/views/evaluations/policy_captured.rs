@@ -14,11 +14,130 @@ use super::policy_matrix::{
 use crate::api::models::{EvalPolicyMatrixResponse, eval_policy_matrix::*};
 use dioxus::prelude::*;
 
+/// Describes the drawer header populations that the matrix must reconcile.
+///
+/// The header counts evaluated flake configurations. Its policy counters
+/// classify configurations by the CF-agent and assigned-requirement gate. The
+/// matrix counts registered systems with a captured plan and their controls.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct HeaderScope {
+    /// Evaluated NixOS configurations reported by the queue/history row.
+    pub configurations: i64,
+    /// Configurations that passed the configuration-level policy gate.
+    pub passed: i64,
+    /// Configurations that failed the configuration-level policy gate.
+    pub failed: i64,
+    /// False when the attempt-scoped counters are not attributable.
+    pub available: bool,
+}
+
+/// Returns explicit population notes when header and matrix scopes differ.
+///
+/// The result never adds matrix rows or outcomes. `captured_configurations`
+/// is the distinct captured configuration count, `failing_rows` counts matrix
+/// rows with a failed control, and `agent_failures` counts compatibility rows
+/// whose global CF-agent result failed.
+pub(super) fn population_notes(
+    header: &HeaderScope,
+    planned_systems: usize,
+    captured_configurations: usize,
+    failing_rows: usize,
+    agent_failures: usize,
+) -> Vec<String> {
+    let mut notes = Vec::new();
+    let configurations = usize::try_from(header.configurations).unwrap_or(0);
+    if configurations != captured_configurations {
+        let mut note = format!(
+            "Matrix: {planned_systems} planned system(s) from {captured_configurations} captured configuration(s). Header Systems: {configurations} evaluated flake configuration(s)"
+        );
+        if configurations > captured_configurations {
+            note.push_str(&format!(
+                "; {} configuration(s) have no registered system or captured plan visible here.",
+                configurations - captured_configurations
+            ));
+        } else {
+            note.push('.');
+        }
+        notes.push(note);
+    }
+    // Explain the policy counter only when it disagrees with the matrix, or
+    // when a global platform failure has no bundle-control representation.
+    if header.available && ((header.failed > 0 && failing_rows == 0) || agent_failures > 0) {
+        let mut note = format!(
+            "Header Policy counts configurations ({} passed / {} failed), not controls; {failing_rows} matrix system(s) have a failed control.",
+            header.passed, header.failed
+        );
+        if agent_failures > 0 {
+            note.push_str(&format!(
+                " {agent_failures} configuration(s) fail the global CF-agent check (Platform evidence); it is not a bundle control."
+            ));
+        }
+        notes.push(note);
+    }
+    notes
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn header(configurations: i64, failed: i64) -> HeaderScope {
+        HeaderScope {
+            configurations,
+            passed: configurations - failed,
+            failed,
+            available: true,
+        }
+    }
+
+    #[test]
+    fn population_notes_explain_unplanned_configurations_and_platform_failures() {
+        let notes = population_notes(&header(41, 1), 12, 12, 0, 1);
+        assert_eq!(notes.len(), 2);
+        assert!(notes[0].contains("12 planned system(s)"));
+        assert!(notes[0].contains("41 evaluated flake configuration(s)"));
+        assert!(notes[0].contains("29 configuration(s) have no registered system"));
+        assert!(notes[1].contains("40 passed / 1 failed"));
+        assert!(notes[1].contains("0 matrix system(s) have a failed control"));
+        assert!(notes[1].contains("1 configuration(s) fail the global CF-agent check"));
+    }
+
+    #[test]
+    fn population_notes_stay_silent_when_scopes_agree_or_counts_are_unavailable() {
+        assert!(population_notes(&header(9, 0), 9, 9, 0, 0).is_empty());
+        // Header and matrix both show failures; no discrepancy to explain.
+        assert!(population_notes(&header(9, 2), 9, 9, 1, 0).is_empty());
+        let unavailable = HeaderScope {
+            available: false,
+            ..header(9, 3)
+        };
+        assert!(population_notes(&unavailable, 9, 9, 0, 0).is_empty());
+        // Shared configurations: more systems than configurations is consistent.
+        assert!(population_notes(&header(2, 0), 5, 2, 0, 0).is_empty());
+    }
+}
+
+/// Counts compatibility rows whose global CF-agent result failed.
+fn agent_failures(data: &EvalPolicyMatrixResponse) -> usize {
+    let Some(index) = data.policies.iter().position(|name| name == "CF agent") else {
+        return 0;
+    };
+    data.systems
+        .iter()
+        .filter(|row| {
+            row.results
+                .get(index)
+                .is_some_and(|result| super::policy_cell_class_suffix(result) == "fail")
+        })
+        .count()
+}
+
 /// Renders captured exact-version memberships and preserves choices across modes.
 #[component]
 pub(super) fn CapturedMatrix(
     snapshot: EvalPolicyMatrixSnapshot,
     compatibility: EvalPolicyMatrixResponse,
+    #[props(default)] header: Option<HeaderScope>,
     on_open_policy: EventHandler<String>,
     mut state: Signal<ColumnState>,
     mut expanded: Signal<Option<String>>,
@@ -134,6 +253,29 @@ pub(super) fn CapturedMatrix(
     let visible_rows = rows.iter().skip(current_page * page_size).take(page_size);
     let real_bundles = matrix.bundles.iter().filter(|b| !b.synthetic).count();
     let shared = model::shared_control_count(&matrix.bundles);
+    let notes = header
+        .as_ref()
+        .map(|header| {
+            let configurations = snapshot
+                .rows
+                .iter()
+                .map(|row| row.configuration_name.as_str())
+                .collect::<std::collections::HashSet<_>>()
+                .len();
+            let failing_rows = matrix
+                .rows
+                .iter()
+                .filter(|row| row.health() == RowHealth::Failing)
+                .count();
+            population_notes(
+                header,
+                matrix.rows.len(),
+                configurations,
+                failing_rows,
+                agent_failures(&compatibility),
+            )
+        })
+        .unwrap_or_default();
     let bundle_label = |id: &str| {
         snapshot
             .bundles
@@ -159,18 +301,24 @@ pub(super) fn CapturedMatrix(
                             let active = issue.read().as_ref() == Some(&id);
                             rsx! {
                                 button { key: "{id}", class: if active { "pm-issue-chip active" } else { "pm-issue-chip" },
+                                    aria_pressed: active,
+                                    title: "{control.name} · {control.version}: {failed} of {applicable} applicable systems fail. Filter non-pass systems.",
                                     onclick: move |_| { issue.set(if active { None } else { Some(id.clone()) }); },
                                     span { class: "pm-issue-dot" }
                                     span { class: "mono", "{control.name} · {control.version}" }
-                                    " {failed}/{applicable} hosts fail"
+                                    span { class: "pm-issue-fail", "{failed}" }
+                                    span { class: "pm-issue-total", "/{applicable} fail" }
                                 }
                             }
                         }
                     }
-                    if issue.read().is_some() { button { class: "btn btn-ghost xs focus-ring", onclick: move |_| issue.set(None), "Clear issue filter" } }
+                    if issue.read().is_some() {
+                        button { class: "btn-icon focus-ring pm-issues-clear", title: "Clear issue filter", aria_label: "Clear issue filter", onclick: move |_| issue.set(None), "×" }
+                    }
                 }
             }
-            div { class: "pm-controls pm-controls-wrap",
+            div { class: "pm-controls",
+              div { class: "pm-controls-line",
                 div { class: "seg",
                     for (filter, label, health) in [
                         (RowFilter::All, "All", None),
@@ -200,11 +348,13 @@ pub(super) fn CapturedMatrix(
                     }
                 }
                 div { style: "flex: 1;" }
-                span { class: "pm-col-note", "Columns" }
+                span { class: "pm-controls-label", "Columns" }
                 div { class: "seg",
-                    button { class: if bundle_mode { "active" } else { "" }, onclick: move |_| state.write().set_mode(ColumnMode::Bundles), "Bundles ", span { class: "pm-count", "{real_bundles}" } }
-                    button { class: if !bundle_mode { "active" } else { "" }, onclick: move |_| state.write().set_mode(ColumnMode::Controls), "Controls ", span { class: "pm-count", "{count}" } }
+                    button { class: if bundle_mode { "active" } else { "" }, title: "One roll-up column per captured bundle version", onclick: move |_| state.write().set_mode(ColumnMode::Bundles), "Bundles ", span { class: "pm-count", "{real_bundles}" } }
+                    button { class: if !bundle_mode { "active" } else { "" }, title: "One column per exact policy version", onclick: move |_| state.write().set_mode(ColumnMode::Controls), "Controls ", span { class: "pm-count", "{count}" } }
                 }
+              }
+              div { class: "pm-controls-line",
                 if bundle_mode {
                     span { class: "pm-col-note",
                         title: "Controls are unique exact policy-version IDs. Shared controls belong to at least two distinct real bundle-version IDs. Synthetic groups do not count as bundles. Counts do not assert framework requirement compliance.",
@@ -224,10 +374,16 @@ pub(super) fn CapturedMatrix(
                         }
                     }
                 }
-                span { class: "pm-col-note", "Sort" }
+                span { class: "pm-controls-label", "Sort" }
                 div { class: "seg",
                     button { class: if choices.sort == RowSort::WorstFirst { "active" } else { "" }, onclick: move |_| state.write().sort = RowSort::WorstFirst, "Worst first" }
                     button { class: if choices.sort == RowSort::Name { "active" } else { "" }, onclick: move |_| state.write().sort = RowSort::Name, "Name" }
+                }
+              }
+            }
+            if !notes.is_empty() {
+                div { class: "pm-scope-note", role: "note", aria_label: "Matrix scope",
+                    for note in notes { p { "{note}" } }
                 }
             }
             if matrix.controls.is_empty() {
@@ -251,12 +407,19 @@ pub(super) fn CapturedMatrix(
                                     let metadata = snapshot.bundles.iter().find(|b| b.bundle_version_id.to_string() == id);
                                     let summary = total_summary(matrix.rows.iter().map(|row| row.bundle_summary(bundle)));
                                     let framework = metadata.map(|meta| format!("{} {}", meta.framework, meta.framework_version.as_deref().unwrap_or(""))).unwrap_or_default();
+                                    let framework = framework.trim().to_owned();
+                                    // Version stays visible beside the name; it is
+                                    // part of the captured bundle identity.
+                                    let (name, version) = metadata.map(|meta| (meta.name.clone(), Some(meta.version.clone()))).unwrap_or_else(|| (bundle_label(&bundle.id), None));
                                     rsx! { th { key: "{id}", class: "pm-th-bundle",
                                         button { class: "pm-bundle-heading focus-ring", title: "{bundle_label(&bundle.id)} · {framework} — {bundle.control_ids.len()} controls; {summary.failed} fail / {summary.warnings} warning / {summary.passed} pass / {summary.unknown} unknown. View constituent controls.", onclick: move |_| state.write().focus_bundle(&id),
                                             span { class: "pm-th-bundle-inner",
-                                                span { class: "pm-th-bundle-name", "{bundle_label(&bundle.id)}" }
+                                                span { class: "pm-th-bundle-name",
+                                                    "{name}"
+                                                    if let Some(version) = version { span { class: "pm-th-bundle-version", "{version}" } }
+                                                }
                                                 span { class: "pm-th-bundle-sub",
-                                                    if !framework.trim().is_empty() { "{framework.trim()} · " }
+                                                    if !framework.is_empty() { "{framework} · " }
                                                     "{bundle.control_ids.len()} controls"
                                                 }
                                             }
@@ -283,6 +446,9 @@ pub(super) fn CapturedMatrix(
                                 }
                             }
                         }
+                        // Layout only: absorbs spare width. It is hidden from assistive
+                        // technology and carries no evidence.
+                        th { class: "pm-th-fill", aria_hidden: "true" }
                     } }
                     tbody {
                         for row in visible_rows {
@@ -333,16 +499,17 @@ pub(super) fn CapturedMatrix(
                                                 }
                                             }
                                         }
+                                        td { class: "pm-td-fill", aria_hidden: "true" }
                                     }
                                     if is_expanded {
-                                        tr { class: "pm-expand-row", td { colspan: columns + 2,
+                                        tr { class: "pm-expand-row", td { colspan: columns + 3,
                                              RowDetails { row: (**row).clone(), controls: matrix.controls.clone(), bundles: snapshot.bundles.clone(), on_open_policy, snapshot: snapshot.clone(), finding }
                                         } }
                                     }
                                 }
                             }
                         }
-                        if rows.is_empty() { tr { td { colspan: columns + 2, class: "pm-empty", "No planned systems match this filter." } } }
+                        if rows.is_empty() { tr { td { colspan: columns + 3, class: "pm-empty", "No planned systems match this filter." } } }
                     }
                 }
             }
@@ -353,10 +520,11 @@ pub(super) fn CapturedMatrix(
                     button { class: "btn btn-ghost xs focus-ring", disabled: current_page + 1 >= pages, onclick: move |_| page.set(current_page + 1), "Next systems" }
                 }
             }
+            PlatformEvidence { data: compatibility.clone() }
             div { class: "pm-legend",
                 span { span { class: "pm-legend-sw pm-pass", "✓" } " Pass" }
                 span { span { class: "pm-legend-sw pm-warn", "!" } " Warning" }
-                span { span { class: "pm-legend-sw pm-fail", "✗" } " Fail" }
+                span { title: "Enforce-mode failure. Report-only failures are warnings.", span { class: "pm-legend-sw pm-fail", "✗" } " Fail — blocking" }
                 span { title: "Unknown applicable outcomes remain in the health denominator.", span { class: "pm-legend-sw pm-legacy-unknown", "?" } " Unknown" }
                 span { title: "Not assigned is excluded from the health denominator; empty assigned bundles are not passes.", span { class: "pm-legend-sw pm-not-assigned", "–" } " N/A" }
                 span { class: "pm-legend-guidance",
@@ -364,7 +532,6 @@ pub(super) fn CapturedMatrix(
                     else { "Click any control header or cell to filter · Click a row to expand" }
                 }
             }
-            PlatformEvidence { data: compatibility }
         }
     }
 }

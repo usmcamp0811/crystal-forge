@@ -15,13 +15,14 @@ use std::collections::{HashMap, HashSet};
 
 /// Targets an 8192-cell body budget, capped at 100 systems.
 ///
-/// The two identity/health columns consume the same budget as control columns.
-/// A 60-system/128-control fixture therefore retains every system on one page.
+/// The identity, health, and layout filler cells consume the same budget as
+/// control columns. A 60-system/128-control fixture therefore retains every
+/// system on one page.
 /// Pagination changes rendering only; aggregation and trimming use all rows.
 /// At least one system remains visible if a single row exceeds the budget;
 /// horizontal scrolling retains all actual control columns in that case.
 pub(super) fn rows_per_page(visible_columns: usize) -> usize {
-    (8192 / visible_columns.saturating_add(2)).clamp(1, 100)
+    (8192 / visible_columns.saturating_add(3)).clamp(1, 100)
 }
 
 #[cfg(test)]
@@ -34,7 +35,7 @@ mod render_budget_tests {
         for columns in [6, 128, 256, 512, 1024, 4096] {
             let rows = rows_per_page(columns);
             assert!((1..=100).contains(&rows));
-            assert!(rows * (columns + 2) <= 8192);
+            assert!(rows * (columns + 3) <= 8192);
         }
     }
 }

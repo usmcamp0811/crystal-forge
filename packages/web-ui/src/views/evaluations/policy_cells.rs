@@ -115,16 +115,33 @@ pub(super) fn BundleResult(
     } else {
         "pm-bundle-cell pm-pass"
     };
+    // Cell text stays compact for matrix density; the title carries the full
+    // state so unknown applicability is never shown as a clean or empty cell.
+    let title = match (applicability, resolved) {
+        (BundleApplicability::NotAssigned, _) => "Not assigned to this system".to_owned(),
+        (BundleApplicability::Unknown, false) => {
+            "Bundle metadata unknown; applicability unresolved".to_owned()
+        }
+        (BundleApplicability::Unknown, true) => format!(
+            "Bundle metadata unknown; {}/{} known controls pass",
+            summary.passed, summary.applicable
+        ),
+        (_, false) => "Applicability unresolved".to_owned(),
+        _ if summary.applicable == 0 => "Assigned bundle with no eligible controls".to_owned(),
+        _ => format!(
+            "{}/{} applicable controls pass",
+            summary.passed, summary.applicable
+        ),
+    };
     rsx! {
-        span { class,
-            if applicability == BundleApplicability::NotAssigned { strong { "Not assigned" } }
+        span { class, title: "{title}",
+            if applicability == BundleApplicability::NotAssigned { strong { "N/A" } }
             else if applicability == BundleApplicability::Unknown {
-                strong { "Bundle metadata unknown" }
-                if !resolved { small { "Applicability unresolved" } }
-                else if summary.applicable > 0 { small { "{summary.passed}/{summary.applicable} known controls" } }
+                if resolved && summary.applicable > 0 { strong { "{summary.passed}/{summary.applicable}" } small { class: "pm-bundle-unknown", "?" } }
+                else { strong { "Unknown" } }
             }
-            else if !resolved { strong { "Applicability unresolved" } }
-            else if summary.applicable == 0 { strong { title: "Assigned bundle with no eligible controls", "N/A" } }
+            else if !resolved { strong { "Unknown" } }
+            else if summary.applicable == 0 { strong { "N/A" } }
             else { strong { "{summary.passed}/{summary.applicable}" } }
             if summary.failed > 0 { small { class: "pm-bundle-fail", title: "{summary.failed} failed controls", "{summary.failed}" } }
             if summary.warnings > 0 { small { class: "pm-bundle-warn", title: "{summary.warnings} warning controls", "{summary.warnings}" } }
@@ -133,7 +150,103 @@ pub(super) fn BundleResult(
     }
 }
 
+/// Orders expanded-row cards: failures, warnings, unknowns, passes, then N/A.
+pub(super) fn card_rank(outcome: Outcome) -> u8 {
+    match outcome {
+        Outcome::Fail => 0,
+        Outcome::Warning => 1,
+        Outcome::Unknown => 2,
+        Outcome::Pass => 3,
+        Outcome::NotAssigned => 4,
+    }
+}
+
+/// Returns true for outcomes shown before the optional passed/N/A section.
+pub(super) fn needs_attention(outcome: Outcome) -> bool {
+    matches!(outcome, Outcome::Fail | Outcome::Warning | Outcome::Unknown)
+}
+
+/// Returns the one-line card summary from captured data and outcome semantics.
+///
+/// A captured description takes precedence. Without one, the summary states
+/// only the projected outcome meaning; it never invents assertion text.
+pub(super) fn card_summary(
+    outcome: Outcome,
+    report_only: bool,
+    executable: bool,
+    description: Option<&str>,
+) -> String {
+    if !executable {
+        return "Implementation skipped — evidence unavailable".into();
+    }
+    if let Some(description) = description.filter(|d| !d.trim().is_empty()) {
+        return description.to_owned();
+    }
+    match outcome {
+        Outcome::Fail => "Blocking failure (enforce mode)".into(),
+        Outcome::Warning if report_only => "Report-only failure — not blocking".into(),
+        Outcome::Warning => "Warning — not blocking".into(),
+        Outcome::Unknown => "No trustworthy matching-attempt outcome is available.".into(),
+        Outcome::Pass => "Passed".into(),
+        Outcome::NotAssigned => "Not assigned to this system".into(),
+    }
+}
+
+#[cfg(test)]
+mod card_tests {
+    use super::*;
+
+    #[test]
+    fn cards_rank_failures_first_and_keep_passes_secondary() {
+        let mut outcomes = [
+            Outcome::Pass,
+            Outcome::NotAssigned,
+            Outcome::Unknown,
+            Outcome::Warning,
+            Outcome::Fail,
+        ];
+        outcomes.sort_by_key(|o| card_rank(*o));
+        assert_eq!(
+            outcomes,
+            [
+                Outcome::Fail,
+                Outcome::Warning,
+                Outcome::Unknown,
+                Outcome::Pass,
+                Outcome::NotAssigned
+            ]
+        );
+        assert!(needs_attention(Outcome::Unknown));
+        assert!(!needs_attention(Outcome::Pass));
+        assert!(!needs_attention(Outcome::NotAssigned));
+    }
+
+    #[test]
+    fn card_summary_uses_captured_text_and_never_invents_assertions() {
+        assert_eq!(
+            card_summary(Outcome::Fail, false, true, Some("Root login disabled")),
+            "Root login disabled"
+        );
+        assert_eq!(
+            card_summary(Outcome::Fail, false, true, None),
+            "Blocking failure (enforce mode)"
+        );
+        assert_eq!(
+            card_summary(Outcome::Warning, true, true, Some("  ")),
+            "Report-only failure — not blocking"
+        );
+        assert_eq!(
+            card_summary(Outcome::Fail, false, false, Some("ignored")),
+            "Implementation skipped — evidence unavailable"
+        );
+    }
+}
+
 /// Renders actual captured control outcomes for an expanded planned system.
+///
+/// Failures, warnings and unknown outcomes appear first as collapsible cards.
+/// Passed and not-assigned controls stay behind an explicit toggle. Missing
+/// captured assertion text is shown as unavailable, never synthesized.
 #[component]
 pub(super) fn RowDetails(
     row: MatrixRow,
@@ -143,27 +256,25 @@ pub(super) fn RowDetails(
     snapshot: EvalPolicyMatrixSnapshot,
     mut finding: Signal<Option<String>>,
 ) -> Element {
-    let restoring_passed = controls.iter().any(|control| {
-        let id = control.policy_version_id.to_string();
-        finding.peek().as_ref() == Some(&format!("{}:{id}", row.key))
-            && row.outcomes.get(&id) == Some(&Outcome::Pass)
-    });
-    let mut show_passed = use_signal(|| restoring_passed);
-    let mut controls = controls;
-    controls.sort_by_key(|control| {
-        match row
-            .outcomes
+    let outcome_of = |control: &EvalPolicyColumn| {
+        row.outcomes
             .get(&control.policy_version_id.to_string())
             .copied()
             .unwrap_or(Outcome::Unknown)
-        {
-            Outcome::Fail => 0,
-            Outcome::Warning => 1,
-            Outcome::Unknown => 2,
-            Outcome::NotAssigned => 3,
-            Outcome::Pass => 4,
-        }
+    };
+    // Restoring an expanded passed card must reveal the secondary section.
+    let restoring_passed = controls.iter().any(|control| {
+        finding.peek().as_ref() == Some(&format!("{}:{}", row.key, control.policy_version_id))
+            && !needs_attention(outcome_of(control))
     });
+    let mut show_passed = use_signal(|| restoring_passed);
+    let mut controls = controls;
+    controls.sort_by_key(|control| card_rank(outcome_of(control)));
+    let attention = controls
+        .iter()
+        .filter(|control| needs_attention(outcome_of(control)))
+        .count();
+    let secondary = controls.len() - attention;
     let bindings: std::collections::HashMap<_, _> = row
         .source
         .policies
@@ -176,80 +287,122 @@ pub(super) fn RowDetails(
         .assigned_bundles
         .iter()
         .filter(|context| seen.insert(context.bundle_version_id))
+        .map(|context| {
+            let source = match context.source {
+                EvalBundleSource::Assignment => "assignment",
+                EvalBundleSource::VirtualBaseline => "virtual baseline",
+            };
+            match bundles
+                .iter()
+                .find(|b| b.bundle_version_id == context.bundle_version_id)
+            {
+                Some(bundle) => format!("{} {} ({source})", bundle.name, bundle.version),
+                None => format!(
+                    "{} (display metadata unavailable, {source})",
+                    context.bundle_version_id
+                ),
+            }
+        })
         .collect();
+    let config = row.source.configuration_name.clone();
     rsx! {
-        div { class: "pm-expand pm-captured-details",
-            p { "Configuration: ", code { "{row.source.configuration_name}" } }
-            p { "Operator classification: ", match row.source.greenfield { Some(true) => "Greenfield", Some(false) => "Not greenfield", None => "Unknown" } }
-            super::evidence_navigation::OpenSystem { snapshot: snapshot.clone(), system_id: row.source.system_id }
+        div { class: "pm-expand",
             if !row.resolved() {
                 p { class: "pm-provenance-note", "Applicability is incomplete: {row.source.resolution:?}. Counts are known evidence, not a complete applicability claim." }
-            } else if row.common_summary.applicable == 0 {
-                p { "No applicable controls for this system." }
             }
-            if !row.bundle_metadata_complete {
-                p { class: "pm-provenance-note", "Bundle context metadata is incomplete. Missing contexts do not prove that a bundle was unassigned." }
-            } else if contexts.is_empty() {
-                p { "No assigned bundle contexts were captured for this system." }
-            }
-            for context in contexts {
-                {
-                    let metadata = bundles.iter().find(|b| b.bundle_version_id == context.bundle_version_id);
-                    let source = match context.source {
-                        EvalBundleSource::Assignment => "Persisted assignment",
-                        EvalBundleSource::VirtualBaseline => "Virtual baseline",
-                    };
-                    rsx! {
-                        div { class: "pm-captured-detail",
-                            strong { "Assigned bundle: " }
-                            if let Some(bundle) = metadata {
-                                span { "{bundle.name} · {bundle.version} · {bundle.framework} {bundle.framework_version.as_deref().unwrap_or(\"\")}" }
-                            } else { code { "{context.bundle_version_id} (display metadata unavailable)" } }
-                            span { "{source}" }
+            div { class: "pm-failcards",
+                for control in controls.iter().filter(|control| show_passed() || needs_attention(outcome_of(control))) {
+                    {
+                        let id = control.policy_version_id.to_string();
+                        let outcome = outcome_of(control);
+                        let (label, class) = outcome_label(outcome);
+                        let card_class = format!("pm-failcard pm-failcard-{}", class.trim_start_matches("pm-"));
+                        let binding = bindings.get(&control.policy_version_id).copied();
+                        let report_only = binding.is_some_and(|b| b.report_only);
+                        let executable = binding.is_none_or(|b| b.executable);
+                        let summary = card_summary(outcome, report_only, executable, control.description.as_deref());
+                        // The existing drawer callback focuses the registry by name.
+                        // It does not claim to open the immutable captured version.
+                        let policy_name = control.name.clone();
+                        let card_key = format!("{}:{id}", row.key);
+                        let open = finding.read().as_ref() == Some(&card_key);
+                        let detail = row.details.get(&id).cloned();
+                        let mut seen_memberships = std::collections::HashSet::new();
+                        let contributions: Vec<_> = binding.into_iter().flat_map(|b| &b.memberships).filter(|m| seen_memberships.insert(m.bundle_version_id)).filter_map(|m| bundles.iter().find(|b| b.bundle_version_id == m.bundle_version_id)).cloned().collect();
+                        rsx! {
+                            div { key: "{id}", class: "pm-failcard-wrap",
+                                button { class: card_class, aria_expanded: open,
+                                    aria_label: "{control.name} · {control.version}",
+                                    title: "{label}: show captured evidence for this check",
+                                    onclick: move |event: MouseEvent| { event.stop_propagation(); finding.set(if open { None } else { Some(card_key.clone()) }); },
+                                    span { class: "pm-failcard-glyph {class}",
+                                        match outcome { Outcome::Pass => "✓", Outcome::Warning => "!", Outcome::Fail => "✗", Outcome::Unknown => "?", Outcome::NotAssigned => "–" }
+                                    }
+                                    span { class: "pm-failcard-body",
+                                        span { class: "mono pm-failcard-title", style: "display:block", "{control.name} · {control.version}" }
+                                        span { class: "pm-failcard-sub", style: "display:block", "{summary}" }
+                                    }
+                                    span { class: "pm-failcard-chevron", if open { "⌄" } else { "›" } }
+                                }
+                                if open {
+                                    div { class: "pm-failcard-detail",
+                                        if let Some(path) = &control.attribute_path {
+                                            p { class: "mono pm-failcard-path", "nixosConfigurations.{config}.{path}" }
+                                        }
+                                        if let Some(assertion) = &control.assertion {
+                                            p { class: "pm-failcard-assertion", span { class: "mono", style: "font-weight:600", "assertion: " } "{assertion}" }
+                                        } else {
+                                            p { class: "pm-failcard-unavailable", "Assertion text unavailable: this policy version captured no display-safe assertion." }
+                                        }
+                                        if let Some(detail) = detail {
+                                            p { class: "mono pm-failcard-evidence", "{detail}" }
+                                        } else if needs_attention(outcome) {
+                                            p { class: "pm-failcard-unavailable", "No saved outcome detail for this attempt." }
+                                        }
+                                        p { class: "pm-failcard-meta",
+                                            {format!("{label} · {} · policy version {} · lineage {}", if report_only { "report-only" } else { "enforce" }, control.policy_version_id, control.policy_id)}
+                                        }
+                                        if !control.identifiers.is_empty() {
+                                            p { class: "pm-failcard-meta", {format!("Captured identifiers: {}", control.identifiers.join(", "))} }
+                                        }
+                                        div { class: "pm-failcard-actions",
+                                            button { class: "btn btn-ghost xs focus-ring", title: "Find this policy name in the current registry; the captured version above is authoritative for this evaluation.", onclick: move |_| on_open_policy.call(policy_name.clone()), "View policy definition" }
+                                            for bundle in contributions {
+                                                super::evidence_navigation::OpenEvidence { snapshot: snapshot.clone(), system_id: row.source.system_id, policy: control.clone(), bundle }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
+                if attention == 0 && row.resolved() && row.common_summary.applicable > 0 {
+                    div { class: "pm-all-pass", "✓ All applicable controls pass for this system." }
+                } else if row.resolved() && row.common_summary.applicable == 0 {
+                    p { class: "pm-failcard-unavailable", "No applicable controls for this system." }
+                }
             }
-            button { class: "btn btn-ghost xs focus-ring", aria_expanded: show_passed(), onclick: move |_| show_passed.toggle(), if show_passed() { "Hide passed controls" } else { "Show passed controls" } }
-            for control in controls.iter().filter(|control| show_passed() || row.outcomes.get(&control.policy_version_id.to_string()) != Some(&Outcome::Pass)) {
-                {
-                    let id = control.policy_version_id.to_string();
-                    let outcome = row.outcomes.get(&id).copied().unwrap_or(Outcome::Unknown);
-                    let (label, class) = outcome_label(outcome);
-                    let binding = bindings.get(&control.policy_version_id).copied();
-                    let report_only = binding.is_some_and(|b| b.report_only);
-                    let executable = binding.is_none_or(|b| b.executable);
-                    // The existing drawer callback focuses the registry by name.
-                    // Keep the captured version visible; navigation does not
-                    // claim to open an immutable historical version.
-                    let policy_name = control.name.clone();
-                    let card_key = format!("{}:{id}", row.key);
-                    let open = finding.read().as_ref() == Some(&card_key);
-                    let mut seen_memberships = std::collections::HashSet::new();
-                    let contributions: Vec<_> = binding.into_iter().flat_map(|b| &b.memberships).filter(|m| seen_memberships.insert(m.bundle_version_id)).filter_map(|m| bundles.iter().find(|b| b.bundle_version_id == m.bundle_version_id)).cloned().collect();
-                    rsx! {
-                        div { key: "{id}", class: "pm-captured-detail",
-                            span { class, "{label}" }
-                            button { class: "btn btn-ghost xs focus-ring mono", aria_expanded: open, onclick: move |_| finding.set(if open { None } else { Some(card_key.clone()) }), "{control.name} · {control.version}" }
-                            if report_only { span { "Report only" } }
-                            if !executable { span { "Implementation skipped — evidence unavailable" } }
-                            if outcome == Outcome::Unknown { span { "No trustworthy matching-attempt outcome is available." } }
-                            if open {
-                            button { class: "btn btn-ghost xs focus-ring", title: "Find this policy name in the current registry", onclick: move |_| on_open_policy.call(policy_name.clone()), "Policy registry" }
-                                if !control.identifiers.is_empty() { p { {format!("Captured identifiers: {}", control.identifiers.join(", "))} } }
-                            if let Some(description) = &control.description { p { "{description}" } }
-                            if let Some(assertion) = &control.assertion { pre { "{assertion}" } }
-                            if let Some(path) = &control.attribute_path { code { "{path}" } }
-                            if let Some(detail) = row.details.get(&id) {
-                                p { class: "mono", style: "flex-basis: 100%; white-space: pre-wrap; overflow-wrap: anywhere; margin: 0;", "{detail}" }
-                            }
-                            for bundle in contributions {
-                                super::evidence_navigation::OpenEvidence { snapshot: snapshot.clone(), system_id: row.source.system_id, policy: control.clone(), bundle }
-                            }
-                            }
-                        }
+            if secondary > 0 {
+                div { class: "pm-expand-actions",
+                    button { class: "btn btn-ghost xs focus-ring", aria_expanded: show_passed(), onclick: move |_| show_passed.toggle(),
+                        if show_passed() { "Hide passed and N/A controls" } else { "Show {secondary} passed and N/A controls" }
                     }
                 }
+            }
+            div { class: "pm-expand-meta",
+                span { "Configuration: ", code { "{row.source.configuration_name}" } }
+                span { "Operator classification: ", match row.source.greenfield { Some(true) => "Greenfield", Some(false) => "Established", None => "Unknown" } }
+                if !row.bundle_metadata_complete {
+                    span { "Bundle context metadata is incomplete; missing contexts do not prove nonassignment." }
+                } else if contexts.is_empty() {
+                    span { "Assigned bundles: none captured" }
+                } else {
+                    span { {format!("Assigned bundles: {}", contexts.join(" · "))} }
+                }
+            }
+            div { class: "pm-expand-actions",
+                super::evidence_navigation::OpenSystem { snapshot: snapshot.clone(), system_id: row.source.system_id }
             }
         }
     }

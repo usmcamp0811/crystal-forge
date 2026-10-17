@@ -384,8 +384,8 @@ from the number of systems. Mock evidence does not create dependency inventory.
 
 ## UI navigation and presentation
 
-`Open System` uses the captured system UUID and full evaluated commit SHA to open
-SystemDetail Config in commit mode. `View Evidence` offers one action per captured
+`Open system` uses the captured system UUID and full evaluated commit SHA to open
+SystemDetail Config in commit mode. `View in compliance evidence` offers one action per captured
 contributing bundle and carries commit ID/SHA, attempt UUID/number, system UUID,
 bundle lineage/version UUIDs, and policy lineage/version UUIDs into Compliance.
 Compliance fetches the pinned endpoint and validates every identity plus the
@@ -411,8 +411,9 @@ More than 14 distinct controls defaults to Bundles with column trim enabled;
 smaller matrices default to Controls without trim. Mode changes clear bundle
 focus but preserve row filter, sort, and trim. Bundle drilldown selects that exact
 bundle's Controls without changing those choices. Row filtering and sorting run
-before pagination. Rendering targets 8192 body cells, including two identity/health
-columns, with `clamp(8192 / (visible_columns + 2), 1, 100)` systems per page.
+before pagination. Rendering targets 8192 body cells, including the identity,
+health, and layout filler cells, with `clamp(8192 / (visible_columns + 3), 1, 100)`
+systems per page.
 Aggregation, issue counts, and trim use the full relevant row sets, not one page;
 horizontal scrolling retains control columns even when one row exceeds the budget.
 
@@ -422,6 +423,34 @@ remain. Unknown classifications remain in the baseline; an all-greenfield set
 retains all rows. An empty row filter falls back to all planned rows. If trim
 would hide every scoped control, all scoped controls remain visible. Greenfield
 never changes health, rollups, applicability, or control counts.
+
+### Matrix layout and failure-first detail
+
+The captured matrix uses the design geometry: System 180 px, Health 110 px, and
+bundle columns at their min-content width with a 104 px minimum. Bundle names stay
+on one line with their exact version beside the name; long names truncate and keep
+the full identity in the heading title. A hidden trailing filler column is the only
+auto-width column, so one bundle and six bundles keep identical column widths and
+38 px rows. Bundle cells show compact `passed/applicable`, `N/A`, or `Unknown`
+values; the cell title states the full applicability state.
+
+The toolbar has three levels: Top Issues (only when real failed controls exist),
+row filters with the Bundles/Controls selector, then the control summary, column
+options, and sort. Expanded rows list failed, warning, and unknown controls first
+as collapsible cards. Passed and not-assigned controls stay behind an explicit
+toggle. An open card shows captured assertion and attribute path when present,
+otherwise an explicit unavailable statement, plus the saved outcome detail,
+enforcement mode, exact version and lineage identifiers, the registry action, and
+one Compliance evidence action per contributing bundle. Expanded details stay
+pinned to the visible scroll width.
+
+The header Systems value counts evaluated flake configurations; the header Policy
+value counts configurations that pass or fail the CF-agent and assigned-requirement
+gate. The matrix counts registered systems with a captured plan visible to the
+reader, and their controls. When the populations differ, or when global CF-agent
+failures exist, a `Matrix scope` note states both counts. The global CF-agent
+result stays in the collapsed Platform evidence panel and never enters bundle or
+control counts.
 
 ## Verification handoff
 

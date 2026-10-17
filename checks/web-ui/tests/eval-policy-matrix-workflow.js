@@ -94,6 +94,22 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot) {
     await expect(drawer.getByRole('columnheader')).toHaveCount(8);
     await expect(drawer.getByRole('cell')).toHaveCount(60 * 8);
     await screenshot('eval-matrix-bundles');
+    // Design geometry: System 180px and Health 110px; a hidden filler column
+    // absorbs spare width so sparse matrices keep the same dense columns.
+    const geometry=()=>drawer.evaluate(el=>{
+      const w=n=>n.getBoundingClientRect().width;
+      const heads=[...el.querySelectorAll('thead th')];
+      const row=el.querySelector('tbody tr.pm-row');
+      return {system:w(heads[0]),health:w(heads[1]),
+        bundles:Object.fromEntries(heads.filter(n=>n.classList.contains('pm-th-bundle')).map(n=>[n.querySelector('.pm-th-bundle-name').textContent,w(n)])),
+        row:row.getBoundingClientRect().height,bar:w(row.querySelector('.pm-health-bar')),
+        nameLines:[...el.querySelectorAll('.pm-th-bundle-name')].map(n=>Math.round(n.getBoundingClientRect().height))};
+    });
+    const dense=await geometry();
+    expect(Math.round(dense.system)).toBe(180);
+    expect(Math.round(dense.health)).toBe(110);
+    expect(dense.bar).toBeLessThanOrEqual(50);
+    expect(Math.max(...dense.nameLines)).toBeLessThanOrEqual(18);
 
     await drawer.getByRole('button',{name:/^Unavailable \/ N\/A\s+2$/}).click();
     const notApplicableRow = drawer.getByRole('row').filter({hasText:'fixture-host-02'});
@@ -173,8 +189,8 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot) {
     // Shared controls expose each actual contributing context, never a first
     // bundle shortcut. Compliance reads the exact retained attempt and Back
     // returns to this open row, assertion, mode, sort and filter.
-    await expect(drawer.getByRole('button',{name:/^View Evidence · Fixture bundle/})).toHaveCount(3);
-    await drawer.getByRole('button',{name:'View Evidence · Fixture bundle 2 · v1',exact:true}).click();
+    await expect(drawer.getByRole('button',{name:/^View in compliance evidence · Fixture bundle/})).toHaveCount(3);
+    await drawer.getByRole('button',{name:'View in compliance evidence · Fixture bundle 2 · v1',exact:true}).click();
     await expect(page.getByRole('heading',{name:'Evaluation check evidence',exact:true})).toBeVisible();
     await expect(page.getByRole('region',{name:'Exact evaluation evidence'})).toContainText(fixture.matrix.commit_sha);
     await expect(page.getByText('Mock evaluation — simulated outcomes, not compliance evidence.',{exact:true})).toBeVisible();
@@ -191,7 +207,7 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot) {
     response=fixture;
     pinnedResponse=null;
 
-    await drawer.getByRole('button',{name:'Open System',exact:true}).click();
+    await drawer.getByRole('button',{name:'Open system',exact:true}).click();
     await expect(page).toHaveURL(new RegExp(`/systems/${fixture.matrix.rows[0].system_id}\\?.*revision=${fixture.matrix.commit_sha}`));
     // This browser-local UUID is not a persisted system. Even the unavailable
     // receiver must retain the exact-context return action.
@@ -201,7 +217,7 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot) {
 
     // Missing captured contributions fail closed without a deployed fallback.
     pinnedResponse={...fixture,matrix:{...fixture.matrix,rows:fixture.matrix.rows.map((r,index)=>index===0 ? {...r,policies:r.policies.map((p,i)=>i===0 ? {...p,memberships:[]} : p)} : r)}};
-    await drawer.getByRole('button',{name:'View Evidence · Fixture bundle 2 · v1',exact:true}).click();
+    await drawer.getByRole('button',{name:'View in compliance evidence · Fixture bundle 2 · v1',exact:true}).click();
     await expect(page.getByRole('region',{name:'Compliance evaluation evidence',exact:true}).getByRole('alert')).toContainText('exact captured context or membership does not match');
     await expect(page.getByRole('region',{name:'Exact evaluation evidence'})).toHaveCount(0);
     pinnedResponse=null;
@@ -246,6 +262,43 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot) {
     response={...fixture,matrix:{...fixture.matrix,rows:classified.map(r=>({...r,greenfield:true}))}};
     await reopen();
     await expect(drawer.getByRole('columnheader')).toHaveCount(5);
+
+    // One small bundle: identical column geometry, and the header population
+    // (60 evaluated configurations) is reconciled with 12 captured rows.
+    const only=fixture.matrix.bundles[3];
+    const onlyContext=fixture.matrix.rows[0].assigned_bundles[3];
+    response={...fixture,matrix:{...fixture.matrix,columns:fixture.matrix.columns.slice(0,2),bundles:[only],
+      rows:fixture.matrix.rows.slice(4,16).map((r,index)=>({...r,resolution:'resolved',greenfield:null,
+        cells:index===0 ? ['fail','warn'] : ['pass','pass'],
+        details:index===0 ? ['[FIXTURE] captured failure detail',null] : [null,null],
+        assigned_bundles:[onlyContext],
+        policies:r.policies.slice(0,2).map(p=>({...p,report_only:false,memberships:[onlyContext]}))}))}};
+    await reopen();
+    await drawer.getByRole('button',{name:/^All\s+12$/}).click();
+    await drawer.getByRole('button',{name:/^Bundles\s+1$/}).click();
+    await expect(drawer.getByRole('columnheader')).toHaveCount(3);
+    await expect(drawer.getByRole('note',{name:'Matrix scope'})).toContainText('12 planned system(s)');
+    await expect(drawer.getByRole('note',{name:'Matrix scope'})).toContainText('60 evaluated flake configuration(s)');
+    await expect(drawer.getByRole('note',{name:'Matrix scope'})).toContainText('48 configuration(s) have no registered system');
+    const sparse=await geometry();
+    expect(Math.round(sparse.system)).toBe(Math.round(dense.system));
+    expect(Math.round(sparse.health)).toBe(Math.round(dense.health));
+    expect(Math.abs(sparse.row-dense.row)).toBeLessThanOrEqual(1);
+    const onlyName=Object.keys(sparse.bundles)[0];
+    expect(Math.abs(sparse.bundles[onlyName]-dense.bundles[onlyName])).toBeLessThanOrEqual(1);
+    await screenshot('eval-matrix-single-bundle');
+
+    // Failure-first detail: the failed control precedes the warning, passed
+    // controls stay secondary, and absent assertion text stays unavailable.
+    await drawer.getByRole('button',{name:'fixture-host-04',exact:true}).click();
+    const cards=drawer.locator('.pm-failcard-title');
+    await expect(cards).toHaveText(['Fixture policy 000 · 1.0','Fixture policy 001 · 1.0']);
+    await expect(drawer.getByRole('button',{name:/^Show \d+ passed and N\/A controls$/})).toHaveCount(0);
+    await drawer.getByRole('button',{name:'Fixture policy 000 · 1.0',exact:true}).click();
+    await expect(drawer.getByText('[FIXTURE] captured failure detail',{exact:true})).toBeVisible();
+    await expect(drawer.getByText(/^Assertion text unavailable/)).toBeVisible();
+    await expect(drawer.getByRole('button',{name:'View in compliance evidence · Fixture bundle 4 · v1',exact:true})).toBeVisible();
+    await screenshot('eval-matrix-failure-first');
     console.log('PASS structured 60-system/128-control matrix overlap, health, drilldown, evidence, live capture/outcome polling and state preservation');
   } finally {
     release?.();

@@ -5105,7 +5105,21 @@ button.pm-col-note:hover { color: var(--cf-text-secondary); text-decoration: und
   background: color-mix(in oklab, #f59e0b 6%, var(--cf-card-bg));
   border-bottom: 1px solid var(--cf-divider);
 }
-.pm-captured-table .pm-th-bundle { padding: 0; min-width: 104px; }
+/* Design geometry (styles.css .pm-th-host/.pm-th-health/.pm-th-bundle):
+   System 180px, Health 110px, bundle columns at least 104px. The trailing
+   filler column absorbs spare drawer width, so one bundle and six bundles keep
+   the same dense column widths instead of stretching the data columns. */
+.pm-captured-table .pm-th-host { width: 180px; }
+.pm-captured-table .pm-th-health { width: 110px; }
+/* Every data column has a fixed or min-content width; the filler is the only
+   auto column, so the table layout gives all spare width to it. A percentage
+   filler would instead scale overflowing data columns proportionally. */
+.pm-captured-table .pm-th-fill,
+.pm-captured-table .pm-td-fill { width: auto; min-width: 0; padding: 0; }
+.pm-captured-table .pm-td-fill { border-bottom: 1px solid var(--cf-divider); }
+/* width: 1px resolves an auto-layout column to its min-content width, so a
+   bundle column has one size whether the table overflows or not. */
+.pm-captured-table .pm-th-bundle { width: 1px; padding: 0; min-width: 104px; }
 .pm-bundle-heading, .pm-control-heading, .pm-bundle-button, .pm-row-toggle {
   border: 0;
   background: none;
@@ -5117,7 +5131,7 @@ button.pm-col-note:hover { color: var(--cf-text-secondary); text-decoration: und
 .pm-bundle-heading {
   display: block;
   padding: 0;
-  text-align: left;
+  text-align: center;
 }
 .pm-th-bundle-inner {
   display: flex;
@@ -5125,10 +5139,22 @@ button.pm-col-note:hover { color: var(--cf-text-secondary); text-decoration: und
   gap: 2px;
   padding: 10px 10px 8px;
   border-right: 1px solid var(--cf-divider);
-  max-width: 180px;
 }
-.pm-th-bundle-name { font-size: 11.5px; color: var(--cf-text-primary); white-space: normal; overflow-wrap: anywhere; }
-.pm-th-bundle-sub { font-size: 10px; color: var(--cf-text-muted); }
+/* Names stay on one line, as in the design; long names truncate with the full
+   exact-version identity in the heading title. */
+.pm-th-bundle-name {
+  max-width: 200px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--cf-text-primary);
+  white-space: nowrap;
+}
+.pm-th-bundle-version { margin-left: 4px; font-weight: 500; color: var(--cf-text-muted); }
+/* The cap keeps min-content and max-content equal for normal metadata, so
+   overflowing and sparse tables resolve to the same bundle column width. */
+.pm-th-bundle-sub { max-width: 124px; margin: 0 auto; font-size: 10px; font-weight: 600; color: var(--cf-text-muted); }
 .pm-control-heading { display: block; padding: 0; }
 .pm-captured-table .pm-th-policy-inner { height: 110px; }
 .pm-captured-table .pm-th-policy-label { overflow: hidden; text-overflow: ellipsis; max-height: 96px; }
@@ -5159,18 +5185,104 @@ button.pm-col-note:hover { color: var(--cf-text-secondary); text-decoration: und
 .pm-captured .pm-warn { color: #f59e0b; }
 .pm-captured .pm-fail { color: #f87171; }
 .pm-captured .pm-not-assigned, .pm-captured .pm-legacy-unknown { color: var(--cf-text-muted); }
-.pm-row-toggle { padding: 10px 14px; text-align: left; white-space: nowrap; font-family: var(--font-mono); font-weight: 600; }
-.pm-row-toggle::before { content: "›"; margin-right: 8px; color: var(--cf-text-muted); }
+.pm-row-toggle {
+  display: block;
+  max-width: 260px;
+  overflow: hidden;
+  padding: 10px 14px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+.pm-row-toggle::before { content: "›"; display: inline-block; width: 11px; margin-right: 8px; color: var(--cf-text-muted); }
 .pm-row-toggle[aria-expanded="true"]::before { content: "⌄"; }
 .pm-captured .pm-legend { flex-wrap: wrap; }
 .pm-legend-guidance { margin-left: auto; color: var(--cf-text-muted); font-size: 11px; }
-.pm-captured-details { display: flex; flex-direction: column; gap: 10px; }
-.pm-captured-detail { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; font-size: 11px; }
 .pm-empty { padding: 24px; text-align: center; color: var(--cf-text-muted); }
+/* Toolbar hierarchy: filters and column mode first; summary, column options
+   and sort on the secondary line. */
+.pm-captured .pm-controls { flex-direction: column; align-items: stretch; gap: 8px; }
+.pm-controls-line { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; row-gap: 8px; }
+.pm-controls-label { font-size: 11px; color: var(--cf-text-muted); }
+.pm-issue-fail { color: #f87171; font-weight: 700; }
+.pm-issue-total { color: var(--cf-text-muted); }
+.pm-issues-clear { margin-left: auto; }
+.pm-scope-note {
+  flex-shrink: 0;
+  padding: 7px 16px;
+  border-bottom: 1px solid var(--cf-divider);
+  background: var(--cf-subtle-bg);
+  color: var(--cf-text-secondary);
+  font-size: 11px;
+  line-height: 1.5;
+}
+.pm-scope-note p { margin: 0; }
+/* Failure-first expanded row (design .pm-expand/.pm-failcard). */
+/* Expanded details stay within the visible scroll width and pinned to its
+   left edge; wide matrices must not push cards and actions off screen. */
+.pm-captured .pm-scroll { container-type: inline-size; }
+.pm-captured .pm-expand {
+  position: sticky;
+  left: 0;
+  box-sizing: border-box;
+  width: 100cqw;
+  flex-direction: column;
+  align-items: stretch;
+  flex-wrap: nowrap;
+  gap: 12px;
+}
+.pm-expand-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 11px; color: var(--cf-text-muted); }
+.pm-expand-meta code { color: var(--cf-text-secondary); }
+.pm-failcards { display: flex; flex-direction: column; gap: 10px; }
+.pm-failcard-wrap { overflow: hidden; border: 1px solid var(--cf-divider); border-radius: 8px; }
+.pm-captured .pm-failcard {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  font-size: inherit;
+}
+.pm-captured .pm-failcard:hover { transform: none; }
+.pm-captured .pm-failcard-pass { background: color-mix(in oklab, #34d399 6%, transparent); }
+.pm-captured .pm-failcard-not-assigned { background: transparent; }
+.pm-failcard-body { flex: 1; min-width: 0; text-align: left; }
+.pm-failcard-title { font-size: 12px; font-weight: 600; }
+.pm-failcard-sub { margin-top: 2px; font-size: 11px; color: var(--cf-text-muted); }
+.pm-failcard-chevron { flex-shrink: 0; margin-left: 8px; color: var(--cf-text-muted); }
+.pm-failcard-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--cf-divider);
+  background: var(--cf-page-bg);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.pm-failcard-detail p { margin: 0; }
+.pm-failcard-path { font-size: 10.5px; color: var(--cf-text-muted); }
+.pm-failcard-assertion { color: #f87171; }
+.pm-failcard-unavailable { color: var(--cf-text-muted); font-style: italic; }
+.pm-failcard-evidence { white-space: pre-wrap; overflow-wrap: anywhere; }
+.pm-failcard-meta { font-size: 10.5px; color: var(--cf-text-muted); overflow-wrap: anywhere; }
+.pm-failcard-actions, .pm-expand-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.pm-all-pass { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #34d399; }
+/* Global CF-agent evidence stays subordinate and collapsed below the matrix. */
 .pm-platform-evidence { flex: none; max-height: 150px; overflow: auto; border-top: 1px solid var(--cf-divider); font-size: 11px; }
-.pm-platform-evidence summary { padding: 8px 14px; cursor: pointer; font-weight: 600; }
-.pm-platform-evidence p { margin: 4px 14px 8px; color: var(--cf-text-muted); }
-.pm-platform-result { display: flex; flex-wrap: wrap; gap: 10px; padding: 5px 14px; }
+.pm-platform-evidence summary { padding: 6px 16px; cursor: pointer; font-weight: 600; color: var(--cf-text-muted); }
+.pm-platform-evidence p { margin: 4px 16px 8px; color: var(--cf-text-muted); }
+.pm-platform-result { display: flex; flex-wrap: wrap; gap: 10px; padding: 5px 16px; }
+/* Policy statistic follows the design: pass / fail with semantic colors. */
+.ed-policy-val { display: flex; align-items: baseline; gap: 6px; }
+.ed-policy-pass { color: #34d399; }
+.ed-policy-sep { font-size: 12px; color: var(--cf-text-muted); }
+.ed-policy-fail { color: #f87171; }
+.ed-policy-zero, .ed-policy-unavailable { color: var(--cf-text-muted); }
+.ed-stat-unit { font-size: 10px; font-weight: 600; color: var(--cf-text-muted); }
+.ed-identity-meta .chip { padding: 0 6px; font-size: 10px; line-height: 15px; vertical-align: 1px; }
 
 /* Policy matrix - Scroll container */
 .pm-scroll {

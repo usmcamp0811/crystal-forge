@@ -46,7 +46,7 @@ pub(super) fn OpenSystem(
             *EVALUATION_RETURN.write() = Some(saved);
             nav.push(Route::SystemDetailView { id: system_id.to_string(), tab: "config".into(), poam: String::new(), config_mode: "commit".into(), revision: exact.commit_sha, generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() });
         });
-    }, "Open System" } }
+    }, "Open system" } }
 }
 
 /// Offers one exact evidence action per captured contributing bundle.
@@ -72,5 +72,5 @@ pub(super) fn OpenEvidence(
             *EVALUATION_EVIDENCE.write() = Some(evidence);
             nav.push(Route::ComplianceView { bundle: bundle.bundle_id.to_string(), version: bundle.bundle_version_id.to_string(), system: system_id.to_string(), policy: policy.policy_id.to_string(), poam: String::new(), view: "evaluation-evidence".into() });
         });
-    }, "View Evidence · {bundle.name} · {bundle.version}" } }
+    }, "View in compliance evidence · {bundle.name} · {bundle.version}" } }
 }

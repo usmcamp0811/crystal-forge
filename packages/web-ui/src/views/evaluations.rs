@@ -41,6 +41,30 @@ use crate::views::latest_filter::{
 
 const FETCH_LIMIT_MAX: i64 = 10_000; // must match backend LIMIT_MAX
 
+/// Shows the drawer's configuration-level policy counters in design typography.
+///
+/// The values count evaluated configurations, not bundle controls. Unavailable
+/// counters render an em dash rather than a clean zero.
+#[component]
+fn DrawerPolicyCounts(available: bool, passed: i64, failed: i64) -> Element {
+    rsx! {
+        if available {
+            div { class: "ed-stat-val ed-policy-val",
+                title: "Configurations passing / failing the CF-agent and assigned-requirement gate for this attempt. Coverage may be partial; bundle controls are counted in the Policy matrix.",
+                span { class: "ed-policy-pass", "{passed}" }
+                span { class: "ed-policy-sep", "/" }
+                span { class: if failed > 0 { "ed-policy-fail" } else { "ed-policy-zero" }, "{failed}" }
+                span { class: "ed-stat-unit", "configs" }
+            }
+        } else {
+            div { class: "ed-stat-val ed-policy-val ed-policy-unavailable",
+                title: "Trustworthy attempt-scoped policy counts are unavailable.",
+                "—"
+            }
+        }
+    }
+}
+
 /// Shows known attempt-scoped counts without claiming full policy coverage.
 #[component]
 fn PolicyCounts(available: bool, passed: i64, failed: i64) -> Element {
@@ -2006,15 +2030,11 @@ fn EvalDrawer(
                         // be presented as evaluation start or commit time.
                         div { class: "ed-stat", div { class: "ed-stat-label", "Queued" } div { class: "ed-stat-val ed-stat-time", drawer_header::Timestamp { timestamp: ev.enqueued_at } } }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val mono", "—" } }
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
+                        div { class: "ed-stat", title: "Evaluated NixOS configurations in this flake commit. The Policy matrix lists registered systems with a captured bundle plan.", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
                         div {
                             class: "ed-stat",
                             div { class: "ed-stat-label", "Policy" }
-                            div {
-                                class: "ed-stat-val",
-                                style: "display: flex; gap: 6px; align-items: baseline;",
-                                PolicyCounts { available: ev.policy_counts_available, passed: ev.passed_count, failed: ev.policy_failed_count }
-                            }
+                            DrawerPolicyCounts { available: ev.policy_counts_available, passed: ev.passed_count, failed: ev.policy_failed_count }
                         }
                         div { class: "ed-stat", title: "Persisted derivation records for this attempt, not closure packages or outputs. — means unavailable.", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{format_derivation_count(ev.derivation_count)}" } }
                     }
@@ -2052,6 +2072,7 @@ fn EvalDrawer(
                                 key: "{ev.commit_id}",
                                 commit_id: ev.commit_id,
                                 live: is_live,
+                                header: policy_captured::HeaderScope { configurations: ev.system_count, passed: ev.passed_count, failed: ev.policy_failed_count, available: ev.policy_counts_available },
                                 on_open_policy: on_open_policy,
                             }
                         } else {
@@ -2161,15 +2182,11 @@ fn EvalDrawer(
                             }
                         }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val mono", "{format_eval_duration(&ev)}" } }
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
+                        div { class: "ed-stat", title: "Evaluated NixOS configurations in this flake commit. The Policy matrix lists registered systems with a captured bundle plan.", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
                         div {
                             class: "ed-stat",
                             div { class: "ed-stat-label", "Policy" }
-                            div {
-                                class: "ed-stat-val",
-                                style: "display: flex; gap: 6px; align-items: baseline;",
-                                PolicyCounts { available: ev.policy_counts_available, passed: ev.passed_count, failed: ev.policy_failed_count }
-                            }
+                            DrawerPolicyCounts { available: ev.policy_counts_available, passed: ev.passed_count, failed: ev.policy_failed_count }
                         }
                         div { class: "ed-stat", title: "Persisted derivation records for this attempt, not closure packages or outputs. — means unavailable.", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{format_derivation_count(ev.derivation_count)}" } }
                     }
@@ -2207,6 +2224,7 @@ fn EvalDrawer(
                                 key: "{ev.commit_id}",
                                 commit_id: ev.commit_id,
                                 live: is_live,
+                                header: policy_captured::HeaderScope { configurations: ev.system_count, passed: ev.passed_count, failed: ev.policy_failed_count, available: ev.policy_counts_available },
                                 on_open_policy: on_open_policy,
                             }
                         } else {
@@ -2558,6 +2576,7 @@ fn EvalDrawerPolicyTab(
     commit_id: i32,
     on_open_policy: EventHandler<String>,
     #[props(default)] live: bool,
+    #[props(default)] header: Option<policy_captured::HeaderScope>,
 ) -> Element {
     // Keep the displayed response outside Resource: restarting a resource can
     // clear its value and unmount CapturedMatrix, losing presentation choices.
@@ -2730,7 +2749,7 @@ fn EvalDrawerPolicyTab(
                     if let Some(snapshot) = &data.matrix {
                         // A new captured attempt intentionally resets local
                         // choices; successful refreshes of that attempt do not.
-                        policy_captured::CapturedMatrix { key: "{snapshot.evaluation_attempt_id:?}:{snapshot.attempt_number}", snapshot: snapshot.clone(), compatibility: data.clone(), on_open_policy, state: matrix_state, expanded: matrix_expanded, issue: matrix_issue, finding: matrix_finding, page: matrix_page }
+                        policy_captured::CapturedMatrix { key: "{snapshot.evaluation_attempt_id:?}:{snapshot.attempt_number}", snapshot: snapshot.clone(), compatibility: data.clone(), header: header.clone(), on_open_policy, state: matrix_state, expanded: matrix_expanded, issue: matrix_issue, finding: matrix_finding, page: matrix_page }
                     }
                 },
                 Some(Ok(data)) => {
