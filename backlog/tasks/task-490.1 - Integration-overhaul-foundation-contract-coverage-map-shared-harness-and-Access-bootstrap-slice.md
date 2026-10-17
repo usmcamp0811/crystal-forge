@@ -3,9 +3,11 @@ id: TASK-490.1
 title: >-
   Integration overhaul foundation: contract, coverage map, shared harness, and
   Access bootstrap slice
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - claude-opus-5-5
 created_date: '2026-10-17 16:13'
+updated_date: '2026-10-17 16:14'
 labels:
   - testing
   - integration
@@ -51,3 +53,11 @@ Live preview: not applicable; this task changes no browser-visible behavior (tes
 - [ ] #6 nix flake show / eval confirms no new flake check attribute was created by tests/integration and no existing check changed
 - [ ] #7 Bounded Luna child tasks exist with concrete commits, paths, helper signatures, fixtures, scenarios, commands, and completion criteria; dependency-ready ones are To Do
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-opus-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation
+
+Preflight 2026-10-17: branch TASK-490.1-integration-foundation from origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd (owner chose origin/dev over local dev 91809dd8, which has 10 unpushed TASK-488 backlog commits). dev worktree has only pre-existing untracked files (backlog/.locks/TASK-478.lock, session-ses_f927.md), preserved. No main worktree exists. Host sledge: 32 cores, 123 GiB RAM (~45 GiB available), /dev/kvm present. Live preview: not applicable (test-only; no browser-visible behavior change).
+<!-- SECTION:NOTES:END -->
