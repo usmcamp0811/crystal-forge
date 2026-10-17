@@ -4,7 +4,7 @@ title: 'Assurance: real finding triage and batch-triage persistence scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-17 20:30'
+updated_date: '2026-10-17 20:33'
 labels:
   - testing
   - integration
@@ -53,4 +53,6 @@ Completion: named scenario is registered; real VM run passes all cases or retain
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction replaces old layout/commands. Additional dispatch blocker: TASK-490.20/.21 need finer splitting of triage versus policy waiver/acceptance versus closure/verification. Scope preserved, not expanded or split now. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
+
+Packet decomposition correction 2026-10-17: this task now covers triage/batch triage only. Do not test or own finding waiver or acceptance-register lifecycle; those are separate TASK-490.27/.28 with distinct starting state/authority. Every run is a fresh VM/database, so TASK-490.16's previous run output cannot be reused; execute a real scan as setup in this scenario using the accepted setup flow, never seed findings. Foundation scenario has executed and failed on TASK-490.25/.26; no ready foundation dependency commit exists. Remain Backlog.
 <!-- SECTION:NOTES:END -->
