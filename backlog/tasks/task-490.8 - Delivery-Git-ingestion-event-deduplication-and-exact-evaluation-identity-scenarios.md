@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-17 17:26'
+updated_date: '2026-10-17 20:33'
 labels:
   - testing
   - integration
@@ -47,4 +47,6 @@ READINESS: actual foundation commit unresolved; foundation blocked by two existi
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction: native owner-local paths and explicit coordinator registration replace old layout. Child files are disjoint from coordinator proving scenario. Foundation commit unresolved; two existing Rust package tests block foundation; no VM execution. Backlog, not ready. Future packet needs actual dependency commit(s) and verified commands before To Do. No Luna delegation or executed slice is claimed.
+
+Isolation correction: do not consume runtime Git commit/evaluation records from TASK-490.7. Authored immutable Git fixture definitions may be reused, but this scenario pushes/ingests its own commits in its fresh VM/database and records its own receipts. Current foundation VM fails at server startup; remain Backlog until corrected foundation evidence and tested role-proving commit exist.
 <!-- SECTION:NOTES:END -->
