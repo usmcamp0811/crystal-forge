@@ -3,11 +3,11 @@ id: TASK-490.1
 title: >-
   Integration overhaul foundation: contract, coverage map, shared harness, and
   Access bootstrap slice
-status: In Progress
+status: Backlog
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-17 16:14'
+updated_date: '2026-10-17 17:14'
 labels:
   - testing
   - integration
@@ -29,35 +29,36 @@ ordinal: 513000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Problem: the four-owner integration architecture (parent TASK-490) has no shared harness, no adopted contract in the repository, and no coverage or retirement map. Children cannot start without a tested shared interface and exact registration mechanism.
+Problem: children need an adopted integration contract, coverage/retirement map, a concrete shared harness, and a verified registration interface. Goal: establish those foundations and prove one Access slice: fresh server/database startup using normal module configuration, supported first-admin bootstrap, production-UI browser sign-in, and authoritative reload/read. Test-only scope from TASK-490 applies; docs/design/CrystalForge/ is read-only.
 
-Goal: adopt the contract, record coverage and retirement maps, build the smallest shared NixOS-test harness the first scenario and the bounded children need, and prove it with one real executed Access vertical slice: fresh server/database startup with normal module configuration, supported local first-admin bootstrap, real production-UI browser sign-in, and an authoritative reload/read.
+Corrected architecture: native checks/integration-access/default.nix uses Snowfall signature { lib, inputs, pkgs, ... }, an explicit coordinator-owned scenarios attrset, and a normal pkgs.linkFarm aggregate of ALL registered gates. The focused slice is checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap; .run exposes evidence. Scenario .nix/.py/.cjs scripts, fixtures, and assets belong under checks/integration-access/. Shared helpers belong under lib/integration-test and use lib.crystal-forge.makeIntegrationTestHarness { pkgs }. No root tests/, legacyPackages.integration, mkOwner, or custom discovery. Meaningful WIP checks can be discoverable; no incomplete-unexported rule. Only Access exists now; create Delivery/Assurance/Upgrade default.nix only when each has meaningful scenarios, never placeholders.
 
-Non-goals: no final flake check is exported (owners stay unexported until complete); no legacy check or CI job is removed; no product or module fix; no generic DSL, coverage database, generated registry, or new CI service; no edits to docs/design/CrystalForge/.
+Coordinator owns lib/integration-test/**, owner default.nix registration, flake/CI wiring, contract, coverage map and affected AGENTS.md/agent/testing docs. Children receive disjoint scenario files and owner-local fixtures/assets; their integration requires explicit coordinator registration.
 
-Architectural constraints: test-only scope from TASK-490. Harness lives in tests/integration/ (not a snowfall-discovered directory). Max five VM roles (controller, services, builderA, builderB, targetA); only needed roles instantiated. Checks share immutable inputs only. Production server package is cf-server-drv (embedded UI) selected through the normal module.
+Harness scope: at most five roles (controller, services, builderA, builderB, targetA), instantiate only needed roles; immutable inputs only are shared. Select production cf-server-drv with embedded UI through the normal module. Provide deterministic facts plus runtime receipts, bounded waits, fault injection, pinned browser/render profile, failure artifacts, and exact documented helper signatures. Add roles only with a proving scenario, not speculative abstractions. No generic DSL, generated registry, coverage database, new CI service, legacy removal, product/module fixes, or design edits.
 
-Dependencies: none. Base origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd.
-Risk: medium (shared interface that all children depend on; VM runtime cost).
-Impact areas: tests/integration/**, docs/knowledge/testing/**, AGENTS.md, docs/agents/verification.md, backlog records.
-Live preview: not applicable; this task changes no browser-visible behavior (test-only).
+Authority: adopt accepted owner requirements; D1 as-built docs are evidence only, not accepted authority. Uncertain cases remain blocked pending owner decision. Contract implementation_status stays partial until evidence supports more.
+
+Verification candidates (not verified): nix eval .#checks.x86_64-linux.integration-access.scenarios --apply builtins.attrNames; nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L; nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap.run -L for evidence; nix build .#checks.x86_64-linux.integration-access -L for all registered gates. Verify native check discovery and no placeholder owners. Real VM execution, not evaluation/build alone, must be evidenced with actual outcome and command. Preserve correct failing assertions and link product bugs.
+
+READINESS: Backlog, blocked by two existing Rust package tests; no VM execution. The actual foundation dependency commit is unresolved. Historical base origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd is not that commit. Future child packets need actual dependency commit(s), verified commands, implemented helper signatures, exact paths, fixtures and registration before To Do. No delegation or executed slice is claimed. Risk: medium, shared interface and VM cost. Live preview not applicable: no browser-visible behavior change.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Contract is committed at docs/knowledge/testing/integration-test-contract.md with implementation_status partial and an adoption note that distinguishes adopted rules from implemented checks; AGENTS.md and docs/agents/verification.md link to it
-- [ ] #2 docs/knowledge/testing/integration-coverage-map.md contains the obligation map (contract ID to owner, scenario, independent expected result, evidence, status) and the legacy retirement map (every checks/* directory and CI job with a disposition)
-- [ ] #3 tests/integration/ provides a role/topology interface, production package selection, deterministic facts plus runtime receipts, bounded waits, fault-injection helper, pinned browser/render profile, failure artifacts, and one coordinator-owned scenario registration point per owner
-- [ ] #4 A focused owner-local command runs a named scenario in a real NixOS VM test with baseline updating disabled and propagates failure
-- [ ] #5 The Access bootstrap slice executes in a real VM (not only evaluated or built) and its actual outcome is recorded with command and evidence; a product defect, if exposed, keeps its failing assertion and gets a linked Backlog defect
-- [ ] #6 nix flake show / eval confirms no new flake check attribute was created by tests/integration and no existing check changed
-- [ ] #7 Bounded Luna child tasks exist with concrete commits, paths, helper signatures, fixtures, scenarios, commands, and completion criteria; dependency-ready ones are To Do
+- [ ] #1 Contract is adopted at docs/knowledge/testing/integration-test-contract.md with implementation_status partial, adopted-versus-implemented distinction, and affected AGENTS.md/agent verification links; D1 is not authority
+- [ ] #2 Coverage map records accepted obligation ID, owner, scenario, independent expected result, evidence and status, plus retirement disposition for every legacy check and CI job
+- [ ] #3 lib/integration-test exposes lib.crystal-forge.makeIntegrationTestHarness { pkgs } with documented concrete roles, production package selection, facts/receipts, bounded waits, fault injection, pinned rendering and failure artifacts
+- [ ] #4 checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicitly registers lifecycle-local-bootstrap and aggregates ALL registered gates with pkgs.linkFarm; scripts/fixtures/assets stay owner-local
+- [ ] #5 Focused checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap executes in a real VM with baseline updating disabled and failure propagation; exact command, revision, outcome and .run evidence are recorded, including linked defects where applicable
+- [ ] #6 Native discovery exposes meaningful Access WIP without requiring completion; no root tests/, legacyPackages.integration, mkOwner, custom discovery or placeholder Delivery/Assurance/Upgrade owners are added; legacy checks remain until cutover
+- [ ] #7 Future bounded child packets record actual foundation/dependency commit(s), implemented interfaces, disjoint paths, fixtures, explicit coordinator registration and verified commands before To Do; until then all children remain Backlog
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: claude-opus-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation
+2026-10-17 organization correction: native owner directories and lib/integration-test replace the previous layout and completion-only export proposal. Backlog grooming only. Foundation is blocked by two existing Rust package tests; no VM execution or Luna delegation occurred. Actual foundation dependency commit remains unresolved; do not substitute the historical base hash. All children remain Backlog and none is ready. Future packets require actual dependency commit(s) and verified commands before To Do. Uncertain D1/as-built cases require owner decision.
 
-Preflight 2026-10-17: branch TASK-490.1-integration-foundation from origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd (owner chose origin/dev over local dev 91809dd8, which has 10 unpushed TASK-488 backlog commits). dev worktree has only pre-existing untracked files (backlog/.locks/TASK-478.lock, session-ses_f927.md), preserved. No main worktree exists. Host sledge: 32 cores, 123 GiB RAM (~45 GiB available), /dev/kvm present. Live preview: not applicable (test-only; no browser-visible behavior change).
+Historical preflight (not a current lock): branch/worktree TASK-490.1-integration-foundation at /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation was recorded from origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd. Prior notes reported preserved pre-existing dev files, no main worktree, /dev/kvm present, and no live-preview requirement for this test-only task. This correction does not verify those historical environment observations.
 <!-- SECTION:NOTES:END -->
