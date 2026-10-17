@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-17 14:44'
+updated_date: '2026-10-17 14:57'
 labels:
   - web-ui
   - design-parity
@@ -116,6 +116,8 @@ Continuation verification: retain existing task worktree/lock and Draft MR. Veri
 Integration follow-up from authenticated performance inspection: the environment-banner hook still probes the now-protected eval-queue with Fetch's default same-origin credentials, omitting the session across preview ports. Add explicit Include credentials to this existing probe and document its authenticated contract. Keep server authorization unchanged. Verify authenticated browser probe success and mock banners, then rerun UI unit/WASM checks and focused browser workflow. This is required to preserve the existing mock-mode indicator after queue authorization changes.
 
 User-requested continuation: remove the visible 'known' text beside Policy count pills in the Evaluation table. Parent will remove only the decorative span from shared PolicyCounts in packages/web-ui/src/views/evaluations.rs, preserving tooltip, counters, availability and authorization. Retain existing In Progress lock/worktree /home/mcamp/code/crystal-forge/TASK-488-eval-drawer-pixel-parity and same-named branch at reported HEAD 0c180049. Parent reports owned preview PIDs 21950/8633 on localhost:8080/:3445 verified HTTP 200 before UI edits. Verify targeted UI tests/WASM or current preview and inspect the table. This backlog-only handoff changes no code, services, database, Git, MR, status or acceptance criteria.
+
+Latest user correction explicitly supersedes the previous UI appended-unmanaged-row plan. In the existing locked worktree at 0c180049, restrict Policy matrix presentation, shared-context counts, and membership contributions to captured rows with system_id Some; retain mapped planned rows with missing/excluded evidence as Unknown. Preserve immutable full inventory, header configuration counters, backend/API and flat compatibility, historical UUID identity, authorization, and distinct per-host shared-configuration contexts. Remove the visible Config suffix. Writes are limited to policy_adapter.rs, policy_captured.rs, eval-policy-matrix-workflow.js, and evaluation-policy-matrix.md; preserve the parent's evaluations.rs edit. Update targeted adapter/browser assertions and documentation, then run changed-file static formatting, JavaScript syntax, and diff checks only. Parent owns builds, runtime/browser verification and the existing preview.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
