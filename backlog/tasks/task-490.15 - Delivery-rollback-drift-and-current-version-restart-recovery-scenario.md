@@ -4,7 +4,7 @@ title: 'Delivery: rollback, drift, and current-version restart recovery scenario
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:37'
-updated_date: '2026-10-17 17:17'
+updated_date: '2026-10-17 17:27'
 labels:
   - testing
   - integration
@@ -24,7 +24,7 @@ Owning check: integration-delivery. Contract ID: delivery.activation.recovery. E
 
 Scope: System detail UI rollback restores previous generation on targetA, verified through actual /run/current-system and boot entry. Out-of-band local change reports drift with actual running identity. Kill/restart server during evaluation/build and agent during deployment; bounded waits prove consistent recovery at the current version. Non-goal: version-transition recovery (Upgrade 490.23). TASK-490 test-only scope applies.
 
-Organization: native checks/integration-delivery/default.nix has { lib, inputs, pkgs, ... }, explicit coordinator registrations and normal pkgs.linkFarm aggregate of ALL registered gates. Shared lib/integration-test through lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns owner default.nix/shared lib/CI/docs; child integration requires explicit registration and disjoint files. Meaningful WIP can be discoverable; only Access exists now, other owners only with meaningful scenarios, no placeholders.
+Organization: native checks/integration-delivery/default.nix has { lib, inputs, pkgs, ... }, explicit coordinator registrations and normal pkgs.linkFarm aggregate of ALL registered gates. Shared lib/integration-test through lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns owner default.nix/shared lib/CI/docs; child integration requires explicit registration and disjoint files. Meaningful WIP can be discoverable; only Access exists now, other owners only with meaningful scenarios, no placeholders.
 
 Prerequisite: TASK-490.14 integrated. Read cf-server api/systems.rs rollback/rollback-generation/sync/history/agent-events, startup reset_non_terminal_derivations, cf-agent system_state.rs; docs/knowledge/deployment/* and ui/deployment-history-rendering-rules.md; SystemDetail.jsx. As-built D1 is evidence, not accepted authority; uncertain recovery states stay blocked pending owner decision.
 
