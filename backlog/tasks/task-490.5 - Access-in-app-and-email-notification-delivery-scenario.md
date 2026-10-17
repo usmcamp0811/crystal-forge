@@ -4,7 +4,7 @@ title: 'Access: in-app and email notification delivery scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-17 17:15'
+updated_date: '2026-10-17 17:26'
 labels:
   - testing
   - integration
@@ -25,7 +25,7 @@ Owning check: integration-access. Contract ID: access.configuration.notification
 
 Scope: a real BuildFailures (or DeployFailures) event from the Delivery fixture creates an in-app notification for a subscribed user and none for an unsubscribed user. Read, read-all, dismiss and delete persist. Enable server.notificationEmail toward the services-role local receiver: exactly the subscribed user's message arrives; email disabled produces none. Non-goals: digest timing and external providers. TASK-490 test-only restrictions apply.
 
-Organization: native checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios and pkgs.linkFarm aggregating ALL registered gates. Shared helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }. Scripts/fixtures/assets stay owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns owner default.nix, shared lib and CI/docs; child integration needs explicit registration. Meaningful WIP may be discoverable; only Access exists now, no placeholder owners.
+Organization: native checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios and pkgs.linkFarm aggregating ALL registered gates. Shared helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }. Scripts/fixtures/assets stay owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns owner default.nix, shared lib and CI/docs; child integration needs explicit registration. Meaningful WIP may be discoverable; only Access exists now, no placeholder owners.
 
 Prerequisites: TASK-490.7 services role/receiver/builder and TASK-490.11 real failing-build fixture. Read cf-server handlers/api/user_notifications.rs, models/user_notifications.rs, notification email worker, modules/nixos/crystal-forge server.notificationEmail.* and docs/knowledge/ui/alerts-and-notifications-decision.md. As-built docs are evidence, not accepted D1 authority; uncertain cases stay blocked pending owner decision.
 
