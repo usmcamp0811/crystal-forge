@@ -4,7 +4,7 @@ title: 'Delivery: Config Inspector values and provenance scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-17 17:16'
+updated_date: '2026-10-17 17:26'
 labels:
   - testing
   - integration
@@ -24,7 +24,7 @@ Owning check: integration-delivery. Contract ID: delivery.evaluation.config-insp
 
 Scope: author a flake with distinguishable option values and definition files. System Config tab and flake Config Inspector show exact values/provenance for the exact revision; secret-path option is redacted in API/UI; second revision with changed value is distinguishable and historical selection stays exact. Partial inventory appears only when worker reports it. Non-goal: Nix-expression unit behavior, retained in non-integration checks. TASK-490 test-only restrictions apply.
 
-Organization: native checks/integration-delivery/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator registration and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers live at lib/integration-test through lib.crystal-forge.makeIntegrationTestHarness { pkgs }. Scripts/fixtures/assets owner-local; no root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix, shared lib and CI/docs; child integration requires explicit registration and disjoint files. Meaningful WIP can be discoverable; only Access exists now, add other owners only with meaningful scenarios, no placeholders.
+Organization: native checks/integration-delivery/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator registration and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers live at lib/integration-test through lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }. Scripts/fixtures/assets owner-local; no root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix, shared lib and CI/docs; child integration requires explicit registration and disjoint files. Meaningful WIP can be discoverable; only Access exists now, add other owners only with meaningful scenarios, no placeholders.
 
 Prerequisite: TASK-490.8 integrated. Read cf-server bin/config-inspector-worker.rs, handlers/api/systems.rs config-inspections/config-observations/evaluated-options, flakes.rs revision outputs/module declarations; web-ui system Config tab/flake explorer; ConfigExplorer.jsx and FlakeExplorer.jsx; docs/knowledge/evaluation and Config Inspector concepts. Adapt read-only checks/config-inspector/fixture without modifying it. As-built D1 is evidence, not authority; uncertain cases blocked pending owner decision.
 
