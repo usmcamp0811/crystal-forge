@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-17 17:18'
+updated_date: '2026-10-17 17:28'
 labels:
   - testing
   - integration
@@ -34,7 +34,7 @@ Owning check: integration-assurance. Contract ID: assurance.policy.stig-import. 
 
 Non-goals: enforcement (490.18), export/interchange round-trip (490.22), evaluation evidence, production changes, visual baselines without approved ImportStigModal state. TASK-490 test-only scope applies.
 
-Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }. All scripts/fixtures/assets are owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; child integration requires explicit registration. Meaningful WIP may be discoverable; only Access exists now; coordinator adds Assurance default.nix with meaningful scenario, never placeholder.
+Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }. All scripts/fixtures/assets are owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; child integration requires explicit registration. Meaningful WIP may be discoverable; only Access exists now; coordinator adds Assurance default.nix with meaningful scenario, never placeholder.
 
 Authority review: docs/knowledge/compliance/cf-xccdf-interchange-operator-guide.md, cf-xccdf-interchange-profile.md and stig-modules.md are as-built evidence, not accepted D1 authority. XCCDF design review draft is not acceptance authority. Approved presentation references: ImportStigModal.jsx, PoliciesView.jsx, PolicyEditor.jsx, read-only. Uncertain semantics stay blocked pending owner decision; no Authority: as-built header.
 
@@ -46,7 +46,7 @@ Verify actual foundation interface first. Pattern checks/integration-access/scen
 
 Scenario: preview V1R1 shows exact independently computed counts/identities and persists no policies/framework requirements. Import V1R1 persists exact rules/provenance; V1R2 is distinguishable and does not rewrite V1R1. Malformed/non-XCCDF rejected visibly with no partial rows. UI mapping of imported rule to framework requirement persists through reload. Viewer enforcement is 490.2. Cover success, validation error and preview loading only when approved state exists.
 
-Candidates, NOT verified: nix build .#checks.x86_64-linux.integration-assurance.scenarios.policy-stig-import -L; append .run for evidence; nix eval .#checks.x86_64-linux.integration-assurance.scenarios --apply builtins.attrNames; aggregate nix build .#checks.x86_64-linux.integration-assurance -L. At most two concurrent VMs. Completion requires explicit registration, real VM execution and revision/commands/outcomes/evidence notes. Preserve correct failing assertions with linked Backlog product bugs; shared/authority gaps escalate to coordinator.
+Candidates, NOT verified: nix build .#checks.x86_64-linux.integration-assurance.scenarios.policy-stig-import -L; append .run for evidence; nix eval .#checks.x86_64-linux.integration-assurance.scenarios --apply builtins.attrNames; aggregate nix build .#checks.x86_64-linux.integration-assurance -L. Run one VM test at a time until measured capacity supports a higher limit. Completion requires explicit registration, real VM execution and revision/commands/outcomes/evidence notes. Preserve correct failing assertions with linked Backlog product bugs; shared/authority gaps escalate to coordinator.
 
 READINESS: actual foundation commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s), implemented helpers/fixtures/registration and verified commands required before To Do. No delegation or executed slice is claimed.
 <!-- SECTION:DESCRIPTION:END -->
