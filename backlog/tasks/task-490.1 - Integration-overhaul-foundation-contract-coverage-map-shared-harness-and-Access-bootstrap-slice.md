@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-17 17:39'
+updated_date: '2026-10-17 18:37'
 labels:
   - testing
   - integration
@@ -76,4 +76,6 @@ Static verification succeeded via nix develop: node --check on lib/integration-t
 BLOCKED: TASK-491 prevents real VM execution of the foundation slice. Bootstrap/session behavior remains unverified. No children are ready; all Luna packets need recorded tested dependency commits and executable interface evidence before To Do. No Luna delegation occurred. Foundation is In Progress, not Review/Done.
 
 Preserved corrected native Snowfall WIP in commit 683c86e03ef14b37e69c00030d6d17660398324d on TASK-490.1-integration-foundation, pushed to origin. Draft MR !335: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335 . This is NOT a tested foundation dependency commit: no VM slice executed because TASK-491 blocks the unchanged server package. Status remains In Progress, lock retained; no Review/Done or ready Luna packets. Final okf-knowledge passed after registering the new Access README in the existing OKF manifest (58 tests, 191 concepts, 216 Mermaid blocks). No full flake check was run.
+
+TASK-491 prerequisite repaired in commit af39284bdf16d56402f01a64c916f17948e43b02; draft/normal MR !336: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/336. The normal production server package build now passes its full check phase (1794 passed, 0 failed, 682 ignored). This does NOT establish the Access VM scenario. TASK-490.1's focused scenario has not yet been rerun at this prerequisite commit; remains In Progress, blocked on executing its real VM/browser slice. TASK-491 is in Review; do not select/delegate dependent packets until coordinator integrates the prerequisite commit and verifies the slice.
 <!-- SECTION:NOTES:END -->
