@@ -6,17 +6,19 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-17 17:29'
+updated_date: '2026-10-17 20:34'
 labels:
   - testing
   - integration
   - coordinator
 dependencies:
+  - TASK-490.1
   - TASK-490.2
   - TASK-490.3
   - TASK-490.4
   - TASK-490.5
   - TASK-490.6
+  - TASK-490.7
   - TASK-490.8
   - TASK-490.9
   - TASK-490.10
@@ -33,6 +35,11 @@ dependencies:
   - TASK-490.21
   - TASK-490.22
   - TASK-490.23
+  - TASK-490.25
+  - TASK-490.26
+  - TASK-490.27
+  - TASK-490.28
+  - TASK-490.29
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -71,4 +78,6 @@ READINESS: all predecessor children remain Backlog, none ready. Actual foundatio
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction replaces old registration/layout/commands and incomplete-unexported rule. Coordinator writer, not Luna. Only Access exists now; remaining native owner default.nix files require meaningful scenarios, no placeholders. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. All children Backlog, none ready. Future packets need actual dependency commit(s) and verified commands before To Do. TASK-490.20/.21 finer splitting remains a dispatch blocker without scope expansion now. D1/as-built is not authority; uncertain cases await owner decision. No delegation or executed slice is claimed.
+
+Cutover dependencies expanded 2026-10-17 to include the two product blockers discovered by the correct Access foundation slice (TASK-490.25/.26) and the decomposed Assurance work packets (.27-.29). Passing or explicit owner scope approval is still required before retiring the legacy gates. No dependent task is ready.
 <!-- SECTION:NOTES:END -->
