@@ -4,7 +4,7 @@ title: 'Assurance: hardening scan and justification scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-17 17:18'
+updated_date: '2026-10-17 17:27'
 labels:
   - testing
   - integration
@@ -24,7 +24,7 @@ Owning check: integration-assurance. Contract ID: assurance.scanning.hardening. 
 
 Scope: targetA runs authored services with distinct systemd hardening settings; real scan produces expected per-service findings independently derived from authored unit settings, not CF output. Justification persists and survives reload. Rescan after real deployment changing one service updates only that service. Non-goals: STIG controls (490.19), CVEs. TASK-490 test-only scope applies.
 
-Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; integration requires explicit registration of disjoint child files. Meaningful WIP can be discoverable; only Access exists now, other owners only with meaningful scenarios, no placeholders.
+Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; integration requires explicit registration of disjoint child files. Meaningful WIP can be discoverable; only Access exists now, other owners only with meaningful scenarios, no placeholders.
 
 Prerequisite: TASK-490.14 integrated. Read cf-server bin/hardening-worker.rs, api/hardening.rs, systems.rs hardening/inventory/scan/justifications, modules/nixos/crystal-forge hardening options and HardeningTab.jsx. As-built D1 is evidence, not accepted authority; uncertain cases remain blocked pending owner decision.
 
