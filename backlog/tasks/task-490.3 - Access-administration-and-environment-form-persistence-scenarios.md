@@ -4,7 +4,7 @@ title: 'Access: administration and environment form persistence scenarios'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-17 17:15'
+updated_date: '2026-10-17 17:25'
 labels:
   - testing
   - integration
@@ -29,7 +29,7 @@ Owning check: integration-access. Contract IDs: access.configuration.admin, acce
 
 Exclusive writes: checks/integration-access/scenarios/configuration-admin-forms.{nix,py,cjs} and configuration-environment-forms.{nix,py,cjs}. Other paths are read-only. Non-goals: cache/builder/flake/system forms (domain setup), cache Test/credentials (490.12/.13), OIDC execution (490.6), role enforcement (490.2), unapproved visual baselines, production changes. TASK-490 test-only scope applies.
 
-Corrected organization: owner default.nix at checks/integration-access/default.nix has Snowfall signature { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios, normal pkgs.linkFarm aggregate of ALL registered gates. Helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }. Scripts/fixtures/assets are owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator alone edits owner default.nix, shared lib, CI/docs and explicitly registers child scenarios. Meaningful WIP checks may be discoverable; only Access exists now, no placeholder owners.
+Corrected organization: owner default.nix at checks/integration-access/default.nix has Snowfall signature { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios, normal pkgs.linkFarm aggregate of ALL registered gates. Helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }. Scripts/fixtures/assets are owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator alone edits owner default.nix, shared lib, CI/docs and explicitly registers child scenarios. Meaningful WIP checks may be discoverable; only Access exists now, no placeholder owners.
 
 Authority review: docs/knowledge/ui/admin-console-and-login-views.md, api/builders-queues-environments-dashboard-admin-api.md (admin/environments), ui/flakes-environments-builds-and-evaluations-views.md (Environments) are as-built evidence, not accepted D1 authority. Approved presentation references remain docs/design/CrystalForge/components/AdminView.jsx and EnvironmentsView.jsx, read-only. Uncertain behavior stays blocked pending owner decision; do not use Authority: as-built headers.
 
@@ -41,7 +41,7 @@ configuration-admin-forms: create user via Admin UI, verify users and user_role_
 
 configuration-environment-forms: UI create/edit/delete, each verified in environments and after reload. Duplicate-name validation retains draft and creates no row. Cover success, fresh-install empty list, write error/draft preservation, and pending/disabled save only where approved design defines it.
 
-Candidate commands, NOT verified: nix build .#checks.x86_64-linux.integration-access.scenarios.configuration-admin-forms -L and configuration-environment-forms; append .run for evidence. Coordinator aggregate: nix build .#checks.x86_64-linux.integration-access -L. At most two VM tests concurrently. Explicit registration and real VM execution required; notes record exact commands, revision, outcome and evidence paths. Independent expectations must come from authored facts/accepted requirements. Preserve correct failing assertions and linked Backlog product bugs; escalate harness/authority gaps to coordinator, never change product code or coordinator-owned files.
+Candidate commands, NOT verified: nix build .#checks.x86_64-linux.integration-access.scenarios.configuration-admin-forms -L and configuration-environment-forms; append .run for evidence. Coordinator aggregate: nix build .#checks.x86_64-linux.integration-access -L. Run one VM test at a time until measured capacity supports a higher limit. Explicit registration and real VM execution required; notes record exact commands, revision, outcome and evidence paths. Independent expectations must come from authored facts/accepted requirements. Preserve correct failing assertions and linked Backlog product bugs; escalate harness/authority gaps to coordinator, never change product code or coordinator-owned files.
 
 READINESS: foundation dependency commit unresolved; foundation blocked by two existing Rust package tests, no VM execution. Backlog, not ready. Future packet requires actual dependency commit(s), verified commands and implemented interfaces/fixtures/registration before To Do. No delegation or executed slice is claimed.
 <!-- SECTION:DESCRIPTION:END -->
