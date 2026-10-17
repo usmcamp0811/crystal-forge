@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-17 17:24'
+updated_date: '2026-10-17 17:39'
 labels:
   - testing
   - integration
@@ -15,6 +15,7 @@ references:
   - AGENTS.md
   - docs/agents/verification.md
   - docs/knowledge/testing/flake-checks.md
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335'
 priority: high
 type: task
 ordinal: 512000
@@ -61,4 +62,6 @@ Historical coordination context: prior owner claude-opus-5-5 recorded the founda
 LOCK: claude-opus-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation
 
 Run one VM test at a time until measured capacity supports a higher limit. Foundation remains In Progress, blocked pending package build; dependent children remain Backlog. No foundation readiness or verification is claimed.
+
+Corrected native-layout WIP preserved and pushed: 683c86e03ef14b37e69c00030d6d17660398324d; draft MR !335 (not merge-ready). Only integration-access is discoverable (27 total checks, previous 26 unchanged). No root tests tree/custom discovery/flake-output assembly remains. TASK-491 blocks VM execution; foundation incomplete and Luna children stay Backlog. No Luna dispatch, deployment, merge, Review, or Done transition occurred.
 <!-- SECTION:NOTES:END -->
