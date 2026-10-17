@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-17 17:39'
+updated_date: '2026-10-17 20:35'
 labels:
   - testing
   - integration
@@ -64,4 +64,6 @@ LOCK: claude-opus-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-int
 Run one VM test at a time until measured capacity supports a higher limit. Foundation remains In Progress, blocked pending package build; dependent children remain Backlog. No foundation readiness or verification is claimed.
 
 Corrected native-layout WIP preserved and pushed: 683c86e03ef14b37e69c00030d6d17660398324d; draft MR !335 (not merge-ready). Only integration-access is discoverable (27 total checks, previous 26 unchanged). No root tests tree/custom discovery/flake-output assembly remains. TASK-491 blocks VM execution; foundation incomplete and Luna children stay Backlog. No Luna dispatch, deployment, merge, Review, or Done transition occurred.
+
+Foundation resumed on 2026-10-17 in the existing dedicated worktree. Integrated tested TASK-491 dependency by cherry-pick `af39284bdf16d56402f01a64c916f17948e43b02` as `a6c8922650bf7f0ff643d181422c0092cfc43242`. The exact Access scenario executed in a VM and failed at startup, preserving its assertion. Generated config evidence reveals product blockers TASK-490.25 (local PostgreSQL socket host becomes empty-authority URI) and TASK-490.26 (local auth_mode omitted; AUTH_MODE unset; route behavior not reached because DB URL failure comes first). Both are Backlog, not fixed. Coverage map now records exact evidence and marks the scenario failing, not passing. Assurance packets .20/.21 were narrowed; .27/.28/.29 split waiver, acceptance register, and verify/closure. Per-scenario fresh DB/VM rule now says task deps never share runtime outputs. All child packets remain Backlog; no Luna dispatch, merge, deploy, or application fix.
 <!-- SECTION:NOTES:END -->
