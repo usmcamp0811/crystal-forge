@@ -4,7 +4,7 @@ title: 'Upgrade: real supported old-version transition and continuity scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-17 17:19'
+updated_date: '2026-10-17 17:29'
 labels:
   - testing
   - integration
@@ -26,7 +26,7 @@ BLOCKED D2: no accepted support decision names oldest supported in-place source 
 
 Scope once unblocked: build actual old package from its own pinned source/migrations. Through old API/UI create users/credentials, evaluation/build/deployment history, queued build and pending deployment. Current package starts normally on same PostgreSQL data directory and applies migrations. Existing passwords still sign in, exact history identities persist, in-flight work reaches specified states, representative new evaluate/build completes. Old agents/builders continue within the declared compatibility window. No same-version restart substitute, synthetic old schema or current-version seeded data. Non-goals: current-version recovery (490.15), retained non-integration server-regressions migration-prefix rehearsals. TASK-490 test-only scope applies.
 
-Organization: native checks/integration-upgrade/default.nix uses { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Shared helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; child files disjoint and integration requires explicit registration. Meaningful WIP may be discoverable; only Access exists now; Upgrade default.nix only with meaningful scenario after blockers, no placeholder.
+Organization: native checks/integration-upgrade/default.nix uses { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Shared helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; child files disjoint and integration requires explicit registration. Meaningful WIP may be discoverable; only Access exists now; Upgrade default.nix only with meaningful scenario after blockers, no placeholder.
 
 Prerequisite TASK-490.7 plus D2 decision. Candidate, NOT verified: nix build .#checks.x86_64-linux.integration-upgrade.scenarios.continuity -L; append .run for evidence; aggregate nix build .#checks.x86_64-linux.integration-upgrade -L. Completion requires explicit registration, real VM execution and exact old/current revisions, commands, outcomes and evidence; keep correct failing assertions and linked Backlog product bugs.
 
