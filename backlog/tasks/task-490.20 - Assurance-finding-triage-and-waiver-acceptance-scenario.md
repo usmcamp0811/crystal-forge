@@ -4,7 +4,7 @@ title: 'Assurance: finding triage and waiver/acceptance scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-17 17:18'
+updated_date: '2026-10-17 17:28'
 labels:
   - testing
   - integration
@@ -26,7 +26,7 @@ Preserved scope: start from real TASK-490.16 scan evidence. System/fleet triage 
 
 NOT DISPATCH READY: TASK-490.20/.21 still need finer splitting between finding triage, policy waiver/acceptance and closure/verification. The current separation from POA&M is insufficient. Record the refinement blocker now; do not expand scope or create new slices in this correction. TASK-490.16 integration alone does not make this task ready.
 
-Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; child files stay disjoint and integration requires explicit registration. Meaningful WIP may be discoverable; only Access exists now, other owners require meaningful scenarios, no placeholders.
+Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; child files stay disjoint and integration requires explicit registration. Meaningful WIP may be discoverable; only Access exists now, other owners require meaningful scenarios, no placeholders.
 
 Read-only source: cf-server api/cves.rs triage/batch/justification, poam.rs finding-waivers, acceptance_register.rs, models/poam.rs WaiverDecision; owner-approved docs/design/CrystalForge cve-poam-evidence-continuity-design-spec.md; docs/knowledge/cves/fleet-cve-triage*; CveBatchTriage.jsx/PoamViews.jsx. As-built D1 is evidence, not accepted authority; uncertain policy/waiver semantics blocked pending owner decision.
 
