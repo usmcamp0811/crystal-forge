@@ -4,6 +4,7 @@ title: NixOS server.auth_mode=local is not propagated to the server runtime
 status: Backlog
 assignee: []
 created_date: '2026-10-17 20:28'
+updated_date: '2026-10-17 23:57'
 labels:
   - bug
   - nixos
@@ -38,3 +39,9 @@ This is a product fix, explicitly out of scope for TASK-490.1. Do not add a test
 - [ ] #2 The fresh setup-status endpoint reports auth_mode local and requires_setup true on an empty database
 - [ ] #3 The local registration and sign-in routes are registered through the normal module configuration without a test-only environment override
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Final clean combined source commit 39a6a54b651a8b77fc3416b73195e363a782fa2e reproduces the generated-config mismatch: summary shows `[server]` with no auth_mode and systemd AUTH_MODE=unset. The server failed earlier on TASK-490.25, so this VM did not observe an auth-mode response or route registration. Evidence is in /nix/store/vcfbia521bjad2a85yca3h3n9i4m4ikf-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt.
+<!-- SECTION:NOTES:END -->
