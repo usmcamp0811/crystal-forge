@@ -20,13 +20,17 @@ use crate::api::models::{
 };
 use crate::handlers::agent_request::CFState;
 use crate::handlers::api::auth_session::require_csrf;
-use crate::handlers::api::rbac::{
-    require_admin, require_operator_or_admin, require_viewer_or_above,
-};
+use crate::handlers::api::rbac::{require_admin, require_operator_or_admin};
+
+mod visibility;
 
 const EVAL_LOG_CHANNEL_BUFFER: usize = 1000;
 const MAX_EVAL_LOG_CHANNELS: usize = 1024;
 const EVAL_LOG_HISTORY_BUFFER: usize = 2000;
+// Bound authorization and socket backpressure independently. An idle socket
+// checks revocation every 20 seconds; a stuck read/send gets only 5 more seconds.
+const EVAL_STREAM_OPERATION_TIMEOUT: Duration = Duration::from_secs(5);
+const EVAL_STREAM_REVALIDATION_INTERVAL: Duration = Duration::from_secs(20);
 
 fn parse_id_list(segment: &str) -> Option<Vec<i32>> {
     let trimmed = segment.trim();
@@ -60,22 +64,21 @@ fn reorder_validation_details(message: &str) -> Option<serde_json::Value> {
     }))
 }
 
-/// List evaluation queue items.
+/// Lists evaluation queue items projected to current viewer membership.
 /// GET /api/v1/commits/eval-queue
+///
+/// Returns 403 before reading queue evidence when viewer authentication fails.
+/// Administrators receive the full projection; other viewers pass their actual
+/// user UUID to the scoped reader, including for counts and pagination.
 pub async fn list_eval_queue(
     State(state): State<CFState>,
     headers: HeaderMap,
     axum::extract::Query(mut params): axum::extract::Query<EvalQueueParams>,
 ) -> impl IntoResponse {
-    let Some((user_id, roles)) =
-        crate::handlers::api::rbac::authenticated_user_roles(&state.pool, &headers).await
-    else {
-        return StatusCode::FORBIDDEN.into_response();
+    let visibility_user = match visibility::viewer_scope(&state.pool, &headers).await {
+        Ok(scope) => scope,
+        Err(status) => return status.into_response(),
     };
-    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-    let visibility_user = (!crate::handlers::api::rbac::has_admin_role(&roles)).then_some(user_id);
 
     params.limit = params.limit.max(1).min(crate::api::models::LIMIT_MAX);
 
@@ -113,6 +116,10 @@ pub async fn list_eval_queue(
             system_count: row.system_count,
             derivation_count: row.derivation_count,
             policy_counts_available: row.policy_counts_available,
+            inventory_available: row.inventory_available,
+            policy_pending_count: row.policy_pending_count,
+            unselected_count: row.unselected_count,
+            policy_unavailable_count: row.policy_unavailable_count,
             passed_count: row.passed_count,
             policy_failed_count: row.policy_failed_count,
             eval_failed_count: row.eval_failed_count,
@@ -210,25 +217,62 @@ pub enum SystemEvalStatus {
     QueuedForBuild,
 }
 
-/// WebSocket endpoint for streaming evaluation logs
+/// Streams indivisible commit logs to currently authorized whole-flake viewers.
 /// GET /api/v1/commits/:commit_id/eval/stream
+///
+/// Missing and inaccessible commits both return 404. Nonadministrators require
+/// complete current host membership and exact-latest discovery inventory. The
+/// stream revalidates session, roles, inventory, and membership before accessing
+/// replay history, before every outgoing event, and every 20-second heartbeat.
+/// Revocation or authorization errors close the socket without further evidence.
 pub async fn stream_eval_logs(
     ws: WebSocketUpgrade,
     Path(commit_id): Path<i32>,
     State(state): State<CFState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if require_viewer_or_above(&state.pool, &headers)
-        .await
-        .is_none()
-    {
-        return StatusCode::FORBIDDEN.into_response();
+    if let Err(status) = authorize_eval_stream(&state, &headers, commit_id).await {
+        return status.into_response();
     }
 
-    ws.on_upgrade(move |socket| handle_eval_stream(socket, commit_id, state))
+    ws.on_upgrade(move |socket| handle_eval_stream(socket, commit_id, state, headers))
 }
 
-async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFState) {
+// SECURITY: Do not retain a handshake principal. A new session/role lookup also
+// catches account/session invalidation and administrator-role revocation.
+// Bound each check so an unavailable database cannot keep an idle stream alive.
+async fn authorize_eval_stream(
+    state: &CFState,
+    headers: &HeaderMap,
+    commit_id: i32,
+) -> Result<(), StatusCode> {
+    tokio::time::timeout(EVAL_STREAM_OPERATION_TIMEOUT, async {
+        let scope = visibility::viewer_scope(&state.pool, headers).await?;
+        match visibility::full_flake_snapshot(&state.pool, commit_id, scope).await {
+            Ok(Some(tx)) => tx
+                .commit()
+                .await
+                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR),
+            Ok(None) => Err(StatusCode::NOT_FOUND),
+            Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+        }
+    })
+    .await
+    .unwrap_or(Err(StatusCode::SERVICE_UNAVAILABLE))
+}
+
+async fn handle_eval_stream(
+    mut socket: WebSocket,
+    commit_id: i32,
+    state: CFState,
+    headers: HeaderMap,
+) {
+    if authorize_eval_stream(&state, &headers, commit_id)
+        .await
+        .is_err()
+    {
+        return;
+    }
     tracing::info!(
         "📡 WebSocket connection established for commit {} evaluation",
         commit_id
@@ -255,18 +299,27 @@ async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFStat
     };
 
     for log_line in history_snapshot {
-        if let Err(e) = socket.send(Message::Text(log_line.into())).await {
-            tracing::error!(
-                "Failed to replay eval log history to WebSocket client for commit {}: {}",
-                commit_id,
-                e
-            );
+        if authorize_eval_stream(&state, &headers, commit_id)
+            .await
+            .is_err()
+        {
+            return;
+        }
+        if !matches!(
+            tokio::time::timeout(
+                EVAL_STREAM_OPERATION_TIMEOUT,
+                socket.send(Message::Text(log_line.into())),
+            )
+            .await,
+            Ok(Ok(()))
+        ) {
+            tracing::debug!(commit_id, "Eval log replay stopped or timed out");
             return;
         }
     }
 
     let mut rx = tx.subscribe();
-    let mut keepalive = interval(Duration::from_secs(20));
+    let mut keepalive = interval(EVAL_STREAM_REVALIDATION_INTERVAL);
 
     // Stream messages from the broadcast channel to this WebSocket client
     loop {
@@ -274,8 +327,14 @@ async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFStat
             recv = rx.recv() => {
                 match recv {
                     Ok(log_line) => {
-                        if let Err(e) = socket.send(Message::Text(log_line)).await {
-                            tracing::error!("Failed to send eval log to WebSocket client: {}", e);
+                        if authorize_eval_stream(&state, &headers, commit_id).await.is_err() {
+                            break;
+                        }
+                        if !matches!(tokio::time::timeout(
+                            EVAL_STREAM_OPERATION_TIMEOUT,
+                            socket.send(Message::Text(log_line)),
+                        ).await, Ok(Ok(()))) {
+                            tracing::debug!(commit_id, "Eval log send stopped or timed out");
                             break;
                         }
                     }
@@ -290,8 +349,14 @@ async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFStat
                 }
             }
             _ = keepalive.tick() => {
-                if let Err(e) = socket.send(Message::Ping(Vec::new().into())).await {
-                    tracing::debug!("Eval WebSocket ping failed for commit {}: {}", commit_id, e);
+                if authorize_eval_stream(&state, &headers, commit_id).await.is_err() {
+                    break;
+                }
+                if !matches!(tokio::time::timeout(
+                    EVAL_STREAM_OPERATION_TIMEOUT,
+                    socket.send(Message::Ping(Vec::new().into())),
+                ).await, Ok(Ok(()))) {
+                    tracing::debug!(commit_id, "Eval WebSocket heartbeat stopped or timed out");
                     break;
                 }
             }
@@ -301,30 +366,32 @@ async fn handle_eval_stream(mut socket: WebSocket, commit_id: i32, state: CFStat
     tracing::info!("WebSocket connection closed for commit {} eval", commit_id);
 }
 
-/// Fetch historical evaluation logs from database for a specific commit.
+/// Returns commit log history after current whole-flake viewer authorization.
 ///
 /// This endpoint retrieves persisted logs for completed/failed/cancelled evaluations.
 /// For in-progress evaluations, clients should use the WebSocket stream instead.
+/// Nonadministrators require all current hosts and exact-latest inventory to be
+/// authorized. Authorization and logs share one read-only repeatable-read
+/// snapshot. Missing and foreign commits both return 404. Logs are commit-scoped,
+/// not pinned-attempt evidence, and do not use string-based redaction.
 pub async fn get_eval_logs_history(
     Path(commit_id): Path<i32>,
     State(state): State<CFState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if require_viewer_or_above(&state.pool, &headers)
-        .await
-        .is_none()
-    {
-        return StatusCode::FORBIDDEN.into_response();
-    }
+    let scope = match visibility::viewer_scope(&state.pool, &headers).await {
+        Ok(scope) => scope,
+        Err(status) => return status.into_response(),
+    };
 
-    let logs =
-        match crate::queries::eval_logs::fetch_eval_logs_by_commit(&state.pool, commit_id).await {
-            Ok(logs) => logs,
-            Err(e) => {
-                tracing::error!("Failed to fetch eval logs for commit {}: {}", commit_id, e);
-                return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-            }
-        };
+    let logs = match visibility::logs_for_user(&state.pool, commit_id, scope).await {
+        Ok(Some(logs)) => logs,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!("Failed to fetch eval logs for commit {}: {}", commit_id, e);
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
 
     let entries: Vec<EvalLogEntry> = logs
         .into_iter()
@@ -378,15 +445,10 @@ async fn eval_policy_matrix_response(
     state: CFState,
     headers: HeaderMap,
 ) -> axum::response::Response {
-    let Some((user_id, roles)) =
-        crate::handlers::api::rbac::authenticated_user_roles(&state.pool, &headers).await
-    else {
-        return StatusCode::FORBIDDEN.into_response();
+    let visibility_user = match visibility::viewer_scope(&state.pool, &headers).await {
+        Ok(scope) => scope,
+        Err(status) => return status.into_response(),
     };
-    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
-        return StatusCode::FORBIDDEN.into_response();
-    }
-    let visibility_user = (!crate::handlers::api::rbac::has_admin_role(&roles)).then_some(user_id);
 
     let selected = match attempt_id {
         Some(attempt_id) => {
@@ -606,27 +668,26 @@ fn build_eval_policy_matrix_response(
     }
 }
 
-/// Fetch dependency/derivation package breakdown for a commit evaluation.
+/// Returns the latest route's mutable native graph to whole-flake viewers.
 /// GET /api/v1/commits/:commit_id/eval/dependency-graph
+///
+/// Missing and inaccessible commits both return 404. Nonadministrators need
+/// complete current host membership and registered exact-latest inventory.
+/// Authorization and evidence share one repeatable-read snapshot. Native graph
+/// data is mutable and MUST NOT be presented as pinned-attempt evidence.
 pub async fn get_eval_dependency_graph(
     Path(commit_id): Path<i32>,
     State(state): State<CFState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if require_viewer_or_above(&state.pool, &headers)
-        .await
-        .is_none()
-    {
-        return StatusCode::FORBIDDEN.into_response();
-    }
+    let scope = match visibility::viewer_scope(&state.pool, &headers).await {
+        Ok(scope) => scope,
+        Err(status) => return status.into_response(),
+    };
 
-    let rows = match crate::queries::commits::fetch_eval_dependency_breakdown(
-        &state.pool,
-        commit_id,
-    )
-    .await
-    {
-        Ok(rows) => rows,
+    let rows = match visibility::graph_for_user(&state.pool, commit_id, scope).await {
+        Ok(Some(rows)) => rows,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
             tracing::error!(
                 "Failed to fetch eval dependency graph for commit {}: {}",
@@ -907,19 +968,21 @@ pub async fn force_cancel_commit_evaluation(
     }
 }
 
-/// List paginated eval history (complete, failed, cancelled).
+/// Lists paginated evaluation history restricted to current viewer membership.
 /// GET /api/v1/commits/eval-history
+///
+/// Returns 403 before reading history when viewer authentication fails.
+/// Administrators use unrestricted scope; other viewers pass their user UUID
+/// to the scoped reader for evidence, derived metadata, counts, and pagination.
 pub async fn list_eval_history(
     State(state): State<CFState>,
     headers: HeaderMap,
     axum::extract::Query(mut params): axum::extract::Query<EvalHistoryParams>,
 ) -> impl IntoResponse {
-    if require_viewer_or_above(&state.pool, &headers)
-        .await
-        .is_none()
-    {
-        return StatusCode::FORBIDDEN.into_response();
-    }
+    let scope = match visibility::viewer_scope(&state.pool, &headers).await {
+        Ok(scope) => scope,
+        Err(status) => return status.into_response(),
+    };
 
     params.page = params.page.max(1);
     params.limit = params.limit.max(1).min(crate::api::models::LIMIT_MAX);
@@ -928,7 +991,7 @@ pub async fn list_eval_history(
         return StatusCode::BAD_REQUEST.into_response();
     }
 
-    match crate::queries::commits::list_eval_history(&state.pool, &params).await {
+    match crate::queries::commits::list_eval_history_for_user(&state.pool, &params, scope).await {
         Ok(page_result) => {
             let body: EvalHistoryPage = page_result;
             (StatusCode::OK, Json(body)).into_response()
@@ -956,6 +1019,52 @@ mod tests {
             std::sync::Arc::new(crate::queue::QueueNotifier::new()),
             crate::server::jobs::BackgroundJobRegistry::new(),
         )
+    }
+
+    #[tokio::test]
+    async fn evaluation_reads_require_identity_before_accessing_evidence() {
+        // No cookie must return before the lazy pool connects, including queue
+        // and history summary reads and the stream's repeated authorization.
+        assert_eq!(
+            list_eval_queue(
+                State(test_state()),
+                HeaderMap::new(),
+                axum::extract::Query(EvalQueueParams::default()),
+            )
+            .await
+            .into_response()
+            .status(),
+            StatusCode::FORBIDDEN,
+        );
+        assert_eq!(
+            list_eval_history(
+                State(test_state()),
+                HeaderMap::new(),
+                axum::extract::Query(EvalHistoryParams::default()),
+            )
+            .await
+            .into_response()
+            .status(),
+            StatusCode::FORBIDDEN,
+        );
+        assert_eq!(
+            get_eval_logs_history(Path(42), State(test_state()), HeaderMap::new())
+                .await
+                .into_response()
+                .status(),
+            StatusCode::FORBIDDEN,
+        );
+        assert_eq!(
+            get_eval_dependency_graph(Path(42), State(test_state()), HeaderMap::new())
+                .await
+                .into_response()
+                .status(),
+            StatusCode::FORBIDDEN,
+        );
+        assert_eq!(
+            authorize_eval_stream(&test_state(), &HeaderMap::new(), 42).await,
+            Err(StatusCode::FORBIDDEN),
+        );
     }
 
     #[tokio::test]
@@ -1079,6 +1188,7 @@ mod tests {
         });
         let rows = vec![
             crate::queries::commits::EvalPolicySystemRow {
+                cf_agent_enabled: None,
                 system_name: "gray".to_string(),
                 eval_status: "evaluated".to_string(),
                 error_message: None,
@@ -1086,6 +1196,7 @@ mod tests {
                 policy_requirements_met: Some(false),
             },
             crate::queries::commits::EvalPolicySystemRow {
+                cf_agent_enabled: None,
                 system_name: "mattis".to_string(),
                 eval_status: "evaluated".to_string(),
                 error_message: None,
@@ -1118,6 +1229,7 @@ mod tests {
     #[test]
     fn policy_matrix_marks_pre_migration_rows_as_legacy_unknown() {
         let rows = vec![crate::queries::commits::EvalPolicySystemRow {
+            cf_agent_enabled: None,
             system_name: "ancient-host".to_string(),
             eval_status: "evaluated".to_string(),
             error_message: None,
@@ -1144,6 +1256,7 @@ mod tests {
     #[test]
     fn policy_matrix_does_not_treat_populated_results_as_legacy_unknown() {
         let rows = vec![crate::queries::commits::EvalPolicySystemRow {
+            cf_agent_enabled: None,
             system_name: "gray".to_string(),
             eval_status: "evaluated".to_string(),
             error_message: None,
@@ -1168,6 +1281,7 @@ mod tests {
     fn non_strict_failed_policy_renders_as_warn_not_fail() {
         let policy_id = "f2752e95-40f5-4cb7-9211-7ac8fd98334f";
         let rows = vec![crate::queries::commits::EvalPolicySystemRow {
+            cf_agent_enabled: None,
             system_name: "gray".to_string(),
             eval_status: "evaluated".to_string(),
             error_message: None,
@@ -1272,6 +1386,7 @@ mod tests {
     fn strict_failed_policy_still_renders_as_fail() {
         let policy_id = "f2752e95-40f5-4cb7-9211-7ac8fd98334f";
         let rows = vec![crate::queries::commits::EvalPolicySystemRow {
+            cf_agent_enabled: None,
             system_name: "gray".to_string(),
             eval_status: "evaluated".to_string(),
             error_message: None,
@@ -1304,6 +1419,7 @@ mod tests {
     fn policy_matrix_column_uses_db_name_not_description() {
         let policy_id = "f2752e95-40f5-4cb7-9211-7ac8fd98334f";
         let rows = vec![crate::queries::commits::EvalPolicySystemRow {
+            cf_agent_enabled: None,
             system_name: "gray".to_string(),
             eval_status: "evaluated".to_string(),
             error_message: None,
@@ -1339,6 +1455,7 @@ mod tests {
     fn build_failed_derivation_not_eval_failed() {
         for status in [7u32, 8, 10, 12] {
             let rows = vec![crate::queries::commits::EvalPolicySystemRow {
+                cf_agent_enabled: None,
                 system_name: format!("sys-status-{status}"),
                 eval_status: "evaluated".to_string(),
                 error_message: Some("Build failed: gcc segfault".to_string()),
@@ -1377,6 +1494,7 @@ mod tests {
     fn policy_matrix_deduplicates_legacy_cf_agent_assigned_result() {
         let policy_id = "legacy-cf-agent-uuid";
         let rows = vec![crate::queries::commits::EvalPolicySystemRow {
+            cf_agent_enabled: None,
             system_name: "gray".to_string(),
             eval_status: "evaluated".to_string(),
             error_message: None,
@@ -1421,6 +1539,7 @@ mod tests {
     fn policy_matrix_does_not_filter_other_policy_types() {
         let policy_id = "some-other-uuid";
         let rows = vec![crate::queries::commits::EvalPolicySystemRow {
+            cf_agent_enabled: None,
             system_name: "gray".to_string(),
             eval_status: "evaluated".to_string(),
             error_message: None,

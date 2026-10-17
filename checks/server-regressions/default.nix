@@ -812,6 +812,63 @@ SQL
       runExactCacheRegression "$testName" --ignored
     done
 
+    # TASK-488 discovery, summary, and evidence visibility use isolated SQLx
+    # databases. Require every qualified case to pass the exact-success guard.
+    for testName in \
+      queries::evaluation_inventory::tests::inventory_normalizes_exact_names_and_rejects_replacement \
+      queries::evaluation_inventory::tests::inventory_empty_and_selection_subset_are_distinct_from_missing \
+      queries::evaluation_inventory::tests::inventory_schema_enforces_owner_immutability_and_parent_cascade \
+      queries::evaluation_inventory::tests::inventory_rejects_cancelled_superseded_and_nonactive_writers \
+      queries::evaluation_inventory::tests::inventory_retry_never_inherits_or_accepts_older_writes \
+      queries::evaluation_inventory::tests::inventory_competing_first_writes_preserve_one_complete_record \
+      queries::commits::inventory_summary_tests::exact_inventory_replaces_cached_41_and_excludes_unselected_outcomes \
+      queries::commits::inventory_summary_tests::inventory_partial_unknown_ambiguous_and_queued_retry_remain_pending \
+      queries::commits::inventory_summary_tests::scoped_summaries_hide_shared_policy_facts_search_errors_and_revoked_membership \
+      handlers::api::commits::visibility::tests::mixed_environment_flake_denies_unstructured_evidence \
+      handlers::api::commits::visibility::tests::revocation_rechecks_each_snapshot_and_keeps_reads_atomic \
+      handlers::api::commits::visibility::tests::unmanaged_discovery_name_denies_even_with_all_memberships \
+      handlers::api::commits::visibility::tests::missing_inventory_and_queued_retry_never_inherit_authority \
+      handlers::api::commits::visibility::tests::all_visible_configs_allow_logs_and_mutable_latest_graph \
+      handlers::api::commits::visibility::tests::shared_configuration_hidden_host_denies_even_when_inactive \
+      handlers::api::commits::visibility::tests::missing_identity_or_registration_never_grants_vacuous_access \
+      handlers::api::commits::visibility::tests::mutable_graph_preserves_counts_but_denies_unmanaged_retained_rows \
+      handlers::api::commits::visibility::tests::stream_revalidation_observes_membership_roles_and_session_revocation \
+      queries::eval_policy_plans::inventory_projection_tests::inventory_discovered_41_preserves_exact_names_and_12_captured_hosts \
+      queries::eval_policy_plans::inventory_projection_tests::inventory_absent_and_unselected_registered_rows_keep_unknown_evidence \
+      queries::eval_policy_plans::inventory_projection_tests::inventory_shared_hosts_count_one_matching_global_failure_without_fake_policies \
+      queries::eval_policy_plans::inventory_projection_tests::inventory_history_ignores_cache_mutation_and_queued_retry_has_no_inventory \
+      queries::eval_policy_plans::inventory_projection_tests::inventory_scoped_reads_hide_unmanaged_hidden_columns_and_global_failure_details \
+      queries::eval_policy_plans::inventory_projection_tests::inventory_missing_discovery_is_unavailable_despite_passing_native_and_cache
+    do
+      runExactCacheRegression "$testName" --ignored
+    done
+
+    # TASK-488 native history uses immutable exact-attempt evidence. These SQLx
+    # cases also replay the attributable 0308 import; retain the exact guard.
+    for testName in \
+      queries::evaluation_native_outcomes::tests::native_outcome_rejects_cancelled_superseded_and_nonactive_owners \
+      queries::evaluation_native_outcomes::tests::native_outcome_requires_exact_selected_native_inventory \
+      queries::evaluation_native_outcomes::tests::native_outcome_first_write_schema_immutability_and_parent_cascade \
+      queries::evaluation_native_outcomes::tests::native_outcome_sidecar_has_no_artifact_build_or_observation_side_effects \
+      queries::evaluation_native_outcomes::tests::native_outcome_retry_retains_historical_values_under_new_ea \
+      queries::evaluation_native_outcomes::tests::native_producers_atomically_retain_success_and_confirmed_failure_across_retry
+    do
+      runExactCacheRegression "$testName" --ignored
+    done
+
+    # Receiver reads must enforce the same environment boundary as the matrix.
+    # Exact names also ensure the scope-lock concurrency checks really execute.
+    for testName in \
+      handlers::api::compliance::tests::receiver_security::system_receivers_hide_out_of_scope_hosts_with_identical_404 \
+      handlers::api::compliance::tests::receiver_security::bundle_systems_scope_host_details_and_every_total_before_rollup \
+      handlers::api::compliance::tests::receiver_security::receiver_scope_rechecks_revocations_moves_unscoped_and_deleted_hosts \
+      handlers::api::compliance::tests::receiver_security::receiver_scope_preserves_empty_revisions_and_legacy_system_rollups \
+      handlers::api::compliance::tests::receiver_security::single_receiver_guard_blocks_revocation_and_move_until_materialized \
+      handlers::api::compliance::tests::receiver_security::bundle_receiver_guard_bounds_candidates_and_blocks_scope_writes
+    do
+      runExactCacheRegression "$testName" --ignored
+    done
+
     # TASK-484 uses sqlx-created databases in this sandbox. Run each test in a
     # separate process because the heavy-Nix semaphore is process-global.
     for testName in \

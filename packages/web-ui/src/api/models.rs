@@ -4655,6 +4655,18 @@ pub struct EvalQueueSummary {
 /// A single commit item in the evaluation queue.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalQueueItem {
+    /// Configuration coverage unavailable for this attempt or caller.
+    #[serde(default)]
+    pub policy_unavailable_count: i64,
+    /// Discovered configurations explicitly not selected for execution.
+    #[serde(default)]
+    pub unselected_count: i64,
+    /// True only when the represented attempt has a verified visible inventory.
+    #[serde(default)]
+    pub inventory_available: bool,
+    /// Selected configurations without an attributable terminal gate result.
+    #[serde(default)]
+    pub policy_pending_count: i64,
     pub commit_id: i32,
     pub flake_id: i32,
     pub flake_name: String,
@@ -4696,6 +4708,18 @@ pub struct ReorderEvalQueueRequest {
 /// A single row in the eval history list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalHistoryItem {
+    /// Configuration coverage unavailable for this attempt or caller.
+    #[serde(default)]
+    pub policy_unavailable_count: i64,
+    /// Discovered configurations explicitly not selected for execution.
+    #[serde(default)]
+    pub unselected_count: i64,
+    /// True only when the represented attempt has a verified visible inventory.
+    #[serde(default)]
+    pub inventory_available: bool,
+    /// Selected configurations without an attributable terminal gate result.
+    #[serde(default)]
+    pub policy_pending_count: i64,
     pub commit_id: i32,
     pub flake_id: i32,
     pub flake_name: String,

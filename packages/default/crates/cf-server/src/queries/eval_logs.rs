@@ -95,6 +95,28 @@ pub async fn fetch_eval_logs_by_commit(
     .await
 }
 
+/// Reads commit-scoped logs through the caller's authorized read transaction.
+///
+/// The caller MUST authorize whole-flake access before calling this function.
+/// Keeping the same repeatable-read snapshot prevents membership revocation or
+/// system moves from separating authorization and evidence. These logs do not
+/// identify an attempt and MUST NOT be presented as pinned-attempt evidence.
+///
+/// # Errors
+/// Returns database read errors without retrying in another snapshot.
+pub(crate) async fn fetch_eval_logs_by_commit_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    commit_id: i32,
+) -> Result<Vec<EvalLogRow>, sqlx::Error> {
+    sqlx::query_as::<_, EvalLogRow>(
+        "SELECT id, commit_id, log_timestamp, log_sequence, log_level, log_message
+         FROM eval_logs WHERE commit_id = $1 ORDER BY log_sequence ASC",
+    )
+    .bind(commit_id)
+    .fetch_all(&mut **tx)
+    .await
+}
+
 /// Delete all evaluation logs for a specific commit.
 pub async fn delete_eval_logs_by_commit(pool: &PgPool, commit_id: i32) -> Result<u64, sqlx::Error> {
     let result = sqlx::query(

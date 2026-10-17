@@ -1324,6 +1324,16 @@ mod tests {
         let check =
             PolicyCheckResult::from_assigned(name.clone(), &json!({"cfAgentEnabled": true}), &[])
                 .unwrap();
+        crate::queries::evaluation_inventory::persist_inventory(
+            &pool,
+            commit_id,
+            attempt,
+            std::slice::from_ref(&name),
+            std::slice::from_ref(&name),
+            crate::queries::evaluation_inventory::InventoryExecutionMode::Native,
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             persist_evaluated_system(&pool, commit_id, attempt, &result, &check, &[],)
                 .await

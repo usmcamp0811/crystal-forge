@@ -6,6 +6,19 @@ use uuid::Uuid;
 /// Contains identities and evidence from one represented evaluation attempt.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalPolicyMatrixSnapshot {
+    /// Source display identity copied when this plan was captured; never filled
+    /// from today's catalog for older records.
+    #[serde(default)]
+    pub source_label: Option<EvalSourceLabel>,
+    /// Exact-attempt verified discovery; None means pending or unavailable.
+    #[serde(default)]
+    pub inventory: Option<EvalAttemptInventory>,
+    /// Distinct visible configuration gate coverage, never a control count.
+    #[serde(default)]
+    pub configuration_summary: Option<EvalConfigurationSummary>,
+    /// Saved matching-attempt global gate diagnostics, without policy IDs.
+    #[serde(default)]
+    pub configuration_failures: Vec<EvalConfigurationFailure>,
     /// Identifies the captured attempt when available.
     pub evaluation_attempt_id: Option<Uuid>,
     /// Numbers the represented queue/history attempt.
@@ -38,6 +51,71 @@ pub struct EvalPolicyMatrixSnapshot {
     pub empty_bundle_metadata_complete: bool,
     /// Retains planned systems even when evidence is missing.
     pub rows: Vec<EvalMatrixRow>,
+}
+
+/// Identifies the watched source as it was labeled at capture.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalSourceLabel {
+    /// Captured flake display name.
+    pub name: String,
+    /// Captured watched branch, when known.
+    pub branch: Option<String>,
+}
+
+/// Identifies the exact visible discovered and selected configuration sets.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalAttemptInventory {
+    /// Native verified discovery or synthetic mock mode.
+    pub execution_mode: String,
+    /// Sorted distinct visible names discovered by this attempt.
+    pub configurations: Vec<String>,
+    /// Visible discovered names selected for execution.
+    pub selected_configurations: Vec<String>,
+}
+
+/// Reports gate coverage once per configuration, including shared host contexts.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EvalConfigurationSummary {
+    /// Distinct visible planned or discovered configurations.
+    pub total: usize,
+    /// Known passing configuration gates.
+    pub passed: usize,
+    /// Known failed policy/agent gates.
+    pub failed: usize,
+    /// Known Nix evaluation failures.
+    pub evaluation_failed: usize,
+    /// Selected configurations with unavailable evidence, plus planned names
+    /// absent from discovery. No missing name is counted as executed.
+    pub pending: usize,
+    /// Known unavailable coverage, distinct from work that can still complete.
+    #[serde(default)]
+    pub unavailable: usize,
+    /// Discovered configurations excluded from execution selection.
+    pub excluded: usize,
+}
+
+/// Carries an actual global gate failure for an exact configuration identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalConfigurationFailure {
+    /// Actual gate identity; this is never a fabricated versioned policy.
+    #[serde(default)]
+    pub kind: EvalConfigurationFailureKind,
+    /// Exact discovered configuration name.
+    pub configuration_name: String,
+    /// Saved diagnostic from the matching attempt, never a synthesized assertion.
+    /// Empty when the gate failed without a saved diagnostic.
+    pub detail: String,
+}
+
+/// Distinguishes actual configuration gates from versioned control results.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalConfigurationFailureKind {
+    /// The unconditional CF-agent gate failed.
+    #[default]
+    CfAgent,
+    /// The requirement gate failed without a saved per-control attribution.
+    Requirements,
 }
 
 /// Distinguishes historical capture from unavailable legacy provenance.

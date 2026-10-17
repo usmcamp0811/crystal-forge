@@ -2,10 +2,9 @@
 
 use super::policy_adapter::{BundleApplicability, MatrixRow};
 use super::policy_matrix::{Outcome, Summary};
-use super::{policy_cell_class_suffix, policy_cell_glyph};
-use crate::api::models::EvalPolicyMatrixResponse;
 use crate::api::models::eval_policy_matrix::{
-    EvalBundleColumn, EvalBundleSource, EvalPolicyColumn, EvalPolicyMatrixSnapshot,
+    EvalBundleColumn, EvalBundleSource, EvalConfigurationFailureKind, EvalPolicyColumn,
+    EvalPolicyMatrixSnapshot,
 };
 use dioxus::prelude::*;
 
@@ -46,7 +45,7 @@ pub(super) fn HeaderStatusBar(summary: Summary) -> Element {
     let denominator = summary.applicable.max(1) as f64;
     rsx! {
         span { class: "pm-th-policy-bar", role: "img",
-            aria_label: "{summary.failed} fail, {summary.warnings} warning, {summary.passed} pass, {summary.unknown} unknown; {summary.applicable} applicable system/control pairs",
+            aria_label: "{summary.failed} fail, {summary.warnings} warning, {summary.passed} pass, {summary.unknown} unknown; {summary.applicable} known or unresolved system/control slots",
             for (count, color) in [(summary.failed, "#f87171"), (summary.warnings, "#f59e0b"), (summary.passed, "#34d399"), (summary.unknown, "var(--cf-text-muted)")] {
                 if count > 0 { span { style: "width: {100.0 * count as f64 / denominator}%; background: {color};" } }
             }
@@ -177,7 +176,7 @@ pub(super) fn card_summary(
     description: Option<&str>,
 ) -> String {
     if !executable {
-        return "Implementation skipped — evidence unavailable".into();
+        return "Implementation skipped".into();
     }
     if let Some(description) = description.filter(|d| !d.trim().is_empty()) {
         return description.to_owned();
@@ -186,7 +185,7 @@ pub(super) fn card_summary(
         Outcome::Fail => "Blocking failure (enforce mode)".into(),
         Outcome::Warning if report_only => "Report-only failure — not blocking".into(),
         Outcome::Warning => "Warning — not blocking".into(),
-        Outcome::Unknown => "No trustworthy matching-attempt outcome is available.".into(),
+        Outcome::Unknown => "Unknown".into(),
         Outcome::Pass => "Passed".into(),
         Outcome::NotAssigned => "Not assigned to this system".into(),
     }
@@ -237,16 +236,48 @@ mod card_tests {
         );
         assert_eq!(
             card_summary(Outcome::Fail, false, false, Some("ignored")),
-            "Implementation skipped — evidence unavailable"
+            "Implementation skipped"
         );
+    }
+
+    #[test]
+    fn only_unknown_cards_without_saved_evidence_need_an_unavailable_state() {
+        for outcome in [
+            Outcome::Pass,
+            Outcome::Warning,
+            Outcome::Fail,
+            Outcome::NotAssigned,
+        ] {
+            assert!(!evidence_unavailable(outcome, None, None, None));
+        }
+        assert!(evidence_unavailable(Outcome::Unknown, None, None, None));
+        assert!(evidence_unavailable(
+            Outcome::Unknown,
+            Some(" "),
+            None,
+            None
+        ));
+        for evidence in [
+            (Some("saved assertion"), None, None),
+            (None, Some("config.security.audit"), None),
+            (None, None, Some("saved cause")),
+        ] {
+            assert!(!evidence_unavailable(
+                Outcome::Unknown,
+                evidence.0,
+                evidence.1,
+                evidence.2
+            ));
+        }
     }
 }
 
 /// Renders actual captured control outcomes for an expanded planned system.
 ///
 /// Failures, warnings and unknown outcomes appear first as collapsible cards.
-/// Passed and not-assigned controls stay behind an explicit toggle. Missing
-/// captured assertion text is shown as unavailable, never synthesized.
+/// Passed and not-assigned controls stay behind an explicit toggle. Assertion,
+/// path, and detail text is displayed only when saved. Unknown cards
+/// without any saved evidence show one compact unavailable state.
 #[component]
 pub(super) fn RowDetails(
     row: MatrixRow,
@@ -307,8 +338,22 @@ pub(super) fn RowDetails(
     let config = row.source.configuration_name.clone();
     rsx! {
         div { class: "pm-expand",
-            if !row.resolved() {
-                p { class: "pm-provenance-note", "Applicability is incomplete: {row.source.resolution:?}. Counts are known evidence, not a complete applicability claim." }
+            if let Some(status) = row.status_label() {
+                p { class: "pm-failcard-unavailable", "{status}" }
+            }
+            for failure in snapshot.configuration_failures.iter().filter(|failure| row.configuration_failed && failure.configuration_name == config) {
+                div { class: "pm-failcard-wrap",
+                    div { class: "pm-failcard pm-failcard-fail",
+                        span { class: "pm-failcard-glyph pm-fail", "✗" }
+                        div { class: "pm-failcard-body",
+                            div { class: "pm-failcard-title", match failure.kind {
+                                EvalConfigurationFailureKind::CfAgent => "Configuration requirement · Crystal Forge agent",
+                                EvalConfigurationFailureKind::Requirements => "Configuration policy requirements",
+                            } }
+                            if !failure.detail.is_empty() { p { class: "mono pm-failcard-evidence", "{failure.detail}" } }
+                        }
+                    }
+                }
             }
             div { class: "pm-failcards",
                 for control in controls.iter().filter(|control| show_passed() || needs_attention(outcome_of(control))) {
@@ -326,7 +371,7 @@ pub(super) fn RowDetails(
                         let policy_name = control.name.clone();
                         let card_key = format!("{}:{id}", row.key);
                         let open = finding.read().as_ref() == Some(&card_key);
-                        let detail = row.details.get(&id).cloned();
+                        let detail = row.details.get(&id).filter(|text| !text.trim().is_empty()).cloned();
                         let mut seen_memberships = std::collections::HashSet::new();
                         let contributions: Vec<_> = binding.into_iter().flat_map(|b| &b.memberships).filter(|m| seen_memberships.insert(m.bundle_version_id)).filter_map(|m| bundles.iter().find(|b| b.bundle_version_id == m.bundle_version_id)).cloned().collect();
                         rsx! {
@@ -346,18 +391,17 @@ pub(super) fn RowDetails(
                                 }
                                 if open {
                                     div { class: "pm-failcard-detail",
-                                        if let Some(path) = &control.attribute_path {
+                                        if let Some(path) = control.attribute_path.as_deref().filter(|text| !text.trim().is_empty()) {
                                             p { class: "mono pm-failcard-path", "nixosConfigurations.{config}.{path}" }
                                         }
-                                        if let Some(assertion) = &control.assertion {
+                                        if let Some(assertion) = control.assertion.as_deref().filter(|text| !text.trim().is_empty()) {
                                             p { class: "pm-failcard-assertion", span { class: "mono", style: "font-weight:600", "assertion: " } "{assertion}" }
-                                        } else {
-                                            p { class: "pm-failcard-unavailable", "Assertion text unavailable: this policy version captured no display-safe assertion." }
                                         }
-                                        if let Some(detail) = detail {
+                                        if let Some(detail) = &detail {
                                             p { class: "mono pm-failcard-evidence", "{detail}" }
-                                        } else if needs_attention(outcome) {
-                                            p { class: "pm-failcard-unavailable", "No saved outcome detail for this attempt." }
+                                        }
+                                        if evidence_unavailable(outcome, control.assertion.as_deref(), control.attribute_path.as_deref(), detail.as_deref()) {
+                                            p { class: "pm-failcard-unavailable", "Evidence unavailable" }
                                         }
                                         p { class: "pm-failcard-meta",
                                             {format!("{label} · {} · policy version {} · lineage {}", if report_only { "report-only" } else { "enforce" }, control.policy_version_id, control.policy_id)}
@@ -408,34 +452,15 @@ pub(super) fn RowDetails(
     }
 }
 
-/// Preserves the global CF-agent compatibility check outside bundle counts.
-///
-/// The flat API keys this evidence by evaluator configuration. It does not yet
-/// provide structured platform-check identity or captured bundle membership.
-#[component]
-pub(super) fn PlatformEvidence(data: EvalPolicyMatrixResponse) -> Element {
-    let column = data.policies.iter().position(|name| name == "CF agent");
-    rsx! {
-        details { class: "pm-platform-evidence",
-            summary { "Platform evidence · global CF agent" }
-            p { "Per-configuration compatibility evidence. This global check is separate from captured bundle/control totals." }
-            if let Some(index) = column {
-                if data.systems.is_empty() { p { "No platform evidence is available yet." } }
-                for row in &data.systems {
-                    {
-                        let result = row.results.get(index).map(String::as_str).unwrap_or("legacy_unknown");
-                        let class = format!("pm-{}", policy_cell_class_suffix(result));
-                        let detail = row.details.get(index).and_then(|d| d.as_deref());
-                        rsx! {
-                            div { class: "pm-platform-result",
-                                code { "{row.system_name}" }
-                                span { class, "{policy_cell_glyph(result)} {result}" }
-                                if let Some(detail) = detail { span { "{detail}" } }
-                            }
-                        }
-                    }
-                }
-            } else { p { "Global CF-agent evidence is unavailable in this response." } }
-        }
-    }
+/// Returns whether an unknown outcome has no saved diagnostic evidence.
+fn evidence_unavailable(
+    outcome: Outcome,
+    assertion: Option<&str>,
+    path: Option<&str>,
+    detail: Option<&str>,
+) -> bool {
+    outcome == Outcome::Unknown
+        && [assertion, path, detail]
+            .into_iter()
+            .all(|text| text.is_none_or(|text| text.trim().is_empty()))
 }

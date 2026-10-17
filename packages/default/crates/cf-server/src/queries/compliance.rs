@@ -2103,6 +2103,8 @@ pub async fn delete_bundle(pool: &PgPool, bundle_id: Uuid) -> Result<BundleDelet
 /// [`list_bundle_systems_for_version`] to inspect assignments to another exact
 /// version. This alias never mixes assigned versions. Without a selected
 /// default revision it returns an empty collection, not lineage-wide data.
+/// Callers must authorize fleet-wide access or use
+/// [`list_bundle_systems_for_user`] for environment-scoped reads.
 ///
 /// # Errors
 ///
@@ -2126,17 +2128,90 @@ pub async fn list_bundle_systems(
     pool: &PgPool,
     bundle_id: Uuid,
 ) -> Result<Option<ComplianceBundleSystemsResponse>> {
+    list_bundle_systems_for_user(pool, bundle_id, None, None).await
+}
+
+/// Returns exact-revision system rollups scoped to current user memberships.
+///
+/// `version_id: None` selects the catalog default revision. `user_id: None`
+/// grants fleet-wide access and is reserved for authorized administrators.
+/// `Some(user_id)` restricts candidates to existing systems whose current
+/// environment has a current membership for that user. An empty scope returns
+/// empty systems and zero totals, without hiding global bundle/version identity.
+/// Filtering precedes evidence loading and every derived rollup.
+/// Membership and environment checks share the candidate SELECT's snapshot;
+/// subsequent evidence reads retain the existing pool-based read behavior.
+/// Receiver handlers that hold scope locks use
+/// `list_bundle_systems_for_locked_ids` to exclude unlocked new candidates.
+///
+/// # Errors
+///
+/// Returns an error if bundle, membership, system, or evidence reads fail.
+///
+/// # Examples
+///
+/// ```no_run
+/// # async fn example(pool: &sqlx::PgPool, bundle: uuid::Uuid, user: uuid::Uuid) -> anyhow::Result<()> {
+/// let visible = crystal_forge::queries::compliance::list_bundle_systems_for_user(
+///     pool, bundle, None, Some(user),
+/// ).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn list_bundle_systems_for_user(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    version_id: Option<Uuid>,
+    user_id: Option<Uuid>,
+) -> Result<Option<ComplianceBundleSystemsResponse>> {
+    list_bundle_systems_scoped(pool, bundle_id, version_id, user_id, None).await
+}
+
+/// Returns rollups restricted to an exact set of locked authorized systems.
+///
+/// The caller must hold shared system and membership locks for every ID until
+/// this result is materialized. An empty slice grants no system visibility.
+/// Candidates, evidence, and totals cannot include IDs outside this slice,
+/// even if another system becomes authorized while the read is in flight.
+/// Global bundle/version identity and default-revision semantics are preserved.
+///
+/// # Errors
+///
+/// Returns an error if bundle, system, assignment, or evidence reads fail.
+pub(crate) async fn list_bundle_systems_for_locked_ids(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    version_id: Option<Uuid>,
+    allowed_system_ids: &[Uuid],
+) -> Result<Option<ComplianceBundleSystemsResponse>> {
+    list_bundle_systems_scoped(pool, bundle_id, version_id, None, Some(allowed_system_ids)).await
+}
+
+async fn list_bundle_systems_scoped(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    version_id: Option<Uuid>,
+    user_id: Option<Uuid>,
+    allowed_system_ids: Option<&[Uuid]>,
+) -> Result<Option<ComplianceBundleSystemsResponse>> {
     let Some(bundle) = find_bundle(pool, bundle_id).await? else {
         return Ok(None);
     };
     // The unversioned endpoint is a convenience alias for the bundle's current
     // immutable revision. It must never fall back to mutable lineage membership
     // because that would bypass assignment overlays and diverge from the UI.
-    if let Some(version_id) = bundle
-        .current_published_version_id
+    if let Some(version_id) = version_id
+        .or(bundle.current_published_version_id)
         .or(bundle.current_draft_version_id)
     {
-        return list_bundle_systems_for_version(pool, bundle_id, version_id).await;
+        return list_bundle_systems_for_version_scoped(
+            pool,
+            bundle_id,
+            version_id,
+            user_id,
+            allowed_system_ids,
+        )
+        .await;
     }
     // COMPATIBILITY: This alias describes one default immutable revision, not
     // a union of every active versioned assignment. Without a default it must
@@ -2153,6 +2228,8 @@ async fn list_explicit_bundle_version_system_rows(
     pool: &PgPool,
     bundle_id: Uuid,
     bundle_version_id: Uuid,
+    user_id: Option<Uuid>,
+    allowed_system_ids: Option<&[Uuid]>,
 ) -> Result<Vec<SystemRow>> {
     // INVARIANT: The immutable current version belongs to the assignment
     // lineage. An active system assignment wins over any environment
@@ -2182,21 +2259,47 @@ async fn list_explicit_bundle_version_system_rows(
                   ))
          )
         JOIN compliance_bundles b ON b.id = a.bundle_id AND b.id = $1
+        WHERE ($3::uuid IS NULL OR EXISTS (
+            SELECT 1 FROM systems current_system
+            JOIN user_environment_memberships membership
+              ON membership.environment_id = current_system.environment_id
+             AND membership.user_id = $3
+            WHERE current_system.id = v.id
+        ))
+          AND ($4::uuid[] IS NULL OR v.id=ANY($4))
         ORDER BY v.hostname ASC
         "#,
     )
     .bind(bundle_id)
     .bind(bundle_version_id)
+    .bind(user_id)
+    .bind(allowed_system_ids)
     .fetch_all(pool)
     .await?)
 }
 
-/// Resolve the systems rollup against one exact immutable bundle revision.
-/// This deliberately does not substitute the lineage's current membership.
+/// Resolves fleet-wide rollups against one exact immutable bundle revision.
+///
+/// This does not substitute the lineage's current membership. Callers must
+/// authorize fleet-wide access or use [`list_bundle_systems_for_user`].
+///
+/// # Errors
+///
+/// Returns an error if bundle, system, assignment, or evidence reads fail.
 pub async fn list_bundle_systems_for_version(
     pool: &PgPool,
     bundle_id: Uuid,
     bundle_version_id: Uuid,
+) -> Result<Option<ComplianceBundleSystemsResponse>> {
+    list_bundle_systems_for_version_scoped(pool, bundle_id, bundle_version_id, None, None).await
+}
+
+async fn list_bundle_systems_for_version_scoped(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    bundle_version_id: Uuid,
+    user_id: Option<Uuid>,
+    allowed_system_ids: Option<&[Uuid]>,
 ) -> Result<Option<ComplianceBundleSystemsResponse>> {
     let Some(_bundle) = find_bundle(pool, bundle_id).await? else {
         return Ok(None);
@@ -2232,8 +2335,16 @@ pub async fn list_bundle_systems_for_version(
     .bind(bundle_id)
     .fetch_all(pool)
     .await?;
-    let systems =
-        list_explicit_bundle_version_system_rows(pool, bundle_id, bundle_version_id).await?;
+    // SECURITY: Select visible current systems before loading host evidence or
+    // deriving counts. Retaining fleet-wide totals after filtering leaks scope.
+    let systems = list_explicit_bundle_version_system_rows(
+        pool,
+        bundle_id,
+        bundle_version_id,
+        user_id,
+        allowed_system_ids,
+    )
+    .await?;
     let system_ids: Vec<Uuid> = systems.iter().map(|system| system.id).collect();
     let effective = resolve_systems_effective_policies_for_bundle_version_batch(
         pool,
@@ -2823,10 +2934,11 @@ pub async fn get_system_evidence(
             version.id
         }
     };
-    let system = list_explicit_bundle_version_system_rows(pool, bundle_id, selected_version_id)
-        .await?
-        .into_iter()
-        .find(|row| row.id == system_id);
+    let system =
+        list_explicit_bundle_version_system_rows(pool, bundle_id, selected_version_id, None, None)
+            .await?
+            .into_iter()
+            .find(|row| row.id == system_id);
     let Some(system) = system else {
         return Ok(None);
     };

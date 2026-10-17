@@ -49,10 +49,10 @@ use crate::queries::compliance::{
     PolicyDraftDerivationError, PolicyDraftIntent, bundle_deletion_eligibility,
     create_bundle as create_bundle_row, create_grouping_scheme, delete_bundle as delete_bundle_row,
     delete_grouping_scheme, ensure_bundle_draft, ensure_policy_draft, get_system_evidence,
-    list_bundle_systems, list_bundle_systems_for_version, list_bundle_version_policy_membership,
-    list_bundle_version_requirement_membership, list_bundles, list_grouping_schemes,
-    list_system_bundles, load_policy_version_usage, update_bundle as update_bundle_row,
-    update_grouping_scheme,
+    list_bundle_systems_for_locked_ids, list_bundle_systems_for_user,
+    list_bundle_version_policy_membership, list_bundle_version_requirement_membership,
+    list_bundles, list_grouping_schemes, list_system_bundles, load_policy_version_usage,
+    update_bundle as update_bundle_row, update_grouping_scheme,
 };
 use crate::queries::compliance_interchange;
 use crate::queries::framework_requirements::{
@@ -389,23 +389,54 @@ pub async fn get_bundle_version_requirement_membership(
     }
 }
 
-/// `GET /api/v1/compliance/bundles/:id/systems`
+/// Returns bundle systems and totals within the caller's current environments.
+///
+/// `GET /api/v1/compliance/bundles/:id/systems` preserves global bundle/version
+/// identity. Non-admin callers see only systems in their current memberships;
+/// all evidence and totals derive from those systems. Admins retain fleet-wide
+/// access. A valid revision with no visible systems returns an empty collection.
+/// Non-admin reads retain shared membership/system locks through response
+/// materialization and restrict candidates to the exact locked system IDs.
+/// Missing bundles or mismatched versions return 404, authentication failures
+/// return 403, and database failures return 500.
 pub async fn get_compliance_bundle_systems(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(bundle_id): Path<Uuid>,
     Query(query): Query<BundleVersionQuery>,
 ) -> impl IntoResponse {
-    if authenticated_user_roles(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
     }
 
-    let result = match query.version_id {
-        Some(version_id) => list_bundle_systems_for_version(&pool, bundle_id, version_id).await,
-        None => list_bundle_systems(&pool, bundle_id).await,
+    let guard = if has_admin_role(&roles) {
+        None
+    } else {
+        match lock_receiver_read_scope(&pool, user_id, crate::auth::models::Role::Viewer, None)
+            .await
+        {
+            Ok(guard) => Some(guard),
+            Err(response) => return response,
+        }
+    };
+    let result = if let Some((_, system_ids)) = &guard {
+        list_bundle_systems_for_locked_ids(&pool, bundle_id, query.version_id, system_ids).await
+    } else {
+        list_bundle_systems_for_user(&pool, bundle_id, query.version_id, None).await
     };
     match result {
-        Ok(Some(response)) => (StatusCode::OK, Json(response)).into_response(),
+        Ok(Some(response)) => {
+            let response = (StatusCode::OK, Json(response)).into_response();
+            if let Some((tx, _)) = guard {
+                if tx.commit().await.is_err() {
+                    return internal_error("Failed to commit read scope guard");
+                }
+            }
+            response
+        }
         Ok(None) => not_found(),
         Err(_) => internal_error("Failed to load compliance systems"),
     }
@@ -416,21 +447,115 @@ pub struct BundleVersionQuery {
     pub version_id: Option<Uuid>,
 }
 
-/// `GET /api/v1/systems/:system_id/compliance`
-/// Returns all compliance bundles applicable to the specified system with rollups.
+/// Locks a non-admin receiver's current authorization rows until release.
+///
+/// A target read locks the system first, then the user's membership rows in
+/// environment-ID order, and validates the locked environment with the role
+/// policy. A collection read locks memberships first, then authorized systems
+/// in system-ID order. Shared reader locks are compatible across both paths;
+/// sorted rows avoid opposite-order acquisition within each row class.
+/// PostgreSQL can abort a deadlock involving writers; callers must fail closed.
+///
+/// The returned transaction must remain open through response materialization.
+/// Collection callers must use the returned exact IDs, not a fresh membership
+/// predicate: systems created or moved into scope later are not locked.
+/// Pool-based data reads require another available connection while this guard
+/// holds its connection. This guard stabilizes authorization, not evidence.
+///
+/// # Errors
+///
+/// Returns the same 404 for missing and inaccessible targets. Returns 500 on
+/// transaction or lock-query failure. Dropping a failed guard rolls it back.
+pub(super) async fn lock_receiver_read_scope(
+    pool: &PgPool,
+    user_id: Uuid,
+    role: crate::auth::models::Role,
+    target: Option<Uuid>,
+) -> Result<(sqlx::Transaction<'_, sqlx::Postgres>, Vec<Uuid>), axum::response::Response> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| internal_error("Failed to start read scope guard"))?;
+    let environment = if let Some(system_id) = target {
+        let row: Option<(Option<Uuid>,)> =
+            sqlx::query_as("SELECT environment_id FROM systems WHERE id=$1 FOR SHARE")
+                .bind(system_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|_| internal_error("Failed to lock system read scope"))?;
+        Some(row.ok_or_else(not_found)?.0)
+    } else {
+        None
+    };
+    // CONCURRENCY: FOR SHARE blocks membership deletion and reassignment, and
+    // blocks system moves/deletion (FOR KEY SHARE would permit environment
+    // updates). Keep these locks while separate pool reads assemble the body.
+    let environments: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT environment_id FROM user_environment_memberships
+         WHERE user_id=$1 ORDER BY environment_id FOR SHARE",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|_| internal_error("Failed to lock environment memberships"))?;
+    let system_ids = if let Some(environment) = environment {
+        if !role.can_access_system_environment(environment, &environments.iter().copied().collect())
+        {
+            return Err(not_found());
+        }
+        target.into_iter().collect()
+    } else {
+        sqlx::query_scalar(
+            "SELECT id FROM systems WHERE environment_id=ANY($1)
+             ORDER BY id FOR SHARE",
+        )
+        .bind(&environments)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|_| internal_error("Failed to lock system read scope"))?
+    };
+    Ok((tx, system_ids))
+}
+
+/// Returns applicable compliance bundles and rollups for an accessible system.
+///
+/// `GET /api/v1/systems/:system_id/compliance` requires current environment
+/// membership for non-admin callers, including for legacy direct-policy data.
+/// Administrators retain fleet-wide access.
+/// Non-admin reads hold shared locks on the target and current memberships
+/// until the response body is materialized.
 ///
 /// This endpoint uses set-based queries to avoid N+1 database patterns.
 /// All-or-nothing behavior: infrastructure failures return 500.
 ///
-/// Returns 404 if the system does not exist.
+/// Missing and inaccessible systems return the same 404 response.
+/// Authentication failures return 403; database failures return 500.
 pub async fn get_system_compliance_bundles(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if authenticated_user_roles(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
     }
+    let guard = if has_admin_role(&roles) {
+        None
+    } else {
+        match lock_receiver_read_scope(
+            &pool,
+            user_id,
+            crate::auth::models::Role::Viewer,
+            Some(system_id),
+        )
+        .await
+        {
+            Ok((tx, _)) => Some(tx),
+            Err(response) => return response,
+        }
+    };
 
     match list_system_bundles(&pool, system_id).await {
         Ok(Some(bundle_rollups)) => {
@@ -449,7 +574,7 @@ pub async fn get_system_compliance_bundles(
                 })
                 .collect();
 
-            (
+            let response = (
                 StatusCode::OK,
                 Json(SystemComplianceBundlesResponse {
                     system_id,
@@ -458,14 +583,24 @@ pub async fn get_system_compliance_bundles(
                     overall_rollup: bundle_rollups.overall_rollup,
                 }),
             )
-                .into_response()
+                .into_response();
+            if let Some(tx) = guard {
+                if tx.commit().await.is_err() {
+                    return internal_error("Failed to commit read scope guard");
+                }
+            }
+            response
         }
         Ok(None) => not_found(),
         Err(_) => internal_error("Failed to load system compliance bundles"),
     }
 }
 
-/// `GET /api/v1/compliance/bundles/:id/systems/:system_id/evidence`
+/// Returns deployed compliance evidence only within the caller's current scope.
+///
+/// `GET /api/v1/compliance/bundles/:id/systems/:system_id/evidence` requires
+/// viewer-or-above access. Nonadmin scope locks remain held through response
+/// materialization; absent and inaccessible systems share a 404 response.
 pub async fn get_compliance_system_evidence(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -475,28 +610,35 @@ pub async fn get_compliance_system_evidence(
     let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
-    let system = match find_system_access_row(&pool, system_id).await {
-        Ok(Some(system)) => system,
-        Ok(None) => return not_found(),
-        Err(_) => return internal_error("Failed to load system"),
-    };
-    if !has_admin_role(&roles) {
-        let environment_ids = match get_user_environment_membership_ids(&pool, user_id).await {
-            Ok(environment_ids) => environment_ids,
-            Err(_) => return internal_error("Failed to load environment memberships"),
-        };
-        if system
-            .environment_id
-            .is_none_or(|environment_id| !environment_ids.contains(&environment_id))
-        {
-            // SECURITY: Return Not Found so callers cannot enumerate systems
-            // outside their environment memberships.
-            return not_found();
-        }
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
+        return forbidden();
     }
+    let guard = if has_admin_role(&roles) {
+        None
+    } else {
+        match lock_receiver_read_scope(
+            &pool,
+            user_id,
+            crate::auth::models::Role::Viewer,
+            Some(system_id),
+        )
+        .await
+        {
+            Ok((tx, _)) => Some(tx),
+            Err(response) => return response,
+        }
+    };
 
     match get_system_evidence(&pool, bundle_id, system_id, query.version_id).await {
-        Ok(Some(response)) => (StatusCode::OK, Json(response)).into_response(),
+        Ok(Some(response)) => {
+            let response = (StatusCode::OK, Json(response)).into_response();
+            if let Some(tx) = guard {
+                if tx.commit().await.is_err() {
+                    return internal_error("Failed to commit read scope guard");
+                }
+            }
+            response
+        }
         Ok(None) => not_found(),
         Err(_) => internal_error("Failed to load compliance evidence"),
     }
@@ -8047,6 +8189,8 @@ fn is_body_limit_error(err: &axum::extract::multipart::MultipartError) -> bool {
 
 #[cfg(test)]
 mod tests {
+    mod receiver_security;
+
     use super::*;
     use crate::auth::session::{
         CSRF_COOKIE_NAME, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, hash_token,

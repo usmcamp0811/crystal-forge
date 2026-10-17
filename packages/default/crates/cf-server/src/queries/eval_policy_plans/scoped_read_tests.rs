@@ -67,8 +67,21 @@ async fn fixture(pool: &PgPool, shared: bool) -> Fixture {
     let mut tx = pool.begin().await.unwrap();
     insert_plan(&mut tx, commit, &plan).await.unwrap();
     tx.commit().await.unwrap();
+    let names = if shared {
+        vec!["shared"]
+    } else {
+        vec!["hidden-config", "shared"]
+    };
+    tests::inventory(
+        pool,
+        commit,
+        number,
+        &names,
+        crate::queries::evaluation_inventory::InventoryExecutionMode::Mock,
+    )
+    .await;
     let document = json!({"evaluation_attempt": number, "execution_mode":"mock",
-    "global":{"cfAgentEnabled":{"passed":true}},
+    "global":{"cfAgentEnabled":{"passed":false,"details":"configuration-wide gate diagnostic"}},
     "assigned":{
         plan.columns[0].policy_version_id.to_string(): {"passed":true,"name":"visible-policy","details":"visible detail"},
         hidden_policy.to_string(): {"passed":false,"blocking":true,"name":"hidden-only-policy","details":"hidden-only-detail"}
@@ -78,7 +91,7 @@ async fn fixture(pool: &PgPool, shared: bool) -> Fixture {
     } else {
         vec!["shared", "hidden-config"]
     } {
-        sqlx::query("INSERT INTO evaluation_mock_outcomes(evaluation_attempt_id,commit_id,attempt_number,configuration_name,policy_results,cf_agent_enabled,policy_requirements_met) VALUES($1,$2,$3,$4,$5,TRUE,FALSE)")
+        sqlx::query("INSERT INTO evaluation_mock_outcomes(evaluation_attempt_id,commit_id,attempt_number,configuration_name,policy_results,cf_agent_enabled,policy_requirements_met) VALUES($1,$2,$3,$4,$5,FALSE,FALSE)")
             .bind(attempt).bind(commit).bind(number).bind(config).bind(&document)
             .execute(pool).await.unwrap();
     }
@@ -135,6 +148,14 @@ async fn mixed_flake_projects_all_metadata_and_shared_configuration(pool: PgPool
             assert!(matrix.mock_evidence);
             assert_eq!(matrix.rows[0].cells.len(), 1);
             assert_eq!(matrix.rows[0].details.len(), 1);
+            assert_eq!(
+                matrix.rows[0].cells,
+                vec![if i == 0 {
+                    EvalMatrixCell::Pass
+                } else {
+                    EvalMatrixCell::Fail
+                }]
+            );
             let (_, pinned) = fetch_matrix_for_user_at_attempt(
                 &pool,
                 f.commit,
@@ -151,6 +172,25 @@ async fn mixed_flake_projects_all_metadata_and_shared_configuration(pool: PgPool
             );
             assert_eq!(flat.len(), 1);
             assert_eq!(flat[0].system_name, format!("captured-host-{i}"));
+            if shared {
+                assert!(flat[0].policy_results.get("global").is_none());
+                assert!(flat[0].policy_requirements_met.is_none());
+                assert!(flat[0].error_message.is_none());
+                assert_eq!(matrix.configuration_failures.len(), 1);
+                assert!(matrix.configuration_failures[0].detail.is_empty());
+                let summary = matrix.configuration_summary.as_ref().unwrap();
+                assert_eq!((summary.total, summary.pending, summary.failed), (1, 0, 1));
+                assert!(
+                    !format!("{flat:?} {pinned:?} {matrix:?}")
+                        .contains("configuration-wide gate diagnostic")
+                );
+            } else {
+                assert_eq!(
+                    flat[0].policy_results["global"]["cfAgentEnabled"]["passed"],
+                    false
+                );
+                assert_eq!(flat[0].policy_requirements_met, Some(false));
+            }
             assert_eq!(
                 flat[0].policy_results["assigned"]
                     .as_object()
@@ -175,6 +215,14 @@ async fn mixed_flake_projects_all_metadata_and_shared_configuration(pool: PgPool
         assert_eq!(admin.columns.len(), 2);
         assert_eq!(admin.bundles.len(), 2);
         assert_eq!(flat.len(), if shared { 1 } else { 2 });
+        assert_eq!(
+            flat[0].policy_results["global"]["cfAgentEnabled"]["passed"],
+            false
+        );
+        assert_eq!(
+            admin.configuration_failures.len(),
+            if shared { 1 } else { 2 }
+        );
     }
 }
 
@@ -327,18 +375,26 @@ async fn legacy_configuration_names_cannot_grant_historical_host_access(pool: Pg
     .unwrap();
     sqlx::query("INSERT INTO derivations(commit_id,derivation_name,derivation_type,status_id,policy_results,policy_requirements_met) VALUES($1,'shared','nixos',5,'{\"assigned\":{\"hidden\":{\"name\":\"hidden-policy\",\"passed\":true}}}',TRUE)")
         .bind(legacy).execute(&pool).await.unwrap();
-    let (flat, matrix) = fetch_matrix_for_user(&pool, legacy, Some(f.users[0]))
+    let scoped = fetch_matrix_for_user(&pool, legacy, Some(f.users[0]))
         .await
-        .unwrap()
         .unwrap();
-    assert_eq!(matrix.provenance, EvalMatrixProvenance::LegacyUnavailable);
-    assert!(flat.is_empty());
-    assert!(matrix.rows.is_empty() && matrix.columns.is_empty() && matrix.bundles.is_empty());
-    assert!(!matrix.mock_evidence);
+    assert!(
+        scoped.is_none(),
+        "current flake membership cannot authorize unproven history"
+    );
     let (flat, admin) = fetch_matrix(&pool, legacy).await.unwrap();
     assert_eq!(admin.provenance, EvalMatrixProvenance::LegacyUnavailable);
-    assert_eq!(flat.len(), 1);
-    assert!(flat[0].policy_results["assigned"].get("hidden").is_some());
+    assert!(admin.rows.is_empty());
+    assert!(admin.inventory.is_none());
+    assert!(admin.configuration_summary.is_none());
+    assert!(flat.is_empty());
+    let stored: Value =
+        sqlx::query_scalar("SELECT policy_results FROM derivations WHERE commit_id=$1")
+            .bind(legacy)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+    assert!(stored["assigned"].get("hidden").is_some());
 }
 
 #[sqlx::test(migrations = "./migrations")]

@@ -10,6 +10,23 @@ use uuid::Uuid;
 /// Describes the captured plan and outcomes for one represented attempt.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalPolicyMatrixSnapshot {
+    /// Display identity copied at policy-plan capture, never reconstructed for
+    /// historical records from the current registry. Older captures omit it.
+    #[serde(default)]
+    pub source_label: Option<EvalSourceLabel>,
+    /// Exact-attempt post-discovery inventory, projected to current visibility.
+    /// None means discovery is pending or unavailable, never an empty inventory.
+    /// This extension is read-only and is not part of the pre-execution plan.
+    #[serde(default)]
+    pub inventory: Option<EvalAttemptInventory>,
+    /// Configuration-level gate coverage for the visible selected inventory.
+    /// Absent until exact-attempt discovery exists. This does not count controls.
+    #[serde(default)]
+    pub configuration_summary: Option<EvalConfigurationSummary>,
+    /// Exact-attempt global gate failures, not assigned policy-version failures.
+    /// Entries require complete authorization to the configuration-wide evidence.
+    #[serde(default)]
+    pub configuration_failures: Vec<EvalConfigurationFailure>,
     /// Identifies the immutable evaluation attempt, when recorded.
     pub evaluation_attempt_id: Option<Uuid>,
     /// Names the selected queue/history attempt in the same read snapshot.
@@ -50,6 +67,72 @@ pub struct EvalPolicyMatrixSnapshot {
     pub empty_bundle_metadata_complete: bool,
     /// Planned rows survive missing, failed, or stale derivation results.
     pub rows: Vec<EvalMatrixRow>,
+}
+
+/// Preserves the watched source's display identity at capture time.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalSourceLabel {
+    /// Flake display name at capture, not a generated reference-fixture label.
+    pub name: String,
+    /// Watched branch at capture; None does not imply a branch named main.
+    pub branch: Option<String>,
+}
+
+/// Lists verified configuration names discovered by the selected attempt.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalAttemptInventory {
+    /// Native discovery or explicitly synthetic mock inventory.
+    pub execution_mode: String,
+    /// Sorted distinct visible discovered configuration identities.
+    pub configurations: Vec<String>,
+    /// Visible discovered identities selected for execution; not proof of success.
+    pub selected_configurations: Vec<String>,
+}
+
+/// Counts distinct configuration gates, without duplicating shared host rows.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct EvalConfigurationSummary {
+    /// Distinct visible planned or discovered configurations for this attempt.
+    pub total: usize,
+    /// Selected configurations with an unambiguous successful gate result.
+    pub passed: usize,
+    /// Selected configurations with an unambiguous failed policy/agent gate.
+    pub failed: usize,
+    /// Selected configurations with an authoritative Nix evaluation failure.
+    pub evaluation_failed: usize,
+    /// Selected configurations without a terminal result while the current
+    /// active attempt can still complete their evaluation.
+    pub pending: usize,
+    /// Configurations with unavailable terminal evidence, denied requirement
+    /// coverage, or a planned name absent from verified discovery.
+    #[serde(default)]
+    pub unavailable: usize,
+    /// Discovered configurations deliberately excluded from execution selection.
+    pub excluded: usize,
+}
+
+/// Reports a genuine configuration-level global gate failure without policy IDs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct EvalConfigurationFailure {
+    /// Identifies the actual configuration gate, without claiming a policy ID.
+    #[serde(default)]
+    pub kind: EvalConfigurationFailureKind,
+    /// Exact discovered configuration key, not a fabricated system UUID.
+    pub configuration_name: String,
+    /// Saved failure detail from the matching-attempt global CF-agent result.
+    /// Empty when the false gate is authoritative but no diagnostic was saved.
+    pub detail: String,
+}
+
+/// Distinguishes the unconditional agent gate from unattributed requirement gates.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalConfigurationFailureKind {
+    /// The authoritative CF-agent configuration gate is false.
+    #[default]
+    CfAgent,
+    /// The configuration requirement gate failed without a provable control cause.
+    Requirements,
 }
 
 /// Describes whether historical assignment provenance was recorded.

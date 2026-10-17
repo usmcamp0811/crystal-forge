@@ -857,6 +857,16 @@ async fn load_and_capture_policies_for_eval(
             crate::queries::eval_policy_plans::lock_attempt(&mut tx, commit_id, number).await?;
         capture.evaluation_attempt_id = Some(id);
         capture.attempt_number = number;
+        let (name, branch): (String, Option<String>) = sqlx::query_as(
+            "SELECT f.name,f.branch FROM flakes f JOIN commits c ON c.flake_id=f.id
+             WHERE c.id=$1 AND f.id=$2",
+        )
+        .bind(commit_id)
+        .bind(flake_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        capture.source_label =
+            Some(crate::api::eval_policy_matrix::EvalSourceLabel { name, branch });
     }
     let result = load_policies_for_eval_in_tx(&mut tx, flake_id, &mut capture).await;
     if let Some((commit_id, _)) = attempt {

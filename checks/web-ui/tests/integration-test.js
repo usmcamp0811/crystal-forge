@@ -21346,11 +21346,10 @@ security.audit.enable = true;</fixtext>
     description: "Dense evaluation matrix bundle/control modes, overlap, health, drilldown and preserved state",
     action: async (page) => {
       const { expect } = require("@playwright/test");
-      const { denseMatrix, runEvalPolicyMatrixWorkflow } = require("./eval-policy-matrix-workflow.js");
+      const { runEvalPolicyMatrixWorkflow } = require("./eval-policy-matrix-workflow.js");
       const stepName = "26e-evaluation-policy-bundle-controls";
       const commitId = 488;
       const now = "2026-10-15T12:00:00Z";
-      const systems = denseMatrix(commitId).matrix.rows.map(row => row.system_name);
       // Browser-local fixtures keep this workflow independent of seeded commits
       // and safe for the host runner's existing authenticated context.
       const item = {
@@ -21358,9 +21357,28 @@ security.audit.enable = true;</fixtext>
         branch: "main", commit_hash: "0488048804880488048804880488048804880488",
         commit_message: "[FIXTURE] Dense evaluation policy matrix", author: "Fixture Bot",
         committed_at: now, enqueued_at: now, is_latest_per_flake: true,
-        evaluation_status: "in_progress", queue_position: 1, systems,
-        system_count: systems.length, passed_count: 56, policy_failed_count: 1,
-        eval_failed_count: 0, attempt_number: 1,
+        evaluation_status: "in_progress", queue_position: 1, systems: [],
+        system_count: 0, passed_count: 0, policy_failed_count: 0,
+        inventory_available: false, policy_counts_available: false, policy_pending_count: 0,
+        policy_unavailable_count: 0, unselected_count: 0, eval_failed_count: 0, attempt_number: 1,
+      };
+      // Only successful latest responses advance the browser-local queue fixture.
+      // Pinned historical reads must never retarget this latest summary.
+      const onSnapshot = snapshot => {
+        const summary = snapshot?.configuration_summary;
+        item.systems = [...new Set([
+          ...(snapshot?.rows ?? []).map(row => row.configuration_name),
+          ...(snapshot?.inventory?.configurations ?? []),
+        ])].sort();
+        item.inventory_available = snapshot?.inventory != null;
+        item.policy_counts_available = item.inventory_available && summary != null;
+        item.system_count = item.inventory_available ? summary?.total ?? 0 : 0;
+        item.passed_count = summary?.passed ?? 0;
+        item.policy_failed_count = summary?.failed ?? 0;
+        item.eval_failed_count = summary?.evaluation_failed ?? 0;
+        item.policy_pending_count = summary?.pending ?? 0;
+        item.policy_unavailable_count = summary?.unavailable ?? 0;
+        item.unselected_count = summary?.excluded ?? 0;
       };
       const queueEndpoint = "**/api/v1/commits/eval-queue**";
       const logEndpoint = `**/api/v1/commits/${commitId}/eval/logs*`;
@@ -21370,11 +21388,21 @@ security.audit.enable = true;</fixtext>
         forceRequests += 1;
         return route.fulfill({ status: 204 });
       };
-      const queueRoute = route => route.fulfill({ json: {
-        active_count: 1, completed_count: 0, successful_count: 0, failed_count: 0,
-        domain_total: 1, filtered_total: 1, execution_mode: "mock",
-        timestamp: now, items: [item],
-      } });
+      let authenticatedModeProbe = false;
+      const queueRoute = async route => {
+        const url = new URL(route.request().url());
+        if (url.searchParams.has("_ts") && !url.searchParams.has("limit")) {
+          // The banner uses this protected endpoint too. Cross-origin preview
+          // requests must include the session, not rely on public queue access.
+          const headers = await route.request().allHeaders();
+          authenticatedModeProbe = /(?:^|;\s*)__Host-cf-session=/.test(headers.cookie ?? "");
+        }
+        await route.fulfill({ json: {
+          active_count: 1, completed_count: 0, successful_count: 0, failed_count: 0,
+          domain_total: 1, filtered_total: 1, execution_mode: "mock",
+          timestamp: now, items: [item],
+        } });
+      };
       const logRoute = route => route.fulfill({ json: [] });
       const drawer = page.getByRole("dialog", { name: "Evaluation detail", exact: true });
       await page.route(queueEndpoint, queueRoute);
@@ -21382,6 +21410,7 @@ security.audit.enable = true;</fixtext>
       await page.route(forceEndpoint, forceRoute);
       try {
         await page.goto(`${baseUrl}/evaluations`, { timeout: LOAD_TIMEOUT });
+        await expect.poll(() => authenticatedModeProbe).toBe(true);
         const coach = page.getByRole("complementary", { name: "Crystal Forge Coach", exact: true });
         // Saved Coach preferences can arrive between the visibility check and
         // click. Retry normal user interaction without bypassing hit testing.
@@ -21392,13 +21421,15 @@ security.audit.enable = true;</fixtext>
           await page.getByRole("row").filter({ hasText: item.commit_hash.slice(0, 12) }).click({ timeout: 1000 });
         }).toPass({ timeout: LOAD_TIMEOUT });
         await expect(drawer).toBeVisible();
+        await expect(drawer.locator('.ed-stat').filter({has:page.getByText('Systems',{exact:true})}).locator('.ed-stat-val')).toHaveText(/—\s*Discovering/);
+        await expect(drawer.locator('.ed-stat').filter({has:page.getByText('Policy',{exact:true})}).locator('.ed-stat-val')).toHaveText(/—\s*Pending/);
         await drawer.getByRole("button", { name: "Expand", exact: true }).click();
         await expect(drawer.getByRole("button", { name: "Restore", exact: true })).toBeVisible();
         await expect.poll(async () => (await drawer.boundingBox()).width)
           .toBe(Math.min(1360, page.viewportSize().width));
         await drawer.getByRole("button", { name: "Restore", exact: true }).click();
         await runEvalPolicyMatrixWorkflow(page, commitId,
-          state => captureWorkflowState(page, stepName, state));
+          state => captureWorkflowState(page, stepName, state), onSnapshot);
         await drawer.getByRole("button", { name: "Close", exact: true }).click();
         await expect(drawer).toBeHidden();
         item.evaluation_status = "cancelling";

@@ -1,12 +1,17 @@
 //! Read-only exact evaluation-check evidence in Compliance context.
 //!
 //! This receiver never queries current bundle membership or deployed evidence.
-//! A missing in-memory handoff or mismatched route is explicitly unavailable.
+//! Full route identity is validated against the authorized pinned API response.
+//! Missing or mismatched evidence fails closed, including after refresh.
 
 use crate::api::{
     client::fetch_eval_attempt_policy_matrix,
     models::{EvalPolicyMatrixResponse, eval_policy_matrix::*},
 };
+use crate::components::dialog_focus::{
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
+};
+use crate::components::icon::{Icon, IconName};
 use crate::routes::Route;
 use crate::state::evaluation_drawer::*;
 use dioxus::prelude::*;
@@ -18,25 +23,23 @@ fn validate<'a>(
 ) -> Option<(&'a EvalPolicyMatrixSnapshot, &'a EvalMatrixRow, usize)> {
     let snapshot = data.matrix.as_ref()?;
     let identity = &target.evaluation;
-    if identity.commit_sha.len() != 40
-        || !identity.commit_sha.bytes().all(|b| b.is_ascii_hexdigit())
-    {
+    if !identity.matches_response(data) || snapshot.provenance != EvalMatrixProvenance::Captured {
         return None;
     }
-    if data.commit_id != identity.commit_id
-        || snapshot.provenance != EvalMatrixProvenance::Captured
-        || snapshot.commit_sha.as_ref() != Some(&identity.commit_sha)
-        || snapshot.evaluation_attempt_id != Some(identity.attempt_id)
-        || snapshot.attempt_number != identity.attempt_number
-    {
-        return None;
-    }
-    snapshot.bundles.iter().find(|b| {
+    let mut bundles = snapshot.bundles.iter().filter(|b| {
         b.bundle_id == target.bundle_id && b.bundle_version_id == target.bundle_version_id
-    })?;
-    let position = snapshot.columns.iter().position(|p| {
+    });
+    bundles.next()?;
+    if bundles.next().is_some() {
+        return None;
+    }
+    let mut positions = snapshot.columns.iter().enumerate().filter(|(_, p)| {
         p.policy_id == target.policy_id && p.policy_version_id == target.policy_version_id
-    })?;
+    });
+    let (position, _) = positions.next()?;
+    if positions.next().is_some() {
+        return None;
+    }
     let mut rows = snapshot
         .rows
         .iter()
@@ -122,55 +125,134 @@ mod tests {
         ambiguous.matrix.as_mut().unwrap().rows.push(row);
         assert!(validate(&ambiguous, &target).is_none());
     }
+
+    #[test]
+    fn route_resolves_from_api_without_a_browser_handoff() {
+        let (data, target) = fixture();
+        let route = EvaluationEvidenceRoute::parse(
+            1,
+            target.evaluation.attempt_id,
+            &target.bundle_id.to_string(),
+            &target.bundle_version_id.to_string(),
+            &target.system_id.to_string(),
+            &target.policy_version_id.to_string(),
+        )
+        .unwrap();
+        let resolved = route.resolve(&data).unwrap();
+        assert_eq!(resolved, target);
+        assert!(validate(&data, &resolved).is_some());
+        let mut wrong_commit = route.clone();
+        wrong_commit.commit_id += 1;
+        assert!(wrong_commit.resolve(&data).is_none());
+        let mut wrong_attempt = route.clone();
+        wrong_attempt.attempt_id = Uuid::from_u128(99);
+        assert!(wrong_attempt.resolve(&data).is_none());
+        let mut wrong_lineage = data.clone();
+        wrong_lineage.matrix.as_mut().unwrap().bundles[0].bundle_id = Uuid::from_u128(99);
+        assert!(validate(&wrong_lineage, &route.resolve(&wrong_lineage).unwrap()).is_none());
+        let mut no_contribution = data.clone();
+        no_contribution.matrix.as_mut().unwrap().rows[0].policies[0]
+            .memberships
+            .clear();
+        assert!(validate(&no_contribution, &route.resolve(&no_contribution).unwrap()).is_none());
+        let mut legacy = data.clone();
+        legacy.matrix.as_mut().unwrap().provenance = EvalMatrixProvenance::LegacyUnavailable;
+        assert!(validate(&legacy, &route.resolve(&legacy).unwrap()).is_none());
+    }
+
+    #[test]
+    fn duplicate_captured_versions_do_not_authorize_arbitrary_selection() {
+        let (mut data, target) = fixture();
+        let duplicate = data.matrix.as_ref().unwrap().columns[0].clone();
+        data.matrix.as_mut().unwrap().columns.push(duplicate);
+        assert!(validate(&data, &target).is_none());
+        let (mut data, target) = fixture();
+        let duplicate = data.matrix.as_ref().unwrap().bundles[0].clone();
+        data.matrix.as_mut().unwrap().bundles.push(duplicate);
+        assert!(validate(&data, &target).is_none());
+    }
+
+    #[test]
+    fn pinned_identity_rejects_missing_malformed_and_retried_context() {
+        let (data, target) = fixture();
+        for index in 0..8 {
+            let mut wrong = data.clone();
+            let snapshot = wrong.matrix.as_mut().unwrap();
+            match index {
+                0 => snapshot.commit_sha = None,
+                1 => snapshot.commit_sha = Some("latest".into()),
+                2 => snapshot.commit_sha = Some("b".repeat(40)),
+                3 => snapshot.evaluation_attempt_id = None,
+                4 => snapshot.evaluation_attempt_id = Some(Uuid::nil()),
+                5 => snapshot.evaluation_attempt_id = Some(Uuid::from_u128(99)),
+                6 => snapshot.attempt_number = 0,
+                _ => snapshot.attempt_number += 1,
+            }
+            assert!(
+                !target.evaluation.matches_response(&wrong),
+                "context {index}"
+            );
+        }
+        let mut wrong = data.clone();
+        wrong.commit_id += 1;
+        assert!(!target.evaluation.matches_response(&wrong));
+        wrong.matrix = None;
+        assert!(!target.evaluation.matches_response(&wrong));
+    }
 }
 
 /// Displays one exact captured check without manufacturing assessment IDs.
 #[component]
 pub(super) fn EvaluationEvidenceDrawer(
+    commit_id: i32,
+    attempt_id: uuid::Uuid,
     bundle: String,
     version: String,
     system: String,
     policy: String,
 ) -> Element {
-    let target = use_hook(|| {
-        EVALUATION_EVIDENCE.peek().clone().filter(|target| {
-            target.bundle_id.to_string() == bundle
-                && target.bundle_version_id.to_string() == version
-                && target.system_id.to_string() == system
-                && target.policy_id.to_string() == policy
-        })
-    });
-    let requested = target.clone();
+    let requested =
+        EvaluationEvidenceRoute::parse(commit_id, attempt_id, &bundle, &version, &system, &policy);
+    let resource_target = requested.clone();
     let resource = use_resource(move || {
-        let requested = requested.clone();
+        let requested = resource_target.clone();
         async move {
             match requested {
                 Some(target) => Some(
-                    fetch_eval_attempt_policy_matrix(
-                        target.evaluation.commit_id,
-                        target.evaluation.attempt_id,
-                    )
-                    .await,
+                    fetch_eval_attempt_policy_matrix(target.commit_id, target.attempt_id).await,
                 ),
                 None => None,
             }
         }
     });
     let nav = navigator();
-    let return_commit = target.as_ref().map(|t| t.evaluation.commit_id).or_else(|| {
-        EVALUATION_RETURN
-            .peek()
-            .as_ref()
-            .map(|r| r.identity.commit_id)
-    });
+    let close = move || {
+        nav.push(Route::ComplianceView {
+            bundle: String::new(),
+            version: String::new(),
+            system: String::new(),
+            policy: String::new(),
+            poam: String::new(),
+            view: String::new(),
+        });
+    };
     rsx! {
-        section { class: "page-content", aria_label: "Compliance evaluation evidence",
-            h1 { "Evaluation check evidence" }
+        div { class: "fl-tray-backdrop", onclick: move |_| close() }
+        aside { id: "compliance-evaluation-dialog", class: "fl-tray", role: "dialog", aria_modal: "true", aria_labelledby: "compliance-evaluation-title", tabindex: "-1", style: "width:min(900px,96vw);",
+            onkeydown: move |event| if event.key() == Key::Escape { close(); },
+            DialogFocusRestore {}
+            DialogFocusSentinel { dialog_id: "compliance-evaluation-dialog".to_string(), boundary: DialogFocusBoundary::Last }
+            header { class: "fl-tray-head",
+                h2 { id: "compliance-evaluation-title", "Evaluation check evidence" }
+                button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close evaluation evidence", onclick: move |_| close(), Icon { name: IconName::X, size: 16 } }
+            }
+            div { style: "padding:18px;overflow:auto;flex:1;",
             p { "Read-only captured evaluation evidence. This check does not establish framework requirement satisfaction or deployed compliance." }
-            button { class: "btn btn-ghost focus-ring", onclick: move |_| { *EVALUATION_EVIDENCE.write() = None; if let Some(commit_id) = return_commit { nav.push(Route::EvaluationsCommitView { commit_id }); } else { nav.push(Route::EvaluationsView {}); } }, "Back to Evaluation" }
-            match (&target, &*resource.read()) {
-                (Some(target), Some(Some(Ok(data)))) => {
-                    if let Some((snapshot, row, position)) = validate(data, target) {
+            button { class: "btn btn-ghost focus-ring", onclick: move |_| { nav.push(Route::EvaluationsAttemptView { commit_id, attempt_id }); }, "Back to Evaluation" }
+            match (&requested, &*resource.read()) {
+                (Some(requested), Some(Some(Ok(data)))) => {
+                    let target = requested.resolve(data);
+                    if let Some((target, (snapshot, row, position))) = target.as_ref().and_then(|target| validate(data, target).map(|validated| (target, validated))) {
                         let control = &snapshot.columns[position];
                         let outcome = row.cells.get(position).copied().unwrap_or(EvalMatrixCell::Unknown);
                         rsx! {
@@ -197,8 +279,10 @@ pub(super) fn EvaluationEvidenceDrawer(
                     } else { rsx! { p { role: "alert", "Evaluation evidence unavailable: exact captured context or membership does not match." } } }
                 },
                 (Some(_), None) => rsx! { p { role: "status", "Loading exact evaluation evidence…" } },
-                _ => rsx! { p { role: "alert", "Evaluation evidence unavailable. The exact attempt may be missing, unauthorized, or the in-memory navigation context has expired." } },
+                _ => rsx! { p { role: "alert", "Evaluation evidence unavailable. The exact route is invalid, or the retained attempt is missing or unauthorized." } },
             }
+            }
+            DialogFocusSentinel { dialog_id: "compliance-evaluation-dialog".to_string(), boundary: DialogFocusBoundary::First }
         }
     }
 }

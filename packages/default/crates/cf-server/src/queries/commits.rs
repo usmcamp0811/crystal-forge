@@ -20,6 +20,9 @@ use tracing::{debug, error, info, warn};
 #[cfg(test)]
 mod partial_resource_failure_tests;
 
+mod inventory_summary;
+#[cfg(test)]
+mod inventory_summary_tests;
 mod policy_counts;
 
 const EVAL_QUEUE_ADVISORY_LOCK_KEY: i64 = 1_600_001;
@@ -1931,6 +1934,14 @@ pub async fn reset_commit_evaluation(pool: &PgPool, commit_id: i32) -> Result<Ev
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct EvalQueueRow {
+    /// True when the latest represented attempt has its own discovery inventory.
+    pub inventory_available: bool,
+    /// Selected authorized configurations without an authoritative outcome.
+    pub policy_pending_count: i64,
+    /// Visible discovered configurations explicitly excluded from execution.
+    pub unselected_count: i64,
+    /// Known unavailable coverage, not unfinished selected work.
+    pub policy_unavailable_count: i64,
     pub commit_id: i32,
     pub flake_id: i32,
     pub flake_name: String,
@@ -1945,9 +1956,10 @@ pub struct EvalQueueRow {
     pub queue_position: i64,
     pub systems: Vec<String>,
     pub system_count: i64,
-    /// Counts persisted records marked for the represented attempt. Returns
-    /// `None` when legacy records cannot be attributed; excludes closure counts,
-    /// outputs, isolated mock outcomes, and records marked for other attempts.
+    /// Counts persisted records within visible discovery configurations for the
+    /// represented attempt. Returns `None` when in-scope legacy records cannot
+    /// be attributed; excludes closure counts, isolated mock outcomes, and
+    /// records marked for other attempts.
     pub derivation_count: Option<i64>,
     /// True when counters have unambiguous represented-attempt attribution.
     /// False makes integer counters unavailable; true does not imply completion.
@@ -1971,19 +1983,27 @@ pub struct EvalQueueResult {
     pub filtered_total: i64,
 }
 
+/// Returns the internal administrator projection of the evaluation queue.
+///
+/// User-facing callers must use [`list_eval_queue_for_user`] with their scope.
+///
+/// # Errors
+/// Returns database query failures.
 pub async fn list_eval_queue(pool: &PgPool, params: &EvalQueueParams) -> Result<EvalQueueResult> {
     list_eval_queue_for_user(pool, params, None).await
 }
 
 /// Returns evaluation queue rows visible to the supplied user scope.
 ///
-/// Native and isolated mock counts use only the latest represented attempt.
-/// Queued retries cannot inherit earlier outcomes. `policy_counts_available`
-/// is false for unattributable legacy or ambiguous current carriers; integer
-/// counters then expose only known evidence and must not imply passing coverage.
+/// Discovery names use only the latest attempt inventory, never the artifact
+/// cache. Missing inventory exposes no names or coverage. Native and isolated
+/// mock policy counts use selected inventory names only. For scoped reads,
+/// every current host sharing a configuration must be visible before its policy
+/// evidence contributes. Known partial counts remain useful while unknown or
+/// ambiguous outcomes remain pending. Queued retries inherit no inventory.
 /// `derivation_count` instead counts only records whose numeric attempt marker
-/// matches the latest attempt row, including a queued retry not yet started.
-/// Unattributable legacy records make that count unavailable, not zero.
+/// matches the latest attempt row and whose name is in visible discovery.
+/// Unattributable in-scope legacy records make that count unavailable, not zero.
 ///
 /// # Errors
 /// Returns database query failures.
@@ -1993,6 +2013,12 @@ pub async fn list_eval_queue_for_user(
     user_id: Option<uuid::Uuid>,
 ) -> Result<EvalQueueResult> {
     let limit = params.limit.max(1).min(crate::api::models::LIMIT_MAX);
+    // CONCURRENCY: Totals, names and evidence must use the same membership and
+    // latest-attempt snapshot, including concurrent revocations and retries.
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
     let status_filter: Vec<String> = params
         .status
         .as_deref()
@@ -2004,7 +2030,7 @@ pub async fn list_eval_queue_for_user(
         .collect();
 
     let counts: (i64, i64, i64, i64, i64, i64) = sqlx::query_as(
-        r#"
+        &format!(r#"
         WITH domain AS (
             SELECT
                 c.id,
@@ -2015,21 +2041,18 @@ pub async fn list_eval_queue_for_user(
                 c.message,
                 c.author,
                 COALESCE(c.evaluation_status, 'pending') AS evaluation_status,
-                COALESCE(cac.nixos_configurations, ARRAY[]::text[]) AS systems,
+                inv.systems,
                 COALESCE(f.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = c.id, FALSE)
                     AS is_latest_per_flake
             FROM commits c
             JOIN flakes f ON f.id = c.flake_id
-            LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
+            {inventory_join}
             LEFT JOIN flake_branch_commit_snapshot latest_snapshot
               ON latest_snapshot.flake_id = c.flake_id
              AND latest_snapshot.position = 0
             WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'cancelling', 'complete', 'failed', 'cancelled')
               AND c.source_archived = false
-              AND ($5::uuid IS NULL OR EXISTS (
-                SELECT 1 FROM systems s JOIN user_environment_memberships uem ON uem.environment_id = s.environment_id
-                WHERE s.flake_id = c.flake_id AND uem.user_id = $5
-              ))
+              AND {visibility}
         ), filtered AS (
             SELECT * FROM domain
             WHERE ($1::text[] IS NULL OR cardinality($1::text[]) = 0 OR evaluation_status = ANY($1::text[]))
@@ -2048,14 +2071,14 @@ pub async fn list_eval_queue_for_user(
             (SELECT COUNT(*) FROM domain WHERE evaluation_status IN ('pending', 'in_progress', 'cancelling')),
             COUNT(*) FILTER (WHERE evaluation_status IN ('pending', 'in_progress', 'cancelling'))
         FROM filtered
-        "#,
+        "#, inventory_join = inventory_summary::join("$5"), visibility = inventory_summary::visibility("$5", true)),
     )
     .bind(if status_filter.is_empty() { None } else { Some(status_filter.clone()) })
     .bind(params.flake.as_deref())
     .bind(params.search.as_deref())
     .bind(params.latest_only)
     .bind(user_id)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await?;
 
     let rows = sqlx::query_as::<_, EvalQueueRow>(
@@ -2073,9 +2096,10 @@ pub async fn list_eval_queue_for_user(
             c.evaluation_enqueued_at AS enqueued_at,
             COALESCE(c.evaluation_status, 'pending') AS evaluation_status,
             COALESCE(c.eval_queue_position, 9223372036854775807) AS queue_position,
-            COALESCE(cac.nixos_configurations, ARRAY[]::text[]) AS systems,
-            COALESCE(CARDINALITY(cac.nixos_configurations), 0)::bigint AS system_count,
-            (SELECT CASE
+            inv.systems,
+            cardinality(inv.systems)::bigint AS system_count,
+            inv.inventory_available,
+             CASE WHEN NOT inv.inventory_available THEN NULL ELSE (SELECT CASE
                 -- Unmarked or malformed legacy records cannot prove ownership.
                 -- Compare JSON values without casting untrusted marker text.
                 WHEN COUNT(*) FILTER (WHERE ea.attempt_number IS NULL
@@ -2083,9 +2107,10 @@ pub async fn list_eval_queue_for_user(
                     OR (d.policy_results->>'evaluation_attempt') !~ '^[1-9][0-9]*$') > 0
                 THEN NULL
                 ELSE COUNT(*) FILTER (WHERE d.policy_results->'evaluation_attempt' = to_jsonb(ea.attempt_number))
-             END FROM derivations d WHERE d.commit_id = c.id) AS derivation_count,
+             END FROM derivations d WHERE d.commit_id = c.id
+                AND d.derivation_name = ANY(inv.systems)) END AS derivation_count,
             pc.passed_count, pc.policy_failed_count, pc.eval_failed_count,
-            pc.policy_counts_available,
+            pc.policy_counts_available, pc.policy_pending_count, pc.unselected_count, pc.policy_unavailable_count,
             COALESCE(ea.attempt_number, 1) AS attempt_number,
             ea.parent_attempt_id,
             ea.root_attempt_id,
@@ -2094,24 +2119,14 @@ pub async fn list_eval_queue_for_user(
                 AS is_latest_per_flake
         FROM commits c
         JOIN flakes f ON f.id = c.flake_id
-        LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
         LEFT JOIN flake_branch_commit_snapshot latest_snapshot
           ON latest_snapshot.flake_id = c.flake_id
          AND latest_snapshot.position = 0
-        LEFT JOIN LATERAL (
-            SELECT id, attempt_number, parent_attempt_id, root_attempt_id, available_at
-            FROM evaluation_attempts
-            WHERE commit_id = c.id
-            ORDER BY attempt_number DESC, created_at DESC
-            LIMIT 1
-        ) ea ON TRUE
+        {inventory_join}
         {policy_counts_join}
         WHERE COALESCE(c.evaluation_status, 'pending') IN ('pending', 'in_progress', 'cancelling', 'complete', 'failed', 'cancelled')
           AND c.source_archived = false
-          AND ($5::uuid IS NULL OR EXISTS (
-            SELECT 1 FROM systems s JOIN user_environment_memberships uem ON uem.environment_id = s.environment_id
-            WHERE s.flake_id = c.flake_id AND uem.user_id = $5
-          ))
+          AND {visibility}
         ), filtered AS (
             SELECT * FROM domain
             WHERE ($1::text[] IS NULL OR cardinality($1::text[]) = 0 OR evaluation_status = ANY($1::text[]))
@@ -2135,7 +2150,7 @@ pub async fn list_eval_queue_for_user(
             committed_at DESC,
             commit_id DESC
         LIMIT $6
-        "#, policy_counts_join = policy_counts::JOIN),
+        "#, policy_counts_join = policy_counts::JOIN, inventory_join = inventory_summary::join("$5"), visibility = inventory_summary::visibility("$5", true)),
     )
     .bind(if status_filter.is_empty() { None } else { Some(status_filter) })
     .bind(params.flake.as_deref())
@@ -2143,9 +2158,10 @@ pub async fn list_eval_queue_for_user(
     .bind(params.latest_only)
     .bind(user_id)
     .bind(limit)
-    .fetch_all(pool)
+    .fetch_all(&mut *tx)
     .await?;
 
+    tx.commit().await?;
     Ok(EvalQueueResult {
         rows,
         active_count: counts.0,
@@ -2587,16 +2603,17 @@ pub async fn cleanup_partial_derivations_for_commit(pool: &PgPool, commit_id: i3
     Ok(())
 }
 
-/// Returns paginated evaluation history (complete, failed, cancelled).
+/// Returns internal administrator history (complete, failed, cancelled).
 ///
+/// User-facing callers must use [`list_eval_history_for_user`] with their scope.
 /// Results are ordered by `evaluation_completed_at DESC` so the most
 /// recently finished eval appears first.
 /// Native and isolated mock counts share latest-attempt attribution rules with
 /// the queue. `policy_counts_available` distinguishes legacy or ambiguous
 /// evidence from known counts without claiming that evaluation is complete.
 /// `derivation_count` counts persisted records marked for the latest represented
-/// attempt, excluding stale attempts and isolated mock outcomes. Unattributable
-/// legacy records make that count unavailable, not zero.
+/// attempt within visible discovery, excluding stale attempts and isolated mock
+/// outcomes. Unattributable in-scope legacy records make it unavailable.
 ///
 /// # Errors
 /// Returns pagination overflow or database query failures.
@@ -2604,11 +2621,36 @@ pub async fn list_eval_history(
     pool: &PgPool,
     params: &EvalHistoryParams,
 ) -> Result<EvalHistoryPage> {
+    list_eval_history_for_user(pool, params, None).await
+}
+
+/// Returns history projected against the user's current environment memberships.
+///
+/// `None` is the internal administrator scope. Scoped commits require a current
+/// registered host on the same flake. Discovery and selected policy counts use
+/// only the latest attempt inventory, with the same conservative shared-config
+/// policy gate as the queue. Missing inventory never falls back to cache or old
+/// attempts. Search uses only projected names. Scoped reads suppress the entire
+/// commit-wide error because it can contain hidden configuration facts.
+///
+/// # Errors
+/// Returns pagination overflow or database query failures.
+pub async fn list_eval_history_for_user(
+    pool: &PgPool,
+    params: &EvalHistoryParams,
+    user_id: Option<uuid::Uuid>,
+) -> Result<EvalHistoryPage> {
     let safe_limit = params.limit.max(1).min(crate::api::models::LIMIT_MAX);
     let safe_page = params.page.max(1);
     let offset = (safe_page - 1).checked_mul(safe_limit).ok_or_else(|| {
         anyhow::anyhow!("offset overflow: page={} limit={}", safe_page, safe_limit)
     })?;
+    // CONCURRENCY: Membership projection and pagination totals share one snapshot
+    // with exact-attempt evidence; neither query can observe a different retry.
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+        .execute(&mut *tx)
+        .await?;
 
     #[derive(sqlx::FromRow)]
     struct HistoryRow {
@@ -2627,6 +2669,10 @@ pub async fn list_eval_history(
         evaluation_duration_ms: Option<i64>,
         evaluation_error_message: Option<String>,
         system_count: i64,
+        inventory_available: bool,
+        policy_pending_count: i64,
+        unselected_count: i64,
+        policy_unavailable_count: i64,
         derivation_count: Option<i64>,
         policy_counts_available: bool,
         passed_count: i64,
@@ -2639,36 +2685,43 @@ pub async fn list_eval_history(
     }
 
     let counts: (i64, i64) = sqlx::query_as(
-        r#"
+        &format!(r#"
         WITH domain AS (
             SELECT c.id, c.flake_id, f.name AS flake_name, COALESCE(f.branch, 'main') AS branch,
                    c.git_commit_hash, c.message, c.author, c.evaluation_status,
-                   c.evaluation_enqueued_at,
+                    c.evaluation_enqueued_at, inv.systems,
                     COALESCE(f.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = c.id, FALSE)
                         AS is_latest_per_flake
             FROM commits c
              JOIN flakes f ON f.id = c.flake_id
+             {inventory_join}
              LEFT JOIN flake_branch_commit_snapshot latest_snapshot
                ON latest_snapshot.flake_id = c.flake_id
               AND latest_snapshot.position = 0
             WHERE c.evaluation_status IN ('complete', 'failed', 'cancelled')
+              AND {visibility}
         ), filtered AS (
             SELECT * FROM domain
             WHERE ($1::text IS NULL OR evaluation_status = $1)
               AND ($2::text IS NULL OR flake_name ILIKE ('%' || $2 || '%'))
               AND ($3::text IS NULL OR flake_name ILIKE ('%' || $3 || '%') OR branch ILIKE ('%' || $3 || '%')
                    OR git_commit_hash ILIKE ('%' || $3 || '%') OR COALESCE(message, '') ILIKE ('%' || $3 || '%')
-                   OR COALESCE(author, '') ILIKE ('%' || $3 || '%') OR evaluation_status ILIKE ('%' || $3 || '%'))
+                   OR COALESCE(author, '') ILIKE ('%' || $3 || '%') OR evaluation_status ILIKE ('%' || $3 || '%')
+                   OR EXISTS (SELECT 1 FROM unnest(systems) system_name WHERE system_name ILIKE ('%' || $3 || '%')))
               AND (NOT $4 OR is_latest_per_flake)
         )
         SELECT (SELECT COUNT(*) FROM domain), (SELECT COUNT(*) FROM filtered)
-        "#,
+        FROM (SELECT $5::bigint, $6::bigint) pagination
+        "#, inventory_join = inventory_summary::join("$7"), visibility = inventory_summary::visibility("$7", false)),
     )
     .bind(params.status.as_deref())
     .bind(params.flake.as_deref())
     .bind(params.search.as_deref())
     .bind(params.latest_only)
-    .fetch_one(pool)
+    .bind(safe_limit)
+    .bind(offset)
+    .bind(user_id)
+    .fetch_one(&mut *tx)
     .await?;
 
     let rows = sqlx::query_as::<_, HistoryRow>(
@@ -2692,18 +2745,21 @@ pub async fn list_eval_history(
                 THEN EXTRACT(EPOCH FROM (c.evaluation_completed_at - c.evaluation_started_at))::BIGINT * 1000
                 ELSE NULL
             END                             AS evaluation_duration_ms,
-            c.evaluation_error_message,
-            COALESCE(CARDINALITY(cac.nixos_configurations), 0)::BIGINT AS system_count,
-            (SELECT CASE
+            CASE WHEN $7::uuid IS NULL THEN c.evaluation_error_message ELSE NULL END AS evaluation_error_message,
+            inv.systems,
+            cardinality(inv.systems)::bigint AS system_count,
+            inv.inventory_available,
+            CASE WHEN NOT inv.inventory_available THEN NULL ELSE (SELECT CASE
                 -- Keep attribution identical to the queue projection above.
                 WHEN COUNT(*) FILTER (WHERE ea.attempt_number IS NULL
                     OR jsonb_typeof(d.policy_results->'evaluation_attempt') IS DISTINCT FROM 'number'
                     OR (d.policy_results->>'evaluation_attempt') !~ '^[1-9][0-9]*$') > 0
                 THEN NULL
                 ELSE COUNT(*) FILTER (WHERE d.policy_results->'evaluation_attempt' = to_jsonb(ea.attempt_number))
-             END FROM derivations d WHERE d.commit_id = c.id) AS derivation_count,
+             END FROM derivations d WHERE d.commit_id = c.id
+                AND d.derivation_name = ANY(inv.systems)) END AS derivation_count,
             pc.passed_count, pc.policy_failed_count, pc.eval_failed_count,
-            pc.policy_counts_available,
+            pc.policy_counts_available, pc.policy_pending_count, pc.unselected_count, pc.policy_unavailable_count,
             concat_ws(
                 ':',
                 'eval',
@@ -2720,33 +2776,28 @@ pub async fn list_eval_history(
                 AS is_latest_per_flake
         FROM commits c
         JOIN flakes f ON f.id = c.flake_id
-        LEFT JOIN commit_artifacts_cache cac ON cac.commit_id = c.id
         LEFT JOIN flake_branch_commit_snapshot latest_snapshot
           ON latest_snapshot.flake_id = c.flake_id
          AND latest_snapshot.position = 0
-        LEFT JOIN LATERAL (
-            SELECT id, attempt_number, parent_attempt_id, root_attempt_id
-            FROM evaluation_attempts
-            WHERE commit_id = c.id
-            ORDER BY attempt_number DESC, created_at DESC
-            LIMIT 1
-        ) ea ON TRUE
+        {inventory_join}
         {policy_counts_join}
         WHERE c.evaluation_status IN ('complete', 'failed', 'cancelled')
+          AND {visibility}
         ), filtered AS (
             SELECT * FROM domain
             WHERE ($1::text IS NULL OR evaluation_status = $1)
               AND ($2::text IS NULL OR flake_name ILIKE ('%' || $2 || '%'))
               AND ($3::text IS NULL OR flake_name ILIKE ('%' || $3 || '%') OR branch ILIKE ('%' || $3 || '%')
                    OR commit_hash ILIKE ('%' || $3 || '%') OR COALESCE(commit_message, '') ILIKE ('%' || $3 || '%')
-                   OR COALESCE(author, '') ILIKE ('%' || $3 || '%') OR evaluation_status ILIKE ('%' || $3 || '%'))
+                   OR COALESCE(author, '') ILIKE ('%' || $3 || '%') OR evaluation_status ILIKE ('%' || $3 || '%')
+                   OR EXISTS (SELECT 1 FROM unnest(systems) system_name WHERE system_name ILIKE ('%' || $3 || '%')))
               AND (NOT $4 OR is_latest_per_flake)
         )
         SELECT *
         FROM filtered
         ORDER BY evaluation_completed_at DESC NULLS LAST, commit_id DESC
         LIMIT $5 OFFSET $6
-        "#, policy_counts_join = policy_counts::JOIN),
+        "#, policy_counts_join = policy_counts::JOIN, inventory_join = inventory_summary::join("$7"), visibility = inventory_summary::visibility("$7", false)),
     )
     .bind(params.status.as_deref())
     .bind(params.flake.as_deref())
@@ -2754,9 +2805,11 @@ pub async fn list_eval_history(
     .bind(params.latest_only)
     .bind(safe_limit)
     .bind(offset)
-    .fetch_all(pool)
+    .bind(user_id)
+    .fetch_all(&mut *tx)
     .await?;
 
+    tx.commit().await?;
     let (domain_total, total_count) = counts;
 
     let items = rows
@@ -2777,6 +2830,10 @@ pub async fn list_eval_history(
             evaluation_duration_ms: r.evaluation_duration_ms,
             evaluation_error_message: r.evaluation_error_message,
             system_count: r.system_count,
+            inventory_available: r.inventory_available,
+            policy_pending_count: r.policy_pending_count,
+            unselected_count: r.unselected_count,
+            policy_unavailable_count: r.policy_unavailable_count,
             derivation_count: r.derivation_count,
             policy_counts_available: r.policy_counts_available,
             passed_count: r.passed_count,
@@ -2800,6 +2857,9 @@ pub async fn list_eval_history(
 
 #[derive(Debug, Clone, sqlx::FromRow)]
 pub struct EvalPolicySystemRow {
+    /// Saved configuration gate used by queue/history counters, not inferred
+    /// from display text or a versioned control result.
+    pub cf_agent_enabled: Option<bool>,
     pub system_name: String,
     pub eval_status: String,
     pub error_message: Option<String>,
@@ -2826,6 +2886,7 @@ pub async fn fetch_eval_policy_matrix(
                 ELSE 'evaluated'
             END AS eval_status,
             d.error_message,
+            d.cf_agent_enabled,
             d.policy_results,
             d.policy_requirements_met
         FROM derivations d
@@ -2969,6 +3030,8 @@ mod tests {
     #[ignore = "requires isolated migration-backed PostgreSQL"]
     async fn derivation_count_isolated_current_mock_has_zero_records(pool: PgPool) {
         let commit = derivation_count_commit(&pool).await;
+        super::inventory_summary_tests::inventory(&pool, commit, &["mock-host"], &["mock-host"])
+            .await;
         sqlx::query(
             "INSERT INTO evaluation_mock_outcomes
                 (evaluation_attempt_id, commit_id, attempt_number, configuration_name,
@@ -2988,6 +3051,8 @@ mod tests {
     #[ignore = "requires isolated migration-backed PostgreSQL"]
     async fn derivation_count_excludes_stale_native_and_queued_retry(pool: PgPool) {
         let commit = derivation_count_commit(&pool).await;
+        super::inventory_summary_tests::inventory(&pool, commit, &["older-host"], &["older-host"])
+            .await;
         sqlx::query(
             "INSERT INTO derivations (commit_id, derivation_name, derivation_type, status_id, policy_results)
              VALUES ($1, 'older-host', 'nixos', 5, '{\"evaluation_attempt\":1}')",
@@ -3018,13 +3083,21 @@ mod tests {
             .find(|row| row.commit_id == commit)
             .unwrap();
         assert_eq!(row.attempt_number, 8);
-        assert_eq!(row.derivation_count, Some(0));
+        assert!(!row.inventory_available);
+        assert_eq!(row.derivation_count, None);
     }
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires isolated migration-backed PostgreSQL"]
     async fn derivation_count_counts_current_native_records_not_groups(pool: PgPool) {
         let commit = derivation_count_commit(&pool).await;
+        let names = [
+            "current-pass",
+            "current-error",
+            "current-pending",
+            "older-host",
+        ];
+        super::inventory_summary_tests::inventory(&pool, commit, &names, &names).await;
         sqlx::query(
             "INSERT INTO derivations (commit_id, derivation_name, derivation_type, status_id, policy_results)
              VALUES ($1, 'current-pass', 'nixos', 5, '{\"evaluation_attempt\":7}'),
@@ -3043,6 +3116,8 @@ mod tests {
     #[ignore = "requires isolated migration-backed PostgreSQL"]
     async fn derivation_count_markerless_legacy_is_unavailable(pool: PgPool) {
         let commit = derivation_count_commit(&pool).await;
+        let names = ["legacy-host", "current-host"];
+        super::inventory_summary_tests::inventory(&pool, commit, &names, &names).await;
         sqlx::query(
             "INSERT INTO derivations (commit_id, derivation_name, derivation_type, status_id, policy_results)
              VALUES ($1, 'legacy-host', 'nixos', 5, '{}'),

@@ -1,7 +1,7 @@
 ---
 type: API
 title: Evaluation policy matrix capture
-description: Defines evaluation-time policy matrix capture, exact-attempt outcome projection, isolated mock evidence, and derivation record count semantics.
+description: Defines immutable evaluation plans, discovery and native history, scoped exact-attempt outcomes, isolated mock evidence, and configuration coverage.
 tags:
   - crystal-forge
   - evaluation
@@ -30,15 +30,17 @@ attempts return the same nondisclosing 404. Database errors and invalid captured
 plans return 500. An accessible selection without a capture returns 200 with
 `legacy_unavailable` provenance.
 
-Authorization, selected attempt context, capture, outcomes, and scope projection
-share one read-only repeatable-read transaction. Admins retain the full projection.
+Authorization, selected attempt context, capture, inventory, outcomes, and scope
+projection share one read-only repeatable-read transaction. Admins retain the full
+projection.
 Other readers require a current system on the commit's flake in an environment
 where the reader has membership. Each returned captured row must match that
 system's UUID and current configuration key (hostname when the configured key is
 blank). Deleted systems, moved-out systems, configuration changes, and revoked
 memberships fail closed; a replacement with the same name cannot inherit access.
 If no current system authorizes the commit, the read returns 404. An authorized
-commit can still return an empty projection when no captured rows match.
+commit without any retained authorized captured row returns the same 404; current
+registration alone cannot authorize a historical attempt.
 
 Scope filtering also removes policy columns and bundle metadata not reachable
 from retained rows, including assigned empty-bundle contexts. Restricted flat
@@ -67,7 +69,18 @@ Types are defined in `src/api/eval_policy_matrix.rs` in the `cf-server` crate:
 - `EvalPolicyMatrixSnapshot`: `evaluation_attempt_id`, `attempt_number`,
   `commit_sha`, `attempt_status`, `started_at`, `completed_at`,
   `mock_evidence`, `provenance`, `columns`, `bundles`,
-  `empty_bundle_metadata_complete`, `rows`.
+  `empty_bundle_metadata_complete`, `rows`, and read-only `inventory`,
+  `configuration_summary`, `configuration_failures`.
+- `EvalAttemptInventory`: `execution_mode` (`native` or `mock`), sorted distinct
+  `configurations`, and `selected_configurations`. Null inventory means discovery
+  is pending or unavailable; present empty arrays mean successful empty discovery.
+- `EvalConfigurationSummary`: distinct configuration counts `total`, `passed`,
+  `failed`, `evaluation_failed`, `pending`, `unavailable`, and `excluded`. These
+  are configuration gates, not policy-version or registered-host counts.
+- `EvalConfigurationFailure`: exact `configuration_name`, `kind` (`cf_agent` or
+  `requirements`), and saved authorized failure `detail`, without a fabricated
+  policy or bundle identity. Requirements failures without a provable failed
+  control have no invented diagnostic. Partial shared visibility withholds detail.
 - `EvalPolicyColumn`: exact `policy_version_id`, lineage `policy_id`, version
   `name`, `version`, `identifiers: Vec<String>`, and nullable `description`,
   `assertion`, and `attribute_path`. Missing identifiers default to empty;
@@ -129,6 +142,84 @@ the existing cancellation and attempt-ownership checks. It does not enqueue
 build/deployment work, perform cache admission, or grant evaluator authorization.
 A duplicate capture is rejected rather than executing newly resolved inputs
 under an existing attempt identity.
+
+## Immutable post-discovery inventory
+
+Migration `0306_evaluation_attempt_inventory.sql` adds
+`evaluation_attempt_inventory`, keyed by the exact attempt UUID. A composite
+foreign key binds UUID, commit ID, and attempt number. The record contains
+`configuration_names`, `selected_configuration_names`, `execution_mode`, and
+`captured_at`. Selected names must be a subset of discovered names. Names retain
+exact spelling, case, whitespace, and Unicode; the production writer sorts and
+deduplicates them. Discovery identity does not come from the mutable
+`commit_artifacts_cache`, derivation outcomes, or the current host registry.
+
+Native capture records verified immutable-source discovery and its build-scope
+selection before evaluator admission. Mock capture records explicitly synthetic
+names and selection with `execution_mode=mock`; it does not prove native
+discovery or execution. Selected means eligible for this attempt's execution,
+not executed, successful, or buildable. Missing inventory is unavailable, even
+when cached names or passing native outcomes exist. Successful empty discovery
+is available and reports zero discovered configurations; captured planned names
+still contribute unavailable coverage to the primary population.
+
+The writer serializes with snapshot/finalizer ownership, locks the commit and
+active attempt, and rejects older, nonactive, cancelled, or superseded writers.
+A newer queued retry prevents an older write before the started counter advances.
+Identical repeated writes are idempotent only while ownership remains active.
+Different names, selection, or mode conflict with the immutable first write.
+Updates and direct deletes are forbidden; parent commit/attempt cleanup can
+cascade. Retries have independent inventory and never inherit an older record.
+
+### Row reconciliation and configuration gates
+
+Matrix reads load inventory by selected attempt UUID, commit, and number in the
+same read-only repeatable-read transaction as authorization, plan, and outcomes.
+Current membership filters discovered names for restricted readers. A retained
+captured system UUID/configuration pair must still match a current authorized
+host; admins can also see unmanaged discovery. Newly registered names do not
+grant historical discovery authority.
+Registry configuration keys are trimmed, with blank keys falling back to hostname;
+discovered names remain exact. A name match does not grant historical host access.
+
+Every authorized captured host keeps its own UUID, applicability, and provenance,
+including hosts sharing one evaluator configuration. A visible discovered name
+without a retained captured row adds a row with `system_id=null`, the exact name,
+`resolution=unavailable`, no digest, no policy bindings, and no bundle memberships.
+No current assignment or system ID is invented. Its applicability and control
+cells remain Unknown, even when configuration-level evidence proves a gate result.
+Restricted reads omit names without retained authorized captured identities.
+
+Planned rows absent from discovery, excluded from selection, or read without
+inventory retain captured provenance but expose only Unknown cells and null
+details. Passing or stale outcomes outside selection cannot fill that gap.
+Planless reads clear outcome-derived matrix identities; only exact discovery can
+add rows. Discovery cannot reconstruct missing historical assignments.
+
+`configuration_summary.total` counts the unique union of visible captured planned
+and discovered configuration names, even when several hosts share one name.
+Discovery and selection remain explicit. Discovered but unselected names count
+as `excluded`; planned names absent from discovery count as `unavailable`, never
+executed, excluded, or pending. Missing inventory leaves summary coverage
+unavailable rather than proving an empty population.
+
+Selected names require one attributable matching-attempt outcome. A missing or
+stale terminal result is `pending` only while the selected latest attempt can
+still complete: a noncancelled queued attempt, or an in-progress attempt matching
+the commit's active counter and status. Terminal, cancelled, or superseded
+attempts cannot finish missing evidence; that coverage is `unavailable`.
+Ambiguous carriers and unknown gate values are unavailable even during execution.
+
+Requirement gates require all current and captured hosts sharing the configuration
+to remain authorized. Partial shared visibility cannot prove a pass or reveal
+hidden requirement results or diagnostics. An attributable intrinsic
+`cf_agent_enabled=false` can still prove configuration failure because the agent
+gate belongs to the shared configuration itself. Its failure entry has empty
+detail under partial visibility. Per-host assigned checks remain separately
+scoped. Matching global failures populate `configuration_failures` once per
+configuration; they never become assigned policy columns, synthetic bundle
+membership, or extra control failures. Restricted flat projection removes global
+facts for partially visible configurations and always withholds Nix stderr.
 
 ## Provenance and metadata boundary
 
@@ -216,10 +307,46 @@ default-empty `assigned_bundles`. Neither absence can establish that no empty
 bundle was assigned. Never backfill them from current catalog state. Migration
 `0303` is unchanged; the JSON additions require no schema migration.
 
+## Immutable native outcome history
+
+Migration `0307_evaluation_native_outcomes.sql` adds
+`evaluation_native_outcomes`, keyed by `(evaluation_attempt_id, configuration_name)`.
+A composite foreign key binds attempt UUID, commit ID, and attempt number.
+Records retain terminal `eval_state`, nullable agent/requirements gates, policy
+JSON, failure diagnostic, and capture time. They contain no derivation/store/output
+identity and grant no build admission or observation authority.
+
+The native writer acquires snapshot-writer, commit, then attempt locks. It requires
+the latest active owner and an exact selected name in that attempt's native
+inventory. Cancellation and supersession reject writes. The JSON attempt marker
+must be an integer matching the owner; mock metadata is rejected. Identical
+repeated writes are idempotent only while ownership remains active; differing
+evidence returns a conflict. The caller rolls back the producer transaction on
+error. Native success persistence and confirmed-failure finalization retain the
+sidecar in their existing transactions, so producer failure cannot publish partial
+history. Updates and direct deletes are forbidden; parent cleanup can cascade.
+
+Migration `0308_retain_attributable_native_history.sql` imports only already
+attributable NixOS carriers. The exact name must be discovered and selected in
+native inventory, and a positive integer JSON marker must match its attempt.
+Eligible evidence has terminal evaluation/build status or a valid confirmed
+failure; malformed failure documents and mock carriers are excluded. Status 6
+retains a Nix evaluation failure; valid explicit confirmation also retains failure
+even when irreversible build state survives. Overall attempt completion is not
+required for an already terminal configuration fact.
+
+One eligible carrier retains its saved gates and policy JSON, or its failure
+diagnostic with null gates. Multiple eligible carriers produce a permanent explicit
+`unavailable` record with only the attempt marker, null gates, and no diagnostic.
+Existing sidecar records win through `ON CONFLICT DO NOTHING`. Retention never
+reconstructs missing discovery, outcomes, assignments, or identity from today's
+catalog, cache, or registry. Unattributable history remains unavailable.
+
 ## Outcome reads
 
 One read-only repeatable-read transaction selects the represented attempt,
-capture, native derivation outcomes, and isolated mock outcomes. The represented
+capture, immutable native outcomes, fallback native derivation outcomes, and
+isolated mock outcomes. The represented
 attempt is the latest attempt number unless the request pins an attempt UUID.
 Latest selection matches queue/history. A queued retry is represented even
 before the commit's started-attempt counter advances. Payload identity must match
@@ -233,7 +360,8 @@ unknown. Each outcome must have an integer
 Missing, stale, malformed, skipped, or evaluation-failed outcomes are unknown.
 The projection accepts only the recognized `evaluated` outcome state; missing
 or unrecognized state strings remain unknown and supply no detail.
-SQL marks only `DryRunComplete` and known downstream build states as evaluated.
+For mutable fallback carriers, SQL marks only `DryRunComplete` and known downstream
+build states as evaluated.
 Pending, NULL, or unknown derivation status IDs remain unavailable even when
 their result document contains a matching attempt marker. A downstream build
 failure does not invalidate otherwise matching evaluation policy evidence.
@@ -273,21 +401,22 @@ authoritative applicability or bundle data. Stale marked evidence is also masked
 from the legacy projection. With a capture, markerless evidence is masked too.
 An absent legacy result now displays
 `legacy_unknown`, not inferred nonassignment. A planless evaluation has
-`legacy_unavailable` provenance, no inferred policy/bundle columns or memberships,
-and outcome-only rows with `system_id=None` and `resolution=unavailable`.
-New attempts that have not captured a plan use the same unavailable contract.
-Newly discovered flake configurations without a registered planned system
-remain in the unrestricted legacy `systems`; no system identity or assignment
-is invented for them in the captured plan. Restricted readers receive only the
-captured-host projection described above.
+`legacy_unavailable` provenance and no inferred policy/bundle columns or memberships.
+Only exact inventory supplies its matrix rows, with `system_id=None` and
+`resolution=unavailable`. New attempts without a capture use the same provenance
+contract. Discovered names can extend the returned matrix, but never change the
+immutable captured plan or invent historical identity or applicability.
 
-Pinned reads preserve captured applicability but cannot restore overwritten
-native results. Native derivation evidence is mutable: if its marker no longer
-matches the selected attempt, controls remain unknown and flat results are
-masked. Pinned reads also mask markerless legacy evidence; only the unrestricted
-latest legacy compatibility projection can retain markerless results. Isolated
-mock evidence remains readable by its exact retained attempt UUID. No read
-reconstructs historical outcomes or memberships from the current catalog.
+Pinned reads preserve captured applicability and exact-attempt native sidecar
+evidence independently of later derivation changes. A retained sidecar suppresses
+the mutable native carrier for that configuration, including when retained evidence
+is explicitly unavailable. Without a sidecar, mutable fallback evidence must still
+match the selected attempt; overwritten markers leave controls unknown and flat
+results masked. Missing inventory and markerless evidence cannot authorize flat
+outcomes, including in the latest legacy response. Isolated mock evidence remains
+readable by its exact retained attempt UUID. Native/mock ambiguity stays
+unavailable. No read reconstructs historical outcomes or memberships from the
+current catalog.
 
 ## Isolated mock evidence
 
@@ -336,16 +465,41 @@ change the stored plan. A queued retry without its own mock records is false.
 
 ## Queue and history policy counters
 
-Queue and history use the shared lateral query in `queries/commits/policy_counts.rs`,
-not a mock-only override of unchanged native counters. Both select the latest
-attempt as `ea`, including queued retries. Native NixOS derivations require a
-positive integer JSON `evaluation_attempt` marker equal to that attempt number.
+Queue and history use `queries/commits/inventory_summary.rs` and the shared
+lateral query in `queries/commits/policy_counts.rs`. Each reader uses one read-only
+REPEATABLE READ transaction for current scope, totals, search, and returned rows.
+Both select the latest attempt as `ea`, including queued retries, and join
+inventory by UUID, commit, and number. After discovery, `systems` and `system_count`
+use the visible unique union of planned and discovered configuration names, not
+cached names or duplicated host counts. `inventory_available=false` means discovery
+is pending or unavailable. An empty available inventory proves zero discovered
+names, but absent planned names still count as unavailable. A retry without
+inventory has unavailable coverage and zero integer counters, not the previous
+attempt's population.
+
+Restricted readers see only names with retained captured UUID/configuration pairs
+matching current visible hosts. Newly registered names cannot grant historical
+authority. Before capture, active queue registration grants only coarse visibility,
+not historical names or evidence. Search uses
+these scoped names, so hidden and unmanaged names cannot affect filtered results.
+Current scope also controls domain totals. History withholds the commit-global
+`evaluation_error_message` from restricted readers. Missing membership, host
+moves, and shared-host visibility are evaluated in the same snapshot as evidence.
+
+Policy coverage includes every visible selected discovered configuration and
+unavailable planned configurations absent from discovery. Requirement outcomes
+require complete current and captured shared-host authority. Partial shared
+visibility withholds requirement facts; an attributable false intrinsic CF-agent
+gate can still prove failure without exposing hidden diagnostics. Native sidecar
+evidence takes precedence over mutable derivations for the exact attempt and name.
+Fallback NixOS derivations require a positive integer JSON `evaluation_attempt`
+marker equal to that attempt number.
 Isolated mock rows must match commit ID, attempt number, and attempt UUID.
 Counts group evidence by configuration, not captured host or control identity.
 Multiple valid current carriers for one configuration, including a native/mock
-pair, contribute no known count.
+pair, contribute no known terminal count and remain unavailable.
 
-Native evidence requires status ID 5, 6, 7, 8, 10, or 12, or a confirmed
+Fallback native evidence requires status ID 5, 6, 7, 8, 10, or 12, or a confirmed
 evaluation failure. A confirmed failure requires Boolean `evaluation_failure=true`
 and a nonblank string `evaluation_failure_error`. A present but incomplete or
 invalid failure document is excluded. Status 6 or confirmed failure contributes
@@ -356,27 +510,39 @@ agent/requirements classification and does not fabricate Nix evaluation errors.
 Stale native evidence does not contribute current counts. Pending native evidence
 is excluded unless it carries a confirmed matching-attempt evaluation failure.
 
-The additive, default-false `policy_counts_available` Boolean distinguishes
-attributable counts from unavailable counts while retaining integer counter
-fields. True means a represented attempt exists, no current configuration has
-multiple evidence carriers, and no native configuration has an unattributable
-marker unless exact current mock evidence replaces that configuration. Missing,
-null, string, fractional, and nonpositive native markers are unattributable.
-True does not prove completion, complete coverage, known policy flags, or a pass.
-A partial attempt can report known counts with true; a queued retry containing
-only attributable older evidence reports zero with true. Ambiguous current
-carriers or uncovered unattributable legacy records make the flag false even if
-other configurations supply integer counts. The UI shows unavailable rather
-than treating false as a clean zero. These runtime SQLx reads introduce no
+`policy_pending_count` counts selected configurations still awaiting terminal
+evidence only while the latest noncancelled attempt can complete. Ambiguous or
+unknown carriers and planned names absent from discovery contribute to
+`policy_unavailable_count`; after terminalization, missing results also become
+unavailable. `unselected_count` reports explicitly excluded discovered names.
+Missing, stale, malformed, or unknown evidence cannot become a pass. Outcomes
+outside discovery selection cannot affect terminal counters.
+
+The default-false `policy_counts_available` Boolean distinguishes attributable
+counts from unavailable counts while retaining integer fields. True requires
+exact inventory, no ambiguous current carriers, and no uncovered unattributable
+native markers in the selected authorized set. Exact current mock evidence can
+replace an unattributable native marker for that configuration. Missing, null,
+string, fractional, and nonpositive native markers are unattributable. True does
+not prove completion, complete coverage, known policy flags, or a pass. A partial
+attempt can report both terminal and pending counts with true. Ambiguity or
+uncovered legacy markers make the flag false even when other counts are known.
+Inventory availability and policy-count availability are independent UI states;
+neither unavailable state is a clean zero. These runtime SQLx reads introduce no
 checked-query metadata and do not change runnable derivation or build queries.
 
 ## Derivation record counts
 
-Queue and history responses add nullable `derivation_count`. The value counts
-persisted derivation records with a valid numeric attempt marker matching the
-represented attempt. It is not a closure-package total or a count of built
-outputs. Older marked records do not contribute. Unattributable legacy records
-make the value unavailable rather than producing a guessed total.
+Queue and history responses add nullable `derivation_count`. With exact inventory,
+the value counts persisted derivation records for the visible planned/discovered
+population with a valid numeric marker matching the represented attempt.
+Discovery selection restricts policy counters; it does not remove discovered names from this record
+count. It is not a closure-package total or a count of built outputs. Older
+marked records and names outside the visible population do not contribute.
+Unattributable markers within that population make the value unavailable. The current SQL
+does not restrict derivation type. Without inventory its visible-name set is
+empty and the aggregate can return zero; that value does not establish known
+empty discovery. Consumers must also check `inventory_available`.
 
 An isolated mock run with no derivation records reports zero. The drawer renders
 the reported value or an em dash when unavailable; it never estimates a count
@@ -394,26 +560,41 @@ or unauthorized context is explicitly unavailable. This read-only check is not
 framework requirement satisfaction or deployed compliance and does not substitute
 current catalog membership or deployed evidence.
 
-Receiver handoffs and return state are in memory; refresh persistence is not
-promised. Back to Evaluation validates the pinned commit SHA and attempt identity
-before restoring the original queue/history target, search/status/flake/latest
-filters, drawer tab and size. Matrix presentation is stored by commit ID and
+Shareable routes carry durable identities:
+
+- `/evaluations/:commit_id` opens the latest commit drawer.
+- `/evaluations/:commit_id/attempts/:attempt_id` opens the exact retained attempt.
+- `/compliance/evaluations/:commit_id/attempts/:attempt_id?bundle=<bundle_uuid>&version=<bundle_version_uuid>&system=<system_uuid>&policy=<policy_version_uuid>`
+  opens captured evaluation evidence over the normal Compliance catalog.
+
+The Compliance receiver mounts the normal catalog, bundle detail, and nested
+policy context with a separate read-only evaluation overlay. Captured evidence
+does not replace deployed Compliance data or require the current catalog to
+reconstruct historical applicability. A copied route refetches and validates
+its exact context; missing or unauthorized context shows unavailable and never
+falls back to latest evidence. In-memory handoffs retain richer return state;
+that state is not promised across refresh. Back to Evaluation validates the pinned
+commit SHA and attempt identity before restoring the original queue/history target,
+search/status/flake/latest filters, drawer tab and size. Matrix presentation is stored by commit ID and
 attempt UUID: mode, row filter, sort, trim, bundle focus, expanded row, issue,
 assertion card, and row page survive same-attempt refreshes and explicit request
 errors. Errors replace displayed evidence rather than presenting cached success.
 A different attempt uses its own saved presentation or defaults. Scroll and
 invoking focus restoration is best effort after validation and mounting. A pinned
-return does not follow newer retry summaries; latest-only header policy counters
-and derivation counts are marked unavailable. Latest evaluation actions require
-opening the latest evaluations view.
+return does not follow newer retry summaries. Its header uses only pinned
+inventory, configuration summary, and attempt metadata; it clears stale list
+counts, commit-wide errors, and mutable derivation counts. Log and Graph tabs
+are disabled with explicit reasons because no exact-attempt APIs exist for them.
+Latest evaluation actions require opening the latest evaluations view.
 
 More than 14 distinct controls defaults to Bundles with column trim enabled;
 smaller matrices default to Controls without trim. Mode changes clear bundle
 focus but preserve row filter, sort, and trim. Bundle drilldown selects that exact
 bundle's Controls without changing those choices. Row filtering and sorting run
 before pagination. Rendering targets 8192 body cells, including the identity,
-health, and layout filler cells, with `clamp(8192 / (visible_columns + 3), 1, 100)`
-systems per page.
+health, and any Bundles-only layout filler cells. The page size is
+`clamp(8192 / (visible_columns + 2), 1, 100)`, where `visible_columns` includes
+the filler only in Bundles mode.
 Aggregation, issue counts, and trim use the full relevant row sets, not one page;
 horizontal scrolling retains control columns even when one row exceeds the budget.
 
@@ -426,13 +607,15 @@ never changes health, rollups, applicability, or control counts.
 
 ### Matrix layout and failure-first detail
 
-The captured matrix uses the design geometry: System 180 px, Health 110 px, and
-bundle columns at their min-content width with a 104 px minimum. Bundle names stay
-on one line with their exact version beside the name; long names truncate and keep
-the full identity in the heading title. A hidden trailing filler column is the only
-auto-width column, so one bundle and six bundles keep identical column widths and
-38 px rows. Bundle cells show compact `passed/applicable`, `N/A`, or `Unknown`
-values; the cell title states the full applicability state.
+Controls use native automatic table layout, including sparse matrices. They do
+not use the former fixed sparse geometry or a trailing filler. Bundles retain
+180 px System and 110 px Health width hints, min-content bundle columns with a
+104 px minimum, and a hidden trailing layout-only filler. Bundle names stay on
+one line with their exact version beside the name; long names truncate and keep
+the full identity in the heading title. A ResizeObserver measures System's actual
+border-box width and positions sticky Health after it as content, fonts, mode,
+or viewport change. Bundle cells show compact `passed/applicable`, `N/A`, or
+`Unknown` values; the cell title states the full applicability state.
 
 The toolbar has three levels: Top Issues (only when real failed controls exist),
 row filters with the Bundles/Controls selector, then the control summary, column
@@ -444,15 +627,75 @@ enforcement mode, exact version and lineage identifiers, the registry action, an
 one Compliance evidence action per contributing bundle. Expanded details stay
 pinned to the visible scroll width.
 
-The header Systems value counts evaluated flake configurations; the header Policy
-value counts configurations that pass or fail the CF-agent and assigned-requirement
-gate. The matrix counts registered systems with a captured plan visible to the
-reader, and their controls. When the populations differ, or when global CF-agent
-failures exist, a `Matrix scope` note states both counts. The global CF-agent
-result stays in the collapsed Platform evidence panel and never enters bundle or
-control counts.
+The header Systems value counts the visible unique planned/discovered configuration
+population after inventory is available; Policy reports configuration-gate coverage,
+including distinct pending, unavailable, and excluded states. The matrix
+reconciles discovered names with captured hosts rather than explaining divergent
+populations through a separate scope note. There is no `Matrix scope` banner or
+`Platform evidence` panel. It shows unmanaged/unavailable rows
+and retains planned rows without discovery evidence. Configuration failures are
+integrated into failure-first row detail and health presentation without creating
+policy IDs or changing bundle/control counts. Missing inventory renders
+`Discovery pending` for an active attempt or `Inventory unavailable for this
+attempt` for retained evidence without discovery, not an empty successful matrix.
+
+## Whole-flake authorization for logs, streams, and graphs
+
+Logs and native dependency graphs are indivisible cross-configuration evidence.
+Viewer-or-above authentication precedes lookup. Missing or inaccessible commits
+return a nondisclosing 404. Admins retain full access. Nonadmins need at least one
+current registered host, membership for every current host on the flake, and
+exact latest-attempt inventory. Every discovered name must map to a current
+registered configuration. Hidden inactive or undiscovered hosts still deny access;
+one visible host cannot authorize a hidden host with the same configuration.
+The selected attempt must also have a valid captured plan. Every original
+captured system UUID and configuration must still match an authorized current
+host; deleting or replacing a captured host cannot grant historical log access.
+Missing inventory, unmanaged discovery, and queued retries without their own
+inventory and plan fail closed. Graph reads additionally reject retained native names
+that no longer map to the current registry.
+
+Authorization and each log/graph evidence read share one read-only REPEATABLE READ
+snapshot. WebSocket authorization rechecks the session, role, and whole-flake
+scope before replay, each outgoing event, and each 20-second heartbeat. Revocation
+or host moves stop subsequent reads/sends; a successful handshake is not a lease.
+An already authorized response retains snapshot semantics. Text redaction cannot
+substitute for whole-flake authority.
+
+Logs remain commit-scoped history. Graphs expose mutable native closure/build
+state and can include retained derivations; they are not historical snapshots
+of the selected attempt. Inventory, captured provenance, and native sidecar history
+are immutable; derivation carriers remain mutable. Pinned reads retain saved
+native sidecar evidence but cannot recover overwritten fallback results, derive
+old assignments from the current catalog, or promote mock inventory into native
+discovery. These limits apply even when the route is
+shareable and its identity is valid.
+
+## System and Compliance receiver authorization
+
+Base System detail, per-system Compliance rollups, and deployed evidence require
+viewer-or-above access to the target's current environment. Missing and hidden
+targets return the same 404. Nonadmin single-system reads hold shared target and
+membership locks until the response is materialized. Bundle-system reads lock
+current memberships and authorized system UUIDs, then restrict all candidates,
+evidence, and aggregates to that exact UUID set. Newly created or moved-in hosts
+cannot enter an in-flight response. Guard commit failures return an error without
+returning the prepared payload. Admin fleet reads retain their existing behavior.
 
 ## Verification handoff
+
+The exact library runner registers 36 additional ignored SQLx cases: six in
+`queries::evaluation_inventory::tests`, three in
+`queries::commits::inventory_summary_tests`, nine in
+`handlers::api::commits::visibility::tests`, six in
+`queries::eval_policy_plans::inventory_projection_tests`, six in
+`queries::evaluation_native_outcomes::tests`, plus six receiver authorization
+and scope-lock cases. These cover immutable native history, attributable legacy
+retention, discovery, current scoped summaries, indivisible evidence authority and
+revocation, and discovery/plan reconciliation. Each invocation must satisfy the
+existing named-success and one-passed/zero-failed/zero-ignored guard. The runner
+selects 125 ignored and 83 non-ignored library cases, 208 total. Registration is
+not a runtime verification result.
 
 Pure tests cover missing/stale outcomes, typed statuses, report-only checks,
 partial rows, overlap retention, empty/conflict/skipped/unavailable resolution,

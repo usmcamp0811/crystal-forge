@@ -228,12 +228,27 @@ mod tests {
         .unwrap()
     }
 
+    async fn inventory(pool: &PgPool, commit: i32, names: &[&str]) {
+        let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+        crate::queries::evaluation_inventory::persist_inventory(
+            pool,
+            commit,
+            7,
+            &names,
+            &names,
+            crate::queries::evaluation_inventory::InventoryExecutionMode::Mock,
+        )
+        .await
+        .unwrap();
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires isolated migration-backed PostgreSQL"]
     async fn mock_persistence_records_attempt_outcomes_without_production_work(pool: PgPool) {
         let commit = active_commit(&pool).await;
         let assigned = assigned();
         let check = super::super::mock_policy_check("web-01", &assigned, false);
+        inventory(&pool, commit, &["web-01"]).await;
         let before = side_effect_counts(&pool).await;
         persist_outcome(&pool, commit, 7, &check, &assigned)
             .await
@@ -320,7 +335,7 @@ mod tests {
         assert_eq!(side_effect_counts(&pool).await, before);
     }
 
-    async fn queue_counts(pool: &PgPool, commit: i32) -> (i64, i64, i64) {
+    async fn queue_counts(pool: &PgPool, commit: i32) -> (i64, i64, i64, bool) {
         let queue = crate::queries::commits::list_eval_queue(
             pool,
             &crate::api::models::EvalQueueParams {
@@ -339,6 +354,7 @@ mod tests {
             row.passed_count,
             row.policy_failed_count,
             row.eval_failed_count,
+            row.policy_counts_available,
         )
     }
 
@@ -357,7 +373,8 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        assert_eq!(queue_counts(&pool, commit).await, (0, 0, 0));
+        assert_eq!(queue_counts(&pool, commit).await, (0, 0, 0, false));
+        inventory(&pool, commit, &["fail", "pass"]).await;
         persist_outcome(
             &pool,
             commit,
@@ -376,7 +393,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert_eq!(queue_counts(&pool, commit).await, (1, 1, 0));
+        assert_eq!(queue_counts(&pool, commit).await, (1, 1, 0, true));
         sqlx::query("UPDATE commits SET evaluation_status = 'complete' WHERE id = $1")
             .bind(commit)
             .execute(&pool)
@@ -410,6 +427,7 @@ mod tests {
             ),
             (1, 1, 0)
         );
+        assert!(row.policy_counts_available);
         sqlx::query(
             "INSERT INTO evaluation_attempts (commit_id, attempt_number, status)
                      VALUES ($1, 8, 'queued')",
@@ -423,7 +441,7 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
-        assert_eq!(queue_counts(&pool, commit).await, (0, 0, 0));
+        assert_eq!(queue_counts(&pool, commit).await, (0, 0, 0, false));
         // Starting a native retry cannot restore markerless legacy counters or
         // inherit the earlier attempt's isolated mock evidence.
         sqlx::query(
@@ -442,6 +460,6 @@ mod tests {
         .execute(&pool)
         .await
         .unwrap();
-        assert_eq!(queue_counts(&pool, commit).await, (0, 0, 0));
+        assert_eq!(queue_counts(&pool, commit).await, (0, 0, 0, false));
     }
 }

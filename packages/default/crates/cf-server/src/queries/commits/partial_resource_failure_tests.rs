@@ -48,6 +48,15 @@ async fn fixture_at_completion_phase(
     confirm_beta: bool,
     phase: CompletionPhase,
 ) -> Fixture {
+    fixture_with_initial_beta_gate(pool, confirm_beta, phase, false).await
+}
+
+async fn fixture_with_initial_beta_gate(
+    pool: &PgPool,
+    confirm_beta: bool,
+    phase: CompletionPhase,
+    beta_enabled: bool,
+) -> Fixture {
     let flake_id: i32 = sqlx::query_scalar(
         "INSERT INTO flakes (name, repo_url) VALUES ('partial-resource', 'https://example.invalid/partial.git') RETURNING id",
     ).fetch_one(pool).await.unwrap();
@@ -115,6 +124,13 @@ async fn fixture_at_completion_phase(
     initialize_eval_passed_attempt(pool, commit_id, attempt, &policies)
         .await
         .unwrap();
+    super::inventory_summary_tests::inventory(
+        pool,
+        commit_id,
+        &["alpha", "beta", "remaining", "unselected"],
+        &["alpha", "beta", "remaining"],
+    )
+    .await;
     // The normal retry policy would schedule children. Resource terminalization
     // must override it without changing any normal failure-class behavior.
     sqlx::query("UPDATE automatic_retry_policy SET max_evaluation_retries = 5, transient_only = FALSE WHERE id = 1")
@@ -122,7 +138,7 @@ async fn fixture_at_completion_phase(
     let mut successes = Vec::new();
     let mut checks = Vec::new();
     let mut confirmed_failures = Vec::new();
-    for (name, enabled) in [("alpha", true), ("beta", false)] {
+    for (name, enabled) in [("alpha", true), ("beta", beta_enabled)] {
         if name == "beta" && phase != CompletionPhase::Acknowledged {
             continue;
         }
@@ -228,7 +244,8 @@ async fn partial_resource_failure_retains_rejected_completion_with_preserved_bui
         EvaluationStatus, queue_derivations_for_build, update_derivation_status,
     };
 
-    let mut fixture = fixture(&pool).await;
+    let mut fixture =
+        fixture_with_initial_beta_gate(&pool, false, CompletionPhase::Acknowledged, true).await;
     // First attempt: both configurations pass and have admitted job history.
     // Activation is the database phase only; no Nix/root probe is invoked.
     fixture.plan.successful_systems[1].cf_agent_enabled = Some(true);
@@ -249,8 +266,8 @@ async fn partial_resource_failure_retains_rejected_completion_with_preserved_bui
     .await
     .unwrap()
     {
-        SystemPersistenceOutcome::NeedsBuildPreparation { derivation_id, .. } => derivation_id,
-        other => panic!("beta must gain initial preparation: {other:?}"),
+        SystemPersistenceOutcome::ExistingBuildJob { derivation_id, .. } => derivation_id,
+        other => panic!("beta must retain its initially admitted build: {other:?}"),
     };
     activate_evaluated_system_build(&pool, fixture.commit_id, fixture.attempt, beta_derivation)
         .await
@@ -289,6 +306,13 @@ async fn partial_resource_failure_retains_rejected_completion_with_preserved_bui
         _ => panic!("manual child attempt must start"),
     };
     assert_eq!(fixture.attempt, 2);
+    super::inventory_summary_tests::inventory(
+        &pool,
+        fixture.commit_id,
+        &["alpha", "beta", "remaining", "unselected"],
+        &["alpha", "beta", "remaining"],
+    )
+    .await;
 
     // Preserve real passing completions in the second attempt before policy
     // replacement. Historical state is neither normalized nor newly admitted.
@@ -381,6 +405,29 @@ async fn partial_resource_failure_retains_rejected_completion_with_preserved_bui
         .await
         .unwrap();
 
+    // Changed policy evidence belongs to a new owner, never a replacement of
+    // the second attempt's immutable passing terminal outcomes.
+    mark_commit_evaluation_complete(&pool, fixture.commit_id, fixture.attempt)
+        .await
+        .unwrap();
+    reset_commit_evaluation(&pool, fixture.commit_id)
+        .await
+        .unwrap();
+    fixture.attempt = match mark_commit_evaluation_started(&pool, fixture.commit_id)
+        .await
+        .unwrap()
+    {
+        EvalStartOutcome::Started { attempt } => attempt,
+        _ => panic!("policy-change attempt must start"),
+    };
+    assert_eq!(fixture.attempt, 3);
+    super::inventory_summary_tests::inventory(
+        &pool,
+        fixture.commit_id,
+        &["alpha", "beta", "remaining", "unselected"],
+        &["alpha", "beta", "remaining"],
+    )
+    .await;
     let mut config = match &fixture.assigned.policy {
         DeploymentPolicy::Composite { config } => serde_json::to_value(config).unwrap(),
         _ => unreachable!("fixture uses a composite"),
@@ -475,7 +522,7 @@ async fn partial_resource_failure_retains_rejected_completion_with_preserved_bui
             assert_eq!(row["build_preparation_state"], "queued");
         }
         assert_eq!(row["policy_requirements_met"], false);
-        assert_eq!(row["policy_results"]["evaluation_attempt"], 2);
+        assert_eq!(row["policy_results"]["evaluation_attempt"], 3);
     }
     for preparation in [Some("queued"), None] {
         for (status_id, job_status) in [(8, "building"), (10, "success"), (12, "failed")] {

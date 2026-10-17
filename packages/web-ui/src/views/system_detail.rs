@@ -1734,7 +1734,7 @@ pub fn SystemDetailView(
                 class: "sd-root",
                 "data-testid": "system-detail-loading",
                 "data-screen-label": "SystemDetail",
-                if let Some(saved) = &evaluation_return { Link { to: Route::EvaluationsCommitView { commit_id: saved.identity.commit_id }, class: "btn btn-ghost focus-ring", "Back to Evaluation" } }
+                if let Some(saved) = &evaluation_return { Link { to: Route::EvaluationsAttemptView { commit_id: saved.identity.commit_id, attempt_id: saved.identity.attempt_id }, class: "btn btn-ghost focus-ring", "Back to Evaluation" } }
                 div {
                     class: "flex items-center justify-center py-16",
                     crate::components::loading::DashboardLoadingSpinner {
@@ -1763,7 +1763,7 @@ pub fn SystemDetailView(
         return rsx! {
             div {
                 class: "space-y-4",
-                if let Some(saved) = &evaluation_return { Link { to: Route::EvaluationsCommitView { commit_id: saved.identity.commit_id }, class: "btn btn-ghost focus-ring", "Back to Evaluation" } }
+                if let Some(saved) = &evaluation_return { Link { to: Route::EvaluationsAttemptView { commit_id: saved.identity.commit_id, attempt_id: saved.identity.attempt_id }, class: "btn btn-ghost focus-ring", "Back to Evaluation" } }
                 Link {
                     to: crate::routes::Route::SystemsView { query: String::new() },
                     class: "inline-flex items-center gap-1 text-sm {theme::text::SECONDARY} hover:text-white transition-colors",
@@ -2305,7 +2305,7 @@ pub fn SystemDetailView(
 
             // Tab navigation
             if let Some(saved) = &evaluation_return {
-                button { class: "btn btn-ghost focus-ring", onclick: { let commit_id = saved.identity.commit_id; move |_| { nav.push(Route::EvaluationsCommitView { commit_id }); } }, "Back to Evaluation" }
+                button { class: "btn btn-ghost focus-ring", onclick: { let commit_id = saved.identity.commit_id; let attempt_id = saved.identity.attempt_id; move |_| { nav.push(Route::EvaluationsAttemptView { commit_id, attempt_id }); } }, "Back to Evaluation" }
             }
             div {
                 "data-testid": "system-detail-tabs",

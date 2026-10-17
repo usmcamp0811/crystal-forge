@@ -5105,21 +5105,19 @@ button.pm-col-note:hover { color: var(--cf-text-secondary); text-decoration: und
   background: color-mix(in oklab, #f59e0b 6%, var(--cf-card-bg));
   border-bottom: 1px solid var(--cf-divider);
 }
-/* Design geometry (styles.css .pm-th-host/.pm-th-health/.pm-th-bundle):
-   System 180px, Health 110px, bundle columns at least 104px. The trailing
-   filler column absorbs spare drawer width, so one bundle and six bundles keep
-   the same dense column widths instead of stretching the data columns. */
-.pm-captured-table .pm-th-host { width: 180px; }
-.pm-captured-table .pm-th-health { width: 110px; }
-/* Every data column has a fixed or min-content width; the filler is the only
-   auto column, so the table layout gives all spare width to it. A percentage
-   filler would instead scale overflowing data columns proportionally. */
-.pm-captured-table .pm-th-fill,
-.pm-captured-table .pm-td-fill { width: auto; min-width: 0; padding: 0; }
-.pm-captured-table .pm-td-fill { border-bottom: 1px solid var(--cf-divider); }
-/* width: 1px resolves an auto-layout column to its min-content width, so a
-   bundle column has one size whether the table overflows or not. */
-.pm-captured-table .pm-th-bundle { width: 1px; padding: 0; min-width: 104px; }
+/* Match the reference's native auto layout in sparse and dense modes. Minimum
+   widths remain 180px / 110px / 104px; no filler absorbs sparse-table space. */
+/* ResizeObserver supplies System's actual border-box width after auto layout,
+   including viewport, mode, font, and content changes. */
+.pm-captured-table .pm-th-health,
+.pm-captured-table .pm-td-health {
+  position: sticky;
+  left: var(--pm-host-width, 180px);
+  background: var(--cf-card-bg);
+  z-index: 1;
+}
+.pm-captured-table .pm-th-health { z-index: 3; }
+.pm-captured-table .pm-th-bundle { padding: 0; min-width: 104px; }
 .pm-bundle-heading, .pm-control-heading, .pm-bundle-button, .pm-row-toggle {
   border: 0;
   background: none;
@@ -5140,21 +5138,15 @@ button.pm-col-note:hover { color: var(--cf-text-secondary); text-decoration: und
   padding: 10px 10px 8px;
   border-right: 1px solid var(--cf-divider);
 }
-/* Names stay on one line, as in the design; long names truncate with the full
-   exact-version identity in the heading title. */
+/* Names and exact versions share the reference heading treatment. Native
+   min-content layout preserves the complete identity without artificial caps. */
 .pm-th-bundle-name {
-  max-width: 200px;
-  overflow: hidden;
-  text-overflow: ellipsis;
   font-size: 11.5px;
   font-weight: 700;
   color: var(--cf-text-primary);
   white-space: nowrap;
 }
-.pm-th-bundle-version { margin-left: 4px; font-weight: 500; color: var(--cf-text-muted); }
-/* The cap keeps min-content and max-content equal for normal metadata, so
-   overflowing and sparse tables resolve to the same bundle column width. */
-.pm-th-bundle-sub { max-width: 124px; margin: 0 auto; font-size: 10px; font-weight: 600; color: var(--cf-text-muted); }
+.pm-th-bundle-sub { font-size: 10px; font-weight: 600; color: var(--cf-text-muted); }
 .pm-control-heading { display: block; padding: 0; }
 .pm-captured-table .pm-th-policy-inner { height: 110px; }
 .pm-captured-table .pm-th-policy-label { overflow: hidden; text-overflow: ellipsis; max-height: 96px; }
@@ -5199,6 +5191,8 @@ button.pm-col-note:hover { color: var(--cf-text-secondary); text-decoration: und
 }
 .pm-row-toggle::before { content: "›"; display: inline-block; width: 11px; margin-right: 8px; color: var(--cf-text-muted); }
 .pm-row-toggle[aria-expanded="true"]::before { content: "⌄"; }
+.pm-row-status { font: 10px var(--font-sans); color: var(--cf-text-muted); }
+.pm-config-gate-marker { color: #f87171; font-weight: 700; }
 .pm-captured .pm-legend { flex-wrap: wrap; }
 .pm-legend-guidance { margin-left: auto; color: var(--cf-text-muted); font-size: 11px; }
 .pm-empty { padding: 24px; text-align: center; color: var(--cf-text-muted); }
@@ -5206,20 +5200,11 @@ button.pm-col-note:hover { color: var(--cf-text-secondary); text-decoration: und
    and sort on the secondary line. */
 .pm-captured .pm-controls { flex-direction: column; align-items: stretch; gap: 8px; }
 .pm-controls-line { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; row-gap: 8px; }
+.pm-sort-controls { display: flex; align-items: center; gap: 10px; }
 .pm-controls-label { font-size: 11px; color: var(--cf-text-muted); }
 .pm-issue-fail { color: #f87171; font-weight: 700; }
 .pm-issue-total { color: var(--cf-text-muted); }
 .pm-issues-clear { margin-left: auto; }
-.pm-scope-note {
-  flex-shrink: 0;
-  padding: 7px 16px;
-  border-bottom: 1px solid var(--cf-divider);
-  background: var(--cf-subtle-bg);
-  color: var(--cf-text-secondary);
-  font-size: 11px;
-  line-height: 1.5;
-}
-.pm-scope-note p { margin: 0; }
 /* Failure-first expanded row (design .pm-expand/.pm-failcard). */
 /* Expanded details stay within the visible scroll width and pinned to its
    left edge; wide matrices must not push cards and actions off screen. */
@@ -5270,19 +5255,20 @@ button.pm-col-note:hover { color: var(--cf-text-secondary); text-decoration: und
 .pm-failcard-meta { font-size: 10.5px; color: var(--cf-text-muted); overflow-wrap: anywhere; }
 .pm-failcard-actions, .pm-expand-actions { display: flex; flex-wrap: wrap; gap: 6px; }
 .pm-all-pass { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #34d399; }
-/* Global CF-agent evidence stays subordinate and collapsed below the matrix. */
-.pm-platform-evidence { flex: none; max-height: 150px; overflow: auto; border-top: 1px solid var(--cf-divider); font-size: 11px; }
-.pm-platform-evidence summary { padding: 6px 16px; cursor: pointer; font-weight: 600; color: var(--cf-text-muted); }
-.pm-platform-evidence p { margin: 4px 16px 8px; color: var(--cf-text-muted); }
-.pm-platform-result { display: flex; flex-wrap: wrap; gap: 10px; padding: 5px 16px; }
 /* Policy statistic follows the design: pass / fail with semantic colors. */
-.ed-policy-val { display: flex; align-items: baseline; gap: 6px; }
+.ed-policy-val { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
 .ed-policy-pass { color: #34d399; }
 .ed-policy-sep { font-size: 12px; color: var(--cf-text-muted); }
 .ed-policy-fail { color: #f87171; }
 .ed-policy-zero, .ed-policy-unavailable { color: var(--cf-text-muted); }
 .ed-stat-unit { font-size: 10px; font-weight: 600; color: var(--cf-text-muted); }
 .ed-identity-meta .chip { padding: 0 6px; font-size: 10px; line-height: 15px; vertical-align: 1px; }
+#compliance-evaluation-dialog .pm-captured-details {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  font-size: 12px;
+}
 
 /* Policy matrix - Scroll container */
 .pm-scroll {

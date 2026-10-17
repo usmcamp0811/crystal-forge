@@ -11,6 +11,7 @@ use uuid::Uuid;
 use crate::api::eval_policy_matrix::*;
 use crate::queries::commits::EvalPolicySystemRow;
 
+mod inventory_projection;
 mod scoped_read;
 
 #[cfg(test)]
@@ -18,6 +19,9 @@ mod scoped_read_tests;
 
 #[cfg(test)]
 mod pinned_read_tests;
+
+#[cfg(test)]
+mod inventory_projection_tests;
 
 /// Locks current attempt ownership before resolving and capturing its plan.
 ///
@@ -74,6 +78,12 @@ pub(crate) async fn insert_plan(
             && plan.started_at.is_none()
             && plan.completed_at.is_none(),
         "capture payload cannot contain read-projected attempt context"
+    );
+    ensure!(
+        plan.inventory.is_none()
+            && plan.configuration_summary.is_none()
+            && plan.configuration_failures.is_empty(),
+        "capture payload cannot contain post-discovery read projections"
     );
     ensure!(
         !plan.mock_evidence,
@@ -257,19 +267,42 @@ async fn fetch_matrix_selected(
                 CASE WHEN d.status_id = 6 THEN 'eval_failed'
                      WHEN d.status_id IN (5, 7, 8, 10, 12) THEN 'evaluated'
                      ELSE 'unavailable' END AS eval_status,
-                d.error_message, d.policy_results, d.policy_requirements_met
+                d.error_message, d.cf_agent_enabled, d.policy_results, d.policy_requirements_met
          FROM derivations d WHERE d.commit_id = $1 AND d.derivation_type = 'nixos'
+           AND lower(COALESCE(d.policy_results->>'execution_mode','real')) <> 'mock'
+           AND NOT EXISTS (SELECT 1 FROM evaluation_native_outcomes n
+               WHERE n.commit_id=$1 AND n.evaluation_attempt_id=$2
+                   AND n.attempt_number=$3 AND n.configuration_name=d.derivation_name)
          ORDER BY d.derivation_name",
     )
     .bind(commit_id)
+    .bind(attempt.1)
+    .bind(attempt.0)
     .fetch_all(&mut *tx)
     .await?;
     for row in &mut rows {
         project_native_failure(row, attempt.0);
     }
+    // Immutable terminal evidence wins over the mutable artifact carrier for
+    // this configuration. A retry can replace artifact JSON but not history.
+    rows.extend(
+        sqlx::query_as::<_, EvalPolicySystemRow>(
+            "SELECT configuration_name AS system_name,
+                CASE WHEN eval_state='unavailable' THEN 'ambiguous' ELSE eval_state END AS eval_status,
+            evaluation_failure_error AS error_message,cf_agent_enabled,
+            policy_results,policy_requirements_met FROM evaluation_native_outcomes
+         WHERE commit_id=$1 AND evaluation_attempt_id=$2 AND attempt_number=$3
+         ORDER BY configuration_name",
+        )
+        .bind(commit_id)
+        .bind(attempt.1)
+        .bind(attempt.0)
+        .fetch_all(&mut *tx)
+        .await?,
+    );
     let mock_rows = sqlx::query_as::<_, EvalPolicySystemRow>(
         "SELECT configuration_name AS system_name, 'evaluated'::text AS eval_status,
-                NULL::text AS error_message, policy_results, policy_requirements_met
+                NULL::text AS error_message, cf_agent_enabled, policy_results, policy_requirements_met
          FROM evaluation_mock_outcomes
          WHERE commit_id = $1 AND attempt_number = $2 AND evaluation_attempt_id = $3
          ORDER BY configuration_name",
@@ -303,9 +336,32 @@ async fn fetch_matrix_selected(
     plan.completed_at = context.5;
     // This transient flag describes durable outcome evidence, not the loader's
     // pre-execution plan. Never write the projected snapshot back to storage.
+    let historical_identities = plan
+        .rows
+        .iter()
+        .map(|row| (row.system_id, row.configuration_name.clone()))
+        .collect::<Vec<_>>();
     if let Some(scope) = &scope {
         scoped_read::project(scope, &mut plan, &mut rows);
+        if plan.rows.is_empty() {
+            // SECURITY: Current access to another host on the flake does not
+            // authorize a historical attempt that captured none of the caller's
+            // retained system identities. Do not expose its context or inventory.
+            tx.commit().await?;
+            return Ok(None);
+        }
     }
+    // Discovery is a separate immutable extension; never infer attempt inventory
+    // from commit_artifacts_cache or today's registered system list.
+    inventory_projection::extend(
+        &mut tx,
+        commit_id,
+        user_id,
+        &historical_identities,
+        &mut plan,
+        &mut rows,
+    )
+    .await?;
     plan.mock_evidence = if scope.is_none() {
         !mock_configurations.is_empty()
     } else {
@@ -314,31 +370,38 @@ async fn fetch_matrix_selected(
             .any(|row| mock_configurations.contains(&row.configuration_name))
     };
     project_outcomes(&mut plan, &rows);
-    if scope.is_some() {
-        scoped_read::project_flat(&plan, &mut rows);
-    }
-    // COMPATIBILITY: Flat fields remain available, but must not display
-    // another attempt's mutable derivation evidence alongside this plan.
-    // Markerless legacy documents retain their existing latest projection;
-    // pinned reads cannot attribute those documents to the selected UUID.
+    inventory_projection::mask_outside_selection(&mut plan);
+    // COMPATIBILITY: Keep the envelope, not the old attribution loophole.
+    // Legacy carriers cannot establish current inventory or prove ownership of
+    // a queued retry. Project names and outcomes before mapping to host labels.
+    rows.retain(|row| {
+        plan.inventory.is_some()
+            && plan
+                .rows
+                .iter()
+                .any(|planned| planned.configuration_name == row.system_name)
+    });
     for row in &mut rows {
-        if pin.is_some()
-            || plan.provenance == EvalMatrixProvenance::Captured
-            || row.policy_results.get("evaluation_attempt").is_some()
-        {
-            if row
+        if plan
+            .inventory
+            .as_ref()
+            .is_none_or(|inventory| !inventory.selected_configurations.contains(&row.system_name))
+            || row
                 .policy_results
                 .get("evaluation_attempt")
                 .and_then(Value::as_i64)
                 != Some(i64::from(plan.attempt_number))
-                || !matches!(row.eval_status.as_str(), "evaluated" | "eval_failed")
-            {
-                row.policy_results = serde_json::json!({});
-                row.policy_requirements_met = None;
-                row.eval_status = "evaluated".into();
-                row.error_message = None;
-            }
+            || !matches!(row.eval_status.as_str(), "evaluated" | "eval_failed")
+        {
+            row.policy_results = serde_json::json!({});
+            row.policy_requirements_met = None;
+            row.cf_agent_enabled = None;
+            row.eval_status = "evaluated".into();
+            row.error_message = None;
         }
+    }
+    if scope.is_some() {
+        scoped_read::project_flat(&plan, &mut rows);
     }
     tx.commit().await?;
     Ok(Some((rows, plan)))
@@ -377,6 +440,7 @@ fn project_native_failure(row: &mut EvalPolicySystemRow, attempt: i32) {
         row.eval_status = "unavailable".into();
         row.error_message = None;
         row.policy_requirements_met = None;
+        row.cf_agent_enabled = None;
         row.policy_results = serde_json::json!({});
     }
 }
@@ -385,6 +449,8 @@ fn project_native_failure(row: &mut EvalPolicySystemRow, attempt: i32) {
 // not hide a current isolated outcome; two valid carriers cannot be reconciled
 // by source priority. Collapse ambiguity to one evidence-free compatibility row
 // so the flat agent fields cannot accidentally pick a passing duplicate either.
+// A retained unavailable native result is already ambiguous; adding a mock
+// result must not restore evidence that the immutable record cannot prove.
 fn merge_mock_outcomes(
     mut native: Vec<EvalPolicySystemRow>,
     mock: Vec<EvalPolicySystemRow>,
@@ -393,7 +459,10 @@ fn merge_mock_outcomes(
     for mut row in mock {
         let ambiguous = native.iter().any(|other| {
             other.system_name == row.system_name
-                && matches!(other.eval_status.as_str(), "evaluated" | "eval_failed")
+                && matches!(
+                    other.eval_status.as_str(),
+                    "evaluated" | "eval_failed" | "ambiguous"
+                )
                 && other
                     .policy_results
                     .get("evaluation_attempt")
@@ -404,7 +473,8 @@ fn merge_mock_outcomes(
         if ambiguous {
             row.policy_results = serde_json::json!({});
             row.policy_requirements_met = None;
-            row.eval_status = "unavailable".into();
+            row.cf_agent_enabled = None;
+            row.eval_status = "ambiguous".into();
         }
         native.push(row);
     }
@@ -418,6 +488,10 @@ fn legacy_snapshot(
     rows: &[EvalPolicySystemRow],
 ) -> EvalPolicyMatrixSnapshot {
     EvalPolicyMatrixSnapshot {
+        source_label: None,
+        inventory: None,
+        configuration_summary: None,
+        configuration_failures: Vec::new(),
         evaluation_attempt_id: id,
         attempt_number: number,
         commit_sha: None,
@@ -448,25 +522,38 @@ fn legacy_snapshot(
 }
 
 fn project_outcomes(plan: &mut EvalPolicyMatrixSnapshot, outcomes: &[EvalPolicySystemRow]) {
+    // PERFORMANCE: Index each eligible carrier and each row's bindings once.
+    // Stale/pending artifact carriers cannot compete with a current terminal
+    // result. Multiple eligible current carriers remain explicitly ambiguous.
+    let mut by_configuration = std::collections::HashMap::<&str, Vec<&EvalPolicySystemRow>>::new();
+    for outcome in outcomes.iter().filter(|outcome| {
+        matches!(outcome.eval_status.as_str(), "evaluated" | "eval_failed")
+            && outcome
+                .policy_results
+                .get("evaluation_attempt")
+                .and_then(Value::as_i64)
+                == Some(i64::from(plan.attempt_number))
+    }) {
+        by_configuration
+            .entry(outcome.system_name.as_str())
+            .or_default()
+            .push(outcome);
+    }
     for row in &mut plan.rows {
-        // Do not choose arbitrarily if malformed data contains duplicate configs.
-        let mut matching = outcomes
-            .iter()
-            .filter(|r| r.system_name == row.configuration_name);
-        let outcome = matching.next();
-        let outcome = if matching.next().is_none() {
-            outcome
-        } else {
-            None
-        };
+        let outcome = by_configuration
+            .get(row.configuration_name.as_str())
+            .filter(|matching| matching.len() == 1)
+            .and_then(|matching| matching.first())
+            .copied();
+        let mut bindings = std::collections::HashMap::new();
+        for binding in &row.policies {
+            bindings.entry(binding.policy_version_id).or_insert(binding);
+        }
         let (cells, details) = plan
             .columns
             .iter()
             .map(|column| {
-                let binding = row
-                    .policies
-                    .iter()
-                    .find(|p| p.policy_version_id == column.policy_version_id);
+                let binding = bindings.get(&column.policy_version_id).copied();
                 let cell = classify_cell(row.resolution, binding, outcome, plan.attempt_number);
                 // Evidence must pass the cell's ownership and availability
                 // gates. Copy only the detail string, not raw metadata.
@@ -564,6 +651,7 @@ mod tests {
 
     fn outcome(id: Uuid, attempt: Value, result: Value) -> EvalPolicySystemRow {
         EvalPolicySystemRow {
+            cf_agent_enabled: Some(true),
             system_name: "shared".into(),
             eval_status: "evaluated".into(),
             error_message: None,
@@ -807,6 +895,10 @@ mod tests {
             })
             .collect();
         EvalPolicyMatrixSnapshot {
+            source_label: None,
+            inventory: None,
+            configuration_summary: None,
+            configuration_failures: Vec::new(),
             evaluation_attempt_id: Some(Uuid::new_v4()),
             attempt_number: 2,
             commit_sha: None,
@@ -1029,6 +1121,22 @@ mod tests {
         (commit, id, number)
     }
 
+    /// Captures discovery and full selection while the fixture owns its attempt.
+    pub(super) async fn inventory(
+        pool: &PgPool,
+        commit: i32,
+        number: i32,
+        names: &[&str],
+        mode: crate::queries::evaluation_inventory::InventoryExecutionMode,
+    ) {
+        let names: Vec<String> = names.iter().map(|name| (*name).to_owned()).collect();
+        crate::queries::evaluation_inventory::persist_inventory(
+            pool, commit, number, &names, &names, mode,
+        )
+        .await
+        .unwrap();
+    }
+
     fn confirmed_failure_plan() -> crate::models::evaluate_with_policies::EvaluationPlan {
         use crate::models::evaluate_with_policies::{ConfirmedSystemFailure, EvaluationPlan};
         EvaluationPlan {
@@ -1064,6 +1172,14 @@ mod tests {
             let mut tx = pool.begin().await.unwrap();
             insert_plan(&mut tx, commit, &captured).await.unwrap();
             tx.commit().await.unwrap();
+            inventory(
+                &pool,
+                commit,
+                number,
+                &["no-result", "shared"],
+                crate::queries::evaluation_inventory::InventoryExecutionMode::Native,
+            )
+            .await;
             if let Some(status) = status {
                 sqlx::query(
                     "INSERT INTO derivations (commit_id, derivation_type, derivation_name,
@@ -1117,7 +1233,8 @@ mod tests {
                 flat[0].error_message.as_deref(),
                 Some("actual Nix module evaluation failure")
             );
-            assert_eq!(flat[0].policy_requirements_met, Some(false));
+            // Nix failure is not evidence that a versioned policy failed.
+            assert_eq!(flat[0].policy_requirements_met, None);
             assert_eq!(matrix.rows[0].cells, vec![EvalMatrixCell::Unknown]);
             assert_eq!(matrix.rows[0].details, vec![None]);
 
@@ -1136,8 +1253,13 @@ mod tests {
                     .await
                     .unwrap();
                 let (flat, matrix) = fetch_matrix(&pool, commit).await.unwrap();
-                assert_ne!(flat[0].eval_status, "eval_failed");
-                assert!(flat[0].error_message.is_none());
+                // Mutating the artifact carrier cannot erase the genuine
+                // immutable failure or substitute an invalid diagnostic.
+                assert_eq!(flat[0].eval_status, "eval_failed");
+                assert_eq!(
+                    flat[0].error_message.as_deref(),
+                    Some("actual Nix module evaluation failure")
+                );
                 assert!(flat[0].policy_requirements_met.is_none());
                 assert_eq!(matrix.rows[0].cells, vec![EvalMatrixCell::Unknown]);
                 assert_eq!(matrix.rows[0].details, vec![None]);
@@ -1154,10 +1276,9 @@ mod tests {
             sqlx::query("INSERT INTO evaluation_attempts (commit_id, attempt_number, status) VALUES ($1, $2, 'queued')")
                 .bind(commit).bind(number + 1).execute(&pool).await.unwrap();
             let (flat, _) = fetch_matrix(&pool, commit).await.unwrap();
-            assert_ne!(flat[0].eval_status, "eval_failed");
-            assert!(flat[0].error_message.is_none());
-            assert!(flat[0].policy_requirements_met.is_none());
-            assert_eq!(flat[0].policy_results, json!({}));
+            // No discovery exists for the retry, so no configuration identity
+            // or diagnostic from the previous attempt may enter the flat DTO.
+            assert!(flat.is_empty());
         }
     }
 
@@ -1251,6 +1372,14 @@ mod tests {
         let mut tx = pool.begin().await.unwrap();
         insert_plan(&mut tx, commit, &captured).await.unwrap();
         tx.commit().await.unwrap();
+        inventory(
+            &pool,
+            commit,
+            number,
+            &["no-result", "shared"],
+            crate::queries::evaluation_inventory::InventoryExecutionMode::Mock,
+        )
+        .await;
         assert!(!fetch_matrix(&pool, commit).await.unwrap().1.mock_evidence);
         assert_eq!(
             fetch_matrix(&pool, commit).await.unwrap().1.rows[0].cells,
@@ -1379,6 +1508,8 @@ mod tests {
         assert!(!retry.mock_evidence);
         assert_eq!(retry.attempt_number, number + 1);
         assert_eq!(retry.provenance, EvalMatrixProvenance::LegacyUnavailable);
+        assert!(retry.inventory.is_none());
+        assert!(retry.rows.is_empty());
         assert!(
             flat.iter()
                 .all(|row| row.policy_results.get("execution_mode").is_none())
@@ -1405,6 +1536,9 @@ mod tests {
             legacy_mock.provenance,
             EvalMatrixProvenance::LegacyUnavailable
         );
+        assert!(legacy_mock.inventory.is_none());
+        assert!(legacy_mock.configuration_summary.is_none());
+        assert!(legacy_mock.rows.is_empty());
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -1449,6 +1583,14 @@ mod tests {
         let mut tx = pool.begin().await.unwrap();
         insert_plan(&mut tx, commit, &plan).await.unwrap();
         tx.commit().await.unwrap();
+        inventory(
+            &pool,
+            commit,
+            number,
+            &["no-result", "shared"],
+            crate::queries::evaluation_inventory::InventoryExecutionMode::Native,
+        )
+        .await;
         let mut tx = pool.begin().await.unwrap();
         assert!(lock_attempt(&mut tx, commit, number).await.is_err());
         tx.rollback().await.unwrap();

@@ -2322,6 +2322,20 @@ pub struct EvalQueueSummary {
 /// A single commit item in the evaluation queue.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalQueueItem {
+    /// Known unavailable configuration coverage, not pending execution.
+    #[serde(default)]
+    pub policy_unavailable_count: i64,
+    /// Visible discovered configurations explicitly excluded from execution.
+    #[serde(default)]
+    pub unselected_count: i64,
+    /// True when discovery inventory exists for this exact represented attempt.
+    #[serde(default)]
+    pub inventory_available: bool,
+    /// Selected configurations without an authoritative outcome, plus planned
+    /// configurations absent from discovery. Terminal attempts report unknown
+    /// coverage here rather than implying a pass or silently dropping a name.
+    #[serde(default)]
+    pub policy_pending_count: i64,
     pub commit_id: i32,
     pub flake_id: i32,
     pub flake_name: String,
@@ -2335,11 +2349,14 @@ pub struct EvalQueueItem {
     pub is_latest_per_flake: bool,
     pub evaluation_status: String,
     pub queue_position: i64,
+    /// Distinct visible planned/discovered identities once inventory is available.
     pub systems: Vec<String>,
+    /// Primary attempt population size; unavailable until `inventory_available`.
     pub system_count: i64,
     /// Counts persisted derivation records for the represented attempt, not
-    /// closure packages or outputs. `None` means legacy records cannot be
-    /// attributed to an attempt. Isolated mock outcomes are not derivations.
+    /// closure packages or outputs. `None` means discovery is unavailable or
+    /// legacy records cannot be attributed. Isolated mock outcomes are not
+    /// derivations.
     #[serde(default)]
     pub derivation_count: Option<i64>,
     /// True when policy counters have unambiguous represented-attempt
@@ -2389,6 +2406,20 @@ pub enum CancelEvalOutcome {
 /// A single row in the eval history list.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EvalHistoryItem {
+    /// Unavailable configuration coverage, distinct from known gate failures.
+    #[serde(default)]
+    pub policy_unavailable_count: i64,
+    /// Visible discovered configurations explicitly excluded from execution.
+    #[serde(default)]
+    pub unselected_count: i64,
+    /// True when discovery inventory exists for this exact represented attempt.
+    #[serde(default)]
+    pub inventory_available: bool,
+    /// Selected configurations without an authoritative outcome, plus planned
+    /// configurations absent from discovery. This is unavailable coverage after
+    /// completion, not a passing result.
+    #[serde(default)]
+    pub policy_pending_count: i64,
     pub commit_id: i32,
     pub flake_id: i32,
     pub flake_name: String,
@@ -2406,10 +2437,12 @@ pub struct EvalHistoryItem {
     /// Elapsed milliseconds from started_at to completed_at.
     pub evaluation_duration_ms: Option<i64>,
     pub evaluation_error_message: Option<String>,
+    /// Distinct visible planned/discovered population; unavailable before discovery.
     pub system_count: i64,
     /// Counts persisted derivation records for the represented attempt, not
-    /// closure packages or outputs. `None` means legacy records cannot be
-    /// attributed to an attempt. Isolated mock outcomes are not derivations.
+    /// closure packages or outputs. `None` means discovery is unavailable or
+    /// legacy records cannot be attributed. Isolated mock outcomes are not
+    /// derivations.
     #[serde(default)]
     pub derivation_count: Option<i64>,
     /// True when policy counters have unambiguous represented-attempt

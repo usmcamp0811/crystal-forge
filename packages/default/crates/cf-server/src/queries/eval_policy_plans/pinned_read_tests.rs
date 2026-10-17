@@ -8,6 +8,7 @@ async fn capture(
     commit: i32,
     attempt: Uuid,
     number: i32,
+    mode: crate::queries::evaluation_inventory::InventoryExecutionMode,
 ) -> EvalPolicyMatrixSnapshot {
     let mut plan = tests::plan();
     plan.evaluation_attempt_id = Some(attempt);
@@ -15,6 +16,7 @@ async fn capture(
     let mut tx = pool.begin().await.unwrap();
     insert_plan(&mut tx, commit, &plan).await.unwrap();
     tx.commit().await.unwrap();
+    tests::inventory(pool, commit, number, &["no-result", "shared"], mode).await;
     plan
 }
 
@@ -55,7 +57,14 @@ async fn finish(pool: &PgPool, commit: i32) {
 #[ignore = "requires isolated migration-backed PostgreSQL"]
 async fn pin_belongs_to_commit_and_never_falls_back_to_new_retry(pool: PgPool) {
     let (commit, id, number) = tests::commit(&pool).await;
-    let original = capture(&pool, commit, id, number).await;
+    let original = capture(
+        &pool,
+        commit,
+        id,
+        number,
+        crate::queries::evaluation_inventory::InventoryExecutionMode::Native,
+    )
+    .await;
     finish(&pool, commit).await;
     let (foreign, foreign_id, _) = tests::commit(&pool).await;
     finish(&pool, foreign).await;
@@ -128,7 +137,14 @@ async fn pin_belongs_to_commit_and_never_falls_back_to_new_retry(pool: PgPool) {
 #[ignore = "requires isolated migration-backed PostgreSQL"]
 async fn historical_mock_values_survive_retry_while_stale_native_is_unknown(pool: PgPool) {
     let (commit, id, number) = tests::commit(&pool).await;
-    let original = capture(&pool, commit, id, number).await;
+    let original = capture(
+        &pool,
+        commit,
+        id,
+        number,
+        crate::queries::evaluation_inventory::InventoryExecutionMode::Mock,
+    )
+    .await;
     let policy = original.columns[0].policy_version_id;
     sqlx::query("INSERT INTO evaluation_mock_outcomes(evaluation_attempt_id,commit_id,attempt_number,configuration_name,policy_results,cf_agent_enabled,policy_requirements_met) VALUES($1,$2,$3,'shared',$4,TRUE,FALSE)")
         .bind(id).bind(commit).bind(number)
@@ -142,6 +158,12 @@ async fn historical_mock_values_survive_retry_while_stale_native_is_unknown(pool
     let mut tx = pool.begin().await.unwrap();
     insert_plan(&mut tx, commit, &next_plan).await.unwrap();
     tx.commit().await.unwrap();
+    // This historical-read fixture represents discovery on a queued retry.
+    // Insert exact immutable inventory before its outcomes; the active writer
+    // correctly rejects queued attempts and must not be used to manufacture it.
+    sqlx::query("INSERT INTO evaluation_attempt_inventory(evaluation_attempt_id,commit_id,attempt_number,configuration_names,selected_configuration_names,execution_mode) VALUES($1,$2,$3,ARRAY['no-result','shared'],ARRAY['no-result','shared'],'native')")
+        .bind(next_id).bind(commit).bind(number + 1)
+        .execute(&pool).await.unwrap();
     sqlx::query("INSERT INTO derivations(commit_id,derivation_type,derivation_name,status_id,policy_results) VALUES($1,'nixos','shared',5,$2)")
         .bind(commit).bind(json!({"evaluation_attempt":number+1,"assigned":{
             policy.to_string():{"passed":true,"details":"new native pass"}
@@ -191,7 +213,14 @@ fn earlier_context_defaults_are_unknown() {
 #[ignore = "requires isolated migration-backed PostgreSQL"]
 async fn pinned_native_failure_is_preserved_until_its_marker_is_overwritten(pool: PgPool) {
     let (commit, id, number) = tests::commit(&pool).await;
-    capture(&pool, commit, id, number).await;
+    capture(
+        &pool,
+        commit,
+        id,
+        number,
+        crate::queries::evaluation_inventory::InventoryExecutionMode::Native,
+    )
+    .await;
     sqlx::query("INSERT INTO derivations(commit_id,derivation_type,derivation_name,status_id,policy_results,error_message) VALUES($1,'nixos','shared',10,$2,'unrelated build diagnostic')")
         .bind(commit).bind(json!({"evaluation_attempt":number,"evaluation_failure":true,
             "evaluation_failure_error":"exact old Nix failure"})).execute(&pool).await.unwrap();

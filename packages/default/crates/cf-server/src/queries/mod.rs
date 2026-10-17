@@ -28,6 +28,8 @@ pub mod derivations;
 pub mod environments;
 pub mod eval_logs;
 pub mod eval_policy_plans;
+pub mod evaluation_inventory;
+pub(crate) mod evaluation_native_outcomes;
 pub mod evaluation_snapshots;
 pub mod flake_credentials;
 pub mod flakes;

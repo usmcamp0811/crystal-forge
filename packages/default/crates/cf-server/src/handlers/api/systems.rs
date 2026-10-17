@@ -244,6 +244,14 @@ pub async fn create_system(
     (StatusCode::CREATED, Json(detail)).into_response()
 }
 
+/// Returns system details within the caller's current environment memberships.
+///
+/// Administrators can inspect every system, including systems without an
+/// environment. Other callers need explicit membership in the system's current
+/// environment. Missing and inaccessible systems return the same 404 response.
+/// Non-admin reads hold shared locks on the target and current memberships
+/// until the response body is materialized.
+/// Authentication failures return 403; database failures return 500.
 pub async fn get_system(
     State(state): State<CFState>,
     State(pool): State<PgPool>,
@@ -254,12 +262,26 @@ pub async fn get_system(
         return forbidden();
     };
 
-    let Some(_caller_role) = highest_role(&roles) else {
+    let Some(caller_role) = highest_role(&roles) else {
         return forbidden();
     };
-    let _environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
-        Ok(value) => value,
-        Err(_) => return internal_error("Failed to load environment memberships"),
+    // SECURITY: The base response must enforce the same boundary as its
+    // configuration subrequests and retain that authorization while loading
+    // details. Admin access does not depend on mutable environment scope.
+    let guard = if caller_role == Role::Admin {
+        None
+    } else {
+        match super::compliance::lock_receiver_read_scope(
+            &pool,
+            user_id,
+            caller_role,
+            Some(system_id),
+        )
+        .await
+        {
+            Ok((tx, _)) => Some(tx),
+            Err(response) => return response,
+        }
     };
 
     let row = match get_system_detail_by_id(&pool, system_id).await {
@@ -267,13 +289,15 @@ pub async fn get_system(
         Ok(None) => return not_found(),
         Err(_) => return internal_error("Failed to load system"),
     };
-
-    // Note: Environment-based access control would go here
-    // For now, simplified - in production you'd check environment membership
-
     let detail = detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs);
 
-    (StatusCode::OK, Json(detail)).into_response()
+    let response = (StatusCode::OK, Json(detail)).into_response();
+    if let Some(tx) = guard {
+        if tx.commit().await.is_err() {
+            return internal_error("Failed to commit read scope guard");
+        }
+    }
+    response
 }
 
 /// Returns a bounded page of cached evaluated options for one system revision.

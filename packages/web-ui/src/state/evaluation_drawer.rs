@@ -1,10 +1,10 @@
-//! In-memory evaluation navigation contracts. No refresh persistence is promised.
+//! Exact evaluation navigation and optional in-memory presentation contracts.
 //!
 //! Exact attempt identity gates restoration. Receivers must validate captured
 //! membership before presenting evidence; catalog and deployed data are not
 //! substitutes for an unavailable historical evaluation.
 
-use crate::api::models::{EvalHistoryItem, EvalQueueItem};
+use crate::api::models::{EvalHistoryItem, EvalPolicyMatrixResponse, EvalQueueItem};
 use dioxus::prelude::*;
 use uuid::Uuid;
 
@@ -19,6 +19,118 @@ pub struct EvaluationIdentity {
     pub attempt_id: Uuid,
     /// Human-visible attempt number, validated with the UUID.
     pub attempt_number: i32,
+}
+
+impl EvaluationIdentity {
+    /// Reads exact identity from a pinned response, rejecting route mismatches.
+    ///
+    /// Missing context, invalid SHA, nil UUID, and nonpositive attempts fail closed.
+    pub fn from_response(
+        data: &EvalPolicyMatrixResponse,
+        commit_id: i32,
+        attempt_id: Uuid,
+    ) -> Option<Self> {
+        let snapshot = data.matrix.as_ref()?;
+        let sha = snapshot.commit_sha.as_ref()?;
+        (data.commit_id == commit_id
+            && commit_id > 0
+            && !attempt_id.is_nil()
+            && snapshot.evaluation_attempt_id == Some(attempt_id)
+            && snapshot.attempt_number > 0
+            && sha.len() == 40
+            && sha.bytes().all(|b| b.is_ascii_hexdigit()))
+        .then(|| Self {
+            commit_id,
+            commit_sha: sha.clone(),
+            attempt_id,
+            attempt_number: snapshot.attempt_number,
+        })
+    }
+
+    /// Checks the complete server identity, including SHA and attempt number.
+    pub fn matches_response(&self, data: &EvalPolicyMatrixResponse) -> bool {
+        Self::from_response(data, self.commit_id, self.attempt_id).as_ref() == Some(self)
+    }
+}
+
+/// Identifies shareable historical evidence without relying on browser globals.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct EvaluationEvidenceRoute {
+    /// Database commit identity from the path.
+    pub commit_id: i32,
+    /// Exact retained attempt UUID from the path.
+    pub attempt_id: Uuid,
+    /// Captured bundle lineage UUID from the query.
+    pub bundle_id: Uuid,
+    /// Exact bundle version UUID from the query.
+    pub bundle_version_id: Uuid,
+    /// Captured system UUID from the query.
+    pub system_id: Uuid,
+    /// Exact policy version UUID from the query; the API supplies its lineage.
+    pub policy_version_id: Uuid,
+}
+
+impl EvaluationEvidenceRoute {
+    /// Parses required full UUIDs and rejects incomplete or nil route targets.
+    ///
+    /// Returns `None` for a nonpositive commit ID, nil attempt, or malformed,
+    /// abbreviated, or nil query UUID. `policy` identifies a policy version.
+    pub fn parse(
+        commit_id: i32,
+        attempt_id: Uuid,
+        bundle: &str,
+        version: &str,
+        system: &str,
+        policy: &str,
+    ) -> Option<Self> {
+        let full_uuid = |value: &str| {
+            let parsed = Uuid::parse_str(value).ok()?;
+            (value.len() == 36 && !parsed.is_nil()).then_some(parsed)
+        };
+        if commit_id <= 0 || attempt_id.is_nil() {
+            return None;
+        }
+        Some(Self {
+            commit_id,
+            attempt_id,
+            bundle_id: full_uuid(bundle)?,
+            bundle_version_id: full_uuid(version)?,
+            system_id: full_uuid(system)?,
+            policy_version_id: full_uuid(policy)?,
+        })
+    }
+
+    /// Resolves policy lineage only from the exact authorized attempt response.
+    ///
+    /// Returns `None` for mismatched attempt identity or missing or ambiguous
+    /// policy-version metadata. This does not establish bundle membership.
+    /// The receiver must also validate the system's captured bundle contribution.
+    pub fn resolve(&self, data: &EvalPolicyMatrixResponse) -> Option<EvaluationEvidence> {
+        let evaluation = EvaluationIdentity::from_response(data, self.commit_id, self.attempt_id)?;
+        let snapshot = data.matrix.as_ref()?;
+        let mut policies = snapshot
+            .columns
+            .iter()
+            .filter(|p| p.policy_version_id == self.policy_version_id);
+        let policy = policies.next()?;
+        if policies.next().is_some() {
+            return None;
+        }
+        Some(EvaluationEvidence {
+            evaluation,
+            system_id: self.system_id,
+            bundle_id: self.bundle_id,
+            bundle_version_id: self.bundle_version_id,
+            policy_id: policy.policy_id,
+            policy_version_id: self.policy_version_id,
+        })
+    }
+}
+
+/// Selects Policy for retained attempts because exact Log/Graph APIs are absent.
+/// The original return-state tab remains stored for a future supported receiver.
+pub fn retained_tab(tab: &str, pinned: bool) -> String {
+    if pinned { "policy".into() } else { tab.into() }
 }
 
 /// Selects evaluation check evidence, not framework satisfaction or a finding.
@@ -160,8 +272,9 @@ impl MatrixPresentation {
 pub struct EvaluationReturn {
     /// Exact attempt to restore through the pinned endpoint.
     pub identity: EvaluationIdentity,
-    /// Original summary; never silently replaced by a retry summary.
-    pub target: EvaluationTarget,
+    /// Original summary; absent for direct URLs without a queue/history origin.
+    /// Receivers must not substitute a latest summary when this is absent.
+    pub target: Option<EvaluationTarget>,
     /// History page selection.
     pub history: bool,
     /// Search text.
@@ -183,30 +296,63 @@ pub struct EvaluationReturn {
 }
 
 impl EvaluationReturn {
+    /// Requires both path identities before reusing rich presentation state.
+    pub fn matches_route(&self, commit_id: i32, attempt_id: Uuid) -> bool {
+        self.matches_commit(commit_id) && self.identity.attempt_id == attempt_id
+    }
+
     /// Checks the stored summary before restoring any page or drawer state.
     /// The receiver must still validate the pinned API response independently.
     pub fn matches_commit(&self, commit_id: i32) -> bool {
         let (id, sha, attempt) = match &self.target {
-            EvaluationTarget::Queue(item) => {
+            Some(EvaluationTarget::Queue(item)) => {
                 (item.commit_id, &item.commit_hash, item.attempt_number)
             }
-            EvaluationTarget::History(item) => {
+            Some(EvaluationTarget::History(item)) => {
                 (item.commit_id, &item.commit_hash, item.attempt_number)
             }
+            None => (
+                self.identity.commit_id,
+                &self.identity.commit_sha,
+                self.identity.attempt_number,
+            ),
         };
         id == commit_id
             && id == self.identity.commit_id
             && sha == &self.identity.commit_sha
             && attempt == self.identity.attempt_number
+            && attempt > 0
+            && id > 0
             && !self.identity.attempt_id.is_nil()
             && sha.len() == 40
             && sha.bytes().all(|byte| byte.is_ascii_hexdigit())
     }
 }
 
+impl EvaluationReturn {
+    /// Creates presentation defaults for an exact URL without a saved summary.
+    ///
+    /// Only the pinned API can supply identity; no queue/history data is inferred.
+    pub fn direct(identity: EvaluationIdentity) -> Self {
+        Self {
+            identity,
+            target: None,
+            history: true,
+            search: String::new(),
+            status: "all".into(),
+            flake: "all".into(),
+            latest: false,
+            tab: "policy".into(),
+            maximized: false,
+            system: None,
+            dom: None,
+        }
+    }
+}
+
 /// Keeps page state during an in-memory receiver round trip.
 pub static EVALUATION_RETURN: GlobalSignal<Option<EvaluationReturn>> = Signal::global(|| None);
-/// Carries an explicit evaluation-evidence request into Compliance.
+/// Carries optional legacy handoff context; exact routes do not require it.
 pub static EVALUATION_EVIDENCE: GlobalSignal<Option<EvaluationEvidence>> = Signal::global(|| None);
 /// Retains presentation by exact commit and attempt, including across errors.
 pub static MATRIX_PRESENTATIONS: GlobalSignal<
@@ -228,4 +374,104 @@ pub async fn restore_dom(value: serde_json::Value) {
     );
     let _ = eval.send(value);
     let _ = eval.await;
+}
+
+#[cfg(test)]
+mod navigation_tests {
+    use super::*;
+
+    #[test]
+    fn evidence_routes_require_full_non_nil_identity() {
+        let id = Uuid::from_u128(1);
+        let full = id.to_string();
+        assert!(EvaluationEvidenceRoute::parse(1, id, &full, &full, &full, &full).is_some());
+        for invalid in [
+            "",
+            "1",
+            "00000000000000000000000000000001",
+            "00000000-0000-0000-0000-000000000000",
+        ] {
+            assert!(EvaluationEvidenceRoute::parse(1, id, invalid, &full, &full, &full).is_none());
+            assert!(EvaluationEvidenceRoute::parse(1, id, &full, invalid, &full, &full).is_none());
+            assert!(EvaluationEvidenceRoute::parse(1, id, &full, &full, invalid, &full).is_none());
+            assert!(EvaluationEvidenceRoute::parse(1, id, &full, &full, &full, invalid).is_none());
+        }
+        assert!(EvaluationEvidenceRoute::parse(0, id, &full, &full, &full, &full).is_none());
+        assert!(
+            EvaluationEvidenceRoute::parse(1, Uuid::nil(), &full, &full, &full, &full).is_none()
+        );
+    }
+
+    #[test]
+    fn direct_return_cannot_match_another_commit_or_attempt() {
+        let identity = EvaluationIdentity {
+            commit_id: 1,
+            commit_sha: "a".repeat(40),
+            attempt_id: Uuid::from_u128(1),
+            attempt_number: 2,
+        };
+        let saved = EvaluationReturn::direct(identity.clone());
+        assert!(saved.target.is_none());
+        assert!(saved.matches_route(1, identity.attempt_id));
+        assert!(!saved.matches_route(2, identity.attempt_id));
+        assert!(!saved.matches_route(1, Uuid::from_u128(2)));
+        let mut invalid = saved.clone();
+        invalid.identity.commit_sha = "latest".into();
+        assert!(!invalid.matches_commit(1));
+        invalid = saved.clone();
+        invalid.identity.attempt_id = Uuid::nil();
+        assert!(!invalid.matches_commit(1));
+        invalid = saved;
+        invalid.identity.attempt_number = 0;
+        assert!(!invalid.matches_commit(1));
+    }
+
+    #[test]
+    fn retained_tabs_select_policy_without_mutating_original_return_choice() {
+        for tab in ["log", "graph", "policy"] {
+            assert_eq!(retained_tab(tab, true), "policy");
+            assert_eq!(retained_tab(tab, false), tab);
+        }
+    }
+
+    #[test]
+    fn rich_return_rejects_summary_identity_drift_and_preserves_presentation() {
+        let identity = EvaluationIdentity {
+            commit_id: 1,
+            commit_sha: "a".repeat(40),
+            attempt_id: Uuid::from_u128(1),
+            attempt_number: 2,
+        };
+        let summary: EvalQueueItem = serde_json::from_value(serde_json::json!({
+            "commit_id":1, "flake_id":1, "flake_name":"captured", "branch":"main",
+            "commit_hash":identity.commit_sha, "commit_message":null, "author":null,
+            "committed_at":"2026-10-16T00:00:00Z", "enqueued_at":"2026-10-16T00:00:00Z",
+            "evaluation_status":"in_progress", "queue_position":1, "systems":[],
+            "system_count":0, "passed_count":0, "policy_failed_count":0, "eval_failed_count":0,
+            "attempt_number":2
+        }))
+        .unwrap();
+        let mut saved = EvaluationReturn::direct(identity.clone());
+        saved.target = Some(EvaluationTarget::Queue(summary.clone()));
+        saved.search = "host".into();
+        saved.status = "failed".into();
+        saved.flake = "7".into();
+        saved.tab = "graph".into();
+        saved.maximized = true;
+        saved.dom = Some(serde_json::json!({"focus":"invoking-control", "window":{"x":0,"y":90}}));
+        let original = saved.clone();
+        assert!(saved.matches_route(1, identity.attempt_id));
+        assert_eq!(retained_tab(&saved.tab, true), "policy");
+        assert!(saved == original);
+        for index in 0..3 {
+            let mut wrong = summary.clone();
+            match index {
+                0 => wrong.commit_id += 1,
+                1 => wrong.commit_hash = "b".repeat(40),
+                _ => wrong.attempt_number += 1,
+            }
+            saved.target = Some(EvaluationTarget::Queue(wrong));
+            assert!(!saved.matches_route(1, identity.attempt_id));
+        }
+    }
 }

@@ -2966,10 +2966,15 @@ fn system_not_queued_reason(
 /// returns [`SystemPersistenceOutcome::NeedsBuildPreparation`]. The later
 /// activation transaction preserves that row and creates a replacement attempt.
 /// Other existing build jobs return [`SystemPersistenceOutcome::ExistingBuildJob`].
+/// Retains native terminal flags and policy results in an immutable exact-attempt
+/// sidecar in this transaction. Requires selected Native discovery inventory;
+/// mutable derivation updates on a later retry cannot erase this evidence.
 ///
 /// # Errors
 ///
-/// Returns an error when policy resolution or a database operation fails.
+/// Returns an error when policy resolution, selected Native inventory proof, or
+/// database persistence fails, or when terminal evidence differs from the first
+/// write for this attempt/configuration. Errors roll back this transaction.
 pub async fn persist_evaluated_system(
     pool: &PgPool,
     commit_id: i32,
@@ -2987,42 +2992,23 @@ pub async fn persist_evaluated_system(
     // is the global first lock for every evaluation finalization transaction.
     crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await?;
 
-    #[derive(sqlx::FromRow)]
-    struct CommitState {
-        evaluation_status: Option<String>,
-        evaluation_attempt_count: Option<i32>,
-        cancellation_requested: Option<bool>,
-    }
-
-    let state = sqlx::query_as::<_, CommitState>(
-        r#"
-        SELECT evaluation_status, evaluation_attempt_count, cancellation_requested
-        FROM commits
-        WHERE id = $1
-        FOR UPDATE
-        "#,
+    // CONCURRENCY: Retain exact latest attempt ownership before policy,
+    // derivation, and build locks. A queued retry supersedes this writer too.
+    if let Err(error) = crate::queries::evaluation_native_outcomes::lock_native_owner_tx(
+        &mut tx,
+        commit_id,
+        expected_attempt,
     )
-    .bind(commit_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    let Some(state) = state else {
+    .await
+    {
         tx.rollback().await?;
-        return Ok(SystemPersistenceOutcome::Superseded);
-    };
-
-    let attempt_count = state.evaluation_attempt_count.unwrap_or(0);
-    let status = state.evaluation_status.as_deref().unwrap_or("pending");
-    let cancellation = state.cancellation_requested.unwrap_or(false);
-
-    if attempt_count != expected_attempt || !matches!(status, "in_progress" | "cancelling") {
-        tx.rollback().await?;
-        return Ok(SystemPersistenceOutcome::Superseded);
-    }
-
-    if cancellation || status == "cancelling" {
-        tx.rollback().await?;
-        return Ok(SystemPersistenceOutcome::Cancelled);
+        if error.is::<EvaluationSuperseded>() {
+            return Ok(SystemPersistenceOutcome::Superseded);
+        }
+        if error.is::<EvaluationCancelled>() {
+            return Ok(SystemPersistenceOutcome::Cancelled);
+        }
+        return Err(error);
     }
 
     let system_id = sqlx::query_scalar::<_, uuid::Uuid>(
@@ -3067,6 +3053,18 @@ pub async fn persist_evaluated_system(
     // INVARIANT: Failure-only partial publication accepts only this exact
     // attempt's persisted result, never a success inherited from an older run.
     policy_results["evaluation_attempt"] = serde_json::json!(expected_attempt);
+    crate::queries::evaluation_native_outcomes::persist_native_outcome_tx(
+        &mut tx,
+        commit_id,
+        expected_attempt,
+        &result.system_name,
+        crate::queries::evaluation_native_outcomes::NativeEvalState::Evaluated,
+        result.cf_agent_enabled,
+        Some(policy_requirements_met),
+        &policy_results,
+        None,
+    )
+    .await?;
     let write = record_successful_eval_result_in_tx(
         &mut tx,
         Some(commit_id),
@@ -3935,10 +3933,14 @@ async fn prepare_persisted_evaluated_system(
 /// Confirmed failures carry the expected attempt and diagnostic in
 /// `policy_results` in the same transaction. This evidence does not replace
 /// an irreversible build status or its artifact paths.
+/// Each confirmed failure also creates immutable native sidecar evidence after
+/// exact selected Native inventory proof. Missing discovery is not a failure
+/// outcome. A newer queued attempt supersedes the finalizer before publication.
 ///
 /// # Errors
-/// Returns database, snapshot, or terminal-policy persistence failures. Earlier
-/// incremental success transactions are not rolled back by this finalizer.
+/// Returns database, snapshot, terminal-policy, native inventory proof, or
+/// immutable outcome conflict errors. Earlier incremental success transactions
+/// are not rolled back by this finalizer.
 pub async fn finalize_evaluation_attempt(
     pool: &PgPool,
     commit_id: i32,
@@ -3994,10 +3996,12 @@ pub async fn finalize_evaluation_attempt(
     // lineage cannot leave a terminal commit with an active attempt row.
     let active_attempt_id: Option<uuid::Uuid> = sqlx::query_scalar(
         r#"
-        SELECT id
-        FROM evaluation_attempts
-        WHERE commit_id = $1 AND attempt_number = $2 AND status = 'in_progress'
-        FOR UPDATE
+        SELECT a.id
+        FROM evaluation_attempts a
+        WHERE a.commit_id = $1 AND a.attempt_number = $2 AND a.status = 'in_progress'
+          AND NOT EXISTS (SELECT 1 FROM evaluation_attempts newer
+              WHERE newer.commit_id = a.commit_id AND newer.attempt_number > a.attempt_number)
+        FOR UPDATE OF a
         "#,
     )
     .bind(commit_id)
@@ -4055,6 +4059,24 @@ pub async fn finalize_evaluation_attempt(
     sorted_failures.sort_by(|a, b| a.system_name.cmp(&b.system_name));
 
     for cf in &sorted_failures {
+        // Only confirmed post-discovery failures become historical evidence.
+        // The writer proves exact selected Native inventory in this same tx.
+        crate::queries::evaluation_native_outcomes::persist_native_outcome_tx(
+            &mut tx,
+            commit_id,
+            expected_attempt,
+            &cf.system_name,
+            crate::queries::evaluation_native_outcomes::NativeEvalState::EvalFailed,
+            None,
+            None,
+            &serde_json::json!({
+                "evaluation_attempt": expected_attempt,
+                "evaluation_failure": true,
+                "evaluation_failure_error": cf.error,
+            }),
+            Some(&cf.error),
+        )
+        .await?;
         let write = record_synthetic_eval_failure_in_tx(
             &mut tx,
             Some(commit_id),
@@ -4749,8 +4771,22 @@ async fn evaluate_with_nix_eval_jobs_inner(
         ),
     )
     .await;
-    // Publish the full inventory for UI reads, including a valid empty set.
-    // Preserve changed_files; this row is never evaluation authority.
+    // INVARIANT: Every replacement expression selects only this original
+    // verified inventory/build-scope intersection. Terminal outcomes never
+    // re-enter a later child, even when their policies prohibit building.
+    let expected_systems = systems_selected_for_evaluation(&known_systems, &allowed_systems);
+    // INVARIANT: Required exact-attempt persistence precedes evaluator admission.
+    // The mutable artifact cache below remains non-authoritative and optional.
+    crate::queries::evaluation_inventory::persist_inventory(
+        pool,
+        commit.id,
+        expected_attempt,
+        &known_systems,
+        &expected_systems,
+        crate::queries::evaluation_inventory::InventoryExecutionMode::Native,
+    )
+    .await?;
+    // Preserve changed_files and publish the full inventory, including empty.
     persist_discovery_inventory(
         crate::queries::commits_artifacts::upsert_commit_artifact_systems(
             pool,
@@ -4761,10 +4797,6 @@ async fn evaluate_with_nix_eval_jobs_inner(
     )
     .await?;
     let has_known_systems = !known_systems.is_empty();
-    // INVARIANT: Every replacement expression selects only this original
-    // verified inventory/build-scope intersection. Terminal outcomes never
-    // re-enter a later child, even when their policies prohibit building.
-    let expected_systems = systems_selected_for_evaluation(&known_systems, &allowed_systems);
     let mut seen_systems: HashSet<String> = HashSet::new();
     // Systems for which nix-eval-jobs emitted a JSON line with an `error`
     // field. These are confirmed evaluation failures — the error message is
@@ -7369,6 +7401,17 @@ async fn evaluate_with_mock_eval_jobs_inner(
     let planned_systems = list_configuration_names_for_flake(pool, flake.id).await?;
     let candidate_systems = select_mock_system_names(planned_systems, configured_systems);
     let systems = resolve_mock_systems(&flake.name, target_system, &candidate_systems)?;
+    // Mock inventory is exactly the resolved synthetic list, never native
+    // discovery evidence. Persist before simulated stages or outcome publication.
+    crate::queries::evaluation_inventory::persist_inventory(
+        pool,
+        commit.id,
+        expected_attempt,
+        &systems,
+        &systems,
+        crate::queries::evaluation_inventory::InventoryExecutionMode::Mock,
+    )
+    .await?;
     let stage_delay = mock_eval_stage_delay(systems.len());
 
     crate::queries::commits_artifacts::upsert_commit_artifact_cache(pool, commit.id, &systems, &[])
@@ -10620,6 +10663,21 @@ mod tests {
         }
     }
 
+    // Native producer fixtures model completed discovery, not cached names.
+    async fn native_inventory(pool: &PgPool, commit_id: i32, attempt: i32, names: &[&str]) {
+        let names: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
+        crate::queries::evaluation_inventory::persist_inventory(
+            pool,
+            commit_id,
+            attempt,
+            &names,
+            &names,
+            crate::queries::evaluation_inventory::InventoryExecutionMode::Native,
+        )
+        .await
+        .expect("verified native fixture inventory should persist");
+    }
+
     fn successful_system(system_name: &str) -> SuccessfulSystemResult {
         SuccessfulSystemResult {
             system_name: system_name.to_string(),
@@ -11323,18 +11381,15 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
-
-        finalize_evaluation_attempt(
-            &pool,
-            commit_id,
-            attempt,
-            &plan(
-                vec![successful_system("alpha")],
-                vec![failed_system("broken\0system", "module error")],
-            ),
-        )
-        .await
-        .expect_err("nul byte should make synthetic failure write fail");
+        native_inventory(&pool, commit_id, attempt, &["alpha", "broken"]).await;
+        let mut evaluation = plan(
+            vec![successful_system("alpha")],
+            vec![failed_system("broken", "module error")],
+        );
+        evaluation.force_build_job_insert_failure = true;
+        finalize_evaluation_attempt(&pool, commit_id, attempt, &evaluation)
+            .await
+            .expect_err("injected finalization failure should roll back all writes");
 
         assert_eq!(derivation_count(&pool, commit_id).await, 0);
 
@@ -11363,6 +11418,7 @@ mod tests {
 
         let system = successful_system("alpha");
         let check = passing_policy_check("alpha");
+        native_inventory(&pool, commit_id, attempt, &["alpha"]).await;
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
@@ -11414,6 +11470,7 @@ mod tests {
             .expect("policy metadata should parse");
 
         let system = successful_system("gray");
+        native_inventory(&pool, commit_id, attempt, &["gray"]).await;
 
         // Simulates the fallback path: finalize_evaluated_system called with
         // this configuration's real assigned policies, matching what the
@@ -11443,7 +11500,8 @@ mod tests {
         // What the bulk streaming path would have produced for the
         // identical check + assigned policies (this is exactly what
         // `persist_evaluated_system` computes internally).
-        let expected = policy_results_json(&check, &assigned);
+        let mut expected = policy_results_json(&check, &assigned);
+        expected["evaluation_attempt"] = serde_json::json!(attempt);
         assert_eq!(
             persisted, expected,
             "fallback path must persist the same policy_results document as the bulk path"
@@ -11480,6 +11538,7 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
+        native_inventory(&pool, commit_id, attempt, &["writer-lock-host"]).await;
 
         let mut blocker = pool.begin().await.expect("blocker should begin");
         lock_snapshot_writer_tx(&mut blocker)
@@ -11545,6 +11604,7 @@ mod tests {
 
         let system = successful_system("alpha");
         let check = failing_policy_check("alpha", true, "Require packages: git");
+        native_inventory(&pool, commit_id, attempt, &["alpha"]).await;
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
@@ -11585,6 +11645,7 @@ mod tests {
 
         let system = successful_system("alpha");
         let check = failing_policy_check("alpha", false, "Require packages: git");
+        native_inventory(&pool, commit_id, attempt, &["alpha"]).await;
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
@@ -11608,6 +11669,7 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
+        native_inventory(&pool, commit_id, attempt, &["alpha"]).await;
 
         let system = successful_system("alpha");
         let check = passing_policy_check("alpha");
@@ -11645,6 +11707,7 @@ mod tests {
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
         let system = successful_system("policy-cancel");
+        native_inventory(&pool, commit_id, attempt, &["policy-cancel"]).await;
 
         let first = finalize_evaluated_system(
             &pool,
@@ -11675,6 +11738,19 @@ mod tests {
         .await
         .expect("fixture derivation should enter the build-active state");
 
+        // Different terminal policy evidence requires a new evaluation owner.
+        finalize_evaluation_attempt(&pool, commit_id, attempt, &plan(vec![], vec![]))
+            .await
+            .expect("first evaluation should complete");
+        sqlx::query("INSERT INTO evaluation_attempts (commit_id, attempt_number, status) VALUES ($1, $2, 'queued')")
+            .bind(commit_id).bind(attempt + 1).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE commits SET evaluation_status = 'pending' WHERE id = $1")
+            .bind(commit_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let attempt = start_eval(&pool, commit_id).await;
+        native_inventory(&pool, commit_id, attempt, &["policy-cancel"]).await;
         let cancelled = finalize_evaluated_system(
             &pool,
             commit_id,
@@ -11722,15 +11798,12 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
-
-        finalize_evaluation_attempt(
-            &pool,
-            commit_id,
-            attempt,
-            &plan(vec![], vec![failed_system("bad\0system", "module error")]),
-        )
-        .await
-        .expect_err("synthetic failure write should roll back finalization");
+        native_inventory(&pool, commit_id, attempt, &["bad"]).await;
+        let mut evaluation = plan(vec![], vec![failed_system("bad", "module error")]);
+        evaluation.force_build_job_insert_failure = true;
+        finalize_evaluation_attempt(&pool, commit_id, attempt, &evaluation)
+            .await
+            .expect_err("synthetic failure write should roll back finalization");
 
         assert_eq!(derivation_count(&pool, commit_id).await, 0);
         assert_eq!(build_job_count(&pool, commit_id).await, 0);
@@ -11836,6 +11909,7 @@ mod tests {
         let attempt = start_eval(&pool, commit_id).await;
 
         let system = successful_system_no_agent("beta");
+        native_inventory(&pool, commit_id, attempt, &["beta"]).await;
         let check = agent_disabled_check("beta");
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
@@ -11872,6 +11946,7 @@ mod tests {
         let attempt = start_eval(&pool, commit_id).await;
 
         let system = successful_system_no_agent("gamma");
+        native_inventory(&pool, commit_id, attempt, &["gamma"]).await;
         let check = agent_disabled_with_strict_failure("gamma");
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
@@ -11908,6 +11983,7 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
+        native_inventory(&pool, commit_id, attempt, &["alpha", "beta"]).await;
 
         // First system finalizes successfully while eval is in_progress.
         let first_system = successful_system("alpha");
@@ -11973,6 +12049,7 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
+        native_inventory(&pool, commit_id, attempt, &["alpha", "broken"]).await;
 
         // Finalize A incrementally (simulating streaming bulk path).
         let system_a = successful_system("alpha");
@@ -12139,6 +12216,7 @@ mod tests {
         let attempt = start_eval(&pool, commit_id).await;
 
         let system = successful_system("delta");
+        native_inventory(&pool, commit_id, attempt, &["delta"]).await;
         let check = passing_policy_check("delta");
 
         // First finalize inserts derivation + build job.
@@ -12187,6 +12265,7 @@ mod tests {
         let attempt = start_eval(&pool, commit_id).await;
 
         let system = successful_system("epsilon");
+        native_inventory(&pool, commit_id, attempt, &["epsilon"]).await;
         let check = passing_policy_check("epsilon");
 
         let first = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
@@ -12258,6 +12337,7 @@ mod tests {
         //   → standalone eval runs and succeeds
         //   → finalize_evaluated_system called with the standalone result
         let system = successful_system("nix-builder-1");
+        native_inventory(&pool, commit_id, attempt, &["nix-builder-1"]).await;
         let check = passing_policy_check("nix-builder-1");
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
@@ -12383,6 +12463,7 @@ mod tests {
         let attempt = start_eval(&pool, commit_id).await;
 
         let system = successful_system("kappa");
+        native_inventory(&pool, commit_id, attempt, &["kappa"]).await;
         let check = passing_policy_check("kappa");
 
         // First finalize → Queued
@@ -12494,6 +12575,7 @@ mod tests {
 
         // ── Phase 1: persist only (no build job) ─────────────────────
         let system = successful_system("lambda");
+        native_inventory(&pool, commit_id, attempt, &["lambda"]).await;
         let check = passing_policy_check("lambda");
         let persisted = persist_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
@@ -12569,6 +12651,7 @@ mod tests {
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
         let system = successful_system("obsolete-contract-recovery");
+        native_inventory(&pool, commit_id, attempt, &["obsolete-contract-recovery"]).await;
         let check = passing_policy_check("obsolete-contract-recovery");
 
         let first = persist_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])

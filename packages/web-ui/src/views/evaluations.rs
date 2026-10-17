@@ -44,23 +44,363 @@ const FETCH_LIMIT_MAX: i64 = 10_000; // must match backend LIMIT_MAX
 /// Shows the drawer's configuration-level policy counters in design typography.
 ///
 /// The values count evaluated configurations, not bundle controls. Unavailable
-/// counters render an em dash rather than a clean zero.
+/// counters render an em dash rather than a clean zero. Empty known coverage
+/// explicitly says `No results`; zero failures alone do not prove a clean gate.
 #[component]
-fn DrawerPolicyCounts(available: bool, passed: i64, failed: i64) -> Element {
+fn DrawerPolicyCounts(
+    available: bool,
+    passed: i64,
+    failed: i64,
+    #[props(default)] pending: i64,
+    #[props(default)] unavailable: i64,
+    #[props(default)] evaluation_errors: i64,
+    #[props(default)] excluded: i64,
+    #[props(default)] live: bool,
+) -> Element {
     rsx! {
         if available {
             div { class: "ed-stat-val ed-policy-val",
                 title: "Configurations passing / failing the CF-agent and assigned-requirement gate for this attempt. Coverage may be partial; bundle controls are counted in the Policy matrix.",
-                span { class: "ed-policy-pass", "{passed}" }
+                span { class: if passed > 0 { "ed-policy-pass" } else { "ed-policy-zero" }, "{passed}" }
                 span { class: "ed-policy-sep", "/" }
                 span { class: if failed > 0 { "ed-policy-fail" } else { "ed-policy-zero" }, "{failed}" }
-                span { class: "ed-stat-unit", "configs" }
+                if pending > 0 { span { class: "ed-stat-unit", if live { "{pending} pending" } else { "{pending} unavailable" } } }
+                if unavailable > 0 { span { class: "ed-stat-unit", "{unavailable} unavailable" } }
+                if evaluation_errors > 0 { span { class: "ed-stat-unit", "{evaluation_errors} eval errors" } }
+                if excluded > 0 { span { class: "ed-stat-unit", "{excluded} not selected" } }
+                if unavailable == 0 && evaluation_errors == 0 && excluded == 0 && policy_has_no_results(available, passed, failed, pending) { span { class: "ed-stat-unit", "No results" } }
             }
         } else {
             div { class: "ed-stat-val ed-policy-val ed-policy-unavailable",
                 title: "Trustworthy attempt-scoped policy counts are unavailable.",
                 "—"
+                span { class: "ed-stat-unit", if live { " Pending" } else { " Unavailable" } }
             }
+        }
+    }
+}
+
+fn policy_has_no_results(available: bool, passed: i64, failed: i64, pending: i64) -> bool {
+    available && passed == 0 && failed == 0 && pending == 0
+}
+
+fn format_inventory_count(available: bool, count: i64) -> String {
+    if available {
+        count.to_string()
+    } else {
+        "—".into()
+    }
+}
+
+fn snapshot_population(
+    snapshot: &crate::api::models::eval_policy_matrix::EvalPolicyMatrixSnapshot,
+) -> i64 {
+    let Some(inventory) = &snapshot.inventory else {
+        return 0;
+    };
+    snapshot
+        .configuration_summary
+        .as_ref()
+        .map(|summary| summary.total as i64)
+        .unwrap_or_else(|| {
+            inventory
+                .configurations
+                .iter()
+                .map(String::as_str)
+                .chain(
+                    snapshot
+                        .rows
+                        .iter()
+                        .map(|row| row.configuration_name.as_str()),
+                )
+                .collect::<std::collections::HashSet<_>>()
+                .len() as i64
+        })
+}
+
+/// Refreshes a saved header only from its validated exact-attempt response.
+///
+/// Retains original flake identity and presentation. Missing attempt data clears
+/// old counters and completion metadata; latest queue/history data is never read.
+/// Queue DTOs have no actual start/completion fields, so queue time stays queue
+/// time. Retained responses cannot establish a derivation count.
+fn refresh_retained_return(
+    mut saved: EvaluationReturn,
+    data: &crate::api::models::EvalPolicyMatrixResponse,
+) -> Option<EvaluationReturn> {
+    if !saved.identity.matches_response(data) {
+        return None;
+    }
+    let snapshot = data.matrix.as_ref()?;
+    let inventory = snapshot.inventory.as_ref();
+    let summary = inventory.and(snapshot.configuration_summary.as_ref());
+    let total = snapshot_population(snapshot);
+    let passed = summary.map_or(0, |summary| summary.passed) as i64;
+    let failed = summary.map_or(0, |summary| summary.failed) as i64;
+    let evaluation_failed = summary.map_or(0, |summary| summary.evaluation_failed) as i64;
+    let pending = summary.map_or(0, |summary| summary.pending) as i64;
+    let excluded = summary.map_or(0, |summary| summary.excluded) as i64;
+    let unavailable = summary.map_or(0, |summary| summary.unavailable) as i64;
+    let status = snapshot
+        .attempt_status
+        .clone()
+        .unwrap_or_else(|| "unavailable".into());
+    match saved.target.as_mut() {
+        Some(EvalDrawerTarget::Queue(item)) => {
+            item.inventory_available = inventory.is_some();
+            item.system_count = total;
+            item.systems = inventory.map_or_else(Vec::new, |inventory| {
+                inventory
+                    .configurations
+                    .iter()
+                    .cloned()
+                    .chain(
+                        snapshot
+                            .rows
+                            .iter()
+                            .map(|row| row.configuration_name.clone()),
+                    )
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            });
+            item.policy_counts_available = summary.is_some();
+            item.passed_count = passed;
+            item.policy_failed_count = failed;
+            item.eval_failed_count = evaluation_failed;
+            item.policy_pending_count = pending;
+            item.unselected_count = excluded;
+            item.policy_unavailable_count = unavailable;
+            item.derivation_count = None;
+            item.evaluation_status = status;
+        }
+        Some(EvalDrawerTarget::History(item)) => {
+            item.inventory_available = inventory.is_some();
+            item.system_count = total;
+            item.policy_counts_available = summary.is_some();
+            item.passed_count = passed;
+            item.policy_failed_count = failed;
+            item.eval_failed_count = evaluation_failed;
+            item.policy_pending_count = pending;
+            item.unselected_count = excluded;
+            item.policy_unavailable_count = unavailable;
+            item.derivation_count = None;
+            item.evaluation_status = status;
+            item.evaluation_completed_at = snapshot.completed_at;
+            item.evaluation_duration_ms = snapshot
+                .started_at
+                .zip(snapshot.completed_at)
+                .map(|(start, end)| (end - start).num_milliseconds())
+                .filter(|duration| *duration >= 0);
+            // The pinned response does not supply the old summary's error text.
+            item.evaluation_error_message = None;
+        }
+        None => {}
+    }
+    Some(saved)
+}
+
+#[cfg(test)]
+mod retained_header_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn response() -> crate::api::models::EvalPolicyMatrixResponse {
+        serde_json::from_value(json!({
+            "commit_id": 7, "policies": [], "systems": [],
+            "matrix": {
+                "evaluation_attempt_id": uuid::Uuid::from_u128(8),
+                "attempt_number": 2, "commit_sha": "a".repeat(40),
+                "attempt_status": "failed", "started_at": "2026-10-16T00:00:00Z",
+                "completed_at": "2026-10-16T00:01:03Z",
+                "provenance": "captured", "columns": [], "bundles": [],
+                "empty_bundle_metadata_complete": true, "rows": [],
+                "inventory": { "execution_mode": "native",
+                    "configurations": ["one", "two", "three", "four", "five"],
+                    "selected_configurations": ["one", "two", "three", "four", "five"] },
+                "configuration_summary": { "total": 5, "passed": 1, "failed": 1,
+                    "evaluation_failed": 1, "pending": 0, "unavailable": 2, "excluded": 0 }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn saved(history: bool) -> EvaluationReturn {
+        // Deliberately stale/latest-looking fields must all be replaced, while
+        // original flake metadata remains useful for a rich return header.
+        let item = json!({
+            "commit_id": 7, "flake_id": 3, "flake_name": "original", "branch": "main",
+            "commit_hash": "a".repeat(40), "commit_message": null, "author": null,
+            "committed_at": "2026-10-15T00:00:00Z", "enqueued_at": "2026-10-15T00:00:01Z",
+            "evaluation_status": "complete", "queue_position": 1, "systems": ["stale"],
+            "system_count": 999, "passed_count": 998, "policy_failed_count": 997,
+            "eval_failed_count": 996, "policy_pending_count": 995,
+            "policy_unavailable_count": 993, "unselected_count": 992,
+            "inventory_available": true, "policy_counts_available": true,
+            "derivation_count": 994, "attempt_number": 2,
+            "evaluation_completed_at": "2026-10-15T01:00:00Z",
+            "evaluation_duration_ms": 999999, "evaluation_error_message": "stale error",
+            "alert_occurrence_id": "original"
+        });
+        let mut saved = EvaluationReturn::direct(EvaluationIdentity {
+            commit_id: 7,
+            commit_sha: "a".repeat(40),
+            attempt_id: uuid::Uuid::from_u128(8),
+            attempt_number: 2,
+        });
+        saved.target = Some(if history {
+            EvalDrawerTarget::History(serde_json::from_value(item).unwrap())
+        } else {
+            EvalDrawerTarget::Queue(serde_json::from_value(item).unwrap())
+        });
+        saved
+    }
+
+    fn target_json(saved: EvaluationReturn) -> Value {
+        match saved.target.unwrap() {
+            EvalDrawerTarget::Queue(item) => serde_json::to_value(item).unwrap(),
+            EvalDrawerTarget::History(item) => serde_json::to_value(item).unwrap(),
+        }
+    }
+
+    #[test]
+    fn retained_headers_replace_stale_counts_with_exact_inventory_not_matrix_rows() {
+        let data = response();
+        for history in [false, true] {
+            let item = target_json(refresh_retained_return(saved(history), &data).unwrap());
+            for (key, expected) in [
+                ("system_count", 5),
+                ("passed_count", 1),
+                ("policy_failed_count", 1),
+                ("eval_failed_count", 1),
+                ("policy_pending_count", 0),
+                ("policy_unavailable_count", 2),
+                ("unselected_count", 0),
+            ] {
+                assert_eq!(item[key], json!(expected), "{key}");
+            }
+            assert_eq!(item["inventory_available"], true);
+            assert_eq!(item["policy_counts_available"], true);
+            assert_eq!(item["derivation_count"], Value::Null);
+            assert_eq!(item["evaluation_status"], "failed");
+            assert_eq!(item["flake_name"], "original");
+            if history {
+                assert_eq!(item["evaluation_completed_at"], "2026-10-16T00:01:03Z");
+                assert_eq!(item["evaluation_duration_ms"], 63000);
+                assert_eq!(item["evaluation_error_message"], Value::Null);
+            } else {
+                assert_eq!(
+                    item["systems"],
+                    json!(["five", "four", "one", "three", "two"])
+                );
+                assert_eq!(item["enqueued_at"], "2026-10-15T00:00:01Z");
+            }
+        }
+    }
+
+    #[test]
+    fn missing_retained_inventory_and_metadata_clear_old_header_fields() {
+        let mut data = response();
+        let snapshot = data.matrix.as_mut().unwrap();
+        snapshot.inventory = None;
+        snapshot.configuration_summary = None;
+        snapshot.started_at = None;
+        snapshot.completed_at = None;
+        snapshot.attempt_status = None;
+        for history in [false, true] {
+            let item = target_json(refresh_retained_return(saved(history), &data).unwrap());
+            for key in [
+                "system_count",
+                "passed_count",
+                "policy_failed_count",
+                "eval_failed_count",
+                "policy_pending_count",
+                "policy_unavailable_count",
+                "unselected_count",
+            ] {
+                assert_eq!(item[key], 0, "{key}");
+            }
+            assert_eq!(item["inventory_available"], false);
+            assert_eq!(item["policy_counts_available"], false);
+            assert_eq!(item["derivation_count"], Value::Null);
+            assert_eq!(item["evaluation_status"], "unavailable");
+            if history {
+                assert_eq!(item["evaluation_completed_at"], Value::Null);
+                assert_eq!(item["evaluation_duration_ms"], Value::Null);
+            } else {
+                assert_eq!(item["systems"], json!([]));
+            }
+        }
+    }
+
+    #[test]
+    fn retained_pending_and_empty_coverage_do_not_claim_clean_results() {
+        assert!(policy_has_no_results(true, 0, 0, 0));
+        assert!(!policy_has_no_results(false, 0, 0, 0));
+        assert!(!policy_has_no_results(true, 0, 0, 3));
+        assert!(!policy_has_no_results(true, 1, 0, 0));
+        let mut data = response();
+        let snapshot = data.matrix.as_mut().unwrap();
+        snapshot.configuration_summary = Some(Default::default());
+        let inventory = snapshot.inventory.as_mut().unwrap();
+        inventory.configurations.clear();
+        inventory.selected_configurations.clear();
+        let item = target_json(refresh_retained_return(saved(true), &data).unwrap());
+        assert_eq!(item["policy_counts_available"], true);
+        assert_eq!(item["passed_count"], 0);
+        assert_eq!(item["policy_failed_count"], 0);
+        assert_eq!(item["policy_pending_count"], 0);
+        let snapshot = data.matrix.as_mut().unwrap();
+        let summary = snapshot.configuration_summary.as_mut().unwrap();
+        summary.total = 3;
+        summary.pending = 3;
+        let inventory = snapshot.inventory.as_mut().unwrap();
+        inventory.configurations = vec!["one".into(), "three".into(), "two".into()];
+        inventory.selected_configurations = inventory.configurations.clone();
+        snapshot.completed_at = None;
+        snapshot.attempt_status = Some("in_progress".into());
+        let item = target_json(refresh_retained_return(saved(true), &data).unwrap());
+        assert_eq!(item["policy_pending_count"], 3);
+        assert_eq!(item["evaluation_status"], "in_progress");
+        assert_eq!(item["evaluation_duration_ms"], Value::Null);
+    }
+
+    #[test]
+    fn retained_refresh_rejects_another_attempt_without_a_latest_fallback() {
+        let mut data = response();
+        data.matrix.as_mut().unwrap().evaluation_attempt_id = Some(uuid::Uuid::from_u128(9));
+        assert!(refresh_retained_return(saved(true), &data).is_none());
+        assert!(refresh_retained_return(saved(false), &data).is_none());
+    }
+
+    #[test]
+    fn retained_policy_coverage_requires_verified_inventory_and_summary() {
+        let mut data = response();
+        data.matrix.as_mut().unwrap().inventory = None;
+        let item = target_json(refresh_retained_return(saved(true), &data).unwrap());
+        assert_eq!(item["inventory_available"], false);
+        assert_eq!(item["policy_counts_available"], false);
+        assert_eq!(item["policy_pending_count"], 0);
+        assert_eq!(item["policy_unavailable_count"], 0);
+
+        let mut data = response();
+        data.matrix.as_mut().unwrap().configuration_summary = None;
+        let item = target_json(refresh_retained_return(saved(false), &data).unwrap());
+        assert_eq!(item["inventory_available"], true);
+        assert_eq!(item["system_count"], 5);
+        assert_eq!(item["policy_counts_available"], false);
+        assert_eq!(item["passed_count"], 0);
+    }
+}
+
+/// Displays the reconciled planned/discovered population after verified discovery.
+/// Until discovery exists, no cache-derived number is presented as coverage.
+#[component]
+fn InventoryCount(available: bool, count: i64, live: bool) -> Element {
+    rsx! {
+        div { class: "ed-stat-val",
+            if available { "{count}" }
+            else { "—" span { class: "ed-stat-unit", if live { " Discovering" } else { " Unavailable" } } }
         }
     }
 }
@@ -137,8 +477,19 @@ pub fn EvaluationsCommitView(commit_id: i32) -> Element {
     rsx! { EvaluationsPage { key: "{commit_id}", requested_commit: Some(commit_id) } }
 }
 
+/// Opens a retained attempt from its shareable path, including after refresh.
+///
+/// Missing or unauthorized attempts never fall back to the latest evaluation.
 #[component]
-fn EvaluationsPage(#[props(default)] requested_commit: Option<i32>) -> Element {
+pub fn EvaluationsAttemptView(commit_id: i32, attempt_id: uuid::Uuid) -> Element {
+    rsx! { EvaluationsPage { key: "{commit_id}-{attempt_id}", requested_commit: Some(commit_id), requested_attempt: Some(attempt_id) } }
+}
+
+#[component]
+fn EvaluationsPage(
+    #[props(default)] requested_commit: Option<i32>,
+    #[props(default)] requested_attempt: Option<uuid::Uuid>,
+) -> Element {
     let nav = navigator();
     let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
     let mut queue_items = use_signal(Vec::<EvalQueueItem>::new);
@@ -172,36 +523,38 @@ fn EvaluationsPage(#[props(default)] requested_commit: Option<i32>) -> Element {
     let mut history_total_acc = use_signal(|| 0_i64);
     let mut history_domain_total = use_signal(|| 0_i64);
     let initial_return = use_hook(move || {
-        EVALUATION_RETURN
-            .peek()
-            .clone()
-            .filter(|r| requested_commit.is_some_and(|commit_id| r.matches_commit(commit_id)))
+        EVALUATION_RETURN.peek().clone().filter(|r| {
+            requested_commit.is_some_and(|commit_id| r.matches_commit(commit_id))
+                && requested_attempt.is_none_or(|attempt_id| r.identity.attempt_id == attempt_id)
+        })
     });
     let mut restored = use_signal(|| false);
+    let mut direct_return = use_signal(|| None::<EvaluationReturn>);
     let return_to_validate = initial_return.clone();
     let return_validation = use_resource(move || {
         let saved = return_to_validate.clone();
         async move {
-            if let Some(saved) = saved {
-                Some(
-                    crate::api::client::fetch_eval_attempt_policy_matrix(
-                        saved.identity.commit_id,
-                        saved.identity.attempt_id,
-                    )
-                    .await
-                    .is_ok_and(|data| {
-                        data.commit_id == saved.identity.commit_id
-                            && data.matrix.as_ref().is_some_and(|snapshot| {
-                                snapshot.commit_sha.as_ref() == Some(&saved.identity.commit_sha)
-                                    && snapshot.evaluation_attempt_id
-                                        == Some(saved.identity.attempt_id)
-                                    && snapshot.attempt_number == saved.identity.attempt_number
-                            })
-                    }),
-                )
-            } else {
-                None
-            }
+            let exact = requested_commit.zip(requested_attempt).or_else(|| {
+                saved
+                    .as_ref()
+                    .map(|s| (s.identity.commit_id, s.identity.attempt_id))
+            });
+            let Some((commit_id, attempt_id)) = exact else {
+                return None;
+            };
+            crate::api::client::fetch_eval_attempt_policy_matrix(commit_id, attempt_id)
+                .await
+                .ok()
+                .and_then(|data| {
+                    let identity = EvaluationIdentity::from_response(&data, commit_id, attempt_id)?;
+                    if let Some(saved) = saved {
+                        // Invalid saved identity must fail closed, even if the
+                        // server returned another otherwise valid exact context.
+                        refresh_retained_return(saved, &data)
+                    } else {
+                        Some(EvaluationReturn::direct(identity))
+                    }
+                })
         }
     });
     let return_for_effect = initial_return.clone();
@@ -209,12 +562,12 @@ fn EvaluationsPage(#[props(default)] requested_commit: Option<i32>) -> Element {
         if restored() {
             return;
         }
-        if let Some(saved) = &return_for_effect {
+        if return_for_effect.is_some() || requested_attempt.is_some() {
             // Do not apply saved page or drawer choices to an unvalidated
             // response. Missing/unauthorized historical attempts fail closed.
-            if *return_validation.read() != Some(Some(true)) {
+            let Some(Some(saved)) = return_validation.read().clone() else {
                 return;
-            }
+            };
             active_tab.set(if saved.history {
                 EvaluationsTab::History
             } else {
@@ -226,20 +579,14 @@ fn EvaluationsPage(#[props(default)] requested_commit: Option<i32>) -> Element {
             if latest_filter().enabled() != saved.latest {
                 latest_filter.write().toggle();
             }
-            let mut target = saved.target.clone();
-            // Queue/history counters are latest-only. The pinned matrix proves
-            // identity and retained outcomes, not that a cached summary counter
-            // remains attributable after a retry overwrites native carriers.
-            match &mut target {
-                EvalDrawerTarget::Queue(item) => {
-                    item.policy_counts_available = false;
-                    item.derivation_count = None;
-                }
-                EvalDrawerTarget::History(item) => {
-                    item.policy_counts_available = false;
-                    item.derivation_count = None;
-                }
-            }
+            // Publish only validated identity before mounting a pinned Policy
+            // tab. Its initial request must never choose the latest endpoint.
+            *EVALUATION_RETURN.write() = Some(saved.clone());
+            let Some(target) = saved.target.clone() else {
+                direct_return.set(Some(saved));
+                restored.set(true);
+                return;
+            };
             drawer_target.set(Some(target));
             restored.set(true);
         } else if let Some(id) = requested_commit {
@@ -742,6 +1089,14 @@ fn EvaluationsPage(#[props(default)] requested_commit: Option<i32>) -> Element {
                 tabindex: 0,
                 onkeydown: move |evt| {
                     // No keyboard nav while drawer is open
+                    if direct_return.peek().is_some() {
+                        if evt.key() == Key::Escape {
+                            direct_return.set(None);
+                            *EVALUATION_RETURN.write() = None;
+                            nav.push(Route::EvaluationsView {});
+                        }
+                        return;
+                    }
                     if drawer_target.read().is_some() {
                         if evt.key() == Key::Escape {
                             drawer_target.set(None);
@@ -857,7 +1212,10 @@ fn EvaluationsPage(#[props(default)] requested_commit: Option<i32>) -> Element {
                 }
 
                 // Stat strip
-                if *return_validation.read() == Some(Some(false)) {
+                if requested_attempt.is_some() && return_validation.read().is_none() {
+                    p { role: "status", "Loading exact retained attempt…" }
+                }
+                if (requested_attempt.is_some() || initial_return.is_some()) && matches!(&*return_validation.read(), Some(None)) {
                     div { role: "alert", "Exact evaluation attempt unavailable. Saved drawer state was not applied to another attempt." }
                     button { class: "btn btn-ghost focus-ring", onclick: move |_| { *EVALUATION_RETURN.write() = None; nav.push(Route::EvaluationsView {}); }, "Open latest evaluations" }
                 }
@@ -1133,7 +1491,12 @@ fn EvaluationsPage(#[props(default)] requested_commit: Option<i32>) -> Element {
                     }
                 }
 
-                if let Some(target) = drawer_target.read().clone() {
+                if let Some(saved) = direct_return() {
+                    evidence_navigation::RetainedAttemptDrawer {
+                        saved,
+                        on_close: move |_| { direct_return.set(None); *EVALUATION_RETURN.write() = None; nav.push(Route::EvaluationsView {}); },
+                    }
+                } else if let Some(target) = drawer_target.read().clone() {
                     EvalDrawer {
                         target: target,
                         refresh: active_refresh,
@@ -1384,7 +1747,7 @@ fn EvalActiveQueue(
                                         "{status_meta.label}"
                                     }
                                 }
-                                td { style: "font-size: 12px; color: var(--cf-text-secondary);", "{ev_clone.system_count} hosts" }
+                                td { style: "font-size: 12px; color: var(--cf-text-secondary);", "{format_inventory_count(ev_clone.inventory_available, ev_clone.system_count)}" }
                                 td {
                                     div { style: "display: flex; gap: 6px;",
                                         PolicyCounts { available: ev_clone.policy_counts_available, passed: ev_clone.passed_count, failed: ev_clone.policy_failed_count }
@@ -1720,7 +2083,7 @@ fn EvalHistory(
                                             }
                                             td {
                                                 style: "font-size: 12px;",
-                                                "{ev.system_count}"
+                                                "{format_inventory_count(ev.inventory_available, ev.system_count)}"
                                             }
                                             td {
                                                 div {
@@ -1873,20 +2236,21 @@ fn EvalDrawer(
             .clone()
             .filter(|saved| match &target {
                 EvalDrawerTarget::Queue(item) => {
-                    item.commit_id == saved.identity.commit_id
+                    saved.matches_commit(item.commit_id)
                         && item.attempt_number == saved.identity.attempt_number
                 }
                 EvalDrawerTarget::History(item) => {
-                    item.commit_id == saved.identity.commit_id
+                    saved.matches_commit(item.commit_id)
                         && item.attempt_number == saved.identity.attempt_number
                 }
             })
     });
-    let saved_tab = saved
+    let original_tab = saved
         .as_ref()
         .map(|s| s.tab.clone())
         .unwrap_or_else(|| "log".into());
     let pinned_view = saved.is_some();
+    let saved_tab = handoff::retained_tab(&original_tab, pinned_view);
     let nav = navigator();
     let mut drawer_tab = use_signal(|| saved_tab);
     let maximized = use_signal(|| saved.as_ref().is_some_and(|s| s.maximized));
@@ -1903,19 +2267,26 @@ fn EvalDrawer(
                 EvalDrawerTarget::Queue(i) => i.commit_hash.clone(),
                 EvalDrawerTarget::History(i) => i.commit_hash.clone(),
             },
-            attempt_id: uuid::Uuid::nil(),
+            attempt_id: saved
+                .as_ref()
+                .map(|s| s.identity.attempt_id)
+                .unwrap_or_else(uuid::Uuid::nil),
             attempt_number: match &target {
                 EvalDrawerTarget::Queue(i) => i.attempt_number,
                 EvalDrawerTarget::History(i) => i.attempt_number,
             },
         },
-        target: target_for_context,
+        target: Some(target_for_context),
         history: page_history,
         search: page_search,
         status: page_status,
         flake: page_flake,
         latest: page_latest,
-        tab: drawer_tab(),
+        tab: if pinned_view {
+            original_tab
+        } else {
+            drawer_tab()
+        },
         maximized: maximized(),
         system: None,
         dom: None,
@@ -2030,11 +2401,11 @@ fn EvalDrawer(
                         // be presented as evaluation start or commit time.
                         div { class: "ed-stat", div { class: "ed-stat-label", "Queued" } div { class: "ed-stat-val ed-stat-time", drawer_header::Timestamp { timestamp: ev.enqueued_at } } }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val mono", "—" } }
-                        div { class: "ed-stat", title: "Evaluated NixOS configurations in this flake commit. The Policy matrix lists registered systems with a captured bundle plan.", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
+                        div { class: "ed-stat", title: "Visible planned and discovered configurations for this exact attempt.", div { class: "ed-stat-label", "Systems" } InventoryCount { available: ev.inventory_available, count: ev.system_count, live: is_live } }
                         div {
                             class: "ed-stat",
                             div { class: "ed-stat-label", "Policy" }
-                            DrawerPolicyCounts { available: ev.policy_counts_available, passed: ev.passed_count, failed: ev.policy_failed_count }
+                            DrawerPolicyCounts { available: ev.inventory_available, passed: ev.passed_count, failed: ev.policy_failed_count, pending: ev.policy_pending_count, unavailable: ev.policy_unavailable_count, evaluation_errors: ev.eval_failed_count, excluded: ev.unselected_count, live: is_live }
                         }
                         div { class: "ed-stat", title: "Persisted derivation records for this attempt, not closure packages or outputs. — means unavailable.", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{format_derivation_count(ev.derivation_count)}" } }
                     }
@@ -2043,9 +2414,13 @@ fn EvalDrawer(
                         style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border); flex-shrink: 0;",
                         button {
                             class: if drawer_tab() == "log" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
+                            disabled: pinned_view,
+                            aria_disabled: pinned_view,
+                            aria_describedby: if pinned_view { "retained-log-unavailable" } else { "" },
+                            title: if pinned_view { "Log unavailable for retained attempt: no exact-attempt log API is available." } else { "Evaluation log" },
                             onclick: move |_| drawer_tab.set("log".to_string()),
                             Icon { name: IconName::EvaluationLog, size: 12 }
-                            " Log"
+                            if pinned_view { " Log unavailable for retained attempt" } else { " Log" }
                             if is_live { span { class: "ed-pulse" } }
                         }
                         button {
@@ -2056,6 +2431,10 @@ fn EvalDrawer(
                         }
                         button {
                             class: if drawer_tab() == "graph" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
+                            disabled: pinned_view,
+                            aria_disabled: pinned_view,
+                            aria_describedby: if pinned_view { "retained-graph-unavailable" } else { "" },
+                            title: if pinned_view { "Dependency graph unavailable for retained attempt: no exact-attempt graph API is available." } else { "Dependency graph" },
                             onclick: move |_| drawer_tab.set("graph".to_string()),
                             Icon { name: IconName::EvaluationGraph, size: 12 }
                             " Dependency graph"
@@ -2063,6 +2442,7 @@ fn EvalDrawer(
                     }
                     div {
                         class: "ed-body",
+                        if pinned_view { evidence_navigation::RetainedTabReasons {} }
                         if pinned_view && drawer_tab() != "policy" {
                             p { role: "note", "Pinned attempt log and dependency evidence are unavailable from the current endpoints." }
                         } else if drawer_tab() == "log" {
@@ -2072,7 +2452,6 @@ fn EvalDrawer(
                                 key: "{ev.commit_id}",
                                 commit_id: ev.commit_id,
                                 live: is_live,
-                                header: policy_captured::HeaderScope { configurations: ev.system_count, passed: ev.passed_count, failed: ev.policy_failed_count, available: ev.policy_counts_available },
                                 on_open_policy: on_open_policy,
                             }
                         } else {
@@ -2182,11 +2561,11 @@ fn EvalDrawer(
                             }
                         }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val mono", "{format_eval_duration(&ev)}" } }
-                        div { class: "ed-stat", title: "Evaluated NixOS configurations in this flake commit. The Policy matrix lists registered systems with a captured bundle plan.", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
+                        div { class: "ed-stat", title: "Visible planned and discovered configurations for this exact attempt.", div { class: "ed-stat-label", "Systems" } InventoryCount { available: ev.inventory_available, count: ev.system_count, live: is_live } }
                         div {
                             class: "ed-stat",
                             div { class: "ed-stat-label", "Policy" }
-                            DrawerPolicyCounts { available: ev.policy_counts_available, passed: ev.passed_count, failed: ev.policy_failed_count }
+                            DrawerPolicyCounts { available: ev.inventory_available, passed: ev.passed_count, failed: ev.policy_failed_count, pending: ev.policy_pending_count, unavailable: ev.policy_unavailable_count, evaluation_errors: ev.eval_failed_count, excluded: ev.unselected_count, live: is_live }
                         }
                         div { class: "ed-stat", title: "Persisted derivation records for this attempt, not closure packages or outputs. — means unavailable.", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{format_derivation_count(ev.derivation_count)}" } }
                     }
@@ -2195,9 +2574,13 @@ fn EvalDrawer(
                         style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border); flex-shrink: 0;",
                         button {
                             class: if drawer_tab() == "log" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
+                            disabled: pinned_view,
+                            aria_disabled: pinned_view,
+                            aria_describedby: if pinned_view { "retained-log-unavailable" } else { "" },
+                            title: if pinned_view { "Log unavailable for retained attempt: no exact-attempt log API is available." } else { "Evaluation log" },
                             onclick: move |_| drawer_tab.set("log".to_string()),
                             Icon { name: IconName::EvaluationLog, size: 12 }
-                            " Log"
+                            if pinned_view { " Log unavailable for retained attempt" } else { " Log" }
                             if is_live { span { class: "ed-pulse" } }
                         }
                         button {
@@ -2208,6 +2591,10 @@ fn EvalDrawer(
                         }
                         button {
                             class: if drawer_tab() == "graph" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
+                            disabled: pinned_view,
+                            aria_disabled: pinned_view,
+                            aria_describedby: if pinned_view { "retained-graph-unavailable" } else { "" },
+                            title: if pinned_view { "Dependency graph unavailable for retained attempt: no exact-attempt graph API is available." } else { "Dependency graph" },
                             onclick: move |_| drawer_tab.set("graph".to_string()),
                             Icon { name: IconName::EvaluationGraph, size: 12 }
                             " Dependency graph"
@@ -2215,6 +2602,7 @@ fn EvalDrawer(
                     }
                     div {
                         class: "ed-body",
+                        if pinned_view { evidence_navigation::RetainedTabReasons {} }
                         if pinned_view && drawer_tab() != "policy" {
                             p { role: "note", "Pinned attempt log and dependency evidence are unavailable from the current endpoints." }
                         } else if drawer_tab() == "log" {
@@ -2224,7 +2612,6 @@ fn EvalDrawer(
                                 key: "{ev.commit_id}",
                                 commit_id: ev.commit_id,
                                 live: is_live,
-                                header: policy_captured::HeaderScope { configurations: ev.system_count, passed: ev.passed_count, failed: ev.policy_failed_count, available: ev.policy_counts_available },
                                 on_open_policy: on_open_policy,
                             }
                         } else {
@@ -2576,7 +2963,6 @@ fn EvalDrawerPolicyTab(
     commit_id: i32,
     on_open_policy: EventHandler<String>,
     #[props(default)] live: bool,
-    #[props(default)] header: Option<policy_captured::HeaderScope>,
 ) -> Element {
     // Keep the displayed response outside Resource: restarting a resource can
     // clear its value and unmount CapturedMatrix, losing presentation choices.
@@ -2745,11 +3131,11 @@ fn EvalDrawerPolicyTab(
                     button { class: "btn btn-ghost xs focus-ring", onclick: move |_| request_generation += 1, "Retry matrix request" }
                 },
                 Some(Ok(data)) if data.commit_id != commit_id || !valid_return => rsx! { div { role: "alert", "Exact evaluation attempt unavailable or context mismatch. Saved presentation was not applied to another attempt." } },
-                Some(Ok(data)) if data.matrix.as_ref().is_some_and(|matrix| matrix.provenance == crate::api::models::eval_policy_matrix::EvalMatrixProvenance::Captured) => rsx! {
+                Some(Ok(data)) if data.matrix.is_some() => rsx! {
                     if let Some(snapshot) = &data.matrix {
                         // A new captured attempt intentionally resets local
                         // choices; successful refreshes of that attempt do not.
-                        policy_captured::CapturedMatrix { key: "{snapshot.evaluation_attempt_id:?}:{snapshot.attempt_number}", snapshot: snapshot.clone(), compatibility: data.clone(), header: header.clone(), on_open_policy, state: matrix_state, expanded: matrix_expanded, issue: matrix_issue, finding: matrix_finding, page: matrix_page }
+                        policy_captured::CapturedMatrix { key: "{snapshot.evaluation_attempt_id:?}:{snapshot.attempt_number}", snapshot: snapshot.clone(), on_open_policy, state: matrix_state, expanded: matrix_expanded, issue: matrix_issue, finding: matrix_finding, page: matrix_page }
                     }
                 },
                 Some(Ok(data)) => {
@@ -3491,7 +3877,7 @@ fn is_active_eval_status(status: &str) -> bool {
     let normalized = status.trim().to_ascii_lowercase();
     matches!(
         normalized.as_str(),
-        "pending" | "in_progress" | "in-progress" | "in progress" | "cancelling"
+        "queued" | "pending" | "in_progress" | "in-progress" | "in progress" | "cancelling"
     )
 }
 

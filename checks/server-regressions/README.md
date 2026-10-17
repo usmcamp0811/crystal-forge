@@ -210,21 +210,129 @@ queries::eval_policy_plans::pinned_read_tests::pinned_native_failure_is_preserve
 - **Pinned contexts:** Pins belong to the requested commit and never fall back to
   a newer retry. Responses project exact commit SHA, attempt UUID/number, status,
   and start/completion timestamps without changing the stored capture. Historical
-  mock outcomes survive retry; overwritten native markers leave old controls
-  Unknown and hide retry diagnostics. Exact old native failure evidence remains
-  visible only while its marker survives. The scoped pin test rechecks current
+  mock outcomes survive retry. These original native fixtures exercise mutable
+  fallback: overwritten markers leave old controls Unknown and hide retry
+  diagnostics, while exact old failure evidence remains visible only while its
+  marker survives. Immutable native retention is covered separately below.
+  The scoped pin test rechecks current
   membership and withholds foreign metadata and commit-global errors.
 
 These declarations describe registered coverage. Parent-owned targeted runs are
 separate evidence; registration does not establish an exact-head CI pass.
 
+### TASK-488 exact inventory and visibility regressions
+
+These 24 ignored, migration-backed SQLx cases use the same exact-success guard.
+Each qualified name runs with `--ignored --exact --test-threads=1`; both the
+named success line and the one-passed/zero-failed/zero-ignored summary are required.
+
+```text
+queries::evaluation_inventory::tests::inventory_normalizes_exact_names_and_rejects_replacement
+queries::evaluation_inventory::tests::inventory_empty_and_selection_subset_are_distinct_from_missing
+queries::evaluation_inventory::tests::inventory_schema_enforces_owner_immutability_and_parent_cascade
+queries::evaluation_inventory::tests::inventory_rejects_cancelled_superseded_and_nonactive_writers
+queries::evaluation_inventory::tests::inventory_retry_never_inherits_or_accepts_older_writes
+queries::evaluation_inventory::tests::inventory_competing_first_writes_preserve_one_complete_record
+queries::commits::inventory_summary_tests::exact_inventory_replaces_cached_41_and_excludes_unselected_outcomes
+queries::commits::inventory_summary_tests::inventory_partial_unknown_ambiguous_and_queued_retry_remain_pending
+queries::commits::inventory_summary_tests::scoped_summaries_hide_shared_policy_facts_search_errors_and_revoked_membership
+handlers::api::commits::visibility::tests::mixed_environment_flake_denies_unstructured_evidence
+handlers::api::commits::visibility::tests::revocation_rechecks_each_snapshot_and_keeps_reads_atomic
+handlers::api::commits::visibility::tests::unmanaged_discovery_name_denies_even_with_all_memberships
+handlers::api::commits::visibility::tests::missing_inventory_and_queued_retry_never_inherit_authority
+handlers::api::commits::visibility::tests::all_visible_configs_allow_logs_and_mutable_latest_graph
+handlers::api::commits::visibility::tests::shared_configuration_hidden_host_denies_even_when_inactive
+handlers::api::commits::visibility::tests::missing_identity_or_registration_never_grants_vacuous_access
+handlers::api::commits::visibility::tests::mutable_graph_preserves_counts_but_denies_unmanaged_retained_rows
+handlers::api::commits::visibility::tests::stream_revalidation_observes_membership_roles_and_session_revocation
+queries::eval_policy_plans::inventory_projection_tests::inventory_discovered_41_preserves_exact_names_and_12_captured_hosts
+queries::eval_policy_plans::inventory_projection_tests::inventory_absent_and_unselected_registered_rows_keep_unknown_evidence
+queries::eval_policy_plans::inventory_projection_tests::inventory_shared_hosts_count_one_matching_global_failure_without_fake_policies
+queries::eval_policy_plans::inventory_projection_tests::inventory_history_ignores_cache_mutation_and_queued_retry_has_no_inventory
+queries::eval_policy_plans::inventory_projection_tests::inventory_scoped_reads_hide_unmanaged_hidden_columns_and_global_failure_details
+queries::eval_policy_plans::inventory_projection_tests::inventory_missing_discovery_is_unavailable_despite_passing_native_and_cache
+```
+
+- **Inventory persistence (six cases):** Migration `0306` records immutable
+  exact-attempt discovered and selected names with native/mock provenance.
+  Cases cover exact spelling, sorting/deduplication, empty versus missing
+  discovery, selection subsets, first-write conflicts, schema ownership and
+  parent cleanup, cancellation, supersession, retries, and competing writers.
+- **Queue/history summaries (three cases):** Exact discovery replaces mutable
+  cached names. Counters exclude unselected and out-of-inventory outcomes and
+  distinguish pending from unavailable coverage. Current membership scopes names,
+  search, totals, errors, and shared-configuration policy facts; revocation removes
+  access. Both summary readers use read-only REPEATABLE READ transactions.
+- **Indivisible evidence visibility (nine cases):** Logs, WebSocket authorization,
+  and mutable latest graphs require whole-flake scope. Cases cover mixed and
+  shared environments, inactive hosts, unmanaged names, missing inventory,
+  queued retries, moves, missing registration, and membership/role/session
+  revocation. An authorized snapshot can finish; the next check observes changes.
+- **Matrix inventory reconciliation (six cases):** Discovery extends captured host
+  rows without invented IDs or applicability. Absent or unselected planned rows
+  retain provenance and Unknown evidence. Shared hosts count one configuration
+  gate; scoped reads hide unmanaged names, hidden columns, and global diagnostics.
+  The primary population is the distinct union of planned and discovered names.
+  Absent planned names and ambiguous evidence are unavailable. Missing results
+  are pending only while the current attempt can still complete. A saved false
+  intrinsic CF-agent gate can prove failure under partial shared visibility;
+  hidden requirement outcomes and free-form diagnostics remain withheld.
+  Cache changes cannot rewrite retained inventory, and retries inherit none.
+
+These declarations describe registered coverage, not execution results. Native
+outcome fixtures do not prove that Nix evaluation ran. Runtime and CI verification
+remain separate evidence.
+
+### TASK-488 immutable native outcome regressions
+
+These six ignored, migration-backed SQLx cases run through the same
+`--ignored --exact --test-threads=1` guard. Each invocation must report the named
+success line and exactly one passed test with zero failures and zero ignored tests.
+
+```text
+queries::evaluation_native_outcomes::tests::native_outcome_rejects_cancelled_superseded_and_nonactive_owners
+queries::evaluation_native_outcomes::tests::native_outcome_requires_exact_selected_native_inventory
+queries::evaluation_native_outcomes::tests::native_outcome_first_write_schema_immutability_and_parent_cascade
+queries::evaluation_native_outcomes::tests::native_outcome_sidecar_has_no_artifact_build_or_observation_side_effects
+queries::evaluation_native_outcomes::tests::native_outcome_retry_retains_historical_values_under_new_ea
+queries::evaluation_native_outcomes::tests::native_producers_atomically_retain_success_and_confirmed_failure_across_retry
+```
+
+Migration `0307` retains exact-attempt native evidence independently of mutable
+derivations. The cases cover active ownership, cancellation, supersession,
+exact selected native inventory, first-write conflicts, schema immutability,
+parent cleanup, and absence of artifact, build, observation, and snapshot writes
+by the sidecar. Production persistence/finalization cases cover atomic success
+and confirmed failure, rollback, and historical values across retry.
+
+The same cases replay the data statement from migration `0308`. Retention
+requires exact discovered-and-selected native names and positive integer attempt
+markers. Mock, malformed, unselected, and unattributable carriers are excluded.
+Tests preserve existing immutable records and historical values after mutable
+carrier overwrite, and verify explicit unavailable records and native/mock
+ambiguity. The derivation uniqueness constraint prevents seeding duplicate native
+carriers; the schema case checks unavailable-state restrictions directly.
+Registration does not establish execution or a passing current-source result.
+
+### System and Compliance receiver scope
+
+Six migration-backed receiver tests cover single-system and bundle-system reads,
+scope revocation, hidden rollups, and preservation of empty/legacy responses.
+Two cases use PostgreSQL lock wait inspection to prove that membership deletion
+and environment moves wait until a receiver finishes materializing its response.
+The bundle reader restricts candidates to the exact locked system UUID set.
+
 ## TASK-470 selected library tests
 
-The exact library-test runner selects 89 ignored tests: the 62 tests in the
+The exact library-test runner selects 125 ignored tests: the 62 tests in the
 TASK-470 extra library list below (including four TASK-488 isolated mock tests
 and four derivation-count tests, plus two native-finalizer tests),
 the six TASK-484 tests, four original TASK-488 capture tests, 16 MR334 review
-tests above, and this TASK-487 regression:
+tests above, the 24 inventory and visibility tests above, six immutable native
+outcome tests, six receiver scope tests,
+and this TASK-487
+regression. With the unchanged 83 non-ignored selections, the exact library-test
+runner selects 208 tests in total:
 
 ```text
 handlers::api::deployment_policies::tests::test_list_deployment_policies_includes_fixture
@@ -728,7 +836,7 @@ its matching `END` identifies the active target and whether Cargo was compiling
 or executing. The library also has an explicit compilation boundary before its
 selected tests execute. Cargo's normal output reports executed test names.
 
-Each of the 89 ignored and 83 non-ignored selected library tests emits its qualified name,
+Each of the 125 ignored and 83 non-ignored selected library tests emits its qualified name,
 mode, start time, exit status, and elapsed time. Cargo stdout and stderr still
 pass through `tee` to the exact-test guard. `pipefail` preserves failures from
 Cargo or `tee`; success still requires the named `... ok` line and the existing

@@ -19,6 +19,10 @@ use crate::models::deployment_policies::DeploymentPolicyRecord;
 /// Creates an empty capture accumulator without an assigned attempt identity.
 pub(super) fn new_snapshot() -> EvalPolicyMatrixSnapshot {
     EvalPolicyMatrixSnapshot {
+        source_label: None,
+        inventory: None,
+        configuration_summary: None,
+        configuration_failures: Vec::new(),
         evaluation_attempt_id: None,
         attempt_number: 0,
         commit_sha: None,
