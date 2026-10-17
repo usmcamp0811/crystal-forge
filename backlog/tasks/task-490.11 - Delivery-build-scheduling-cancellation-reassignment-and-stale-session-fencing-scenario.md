@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:37'
-updated_date: '2026-10-17 17:16'
+updated_date: '2026-10-17 17:27'
 labels:
   - testing
   - integration
@@ -26,7 +26,7 @@ Owning check: integration-delivery. Contract ID: delivery.build.scheduling. Excl
 
 Scope: operator cancels a running build from Builds UI; builder stops and job reaches cancelled without completion. Retry requeues and real build completes. Stop/kill builderA mid-job with unit_stopped/unit_killed; lease expiry reassigns to builderB. Returning builderA's stale session cannot complete/publish (fencing). A deliberately failing derivation produces a failed job and log. Non-goals: strategy auth (490.10), notifications (490.5). TASK-490 test-only restrictions apply.
 
-Organization: native checks/integration-delivery/default.nix has { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs and explicitly registers child files. Meaningful WIP can be discoverable; only Access exists now, other owners require meaningful scenarios, no placeholders.
+Organization: native checks/integration-delivery/default.nix has { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs and explicitly registers child files. Meaningful WIP can be discoverable; only Access exists now, other owners require meaningful scenarios, no placeholders.
 
 Prerequisite: TASK-490.10 integrated. Read cf-server handlers/api/builders.rs cancel/requeue/force-cancel/prioritize/finalize-cancelled/heartbeat, queries/builders*, lease/heartbeat modules; docs/knowledge/api/builder-job-lifecycle-api.md; BuildsView.jsx. As-built D1 is evidence, not authority; uncertain requirements blocked pending owner decision.
 
