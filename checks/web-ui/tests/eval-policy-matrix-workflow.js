@@ -172,6 +172,12 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
     await expect(tablePolicyCounts).not.toContainText('known');
     await expect(drawer.locator('.pm-controls-line')).toHaveCount(2);
     await capture('eval-matrix-bundles');
+    await drawer.getByRole('button',{name:'Expand',exact:true}).click();
+    await expect.poll(async()=>Math.round((await drawer.boundingBox()).width)).toBe(Math.min(1360,page.viewportSize().width));
+    expect((await drawer.locator('.pm-controls').boundingBox()).height).toBeLessThanOrEqual(55);
+    await capture('eval-matrix-maximized');
+    await drawer.getByRole('button',{name:'Restore',exact:true}).click();
+    await expect.poll(async()=>Math.round((await drawer.boundingBox()).width)).toBe(Math.min(840,page.viewportSize().width));
     // Reference geometry uses native minimum widths, not fixed preferred widths.
     const geometry=()=>drawer.evaluate(el=>{
       const w=n=>n.getBoundingClientRect().width;

@@ -711,9 +711,11 @@ border-box width and positions sticky Health after it as content, fonts, mode,
 or viewport change. Bundle cells show compact `passed/applicable`, `N/A`, or
 `Unknown` values; the cell title states the full applicability state.
 
-The toolbar has three levels: Top Issues (only when real failed controls exist),
-row filters with the Bundles/Controls selector, then the control summary, column
-options, and sort. The selector remains available whenever a real captured bundle
+Top Issues appear separately only when real failed controls exist. The toolbar
+keeps row filters, the Bundles/Controls selector, control summary, column options,
+and sort in reference order within one wrapping group. Wider drawers use one row
+when the controls fit; narrow drawers wrap without hiding actions.
+The selector remains available whenever a real captured bundle
 exists, including a single bundle with few or no eligible controls. Expanded rows
 list failed, warning, and unknown controls first
 as collapsible cards. Passed and not-assigned controls stay behind an explicit

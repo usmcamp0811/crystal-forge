@@ -5196,10 +5196,10 @@ button.pm-col-note:hover { color: var(--cf-text-secondary); text-decoration: und
 .pm-captured .pm-legend { flex-wrap: wrap; }
 .pm-legend-guidance { margin-left: auto; color: var(--cf-text-muted); font-size: 11px; }
 .pm-empty { padding: 24px; text-align: center; color: var(--cf-text-muted); }
-/* Toolbar hierarchy: filters and column mode first; summary, column options
-   and sort on the secondary line. */
-.pm-captured .pm-controls { flex-direction: column; align-items: stretch; gap: 8px; }
-.pm-controls-line { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; row-gap: 8px; }
+/* Preserve reference order in one wrapping group. A widened drawer can use one
+   row instead of reserving an empty secondary line. */
+.pm-captured .pm-controls { flex-direction: row; flex-wrap: wrap; gap: 8px 10px; }
+.pm-captured .pm-controls-line { display: contents; }
 .pm-sort-controls { display: flex; align-items: center; gap: 10px; }
 .pm-controls-label { font-size: 11px; color: var(--cf-text-muted); }
 .pm-issue-fail { color: #f87171; font-weight: 700; }
