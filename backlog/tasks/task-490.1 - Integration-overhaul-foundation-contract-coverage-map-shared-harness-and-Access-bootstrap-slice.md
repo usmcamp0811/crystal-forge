@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-17 17:20'
+updated_date: '2026-10-17 17:24'
 labels:
   - testing
   - integration
@@ -31,7 +31,7 @@ ordinal: 513000
 <!-- SECTION:DESCRIPTION:BEGIN -->
 Problem: children need an adopted integration contract, coverage/retirement map, a concrete shared harness, and a verified registration interface. Goal: establish those foundations and prove one Access slice: fresh server/database startup using normal module configuration, supported first-admin bootstrap, production-UI browser sign-in, and authoritative reload/read. Test-only scope from TASK-490 applies; docs/design/CrystalForge/ is read-only.
 
-Corrected architecture: native checks/integration-access/default.nix uses Snowfall signature { lib, inputs, pkgs, ... }, an explicit coordinator-owned scenarios attrset, and a normal pkgs.linkFarm aggregate of ALL registered gates. The focused slice is checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap; .run exposes evidence. Scenario .nix/.py/.cjs scripts, fixtures, and assets belong under checks/integration-access/. Shared helpers belong under lib/integration-test and use lib.crystal-forge.makeIntegrationTestHarness { pkgs }. No root tests/, legacyPackages.integration, mkOwner, or custom discovery. Meaningful WIP checks can be discoverable; no incomplete-unexported rule. Only Access exists now; create Delivery/Assurance/Upgrade default.nix only when each has meaningful scenarios, never placeholders.
+Corrected architecture: native checks/integration-access/default.nix uses Snowfall signature { lib, inputs, pkgs, ... }, an explicit coordinator-owned scenarios attrset, and a normal pkgs.linkFarm aggregate of ALL registered gates. The focused slice is checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap; .run exposes evidence. Scenario .nix/.py/.cjs scripts, fixtures, and assets belong under checks/integration-access/. Shared helpers belong under lib/integration-test and use lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }. No root tests/, legacyPackages.integration, mkOwner, or custom discovery. Meaningful WIP checks can be discoverable; no incomplete-unexported rule. Only Access exists now; create Delivery/Assurance/Upgrade default.nix only when each has meaningful scenarios, never placeholders.
 
 Coordinator owns lib/integration-test/**, owner default.nix registration, flake/CI wiring, contract, coverage map and affected AGENTS.md/agent/testing docs. Children receive disjoint scenario files and owner-local fixtures/assets; their integration requires explicit coordinator registration.
 
@@ -41,14 +41,14 @@ Authority: adopt accepted owner requirements; D1 as-built docs are evidence only
 
 Verification candidates (not verified): nix eval .#checks.x86_64-linux.integration-access.scenarios --apply builtins.attrNames; nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L; nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap.run -L for evidence; nix build .#checks.x86_64-linux.integration-access -L for all registered gates. Verify native check discovery and no placeholder owners. Real VM execution, not evaluation/build alone, must be evidenced with actual outcome and command. Preserve correct failing assertions and link product bugs.
 
-READINESS: Backlog, blocked by two existing Rust package tests; no VM execution. The actual foundation dependency commit is unresolved. Historical base origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd is not that commit. Future child packets need actual dependency commit(s), verified commands, implemented helper signatures, exact paths, fixtures and registration before To Do. No delegation or executed slice is claimed. Risk: medium, shared interface and VM cost. Live preview not applicable: no browser-visible behavior change.
+READINESS: In Progress, blocked pending package build by two existing Rust package tests; no VM execution. The actual foundation dependency commit is unresolved. Historical base origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd is not that commit. Future child packets need actual dependency commit(s), verified commands, implemented helper signatures, exact paths, fixtures and registration before To Do. No delegation or executed slice is claimed. Risk: medium, shared interface and VM cost. Live preview not applicable: no browser-visible behavior change.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Contract is adopted at docs/knowledge/testing/integration-test-contract.md with implementation_status partial, adopted-versus-implemented distinction, and affected AGENTS.md/agent verification links; D1 is not authority
 - [ ] #2 Coverage map records accepted obligation ID, owner, scenario, independent expected result, evidence and status, plus retirement disposition for every legacy check and CI job
-- [ ] #3 lib/integration-test exposes lib.crystal-forge.makeIntegrationTestHarness { pkgs } with documented concrete roles, production package selection, facts/receipts, bounded waits, fault injection, pinned rendering and failure artifacts
+- [ ] #3 lib/integration-test exposes lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs } with documented concrete roles, production package selection, facts/receipts, bounded waits, fault injection, pinned rendering and failure artifacts
 - [ ] #4 checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicitly registers lifecycle-local-bootstrap and aggregates ALL registered gates with pkgs.linkFarm; scripts/fixtures/assets stay owner-local
 - [ ] #5 Focused checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap executes in a real VM with baseline updating disabled and failure propagation; exact command, revision, outcome and .run evidence are recorded, including linked defects where applicable
 - [ ] #6 Native discovery exposes meaningful Access WIP without requiring completion; no root tests/, legacyPackages.integration, mkOwner, custom discovery or placeholder Delivery/Assurance/Upgrade owners are added; legacy checks remain until cutover
@@ -63,4 +63,8 @@ READINESS: Backlog, blocked by two existing Rust package tests; no VM execution.
 Historical preflight (not a current lock): branch/worktree TASK-490.1-integration-foundation at /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation was recorded from origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd. Prior notes reported preserved pre-existing dev files, no main worktree, /dev/kvm present, and no live-preview requirement for this test-only task. This correction does not verify those historical environment observations.
 
 Task status correction: foundation remains In Progress under the existing lock and worktree. Layout correction does not retire or restart this active implementation task. Dependent Luna packets remain Backlog pending verified dependency commits. Snowfall helper signature verified during evaluation: lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; } (the check passes inputs because Snowfall's library-loader inputs do not include self).
+
+LOCK: claude-opus-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation
+
+Run one VM test at a time until measured capacity supports a higher limit. Foundation remains In Progress, blocked pending package build; dependent children remain Backlog. No foundation readiness or verification is claimed.
 <!-- SECTION:NOTES:END -->
