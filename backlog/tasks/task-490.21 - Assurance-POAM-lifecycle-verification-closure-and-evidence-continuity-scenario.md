@@ -4,7 +4,7 @@ title: 'Assurance: create and maintain POA&M plans from real failed evidence'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-17 20:30'
+updated_date: '2026-10-17 20:33'
 labels:
   - testing
   - integration
@@ -54,4 +54,6 @@ Completion: scenario files are coordinator-registered; real VM execution passes 
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction replaces old layout/commands. Additional blocker: TASK-490.20/.21 need finer splitting of triage versus policy waiver/acceptance versus verification/closure; scope preserved, no new slices or scope expansion now. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
+
+Packet decomposition/isolation correction 2026-10-17: this task covers POA&M create/link/milestones/notes and approved plan-state edits only. Verification/closure/reopen is TASK-490.29, a separate starting state and authority. No TASK-490.16/.18 VM/database/output is reusable: this scenario must create its own real failed scan/evaluation evidence through actual setup, without seeding the failure under test. Foundation VM run fails on TASK-490.25/.26; no ready dependency commit exists. Remain Backlog.
 <!-- SECTION:NOTES:END -->
