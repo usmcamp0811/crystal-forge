@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-17 16:14'
+updated_date: '2026-10-17 17:14'
 labels:
   - testing
   - integration
@@ -23,32 +23,38 @@ ordinal: 512000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The current integration layer is a mix of about 14 VM checks and one 26.9k-line browser suite. 105 of its 181 browser steps are route-mocked, OIDC is never completed end to end, CVE scanning uses a fake runner, real deploy/rollback is excluded, and no real old-version upgrade is tested. The authoritative browser gate (web-ui-check) is allow_failure. Coverage ownership is unclear and duplicates proliferate per task.
+The current integration layer mixes about 14 VM checks and a 26.9k-line browser suite. 105 of 181 browser steps are route-mocked; OIDC is not completed end to end, CVE scanning uses a fake runner, deploy/rollback is excluded, and a real old-version upgrade is missing. The authoritative browser job is allow_failure. This parent tracks the owner-approved test-only overhaul into four contract owners: integration-access, integration-delivery, integration-assurance, integration-upgrade.
 
-The owner (Matt, 2026-10-17 session) approved adopting the integration maintenance contract (source file /home/mcamp/code/crystal-forge/crystal-forge-integration-test-contract.md, to be committed at docs/knowledge/testing/integration-test-contract.md). It replaces the integration layer with exactly four flake checks: integration-access, integration-delivery, integration-assurance, integration-upgrade. This parent tracks the overhaul; bounded children implement it.
+Contract source: /home/mcamp/code/crystal-forge/crystal-forge-integration-test-contract.md, to be adopted at docs/knowledge/testing/integration-test-contract.md. The organization correction below supersedes prior layout proposals. As-built documentation (D1) is implementation evidence, not accepted authority. Uncertain expected behavior is blocked pending an explicit owner decision; do not infer acceptance from implementation.
 
-OWNER AUTHORIZATION (recorded verbatim in intent): the agent may create this parent and bounded children, select them for this work, move dependency-ready children to To Do, create task branches/worktrees, lock and start the foundation, and implement it. The authorization covers this overhaul only. It does NOT authorize: merging into dev/main, deploying, marking the overall task Done without final approval, selecting unrelated backlog work, or starting product-fix tasks.
+ORGANIZATION: native Snowfall owners live at checks/integration-{access,delivery,assurance,upgrade}/default.nix with signatures { lib, inputs, pkgs, ... }. Scenario scripts, fixtures, and assets live under their respective owner directories. Shared helpers live at lib/integration-test and are obtained through lib.crystal-forge.makeIntegrationTestHarness { pkgs }. No root tests/ tree, legacyPackages.integration export, mkOwner, or custom discovery. Access has an explicit coordinator-owned scenarios attrset. Each normal owner derivation uses pkgs.linkFarm to aggregate ALL registered scenario gates and propagate failures. Focused foundation target: checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap, with .run for evidence. Meaningful WIP checks may be discoverable. Only Access exists at this stage; other owner default.nix files are added only with meaningful scenarios, never placeholders. Exactly four integration owners is the final cutover inventory, not a foundation export precondition.
 
-STRICT SCOPE (test-only): application functionality is read-only. Allowed: integration test code and test-only fixtures, test-only NixOS configs, shared test helpers, browser tooling, the four flake registrations and directly required execution wiring, pinned test dependencies that do not change application dependencies, the existing integration CI entry point at cutover, the canonical contract, directly affected testing docs and agent-guide links, and task records. Forbidden: production Rust/UI/assets/styles/APIs/authz/policy/deployment logic/migrations/SQLx metadata/module semantics, production test selectors, debug endpoints, auth bypasses, mock-success paths, patched application in test derivations, and runtime dependency changes. Rust unit tests stay. docs/design/CrystalForge/ stays read-only.
+SINGLE WRITER: the coordinator owns every owner default.nix, lib/integration-test/**, flake/CI wiring, canonical contract, coverage map, AGENTS.md and directly affected agent/testing docs. Children write disjoint named scenario files and owner-local fixtures/assets; integration requires explicit coordinator registration. TASK-490.7 and TASK-490.24 are coordinator-written work, not Luna packets.
 
-Overhaul integration branch: TASK-490.1-integration-foundation (the foundation branch). Child commits are integrated there. Base: origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd.
+STRICT SCOPE: application functionality is read-only. Allowed: integration test code, test-only fixtures/configs/helpers/browser tooling, native owner registrations and required execution wiring, pinned test dependencies without application dependency changes, existing integration CI entry point at cutover, contract, coverage map, directly affected testing docs/agent links, and task records. Forbidden: production Rust/UI/assets/styles/APIs/authz/policy/deployment logic/migrations/SQLx metadata/module semantics, production selectors, debug endpoints, auth bypasses, mock-success paths, patched application derivations, runtime dependency changes, and docs/design/CrystalForge/ edits. Rust unit tests stay. Product defects retain executable failing assertions and become linked Backlog bugs.
 
-Coordinator-owned (single writer) paths: tests/integration/lib/**, tests/integration/default.nix, tests/integration/<owner>/default.nix (scenario registration lists), checks/integration-{access,delivery,assurance,upgrade}/ (created only at owner completion), flake/CI wiring, docs/knowledge/testing/integration-test-contract.md, docs/knowledge/testing/integration-coverage-map.md, AGENTS.md and docs/agents/* integration links.
+Overhaul branch: TASK-490.1-integration-foundation; designated historical base origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd. This base is not a foundation dependency commit. Child commits are integrated by the coordinator.
+
+READINESS: the actual foundation dependency commit remains unresolved. Foundation is blocked by two existing Rust package tests; no VM execution has occurred. Every child remains Backlog and none is ready. Future packets require actual foundation/dependency commit(s), implemented helper signatures, exact writable paths, fixtures, registration, and verified commands before To Do. TASK-490.20/.21 also require finer splitting of triage, policy waiver, and closure before dispatch; this correction does not expand or split their scope.
+
+Prior owner authorization covers this overhaul only and permits dependency-ready task selection and implementation preflight. It does not override these blockers or authorize merging, deploying, unrelated work, product fixes, or marking the overhaul Done without final approval.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The integration contract is committed at docs/knowledge/testing/integration-test-contract.md with accurate implementation_status and an AGENTS.md rule that replaces the single web-ui UI-verification rule
-- [ ] #2 The coverage map records every accepted obligation with one primary owner, scenario, independent expected result, evidence, and status, plus a retirement disposition for every legacy integration check and CI job
-- [ ] #3 Exactly four integration flake checks (integration-access, integration-delivery, integration-assurance, integration-upgrade) exist at cutover; non-integration checks keep their own attributes and are classified explicitly
-- [ ] #4 Each exported owner executes its complete required scenario set and propagates every scenario failure; no owner is exported before its required set is implemented
-- [ ] #5 Legacy integration registrations and CI jobs are retired only after their replacement owner scenarios pass or an owner-approved scope change exists
-- [ ] #6 Product defects found by correct assertions are recorded as linked Backlog defects and keep their executable failing assertion; none are fixed in this overhaul
-- [ ] #7 No production code, migration, SQLx metadata, UI asset, or design-handoff file is changed by any child of this task
+- [ ] #1 The contract is adopted at docs/knowledge/testing/integration-test-contract.md with accurate implementation_status and directly affected AGENTS.md/verification guidance; as-built D1 is not accepted authority and uncertain cases require an owner decision
+- [ ] #2 The coverage map assigns every accepted obligation one primary owner, scenario, independent expected result, evidence and status, and records a retirement disposition for every legacy integration check and CI job
+- [ ] #3 At final cutover exactly four native Snowfall integration owners exist under checks/integration-{access,delivery,assurance,upgrade}/default.nix using { lib, inputs, pkgs, ... }; non-integration checks retain their own attributes and classification
+- [ ] #4 Each normal owner is a pkgs.linkFarm aggregate of ALL explicitly registered scenario gates and propagates every failure; meaningful WIP checks may be discoverable, and no placeholder owner is added
+- [ ] #5 Shared helpers use lib/integration-test through lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets are owner-local, coordinator registration is explicit, and there is no root tests/ tree, legacyPackages.integration, mkOwner, or custom discovery
+- [ ] #6 Legacy registrations and CI jobs are retired only after passing replacements or an explicit owner-approved scope change; correct product-defect assertions remain executable and linked to Backlog bugs
+- [ ] #7 No production code, migrations, SQLx metadata, UI assets, or design-handoff files change; child packets remain Backlog until actual dependency commits and verified commands exist
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-LOCK: claude-opus-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation (overhaul integration branch TASK-490.1-integration-foundation).
+Organization correction recorded 2026-10-17: this task's description and AC supersede prior layout and incomplete-unexported rules. Backlog grooming only; no implementation, Luna delegation, or slice execution is claimed. Foundation dependency commit is unresolved. Foundation is blocked by two existing Rust package tests; no VM execution. All 24 children remain Backlog, none dispatch-ready. Future packets need actual dependency commit(s) and verified commands before To Do. TASK-490.7/.24 are coordinator writer tasks; TASK-490.20/.21 need finer splitting of triage, policy waiver, and closure without scope expansion now.
+
+Historical coordination context: prior owner claude-opus-5-5 recorded the foundation worktree /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation. That historical record is not evidence of a completed foundation or current dispatch readiness.
 <!-- SECTION:NOTES:END -->
