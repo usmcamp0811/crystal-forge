@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-17 20:38'
+updated_date: '2026-10-17 23:57'
 labels:
   - testing
   - integration
@@ -88,6 +88,8 @@ Foundation execution update after integrating tested dependency af39284bdf16d564
 Foundation slice execution is now verified as an actual VM run, with a failing correct startup assertion and captured evidence (not a pass): source tested `a6c8922650bf7f0ff643d181422c0092cfc43242-dirty`; exact command `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`; evidence `/nix/store/yfc7pkz5zm8k29b82zzfhm2i8f1gn348-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. Generated config summary states DB host /run/postgresql and AUTH_MODE unset; server fails `both host and hostaddr are missing` before migrations/HTTP. Correct assertions remain. Linked Backlog product defects TASK-490.25 and .26. No application changes or AUTH_MODE override.
 
 Contract/coverage docs now explicitly state each scenario has a fresh VM and DB; dependencies share immutable code/fixture definitions only, never runtime outputs. Map adds contract IDs for finding waivers, acceptance register, POA&M plan entry and POA&M verification/closure; legacy CI manual baseline and screenshot-report jobs are classified. Assurance packets .20/.21 are narrowed and .27/.28/.29 separate their start states/authority; they all remain Backlog. The cutover task depends on product blockers and decomposed scenarios. Remaining foundation blockers: independent role implementations/proving scenario and any further harness defects; local server startup product defects prevent successful Access/browser result.
+
+Final recorded scenario run at committed combined source revision 39a6a54b651a8b77fc3416b73195e363a782fa2e (not dirty): exact command `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`; VM exit was failure at `fresh-startup-applies-migrations`, after ~19s. Evidence `/nix/store/vcfbia521bjad2a85yca3h3n9i4m4ikf-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. Generated config summary and system journal confirm TASK-490.25 database URI failure and absent AUTH_MODE; migrations, browser, and HTTP did not run. No local auth HTTP response claimed. Correct assertion retained and linked defects remain Backlog. Final `okf-knowledge` passed (58 tests, 191 concepts, 216 Mermaid blocks); native check inventory remains 27 with only integration-access new; flake wiring unchanged. Foundation remains In Progress and not passing.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
