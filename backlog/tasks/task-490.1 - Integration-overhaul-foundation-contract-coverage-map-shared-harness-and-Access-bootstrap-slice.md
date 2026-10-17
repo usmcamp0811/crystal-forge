@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-17 17:37'
+updated_date: '2026-10-17 17:39'
 labels:
   - testing
   - integration
@@ -20,6 +20,7 @@ references:
   - modules/nixos/crystal-forge/default.nix
   - packages/web-ui/src/routes.rs
   - checks/web-ui/default.nix
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335'
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -73,4 +74,6 @@ Native Snowfall correction verification (2026-10-17): nix eval --json .#checks.x
 Static verification succeeded via nix develop: node --check on lib/integration-test/browser/cf-browser.cjs and checks/integration-access/scenarios/lifecycle-local-bootstrap.cjs; Python ast.parse for lib/integration-test/driver.py and checks/integration-access/scenarios/lifecycle-local-bootstrap.py. Documentation validation passed (58 tests, 191 concepts, 216 Mermaid blocks); final rerun follows final edits. git diff --check passed. flake.nix exactly matches base again. Removed only overhaul-owned empty root tests directories. Production packages/modules/migrations/SQLx/UI/design and existing CI gates unchanged.
 
 BLOCKED: TASK-491 prevents real VM execution of the foundation slice. Bootstrap/session behavior remains unverified. No children are ready; all Luna packets need recorded tested dependency commits and executable interface evidence before To Do. No Luna delegation occurred. Foundation is In Progress, not Review/Done.
+
+Preserved corrected native Snowfall WIP in commit 683c86e03ef14b37e69c00030d6d17660398324d on TASK-490.1-integration-foundation, pushed to origin. Draft MR !335: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335 . This is NOT a tested foundation dependency commit: no VM slice executed because TASK-491 blocks the unchanged server package. Status remains In Progress, lock retained; no Review/Done or ready Luna packets. Final okf-knowledge passed after registering the new Access README in the existing OKF manifest (58 tests, 191 concepts, 216 Mermaid blocks). No full flake check was run.
 <!-- SECTION:NOTES:END -->
