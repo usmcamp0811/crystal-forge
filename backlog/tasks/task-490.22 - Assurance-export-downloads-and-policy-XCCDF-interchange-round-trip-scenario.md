@@ -4,7 +4,7 @@ title: 'Assurance: export downloads and policy/XCCDF interchange round-trip scen
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-17 17:28'
+updated_date: '2026-10-17 20:33'
 labels:
   - testing
   - integration
@@ -21,17 +21,21 @@ ordinal: 534000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-assurance. Contract ID: assurance.interchange. Exclusive writes: checks/integration-assurance/scenarios/interchange-exports.{nix,py,cjs} and checks/integration-assurance/fixtures/interchange-*. Separate from remediation: independent parsers/schema validators. Legacy OSCAL/SARIF phases mock bundle API; oscal-export/xccdf-schema validate fixture output, not real-record downloads.
+Owning check: integration-assurance. Contract ID: assurance.interchange. Exclusive writes: checks/integration-assurance/scenarios/interchange-exports.{nix,py,cjs}, owner-local interchange fixtures only. This packet is separate from remediation because it needs independent parsers/schema validators and real authenticated browser downloads.
 
-Scope: reuse records produced by TASK-490.19/.21 fixtures. UI-download and independently parse register csv/xlsx/oscal-json/oscal-xml; validate OSCAL with pkgs.crystal-forge.oscal-1-1-2-schemas. Parse POA&M/acceptance csv/xlsx and CVE csv; bundle-version/assignment XCCDF validates with xmllint against vendored XCCDF and schemas/cf-xccdf-1. Policy interchange export/import into fresh scope: preview persists nothing, import atomic, identities round-trip. Client-side SARIF/OSCAL contains expected records/scope. Expected sets derive from authored fixture facts, never CF lists. Scenario-specific schema/data assets remain owner-local or consume existing immutable package inputs. Non-goals: schema-unit coverage in retained non-integration oscal-export/xccdf-schema. TASK-490 test-only restrictions apply.
+WHY: legacy OSCAL/SARIF browser phases route-mock bundle data; oscal-export and xccdf-schema validate fixture/writer outputs, not actual downloads from CF records.
 
-Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Shared helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; child integration requires explicit registration and disjoint files. Meaningful WIP may be discoverable; only Access exists now, other owners need meaningful scenarios, no placeholders.
+SCOPE: create the small required source records through real UI/API setup within this scenario's own fresh VM (never import rows or outputs from TASK-490.19/.21/.27/.28 runs). Download via the production UI and parse independently: register CSV/XLSX/OSCAL JSON/XML; POA&M CSV/XLSX; acceptance CSV/XLSX; CVE CSV; bundle-version/assignment XCCDF; policy interchange export, preview and atomic import into a new scope; client-side SARIF/OSCAL downloads. Expected record IDs/scope come from authored prerequisite facts and receipts from setup actions, not from the response under test. Validate OSCAL/XCCDF with vendored schemas. Non-goals: repeat full POA&M/CVE/policy workflows, schema-unit coverage, production changes.
 
-Prerequisites: TASK-490.19/.21 integrated, including resolution of their packet-readiness blockers. Read cf-server api/register_export.rs, poam.rs export, acceptance_register.rs export, cves.rs export, compliance.rs export_bundle_xccdf/export_assignment_xccdf/policy_interchange_*; web-ui src/export/mod.rs; docs/knowledge/compliance/cf-xccdf-interchange-*.md and AtoPackage.jsx. As-built D1 is evidence, not authority; uncertain supported formats/semantics blocked pending owner decision.
+DEPENDENCY: TASK-490.19 for accepted supported STIG/import format context and TASK-490.21/.28 for source record semantics only; their live data is NOT shared. Requires the tested TASK-490.1 foundation and integrated helper dependencies. Current Access VM run fails on product defects TASK-490.25/.26; remain Backlog.
 
-Candidate, NOT verified: nix build .#checks.x86_64-linux.integration-assurance.scenarios.interchange-exports -L; append .run for evidence; aggregate nix build .#checks.x86_64-linux.integration-assurance -L. Completion requires explicit registration, real VM execution and exact revision/commands/outcomes/evidence. Preserve correct failing assertions and linked Backlog product bugs; escalate helper/authority gaps.
+Read-only sources: cf-server src/handlers/api/register_export.rs, poam.rs, acceptance_register.rs, cves.rs, compliance.rs (exports and policy_interchange_*); packages/web-ui/src/export/mod.rs and export UI; docs/knowledge/compliance/cf-xccdf-interchange-*.md; approved AtoPackage.jsx only for presentation. Non-integration schema checks oscal-export/xccdf-schema stay intact.
 
-READINESS: actual foundation commit unresolved; two existing Rust package tests block foundation; no VM execution. Backlog, not ready. Actual dependency commit(s), implemented interfaces/fixtures/registration and verified commands required before To Do. No delegation or executed slice is claimed.
+Writable paths: checks/integration-assurance/scenarios/interchange-exports.{nix,py,cjs}, checks/integration-assurance/fixtures/interchange-* only. Owner default.nix registration, lib/integration-test, flake/CI and all production/design sources are read-only; coordinator explicitly registers it.
+
+Harness: `lib.crystal-forge.makeIntegrationTestHarness {pkgs,inputs}`; each run creates its own DB/VM. Focused command `nix build .#checks.x86_64-linux.integration-assurance.scenarios.interchange-exports -L` is a candidate, NOT yet verified; `.run` for evidence only. Coordinator runs complete `nix build .#checks.x86_64-linux.integration-assurance -L`.
+
+Completion requires independent parse/schema assertions, downloads from a real authenticated browser, exact expected record IDs/scope, actual complete-owner registration and execution. Preserve correct failure; link a Backlog product defect. No task readiness until exact integrated foundation commits and focused commands are verified.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
