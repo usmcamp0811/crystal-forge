@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 20:31'
+updated_date: '2026-10-17 20:33'
 labels:
   - testing
   - integration
@@ -52,3 +53,9 @@ Completion: both premature and valid verification paths assert authoritative evi
 - [ ] #5 Scenario is explicitly registered and included in the complete Assurance owner run
 - [ ] #6 Real VM execution, revision, exact command, outcome, and evidence paths are recorded
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Isolation clarification: TASK-490.21/.14/.16 outputs, rows, generations, and VMs cannot be consumed here. In this scenario's own fresh VM, generate failed evidence through a real evaluation/scan, create the POA&M through the real workflow, and perform the real remediation/Current evidence transition before asserting verification/closure. Reuse code and immutable facts only, never runtime state. Remain Backlog until accepted verification/closure authority and a tested foundation/dependency commit exist.
+<!-- SECTION:NOTES:END -->
