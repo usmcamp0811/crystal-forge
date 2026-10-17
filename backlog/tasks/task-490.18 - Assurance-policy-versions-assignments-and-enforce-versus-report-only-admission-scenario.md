@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
+updated_date: '2026-10-17 17:18'
 labels:
   - testing
   - integration
@@ -21,13 +22,17 @@ ordinal: 530000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-assurance. Contract ID: assurance.policy.enforcement. Exclusive write path: tests/integration/assurance/scenarios/policy-enforcement.{nix,py,cjs}.
+Owning check: integration-assurance. Contract ID: assurance.policy.enforcement. Exclusive writes: checks/integration-assurance/scenarios/policy-enforcement.{nix,py,cjs}. Existing 19-20e/20ab2 prove policy persistence but not real Enforce versus ReportOnly admission.
 
-WHY: policy creation steps (19-20e, 20ab2) prove persistence, but no scenario proves that an assigned policy version actually blocks (Enforce) or only records (ReportOnly) a real admission decision.
+Scope: admin creates/publishes version with one or two authored-fixture-violable composite rule kinds (e.g. packages_absent and nixos_option), assigns versioned environment/system scope. Evaluating violating commit produces expected failed evidence. Enforce blocks real deployment and leaves target unchanged; ReportOnly records violation and permits deployment. New policy version never rewrites old-version evidence. Non-goals: every rule kind (Rust/unit tests), STIG import (490.19). TASK-490 test-only restrictions apply.
 
-SCOPE: an admin creates and publishes a policy version (composite rule kinds limited to one or two that the authored fixture can violate, e.g. packages_absent and nixos_option), assigns it to an environment and to one system with versioned scope; evaluation of a violating commit produces the expected failed evidence; with Enforce the deployment is blocked and the target does not change; with ReportOnly the deployment proceeds and the violation is recorded; a new policy version does not rewrite evidence for the previous version. Non-goals: every rule kind (unit/Rust tests own per-kind logic); STIG import (490.19).
+Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned registrations and normal pkgs.linkFarm aggregate of ALL registered gates. Shared helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; child files stay disjoint, integration requires explicit registration. Meaningful WIP may be discoverable; only Access exists now; add other owners only with meaningful scenarios, no placeholders.
 
-READY WHEN: TASK-490.14 is integrated. Source to read then: cf-server models/deployment_policies.rs (DeploymentPolicy, CompositeRuleKind, AssignedPolicyEnforcementMode), compliance/resolver.rs (AssignmentMode, AssignmentTarget), handlers/api/compliance.rs (assignments, policy-versions publish/trust), deployment_policies.rs, deployments.rs; docs/knowledge/compliance/assignments-and-report-only-enforcement.md; design PoliciesView.jsx, PolicyEditor.jsx.
+Prerequisite: TASK-490.14 integrated. Read cf-server models/deployment_policies.rs DeploymentPolicy/CompositeRuleKind/AssignedPolicyEnforcementMode, compliance/resolver.rs AssignmentMode/AssignmentTarget, api/compliance.rs assignments/policy-version publish/trust, deployment_policies.rs and deployments.rs; docs/knowledge/compliance/assignments-and-report-only-enforcement.md; PoliciesView.jsx/PolicyEditor.jsx. As-built D1 is evidence, not accepted authority; uncertain cases blocked pending owner decision.
+
+Candidate, NOT verified: nix build .#checks.x86_64-linux.integration-assurance.scenarios.policy-enforcement -L; append .run for evidence; aggregate nix build .#checks.x86_64-linux.integration-assurance -L. Completion requires explicit registration, real VM execution and revision/commands/outcomes/evidence notes, independent fixture facts and retained correct failing assertions with linked Backlog product bugs. Escalate helper/authority gaps, no product changes.
+
+READINESS: actual foundation dependency commit unresolved; two existing Rust package tests block foundation; no VM execution. Backlog, not ready. Actual dependency commit(s), implemented interfaces/fixtures/registration and verified commands required before To Do. No delegation or executed slice is claimed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -38,3 +43,9 @@ READY WHEN: TASK-490.14 is integrated. Source to read then: cf-server models/dep
 - [ ] #4 Evidence remains bound to the policy version that produced it
 - [ ] #5 Executed in real VMs with recorded evidence
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-17 organization correction: native owner-local paths, shared lib/integration-test and explicit coordinator registration. Foundation commit unresolved; two existing Rust package tests block foundation; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
+<!-- SECTION:NOTES:END -->
