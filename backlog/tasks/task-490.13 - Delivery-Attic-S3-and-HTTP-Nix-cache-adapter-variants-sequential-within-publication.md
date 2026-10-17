@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:37'
+updated_date: '2026-10-17 17:17'
 labels:
   - testing
   - integration
@@ -21,13 +22,17 @@ ordinal: 525000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-delivery. Contract ID: delivery.publication.variants. Exclusive write path: tests/integration/delivery/scenarios/publication-variants.{nix,py,cjs}. Implement the variants sequentially in this order: Attic, S3, HTTP/Nix. Each variant proves only its distinct boundary; the common evaluate-build-retrieve workflow is proven once by TASK-490.12 and is reused, not cloned.
+Owning check: integration-delivery. Contract ID: delivery.publication.variants. Exclusive writes: checks/integration-delivery/scenarios/publication-variants.{nix,py,cjs}. Implement sequentially Attic, S3, then HTTP/Nix. Reuse common evaluate/build/retrieve workflow from TASK-490.12; prove only each distinct adapter boundary, no lifecycle cloning. Legacy attic-metrics, attic-publication and browser steps 21-25 partly use SQL clones/private fixture rows.
 
-WHY: legacy attic-metrics, attic-publication, and web-ui steps 21-25 prove adapters partly with SQL clones and a private fixture table. Each supported CacheType must prove its own publication or read authentication once.
+Scope: Attic JWT write with scope negatives and named-cache Test; S3 access-key write/read; HTTP and Nix read-only destinations with public read and no write path. Each variant uses fresh output independently absent at destination first; wrong credentials publish nothing for write-capable adapters. Non-goal: metrics internals (non-integration). TASK-490 test-only scope applies.
 
-SCOPE: Attic JWT write with scope negatives and named-cache Test; S3 access-key write and read; HTTP and Nix read-only destinations (public read, no write path). Each variant: one fresh output, assert_store_absent at the destination first, wrong credentials publish nothing. Non-goals: metrics accounting internals (non-integration).
+Organization: native checks/integration-delivery/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator registrations, normal pkgs.linkFarm aggregate of ALL registered gates. Shared helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns owner default.nix/shared lib/CI/docs; child integration requires explicit registration and disjoint files. Meaningful WIP can be discoverable; only Access exists now, other owners only with meaningful scenarios, no placeholders.
 
-READY WHEN: TASK-490.12 is integrated and TASK-490.7 provides Attic and S3 fixtures. Source to read then: cf-protocol src/cache.rs, cf-server handlers/api/caches.rs (test-credentials), derivations/cache.rs, cf-builder Attic/S3 push; docs/knowledge/caches/*; checks/attic-metrics/README.md, checks/attic-publication/README.md.
+Prerequisites: TASK-490.12 integrated; TASK-490.7 Attic/S3 fixtures. Read cf-protocol src/cache.rs, cf-server caches.rs test-credentials and derivations/cache.rs, cf-builder Attic/S3 push, docs/knowledge/caches/*, checks/attic-metrics/README.md and checks/attic-publication/README.md. As-built D1 is evidence, not accepted authority; uncertain cases blocked pending owner decision.
+
+Candidate, NOT verified: nix build .#checks.x86_64-linux.integration-delivery.scenarios.publication-variants -L; append .run for evidence; aggregate nix build .#checks.x86_64-linux.integration-delivery -L. Completion requires explicit registration, real VM execution and revision/commands/outcomes/evidence notes. Independent expectations; correct failing assertions and linked Backlog product bugs remain; shared gaps go to coordinator.
+
+READINESS: actual foundation commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s), implemented interfaces/fixtures/registration and verified commands required before To Do. No delegation or executed slice is claimed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -37,3 +42,9 @@ READY WHEN: TASK-490.12 is integrated and TASK-490.7 provides Attic and S3 fixtu
 - [ ] #3 No complete lifecycle is duplicated per adapter
 - [ ] #4 Executed in real VMs with recorded evidence
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-17 organization correction: native owner-local paths/commands and explicit coordinator registration. Foundation commit unresolved; two existing Rust package tests block foundation; no VM execution. Backlog, not ready. Future packet needs actual dependency commit(s) and verified commands before To Do. No Luna delegation or executed slice is claimed.
+<!-- SECTION:NOTES:END -->
