@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
+updated_date: '2026-10-17 17:19'
 labels:
   - testing
   - integration
@@ -22,13 +23,19 @@ ordinal: 533000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-assurance. Contract ID: assurance.remediation.poam. Exclusive write path: tests/integration/assurance/scenarios/remediation-poam.{nix,py,cjs}. Split from triage because the starting state is an open plan and the authority is plan execution, verification, and closure.
+Owning check: integration-assurance. Contract ID: assurance.remediation.poam. Exclusive writes currently scoped to checks/integration-assurance/scenarios/remediation-poam.{nix,py,cjs}. Legacy 29g-29m and canonical POA&M lifecycle start from SQL-seeded FAIL evidence; results under test must instead originate in real scan/policy evaluation.
 
-WHY: legacy POA&M proofs (29g-29m, task433-canonical-poam-lifecycle) start from SQL-seeded FAIL evidence. The contract forbids seeding the result under test; failed evidence must come from a real policy evaluation or scan.
+Preserved scope: create POA&Ms from real failed policy evidence (TASK-490.18) and CVE findings (TASK-490.16), link compatible findings, persist milestones/notes, traverse PoamStatus lifecycle. Verification succeeds only after real remediating deployment changes Current evidence to passing. Closure/reopen preserves finding identity; reject stale revisions; authored system/bundle rollups stay exact. Non-goals: waiver decisions (490.20), exports (490.22). TASK-490 test-only scope applies.
 
-SCOPE: create a POA&M from real failed policy evidence (TASK-490.18 fixture) and from a real CVE finding (TASK-490.16 fixture); link compatible findings; milestones and notes persist; transition through the PoamStatus lifecycle; verification succeeds only after a real remediating deployment changes the evidence (Current evidence becomes passing); closure and reopen preserve finding identity; stale revisions are rejected; rollups by system and bundle reflect the authored set. Non-goals: waiver decisions (490.20); exports (490.22).
+NOT DISPATCH READY: TASK-490.20/.21 still need finer splitting of finding triage versus policy waiver/acceptance versus verification/closure. Existing separation is not sufficient dispatch preparation. Note blocker without expanding scope or creating new slices now. Integration of 490.16/.18 alone does not make this ready.
 
-READY WHEN: TASK-490.16 and TASK-490.18 are integrated. Source to read then: cf-server handlers/api/poam.rs (transition, verify, close, reopen, milestones, links, rollups), models/poam.rs (PoamStatus, PoamRisk); docs/design/CrystalForge cve-poam-evidence-continuity-design-spec.md (owner-approved), docs/knowledge/poam/*; design PoamsView.jsx, PoamViews.jsx, PoamRegisterParts.jsx.
+Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator registrations and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; explicit registration of disjoint child files required. Meaningful WIP may be discoverable; only Access exists now, other owners require meaningful scenarios, no placeholders.
+
+Read-only source: cf-server api/poam.rs transition/verify/close/reopen/milestones/links/rollups, models/poam.rs PoamStatus/PoamRisk; owner-approved docs/design/CrystalForge cve-poam-evidence-continuity-design-spec.md, docs/knowledge/poam/*; PoamsView.jsx/PoamViews.jsx/PoamRegisterParts.jsx. As-built D1 is evidence, not accepted authority; uncertain lifecycle requirements blocked pending owner decision.
+
+Candidate only, NOT verified or dispatch authorization: nix build .#checks.x86_64-linux.integration-assurance.scenarios.remediation-poam -L; append .run for evidence; aggregate nix build .#checks.x86_64-linux.integration-assurance -L. Final packet commands/boundaries need revalidation after refinement. Completion requires explicit registration, real VM execution and revision/commands/outcomes/evidence; independent expectations and retained correct failing assertions with linked Backlog bugs.
+
+READINESS: actual foundation commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Finer splitting, actual dependency commit(s), implemented helpers/fixtures/registration and verified commands required before To Do. No delegation or executed slice is claimed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -39,3 +46,9 @@ READY WHEN: TASK-490.16 and TASK-490.18 are integrated. Source to read then: cf-
 - [ ] #4 Closure and reopen preserve identity; stale revisions are rejected
 - [ ] #5 Executed in real VMs with recorded evidence
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-17 organization correction replaces old layout/commands. Additional blocker: TASK-490.20/.21 need finer splitting of triage versus policy waiver/acceptance versus verification/closure; scope preserved, no new slices or scope expansion now. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
+<!-- SECTION:NOTES:END -->
