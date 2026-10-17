@@ -4,7 +4,7 @@ title: 'Delivery: Niks3 publication, authentication, and cold retrieval scenario
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:37'
-updated_date: '2026-10-17 17:16'
+updated_date: '2026-10-17 17:27'
 labels:
   - testing
   - integration
@@ -24,7 +24,7 @@ Owning check: integration-delivery. Contract ID: delivery.publication.niks3. Exc
 
 Scope: configure cache through Caches UI as domain setup, token write auth then mTLS. Fresh builderA output publishes to the destination bound to its ID; independent server read verifies publication. Cold targetA proves output absent first, then retrieves with signature verification. Wrong token/client certificate publishes nothing; other-environment agents receive no read credential. Non-goals: Attic/S3/HTTP/Nix (490.13), activation (490.14). Shared form behavior belongs to Access; cache credentials/Test boundaries remain Delivery. TASK-490 test-only scope applies.
 
-Organization: checks/integration-delivery/default.nix uses native { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Shared lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix, shared lib and CI/docs; child files are disjoint and integration requires explicit registration. Meaningful WIP can be discoverable; only Access exists now, no other owner default.nix until meaningful scenarios, no placeholders.
+Organization: checks/integration-delivery/default.nix uses native { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Shared lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix, shared lib and CI/docs; child files are disjoint and integration requires explicit registration. Meaningful WIP can be discoverable; only Access exists now, no other owner default.nix until meaningful scenarios, no placeholders.
 
 Prerequisites: TASK-490.10 integrated and TASK-490.7 Niks3 services fixture available. Read cf-protocol src/cache.rs CacheType/CacheReadAuth/Niks3WriteAuth, cf-server caches.rs/builders.rs publication/completion, derivations/cache.rs, cf-builder Niks3 push and cf-agent pull; docs/knowledge/caches/niks3-cache.md, checks/niks3-cache/README.md legacy assertions, lib/cache-test-node. As-built D1 is evidence, not authority; uncertain requirements blocked pending owner decision.
 
