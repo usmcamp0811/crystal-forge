@@ -242,6 +242,8 @@ impl ColumnState {
 /// Retains matrix presentation independently of request and component lifetime.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MatrixPresentation {
+    /// Distinguishes usable-capture defaults from a provisional empty response.
+    pub initialized: bool,
     /// Typed mode, filter, sort, trim, and exact bundle focus.
     pub columns: ColumnState,
     /// Expanded system/configuration key.
@@ -258,11 +260,34 @@ impl MatrixPresentation {
     /// Creates design defaults from the deduplicated control count.
     pub fn new(count: usize) -> Self {
         Self {
+            initialized: false,
             columns: ColumnState::new(count),
             expanded: None,
             issue: None,
             finding: None,
             page: 0,
+        }
+    }
+
+    /// Initializes density once captured controls or authoritative emptiness exist.
+    /// Subsequent refreshes preserve explicit presentation choices.
+    pub fn initialize(
+        &mut self,
+        snapshot: &crate::api::models::eval_policy_matrix::EvalPolicyMatrixSnapshot,
+    ) {
+        use crate::api::models::eval_policy_matrix::EvalMatrixProvenance;
+        let count = snapshot
+            .columns
+            .iter()
+            .map(|column| column.policy_version_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        if !self.initialized
+            && snapshot.provenance == EvalMatrixProvenance::Captured
+            && (count > 0 || snapshot.empty_bundle_metadata_complete)
+        {
+            self.columns = ColumnState::new(count);
+            self.initialized = true;
         }
     }
 }
@@ -367,10 +392,45 @@ pub async fn capture_dom() -> Option<serde_json::Value> {
 }
 
 /// Restores captured DOM state through a JSON channel after the drawer mounts.
-/// Missing elements and document-channel failures leave semantic state intact.
+/// Allows three seconds for the validated matrix's asynchronous render, without
+/// moving focus after new operator input. Missing elements and document-channel
+/// failures leave semantic state intact.
 pub async fn restore_dom(value: serde_json::Value) {
     let mut eval = document::eval(
-        r#"const state = await dioxus.recv(); requestAnimationFrame(() => { for (const s of state.scrolls || []) { for (const e of document.getElementsByClassName(s.className)) { e.scrollTop = s.top; e.scrollLeft = s.left; } } if (state.window) window.scrollTo(state.window.x, state.window.y); if (state.focus) document.getElementById(state.focus)?.focus({preventScroll:true}); });"#,
+        r#"
+        const state = await dioxus.recv();
+        const deadline = performance.now() + 3000;
+        let interrupted = false;
+        const interrupt = () => { interrupted = true; };
+        document.addEventListener('pointerdown', interrupt, true);
+        document.addEventListener('keydown', interrupt, true);
+        try {
+            while (!interrupted && performance.now() < deadline) {
+                await new Promise(resolve => requestAnimationFrame(resolve));
+                if (interrupted) break;
+                const focus = state.focus ? document.getElementById(state.focus) : null;
+                if (state.focus && !focus) continue;
+                const targets = (state.scrolls || []).flatMap(saved =>
+                    [...document.getElementsByClassName(saved.className)]
+                        .map(element => ({element, saved})));
+                if ((state.scrolls || []).length && !targets.length) continue;
+                for (const {element, saved} of targets) {
+                    element.scrollTop = saved.top;
+                    element.scrollLeft = saved.left;
+                }
+                if (state.window) window.scrollTo(state.window.x, state.window.y);
+                focus?.focus({preventScroll:true});
+                await new Promise(resolve => requestAnimationFrame(resolve));
+                const restored = targets.every(({element, saved}) =>
+                    Math.abs(element.scrollTop - Math.min(saved.top, element.scrollHeight - element.clientHeight)) <= 1 &&
+                    Math.abs(element.scrollLeft - Math.min(saved.left, element.scrollWidth - element.clientWidth)) <= 1);
+                if (restored && (!focus || document.activeElement === focus)) break;
+            }
+        } finally {
+            document.removeEventListener('pointerdown', interrupt, true);
+            document.removeEventListener('keydown', interrupt, true);
+        }
+        "#,
     );
     let _ = eval.send(value);
     let _ = eval.await;
@@ -379,6 +439,53 @@ pub async fn restore_dom(value: serde_json::Value) {
 #[cfg(test)]
 mod navigation_tests {
     use super::*;
+
+    fn capture(
+        count: usize,
+        complete: bool,
+    ) -> crate::api::models::eval_policy_matrix::EvalPolicyMatrixSnapshot {
+        serde_json::from_value(serde_json::json!({
+            "evaluation_attempt_id": Uuid::from_u128(1), "attempt_number": 1,
+            "provenance": "captured", "empty_bundle_metadata_complete": complete,
+            "columns": (0..count).map(|n| serde_json::json!({"policy_id":Uuid::from_u128(n as u128 + 1), "policy_version_id":Uuid::from_u128(n as u128 + 1), "name":"control", "version":"1"})).collect::<Vec<_>>(),
+            "bundles":[], "rows":[]
+        })).unwrap()
+    }
+
+    #[test]
+    fn density_waits_for_usable_capture_then_preserves_explicit_choices() {
+        let mut state = MatrixPresentation::new(0);
+        state.initialize(&capture(0, false));
+        assert!(!state.initialized);
+        state.initialize(&capture(128, true));
+        assert!(state.initialized);
+        assert_eq!(state.columns.mode, ColumnMode::Bundles);
+        assert!(state.columns.trim);
+        state.columns.set_mode(ColumnMode::Controls);
+        state.columns.trim = false;
+        state.columns.filter = RowFilter::Failing;
+        state.columns.sort = RowSort::Name;
+        let chosen = state.clone();
+        state.initialize(&capture(128, true));
+        assert_eq!(state, chosen);
+        let mut new_attempt = MatrixPresentation::new(0);
+        new_attempt.initialize(&capture(128, true));
+        assert_eq!(new_attempt.columns.mode, ColumnMode::Bundles);
+    }
+
+    #[test]
+    fn density_deduplicates_versions_and_accepts_authoritative_empty_capture() {
+        let mut snapshot = capture(14, true);
+        snapshot.columns.extend(snapshot.columns.clone());
+        let mut state = MatrixPresentation::new(0);
+        state.initialize(&snapshot);
+        assert_eq!(state.columns.mode, ColumnMode::Controls);
+        assert!(!state.columns.trim);
+        let mut empty = MatrixPresentation::new(0);
+        empty.initialize(&capture(0, true));
+        assert!(empty.initialized);
+        assert_eq!(empty.columns.mode, ColumnMode::Controls);
+    }
 
     #[test]
     fn evidence_routes_require_full_non_nil_identity() {

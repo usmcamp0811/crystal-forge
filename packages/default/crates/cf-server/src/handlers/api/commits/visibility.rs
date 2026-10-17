@@ -163,11 +163,10 @@ pub(super) async fn full_flake_snapshot(
     Ok(Some(tx))
 }
 
-/// Reads commit log history only after whole-flake authorization in one snapshot.
+/// Reads exact-latest log history after whole-flake authorization in one snapshot.
 ///
-/// Logs remain commit-scoped, not pinned-attempt evidence. No string redaction
-/// can make a mixed-scope log safe. `None` has the same meaning as in
-/// [`full_flake_snapshot`].
+/// Unattributed and previous-attempt rows are never returned, even to admins.
+/// `None` has the same meaning as in [`full_flake_snapshot`].
 ///
 /// # Errors
 /// Returns SQL errors; denied callers never access the log table.
@@ -179,10 +178,33 @@ pub(super) async fn logs_for_user(
     let Some(mut tx) = full_flake_snapshot(pool, commit_id, user).await? else {
         return Ok(None);
     };
-    let rows =
-        crate::queries::eval_logs::fetch_eval_logs_by_commit_in_tx(&mut tx, commit_id).await?;
+    let Some(owner) = latest_log_owner(&mut tx, commit_id).await? else {
+        return Ok(None);
+    };
+    let rows = crate::queries::eval_logs::fetch_eval_logs_by_commit_in_tx(&mut tx, owner).await?;
     tx.commit().await?;
     Ok(Some(rows))
+}
+
+/// Selects the exact latest log owner in the authorized evidence snapshot.
+///
+/// Administrators bypass membership checks, not attempt coherence. This read
+/// does not grant production authority and does not infer legacy attribution.
+///
+/// # Errors
+/// Returns database errors without retrying in a different snapshot.
+pub(super) async fn latest_log_owner(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+) -> Result<Option<crate::queries::eval_logs::EvalLogOwner>, sqlx::Error> {
+    sqlx::query_as(
+        "SELECT commit_id, id AS evaluation_attempt_id, attempt_number
+         FROM evaluation_attempts WHERE commit_id = $1
+         ORDER BY attempt_number DESC LIMIT 1",
+    )
+    .bind(commit_id)
+    .fetch_optional(&mut **tx)
+    .await
 }
 
 /// Reads the latest route's mutable native graph with whole-flake authority.
@@ -357,21 +379,30 @@ mod tests {
             )
             .bind(commit).bind(names).execute(pool).await.unwrap();
         }
-        crate::queries::eval_logs::insert_eval_log(
-            pool,
-            commit,
-            1,
-            None,
-            "alpha and beta private detail",
-        )
-        .await
-        .unwrap();
         let (attempt_id, attempt_number): (Uuid, i32) = sqlx::query_as(
             "SELECT id, attempt_number FROM evaluation_attempts WHERE commit_id = $1
              ORDER BY attempt_number DESC LIMIT 1",
         )
         .bind(commit)
         .fetch_one(pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE evaluation_attempts SET status = 'complete' WHERE id = $1")
+            .bind(attempt_id)
+            .execute(pool)
+            .await
+            .unwrap();
+        crate::queries::eval_logs::insert_eval_log(
+            pool,
+            crate::queries::eval_logs::EvalLogOwner {
+                commit_id: commit,
+                evaluation_attempt_id: attempt_id,
+                attempt_number,
+            },
+            1,
+            None,
+            "alpha and beta private detail",
+        )
         .await
         .unwrap();
         let plan = EvalPolicyMatrixSnapshot {
@@ -499,10 +530,16 @@ mod tests {
         .unwrap();
         // An already authorized response has snapshot semantics. Every new
         // stream event/heartbeat opens a fresh snapshot and sees revocation.
-        let rows =
-            crate::queries::eval_logs::fetch_eval_logs_by_commit_in_tx(&mut authorized, f.commit)
-                .await
-                .unwrap();
+        let rows = crate::queries::eval_logs::fetch_eval_logs_by_commit_in_tx(
+            &mut authorized,
+            crate::queries::eval_logs::EvalLogOwner {
+                commit_id: f.commit,
+                evaluation_attempt_id: f.plan.evaluation_attempt_id.unwrap(),
+                attempt_number: f.plan.attempt_number,
+            },
+        )
+        .await
+        .unwrap();
         assert_eq!(rows.len(), 1);
         authorized.commit().await.unwrap();
         denied_evidence(&pool, &f).await;
@@ -844,6 +881,14 @@ mod tests {
             std::sync::Arc::new(crate::queue::QueueNotifier::new()),
             crate::server::jobs::BackgroundJobRegistry::new(),
         );
+        let owner = crate::queries::eval_logs::EvalLogOwner {
+            commit_id: f.commit,
+            evaluation_attempt_id: f.plan.evaluation_attempt_id.unwrap(),
+            attempt_number: f.plan.attempt_number,
+        };
+        // This fixture exercises terminal replay and revocation. Active-claim
+        // binding is exercised by the separate real retry/UUID-replacement test.
+        let state = super::super::log_registry::test_producer(&state, owner).await;
         assert_eq!(
             super::super::authorize_eval_stream(&state, &headers, f.commit).await,
             Ok(())
@@ -976,15 +1021,9 @@ mod tests {
 
         let authorized_message = format!("authorized-network-{}", Uuid::new_v4());
         timeout(Duration::from_secs(5), async {
-            crate::queries::eval_logs::insert_eval_log(
-                &pool,
-                f.commit,
-                2,
-                None,
-                &authorized_message,
-            )
-            .await
-            .unwrap();
+            crate::queries::eval_logs::insert_eval_log(&pool, owner, 2, None, &authorized_message)
+                .await
+                .unwrap();
             super::super::broadcast_eval_log(&state, f.commit, authorized_message.clone()).await;
             loop {
                 match client.next().await {
@@ -1065,4 +1104,6 @@ mod tests {
             .await
             .expect("isolated test server should stop after abort");
     }
+
+    include!("visibility/attempt_log_tests.rs");
 }

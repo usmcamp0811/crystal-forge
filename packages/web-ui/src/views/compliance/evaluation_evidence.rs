@@ -9,7 +9,7 @@ use crate::api::{
     models::{EvalPolicyMatrixResponse, eval_policy_matrix::*},
 };
 use crate::components::dialog_focus::{
-    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel, DialogInitialFocus,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::routes::Route;
@@ -20,7 +20,12 @@ use dioxus::prelude::*;
 fn validate<'a>(
     data: &'a EvalPolicyMatrixResponse,
     target: &EvaluationEvidence,
-) -> Option<(&'a EvalPolicyMatrixSnapshot, &'a EvalMatrixRow, usize)> {
+) -> Option<(
+    &'a EvalPolicyMatrixSnapshot,
+    &'a EvalMatrixRow,
+    usize,
+    &'a EvalBundleColumn,
+)> {
     let snapshot = data.matrix.as_ref()?;
     let identity = &target.evaluation;
     if !identity.matches_response(data) || snapshot.provenance != EvalMatrixProvenance::Captured {
@@ -29,7 +34,7 @@ fn validate<'a>(
     let mut bundles = snapshot.bundles.iter().filter(|b| {
         b.bundle_id == target.bundle_id && b.bundle_version_id == target.bundle_version_id
     });
-    bundles.next()?;
+    let bundle = bundles.next()?;
     if bundles.next().is_some() {
         return None;
     }
@@ -49,13 +54,37 @@ fn validate<'a>(
     if rows.next().is_some() {
         return None;
     }
-    row.policies.iter().find(|p| {
-        p.policy_version_id == target.policy_version_id
-            && p.memberships
-                .iter()
-                .any(|m| m.bundle_version_id == target.bundle_version_id)
-    })?;
-    Some((snapshot, row, position))
+    let mut bindings = row
+        .policies
+        .iter()
+        .filter(|p| p.policy_version_id == target.policy_version_id);
+    let binding = bindings.next()?;
+    if bindings.next().is_some()
+        || !binding
+            .memberships
+            .iter()
+            .any(|m| m.bundle_version_id == target.bundle_version_id)
+    {
+        return None;
+    }
+    Some((snapshot, row, position, bundle))
+}
+
+/// Restores rich state only after route, contribution, and saved identity agree.
+/// A direct URL receives safe pinned defaults; invalid saved state fails closed.
+fn validated_return(
+    data: &EvalPolicyMatrixResponse,
+    route: &EvaluationEvidenceRoute,
+    saved: Option<EvaluationReturn>,
+) -> Option<EvaluationReturn> {
+    let target = route.resolve(data)?;
+    validate(data, &target)?;
+    match saved {
+        Some(saved) => (saved.matches_route(route.commit_id, route.attempt_id)
+            && saved.identity == target.evaluation)
+            .then_some(saved),
+        None => Some(EvaluationReturn::direct(target.evaluation)),
+    }
 }
 
 #[cfg(test)]
@@ -92,7 +121,7 @@ mod tests {
     #[test]
     fn exact_evidence_accepts_unknown_outcomes_without_inventing_results() {
         let (data, target) = fixture();
-        let (_, row, position) = validate(&data, &target).unwrap();
+        let (_, row, position, _) = validate(&data, &target).unwrap();
         assert_eq!(row.cells[position], EvalMatrixCell::Unknown);
         assert!(row.details.is_empty());
     }
@@ -139,6 +168,15 @@ mod tests {
         )
         .unwrap();
         let resolved = route.resolve(&data).unwrap();
+        let direct = validated_return(&data, &route, None).unwrap();
+        assert_eq!(direct.identity, target.evaluation);
+        assert!(direct.target.is_none());
+        let mut rich = direct.clone();
+        rich.search = "original search".into();
+        rich.dom = Some(json!({"focus":"exact-finding"}));
+        assert!(validated_return(&data, &route, Some(rich.clone())) == Some(rich.clone()));
+        rich.identity.attempt_number += 1;
+        assert!(validated_return(&data, &route, Some(rich)).is_none());
         assert_eq!(resolved, target);
         assert!(validate(&data, &resolved).is_some());
         let mut wrong_commit = route.clone();
@@ -155,9 +193,62 @@ mod tests {
             .memberships
             .clear();
         assert!(validate(&no_contribution, &route.resolve(&no_contribution).unwrap()).is_none());
+        assert!(validated_return(&no_contribution, &route, Some(direct)).is_none());
         let mut legacy = data.clone();
         legacy.matrix.as_mut().unwrap().provenance = EvalMatrixProvenance::LegacyUnavailable;
         assert!(validate(&legacy, &route.resolve(&legacy).unwrap()).is_none());
+    }
+
+    #[test]
+    fn evidence_dismissal_requires_validated_exact_return_and_live_membership() {
+        let (mut data, target) = fixture();
+        let route = EvaluationEvidenceRoute::parse(
+            1,
+            target.evaluation.attempt_id,
+            &target.bundle_id.to_string(),
+            &target.bundle_version_id.to_string(),
+            &target.system_id.to_string(),
+            &target.policy_version_id.to_string(),
+        )
+        .unwrap();
+        let mut saved = validated_return(&data, &route, None).unwrap();
+        saved.search = "saved search".into();
+        saved.maximized = true;
+        saved.dom = Some(json!({"focus":"finding-opener"}));
+        assert!(validated_return(&data, &route, Some(saved.clone())) == Some(saved.clone()));
+        let mut mismatched = saved.clone();
+        mismatched.identity.attempt_id = Uuid::from_u128(99);
+        assert!(validated_return(&data, &route, Some(mismatched)).is_none());
+        data.matrix.as_mut().unwrap().rows[0].policies[0]
+            .memberships
+            .clear();
+        assert!(validated_return(&data, &route, Some(saved)).is_none());
+        assert!(validated_return(&data, &route, None).is_none());
+    }
+
+    #[test]
+    fn shared_control_preserves_readable_captured_bundle_contexts() {
+        let (mut data, target_a) = fixture();
+        let mut target_b = target_a.clone();
+        target_b.bundle_id = Uuid::from_u128(30);
+        target_b.bundle_version_id = Uuid::from_u128(40);
+        let snapshot = data.matrix.as_mut().unwrap();
+        let mut bundle_b = snapshot.bundles[0].clone();
+        bundle_b.bundle_id = target_b.bundle_id;
+        bundle_b.bundle_version_id = target_b.bundle_version_id;
+        bundle_b.name = "Second captured bundle".into();
+        bundle_b.version = "2".into();
+        bundle_b.framework = "Second framework".into();
+        bundle_b.framework_version = Some("2026".into());
+        snapshot.bundles.push(bundle_b.clone());
+        let mut membership = snapshot.rows[0].policies[0].memberships[0].clone();
+        membership.bundle_version_id = target_b.bundle_version_id;
+        snapshot.rows[0].policies[0].memberships.push(membership);
+        let (_, _, a_position, a) = validate(&data, &target_a).unwrap();
+        let (_, _, b_position, b) = validate(&data, &target_b).unwrap();
+        assert_eq!(a_position, b_position);
+        assert_ne!(a.name, b.name);
+        assert_eq!(b, &bundle_b);
     }
 
     #[test]
@@ -226,33 +317,59 @@ pub(super) fn EvaluationEvidenceDrawer(
         }
     });
     let nav = navigator();
-    let close = move || {
-        nav.push(Route::ComplianceView {
-            bundle: String::new(),
-            version: String::new(),
-            system: String::new(),
-            policy: String::new(),
-            poam: String::new(),
-            view: String::new(),
-        });
-    };
+    let return_state = requested.as_ref().and_then(|route| {
+        let response = resource.read();
+        let data = response.as_ref()?.as_ref()?.as_ref().ok()?;
+        validated_return(data, route, EVALUATION_RETURN.read().clone())
+    });
+    let can_return = return_state.is_some();
+    let close = use_callback(move |_: ()| {
+        *EVALUATION_EVIDENCE.write() = None;
+        if let Some(saved) = return_state.clone() {
+            let identity = saved.identity.clone();
+            *EVALUATION_RETURN.write() = Some(saved);
+            nav.push(Route::EvaluationsAttemptView {
+                commit_id: identity.commit_id,
+                attempt_id: identity.attempt_id,
+            });
+        } else {
+            // Loading and invalid evidence must remain dismissible. Clear the
+            // unvalidated handoff before leaving; never substitute a latest run.
+            *EVALUATION_RETURN.write() = None;
+            nav.push(Route::ComplianceView {
+                bundle: String::new(),
+                version: String::new(),
+                system: String::new(),
+                policy: String::new(),
+                poam: String::new(),
+                view: String::new(),
+            });
+        }
+    });
     rsx! {
-        div { class: "fl-tray-backdrop", onclick: move |_| close() }
+        div { class: "fl-tray-backdrop", onclick: move |_| close.call(()) }
         aside { id: "compliance-evaluation-dialog", class: "fl-tray", role: "dialog", aria_modal: "true", aria_labelledby: "compliance-evaluation-title", tabindex: "-1", style: "width:min(900px,96vw);",
-            onkeydown: move |event| if event.key() == Key::Escape { close(); },
+            onkeydown: move |event| if event.key() == Key::Escape { event.stop_propagation(); close.call(()); },
             DialogFocusRestore {}
+            DialogInitialFocus { dialog_id: "compliance-evaluation-dialog" }
             DialogFocusSentinel { dialog_id: "compliance-evaluation-dialog".to_string(), boundary: DialogFocusBoundary::Last }
             header { class: "fl-tray-head",
                 h2 { id: "compliance-evaluation-title", "Evaluation check evidence" }
-                button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close evaluation evidence", onclick: move |_| close(), Icon { name: IconName::X, size: 16 } }
+                // Keep the initial focus target enabled through validation.
+                // Async results must not reclaim focus from the user's control.
+                button { class: "btn-icon focus-ring", aria_label: "Close evaluation evidence", title: if can_return { "Return to the exact evaluation" } else { "Close to Compliance without evaluation context" }, onclick: move |_| close.call(()), Icon { name: IconName::X, size: 16 } }
             }
             div { style: "padding:18px;overflow:auto;flex:1;",
             p { "Read-only captured evaluation evidence. This check does not establish framework requirement satisfaction or deployed compliance." }
-            button { class: "btn btn-ghost focus-ring", onclick: move |_| { nav.push(Route::EvaluationsAttemptView { commit_id, attempt_id }); }, "Back to Evaluation" }
+            button { class: "btn btn-ghost focus-ring", disabled: !can_return, onclick: move |_| close.call(()), "Back to Evaluation" }
+            if !can_return {
+                p { role: "note", "A validated evaluation return is unavailable. Close, Escape, and the backdrop dismiss to Compliance without evaluation context." }
+                button { class: "btn btn-ghost focus-ring", onclick: move |_| close.call(()), "Open Compliance without evaluation context" }
+            }
             match (&requested, &*resource.read()) {
                 (Some(requested), Some(Some(Ok(data)))) => {
                     let target = requested.resolve(data);
-                    if let Some((target, (snapshot, row, position))) = target.as_ref().and_then(|target| validate(data, target).map(|validated| (target, validated))) {
+                    if let Some((target, (snapshot, row, position, bundle))) = target.as_ref().and_then(|target| validate(data, target).map(|validated| (target, validated))) {
                         let control = &snapshot.columns[position];
                         let outcome = row.cells.get(position).copied().unwrap_or(EvalMatrixCell::Unknown);
                         rsx! {
@@ -264,7 +381,12 @@ pub(super) fn EvaluationEvidenceDrawer(
                                 if let Some(started) = snapshot.started_at { p { "Started: {started}" } }
                                 if let Some(completed) = snapshot.completed_at { p { "Completed: {completed}" } }
                                 p { "System: {row.system_name} · {target.system_id}" }
-                                p { "Bundle lineage {target.bundle_id} · version {target.bundle_version_id}" }
+                                h3 { "{bundle.name} · {bundle.version}" }
+                                p { "{bundle.framework}" if let Some(version) = &bundle.framework_version { " · {version}" } }
+                                p { class: "mono", "Bundle lineage {target.bundle_id} · version {target.bundle_version_id}" }
+                                if let Some(binding) = row.policies.iter().find(|binding| binding.policy_version_id == target.policy_version_id) {
+                                    p { if binding.report_only { "Captured effective mode: Report only" } else { "Captured effective mode: Enforce" } }
+                                }
                                 p { "Policy lineage {target.policy_id} · version {target.policy_version_id}" }
                                 p { "Result: {outcome:?}" }
                             if !control.identifiers.is_empty() { p { {format!("Captured identifiers: {}", control.identifiers.join(", "))} } }

@@ -22,7 +22,9 @@ use crate::handlers::agent_request::CFState;
 use crate::handlers::api::auth_session::require_csrf;
 use crate::handlers::api::rbac::{require_admin, require_operator_or_admin};
 
+pub(crate) mod log_registry;
 mod visibility;
+pub(crate) use log_registry::bind_eval_producer;
 
 const EVAL_LOG_CHANNEL_BUFFER: usize = 1000;
 const MAX_EVAL_LOG_CHANNELS: usize = 1024;
@@ -225,34 +227,62 @@ pub enum SystemEvalStatus {
 /// stream revalidates session, roles, inventory, and membership before accessing
 /// replay history, before every outgoing event, and every 20-second heartbeat.
 /// Revocation or authorization errors close the socket without further evidence.
+/// Replay and events belong to one exact owner. A successor closes the old
+/// generation; its latest authority cannot authorize earlier buffers. Admins
+/// bypass membership checks, not attempt coherence. Wire fields stay unchanged.
 pub async fn stream_eval_logs(
     ws: WebSocketUpgrade,
     Path(commit_id): Path<i32>,
     State(state): State<CFState>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-    if let Err(status) = authorize_eval_stream(&state, &headers, commit_id).await {
-        return status.into_response();
-    }
+    let owner = match authorize_eval_stream_owner(&state, &headers, commit_id, None).await {
+        Ok(owner) => owner,
+        Err(status) => return status.into_response(),
+    };
 
-    ws.on_upgrade(move |socket| handle_eval_stream(socket, commit_id, state, headers))
+    ws.on_upgrade(move |socket| handle_eval_stream(socket, owner, state, headers))
 }
 
 // SECURITY: Do not retain a handshake principal. A new session/role lookup also
 // catches account/session invalidation and administrator-role revocation.
 // Bound each check so an unavailable database cannot keep an idle stream alive.
+#[cfg(test)]
 async fn authorize_eval_stream(
     state: &CFState,
     headers: &HeaderMap,
     commit_id: i32,
 ) -> Result<(), StatusCode> {
+    authorize_eval_stream_owner(state, headers, commit_id, None)
+        .await
+        .map(|_| ())
+}
+
+// SECURITY: The latest-only route must authorize the channel's exact owner,
+// including for administrators. New-attempt authority never authorizes replay
+// or queued events from an earlier attempt of the same commit.
+async fn authorize_eval_stream_owner(
+    state: &CFState,
+    headers: &HeaderMap,
+    commit_id: i32,
+    expected: Option<crate::queries::eval_logs::EvalLogOwner>,
+) -> Result<crate::queries::eval_logs::EvalLogOwner, StatusCode> {
     tokio::time::timeout(EVAL_STREAM_OPERATION_TIMEOUT, async {
         let scope = visibility::viewer_scope(&state.pool, headers).await?;
         match visibility::full_flake_snapshot(&state.pool, commit_id, scope).await {
-            Ok(Some(tx)) => tx
-                .commit()
-                .await
-                .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR),
+            Ok(Some(mut tx)) => {
+                let owner = visibility::latest_log_owner(&mut tx, commit_id)
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+                    .ok_or(StatusCode::NOT_FOUND)?;
+                if expected.is_some_and(|expected| expected != owner) {
+                    return Err(StatusCode::NOT_FOUND);
+                }
+                tx.commit()
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+                Ok(owner)
+            }
             Ok(None) => Err(StatusCode::NOT_FOUND),
             Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
         }
@@ -263,11 +293,12 @@ async fn authorize_eval_stream(
 
 async fn handle_eval_stream(
     mut socket: WebSocket,
-    commit_id: i32,
+    owner: crate::queries::eval_logs::EvalLogOwner,
     state: CFState,
     headers: HeaderMap,
 ) {
-    if authorize_eval_stream(&state, &headers, commit_id)
+    let commit_id = owner.commit_id;
+    if authorize_eval_stream_owner(&state, &headers, commit_id, Some(owner))
         .await
         .is_err()
     {
@@ -278,28 +309,15 @@ async fn handle_eval_stream(
         commit_id
     );
 
-    // Get or create broadcast channel for this commit
-    let Some(tx) = get_or_create_eval_channel(&state, commit_id).await else {
-        tracing::warn!(
-            "Rejecting eval websocket for commit {}: eval channel cap reached",
-            commit_id
-        );
-        let _ = socket
-            .send(Message::Close(Some(axum::extract::ws::CloseFrame {
-                code: 1013,
-                reason: "Server overloaded".into(),
-            })))
-            .await;
+    // CONCURRENCY: Subscribe and replay snapshot share the publication mutex.
+    // Receivers never own a sender; rotation closes an old socket even if idle.
+    let subscription = { state.eval_log_registry.lock().await.subscribe(owner) };
+    let Some((mut rx, history_snapshot)) = subscription else {
         return;
     };
 
-    let history_snapshot = {
-        let history = state.eval_log_history.lock().await;
-        history.get(&commit_id).cloned().unwrap_or_default()
-    };
-
     for log_line in history_snapshot {
-        if authorize_eval_stream(&state, &headers, commit_id)
+        if authorize_eval_stream_owner(&state, &headers, commit_id, Some(owner))
             .await
             .is_err()
         {
@@ -318,7 +336,6 @@ async fn handle_eval_stream(
         }
     }
 
-    let mut rx = tx.subscribe();
     let mut keepalive = interval(EVAL_STREAM_REVALIDATION_INTERVAL);
 
     // Stream messages from the broadcast channel to this WebSocket client
@@ -327,7 +344,7 @@ async fn handle_eval_stream(
             recv = rx.recv() => {
                 match recv {
                     Ok(log_line) => {
-                        if authorize_eval_stream(&state, &headers, commit_id).await.is_err() {
+                        if authorize_eval_stream_owner(&state, &headers, commit_id, Some(owner)).await.is_err() {
                             break;
                         }
                         if !matches!(tokio::time::timeout(
@@ -349,7 +366,7 @@ async fn handle_eval_stream(
                 }
             }
             _ = keepalive.tick() => {
-                if authorize_eval_stream(&state, &headers, commit_id).await.is_err() {
+                if authorize_eval_stream_owner(&state, &headers, commit_id, Some(owner)).await.is_err() {
                     break;
                 }
                 if !matches!(tokio::time::timeout(
@@ -372,8 +389,8 @@ async fn handle_eval_stream(
 /// For in-progress evaluations, clients should use the WebSocket stream instead.
 /// Nonadministrators require all current hosts and exact-latest inventory to be
 /// authorized. Authorization and logs share one read-only repeatable-read
-/// snapshot. Missing and foreign commits both return 404. Logs are commit-scoped,
-/// not pinned-attempt evidence, and do not use string-based redaction.
+/// snapshot. Missing and foreign commits both return 404. Only rows owned by
+/// that exact latest attempt are returned; unattributed legacy rows stay stored.
 pub async fn get_eval_logs_history(
     Path(commit_id): Path<i32>,
     State(state): State<CFState>,
@@ -726,19 +743,18 @@ pub struct EvalLogEntry {
     pub message: String,
 }
 
-/// Ensure a broadcast channel exists for this commit (create if needed)
-pub async fn ensure_eval_channel(state: &CFState, commit_id: i32) {
-    let _ = get_or_create_eval_channel(state, commit_id).await;
-}
-
-/// Helper function to broadcast a log line to all connected WebSocket clients for a commit
-/// IMPORTANT: This will create a channel if one doesn't exist, so logs are buffered even if no clients are connected yet
+/// Publishes a line using the state's immutable producer capability.
+///
+/// Unbound, foreign, superseded, and retired producers are dropped. Publication
+/// never creates a channel or obtains ownership from the latest attempt.
 pub async fn broadcast_eval_log(state: &CFState, commit_id: i32, log_line: String) {
     let msg = EvalLogMessage::Log { message: log_line };
     broadcast_eval_message(state, commit_id, msg).await;
 }
 
-/// Broadcast a system status update
+/// Publishes a system status through the state's exact producer generation.
+///
+/// Unbound or superseded producers cannot append to another attempt's replay.
 pub async fn broadcast_system_status(
     state: &CFState,
     commit_id: i32,
@@ -754,7 +770,10 @@ pub async fn broadcast_system_status(
     broadcast_eval_message(state, commit_id, msg).await;
 }
 
-/// Broadcast an overall eval status update
+/// Publishes an overall status through the state's exact producer generation.
+///
+/// Terminal status remains useful while the generation exists. A superseded
+/// publication is deliberately dropped rather than retargeted to a successor.
 pub async fn broadcast_eval_status(
     state: &CFState,
     commit_id: i32,
@@ -767,71 +786,27 @@ pub async fn broadcast_eval_status(
 
 /// Internal: broadcast a structured message
 async fn broadcast_eval_message(state: &CFState, commit_id: i32, msg: EvalLogMessage) {
-    let Some(tx) = get_or_create_eval_channel(state, commit_id).await else {
-        tracing::warn!(
-            "Dropping eval broadcast for commit {}: eval channel cap reached",
-            commit_id
-        );
+    if let Ok(json) = serde_json::to_string(&msg) {
+        log_registry::publish(state, commit_id, json).await;
+    }
+}
+
+/// Schedules retirement of this producer generation after ten minutes.
+///
+/// The grace period permits late replay of terminal statuses. Cleanup retains
+/// only a token and cannot delete a newer attempt or a replacement generation.
+pub async fn cleanup_eval_channel(state: &CFState, commit_id: i32) {
+    let Some(token) = state
+        .eval_log_producer
+        .filter(|t| t.owner.commit_id == commit_id)
+    else {
         return;
     };
-
-    // Serialize to JSON
-    if let Ok(json) = serde_json::to_string(&msg) {
-        {
-            let mut history = state.eval_log_history.lock().await;
-            let entry = history.entry(commit_id).or_default();
-            entry.push(json.clone());
-            if entry.len() > EVAL_LOG_HISTORY_BUFFER {
-                let overflow = entry.len() - EVAL_LOG_HISTORY_BUFFER;
-                entry.drain(0..overflow);
-            }
-        }
-        let _ = tx.send(json);
-    }
-}
-
-async fn get_or_create_eval_channel(
-    state: &CFState,
-    commit_id: i32,
-) -> Option<tokio::sync::broadcast::Sender<String>> {
-    let mut channels = state.eval_log_channels.lock().await;
-    if let Some(tx) = channels.get(&commit_id) {
-        return Some(tx.clone());
-    }
-
-    if channels.len() >= MAX_EVAL_LOG_CHANNELS {
-        return None;
-    }
-
-    let (tx, _rx) = tokio::sync::broadcast::channel(EVAL_LOG_CHANNEL_BUFFER);
-    tracing::debug!("📡 Created broadcast channel for commit {}", commit_id);
-    channels.insert(commit_id, tx.clone());
-    Some(tx)
-}
-
-/// Cleanup broadcast channel when evaluation completes (with delay)
-/// This allows late-connecting WebSocket clients to still receive log history
-pub async fn cleanup_eval_channel(state: &CFState, commit_id: i32) {
-    // Clone state for the delayed cleanup task
-    let state = state.clone();
-
-    // Spawn a background task to cleanup after 10 minutes
+    let registry = state.eval_log_registry.clone();
     tokio::spawn(async move {
         tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
-
-        let mut channels = state.eval_log_channels.lock().await;
-        channels.remove(&commit_id);
-        drop(channels);
-
-        let mut history = state.eval_log_history.lock().await;
-        history.remove(&commit_id);
-        tracing::debug!(
-            "Cleaned up broadcast channel for commit {} (after 10min delay)",
-            commit_id
-        );
+        registry.lock().await.remove(token);
     });
-
-    tracing::debug!("Scheduled cleanup for commit {} in 10 minutes", commit_id);
 }
 
 /// Trigger manual re-evaluation for a commit
@@ -1092,16 +1067,24 @@ mod tests {
     async fn eval_channel_fanout_and_cleanup() {
         let state = test_state();
         let commit_id = 42;
-
-        ensure_eval_channel(&state, commit_id).await;
-
-        let tx = {
-            let channels = state.eval_log_channels.lock().await;
-            channels.get(&commit_id).expect("channel exists").clone()
+        let owner = crate::queries::eval_logs::EvalLogOwner {
+            commit_id,
+            evaluation_attempt_id: Uuid::new_v4(),
+            attempt_number: 1,
         };
-
-        let mut rx1 = tx.subscribe();
-        let mut rx2 = tx.subscribe();
+        let state = log_registry::test_producer(&state, owner).await;
+        let (mut rx1, _) = state
+            .eval_log_registry
+            .lock()
+            .await
+            .subscribe(owner)
+            .unwrap();
+        let (mut rx2, _) = state
+            .eval_log_registry
+            .lock()
+            .await
+            .subscribe(owner)
+            .unwrap();
 
         broadcast_eval_log(&state, commit_id, "hello".to_string()).await;
 
@@ -1113,18 +1096,16 @@ mod tests {
 
         cleanup_eval_channel(&state, commit_id).await;
 
-        // Cleanup is now delayed (spawned task), so channel should still exist immediately after
-        let channels = state.eval_log_channels.lock().await;
-        assert!(
-            channels.contains_key(&commit_id),
-            "channel should still exist immediately after cleanup (delayed)"
-        );
-
-        drop(channels);
-        let history = state.eval_log_history.lock().await;
-        assert!(
-            history.contains_key(&commit_id),
-            "history should still exist immediately after cleanup (delayed)"
+        let (_, history) = state
+            .eval_log_registry
+            .lock()
+            .await
+            .subscribe(owner)
+            .unwrap();
+        assert_eq!(
+            history.len(),
+            1,
+            "terminal replay survives the cleanup grace period"
         );
     }
 
@@ -1132,16 +1113,109 @@ mod tests {
     async fn eval_log_history_is_buffered() {
         let state = test_state();
         let commit_id = 77;
+        let owner = crate::queries::eval_logs::EvalLogOwner {
+            commit_id,
+            evaluation_attempt_id: Uuid::new_v4(),
+            attempt_number: 1,
+        };
+        let state = log_registry::test_producer(&state, owner).await;
 
         for i in 0..3 {
             broadcast_eval_log(&state, commit_id, format!("line-{i}")).await;
         }
 
-        let history = state.eval_log_history.lock().await;
-        let entries = history.get(&commit_id).expect("history should exist");
+        let (_, entries) = state
+            .eval_log_registry
+            .lock()
+            .await
+            .subscribe(owner)
+            .unwrap();
         assert_eq!(entries.len(), 3);
         assert!(entries[0].contains("line-0"));
         assert!(entries[2].contains("line-2"));
+    }
+
+    #[tokio::test]
+    async fn all_message_variants_require_original_producer_generation() {
+        let base = test_state();
+        let a_owner = crate::queries::eval_logs::EvalLogOwner {
+            commit_id: 42,
+            evaluation_attempt_id: Uuid::new_v4(),
+            attempt_number: 1,
+        };
+        let a = log_registry::test_producer(&base, a_owner).await;
+        broadcast_eval_log(&a, 42, "A-private".into()).await;
+        let b_owner = crate::queries::eval_logs::EvalLogOwner {
+            evaluation_attempt_id: Uuid::new_v4(),
+            attempt_number: 2,
+            ..a_owner
+        };
+        let b = log_registry::test_producer(&base, b_owner).await;
+        broadcast_eval_log(&a, 42, "A-late-log".into()).await;
+        broadcast_system_status(
+            &a,
+            42,
+            "A-private-system".into(),
+            SystemEvalStatus::Failed,
+            Some("A-private-error".into()),
+        )
+        .await;
+        broadcast_eval_status(&a, 42, "failed".into(), Some("A-private-status".into())).await;
+        broadcast_eval_log(&base, 42, "unbound".into()).await;
+        broadcast_eval_log(&b, 43, "foreign-commit".into()).await;
+        base.eval_log_registry
+            .lock()
+            .await
+            .remove(a.eval_log_producer.unwrap());
+        broadcast_eval_log(&b, 42, "B-visible".into()).await;
+        let (_, replay) = base
+            .eval_log_registry
+            .lock()
+            .await
+            .subscribe(b_owner)
+            .unwrap();
+        assert_eq!(replay.len(), 1);
+        assert!(replay[0].contains("B-visible"));
+    }
+
+    #[test]
+    fn eval_log_wire_shapes_remain_compatible() {
+        assert_eq!(
+            serde_json::to_value(EvalLogMessage::Log {
+                message: "line".into()
+            })
+            .unwrap(),
+            serde_json::json!({"type":"log", "message":"line"})
+        );
+        assert_eq!(
+            serde_json::to_value(EvalLogMessage::SystemStatus {
+                system: "alpha".into(),
+                status: SystemEvalStatus::QueuedForBuild,
+                error: None,
+            })
+            .unwrap(),
+            serde_json::json!({"type":"system_status", "system":"alpha", "status":"queued_for_build"})
+        );
+        assert_eq!(
+            serde_json::to_value(EvalLogMessage::EvalStatus {
+                status: "complete".into(),
+                message: None,
+            })
+            .unwrap(),
+            serde_json::json!({"type":"eval_status", "status":"complete"})
+        );
+        let entry = EvalLogEntry {
+            timestamp: chrono::Utc::now(),
+            sequence: 1,
+            level: None,
+            message: "line".into(),
+        };
+        let value = serde_json::to_value(entry).unwrap();
+        assert_eq!(value.as_object().unwrap().len(), 4);
+        assert!(value.get("timestamp").is_some());
+        assert_eq!(value["sequence"], 1);
+        assert_eq!(value["level"], serde_json::Value::Null);
+        assert_eq!(value["message"], "line");
     }
 
     #[test]

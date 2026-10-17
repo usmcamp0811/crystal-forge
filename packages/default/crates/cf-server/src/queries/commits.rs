@@ -24,6 +24,9 @@ mod inventory_summary;
 #[cfg(test)]
 mod inventory_summary_tests;
 mod policy_counts;
+mod restart_recovery;
+#[cfg(test)]
+mod restart_recovery_tests;
 
 const EVAL_QUEUE_ADVISORY_LOCK_KEY: i64 = 1_600_001;
 
@@ -339,70 +342,53 @@ pub async fn get_commit_distance_from_head(
     Ok(distance)
 }
 
-/// Recover orphaned evaluations after a server restart.
+/// Recovers interrupted active evaluations into fresh queued successor attempts.
 ///
-/// NOTE: `cancelled` rows are intentionally left alone — they represent
-/// evaluations the user explicitly cancelled and should not be re-queued.
+/// Each source becomes `failed` with an explicit server-interruption reason.
+/// Its plan, inventory, outcomes, and start timestamp remain historical evidence,
+/// not an executable checkpoint. The normal worker claims the fresh UUID and
+/// captures current policy inputs before execution. Recovery copies the source's
+/// automatic retry count unchanged: only eligible evaluation failures consume
+/// that budget, and only explicit manual re-evaluation resets it.
+///
+/// The entry snapshot identifies exact sources. Snapshot-writer, queue, commit,
+/// and attempt locks serialize validation and the atomic source/child transition.
+/// Repeated or concurrent recovery cannot create siblings. A later interruption
+/// of a started successor can create another successor without a recovery limit.
+/// Queued work, including delayed failure retries, remains unchanged. Cancellation
+/// requests and `cancelling` commits are finalized as cancelled, never recovered.
+/// Terminal commits and commits without an exact active owner remain unchanged.
+///
+/// # Errors
+///
+/// Returns a database or lineage validation error if recovery cannot persist the
+/// complete transition. All transitions in this invocation roll back on error.
+///
+/// # Examples
+///
+/// ```no_run
+/// # async fn startup(pool: &sqlx::PgPool) -> anyhow::Result<()> {
+/// crystal_forge::queries::commits::reset_stuck_commit_evaluations(pool).await?;
+/// // Start the normal evaluation worker only after startup recovery succeeds.
+/// # Ok(())
+/// # }
+/// ```
 pub async fn reset_stuck_commit_evaluations(pool: &PgPool) -> Result<()> {
+    let sources = restart_recovery::interrupted_sources(pool).await?;
     let mut tx = pool.begin().await?;
-    let cancelled = sqlx::query!(
-        r#"
-        UPDATE commits
-        SET
-            evaluation_status = 'cancelled',
-            evaluation_completed_at = COALESCE(evaluation_completed_at, NOW()),
-            cancellation_requested = FALSE
-        WHERE evaluation_status = 'cancelling'
-        RETURNING id, git_commit_hash
-        "#
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        r#"
-        UPDATE evaluation_attempts
-        SET status = 'cancelled', completed_at = COALESCE(completed_at, NOW()), updated_at = NOW()
-        WHERE status = 'in_progress'
-          AND commit_id = ANY($1)
-        "#,
-    )
-    .bind(cancelled.iter().map(|row| row.id).collect::<Vec<_>>())
-    .execute(&mut *tx)
-    .await?;
-
-    let reset = sqlx::query!(
-        r#"
-        UPDATE commits
-        SET evaluation_status = 'pending', evaluation_started_at = NULL
-        WHERE evaluation_status = 'in_progress'
-        RETURNING id, git_commit_hash
-        "#
-    )
-    .fetch_all(&mut *tx)
-    .await?;
-
-    sqlx::query(
-        "UPDATE evaluation_attempts SET status = 'queued', started_at = NULL, available_at = NOW(), updated_at = NOW() WHERE status = 'in_progress' AND commit_id = ANY($1)",
-    )
-    .bind(reset.iter().map(|row| row.id).collect::<Vec<_>>())
-    .execute(&mut *tx)
-    .await?;
+    let (recovered, cancelled) = restart_recovery::recover_sources_tx(&mut tx, &sources).await?;
     tx.commit().await?;
 
-    if !reset.is_empty() {
+    if recovered > 0 {
         warn!(
-            "🧹 Reset {} orphaned in-progress commit evaluations on startup",
-            reset.len()
+            "Created fresh successor attempts for {} interrupted evaluations on startup",
+            recovered
         );
-        for row in &reset {
-            info!("  - Commit {} ({})", row.id, row.git_commit_hash);
-        }
     }
-    if !cancelled.is_empty() {
+    if cancelled > 0 {
         info!(
             "🚫 Finalized {} cancelling evaluations as cancelled on startup",
-            cancelled.len()
+            cancelled
         );
     }
 
@@ -3382,13 +3368,46 @@ mod tests {
     async fn evaluation_history_totals_survive_empty_pagination_boundary(pool: PgPool) {
         for offset in 0..2 {
             let flake_id = insert_throwaway_flake(&pool).await;
-            sqlx::query(
-                "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, evaluation_enqueued_at, evaluation_status, evaluation_completed_at) \
-                 VALUES ($1, $2, NOW(), NOW(), 'complete', NOW() + ($3 * INTERVAL '1 second'))",
+            let commit_id = sqlx::query_scalar::<_, i32>(
+                "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, evaluation_enqueued_at, \
+                     evaluation_status, evaluation_attempt_count, evaluation_started_at, evaluation_completed_at) \
+                 VALUES ($1, $2, NOW(), NOW(), 'complete', 1, NOW(), NOW() + ($3 * INTERVAL '1 second')) RETURNING id",
             )
             .bind(flake_id)
             .bind(format!("history-page-{}", uuid::Uuid::new_v4()))
             .bind(offset)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+
+            // The insertion trigger queues attempt 1. Match its terminal state
+            // to the commit's started attempt counter and lifecycle timestamps.
+            let completed = sqlx::query(
+                "UPDATE evaluation_attempts ea \
+                 SET status = 'complete', started_at = c.evaluation_started_at, \
+                     completed_at = c.evaluation_completed_at, updated_at = NOW() \
+                 FROM commits c \
+                 WHERE c.id = $1 AND ea.commit_id = c.id \
+                   AND ea.attempt_number = c.evaluation_attempt_count AND ea.status = 'queued'",
+            )
+            .bind(commit_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            assert_eq!(completed.rows_affected(), 1);
+
+            // latest_only requires a ready authoritative branch snapshot with
+            // this exact commit at position 0; commit timestamps do not suffice.
+            sqlx::query("UPDATE flakes SET snapshot_ready_at = NOW() WHERE id = $1")
+                .bind(flake_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO flake_branch_commit_snapshot (flake_id, commit_id, position) VALUES ($1, $2, 0)",
+            )
+            .bind(flake_id)
+            .bind(commit_id)
             .execute(&pool)
             .await
             .unwrap();
@@ -3690,6 +3709,20 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(orphan_status, "pending");
+        // Startup creates a fresh attempt; re-queuing the same captured owner
+        // would make the normal loader reject its immutable first-write plan.
+        let lineage: Vec<(uuid::Uuid, Option<uuid::Uuid>, String)> = sqlx::query_as(
+            "SELECT id, parent_attempt_id, status FROM evaluation_attempts
+             WHERE commit_id = $1 ORDER BY attempt_number",
+        )
+        .bind(orphan_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(lineage.len(), 2);
+        assert_eq!(lineage[0].2, "failed");
+        assert_eq!(lineage[1].2, "queued");
+        assert_eq!(lineage[1].1, Some(lineage[0].0));
     }
 
     #[tokio::test]
@@ -4405,10 +4438,9 @@ mod tests {
     }
 
     // ── Test 14: mark_evaluation_failed retry increments attempt count ────────
-    #[tokio::test]
-    #[ignore = "requires live database connection"]
-    async fn failed_attempt_retry_increments_count() {
-        let pool = test_pool().await;
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn failed_attempt_retry_increments_count(pool: PgPool) {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
 
@@ -4423,10 +4455,23 @@ mod tests {
         )
         .await
         .expect("fail should not error");
-        // With attempt_count = 1 (< 3), should retry.
+        // The first transient failure is eligible under the default budget.
         assert_eq!(outcome1, EvalFailureOutcome::RetryScheduled);
 
-        // Attempt 2 starts.
+        // Simulate expiry of this child's configured backoff. Retry scheduling
+        // must not be bypassed merely because the preceding attempt failed.
+        let available = sqlx::query(
+            "UPDATE evaluation_attempts SET available_at = NOW()
+             WHERE commit_id = $1 AND attempt_number = $2 AND status = 'queued'",
+        )
+        .bind(commit_id)
+        .bind(attempt1 + 1)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert_eq!(available.rows_affected(), 1);
+
+        // Attempt 2 starts after its backoff expires.
         let attempt2 = start_eval(&pool, commit_id).await;
         assert_eq!(
             attempt2,

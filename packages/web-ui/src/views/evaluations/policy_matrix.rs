@@ -15,8 +15,8 @@ use std::collections::{HashMap, HashSet};
 
 /// Targets an 8192-cell body budget, capped at 100 systems.
 ///
-/// `visible_columns` includes a layout filler only in Bundles mode. Identity
-/// and health consume two additional cells. A 60-system/128-control fixture
+/// Identity and health consume two additional cells; neither mode adds layout
+/// filler cells. A 60-system/128-control fixture
 /// retains every system on one page.
 /// Pagination changes rendering only; aggregation and trimming use all rows.
 /// At least one system remains visible if a single row exceeds the budget;

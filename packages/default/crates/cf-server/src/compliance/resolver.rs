@@ -1128,6 +1128,12 @@ pub async fn resolve_system_effective_policies(
 /// Callers that authorize a target use this to keep policy resolution, target
 /// validation, assessment merges, and the guarded target write atomic.
 ///
+/// # Concurrency
+/// Reborrows the caller's transaction without acquiring another connection or
+/// changing isolation. Establish REPEATABLE READ before the first query when
+/// resolution must share a stable snapshot with authorization and evidence.
+/// The caller owns commit and rollback; no partial-query retry is performed.
+///
 /// # Errors
 ///
 /// Returns an error when PostgreSQL cannot load policy inputs through the
@@ -1144,6 +1150,12 @@ pub async fn resolve_system_effective_policies_in_tx(
 /// must remain in the same serializable closure as their locks and writes.
 ///
 /// Duplicate input IDs are resolved once. Missing system IDs are omitted.
+///
+/// # Concurrency
+/// Uses the caller's isolation and retained locks, without acquiring another
+/// connection. Establish REPEATABLE READ before the first query for a stable
+/// multiquery snapshot. The caller owns commit, rollback, and whole-operation
+/// retry; database failures must not be retried as isolated queries.
 ///
 /// # Errors
 ///
@@ -1296,6 +1308,80 @@ pub async fn resolve_systems_effective_policies_for_bundle_versions_batch(
     pool: &PgPool,
     requests: &[(Uuid, Vec<Uuid>)],
 ) -> Result<std::collections::HashMap<(Uuid, Uuid), ResolutionOutcome>> {
+    if requests.iter().all(|(_, system_ids)| system_ids.is_empty()) {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await?;
+    let result =
+        resolve_systems_effective_policies_for_bundle_versions_batch_in_tx(&mut tx, requests)
+            .await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Resolves one exact bundle revision in the caller's transaction.
+///
+/// # Concurrency
+/// Uses the caller's snapshot and retains its locks. Does not begin, commit,
+/// or retry a transaction. Callers requiring a stable multiquery snapshot must
+/// establish REPEATABLE READ before their first query.
+///
+/// # Errors
+/// Returns database or policy decode errors; the caller must abort on failure.
+pub async fn resolve_systems_effective_policies_for_bundle_version_batch_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_ids: &[Uuid],
+    bundle_version_id: Uuid,
+) -> Result<std::collections::HashMap<Uuid, ResolutionOutcome>> {
+    Ok(
+        resolve_systems_effective_policies_for_bundle_versions_batch_in_tx(
+            tx,
+            &[(bundle_version_id, system_ids.to_vec())],
+        )
+        .await?
+        .into_iter()
+        .filter_map(|((version_id, system_id), outcome)| {
+            (version_id == bundle_version_id).then_some((system_id, outcome))
+        })
+        .collect(),
+    )
+}
+
+/// Resolves exact bundle revisions and system sets in the caller's transaction.
+///
+/// Duplicate system IDs are resolved once; empty requests return an empty map.
+/// Results retain exact `(bundle_version_id, system_id)` identity.
+///
+/// # Concurrency
+/// Reuses the internal batch core without acquiring a pool connection. The
+/// caller owns isolation, locks, commit, and rollback. Establish REPEATABLE READ
+/// before the first query when combining resolution with other snapshot reads.
+///
+/// # Errors
+/// Returns database or policy decode errors. No partial result or query-only
+/// retry is performed; the caller must abort the transaction on failure.
+///
+/// # Examples
+/// ```no_run
+/// # async fn example(pool: &sqlx::PgPool, version: uuid::Uuid, system: uuid::Uuid) -> anyhow::Result<()> {
+/// let mut tx = pool.begin().await?;
+/// sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+///     .execute(&mut *tx).await?;
+/// let resolved = crystal_forge::compliance::resolver::resolve_systems_effective_policies_for_bundle_versions_batch_in_tx(
+///     &mut tx, &[(version, vec![system])],
+/// ).await?;
+/// let _ = resolved.get(&(version, system));
+/// tx.commit().await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn resolve_systems_effective_policies_for_bundle_versions_batch_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    requests: &[(Uuid, Vec<Uuid>)],
+) -> Result<std::collections::HashMap<(Uuid, Uuid), ResolutionOutcome>> {
     let mut requests_by_version = std::collections::HashMap::<Uuid, Vec<Uuid>>::new();
     for (bundle_version_id, system_ids) in requests {
         let entry = requests_by_version.entry(*bundle_version_id).or_default();
@@ -1317,8 +1403,8 @@ pub async fn resolve_systems_effective_policies_for_bundle_versions_batch(
         return Ok(std::collections::HashMap::new());
     }
 
-    let keyed = resolve_systems_effective_policies_batch(
-        pool,
+    let keyed = resolve_systems_effective_policies_batch_in_tx(
+        tx,
         &all_system_ids,
         Some(&requests_by_version),
         false,

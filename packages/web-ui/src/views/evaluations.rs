@@ -21,11 +21,14 @@ use crate::alerts::{
 
 use crate::api::{
     client::{
-        ApiClientError, cancel_commit_evaluation, fetch_eval_dependency_graph, fetch_eval_history,
+        cancel_commit_evaluation, fetch_eval_dependency_graph, fetch_eval_history,
         fetch_eval_policy_matrix, fetch_eval_queue, force_cancel_commit_evaluation,
         re_evaluate_commit, reorder_eval_queue,
     },
-    models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem},
+    models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem, EvalQueueSummary},
+};
+use crate::components::dialog_focus::{
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel, DialogInitialFocus,
 };
 use crate::components::{Icon, IconName};
 use crate::hooks::{InfiniteScroll, use_infinite_scroll};
@@ -36,7 +39,7 @@ use crate::state::evaluation_drawer::{
 };
 use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::views::latest_filter::{
-    LatestFilterState, marker_matches, replace_unique_by, request_state, reset_key, retain_visible,
+    LatestFilterState, marker_matches, replace_unique_by, reset_key, retain_visible,
 };
 
 const FETCH_LIMIT_MAX: i64 = 10_000; // must match backend LIMIT_MAX
@@ -441,29 +444,209 @@ fn queue_item_matches_search(item: &EvalQueueItem, search: &str) -> bool {
         .any(|value| value.to_lowercase().contains(search))
 }
 
-fn history_item_matches_filters(
-    item: &EvalHistoryItem,
+/// Includes every effective server criterion and refresh generation.
+/// Delimiters in user text cannot alias another request's identity.
+type ListRequestKey = (String, String, String, bool, i64, u64);
+
+/// Owns response identity and success/error together, never in separate signals.
+type AcceptedList<T> = Option<(ListRequestKey, Result<T, String>)>;
+
+/// Allows an accepted window to remain mounted during same-scope polling or
+/// limit growth. A different search/status/flake/latest scope cannot reuse it.
+/// Errors replace successes and remain visible until a newer success arrives.
+fn cached_list_result<'a, T>(
+    stored: &'a AcceptedList<T>,
+    current: &ListRequestKey,
+) -> Option<&'a Result<T, String>> {
+    stored
+        .as_ref()
+        .filter(|(key, _)| {
+            key.0 == current.0 && key.1 == current.1 && key.2 == current.2 && key.3 == current.3
+        })
+        .map(|(_, result)| result)
+}
+
+/// Publishes only the latest full request, including its limit and generation.
+/// A late A response cannot overwrite B, including an A→B→A round trip.
+fn publish_list<T>(
+    stored: &mut AcceptedList<T>,
+    current: &ListRequestKey,
+    response_key: ListRequestKey,
+    result: Result<T, String>,
+) {
+    if &response_key == current {
+        *stored = Some((response_key, result));
+    }
+}
+
+/// Grants selection pruning only to a success owned by the current full request.
+/// Cached windows and loading/error gaps must never remove explicit choices.
+fn owned_list_page<'a, T>(stored: &'a AcceptedList<T>, current: &ListRequestKey) -> Option<&'a T> {
+    stored
+        .as_ref()
+        .filter(|(key, _)| key == current)
+        .and_then(|(_, result)| result.as_ref().ok())
+}
+
+/// Uses the same deduplicated server window for history display and pruning.
+fn history_page_rows(page: &EvalHistoryPage, count: usize) -> Vec<EvalHistoryItem> {
+    replace_unique_by(page.items.clone(), |item| item.commit_id)
+        .into_iter()
+        .take(count)
+        .collect()
+}
+
+fn history_request_key(
+    search: &str,
     status: &str,
     flake: &str,
-    search: &str,
-) -> bool {
-    (status == "all" || item.evaluation_status == status)
-        && (flake == "all"
-            || item
-                .flake_name
-                .to_lowercase()
-                .contains(&flake.to_lowercase()))
-        && (search.is_empty()
-            || [
-                item.flake_name.as_str(),
-                item.branch.as_str(),
-                item.commit_hash.as_str(),
-                item.commit_message.as_deref().unwrap_or_default(),
-                item.author.as_deref().unwrap_or_default(),
-                item.evaluation_status.as_str(),
-            ]
-            .into_iter()
-            .any(|value| value.to_lowercase().contains(search)))
+    latest: bool,
+    limit: i64,
+    generation: u64,
+) -> ListRequestKey {
+    let filter = |value: &str| match value.trim() {
+        "" | "all" => String::new(),
+        value => value.to_owned(),
+    };
+    (
+        search.trim().to_owned(),
+        filter(status),
+        filter(flake),
+        latest,
+        limit,
+        generation,
+    )
+}
+
+/// Leaves list shortcuts to the focused control, including editable ancestors.
+fn list_shortcuts_blocked() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window().and_then(|window| window.document())
+            .and_then(|document| document.active_element())
+            .is_some_and(|element| element.closest("input, select, textarea, button, a, [contenteditable]:not([contenteditable='false']), [role='button'], [role='checkbox'], [role='combobox'], [role='textbox']").ok().flatten().is_some())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
+}
+
+/// Keeps row identity stable across paging and ordering changes.
+fn evaluation_row_id(history: bool, commit_id: i32) -> String {
+    let list = if history { "history" } else { "queue" };
+    format!("evaluation-{list}-row-{commit_id}")
+}
+
+/// Moves keyboard focus to a rendered row, also making it a dialog opener.
+fn focus_evaluation_row(history: bool, commit_id: i32) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+        if let Some(row) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id(&evaluation_row_id(history, commit_id)))
+            .and_then(|row| row.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            let _ = row.focus();
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (history, commit_id);
+}
+
+#[cfg(test)]
+mod request_key_tests {
+    use super::{
+        AcceptedList, cached_list_result, history_request_key, owned_list_page, publish_list,
+    };
+    use crate::views::latest_filter::retain_visible;
+    use std::collections::HashSet;
+
+    #[test]
+    fn same_scope_cache_survives_polling_and_limit_growth_but_not_filter_changes() {
+        let key = history_request_key("host", "all", "all", false, 50, 1);
+        let stored: AcceptedList<Vec<i32>> = Some((key.clone(), Ok(vec![7])));
+        let growing = history_request_key("host", "all", "all", false, 100, 2);
+        assert_eq!(cached_list_result(&stored, &growing), Some(&Ok(vec![7])));
+        assert!(owned_list_page(&stored, &growing).is_none());
+        for different_scope in [
+            history_request_key("other", "all", "all", false, 50, 2),
+            history_request_key("host", "failed", "all", false, 50, 2),
+            history_request_key("host", "all", "flake", false, 50, 2),
+            history_request_key("host", "all", "all", true, 50, 2),
+        ] {
+            assert!(cached_list_result(&stored, &different_scope).is_none());
+        }
+    }
+
+    #[test]
+    fn publication_rejects_reverse_responses_and_superseded_a_to_b_to_a_generations() {
+        let a = history_request_key("a", "all", "all", false, 50, 1);
+        let b = history_request_key("b", "all", "all", false, 50, 2);
+        let newer_a = history_request_key("a", "all", "all", false, 50, 3);
+        let mut stored = None;
+        publish_list(&mut stored, &b, b.clone(), Ok(vec![2]));
+        publish_list(&mut stored, &b, a.clone(), Ok(vec![1]));
+        assert_eq!(owned_list_page(&stored, &b), Some(&vec![2]));
+        publish_list(&mut stored, &newer_a, a, Ok(vec![1]));
+        assert!(cached_list_result(&stored, &newer_a).is_none());
+        publish_list(&mut stored, &newer_a, newer_a.clone(), Ok(vec![3]));
+        publish_list(&mut stored, &newer_a, b, Err("late error".into()));
+        assert_eq!(owned_list_page(&stored, &newer_a), Some(&vec![3]));
+    }
+
+    #[test]
+    fn selection_prunes_only_from_atomic_owned_success_not_loading_or_cached_page() {
+        let key = history_request_key("configuration-only-match", "all", "all", false, 50, 2);
+        let old = history_request_key("configuration-only-match", "all", "all", false, 50, 1);
+        let mut selected = HashSet::from([7, 8]);
+        let mut stored: AcceptedList<Vec<i32>> = None;
+        let prune = |stored: &AcceptedList<Vec<i32>>, selected: &mut HashSet<i32>| {
+            if let Some(ids) = owned_list_page(stored, &key) {
+                retain_visible(selected, ids.iter().copied());
+            }
+        };
+        prune(&stored, &mut selected);
+        stored = Some((old, Ok(vec![])));
+        prune(&stored, &mut selected);
+        assert_eq!(selected, HashSet::from([7, 8]));
+        publish_list(&mut stored, &key, key.clone(), Ok(vec![7]));
+        prune(&stored, &mut selected);
+        assert_eq!(selected, HashSet::from([7]));
+        selected.clear();
+        prune(&stored, &mut selected);
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn accepted_errors_replace_cached_success_without_pruning_selection() {
+        let key = history_request_key("host", "all", "all", false, 50, 1);
+        let next = history_request_key("host", "all", "all", false, 50, 2);
+        let mut stored: AcceptedList<Vec<i32>> = Some((key, Ok(vec![7])));
+        publish_list(&mut stored, &next, next.clone(), Err("unavailable".into()));
+        assert_eq!(
+            cached_list_result(&stored, &next),
+            Some(&Err("unavailable".into()))
+        );
+        assert!(owned_list_page(&stored, &next).is_none());
+    }
+
+    #[test]
+    fn history_key_normalizes_and_covers_all_server_criteria_and_generation() {
+        let key = history_request_key(" host ", "all", "all", false, 50, 1);
+        assert_eq!(key, history_request_key("host", "", "", false, 50, 1));
+        for other in [
+            history_request_key("other", "all", "all", false, 50, 1),
+            history_request_key("host", "failed", "all", false, 50, 1),
+            history_request_key("host", "all", "flake", false, 50, 1),
+            history_request_key("host", "all", "all", true, 50, 1),
+            history_request_key("host", "all", "all", false, 100, 1),
+            history_request_key("host", "all", "all", false, 50, 3),
+        ] {
+            assert_ne!(key, other);
+        }
+    }
 }
 
 #[component]
@@ -491,13 +674,35 @@ fn EvaluationsPage(
 ) -> Element {
     let nav = navigator();
     let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
-    let mut queue_items = use_signal(Vec::<EvalQueueItem>::new);
+    let mut stored_queue =
+        use_signal(|| None::<(ListRequestKey, Result<EvalQueueSummary, String>)>);
     let mut active_fetch_limit = use_signal(|| 200_i64);
     let mut active_refresh = use_signal(|| 0_u64);
     let mut history_refresh = use_signal(|| 0_u64);
     let mut active_tab = use_signal(|| EvaluationsTab::ActiveQueue);
     let mut latest_filter = use_signal(LatestFilterState::default);
     let mut search_query = use_signal(String::new);
+    let queue_generation = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0_u64)));
+    let queue_key = use_memo(move || {
+        let _ = active_refresh();
+        queue_generation.set(queue_generation.get() + 1);
+        history_request_key(
+            &search_query(),
+            "",
+            "",
+            latest_filter().enabled(),
+            active_fetch_limit(),
+            queue_generation.get(),
+        )
+    });
+    let queue_resource =
+        use_memo(move || cached_list_result(&stored_queue.read(), &queue_key()).cloned());
+    let queue_items = use_memo(move || {
+        cached_list_result(&stored_queue.read(), &queue_key())
+            .and_then(|result| result.as_ref().ok())
+            .map(|summary| replace_unique_by(summary.items.clone(), |item| item.commit_id))
+            .unwrap_or_default()
+    });
     let mut drawer_target = use_signal(|| None::<EvalDrawerTarget>);
     // Selection is explicit. Refreshes and filters may prune selected rows but
     // must never select new rows or restore a cleared selection.
@@ -519,9 +724,39 @@ fn EvaluationsPage(
     let mut history_ack_cursor = use_signal(|| None::<String>);
     let mut evals_ack_sent = use_signal(|| false);
     // Accumulated history items across the current page-1 fetch window.
-    let mut history_items_acc: Signal<Vec<EvalHistoryItem>> = use_signal(Vec::new);
-    let mut history_total_acc = use_signal(|| 0_i64);
-    let mut history_domain_total = use_signal(|| 0_i64);
+    let mut stored_history =
+        use_signal(|| None::<(ListRequestKey, Result<EvalHistoryPage, String>)>);
+    let history_generation = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0_u64)));
+    let history_key = use_memo(move || {
+        let _ = history_refresh();
+        history_generation.set(history_generation.get() + 1);
+        history_request_key(
+            &search_query(),
+            &history_status_filter(),
+            &history_flake_filter(),
+            latest_filter().enabled(),
+            history_fetch_limit(),
+            history_generation.get(),
+        )
+    });
+    let history_resource =
+        use_memo(move || cached_list_result(&stored_history.read(), &history_key()).cloned());
+    let history_items_acc = use_memo(move || {
+        cached_list_result(&stored_history.read(), &history_key())
+            .and_then(|result| result.as_ref().ok())
+            .map(|page| history_page_rows(page, usize::MAX))
+            .unwrap_or_default()
+    });
+    let history_total_acc = use_memo(move || {
+        cached_list_result(&stored_history.read(), &history_key())
+            .and_then(|result| result.as_ref().ok())
+            .map_or(0, |page| page.total_count)
+    });
+    let history_domain_total = use_memo(move || {
+        cached_list_result(&stored_history.read(), &history_key())
+            .and_then(|result| result.as_ref().ok())
+            .map_or(0, |page| page.domain_total)
+    });
     let initial_return = use_hook(move || {
         EVALUATION_RETURN.peek().clone().filter(|r| {
             requested_commit.is_some_and(|commit_id| r.matches_commit(commit_id))
@@ -654,37 +889,55 @@ fn EvaluationsPage(
         history_fetch_limit.set(50);
     });
 
-    let history_resource = use_resource(move || async move {
-        let _ = history_refresh();
-        let limit = history_fetch_limit();
-        let status = history_status_filter();
-        let flake = history_flake_filter();
-        let search = search_query();
-        let (search, latest_only) = request_state(&search, latest_filter());
-        fetch_eval_history(
-            1,
-            limit,
-            if status.is_empty() || status == "all" {
-                None
-            } else {
-                Some(status.as_str())
-            },
-            if flake.is_empty() || flake == "all" {
-                None
-            } else {
-                Some(flake.as_str())
-            },
-            search.as_deref(),
-            latest_only,
-        )
-        .await
+    let _history_request = use_resource(move || {
+        let key = history_key();
+        async move {
+            let (search, status, flake, latest_only, limit, _) = &key;
+            let result = fetch_eval_history(
+                1,
+                *limit,
+                if status.is_empty() || status == "all" {
+                    None
+                } else {
+                    Some(status.as_str())
+                },
+                if flake.is_empty() || flake == "all" {
+                    None
+                } else {
+                    Some(flake.as_str())
+                },
+                (!search.is_empty()).then_some(search.as_str()),
+                *latest_only,
+            )
+            .await;
+            let current = history_key.peek().clone();
+            if key == current {
+                publish_list(
+                    &mut stored_history.write(),
+                    &current,
+                    key,
+                    result.map_err(|error| error.to_string()),
+                );
+                history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
+            }
+        }
     });
 
-    let queue_resource = use_resource(move || async move {
-        let _ = active_refresh();
-        let search = search_query();
-        let (search, latest_only) = request_state(&search, latest_filter());
-        fetch_eval_queue(active_fetch_limit(), search.as_deref(), latest_only).await
+    let _queue_request = use_resource(move || {
+        let key = queue_key();
+        async move {
+            let result =
+                fetch_eval_queue(key.4, (!key.0.is_empty()).then_some(key.0.as_str()), key.3).await;
+            let current = queue_key.peek().clone();
+            if key == current {
+                publish_list(
+                    &mut stored_queue.write(),
+                    &current,
+                    key,
+                    result.map_err(|error| error.to_string()),
+                );
+            }
+        }
     });
 
     {
@@ -708,14 +961,6 @@ fn EvaluationsPage(
             let _ = (active_refresh, history_refresh);
         });
     }
-
-    use_effect(move || {
-        if let Some(Ok(summary)) = &*queue_resource.read() {
-            queue_items.set(replace_unique_by(summary.items.clone(), |item| {
-                item.commit_id
-            }));
-        }
-    });
 
     use_effect(move || {
         let Some(focus) = navigation_focus() else {
@@ -784,20 +1029,6 @@ fn EvaluationsPage(
 
         if history_exhausted && active_exhausted {
             navigation_focus.set(None);
-        }
-    });
-
-    // Replace the loaded history window atomically on each refresh. Fetching
-    // from page 1 with a growing limit avoids inconsistencies from mutable
-    // offset pagination (review finding #1).
-    use_effect(move || {
-        if let Some(Ok(page_data)) = &*history_resource.read() {
-            history_total_acc.set(page_data.total_count);
-            history_domain_total.set(page_data.domain_total);
-            history_items_acc.set(replace_unique_by(page_data.items.clone(), |item| {
-                item.commit_id
-            }));
-            history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
         }
     });
 
@@ -926,8 +1157,11 @@ fn EvaluationsPage(
         .unwrap_or(0);
 
     use_effect(move || {
-        let visible = queue_items
-            .read()
+        let stored = stored_queue.read();
+        let Some(summary) = owned_list_page(&stored, &queue_key()) else {
+            return;
+        };
+        let visible = replace_unique_by(summary.items.clone(), |item| item.commit_id)
             .iter()
             .filter(|item| is_active_eval_status(&item.evaluation_status))
             .filter(|item| queue_item_matches_search(item, &search_query().trim().to_lowercase()))
@@ -941,20 +1175,23 @@ fn EvaluationsPage(
         }
     });
 
+    // The server searches authorized configuration names absent from this DTO.
+    // Its matching page is authoritative for rendering, selection, and keys.
+    let history_visible_rows = use_memo(move || {
+        cached_list_result(&stored_history.read(), &history_key())
+            .and_then(|result| result.as_ref().ok())
+            .map(|page| history_page_rows(page, hist_paging.count()))
+            .unwrap_or_default()
+    });
     use_effect(move || {
-        let visible = history_items_acc
-            .read()
+        // Read identity and rows from the same publication. A separate derived
+        // visible-row memo can still contain its loading value in this effect.
+        let stored = stored_history.read();
+        let Some(page) = owned_list_page(&stored, &history_key()) else {
+            return;
+        };
+        let visible = history_page_rows(page, hist_paging.count())
             .iter()
-            .filter(|item| {
-                history_item_matches_filters(
-                    item,
-                    &history_status_filter(),
-                    &history_flake_filter(),
-                    &search_query().trim().to_lowercase(),
-                )
-            })
-            .filter(|item| marker_matches(latest_filter().enabled(), item.is_latest_per_flake))
-            .take(hist_paging.count())
             .map(|item| item.commit_id)
             .collect::<Vec<_>>();
         let mut selected = history_selected_ids.read().clone();
@@ -1000,24 +1237,10 @@ fn EvaluationsPage(
             }
         }
     });
-    let history_visible_rows = history_items_acc
-        .read()
-        .iter()
-        .filter(|item| {
-            history_item_matches_filters(
-                item,
-                &history_status_filter(),
-                &history_flake_filter(),
-                &search_query().trim().to_lowercase(),
-            )
-        })
-        .filter(|item| marker_matches(latest_filter().enabled(), item.is_latest_per_flake))
-        .take(hist_paging.count())
-        .cloned()
-        .collect::<Vec<_>>();
     let selected_history_rows = {
         let ids = history_selected_ids.read();
         history_visible_rows
+            .read()
             .iter()
             .filter(|item| ids.contains(&item.commit_id))
             .cloned()
@@ -1066,6 +1289,7 @@ fn EvaluationsPage(
                 style: "display: flex; flex-direction: column; gap: 16px; outline: none;",
                 tabindex: 0,
                 onkeydown: move |evt| {
+                    if list_shortcuts_blocked() { return; }
                     // No keyboard nav while drawer is open
                     if direct_return.peek().is_some() {
                         if evt.key() == Key::Escape {
@@ -1083,49 +1307,41 @@ fn EvaluationsPage(
                         return;
                     }
 
-                    // Keyboard nav is bounded to the currently *rendered* slice so
-                    // focus never lands on an invisible row (review finding #4).
-                    // `hist_paging` is created in the parent so the visible count
-                    // is directly accessible here, but it may briefly exceed the
-                    // number of actually loaded rows while a server page is in
-                    // flight — cap to the accumulated items count (finding #4).
+                    // Bounds and DOM targets both come from the rendered slice.
                     let list_len = if active_tab() == EvaluationsTab::ActiveQueue {
                         paged_active_items.len()
                     } else {
-                        hist_paging.count().min(history_items_acc.read().len())
+                        history_visible_rows.read().len()
                     };
 
+                    let direction = match evt.key() {
+                        Key::ArrowDown => Some(true),
+                        Key::ArrowUp => Some(false),
+                        Key::Character(ref c) if c == "j" => Some(true),
+                        Key::Character(ref c) if c == "k" => Some(false),
+                        _ => None,
+                    };
+                    if let Some(forward) = direction {
+                        evt.prevent_default();
+                        if list_len == 0 { return; }
+                        let next = match focused_index() {
+                            None => 0,
+                            Some(i) if forward => i.saturating_add(1).min(list_len - 1),
+                            Some(i) => i.saturating_sub(1).min(list_len - 1),
+                        };
+                        let history = active_tab() == EvaluationsTab::History;
+                        let commit_id = if history {
+                            history_visible_rows.read().get(next).map(|item| item.commit_id)
+                        } else {
+                            paged_active_items.get(next).map(|item| item.commit_id)
+                        };
+                        if let Some(commit_id) = commit_id {
+                            focused_index.set(Some(next));
+                            focus_evaluation_row(history, commit_id);
+                        }
+                        return;
+                    }
                     match evt.key() {
-                        Key::Character(ref c) if c == "j" || c == "ArrowDown" => {
-                            let next = match focused_index() {
-                                None => 0,
-                                Some(i) => (i + 1).min(list_len.saturating_sub(1)),
-                            };
-                            focused_index.set(Some(next));
-                        }
-                        Key::ArrowDown => {
-                            let next = match focused_index() {
-                                None => 0,
-                                Some(i) => (i + 1).min(list_len.saturating_sub(1)),
-                            };
-                            focused_index.set(Some(next));
-                        }
-                        Key::Character(ref c) if c == "k" => {
-                            let next = match focused_index() {
-                                None => 0,
-                                Some(0) => 0,
-                                Some(i) => i - 1,
-                            };
-                            focused_index.set(Some(next));
-                        }
-                        Key::ArrowUp => {
-                            let next = match focused_index() {
-                                None => 0,
-                                Some(0) => 0,
-                                Some(i) => i - 1,
-                            };
-                            focused_index.set(Some(next));
-                        }
                         Key::Enter => {
                             if let Some(idx) = focused_index() {
                                 if active_tab() == EvaluationsTab::ActiveQueue {
@@ -1134,8 +1350,8 @@ fn EvaluationsPage(
                                         drawer_target.set(Some(EvalDrawerTarget::Queue(ev.clone())));
                                     }
                                 } else {
-                                    // Use accumulated history items.
-                                    let item = history_items_acc.read().get(idx).cloned();
+                                    // Use the same visible slice as row rendering.
+                                    let item = history_visible_rows.read().get(idx).cloned();
                                     if let Some(ev) = item {
                                         drawer_target.set(Some(EvalDrawerTarget::History(ev)));
                                     }
@@ -1444,6 +1660,7 @@ fn EvaluationsPage(
                         }
 
                         EvalHistory {
+                            visible_rows: history_visible_rows,
                             history_resource: history_resource,
                             history_status_filter: history_status_filter,
                             history_flake_filter: history_flake_filter,
@@ -1571,9 +1788,9 @@ fn EvaluationsPage(
 fn EvalActiveQueue(
     evals: Vec<EvalQueueItem>,
     mut refresh: Signal<u64>,
-    queue_items: Signal<Vec<EvalQueueItem>>,
+    queue_items: Memo<Vec<EvalQueueItem>>,
     mut drawer_target: Signal<Option<EvalDrawerTarget>>,
-    focused_index: Signal<Option<usize>>,
+    mut focused_index: Signal<Option<usize>>,
     mut active_selected_ids: Signal<std::collections::HashSet<i32>>,
     mut toast_msg: Signal<Option<String>>,
     allow_reorder: bool,
@@ -1641,6 +1858,9 @@ fn EvalActiveQueue(
                         rsx! {
                             tr {
                                 key: "{commit_id}",
+                                id: evaluation_row_id(false, commit_id),
+                                tabindex: "0",
+                                onfocus: move |_| focused_index.set(Some(i)),
                                 class: "{row_classes}",
                                 draggable: if allow_reorder { "true" } else { "false" },
                                 ondragstart: move |_| {
@@ -1825,18 +2045,19 @@ fn EvalActiveQueue(
 
 #[component]
 fn EvalHistory(
-    history_resource: Resource<Result<EvalHistoryPage, ApiClientError>>,
+    history_resource: Memo<Option<Result<EvalHistoryPage, String>>>,
+    visible_rows: Memo<Vec<EvalHistoryItem>>,
     mut history_status_filter: Signal<String>,
     mut history_flake_filter: Signal<String>,
     mut history_fetch_limit: Signal<i64>,
     mut refresh: Signal<u64>,
     mut history_selected_ids: Signal<std::collections::HashSet<i32>>,
     mut drawer_target: Signal<Option<EvalDrawerTarget>>,
-    focused_index: Signal<Option<usize>>,
+    mut focused_index: Signal<Option<usize>>,
     flash_evals: bool,
-    history_items_acc: Signal<Vec<EvalHistoryItem>>,
-    history_total_acc: Signal<i64>,
-    history_domain_total: Signal<i64>,
+    history_items_acc: Memo<Vec<EvalHistoryItem>>,
+    history_total_acc: Memo<i64>,
+    history_domain_total: Memo<i64>,
     hist_paging: InfiniteScroll,
     mut toast_msg: Signal<Option<String>>,
     mut search_query: Signal<String>,
@@ -1890,25 +2111,30 @@ fn EvalHistory(
                         history_fetch_limit.set(50);
                         refresh.set(refresh() + 1);
                     },
-                    option { value: "all", "All flakes" }
-                    if let Some(Ok(page_data)) = &*history_snapshot {
+                    option { value: "all", selected: history_flake_filter() == "all", "All flakes" }
                         {
-                            let mut flakes: Vec<String> = page_data
-                                .items
-                                .iter()
-                                .map(|item| item.flake_name.clone())
-                                .collect();
+                            let selected = history_flake_filter();
+                            let mut flakes: Vec<String> = history_snapshot
+                                .as_ref()
+                                .and_then(|result| result.as_ref().ok())
+                                .map(|page| page.items.iter().map(|item| item.flake_name.clone()).collect())
+                                .unwrap_or_default();
+                            // Keep the selected option mounted while its owned
+                            // page reloads; otherwise the browser resets to All.
+                            if selected != "all" && !selected.is_empty() {
+                                flakes.push(selected.clone());
+                            }
                             flakes.sort();
                             flakes.dedup();
-                            flakes.into_iter().map(|flake_name| rsx! {
+                            flakes.into_iter().map(move |flake_name| rsx! {
                                 option {
                                     key: "{flake_name}",
-                                    value: "{flake_name}",
+                                     value: "{flake_name}",
+                                     selected: flake_name == selected,
                                     "{flake_name}"
                                 }
                             })
                         }
-                    }
                 }
 
                 if history_total_acc() > 0 {
@@ -1926,20 +2152,8 @@ fn EvalHistory(
                         // Use accumulated items (across server pages) for the table.
                         // page_data is still used for the flake filter dropdown above
                         // and for loading/error state detection.
-                        let all_loaded = history_items_acc
-                            .read()
-                            .iter()
-                            .filter(|item| history_item_matches_filters(
-                                item,
-                                &history_status_filter(),
-                                &history_flake_filter(),
-                                &search_query().trim().to_lowercase(),
-                            ))
-                            .filter(|item| marker_matches(latest_filter().enabled(), item.is_latest_per_flake))
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        let paged_items: Vec<EvalHistoryItem> = all_loaded.iter().take(hist_paging.count()).cloned().collect();
-                        let hist_has_more = hist_paging.count() < all_loaded.len() || hist_server_has_more;
+                        let paged_items = visible_rows();
+                        let hist_has_more = hist_paging.count() < history_items_acc.read().len() || hist_server_has_more;
                         rsx! {
                     table {
                         class: "sys-table",
@@ -1997,6 +2211,9 @@ fn EvalHistory(
                                     rsx! {
                                         tr {
                                             key: "{commit_id}",
+                                            id: evaluation_row_id(true, commit_id),
+                                            tabindex: "0",
+                                            onfocus: move |_| focused_index.set(Some(row_i)),
                                             class: "{row_class}",
                                             aria_selected: is_selected,
                                             style: "cursor: pointer;",
@@ -2192,7 +2409,7 @@ fn EvalHistory(
 fn EvalDrawer(
     target: EvalDrawerTarget,
     mut refresh: Signal<u64>,
-    on_close: EventHandler<MouseEvent>,
+    on_close: EventHandler<()>,
     mut toast_msg: Signal<Option<String>>,
     on_open_policy: EventHandler<String>,
     page_history: bool,
@@ -2283,7 +2500,7 @@ fn EvalDrawer(
                 ev.evaluation_status.as_str(),
                 "pending" | "in_progress" | "cancelling"
             );
-            let close_click = move |evt: MouseEvent| on_close.call(evt);
+            let close_click = move |_: MouseEvent| on_close.call(());
 
             rsx! {
                 div {
@@ -2291,11 +2508,18 @@ fn EvalDrawer(
                     onclick: close_click,
                 }
                 aside {
+                    id: "queue-evaluation-dialog",
+                    aria_modal: "true",
+                    tabindex: "-1",
+                    onkeydown: move |event| if event.key() == Key::Escape { event.stop_propagation(); on_close.call(()); },
                     class: if maximized() { "fl-tray ed-drawer fl-tray-max" } else { "fl-tray ed-drawer" },
                     role: "dialog",
                     "aria-label": "Evaluation detail",
                     "data-commit-sha": "{ev.commit_hash}",
                     "data-attempt-number": "{ev.attempt_number}",
+                    DialogFocusRestore {}
+                    DialogInitialFocus { dialog_id: "queue-evaluation-dialog" }
+                    DialogFocusSentinel { dialog_id: "queue-evaluation-dialog", boundary: DialogFocusBoundary::Last }
                     header {
                         class: "fl-tray-head",
                         div {
@@ -2431,6 +2655,7 @@ fn EvalDrawer(
                             }
                         }
                     }
+                    DialogFocusSentinel { dialog_id: "queue-evaluation-dialog", boundary: DialogFocusBoundary::First }
                 }
                 if can_force_cancel && force_cancel_target() == Some(ev.commit_id) {
                     drawer_header::ConfirmForceCancel {
@@ -2466,7 +2691,7 @@ fn EvalDrawer(
                 ev.evaluation_status.as_str(),
                 "pending" | "in_progress" | "cancelling"
             );
-            let close_click = move |evt: MouseEvent| on_close.call(evt);
+            let close_click = move |_: MouseEvent| on_close.call(());
 
             rsx! {
                 div {
@@ -2474,11 +2699,18 @@ fn EvalDrawer(
                     onclick: close_click,
                 }
                 aside {
+                    id: "history-evaluation-dialog",
+                    aria_modal: "true",
+                    tabindex: "-1",
+                    onkeydown: move |event| if event.key() == Key::Escape { event.stop_propagation(); on_close.call(()); },
                     class: if maximized() { "fl-tray ed-drawer fl-tray-max" } else { "fl-tray ed-drawer" },
                     role: "dialog",
                     "aria-label": "Evaluation detail",
                     "data-commit-sha": "{ev.commit_hash}",
                     "data-attempt-number": "{ev.attempt_number}",
+                    DialogFocusRestore {}
+                    DialogInitialFocus { dialog_id: "history-evaluation-dialog" }
+                    DialogFocusSentinel { dialog_id: "history-evaluation-dialog", boundary: DialogFocusBoundary::Last }
                     header {
                         class: "fl-tray-head",
                         div {
@@ -2613,6 +2845,7 @@ fn EvalDrawer(
                             }
                         }
                     }
+                    DialogFocusSentinel { dialog_id: "history-evaluation-dialog", boundary: DialogFocusBoundary::First }
                 }
             }
         }
@@ -3010,6 +3243,7 @@ fn EvalDrawerPolicyTab(
     let mut matrix_finding = use_signal(|| None::<String>);
     let mut matrix_page = use_signal(|| 0usize);
     let mut matrix_key = use_signal(|| None::<(i32, uuid::Uuid)>);
+    let mut matrix_initialized = use_signal(|| false);
     let captured_snapshot = policy_snapshot
         .and_then(|r| r.as_ref().ok())
         .filter(|data| data.commit_id == commit_id)
@@ -3023,18 +3257,30 @@ fn EvalDrawerPolicyTab(
             return;
         };
         let key = (commit_id, id);
-        if matrix_key() != Some(key) {
-            let saved = handoff::MATRIX_PRESENTATIONS
+        // Only capture changes drive initialization. Subscribing to an unchanged
+        // provisional false flag would repeatedly publish sparse defaults and
+        // prevent the same attempt's first usable capture from being processed.
+        if *matrix_key.peek() != Some(key) {
+            let mut saved = handoff::MATRIX_PRESENTATIONS
                 .peek()
                 .get(&key)
                 .cloned()
-                .unwrap_or_else(|| handoff::MatrixPresentation::new(snapshot.columns.len()));
+                .unwrap_or_else(|| handoff::MatrixPresentation::new(0));
+            saved.initialize(&snapshot);
+            matrix_initialized.set(saved.initialized);
             matrix_state.set(saved.columns);
             matrix_expanded.set(saved.expanded);
             matrix_issue.set(saved.issue);
             matrix_finding.set(saved.finding);
             matrix_page.set(saved.page);
             matrix_key.set(Some(key));
+        } else if !*matrix_initialized.peek() {
+            let mut defaults = handoff::MatrixPresentation::new(0);
+            defaults.initialize(&snapshot);
+            if defaults.initialized {
+                matrix_state.set(defaults.columns);
+                matrix_initialized.set(true);
+            }
         }
     }));
     use_effect(move || {
@@ -3045,6 +3291,7 @@ fn EvalDrawerPolicyTab(
         handoff::MATRIX_PRESENTATIONS.write().insert(
             key,
             handoff::MatrixPresentation {
+                initialized: matrix_initialized(),
                 columns: state,
                 expanded: matrix_expanded(),
                 issue: matrix_issue(),
@@ -3065,18 +3312,20 @@ fn EvalDrawerPolicyTab(
         })
     });
     let mut dom_restored = use_signal(|| false);
-    use_effect(move || {
-        if valid_return && matrix_key().is_some() && !dom_restored() {
-            dom_restored.set(true);
+    // Validation is a derived value, not a signal read. Track it explicitly so
+    // the initially pending pinned response cannot leave this effect dormant.
+    use_effect(use_reactive(&valid_return, move |valid_return| {
+        if valid_return && matrix_initialized() && matrix_key().is_some() && !dom_restored() {
             if let Some(dom) = EVALUATION_RETURN
                 .peek()
                 .as_ref()
                 .and_then(|s| s.dom.clone())
             {
+                dom_restored.set(true);
                 spawn(handoff::restore_dom(dom));
             }
         }
-    });
+    }));
 
     // Interactive state: filter, sort, expanded row, policy filter (matches JSX)
     let mut filter_state = use_signal(|| "all".to_string());

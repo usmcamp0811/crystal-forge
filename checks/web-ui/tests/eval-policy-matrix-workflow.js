@@ -4,6 +4,7 @@
  * These responses are browser-local; they never rewrite persisted evaluations.
  */
 const { expect } = require('@playwright/test');
+const { assertDialogKeyboard, dismissDialog } = require('./eval-dialog-workflow.js');
 
 function id(index) {
   return `04880488-0000-4000-8000-${index.toString(16).padStart(12, '0')}`;
@@ -39,7 +40,7 @@ function denseMatrix(commitId) {
   ];
   const bundles = memberships.map((_, i) => ({
     bundle_version_id: id(2001+i), bundle_id: id(3001+i),
-    name: `Fixture bundle ${i+1}`, version: 'v1', framework: 'Fixture framework',
+    name: `Fixture bundle ${i+1}`, version: 'v1', framework: `Fixture framework ${i+1}`,
     framework_version: '2026',
   }));
   const contexts = bundles.map((b, i) => ({
@@ -77,7 +78,8 @@ function denseMatrix(commitId) {
   };
 }
 
-async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapshot) {
+async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapshot, onHistoryPhase=()=>{}) {
+  const originalViewport=page.viewportSize();
   const fixture = denseMatrix(commitId);
   const originalDrawer=page.getByRole('dialog',{name:'Evaluation detail',exact:true});
   fixture.matrix.commit_sha=await originalDrawer.getAttribute('data-commit-sha');
@@ -85,9 +87,12 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
   fixture.matrix.mock_evidence=true;
   const endpoint = `**/commits/${commitId}/eval/policy-matrix*`;
   const pinnedEndpoint = `**/commits/${commitId}/eval/attempts/${fixture.matrix.evaluation_attempt_id}/policy-matrix*`;
-  // A captured plan can precede discovery. A live tab must discover inventory
-  // without requiring the user to close or switch tabs.
-  let response={...fixture,matrix:{...fixture.matrix,inventory:null,configuration_summary:null}};
+  // Before capture, the backend's legacy snapshot has no authoritative plan or
+  // inventory. A live tab must initialize defaults from the first usable capture
+  // for this same UUID, without treating the placeholder as an empty capture.
+  let response={...fixture,matrix:{...fixture.matrix,provenance:'legacy_unavailable',
+    empty_bundle_metadata_complete:false,columns:[],bundles:[],rows:[],
+    inventory:null,configuration_summary:null}};
   let fail=false;
   let pending=null;
   let release=null;
@@ -131,8 +136,16 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
     await expect(drawer.getByRole('status').filter({hasText:'Discovery pending'})).toBeVisible();
     await expect(drawer.getByRole('table')).toHaveCount(0);
     await assertHeaders();
+    expect(response.matrix.evaluation_attempt_id).toBe(fixture.matrix.evaluation_attempt_id);
+    expect(response.matrix.columns).toHaveLength(0);
+    expect(response.matrix.provenance).toBe('legacy_unavailable');
+    expect(response.matrix.empty_bundle_metadata_complete).toBe(false);
     response=fixture;
     await expect(drawer.getByRole('button',{name:/^Bundles\s+6$/})).toBeVisible({timeout:12000});
+    await expect(drawer.getByRole('button',{name:/^Bundles\s+6$/})).toHaveClass('active');
+    await drawer.getByRole('button',{name:/^Controls\s+128$/}).click();
+    await expect(drawer.getByRole('button',{name:'Failing only',exact:true})).toHaveClass(/active-filter/);
+    await drawer.getByRole('button',{name:/^Bundles\s+6$/}).click();
     await expect(drawer.getByText('128 controls · 32 shared across bundles',{exact:true})).toBeVisible();
     await expect(drawer.getByRole('button',{name:/^Clean\s+56$/})).toBeVisible();
     await expect(drawer.getByRole('button',{name:/^Unavailable \/ N\/A\s+2$/})).toBeVisible();
@@ -274,6 +287,77 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
     // bundle shortcut. Compliance reads the exact retained attempt and Back
     // returns to this open row, assertion, mode, sort and filter.
     await expect(drawer.getByRole('button',{name:/^View in compliance evidence · Fixture bundle/})).toHaveCount(3);
+    // Browser-local receiver proof: the same shared control has two distinct
+    // captured bundle contexts. Each dismissal must restore its exact opener.
+    const listState = {
+      search: await page.getByPlaceholder('Search queue…').inputValue(),
+      latest: await page.getByRole('button',{name:'Latest per flake',exact:true}).getAttribute('aria-pressed'),
+    };
+    pinnedResponse=response;
+    // Use a real short viewport so one expanded failing row overflows the
+    // matrix's scroll container. Restore reference geometry after this block.
+    await page.setViewportSize({...originalViewport,height:640});
+    try {
+      for (const bundleIndex of [0,1]) {
+        const bundle=fixture.matrix.bundles[bundleIndex];
+        for (const method of ['X','Escape','Backdrop']) {
+          // Enter the drilldown explicitly: changing mode clears bundle focus.
+          await drawer.getByRole('button',{name:/^Bundles\s+6$/}).click();
+          await row.getByRole('button',{name:/93\/96.*1 failed/}).click();
+          await expect(drawer.getByRole('button',{name:/^Controls\s+128$/})).toHaveClass('active');
+          await expect(drawer.getByRole('button',{name:'Fixture bundle 1 · v1 ×',exact:true})).toBeVisible();
+          await expect(drawer.getByRole('columnheader')).toHaveCount(98);
+          const opener=drawer.getByRole('button',{name:`View in compliance evidence · ${bundle.name} · ${bundle.version}`,exact:true});
+          const openerId=await opener.getAttribute('id');
+          expect(openerId).toBeTruthy();
+          await expect.poll(()=>drawer.locator('.pm-scroll').evaluate(el=>el.scrollHeight>el.clientHeight)).toBe(true);
+          await drawer.locator('.pm-scroll').evaluate(el=>{el.scrollTop=80;});
+          // Native focus can scroll the opener into view. Save that final offset.
+          await opener.focus();
+          const scroll=await drawer.locator('.pm-scroll').evaluate(el=>el.scrollTop);
+          expect(scroll).toBeGreaterThan(0);
+          await opener.press('Enter');
+          const evidence=page.getByRole('dialog',{name:'Evaluation check evidence',exact:true});
+          const exact=page.getByRole('region',{name:'Exact evaluation evidence'});
+          await expect(exact).toContainText(fixture.matrix.evaluation_attempt_id);
+          await expect(exact).toContainText(bundle.bundle_id);
+          await expect(exact).toContainText(bundle.bundle_version_id);
+          await expect(exact).toContainText(`${bundle.name} · ${bundle.version}`);
+          await expect(exact).toContainText(bundle.framework);
+          await expect(exact).toContainText(bundle.framework_version);
+          const params=new URL(page.url()).searchParams;
+          expect(params.get('bundle')).toBe(bundle.bundle_id);
+          expect(params.get('version')).toBe(bundle.bundle_version_id);
+          expect(params.get('policy')).toBe(fixture.matrix.columns[0].policy_version_id);
+          await assertDialogKeyboard(page,evidence,'compliance-evaluation-dialog');
+          response={...fixture,matrix:{...fixture.matrix,evaluation_attempt_id:id(9002),
+            attempt_number:fixture.matrix.attempt_number+1,columns:[],bundles:[],rows:[],
+            ...inventoryFixture([],{passed:0,failed:0,evaluation_failed:0,pending:0,excluded:0})}};
+          await dismissDialog(page,evidence,method,'Close evaluation evidence');
+          await expect(evidence).toBeHidden();
+          expect(new URL(page.url()).pathname).toBe(`/evaluations/${commitId}/attempts/${fixture.matrix.evaluation_attempt_id}`);
+          await expect(drawer).toHaveAttribute('data-commit-sha',fixture.matrix.commit_sha);
+          await expect(drawer).toHaveAttribute('data-attempt-number',String(fixture.matrix.attempt_number));
+          await expect(drawer.getByRole('button',{name:/^Controls\s+128$/})).toHaveClass('active');
+          await expect(drawer.getByRole('button',{name:/^Failing\s+1$/})).toHaveClass('active');
+          await expect(drawer.getByRole('button',{name:'Name',exact:true})).toHaveClass('active');
+          await expect(drawer.getByRole('button',{name:'fixture-host-00',exact:true})).toHaveAttribute('aria-expanded','true');
+          await expect(drawer.getByText('[FIXTURE] services.openssh.settings.PermitRootLogin must equal no',{exact:true})).toBeVisible();
+          await expect(page.getByPlaceholder('Search queue…')).toHaveValue(listState.search);
+          await expect(page.getByRole('button',{name:'Latest per flake',exact:true})).toHaveAttribute('aria-pressed',listState.latest);
+          await expect.poll(()=>drawer.locator('.pm-scroll').evaluate(el=>el.scrollTop)).toBe(scroll);
+          await expect(opener).toBeFocused();
+          await expect(drawer.getByRole('button',{name:'Fixture bundle 1 · v1 ×',exact:true})).toBeVisible();
+          await expect(drawer.getByRole('button',{name:'Failing only',exact:true})).not.toHaveClass(/active-filter/);
+          await expect(drawer.getByRole('columnheader')).toHaveCount(98);
+          await drawer.getByRole('button',{name:/^Bundles\s+6$/}).click();
+        }
+      }
+    } finally {
+      await page.setViewportSize(originalViewport);
+    }
+    response=fixture;
+    pinnedResponse=null;
     await drawer.getByRole('button',{name:'View in compliance evidence · Fixture bundle 2 · v1',exact:true}).click();
     await expect(page.getByRole('heading',{name:'Evaluation check evidence',exact:true})).toBeVisible();
     const evidenceUrl=new URL(page.url());
@@ -306,17 +390,24 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
     await page.getByRole('link',{name:'Back to Evaluation',exact:true}).click();
     await expect(drawer.getByRole('button',{name:'Name',exact:true})).toHaveClass('active');
     await expect(drawer.getByText('[FIXTURE] services.openssh.settings.PermitRootLogin must equal no',{exact:true})).toBeVisible();
+    await expect(drawer.getByRole('button',{name:'Log unavailable for retained attempt',exact:true})).toBeDisabled();
 
     // Missing captured contributions fail closed without a deployed fallback.
     pinnedResponse={...fixture,matrix:{...fixture.matrix,rows:fixture.matrix.rows.map((r,index)=>index===0 ? {...r,policies:r.policies.map((p,i)=>i===0 ? {...p,memberships:[]} : p)} : r)}};
     await drawer.getByRole('button',{name:'View in compliance evidence · Fixture bundle 2 · v1',exact:true}).click();
     await expect(page.getByRole('dialog',{name:'Evaluation check evidence',exact:true}).getByRole('alert')).toContainText('exact captured context or membership does not match');
     await expect(page.getByRole('region',{name:'Exact evaluation evidence'})).toHaveCount(0);
+    await expect(page.getByRole('button',{name:'Back to Evaluation',exact:true})).toBeDisabled();
+    // An invalid contribution cannot restore a validated rich return. X exits
+    // through the explicit Compliance fallback; reset the fixture only afterward.
+    await dismissDialog(page,page.getByRole('dialog',{name:'Evaluation check evidence',exact:true}),'X','Close evaluation evidence');
+    await expect.poll(()=>new URL(page.url()).pathname).toBe('/compliance');
+    await expect(page.getByRole('dialog',{name:'Evaluation check evidence',exact:true})).toBeHidden();
+    await expect(page.getByRole('region',{name:'Exact evaluation evidence'})).toHaveCount(0);
     pinnedResponse=null;
-    await page.getByRole('button',{name:'Back to Evaluation',exact:true}).click();
-    await expect(drawer.getByText('[FIXTURE] services.openssh.settings.PermitRootLogin must equal no',{exact:true})).toBeVisible();
-    await expect(drawer.getByRole('button',{name:'Log unavailable for retained attempt',exact:true})).toBeDisabled();
-    await drawer.getByRole('button',{name:'Open latest evaluations',exact:true}).click();
+    response=fixture;
+    await page.goto(new URL('/evaluations',page.url()).href);
+    await page.getByRole('button',{name:/^Active Queue\b/}).click();
     await page.getByRole('row').filter({hasText:fixture.matrix.commit_sha.slice(0,12)}).click();
     await drawer.getByRole('button',{name:'Policy matrix',exact:true}).click();
     await drawer.getByRole('button',{name:'Name',exact:true}).click();
@@ -550,6 +641,22 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
     await expect(policyStat.getByText('1 unavailable',{exact:true})).toBeVisible();
     await expect(drawer.getByRole('button',{name:/^Clean\s+58$/})).toBeVisible();
 
+    // A new dense attempt resets operator choices. This differs from both a
+    // same-UUID empty capture and a same-UUID outcome update above.
+    await drawer.getByRole('button',{name:'Name',exact:true}).click();
+    await drawer.getByRole('button',{name:/^Failing\s+2$/}).click();
+    await drawer.getByRole('button',{name:/^Controls\s+128$/}).click();
+    const resetTrim=drawer.getByRole('button',{name:'Failing only',exact:true});
+    if ((await resetTrim.getAttribute('class')).includes('active-filter')) await resetTrim.click();
+    response={...fixture,matrix:{...fixture.matrix,evaluation_attempt_id:id(9200)}};
+    await reopen();
+    await expect(drawer.getByRole('button',{name:/^Bundles\s+6$/})).toHaveClass('active');
+    await expect(drawer.getByRole('button',{name:/^All\s+60$/})).toHaveClass('active');
+    await expect(drawer.getByRole('button',{name:'Worst first',exact:true})).toHaveClass('active');
+    await drawer.getByRole('button',{name:/^Controls\s+128$/}).click();
+    await expect(resetTrim).toHaveClass(/active-filter/);
+    await expect(drawer.getByRole('button',{name:'fixture-host-00',exact:true})).toHaveAttribute('aria-expanded','false');
+
     // Reload and a fresh JS context cannot depend on owner-held presentation.
     // They must resolve the shareable route from this exact-attempt API fixture.
     pinnedResponse=fixture;
@@ -582,6 +689,7 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
       await freshPage.getByRole('button',{name:'Back to Evaluation',exact:true}).click();
       const retained=freshPage.getByRole('dialog',{name:'Evaluation detail',exact:true});
       await expect(retained).toBeVisible();
+      await assertDialogKeyboard(freshPage,retained,'retained-evaluation-dialog');
       await expect(retained).toHaveAttribute('data-attempt-number',String(fixture.matrix.attempt_number));
       await expect(retained).toHaveAttribute('data-attempt-id',fixture.matrix.evaluation_attempt_id);
       const retainedStat=label=>retained.locator('.ed-stat').filter({has:freshPage.getByText(label,{exact:true})}).locator('.ed-stat-val');
@@ -591,15 +699,89 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
       await expect(retained.getByRole('tab',{name:'Dependency graph unavailable',exact:true})).toBeDisabled();
       await expect(retained.getByRole('button',{name:/^All\s+60$/})).toHaveClass('active');
       expect(freshRequests.every(url=>new URL(url).pathname===new URL(pinnedRequests[0]).pathname)).toBe(true);
+      for (const method of ['Escape','X','Backdrop']) {
+        await freshPage.goto(evidenceUrl.href);
+        const directEvidence=freshPage.getByRole('dialog',{name:'Evaluation check evidence',exact:true});
+        await expect(freshPage.getByRole('region',{name:'Exact evaluation evidence'})).toContainText(fixture.matrix.evaluation_attempt_id);
+        await assertDialogKeyboard(freshPage,directEvidence,'compliance-evaluation-dialog');
+        await dismissDialog(freshPage,directEvidence,method,'Close evaluation evidence');
+        await expect(directEvidence).toBeHidden();
+        await expect(retained).toHaveAttribute('data-attempt-id',fixture.matrix.evaluation_attempt_id);
+        await assertDialogKeyboard(freshPage,retained,'retained-evaluation-dialog');
+        await dismissDialog(freshPage,retained,method);
+        await expect(retained).toBeHidden();
+        // Direct URLs have no connected opener. dialog_focus.rs specifies the
+        // main heading as the focus fallback in this case.
+        await expect(freshPage.getByRole('heading',{name:'Evaluations',exact:true})).toBeFocused();
+      }
     } finally {
       await freshContext.close();
     }
-    // Restore a list-owned drawer for the caller's independent action checks.
+    // Completed owns additional page filters. Exercise their non-default values
+    // through the same evidence dismissals, independently of the queue case.
+    response=fixture;
+    pinnedResponse=fixture;
+    onHistoryPhase(true);
     await page.goto(new URL('/evaluations',evidenceUrl).href);
+    await page.getByRole('button',{name:/^Completed\b/}).click();
+    const completedSearch=page.getByPlaceholder('Search completed…');
+    await completedSearch.fill('TASK-488 matrix fixture');
+    await page.getByRole('button',{name:'complete',exact:true}).click();
+    const completedFlake=page.getByRole('combobox').filter({has:page.getByRole('option',{name:'All flakes',exact:true})});
+    await completedFlake.selectOption('TASK-488 matrix fixture');
+    const latest=page.getByRole('button',{name:'Latest per flake',exact:true});
+    if (await latest.getAttribute('aria-pressed') !== 'true') await latest.click();
+    await page.getByRole('row').filter({hasText:fixture.matrix.commit_sha.slice(0,12)}).click();
+    await drawer.getByRole('button',{name:'Policy matrix',exact:true}).click();
+    await drawer.getByRole('button',{name:/^Failing\s+1$/}).click();
+    await drawer.getByRole('button',{name:'Name',exact:true}).click();
+    await drawer.getByRole('row').filter({hasText:'fixture-host-00'}).getByRole('button',{name:/93\/96.*1 failed/}).click();
+    await drawer.getByRole('button',{name:'fixture-host-00',exact:true}).click();
+    await drawer.getByRole('button',{name:'Fixture policy 000 · 1.0',exact:true}).click();
+    await page.setViewportSize({...originalViewport,height:640});
+    try {
+      for (const method of ['X','Escape','Backdrop']) {
+        const opener=drawer.getByRole('button',{name:'View in compliance evidence · Fixture bundle 2 · v1',exact:true});
+        await expect.poll(()=>drawer.locator('.pm-scroll').evaluate(el=>el.scrollHeight>el.clientHeight)).toBe(true);
+        await drawer.locator('.pm-scroll').evaluate(el=>{el.scrollTop=80;});
+        await opener.focus();
+        const scroll=await drawer.locator('.pm-scroll').evaluate(el=>el.scrollTop);
+        expect(scroll).toBeGreaterThan(0);
+        await opener.press('Enter');
+        const receiver=page.getByRole('dialog',{name:'Evaluation check evidence',exact:true});
+        await expect(page.getByRole('region',{name:'Exact evaluation evidence'})).toContainText(fixture.matrix.evaluation_attempt_id);
+        await dismissDialog(page,receiver,method,'Close evaluation evidence');
+        await expect(receiver).toBeHidden();
+        expect(new URL(page.url()).pathname).toBe(`/evaluations/${commitId}/attempts/${fixture.matrix.evaluation_attempt_id}`);
+        await expect(drawer).toHaveAttribute('data-attempt-number',String(fixture.matrix.attempt_number));
+        await expect(completedSearch).toHaveValue('TASK-488 matrix fixture');
+        await expect(completedFlake).toHaveValue('TASK-488 matrix fixture');
+        await expect(page.getByRole('button',{name:'complete',exact:true})).toHaveClass(/active/);
+        await expect(latest).toHaveAttribute('aria-pressed','true');
+        await expect(drawer.getByRole('button',{name:/^Controls\s+128$/})).toHaveClass('active');
+        await expect(drawer.getByRole('button',{name:'Fixture bundle 1 · v1 ×',exact:true})).toBeVisible();
+        await expect(drawer.getByRole('button',{name:'Failing only',exact:true})).toHaveClass(/active-filter/);
+        await expect(drawer.getByRole('button',{name:/^Failing\s+1$/})).toHaveClass('active');
+        await expect(drawer.getByRole('button',{name:'Name',exact:true})).toHaveClass('active');
+        await expect(drawer.getByRole('button',{name:'fixture-host-00',exact:true})).toHaveAttribute('aria-expanded','true');
+        await expect(drawer.getByText('[FIXTURE] services.openssh.settings.PermitRootLogin must equal no',{exact:true})).toBeVisible();
+        await expect(opener).toBeFocused();
+        await expect.poll(()=>drawer.locator('.pm-scroll').evaluate(el=>el.scrollTop)).toBe(scroll);
+      }
+    } finally {
+      await page.setViewportSize(originalViewport);
+    }
+    // Restore a list-owned drawer for the caller's independent action checks.
+    onHistoryPhase(false);
+    await page.goto(new URL('/evaluations',evidenceUrl).href);
+    // The independent action check below requires the queue's live item.
+    await page.getByRole('button',{name:/^Active Queue\b/}).click();
+    await page.getByPlaceholder('Search queue…').fill('');
     await page.getByRole('row').filter({hasText:fixture.matrix.commit_sha.slice(0,12)}).click();
     console.log('PASS structured 60-system/128-control matrix overlap, health, drilldown, evidence, live capture/outcome polling and state preservation');
   } finally {
     release?.();
+    await page.setViewportSize(originalViewport);
     await page.unroute(endpoint);
     await page.unroute(pinnedEndpoint);
   }

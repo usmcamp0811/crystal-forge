@@ -322,17 +322,66 @@ Two cases use PostgreSQL lock wait inspection to prove that membership deletion
 and environment moves wait until a receiver finishes materializing its response.
 The bundle reader restricts candidates to the exact locked system UUID set.
 
+### TASK-488 log, recovery, receiver, and inventory review regressions
+
+These 20 ignored and nine pure tests preserve all 208 previous exact selections.
+Each uses the existing named-success and exactly-one-passed guard. Registration
+describes coverage; it does not establish a runtime or CI pass.
+
+- **Attempt logs:** Historical rows remain stored; stale single and batch writes
+  fail. Unattributed legacy logs are excluded from current-attempt reads.
+  WebSocket retry replaces a hidden host UUID with a visible UUID under the same
+  configuration name without replaying old-attempt evidence. Six pure tests
+  cover generation fencing, replay/live ordering, bounded buffers, cleanup, all
+  message variants, and compatible wire shapes.
+- **Receivers:** Two additional tests materialize composite evidence with a
+  one-connection pool and preserve environment scope and admin compatibility.
+  Another test proves that evidence reads acquire the POA&M sentinel before
+  system scope locks, matching concurrent metadata writers.
+- **Restart recovery:** Seven tests retain partial durable evidence, capture a
+  fresh child plan, preserve zero and exhausted failure budgets, and retain
+  queued children and delayed backoff. Repeated/concurrent recovery targets the
+  exact source; child insertion failure rolls back source and commit changes.
+  Cancellation, terminal attempts, and missing owners never enqueue work.
+  Recovery does not consume the ordinary failure retry budget or impose a hard
+  cap on restart recovery. Ordinary failures still obey the configured budget.
+- **Required inventory:** Four database tests check cancellation, supersession,
+  timeout, connection reclamation, exact ownership, and conflicts. Three pure
+  helper tests block producer admission after persistence or final-check failure.
+  A fifth database test proves that PostgreSQL's 31-second local timeouts let
+  an abandoned writer return its connection while the external lock stays held.
+  A sixth preserves stricter database/session timeout policies.
+  The actual worker test verifies permit release before blocked finalization,
+  including finalizer failure. Database timeout cases use the actual production
+  30-second deadline, with no shorter runner timeout or deadline override.
+
+The worker requires a runner-provided public TOML fixture containing only:
+
+```toml
+[server]
+host = "127.0.0.1"
+port = 0
+execution_mode = "mock"
+```
+
+The check creates this fixture with `pkgs.writeText` and scopes
+`CRYSTAL_FORGE_CONFIG` only to the exact invocation of
+`server::required_inventory_worker_tests::required_inventory_actual_worker_releases_permit_before_blocked_finalization`.
+`process_pending_commits` reloads `CrystalForgeConfig` independently of `CFState`,
+so mock mode on `CFState` alone is insufficient. No global mock override affects
+integration targets or other tests.
+
 ## TASK-470 selected library tests
 
-The exact library-test runner selects 125 ignored tests: the 62 tests in the
+The exact library-test runner selects 145 ignored tests: the 62 tests in the
 TASK-470 extra library list below (including four TASK-488 isolated mock tests
 and four derivation-count tests, plus two native-finalizer tests),
 the six TASK-484 tests, four original TASK-488 capture tests, 16 MR334 review
 tests above, the 24 inventory and visibility tests above, six immutable native
-outcome tests, six receiver scope tests,
+outcome tests, six receiver scope tests, 20 additional TASK-488 review tests,
 and this TASK-487
-regression. With the unchanged 83 non-ignored selections, the exact library-test
-runner selects 208 tests in total:
+regression. With 92 non-ignored selections (83 existing plus nine TASK-488 pure
+tests), the exact library-test runner selects 237 tests in total:
 
 ```text
 handlers::api::deployment_policies::tests::test_list_deployment_policies_includes_fixture
@@ -674,7 +723,8 @@ projection, protected token files and alphabet boundaries, bounded responses,
 and refusal before file or network access. Native restricted-role and module
 lifecycle acceptance remains covered by the separate `attic-metrics` VM check.
 
-These 83 non-ignored tests run with `--exact --test-threads=1`:
+The following 83 existing non-ignored tests and the nine TASK-488 pure tests
+described above run with `--exact --test-threads=1`, for 92 in total:
 
 ```text
 queries::commits::partial_resource_failure_tests::partial_failure_diagnostic_uses_proven_counts_not_checkpoint_guesses

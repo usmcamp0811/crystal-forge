@@ -5,8 +5,22 @@
 
 use anyhow::{Result, bail};
 use sqlx::PgPool;
+use std::time::Duration;
 
 use crate::models::evaluate_with_policies::{EvaluationCancelled, EvaluationSuperseded};
+
+/// Bounds foreground required-inventory persistence, including pool acquisition.
+///
+/// Matches the configured 30-second database pool acquisition allowance, but
+/// applies once to the whole write rather than separately to each statement.
+pub(crate) const REQUIRED_INVENTORY_WRITE_BUDGET: Duration = Duration::from_secs(30);
+
+/// Separates the database statement ceiling from the foreground write deadline.
+///
+/// PostgreSQL gets one additional second to finish an in-flight statement after
+/// the caller's whole-write budget. A dropped SQLx transaction queues rollback
+/// behind that statement; the statement must end even if its blocker stays held.
+pub(crate) const REQUIRED_INVENTORY_CLEANUP_GRACE: Duration = Duration::from_secs(1);
 
 /// Identifies the source of inventory names without claiming outcome evidence.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -53,12 +67,24 @@ fn normalized(names: &[String]) -> Vec<String> {
 /// current and active. A queued retry makes the older attempt unavailable for
 /// writes even before the started counter advances. No cache is consulted.
 ///
+/// Transaction-local lock and statement timeouts limit each database statement
+/// to at most 31 seconds (the 30-second foreground budget plus one cleanup
+/// second). Each setting preserves a stricter existing nonzero database, role,
+/// or session timeout. Zero means disabled and receives the 31-second ceiling.
+/// These limits let PostgreSQL abort a blocked statement and process SQLx's
+/// queued rollback after the caller drops the write, without releasing the
+/// external blocker. They do not bound pool acquisition or total transaction
+/// time; required-write callers must enforce the separate whole-write deadline.
+/// Rollback acknowledgement and connection reuse still require a responsive
+/// database and executor. An unknown COMMIT result does not prove row absence.
+///
 /// # Errors
 /// Returns `EvaluationSuperseded` for missing, nonactive, or older ownership,
 /// [`EvaluationCancelled`] for cancellation of the owned active attempt, and
 /// [`InventoryConflict`] for differing first-write evidence. Returns validation
 /// errors for selections outside discovery, and database errors on persistence
-/// failure. An error never replaces existing inventory.
+/// failure, including database lock/statement timeout. An error never replaces
+/// existing inventory.
 ///
 /// # Examples
 /// ```no_run
@@ -91,6 +117,25 @@ pub async fn persist_inventory(
         bail!("selected configuration names must be a subset of discovered names");
     }
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: Dropping a SQLx query does not cancel PostgreSQL's lock wait.
+    // Bound the statement before taking any writer locks so a queued rollback
+    // can run while an external snapshot writer still holds its advisory lock.
+    // pg_settings normalizes both settings to milliseconds. Never expand a
+    // stricter nonzero policy. VALUES plus LEFT JOIN applies the ceiling even
+    // if a settings lookup is missing. Both settings reset on commit/rollback.
+    let statement_timeout_ms = i64::try_from(
+        (REQUIRED_INVENTORY_WRITE_BUDGET + REQUIRED_INVENTORY_CLEANUP_GRACE).as_millis(),
+    )?;
+    sqlx::query(
+        "SELECT set_config(requested.name,
+             LEAST(COALESCE(NULLIF(settings.setting::bigint, 0), $1::bigint),
+                 $1::bigint)::text || 'ms', true)
+         FROM (VALUES ('lock_timeout'), ('statement_timeout')) AS requested(name)
+         LEFT JOIN pg_catalog.pg_settings AS settings ON settings.name = requested.name",
+    )
+    .bind(statement_timeout_ms)
+    .execute(&mut *tx)
+    .await?;
     // CONCURRENCY: Match retry/finalizer lock ordering. Commit ownership stays
     // locked through insertion and comparison, preventing a late older writer.
     super::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await?;

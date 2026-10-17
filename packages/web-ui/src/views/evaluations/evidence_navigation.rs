@@ -2,7 +2,7 @@
 
 use crate::api::models::eval_policy_matrix::*;
 use crate::components::dialog_focus::{
-    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel, DialogInitialFocus,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::routes::Route;
@@ -178,8 +178,9 @@ pub(super) fn RetainedAttemptDrawer(
     rsx! {
         div { class: "fl-tray-backdrop", onclick: move |_| on_close.call(()) }
         aside { id: "retained-evaluation-dialog", class: if maximized() { "fl-tray ed-drawer fl-tray-max" } else { "fl-tray ed-drawer" }, role: "dialog", aria_modal: "true", aria_label: "Evaluation detail", "data-attempt-number": "{identity.attempt_number}", "data-attempt-id": "{identity.attempt_id}", "data-commit-sha": "{identity.commit_sha}", tabindex: "-1",
-            onkeydown: move |event| if event.key() == Key::Escape { on_close.call(()); },
+            onkeydown: move |event| if event.key() == Key::Escape { event.stop_propagation(); on_close.call(()); },
             DialogFocusRestore {}
+            DialogInitialFocus { dialog_id: "retained-evaluation-dialog" }
             DialogFocusSentinel { dialog_id: "retained-evaluation-dialog".to_string(), boundary: DialogFocusBoundary::Last }
             header { class: "fl-tray-head",
                 div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;",
@@ -201,7 +202,7 @@ pub(super) fn RetainedAttemptDrawer(
                 }
                 div { style: "display:flex;gap:6px;align-items:center;",
                     super::drawer_header::ExpandButton { maximized }
-                    button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close", onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } }
+                    button { class: "btn-icon focus-ring", aria_label: "Close", onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } }
                 }
             }
             match &*displayed_value {

@@ -141,10 +141,12 @@ pub struct CFState {
     pub queue_notifier: Arc<QueueNotifier>,
     pub job_registry: BackgroundJobRegistry,
     pub nixos_options_metadata: NixosOptionsMetadataProvider,
-    pub eval_log_channels: Arc<
-        tokio::sync::Mutex<std::collections::HashMap<i32, tokio::sync::broadcast::Sender<String>>>,
-    >,
-    pub eval_log_history: Arc<tokio::sync::Mutex<std::collections::HashMap<i32, Vec<String>>>>,
+    /// State-local sole senders and replay, atomically rotated by exact attempt.
+    pub(crate) eval_log_registry:
+        Arc<tokio::sync::Mutex<crate::handlers::api::commits::log_registry::EvalLogRegistry>>,
+    /// Immutable producer capability; request state has no publication authority.
+    pub(crate) eval_log_producer:
+        Option<crate::handlers::api::commits::log_registry::ProducerToken>,
     pub build_log_channels: Arc<
         tokio::sync::Mutex<std::collections::HashMap<Uuid, tokio::sync::broadcast::Sender<String>>>,
     >,
@@ -165,8 +167,8 @@ impl CFState {
             queue_notifier,
             job_registry,
             nixos_options_metadata: NixosOptionsMetadataProvider::from_runtime(),
-            eval_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-            eval_log_history: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            eval_log_registry: Arc::default(),
+            eval_log_producer: None,
             build_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             build_log_history: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }

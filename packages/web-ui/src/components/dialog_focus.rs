@@ -44,7 +44,10 @@ impl DialogFocusGuard {
 #[cfg(target_arch = "wasm32")]
 impl Drop for DialogFocusGuardInner {
     fn drop(&mut self) {
-        let Some(document) = web_sys::window().and_then(|window| window.document()) else {
+        let Some(window) = web_sys::window() else {
+            return;
+        };
+        let Some(document) = window.document() else {
             return;
         };
         if let Some(opener) = self.opener.as_ref() {
@@ -53,23 +56,69 @@ impl Drop for DialogFocusGuardInner {
                 .and_then(|value| value.as_bool())
                 .unwrap_or(false);
             if connected && !matches!(opener.tag_name().as_str(), "BODY" | "HTML") {
-                if opener.focus().is_ok() {
-                    return;
-                }
+                let _ = opener.focus();
             }
         }
-        if let Ok(Some(element)) = document.query_selector("main h1, main [role='heading']")
-            && let Ok(element) = element.dyn_into::<web_sys::HtmlElement>()
-        {
-            if element.tab_index() < 0 {
-                let _ = element.set_attribute("tabindex", "-1");
+        // Drop can run before navigation removes the old page. Resolve fallback
+        // targets one frame later even after successful focus: that opener may
+        // belong to the retiring page and disappear before the next frame.
+        // The owned document survives teardown; newer user/dialog focus wins.
+        let fallback = wasm_bindgen::closure::Closure::once_into_js(move || {
+            if document.active_element().is_some_and(|active| {
+                !matches!(active.tag_name().as_str(), "BODY" | "HTML")
+                    && js_sys::Reflect::get(active.as_ref(), &"isConnected".into())
+                        .ok()
+                        .and_then(|value| value.as_bool())
+                        .unwrap_or(false)
+            }) {
+                return;
             }
-            let _ = element.focus();
+            if let Ok(Some(modal)) = document.query_selector(
+                "[aria-modal='true']:is([role='dialog'],[role='alertdialog']):not([hidden]):not([aria-hidden='true'])",
+            ) {
+                let id = modal.id();
+                if !id.is_empty() {
+                    focus_dialog_boundary(&id, DialogFocusBoundary::First);
+                    if document
+                        .active_element()
+                        .is_some_and(|active| modal.contains(Some(&active)))
+                    {
+                        return;
+                    }
+                }
+                // An inner dialog can disappear without a surviving opener.
+                // Keep fallback focus inside the remaining modal, not behind it.
+                if let Ok(modal) = modal.dyn_into::<web_sys::HtmlElement>() {
+                    let _ = modal.set_attribute("tabindex", "-1");
+                    let _ = modal.focus();
+                }
+                return;
+            }
+            if let Ok(Some(element)) = document.query_selector("main h1, main [role='heading']")
+                && let Ok(element) = element.dyn_into::<web_sys::HtmlElement>()
+            {
+                let _ = element.set_attribute("tabindex", "-1");
+                let _ = element.focus();
+            }
+        });
+        if window
+            .request_animation_frame(fallback.unchecked_ref())
+            .is_err()
+        {
+            // Invoking the one-shot callback also releases its captured state
+            // when a closing window cannot schedule another animation frame.
+            let callback: &js_sys::Function = fallback.unchecked_ref();
+            let _ = callback.call0(&wasm_bindgen::JsValue::NULL);
         }
     }
 }
 
 /// Captures the active opener and restores focus when the owning dialog unmounts.
+///
+/// Focuses a connected opener immediately, then verifies focus one animation
+/// frame later so navigation cannot leave focus on a removed page element.
+/// Fallback resolves the current modal or page heading after navigation.
+/// Leaves focus established by the user or a newly mounted dialog intact.
 #[component]
 pub(crate) fn DialogFocusRestore() -> Element {
     #[cfg(target_arch = "wasm32")]

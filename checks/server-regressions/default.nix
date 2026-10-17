@@ -789,6 +789,59 @@ SQL
       runExactCacheRegression "$testName" --ignored
     done
 
+    # TASK-488 review fixes retain exact-attempt logs and restart evidence,
+    # avoid nested pool acquisition, and bound mandatory inventory persistence.
+    # The database timeout cases exercise the actual 30-second deadline.
+    for testName in \
+      handlers::api::commits::visibility::tests::attempt_log_regressions::websocket_retry_replaces_hidden_uuid_without_replaying_old_attempt \
+      queries::eval_logs_tests::attempt_owned_logs_retain_history_and_fence_stale_single_and_batch \
+      queries::eval_logs_tests::attempt_log_constraints_reject_partial_and_foreign_attribution \
+      queries::commits::restart_recovery_tests::restart_recovery_fresh_loader_capture_preserves_partial_durable_evidence \
+      queries::commits::restart_recovery_tests::restart_recovery_preserves_zero_and_exhausted_failure_budgets \
+      queries::commits::restart_recovery_tests::restart_recovery_repeated_concurrent_exact_source_and_later_child_interruption \
+      queries::commits::restart_recovery_tests::restart_recovery_insert_failure_rolls_back_source_and_commit \
+      queries::commits::restart_recovery_tests::restart_recovery_cancellation_terminal_and_missing_owner_never_enqueue \
+      queries::commits::restart_recovery_tests::restart_recovery_preserves_queued_children_and_delayed_backoff \
+      queries::commits::restart_recovery_tests::restart_recovery_ordinary_failure_retries_before_and_after_interruption \
+      handlers::api::compliance::tests::receiver_security::receiver_handlers_complete_with_one_connection_and_materialized_composite_evidence \
+      handlers::api::compliance::tests::receiver_security::receiver_handlers_single_connection_preserve_scope_and_admin_compatibility \
+      handlers::api::compliance::tests::receiver_security::evidence_receiver_orders_poam_sentinel_before_system_scope_locks \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_snapshot_wait_cancel_reclaims_connection \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_snapshot_wait_superseded_reclaims_connection \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_lock_wait_timeout_reclaims_connection \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_exact_owner_success_and_conflict \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_reclaims_connection_while_snapshot_blocker_stays_held \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_preserves_stricter_database_timeouts
+    do
+      runExactCacheRegression "$testName" --ignored
+    done
+
+    # process_pending_commits reloads CrystalForgeConfig independently of
+    # CFState. Scope this public fixture to the worker's exact test process;
+    # other regressions must retain their existing execution-mode configuration.
+    CRYSTAL_FORGE_CONFIG=${pkgs.writeText "required-inventory-worker-mock.toml" ''
+      [server]
+      host = "127.0.0.1"
+      port = 0
+      execution_mode = "mock"
+    ''} runExactCacheRegression \
+      server::required_inventory_worker_tests::required_inventory_actual_worker_releases_permit_before_blocked_finalization \
+      --ignored
+
+    for testName in \
+      handlers::api::commits::log_registry::tests::rotation_fences_producer_cleanup_and_closes_old_receivers \
+      handlers::api::commits::log_registry::tests::atomic_replay_live_boundary_delivers_each_event_once \
+      handlers::api::commits::log_registry::tests::retired_generation_and_other_state_cannot_publish \
+      handlers::api::commits::log_registry::tests::replay_and_channel_capacity_are_bounded_without_retargeting \
+      handlers::api::commits::tests::all_message_variants_require_original_producer_generation \
+      handlers::api::commits::tests::eval_log_wire_shapes_remain_compatible \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_deadline_drops_writer_without_admission \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_preserves_failures_and_blocks_both_producer_gates \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_final_check_fails_closed
+    do
+      runExactCacheRegression "$testName"
+    done
+
     # MR334 review regressions use the declared module paths, including child
     # test modules. Keep each isolated SQLx case behind the exact-success guard.
     for testName in \

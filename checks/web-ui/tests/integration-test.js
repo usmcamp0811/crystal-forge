@@ -5935,6 +5935,39 @@ async function runTask440LiveSnapshotEvaluation(page) {
       "Expected Config to render a known option from the persisted V2 artifact",
       15000,
     );
+
+    // Persisted receiver proof, separate from 26e's browser-local UUIDs. Reuse
+    // this step's real task-owned flake, completed attempt and V2 artifact.
+    // No matrix route or System Config response is intercepted on this path.
+    const { expect } = require("@playwright/test");
+    const { body: retainedMatrix } = await phase6Api(page,
+      `/api/v1/commits/${fixture.commitId}/eval/attempts/${retry.id}/policy-matrix`);
+    expect(retainedMatrix.matrix?.evaluation_attempt_id).toBe(retry.id);
+    const capturedSystem = retainedMatrix.matrix?.rows.find(row => row.system_id === fixture.systemId);
+    expect(capturedSystem?.configuration_name).toBe(fixture.configurationName);
+    await page.goto(`${baseUrl}/evaluations/${fixture.commitId}/attempts/${retry.id}`, { timeout: LOAD_TIMEOUT });
+    const retainedDrawer = page.getByRole("dialog", { name: "Evaluation detail", exact: true });
+    await expect(retainedDrawer).toHaveAttribute("data-attempt-id", retry.id);
+    await expect(retainedDrawer).toHaveAttribute("data-commit-sha", fixture.revision);
+    await retainedDrawer.getByRole("button", { name: capturedSystem.system_name, exact: true }).click();
+    const openSystem = retainedDrawer.getByRole("button", { name: "Open system", exact: true });
+    await openSystem.focus();
+    await openSystem.press("Enter");
+    const systemUrl = new URL(page.url());
+    expect(systemUrl.pathname).toBe(`/systems/${fixture.systemId}`);
+    expect(systemUrl.searchParams.get("tab")).toBe("config");
+    expect(systemUrl.searchParams.get("config_mode")).toBe("commit");
+    expect(systemUrl.searchParams.get("revision")).toBe(fixture.revision);
+    await expect(page.locator(".cfgx")).toBeVisible();
+    await expect(page.locator(".cfgx-meta-i").filter({ hasText: "inventoryunavailable" })).toHaveCount(0);
+    await page.getByRole("button", { name: "Search", exact: true }).click();
+    await page.getByPlaceholder("Search all certified options…").fill("networking.hostName");
+    await expect(page.getByText("networking.hostName", { exact: true })).toBeVisible({ timeout: 15000 });
+    await page.getByRole("button", { name: "Back to Evaluation", exact: true }).click();
+    await expect(retainedDrawer).toHaveAttribute("data-attempt-id", retry.id);
+    await expect(retainedDrawer).toHaveAttribute("data-commit-sha", fixture.revision);
+    await expect(retainedDrawer.getByRole("button", { name: capturedSystem.system_name, exact: true })).toHaveAttribute("aria-expanded", "true");
+    await expect(openSystem).toBeFocused();
   } finally {
     if (controlsConfigWorker) {
       execFileSync("systemctl", ["start", "crystal-forge-config-inspector.service"]);
@@ -21103,6 +21136,7 @@ security.audit.enable = true;</fixtext>
     action: async (page) => {
       const { expect } = require("@playwright/test");
       let historyRequestCount = 0;
+      let heldHistory = null;
       const evalQueueMock = {
         active_count: 0,
         completed_count: 3,
@@ -21190,7 +21224,29 @@ security.audit.enable = true;</fixtext>
         await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(evalQueueMock) });
       });
       await page.route("**/api/v1/commits/eval-history**", async (route) => {
-        await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(evalHistoryMock) });
+        // Apply every server-owned filter before pagination. The domain total
+        // remains the authorized unfiltered population, including non-latest rows.
+        const params = new URL(route.request().url()).searchParams;
+        const query = params.get("search")?.trim().toLowerCase() || "";
+        const status = params.get("status");
+        const flake = params.get("flake");
+        const latestOnly = params.get("latest_only") === "true";
+        const pageNumber = Math.max(1, Number.parseInt(params.get("page"), 10) || 1);
+        const limit = Math.max(1, Number.parseInt(params.get("limit"), 10) || 50);
+        const filtered = evalHistoryMock.items.filter(item =>
+          (!status || status === "all" || item.evaluation_status === status)
+          && (!flake || flake === "all" || item.flake_name === flake)
+          && (!latestOnly || item.is_latest_per_flake)
+          && [item.flake_name, item.branch, item.commit_hash, item.commit_message, item.author,
+            item.commit_id === 999 ? "configuration-only-match" : ""]
+            .some(value => value.toLowerCase().includes(query)));
+        const items = filtered.slice((pageNumber - 1) * limit, pageNumber * limit);
+        if (heldHistory?.query === query) {
+          heldHistory.started = true;
+          await heldHistory.gate;
+        }
+        await route.fulfill({ json: { ...evalHistoryMock, total_count: filtered.length,
+          domain_total: evalHistoryMock.items.length, page: pageNumber, limit, items } });
         historyRequestCount += 1;
       });
       const logsEndpoint = "**/api/v1/commits/999/eval/logs*";
@@ -21294,7 +21350,102 @@ security.audit.enable = true;</fixtext>
         await assertSelection([completeRow]);
         await drawer.getByRole("button", { name: "Close", exact: true }).click();
         await expect(drawer).toBeHidden();
+
+        const { assertDialogKeyboard, dismissDialog } = require("./eval-dialog-workflow.js");
+        // Ordinary Completed dialogs must restore the keyboard opener for all
+        // dismissal paths, without changing the manual selection above.
+        for (const method of ["Escape", "X", "Backdrop"]) {
+          await completeRow.focus();
+          await completeRow.getByRole("cell").filter({ hasText: "ff1a2b3c4d5e" }).click();
+          await assertDialogKeyboard(page, drawer, "history-evaluation-dialog");
+          await dismissDialog(page, drawer, method);
+          await expect(drawer).toBeHidden();
+          await expect(completeRow).toBeFocused();
+          await assertSelection([completeRow]);
+        }
+        // Typing list shortcut characters and Enter in search must not activate
+        // a row, even when list keyboard navigation already has an index.
+        await completeRow.focus();
+        await page.keyboard.press("j");
+        await page.keyboard.press("k");
+        await search.focus();
+        const emptySearchResponse = page.waitForResponse(response => {
+          const url = new URL(response.url());
+          return url.pathname.endsWith('/commits/eval-history') && url.searchParams.get('search') === 'jk';
+        });
+        await page.keyboard.type("jk");
+        await search.press("Enter");
+        await (await emptySearchResponse).finished();
+        await expect(search).toHaveValue("jk");
+        await expect(rows).toHaveCount(0);
+        await expect(drawer).toBeHidden();
+        await assertSelection([]);
+        await search.fill("");
+        await expect(rows).toHaveCount(3);
+        await assertSelection([]);
+
+        // Only the API knows this configuration name. No visible row metadata
+        // matches it, so a second client-side metadata filter would lose the row.
+        await search.fill("configuration-only-match");
+        await expect(rows).toHaveCount(1);
+        await expect(completeRow).toBeVisible();
+        await expect(page.locator(".q-search-count")).toHaveText("1 of 3");
+        await shiftClick(completeRow);
+        await assertSelection([completeRow]);
+
+        // Hold A until B is displayed and selected. Observe DOM mutations until
+        // a subsequent B poll completes, detecting transient stale commits too.
+        let releaseHistory;
+        heldHistory = { query: "infrastructure", started: false,
+          gate: new Promise(resolve => { releaseHistory = resolve; }) };
+        heldHistory.release = releaseHistory;
+        await search.fill(heldHistory.query);
+        await expect.poll(() => heldHistory.started).toBe(true);
+        const currentSearchResponse = page.waitForResponse(response => {
+          const url = new URL(response.url());
+          return url.pathname.endsWith('/commits/eval-history') && url.searchParams.get('search') === 'configuration-only-match';
+        });
+        await search.fill("configuration-only-match");
+        await (await currentSearchResponse).finished();
+        await expect(rows).toHaveCount(1);
+        await expect(page.locator(".q-search-count")).toHaveText("1 of 3");
+        if (await completeRow.getAttribute("aria-selected") !== "true") await shiftClick(completeRow);
+        await assertSelection([completeRow]);
+        await page.evaluate(() => {
+          window.__evalStaleMutations = [];
+          const inspect = () => {
+            const table = [...document.querySelectorAll('table')].find(el => el.textContent.includes('Flake · commit'));
+            const rows = [...(table?.querySelectorAll('tbody tr') || [])];
+            const count = document.querySelector('.q-search-count')?.textContent;
+            if (rows.length !== 1 || !rows[0]?.textContent.includes('ff1a2b3c4d5e')
+                || rows[0]?.getAttribute('aria-selected') !== 'true' || count !== '1 of 3') {
+              window.__evalStaleMutations.push({ rows: rows.map(row => row.textContent), count });
+            }
+          };
+          window.__evalStaleObserver = new MutationObserver(inspect);
+          window.__evalStaleObserver.observe(document.querySelector('main'), { childList: true, subtree: true, attributes: true, characterData: true });
+        });
+        const lateResponse = page.waitForResponse(response => {
+          const url = new URL(response.url());
+          return url.pathname.endsWith('/commits/eval-history') && url.searchParams.get('search') === heldHistory.query;
+        });
+        releaseHistory();
+        await (await lateResponse).finished();
+        const afterLate = historyRequestCount;
+        heldHistory = null;
+        await expect.poll(() => historyRequestCount, { timeout: 12000 }).toBeGreaterThan(afterLate);
+        await expect(rows).toHaveCount(1);
+        await assertSelection([completeRow]);
+        await expect(page.locator(".q-search-count")).toHaveText("1 of 3");
+        expect(await page.evaluate(() => {
+          window.__evalStaleObserver.disconnect();
+          return window.__evalStaleMutations;
+        })).toEqual([]);
+        await search.fill("");
+        await expect(rows).toHaveCount(3);
       } finally {
+        heldHistory?.release();
+        await page.evaluate(() => window.__evalStaleObserver?.disconnect());
         if (await drawer.isVisible()) {
           await drawer.getByRole("button", { name: "Close", exact: true }).click();
           await expect(drawer).toBeHidden();
@@ -21309,6 +21460,7 @@ security.audit.enable = true;</fixtext>
     name: "26c-evaluations-latest-per-flake-populated",
     description: "Evaluation active and history tabs honor server-authoritative latest markers and retain the pressed filter",
     action: async (page) => {
+      const { expect } = require("@playwright/test");
       const requests = [];
       await routeLatestEvaluationsData(page, requests);
       try {
@@ -21317,23 +21469,23 @@ security.audit.enable = true;</fixtext>
         const tableRows = page.locator(".sys-table tbody tr");
         await assertVisible(page.getByText("dddddddddddd", { exact: true }), "Expected populated active evaluation fixture");
         await assertAttribute(toggle, "aria-pressed", "false", "Latest evaluation toggle should expose its off state");
-        await assertCount(tableRows, 3, "Latest-off active evaluations should retain non-latest rows");
-        await assertCount(page.locator(".sys-table tbody .commit-latest"), 2, "Active evaluations should display server-authoritative latest markers");
+        await expect(tableRows, "Latest-off active evaluations should retain non-latest rows").toHaveCount(3);
+        await expect(page.locator(".sys-table tbody .commit-latest"), "Active evaluations should display server-authoritative latest markers").toHaveCount(2);
 
         await toggle.click();
         await assertHidden(page.getByText("eeeeeeeeeeee", { exact: true }), "Latest-only should hide non-latest active evaluations");
         await assertAttribute(toggle, "aria-pressed", "true", "Latest evaluation toggle should expose its pressed state");
-        await assertCount(tableRows, 2, "Latest-only should leave one active evaluation per flake");
+        await expect(tableRows, "Latest-only should leave one active evaluation per flake").toHaveCount(2);
         if (!requests.some((request) => !request.history && request.params.latest_only === "true")) {
           throw new Error("Expected active evaluation request with latest_only=true");
         }
 
-        await page.getByRole("button", { name: /History/ }).click();
+        await page.getByRole("button", { name: /^Completed\b/ }).click();
         await assertVisible(page.getByText("aaaaaaaaaaaa", { exact: true }), "Expected populated evaluation history fixture");
         await assertHidden(page.getByText("bbbbbbbbbbbb", { exact: true }), "Pressed latest filter should persist when switching to evaluation history");
         await assertAttribute(toggle, "aria-pressed", "true", "Latest evaluation filter should remain pressed across tabs");
-        await assertCount(tableRows, 2, "History latest-only should leave one evaluation per flake");
-        await assertCount(page.locator(".sys-table tbody .commit-latest"), 2, "Evaluation history should retain server-authoritative latest markers");
+        await expect(tableRows, "History latest-only should leave one evaluation per flake").toHaveCount(2);
+        await expect(page.locator(".sys-table tbody .commit-latest"), "Evaluation history should retain server-authoritative latest markers").toHaveCount(2);
       } finally {
         await unrouteLatestEvaluationsData(page);
       }
@@ -21359,10 +21511,10 @@ security.audit.enable = true;</fixtext>
           throw new Error("Expected active evaluation request to combine latest_only and search");
         }
 
-        await page.getByRole("button", { name: /History/ }).click();
+        await page.getByRole("button", { name: /^Completed\b/ }).click();
         await page.getByRole("button", { name: "failed", exact: true }).click();
         await page.locator("select.filter-select").selectOption("workstations");
-        const historySearch = page.getByPlaceholder("Search history…");
+        const historySearch = page.getByPlaceholder("Search completed…");
         await historySearch.fill("workstation");
         await assertVisible(page.getByText("cccccccccccc", { exact: true }), "Latest-only should compose with evaluation status, flake, and search filters");
         await assertHidden(page.getByText("aaaaaaaaaaaa", { exact: true }), "Combined evaluation filters should exclude nonmatching latest rows");
@@ -21449,6 +21601,7 @@ security.audit.enable = true;</fixtext>
         item.unselected_count = summary?.excluded ?? 0;
       };
       const queueEndpoint = "**/api/v1/commits/eval-queue**";
+      const historyEndpoint = "**/api/v1/commits/eval-history**";
       const logEndpoint = `**/api/v1/commits/${commitId}/eval/logs*`;
       const forceEndpoint = `**/api/v1/commits/${commitId}/force-cancel-evaluation`;
       let forceRequests = 0;
@@ -21457,6 +21610,13 @@ security.audit.enable = true;</fixtext>
         return route.fulfill({ status: 204 });
       };
       let authenticatedModeProbe = false;
+      // A terminal history row must not supersede the active fixture before the
+      // workflow explicitly enters its independent Completed-table phase.
+      let completedPhase = false;
+      const onHistoryPhase = enabled => {
+        completedPhase = enabled;
+        item.evaluation_status = enabled ? "complete" : "in_progress";
+      };
       const queueRoute = async route => {
         const url = new URL(route.request().url());
         if (url.searchParams.has("_ts") && !url.searchParams.has("limit")) {
@@ -21465,15 +21625,31 @@ security.audit.enable = true;</fixtext>
           const headers = await route.request().allHeaders();
           authenticatedModeProbe = /(?:^|;\s*)__Host-cf-session=/.test(headers.cookie ?? "");
         }
+        const query = url.searchParams.get('search')?.trim().toLowerCase() || '';
+        const items = [item].filter(row => [row.flake_name, row.commit_hash, ...row.systems].some(value => value.toLowerCase().includes(query)));
         await route.fulfill({ json: {
-          active_count: 1, completed_count: 0, successful_count: 0, failed_count: 0,
-          domain_total: 1, filtered_total: 1, execution_mode: "mock",
-          timestamp: now, items: [item],
+          active_count: completedPhase ? 0 : 1, completed_count: completedPhase ? 1 : 0,
+          successful_count: completedPhase ? 1 : 0, failed_count: 0,
+          domain_total: 1, filtered_total: items.length, execution_mode: "mock",
+          timestamp: now, items,
         } });
       };
       const logRoute = route => route.fulfill({ json: [] });
+      const historyRoute = route => {
+        const params = new URL(route.request().url()).searchParams;
+        const query = params.get('search')?.trim().toLowerCase() || '';
+        const completed = { ...item, evaluation_status: 'complete', evaluation_completed_at: now,
+          evaluation_duration_ms: 1000, evaluation_error_message: null,
+          alert_occurrence_id: `fixture-eval-${commitId}` };
+        const items = (completedPhase ? [completed] : []).filter(row =>
+          (!params.get('status') || params.get('status') === 'all' || params.get('status') === row.evaluation_status)
+          && (!params.get('flake') || params.get('flake') === 'all' || params.get('flake') === row.flake_name)
+          && [row.flake_name,row.commit_hash,...row.systems].some(value => value.toLowerCase().includes(query)));
+        return route.fulfill({ json: { items, total_count: items.length, domain_total: completedPhase ? 1 : 0, page: 1, limit: 50 } });
+      };
       const drawer = page.getByRole("dialog", { name: "Evaluation detail", exact: true });
       await page.route(queueEndpoint, queueRoute);
+      await page.route(historyEndpoint, historyRoute);
       await page.route(logEndpoint, logRoute);
       await page.route(forceEndpoint, forceRoute);
       try {
@@ -21489,6 +21665,37 @@ security.audit.enable = true;</fixtext>
           await page.getByRole("row").filter({ hasText: item.commit_hash.slice(0, 12) }).click({ timeout: 1000 });
         }).toPass({ timeout: LOAD_TIMEOUT });
         await expect(drawer).toBeVisible();
+        const { assertDialogKeyboard, dismissDialog } = require('./eval-dialog-workflow.js');
+        const queueRow = page.getByRole('row').filter({hasText:item.commit_hash.slice(0,12)});
+        await assertDialogKeyboard(page,drawer,'queue-evaluation-dialog');
+        await dismissDialog(page,drawer,'Escape');
+        await expect(drawer).toBeHidden();
+        await expect(queueRow).toBeFocused();
+        for (const method of ['X','Backdrop']) {
+          await queueRow.focus();
+          await queueRow.getByRole('cell').filter({hasText:item.commit_hash.slice(0,12)}).click();
+          await assertDialogKeyboard(page,drawer,'queue-evaluation-dialog');
+          await dismissDialog(page,drawer,method);
+          await expect(drawer).toBeHidden();
+          await expect(queueRow).toBeFocused();
+        }
+        await queueRow.focus();
+        await page.keyboard.press('j');
+        await page.keyboard.press('k');
+        const queueSearch=page.getByPlaceholder('Search queue…');
+        await queueSearch.focus();
+        await page.keyboard.type('jk');
+        await queueSearch.press('Enter');
+        await expect(queueSearch).toHaveValue('jk');
+        await expect(queueRow).toHaveCount(0);
+        await expect(drawer).toBeHidden();
+        await queueSearch.fill(item.flake_name);
+        await expect(queueRow).toBeVisible();
+        const latest=page.getByRole('button',{name:'Latest per flake',exact:true});
+        if (await latest.getAttribute('aria-pressed') !== 'true') await latest.click();
+        await queueRow.focus();
+        await queueRow.click();
+        await expect(drawer).toBeVisible();
         await expect(drawer.locator('.ed-stat').filter({has:page.getByText('Systems',{exact:true})}).locator('.ed-stat-val')).toHaveText(/—\s*Discovering/);
         await expect(drawer.locator('.ed-stat').filter({has:page.getByText('Policy',{exact:true})}).locator('.ed-stat-val')).toHaveText(/—\s*Pending/);
         await drawer.getByRole("button", { name: "Expand", exact: true }).click();
@@ -21497,7 +21704,7 @@ security.audit.enable = true;</fixtext>
           .toBe(Math.min(1360, page.viewportSize().width));
         await drawer.getByRole("button", { name: "Restore", exact: true }).click();
         await runEvalPolicyMatrixWorkflow(page, commitId,
-          state => captureWorkflowState(page, stepName, state), onSnapshot);
+          state => captureWorkflowState(page, stepName, state), onSnapshot, onHistoryPhase);
         await drawer.getByRole("button", { name: "Close", exact: true }).click();
         await expect(drawer).toBeHidden();
         item.evaluation_status = "cancelling";
@@ -21525,6 +21732,7 @@ security.audit.enable = true;</fixtext>
         } finally {
           await page.unroute(logEndpoint, logRoute);
           await page.unroute(queueEndpoint, queueRoute);
+          await page.unroute(historyEndpoint, historyRoute);
           await page.unroute(forceEndpoint, forceRoute);
         }
       }

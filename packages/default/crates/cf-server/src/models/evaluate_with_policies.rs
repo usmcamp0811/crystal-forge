@@ -19,11 +19,14 @@ mod evaluation_recovery;
 mod evaluation_watchdog;
 #[path = "mock_persistence.rs"]
 mod mock_persistence;
+#[path = "required_inventory_persistence.rs"]
+mod required_inventory_persistence;
 use evaluation_pressure::{PressureHysteresis, PressureSampler};
 use evaluation_recovery::{
     EvaluationProgress, PhaseStop, RecoveryController, solo_budget, solo_budget_exhausted,
 };
 use evaluation_watchdog::{EvaluationWatchdog, Expiry, OutputStream, cancellation_ticker};
+use required_inventory_persistence::persist_required_inventory;
 
 const MOCK_EVAL_TOTAL_DURATION_MS: u64 = 30_000;
 const MOCK_EVAL_MIN_PER_SYSTEM_MS: u64 = 5_000;
@@ -1955,7 +1958,24 @@ fn spawn_closure_counting(pool: PgPool, finalized: FinalizedDerivation) {
     });
 }
 
-/// Helper function to broadcast eval log via WebSocket AND persist to database.
+// The sequence carries immutable ownership even when no WebSocket state exists.
+// Do not recover an owner from the current commit when flushing old stderr.
+struct EvalLogSequence {
+    owner: crate::queries::eval_logs::EvalLogOwner,
+    next: i32,
+}
+
+impl EvalLogSequence {
+    async fn for_attempt(pool: &PgPool, commit_id: i32, attempt: i32) -> Result<Self> {
+        let mut tx = pool.begin().await?;
+        let owner =
+            crate::queries::eval_logs::claimed_owner_in_tx(&mut tx, commit_id, attempt).await?;
+        tx.commit().await?;
+        Ok(Self { owner, next: 1 })
+    }
+}
+
+/// Broadcasts and persists diagnostics using the original producer ownership.
 ///
 /// This ensures logs are both:
 /// - Streamed in real-time to connected WebSocket clients
@@ -1964,7 +1984,7 @@ async fn broadcast_and_persist_eval_log(
     pool: &PgPool,
     state: Option<&crate::handlers::agent_request::CFState>,
     commit_id: i32,
-    sequence: &mut i32,
+    sequence: &mut EvalLogSequence,
     message: String,
 ) {
     // SECURITY: This is the common boundary for evaluator diagnostics. Redact
@@ -1972,13 +1992,12 @@ async fn broadcast_and_persist_eval_log(
     let message = crate::security::snapshot_redaction::redact_text(&message);
     let lower = message.to_ascii_lowercase();
 
-    // Broadcast via WebSocket (existing infrastructure)
+    // The producer-state clone retains its original owner and generation.
     if let Some(state) = state {
         crate::handlers::api::commits::broadcast_eval_log(state, commit_id, message.clone()).await;
     }
 
-    // Persist to database (new functionality)
-    // Parse log level from message format if possible
+    // Persistence separately fences the exact owner against queued successors.
     let log_level = if message.starts_with("❌") || lower.contains("error") {
         Some("error")
     } else if message.starts_with("⚠️") || lower.contains("warning") {
@@ -1991,14 +2010,19 @@ async fn broadcast_and_persist_eval_log(
         Some("info")
     };
 
-    if let Err(e) =
-        crate::queries::eval_logs::insert_eval_log(pool, commit_id, *sequence, log_level, &message)
-            .await
+    if let Err(e) = crate::queries::eval_logs::insert_eval_log(
+        pool,
+        sequence.owner,
+        sequence.next,
+        log_level,
+        &message,
+    )
+    .await
     {
         warn!("Failed to persist eval log for commit {}: {}", commit_id, e);
     }
 
-    *sequence += 1;
+    sequence.next += 1;
 }
 
 /// Outcome of a standalone fallback evaluation for a single system.
@@ -3546,7 +3570,7 @@ async fn handle_system_build_activation(
     commit_id: i32,
     system_name: &str,
     outcome: &SystemBuildActivationOutcome,
-    log_sequence: Option<&mut i32>,
+    log_sequence: Option<&mut EvalLogSequence>,
 ) -> Result<()> {
     use crate::handlers::api::commits::SystemEvalStatus;
     match outcome {
@@ -4299,7 +4323,7 @@ async fn handle_system_finalize_outcome(
     commit_id: i32,
     system_name: &str,
     outcome: SystemFinalizeOutcome,
-    log_sequence: &mut i32,
+    log_sequence: &mut EvalLogSequence,
 ) -> Result<SystemFinalizeAction> {
     match outcome {
         SystemFinalizeOutcome::Queued {
@@ -4469,6 +4493,12 @@ enum SystemFinalizeAction {
 /// during discovery is concurrent and query-bounded. Bulk cancellation polling
 /// is cooperative; a pending bulk handler can delay its next two-second poll.
 ///
+/// Logs bind to the claimed `expected_attempt` before source work. All direct
+/// statuses, fallback helpers, stderr batches, final flushes, and spawned build
+/// preparation clones retain that owner. Superseded publications cannot create
+/// or retarget a channel. Persisted logs retain prior attempts; new sequences
+/// belong to the exact attempt rather than replacing commit-wide history.
+///
 /// # Errors
 ///
 /// Returns a classified failure for invalid resource policy, source discovery,
@@ -4522,12 +4552,17 @@ async fn evaluate_with_nix_eval_jobs_inner(
     cf_state: Option<&crate::handlers::agent_request::CFState>,
     queue_notifier: Option<&QueueNotifier>,
 ) -> Result<EvaluationPlan> {
-    // Re-evaluation safety: clear previous persisted logs for this commit so
-    // (commit_id, log_sequence) uniqueness cannot collide on subsequent runs.
-    crate::queries::eval_logs::delete_eval_logs_by_commit(pool, commit.id).await?;
-
-    // Sequence counter for log persistence (1-indexed)
-    let mut log_sequence = 1i32;
+    // SECURITY: Bind once from the claimed expected attempt. Every direct
+    // status, fallback helper, and spawned preparation clone retains this token.
+    let producer_state = match cf_state {
+        Some(state) => Some(
+            crate::handlers::api::commits::bind_eval_producer(state, commit.id, expected_attempt)
+                .await?,
+        ),
+        None => None,
+    };
+    let cf_state = producer_state.as_ref();
+    let mut log_sequence = EvalLogSequence::for_attempt(pool, commit.id, expected_attempt).await?;
 
     // Bounded preparation pipeline: GC root + build activation for each
     // streaming system.  A semaphore limits concurrent nix-store subprocess
@@ -4777,7 +4812,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
     let expected_systems = systems_selected_for_evaluation(&known_systems, &allowed_systems);
     // INVARIANT: Required exact-attempt persistence precedes evaluator admission.
     // The mutable artifact cache below remains non-authoritative and optional.
-    crate::queries::evaluation_inventory::persist_inventory(
+    persist_required_inventory(
         pool,
         commit.id,
         expected_attempt,
@@ -6083,13 +6118,13 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                     } else {
                                         Some("debug".to_string())
                                     };
-                                    stderr_log_batch.push((log_sequence, level, line.clone()));
-                                    log_sequence += 1;
+                                    stderr_log_batch.push((log_sequence.next, level, line.clone()));
+                                    log_sequence.next += 1;
 
                                     if stderr_log_batch.len() >= STDERR_LOG_BATCH_SIZE {
                                         if let Err(e) = crate::queries::eval_logs::insert_eval_logs_batch(
                                             pool,
-                                            commit.id,
+                                            log_sequence.owner,
                                             &stderr_log_batch,
                                         )
                                         .await
@@ -6120,7 +6155,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
             if !stderr_log_batch.is_empty() {
                 if let Err(e) = crate::queries::eval_logs::insert_eval_logs_batch(
                     pool,
-                    commit.id,
+                    log_sequence.owner,
                     &stderr_log_batch,
                 )
                 .await
@@ -7321,6 +7356,9 @@ async fn evaluate_with_nix_eval_jobs_inner(
 /// outcome writes do not queue config observations, prepare or enqueue builds,
 /// create GC roots, or publish composite assessments. No expected output store
 /// path is fabricated. The caller retains ordinary attempt finalization.
+/// Stream and persistent logs use the same claimed exact-attempt ownership as
+/// native evaluation. A retry retains previous logs and cannot inherit their
+/// replay buffer, producer capability, or sequence namespace.
 ///
 /// # Errors
 /// Returns an [`EvaluationFailure`] for database or configuration errors, or
@@ -7386,12 +7424,15 @@ async fn evaluate_with_mock_eval_jobs_inner(
     _queue_notifier: Option<&QueueNotifier>,
 ) -> Result<EvaluationPlan> {
     mock_persistence::verify_active(pool, commit.id, expected_attempt).await?;
-    // Re-evaluation safety: clear previous persisted logs for this commit so
-    // (commit_id, log_sequence) uniqueness cannot collide on subsequent runs.
-    crate::queries::eval_logs::delete_eval_logs_by_commit(pool, commit.id).await?;
-
-    // Sequence counter for persisted/mock streamed logs (1-indexed)
-    let mut log_sequence = 1i32;
+    let producer_state = match cf_state {
+        Some(state) => Some(
+            crate::handlers::api::commits::bind_eval_producer(state, commit.id, expected_attempt)
+                .await?,
+        ),
+        None => None,
+    };
+    let cf_state = producer_state.as_ref();
+    let mut log_sequence = EvalLogSequence::for_attempt(pool, commit.id, expected_attempt).await?;
 
     // MOCK ONLY: The policy plan captured for this attempt is keyed by the
     // configuration names of active registered systems. Mock results use
@@ -7403,7 +7444,7 @@ async fn evaluate_with_mock_eval_jobs_inner(
     let systems = resolve_mock_systems(&flake.name, target_system, &candidate_systems)?;
     // Mock inventory is exactly the resolved synthetic list, never native
     // discovery evidence. Persist before simulated stages or outcome publication.
-    crate::queries::evaluation_inventory::persist_inventory(
+    persist_required_inventory(
         pool,
         commit.id,
         expected_attempt,

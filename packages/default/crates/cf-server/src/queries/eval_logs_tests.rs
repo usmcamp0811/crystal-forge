@@ -1,86 +1,181 @@
-use crate::queries::commits::{get_commit_by_hash, insert_commit_with_metadata};
-use crate::queries::eval_logs::{
-    delete_eval_logs_by_commit, fetch_eval_logs_by_commit, insert_eval_log,
-};
-use crate::queries::flakes::insert_flake;
-use chrono::Utc;
+//! Exact-attempt persistence regressions. Every database is SQLx-owned.
+
+use crate::queries::commits::{self, EvalStartOutcome};
+use crate::queries::eval_logs::{self, EvalLogOwner};
 use sqlx::PgPool;
+use uuid::Uuid;
 
-async fn test_pool_from_env() -> PgPool {
-    let db_url =
-        std::env::var("DATABASE_URL").expect("DATABASE_URL must be set for eval log DB tests");
-
-    PgPool::connect(&db_url)
+async fn fixture(pool: &PgPool) -> EvalLogOwner {
+    let suffix = Uuid::new_v4().to_string();
+    let flake: i32 =
+        sqlx::query_scalar("INSERT INTO flakes(name, repo_url) VALUES ($1, $2) RETURNING id")
+            .bind(&suffix)
+            .bind(format!("https://example.invalid/{suffix}"))
+            .fetch_one(pool)
+            .await
+            .unwrap();
+    let commit: i32 = sqlx::query_scalar(
+        "INSERT INTO commits(flake_id, git_commit_hash, commit_timestamp, evaluation_status)
+         VALUES ($1, $2, NOW(), 'pending') RETURNING id",
+    )
+    .bind(flake)
+    .bind(&suffix)
+    .fetch_one(pool)
+    .await
+    .unwrap();
+    assert!(matches!(
+        commits::mark_commit_evaluation_started(pool, commit)
+            .await
+            .unwrap(),
+        EvalStartOutcome::Started { attempt: 1 }
+    ));
+    let mut tx = pool.begin().await.unwrap();
+    let owner = eval_logs::claimed_owner_in_tx(&mut tx, commit, 1)
         .await
-        .expect("failed to connect to DATABASE_URL")
+        .unwrap();
+    tx.commit().await.unwrap();
+    owner
 }
 
-#[tokio::test]
-#[ignore = "requires live database connection"]
-async fn re_evaluation_replaces_persisted_logs_for_same_commit() {
-    let pool = test_pool_from_env().await;
-
-    let suffix = Utc::now()
-        .timestamp_nanos_opt()
-        .expect("timestamp_nanos should be available")
-        .to_string();
-
-    let flake_name = format!("task-289-eval-logs-{suffix}");
-    let flake_url = format!("https://example.com/{flake_name}.git");
-    let commit_hash = format!("task289reval{suffix}");
-
-    let flake = insert_flake(&pool, &flake_name, &flake_url, "main", "cf_systems_only")
+async fn successor(pool: &PgPool, a: EvalLogOwner) -> EvalLogOwner {
+    sqlx::query("UPDATE automatic_retry_policy SET max_evaluation_retries = 0 WHERE id = 1")
+        .execute(pool)
         .await
-        .expect("insert_flake should succeed");
-
-    insert_commit_with_metadata(
-        &pool,
-        &commit_hash,
-        &flake.repo_url,
-        Utc::now(),
-        Some("task-289 re-eval log test"),
-        Some("test"),
+        .unwrap();
+    commits::mark_commit_evaluation_failed(
+        pool,
+        a.commit_id,
+        "test failure",
+        a.attempt_number,
+        crate::models::retry_policy::RetryFailureClass::Deterministic,
     )
     .await
-    .expect("insert_commit_with_metadata should succeed");
+    .unwrap();
+    commits::reset_commit_evaluation(pool, a.commit_id)
+        .await
+        .unwrap();
+    assert!(
+        matches!(commits::mark_commit_evaluation_started(pool, a.commit_id).await.unwrap(),
+        EvalStartOutcome::Started { attempt } if attempt == a.attempt_number + 1)
+    );
+    let mut tx = pool.begin().await.unwrap();
+    let owner = eval_logs::claimed_owner_in_tx(&mut tx, a.commit_id, a.attempt_number + 1)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    owner
+}
 
-    let commit = get_commit_by_hash(&pool, &commit_hash)
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires isolated migration-backed PostgreSQL"]
+async fn attempt_owned_logs_retain_history_and_fence_stale_single_and_batch(pool: PgPool) {
+    let a = fixture(&pool).await;
+    eval_logs::insert_eval_log(&pool, a, 1, Some("info"), "A-private")
         .await
-        .expect("get_commit_by_hash should succeed");
+        .unwrap();
+    // Legacy storage remains valid, but no current-attempt reader selects it.
+    sqlx::query("INSERT INTO eval_logs(commit_id, log_sequence, log_message) VALUES ($1, 1, 'legacy-private')")
+        .bind(a.commit_id).execute(&pool).await.unwrap();
+    let b = successor(&pool, a).await;
+    assert_ne!(a.evaluation_attempt_id, b.evaluation_attempt_id);
+    assert!(matches!(
+        eval_logs::insert_eval_log(&pool, a, 2, None, "A-late").await,
+        Err(sqlx::Error::RowNotFound)
+    ));
+    assert!(matches!(
+        eval_logs::insert_eval_logs_batch(
+            &pool,
+            a,
+            &[
+                (3, None, "A-stderr".into()),
+                (4, None, "A-final-flush".into())
+            ]
+        )
+        .await,
+        Err(sqlx::Error::RowNotFound)
+    ));
+    assert_eq!(
+        eval_logs::insert_eval_logs_batch(
+            &pool,
+            b,
+            &[(1, None, "B-visible".into()), (2, None, "B-stderr".into())]
+        )
+        .await
+        .unwrap(),
+        2
+    );
+    assert_eq!(
+        eval_logs::insert_eval_logs_batch(
+            &pool,
+            b,
+            &[(1, None, "duplicate-must-not-replace".into())]
+        )
+        .await
+        .unwrap(),
+        0
+    );
+    let mut tx = pool.begin().await.unwrap();
+    let a_rows = eval_logs::fetch_eval_logs_by_commit_in_tx(&mut tx, a)
+        .await
+        .unwrap();
+    let b_rows = eval_logs::fetch_eval_logs_by_commit_in_tx(&mut tx, b)
+        .await
+        .unwrap();
+    tx.commit().await.unwrap();
+    assert_eq!(a_rows.len(), 1);
+    assert_eq!(a_rows[0].log_message, "A-private");
+    assert_eq!(b_rows.len(), 2);
+    assert_eq!(b_rows[0].log_message, "B-visible");
+    assert_eq!(b_rows[1].log_message, "B-stderr");
+    let all = eval_logs::fetch_eval_logs_by_commit(&pool, a.commit_id)
+        .await
+        .unwrap();
+    assert_eq!(all.len(), 4, "source and unattributed storage are retained");
+}
 
-    // Simulate first evaluation attempt
-    insert_eval_log(&pool, commit.id, 1, Some("info"), "first attempt line 1")
-        .await
-        .expect("insert first attempt line 1");
-    insert_eval_log(&pool, commit.id, 2, Some("warn"), "first attempt line 2")
-        .await
-        .expect("insert first attempt line 2");
-
-    let first_attempt_logs = fetch_eval_logs_by_commit(&pool, commit.id)
-        .await
-        .expect("fetch first attempt logs should succeed");
-    assert_eq!(first_attempt_logs.len(), 2);
-
-    // Simulate re-evaluation start behavior: clear old logs then write new sequence from 1
-    let deleted = delete_eval_logs_by_commit(&pool, commit.id)
-        .await
-        .expect("delete_eval_logs_by_commit should succeed");
-    assert_eq!(deleted, 2);
-
-    insert_eval_log(&pool, commit.id, 1, Some("info"), "second attempt line 1")
-        .await
-        .expect("insert second attempt line 1");
-    insert_eval_log(&pool, commit.id, 2, Some("error"), "second attempt line 2")
-        .await
-        .expect("insert second attempt line 2");
-
-    let second_attempt_logs = fetch_eval_logs_by_commit(&pool, commit.id)
-        .await
-        .expect("fetch second attempt logs should succeed");
-
-    assert_eq!(second_attempt_logs.len(), 2);
-    assert_eq!(second_attempt_logs[0].log_sequence, 1);
-    assert_eq!(second_attempt_logs[1].log_sequence, 2);
-    assert_eq!(second_attempt_logs[0].log_message, "second attempt line 1");
-    assert_eq!(second_attempt_logs[1].log_message, "second attempt line 2");
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires isolated migration-backed PostgreSQL"]
+async fn attempt_log_constraints_reject_partial_and_foreign_attribution(pool: PgPool) {
+    let owner = fixture(&pool).await;
+    for (id, number) in [
+        (Some(owner.evaluation_attempt_id), None),
+        (None, Some(owner.attempt_number)),
+        (Some(owner.evaluation_attempt_id), Some(0)),
+        (Some(Uuid::new_v4()), Some(owner.attempt_number)),
+        (
+            Some(owner.evaluation_attempt_id),
+            Some(owner.attempt_number + 1),
+        ),
+    ] {
+        assert!(
+            sqlx::query(
+                "INSERT INTO eval_logs(commit_id, evaluation_attempt_id, attempt_number,
+                 log_sequence, log_message) VALUES ($1, $2, $3, 1, 'invalid')",
+            )
+            .bind(owner.commit_id)
+            .bind(id)
+            .bind(number)
+            .execute(&pool)
+            .await
+            .is_err()
+        );
+    }
+    let foreign = EvalLogOwner {
+        commit_id: owner.commit_id + 1000000,
+        ..owner
+    };
+    assert!(
+        eval_logs::insert_eval_log(&pool, foreign, 1, None, "foreign")
+            .await
+            .is_err()
+    );
+    let foreign_uuid = EvalLogOwner {
+        evaluation_attempt_id: Uuid::new_v4(),
+        ..owner
+    };
+    assert!(
+        eval_logs::insert_eval_logs_batch(&pool, foreign_uuid, &[(1, None, "foreign".into())])
+            .await
+            .is_err()
+    );
 }

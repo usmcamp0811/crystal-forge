@@ -1,7 +1,7 @@
 use anyhow::{Context, Result, bail};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
-use sqlx::{FromRow, PgPool, Postgres, Transaction};
+use sqlx::{Executor, FromRow, PgPool, Postgres, Transaction};
 use std::collections::HashMap;
 use uuid::Uuid;
 
@@ -15,8 +15,7 @@ use crate::compliance::digest::{
     write_bundle_version_digest, write_policy_version_digest,
 };
 use crate::compliance::resolver::{
-    EffectivePolicySource, ResolutionOutcome, resolve_system_effective_policies,
-    resolve_systems_effective_policies_for_bundle_version_batch,
+    EffectivePolicySource, ResolutionOutcome,
     resolve_systems_effective_policies_for_bundle_versions_batch,
 };
 use crate::models::poam::{FindingObservationReference, FindingObservationSource};
@@ -951,8 +950,8 @@ struct PolicyRequirementIdentityRow {
     framework_title: Option<String>,
 }
 
-async fn load_policy_requirement_identities(
-    pool: &PgPool,
+async fn load_policy_requirement_identities<'e>(
+    pool: impl Executor<'e, Database = Postgres>,
     policy_version_ids: &[Uuid],
 ) -> Result<HashMap<Uuid, Vec<crate::api::models::ComplianceRequirementIdentity>>> {
     if policy_version_ids.is_empty() {
@@ -1047,7 +1046,7 @@ fn aggregate_score(pass: i64, evaluated_controls: i64) -> Option<i64> {
 }
 
 async fn list_bundle_summary_aggregates(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     bundles: &[ComplianceBundleSummary],
 ) -> Result<std::collections::HashMap<Uuid, (i64, Option<i64>)>> {
     let pairs: Vec<(Uuid, Uuid)> = bundles
@@ -1096,7 +1095,7 @@ async fn list_bundle_summary_aggregates(
     )
     .bind(&bundle_ids)
     .bind(&version_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
 
     let mut systems_by_pair = std::collections::HashMap::<(Uuid, Uuid), Vec<SystemRow>>::new();
@@ -1138,7 +1137,7 @@ async fn list_bundle_summary_aggregates(
     }
     let resolver_requests: Vec<(Uuid, Vec<Uuid>)> = system_ids_by_version.into_iter().collect();
     let effective_by_version_system =
-        resolve_systems_effective_policies_for_bundle_versions_batch(pool, &resolver_requests)
+        crate::compliance::resolver::resolve_systems_effective_policies_for_bundle_versions_batch_in_tx(tx, &resolver_requests)
             .await?;
 
     // Collect all (bundle_id, system_id) pairs for batch assignment loading
@@ -1154,15 +1153,12 @@ async fn list_bundle_summary_aggregates(
     // not merely the version selected for this catalog aggregate.
     let all_system_ids = pair_list.iter().map(|(_, id)| *id).collect::<Vec<_>>();
     let full_sets =
-        crate::compliance::resolver::resolve_systems_effective_policies_for_deployment_batch(
-            pool,
-            &all_system_ids,
-        )
-        .await?;
+        crate::compliance::resolver::resolve_systems_effective_policies_in_tx(tx, &all_system_ids)
+            .await?;
 
     // Load all assignment statuses in one batch query
     let assignment_statuses = if !pair_list.is_empty() {
-        load_assignment_statuses_for_pairs(pool, &pair_list).await?
+        load_assignment_statuses_for_pairs_in_tx(tx, &pair_list).await?
     } else {
         std::collections::HashMap::new()
     };
@@ -1224,12 +1220,9 @@ async fn list_bundle_summary_aggregates(
 
     // Note: assignment_status is now determined per-system inside the batch function
     let dummy_assignment_status = std::collections::HashMap::new();
-    let batched_rollups = effective_policy_rollups_with_evidence_batch(
-        pool,
-        &evidence_work,
-        &dummy_assignment_status,
-    )
-    .await?;
+    let batched_rollups =
+        effective_policy_rollups_with_evidence_batch(tx, &evidence_work, &dummy_assignment_status)
+            .await?;
     let mut rollups_by_pair = unresolved_by_pair;
     for (pair, rollup) in batched_rollups {
         rollups_by_pair.entry(pair).or_default().push(rollup);
@@ -1249,7 +1242,44 @@ async fn list_bundle_summary_aggregates(
     Ok(aggregates)
 }
 
+/// Returns complete catalog summaries and evidence aggregates in one snapshot.
+///
+/// # Concurrency
+/// Owns one REPEATABLE READ transaction. Call [`list_bundles_in_tx`] when an
+/// existing transaction holds authorization locks; this wrapper acquires a pool
+/// connection and commits only after the entire catalog is assembled.
+///
+/// # Errors
+/// Returns database, resolver, or commit errors without partial summaries.
 pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>> {
+    let mut tx = begin_receiver_transaction(pool).await?;
+    let result = list_bundles_in_tx(&mut tx).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+// All pool compatibility entry points establish isolation before reading.
+// Evidence can insert POA&M findings, so these transactions remain writable.
+async fn begin_receiver_transaction(pool: &PgPool) -> Result<Transaction<'_, Postgres>> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await?;
+    Ok(tx)
+}
+
+/// Returns the complete catalog, version metadata, and evidence aggregates.
+///
+/// # Concurrency
+/// Uses only the caller's transaction. The caller owns isolation and must abort
+/// on failure; this function neither commits nor retries individual queries.
+/// Use REPEATABLE READ before the first query for a stable resolver snapshot.
+///
+/// # Errors
+/// Returns database or resolver errors without a partial catalog.
+pub async fn list_bundles_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+) -> Result<Vec<ComplianceBundleSummary>> {
     let rows = sqlx::query_as::<_, BundleRow>(
         r#"
         SELECT
@@ -1319,7 +1349,7 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
         ORDER BY b.name ASC
         "#,
     )
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
 
     let mut bundles: Vec<ComplianceBundleSummary> = rows.into_iter().map(bundle_from_row).collect();
@@ -1360,7 +1390,7 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
         "#,
     )
     .bind(&bundle_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
 
     for bundle in &mut bundles {
@@ -1386,7 +1416,7 @@ pub async fn list_bundles(pool: &PgPool) -> Result<Vec<ComplianceBundleSummary>>
             .collect();
     }
 
-    let aggregates = list_bundle_summary_aggregates(pool, &bundles).await?;
+    let aggregates = list_bundle_summary_aggregates(tx, &bundles).await?;
     for bundle in &mut bundles {
         if let Some((system_count, score)) = aggregates.get(&bundle.id) {
             bundle.applicable_system_count = *system_count;
@@ -1547,8 +1577,16 @@ pub async fn create_bundle(
         .ok_or_else(|| anyhow::anyhow!("Created bundle was not found"))
 }
 
-pub async fn find_bundle(
-    pool: &PgPool,
+/// Returns catalog metadata for one bundle, or `None` if it does not exist.
+///
+/// Unlike [`list_bundles`], this lookup does not populate version lists or
+/// evidence aggregates. It executes one query on the supplied executor and
+/// does not acquire a connection or change transaction ownership.
+///
+/// # Errors
+/// Returns a database error if bundle metadata cannot be read or decoded.
+pub async fn find_bundle<'e>(
+    pool: impl Executor<'e, Database = Postgres>,
     bundle_id: Uuid,
 ) -> Result<Option<ComplianceBundleSummary>> {
     let row = sqlx::query_as::<_, BundleRow>(
@@ -2139,10 +2177,10 @@ pub async fn list_bundle_systems(
 /// environment has a current membership for that user. An empty scope returns
 /// empty systems and zero totals, without hiding global bundle/version identity.
 /// Filtering precedes evidence loading and every derived rollup.
-/// Membership and environment checks share the candidate SELECT's snapshot;
-/// subsequent evidence reads retain the existing pool-based read behavior.
-/// Receiver handlers that hold scope locks use
-/// `list_bundle_systems_for_locked_ids` to exclude unlocked new candidates.
+/// Membership, resolver, and evidence reads share one REPEATABLE READ
+/// transaction. Receiver handlers that hold scope locks must use
+/// `list_bundle_systems_for_locked_ids_in_tx` with that retained transaction
+/// to exclude unlocked new candidates without acquiring another connection.
 ///
 /// # Errors
 ///
@@ -2164,7 +2202,10 @@ pub async fn list_bundle_systems_for_user(
     version_id: Option<Uuid>,
     user_id: Option<Uuid>,
 ) -> Result<Option<ComplianceBundleSystemsResponse>> {
-    list_bundle_systems_scoped(pool, bundle_id, version_id, user_id, None).await
+    let mut tx = begin_receiver_transaction(pool).await?;
+    let result = list_bundle_systems_scoped(&mut tx, bundle_id, version_id, user_id, None).await?;
+    tx.commit().await?;
+    Ok(result)
 }
 
 /// Returns rollups restricted to an exact set of locked authorized systems.
@@ -2174,6 +2215,8 @@ pub async fn list_bundle_systems_for_user(
 /// Candidates, evidence, and totals cannot include IDs outside this slice,
 /// even if another system becomes authorized while the read is in flight.
 /// Global bundle/version identity and default-revision semantics are preserved.
+/// This compatibility wrapper acquires its own snapshot connection. A receiver
+/// with retained locks must use [`list_bundle_systems_for_locked_ids_in_tx`].
 ///
 /// # Errors
 ///
@@ -2184,17 +2227,44 @@ pub(crate) async fn list_bundle_systems_for_locked_ids(
     version_id: Option<Uuid>,
     allowed_system_ids: &[Uuid],
 ) -> Result<Option<ComplianceBundleSystemsResponse>> {
-    list_bundle_systems_scoped(pool, bundle_id, version_id, None, Some(allowed_system_ids)).await
+    let mut tx = begin_receiver_transaction(pool).await?;
+    let result = list_bundle_systems_for_locked_ids_in_tx(
+        &mut tx,
+        bundle_id,
+        version_id,
+        allowed_system_ids,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Returns exact-revision rollups for the caller's locked authorized UUIDs.
+///
+/// # Concurrency
+/// The caller must hold system and membership locks through materialization in
+/// this same REPEATABLE READ transaction. An empty slice grants no visibility.
+/// Does not begin, commit, or retry; abort the caller transaction on failure.
+///
+/// # Errors
+/// Returns database or resolver errors without partial rollups or totals.
+pub(crate) async fn list_bundle_systems_for_locked_ids_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    bundle_id: Uuid,
+    version_id: Option<Uuid>,
+    allowed_system_ids: &[Uuid],
+) -> Result<Option<ComplianceBundleSystemsResponse>> {
+    list_bundle_systems_scoped(tx, bundle_id, version_id, None, Some(allowed_system_ids)).await
 }
 
 async fn list_bundle_systems_scoped(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     bundle_id: Uuid,
     version_id: Option<Uuid>,
     user_id: Option<Uuid>,
     allowed_system_ids: Option<&[Uuid]>,
 ) -> Result<Option<ComplianceBundleSystemsResponse>> {
-    let Some(bundle) = find_bundle(pool, bundle_id).await? else {
+    let Some(bundle) = find_bundle(&mut **tx, bundle_id).await? else {
         return Ok(None);
     };
     // The unversioned endpoint is a convenience alias for the bundle's current
@@ -2205,7 +2275,7 @@ async fn list_bundle_systems_scoped(
         .or(bundle.current_draft_version_id)
     {
         return list_bundle_systems_for_version_scoped(
-            pool,
+            tx,
             bundle_id,
             version_id,
             user_id,
@@ -2224,8 +2294,8 @@ async fn list_bundle_systems_scoped(
     }))
 }
 
-async fn list_explicit_bundle_version_system_rows(
-    pool: &PgPool,
+async fn list_explicit_bundle_version_system_rows<'e>(
+    pool: impl Executor<'e, Database = Postgres>,
     bundle_id: Uuid,
     bundle_version_id: Uuid,
     user_id: Option<Uuid>,
@@ -2283,6 +2353,10 @@ async fn list_explicit_bundle_version_system_rows(
 /// This does not substitute the lineage's current membership. Callers must
 /// authorize fleet-wide access or use [`list_bundle_systems_for_user`].
 ///
+/// # Concurrency
+/// Owns one REPEATABLE READ transaction for applicability, resolver inputs,
+/// assignment metadata, and evidence. Commits after complete rollup assembly.
+///
 /// # Errors
 ///
 /// Returns an error if bundle, system, assignment, or evidence reads fail.
@@ -2291,23 +2365,28 @@ pub async fn list_bundle_systems_for_version(
     bundle_id: Uuid,
     bundle_version_id: Uuid,
 ) -> Result<Option<ComplianceBundleSystemsResponse>> {
-    list_bundle_systems_for_version_scoped(pool, bundle_id, bundle_version_id, None, None).await
+    let mut tx = begin_receiver_transaction(pool).await?;
+    let result =
+        list_bundle_systems_for_version_scoped(&mut tx, bundle_id, bundle_version_id, None, None)
+            .await?;
+    tx.commit().await?;
+    Ok(result)
 }
 
 async fn list_bundle_systems_for_version_scoped(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     bundle_id: Uuid,
     bundle_version_id: Uuid,
     user_id: Option<Uuid>,
     allowed_system_ids: Option<&[Uuid]>,
 ) -> Result<Option<ComplianceBundleSystemsResponse>> {
-    let Some(_bundle) = find_bundle(pool, bundle_id).await? else {
+    let Some(_bundle) = find_bundle(&mut **tx, bundle_id).await? else {
         return Ok(None);
     };
     let version_belongs: Option<Uuid> =
         sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1")
             .bind(bundle_version_id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut **tx)
             .await?;
     if version_belongs != Some(bundle_id) {
         return Ok(None);
@@ -2318,7 +2397,7 @@ async fn list_bundle_systems_for_version_scoped(
         "SELECT current_published_version_id FROM compliance_bundles WHERE id = $1",
     )
     .bind(bundle_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await?
     .flatten();
 
@@ -2333,12 +2412,12 @@ async fn list_bundle_systems_for_version_scoped(
     )
     .bind(bundle_version_id)
     .bind(bundle_id)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
     // SECURITY: Select visible current systems before loading host evidence or
     // deriving counts. Retaining fleet-wide totals after filtering leaks scope.
     let systems = list_explicit_bundle_version_system_rows(
-        pool,
+        &mut **tx,
         bundle_id,
         bundle_version_id,
         user_id,
@@ -2346,22 +2425,19 @@ async fn list_bundle_systems_for_version_scoped(
     )
     .await?;
     let system_ids: Vec<Uuid> = systems.iter().map(|system| system.id).collect();
-    let effective = resolve_systems_effective_policies_for_bundle_version_batch(
-        pool,
+    let effective = crate::compliance::resolver::resolve_systems_effective_policies_for_bundle_version_batch_in_tx(
+        tx,
         &system_ids,
         bundle_version_id,
     )
     .await?;
     let full_sets =
-        crate::compliance::resolver::resolve_systems_effective_policies_for_deployment_batch(
-            pool,
-            &system_ids,
-        )
-        .await?;
+        crate::compliance::resolver::resolve_systems_effective_policies_in_tx(tx, &system_ids)
+            .await?;
 
     // Load assignment metadata for all systems in one batch query
-    let assignment_metadata = load_assignment_metadata_for_systems(
-        pool,
+    let assignment_metadata = load_assignment_metadata_for_systems_in_tx(
+        tx,
         bundle_id,
         current_published_version,
         &system_ids,
@@ -2378,7 +2454,7 @@ async fn list_bundle_systems_for_version_scoped(
         .collect();
 
     let materialized_policies = if !all_effective_policies.is_empty() {
-        materialize_effective_policies(pool, &all_effective_policies).await?
+        materialize_effective_policies(&mut **tx, &all_effective_policies).await?
     } else {
         Vec::new()
     };
@@ -2419,7 +2495,7 @@ async fn list_bundle_systems_for_version_scoped(
             "#,
         )
         .bind(&system_ids)
-        .fetch_all(pool)
+        .fetch_all(&mut **tx)
         .await?;
 
         context_rows.into_iter().fold(
@@ -2442,7 +2518,7 @@ async fn list_bundle_systems_for_version_scoped(
         .values()
         .map(|context| context.derivation_id)
         .collect();
-    let cve_scans = latest_completed_cve_scans(pool, &derivation_ids).await?;
+    let cve_scans = latest_completed_cve_scans(&mut **tx, &derivation_ids).await?;
     let assessment_requests = effective
         .iter()
         .flat_map(|(system_id, outcome)| {
@@ -2465,7 +2541,7 @@ async fn list_bundle_systems_for_version_scoped(
             })
         })
         .collect::<Vec<_>>();
-    let composite_statuses = load_composite_assessment_statuses(pool, &assessment_requests).await?;
+    let composite_statuses = load_composite_assessment_statuses(tx, &assessment_requests).await?;
 
     let mut rollups = Vec::with_capacity(systems.len());
     for system in systems {
@@ -2573,8 +2649,8 @@ pub struct AssignedBundleVersion {
     pub enforcement_mode: String,
 }
 
-async fn load_system_assigned_bundles(
-    pool: &PgPool,
+async fn load_system_assigned_bundles<'e>(
+    pool: impl Executor<'e, Database = Postgres>,
     system_id: Uuid,
 ) -> Result<HashMap<Uuid, AssignedBundleVersion>> {
     // INVARIANT: System scope wins for one bundle, while distinct environments
@@ -2659,6 +2735,10 @@ fn partition_effective_policies_by_bundle(
 /// Returns a database error if a source read or rollup fails. No partial
 /// bundle list is returned on failure.
 ///
+/// # Concurrency
+/// Owns and commits one REPEATABLE READ transaction. Use
+/// [`list_system_bundles_in_tx`] when the caller already holds scope locks.
+///
 /// # Examples
 ///
 /// ```no_run
@@ -2677,6 +2757,29 @@ pub async fn list_system_bundles(
     pool: &PgPool,
     system_id: Uuid,
 ) -> Result<Option<SystemBundleRollups>> {
+    let mut tx = begin_receiver_transaction(pool).await?;
+    let result = list_system_bundles_in_tx(&mut tx, system_id).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Returns assigned bundle versions and full rollups in the caller's snapshot.
+///
+/// Returns `None` for a missing system. Preserves catalog aggregates, assignment
+/// precedence, exact versions, and direct-policy and overall rollups.
+///
+/// # Concurrency
+/// Uses only the retained transaction, including catalog and resolver reads.
+/// Establish REPEATABLE READ before the first query and hold authorization locks
+/// through response materialization. The caller owns commit and rollback.
+///
+/// # Errors
+/// Returns database or resolver errors. Abort the transaction on failure;
+/// serialization and deadlock failures are not retried query by query.
+pub async fn list_system_bundles_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+) -> Result<Option<SystemBundleRollups>> {
     // First verify the system exists - return None for 404 behavior
     let system_row = sqlx::query_as::<_, SystemRow>(
         r#"
@@ -2692,17 +2795,17 @@ pub async fn list_system_bundles(
         "#,
     )
     .bind(system_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut **tx)
     .await?;
 
     let Some(system) = system_row else {
         return Ok(None);
     };
 
-    // Get all bundles (one query)
-    let all_bundles = list_bundles(pool).await?;
+    // Preserve full catalog metadata and aggregates in the retained snapshot.
+    let all_bundles = list_bundles_in_tx(tx).await?;
 
-    let assignment_versions = load_system_assigned_bundles(pool, system_id).await?;
+    let assignment_versions = load_system_assigned_bundles(&mut **tx, system_id).await?;
     let version_ids = assignment_versions
         .values()
         .map(|assigned| assigned.id)
@@ -2717,7 +2820,7 @@ pub async fn list_system_bundles(
            GROUP BY bv.bundle_id"#,
     )
     .bind(&version_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?
     .into_iter()
     .collect();
@@ -2727,7 +2830,8 @@ pub async fn list_system_bundles(
         .filter(|bundle| assignment_versions.contains_key(&bundle.id))
         .collect();
 
-    let outcome = resolve_system_effective_policies(pool, system_id).await?;
+    let outcome =
+        crate::compliance::resolver::resolve_system_effective_policies_in_tx(tx, system_id).await?;
     let ResolutionOutcome::Resolved(effective) = outcome else {
         let state = match outcome {
             ResolutionOutcome::Conflict(conflicts) => conflicts
@@ -2770,7 +2874,7 @@ pub async fn list_system_bundles(
     let bundle_for_effective: Option<Uuid> =
         sqlx::query_scalar("SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1")
             .bind(effective.bundle_version_id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut **tx)
             .await?;
     if let Some(eff_bundle_id) = bundle_for_effective {
         // Only add if not already in visible_bundles
@@ -2781,7 +2885,7 @@ pub async fn list_system_bundles(
 
     // Load all assignment statuses in one batch query
     let assignment_statuses = if !all_pairs.is_empty() {
-        load_assignment_statuses_for_pairs(pool, &all_pairs).await?
+        load_assignment_statuses_for_pairs_in_tx(tx, &all_pairs).await?
     } else {
         std::collections::HashMap::new()
     };
@@ -2798,8 +2902,8 @@ pub async fn list_system_bundles(
         let policies = policies_by_bundle.remove(&bundle.id).unwrap_or_default();
         bundles.push((
             bundle,
-            effective_policy_rollup_with_evidence(
-                pool,
+            effective_policy_rollup_with_evidence_in_tx(
+                tx,
                 &system,
                 &policies,
                 &effective.effective_set_digest,
@@ -2809,8 +2913,8 @@ pub async fn list_system_bundles(
             .await?,
         ));
     }
-    let direct_rollup = effective_policy_rollup_with_evidence(
-        pool,
+    let direct_rollup = effective_policy_rollup_with_evidence_in_tx(
+        tx,
         &system,
         &direct_policies,
         &effective.effective_set_digest,
@@ -2828,8 +2932,8 @@ pub async fn list_system_bundles(
     } else {
         None
     };
-    let overall_rollup = effective_policy_rollup_with_evidence(
-        pool,
+    let overall_rollup = effective_policy_rollup_with_evidence_in_tx(
+        tx,
         &system,
         &effective.policies,
         &effective.effective_set_digest,
@@ -2899,6 +3003,11 @@ pub(crate) fn assemble_system_compliance_bundles(
 /// Returns a database or effective-evidence resolution error. It does not
 /// return a partial control set on failure.
 ///
+/// # Concurrency
+/// Owns one writable REPEATABLE READ transaction, including POA&M finding
+/// inserts and assignment epoch checks. Commits only after complete evidence
+/// assembly. Use [`get_system_evidence_in_tx`] with retained scope locks.
+///
 /// # Examples
 ///
 /// ```no_run
@@ -2917,7 +3026,51 @@ pub async fn get_system_evidence(
     system_id: Uuid,
     bundle_version_id: Option<Uuid>,
 ) -> Result<Option<ComplianceEvidenceResponse>> {
-    let Some(_bundle) = find_bundle(pool, bundle_id).await? else {
+    let mut tx = begin_receiver_transaction(pool).await?;
+    let result =
+        get_system_evidence_in_tx(&mut tx, bundle_id, system_id, bundle_version_id).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Returns exact assigned-version evidence in the caller's transaction.
+///
+/// Default selection follows the current immutable assignment snapshot, not a
+/// catalog pointer. Returns `None` for missing or inapplicable targets.
+///
+/// # Concurrency
+/// Requires a writable transaction: stable POA&M finding identities can be
+/// inserted. Establish REPEATABLE READ before the first query. Retains the
+/// caller's authorization locks, then takes the POA&M system sentinel before
+/// finding insertion and assignment epoch locks before accepting assessments.
+/// Never begins a nested transaction, commits, or retries partial queries.
+///
+/// # Errors
+/// Returns database or resolver errors without partial evidence. The caller
+/// must roll back on failure, including serialization or deadlock failures.
+///
+/// # Examples
+/// ```no_run
+/// # async fn example(pool: &sqlx::PgPool, bundle: uuid::Uuid, system: uuid::Uuid) -> anyhow::Result<()> {
+/// // The caller must authorize the system before exposing the returned DTO.
+/// let mut tx = pool.begin().await?;
+/// sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+///     .execute(&mut *tx).await?;
+/// let evidence = crystal_forge::queries::compliance::get_system_evidence_in_tx(
+///     &mut tx, bundle, system, None,
+/// ).await?;
+/// tx.commit().await?;
+/// let _ = evidence;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn get_system_evidence_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    bundle_id: Uuid,
+    system_id: Uuid,
+    bundle_version_id: Option<Uuid>,
+) -> Result<Option<ComplianceEvidenceResponse>> {
+    let Some(_bundle) = find_bundle(&mut **tx, bundle_id).await? else {
         return Ok(None);
     };
 
@@ -2927,18 +3080,23 @@ pub async fn get_system_evidence(
     let selected_version_id = match bundle_version_id {
         Some(version_id) => version_id,
         None => {
-            let assigned = load_system_assigned_bundles(pool, system_id).await?;
+            let assigned = load_system_assigned_bundles(&mut **tx, system_id).await?;
             let Some(version) = assigned.get(&bundle_id) else {
                 return Ok(None);
             };
             version.id
         }
     };
-    let system =
-        list_explicit_bundle_version_system_rows(pool, bundle_id, selected_version_id, None, None)
-            .await?
-            .into_iter()
-            .find(|row| row.id == system_id);
+    let system = list_explicit_bundle_version_system_rows(
+        &mut **tx,
+        bundle_id,
+        selected_version_id,
+        None,
+        Some(&[system_id]),
+    )
+    .await?
+    .into_iter()
+    .find(|row| row.id == system_id);
     let Some(system) = system else {
         return Ok(None);
     };
@@ -2946,7 +3104,7 @@ pub async fn get_system_evidence(
     let version: Option<(Uuid, String)> =
         sqlx::query_as("SELECT bundle_id, framework FROM compliance_bundle_versions WHERE id = $1")
             .bind(selected_version_id)
-            .fetch_optional(pool)
+            .fetch_optional(&mut **tx)
             .await?;
     if version.as_ref().map(|(id, _)| *id) != Some(bundle_id) {
         return Ok(None);
@@ -2963,7 +3121,7 @@ pub async fn get_system_evidence(
     )
     .bind(selected_version_id)
     .bind(bundle_id)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
     let mut resolution_state: Option<String> = None;
     let mut current_effective_set_digest: Option<String> = None;
@@ -2971,7 +3129,7 @@ pub async fn get_system_evidence(
     let mut assessment_digests_by_version = HashMap::new();
     let mut current_policies_by_version = HashMap::new();
     if let ResolutionOutcome::Resolved(effective) =
-        resolve_system_effective_policies(pool, system_id).await?
+        crate::compliance::resolver::resolve_system_effective_policies_in_tx(tx, system_id).await?
     {
         // INVARIANT: An assessment digest covers the complete effective set,
         // but a bundle drawer shows only policies that the requested bundle
@@ -3014,7 +3172,7 @@ pub async fn get_system_evidence(
                     current_policies_by_version.insert(policy.policy_version_id, policy.clone());
                 }
             }
-            policies = materialize_effective_policies(pool, &requested_policies).await?;
+            policies = materialize_effective_policies(&mut **tx, &requested_policies).await?;
         } else {
             resolution_state = Some("not_applicable".to_string());
         }
@@ -3023,8 +3181,7 @@ pub async fn get_system_evidence(
     }
     let policy_lineage_ids = policies.iter().map(|policy| policy.id).collect::<Vec<_>>();
     if !policy_lineage_ids.is_empty() {
-        let mut tx = pool.begin().await?;
-        crate::services::composite_enforcement::lock_poam_system_key_tx(&mut tx, system.id).await?;
+        crate::services::composite_enforcement::lock_poam_system_key_tx(tx, system.id).await?;
         sqlx::query(
             r#"INSERT INTO poam_findings(system_id,policy_lineage_id)
                SELECT $1,policy_id FROM UNNEST($2::uuid[]) policy_id
@@ -3032,22 +3189,21 @@ pub async fn get_system_evidence(
         )
         .bind(system.id)
         .bind(&policy_lineage_ids)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await?;
-        tx.commit().await?;
     }
     let finding_ids = sqlx::query_as::<_, (Uuid, Uuid)>(
         "SELECT policy_lineage_id,id FROM poam_findings WHERE system_id=$1 AND policy_lineage_id=ANY($2)",
     )
     .bind(system.id)
     .bind(&policy_lineage_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?
     .into_iter()
     .collect::<HashMap<_, _>>();
-    let context = assessment_context(pool, system.id).await?;
+    let context = assessment_context(&mut **tx, system.id).await?;
     let cve_scan = match context.as_ref() {
-        Some(context) => latest_completed_cve_scan(pool, context.derivation_id).await?,
+        Some(context) => latest_completed_cve_scan(&mut **tx, context.derivation_id).await?,
         None => None,
     };
     let mut composite_results = match context.as_ref() {
@@ -3057,7 +3213,7 @@ pub async fn get_system_evidence(
         ) {
             (Some(assessment_digest), Some(complete_digest)) => {
                 load_composite_assessment_results(
-                    pool,
+                    &mut **tx,
                     system.id,
                     context.derivation_id,
                     &context.target_store_path,
@@ -3072,7 +3228,6 @@ pub async fn get_system_evidence(
         None => HashMap::new(),
     };
     if !composite_results.is_empty() {
-        let mut tx = pool.begin().await?;
         let mut current_results = HashMap::new();
         for (version_id, result) in composite_results {
             if let (Some(policy), Some(assessment_id)) = (
@@ -3080,13 +3235,12 @@ pub async fn get_system_evidence(
                 result.assessment_id,
             ) {
                 if crate::services::composite_enforcement::assessment_matches_current_assignment_epoch_in_tx(
-                    &mut tx, policy, assessment_id,
+                    tx, policy, assessment_id,
                 ).await? {
                     current_results.insert(version_id, result);
                 }
             }
         }
-        tx.commit().await?;
         composite_results = current_results;
     }
     let composite_version_ids = policies
@@ -3105,7 +3259,7 @@ pub async fn get_system_evidence(
         })
         .collect::<Vec<_>>();
     for (version_id, result) in load_current_eval_attempt_results(
-        pool,
+        &mut **tx,
         system.id,
         &composite_version_ids,
         &attempt_assignments,
@@ -3120,7 +3274,7 @@ pub async fn get_system_evidence(
         .collect::<Vec<_>>();
     // PERFORMANCE: Resolve mappings for every control in one exact-version query.
     let mut requirement_identities =
-        load_policy_requirement_identities(pool, &policy_version_ids).await?;
+        load_policy_requirement_identities(&mut **tx, &policy_version_ids).await?;
     let mut controls = Vec::with_capacity(policies.len());
     for policy in policies {
         let version_id = policy.version_id;
@@ -3294,9 +3448,35 @@ pub async fn load_assignment_statuses_for_systems(
     Ok(metadata.into_iter().map(|(k, v)| (k, v.status)).collect())
 }
 
-/// Load assignment metadata including status and creator information.
+/// Returns assignment status and creator labels for the requested systems.
+///
+/// # Concurrency
+/// Owns one REPEATABLE READ snapshot for assignment and actor reads. Does not
+/// lock assignment epochs; results describe that snapshot, not write authority.
+///
+/// # Errors
+/// Returns database or commit errors without partial metadata.
 pub async fn load_assignment_metadata_for_systems(
     pool: &PgPool,
+    bundle_id: Uuid,
+    current_published_version: Option<Uuid>,
+    system_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, AssignmentMetadata>> {
+    let mut tx = begin_receiver_transaction(pool).await?;
+    let result = load_assignment_metadata_for_systems_in_tx(
+        &mut tx,
+        bundle_id,
+        current_published_version,
+        system_ids,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+// Metadata and actor labels must use the same snapshot as the rollup.
+async fn load_assignment_metadata_for_systems_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
     bundle_id: Uuid,
     current_published_version: Option<Uuid>,
     system_ids: &[Uuid],
@@ -3365,7 +3545,7 @@ pub async fn load_assignment_metadata_for_systems(
     )
     .bind(bundle_id)
     .bind(system_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
 
     // Collect user IDs for batched lookup
@@ -3379,7 +3559,7 @@ pub async fn load_assignment_metadata_for_systems(
              FROM users WHERE id = ANY($1)",
         )
         .bind(&user_ids)
-        .fetch_all(pool)
+        .fetch_all(&mut **tx)
         .await?;
         user_rows
             .into_iter()
@@ -3430,9 +3610,27 @@ pub async fn load_assignment_metadata_for_systems(
 /// Batch load assignment statuses for arbitrary (bundle_id, system_id) pairs.
 /// Returns a map keyed by (bundle_id, system_id) tuple with optional status strings.
 /// All requested pairs are present in the result; unassigned pairs have None.
+///
+/// # Concurrency
+/// Owns one REPEATABLE READ transaction for published pointers and assignment
+/// snapshots. Receiver cores use the retained-transaction implementation.
+///
+/// # Errors
+/// Returns database or commit errors without partial statuses.
 pub async fn load_assignment_statuses_for_pairs(
     pool: &PgPool,
     pairs: &[(Uuid, Uuid)], // (bundle_id, system_id)
+) -> Result<std::collections::HashMap<(Uuid, Uuid), Option<String>>> {
+    let mut tx = begin_receiver_transaction(pool).await?;
+    let result = load_assignment_statuses_for_pairs_in_tx(&mut tx, pairs).await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+// The published pointer and immutable assignment snapshot are read atomically.
+async fn load_assignment_statuses_for_pairs_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    pairs: &[(Uuid, Uuid)],
 ) -> Result<std::collections::HashMap<(Uuid, Uuid), Option<String>>> {
     if pairs.is_empty() {
         return Ok(std::collections::HashMap::new());
@@ -3458,7 +3656,7 @@ pub async fn load_assignment_statuses_for_pairs(
         "SELECT id AS bundle_id, current_published_version_id FROM compliance_bundles WHERE id = ANY($1)",
     )
     .bind(&bundle_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
     let versions_by_bundle: std::collections::HashMap<Uuid, Option<Uuid>> = versions
         .into_iter()
@@ -3528,7 +3726,7 @@ pub async fn load_assignment_statuses_for_pairs(
             .copied()
             .collect::<Vec<_>>(),
     )
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
 
     // Build result map with status determination
@@ -3885,8 +4083,38 @@ pub(crate) fn effective_policy_rollup(
 /// Resolve evidence for the exact version/configuration selected by the
 /// assignment resolver. This keeps assignment overlays and evidence views on
 /// the same policy set while avoiding heartbeat-derived results.
+///
+/// # Concurrency
+/// Owns a REPEATABLE READ transaction. Receiver cores use the transaction-backed
+/// variant to retain authorization locks without another pool acquisition.
+///
+/// # Errors
+/// Returns database, materialization, or commit errors without a partial rollup.
 pub(crate) async fn effective_policy_rollup_with_evidence(
     pool: &PgPool,
+    system: &SystemRow,
+    effective_policies: &[crate::compliance::resolver::EffectivePolicy],
+    effective_set_digest: &str,
+    authorization_digest: &str,
+    assignment_status: Option<String>,
+) -> Result<ComplianceSystemRollup> {
+    let mut tx = begin_receiver_transaction(pool).await?;
+    let result = effective_policy_rollup_with_evidence_in_tx(
+        &mut tx,
+        system,
+        effective_policies,
+        effective_set_digest,
+        authorization_digest,
+        assignment_status,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+// Retains the caller's snapshot for every evidence input and status.
+async fn effective_policy_rollup_with_evidence_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
     system: &SystemRow,
     effective_policies: &[crate::compliance::resolver::EffectivePolicy],
     effective_set_digest: &str,
@@ -3899,8 +4127,8 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
         approved_by: None,
         reason: None,
     });
-    effective_policy_rollup_with_evidence_and_metadata(
-        pool,
+    effective_policy_rollup_with_evidence_and_metadata_in_tx(
+        tx,
         system,
         effective_policies,
         effective_set_digest,
@@ -3910,6 +4138,15 @@ pub(crate) async fn effective_policy_rollup_with_evidence(
     .await
 }
 
+/// Returns an effective-policy evidence rollup with assignment display metadata.
+///
+/// # Concurrency
+/// Owns one REPEATABLE READ transaction for evidence reads; supplied policy and
+/// assignment metadata remain the caller's responsibility. Receiver cores use
+/// the transaction-backed variant to share their authorization snapshot.
+///
+/// # Errors
+/// Returns database, materialization, or commit errors without a partial rollup.
 pub(crate) async fn effective_policy_rollup_with_evidence_and_metadata(
     pool: &PgPool,
     system: &SystemRow,
@@ -3918,7 +4155,30 @@ pub(crate) async fn effective_policy_rollup_with_evidence_and_metadata(
     authorization_digest: &str,
     assignment_metadata: Option<&AssignmentMetadata>,
 ) -> Result<ComplianceSystemRollup> {
-    let policies = materialize_effective_policies(pool, effective_policies).await?;
+    let mut tx = begin_receiver_transaction(pool).await?;
+    let result = effective_policy_rollup_with_evidence_and_metadata_in_tx(
+        &mut tx,
+        system,
+        effective_policies,
+        effective_set_digest,
+        authorization_digest,
+        assignment_metadata,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+// Does not acquire another connection while a receiver holds scope locks.
+async fn effective_policy_rollup_with_evidence_and_metadata_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system: &SystemRow,
+    effective_policies: &[crate::compliance::resolver::EffectivePolicy],
+    effective_set_digest: &str,
+    authorization_digest: &str,
+    assignment_metadata: Option<&AssignmentMetadata>,
+) -> Result<ComplianceSystemRollup> {
+    let policies = materialize_effective_policies(&mut **tx, effective_policies).await?;
     let report_only = effective_policies
         .iter()
         .filter(|policy| {
@@ -3930,15 +4190,15 @@ pub(crate) async fn effective_policy_rollup_with_evidence_and_metadata(
         .count() as i64;
 
     // Batch-load assessment context for this system (not per-policy)
-    let context = assessment_context(pool, system.id).await?;
+    let context = assessment_context(&mut **tx, system.id).await?;
     let cve_scan = match context.as_ref() {
-        Some(context) => latest_completed_cve_scan(pool, context.derivation_id).await?,
+        Some(context) => latest_completed_cve_scan(&mut **tx, context.derivation_id).await?,
         None => None,
     };
     let composite_statuses = match context.as_ref() {
         Some(context) => {
             load_composite_assessment_statuses(
-                pool,
+                tx,
                 &composite_status_requests(
                     system.id,
                     context,
@@ -3984,7 +4244,7 @@ pub(crate) async fn effective_policy_rollup_with_evidence_and_metadata(
 /// assessment contexts, and latest completed CVE scans once for the complete
 /// set of `(bundle version, system)` work.
 async fn effective_policy_rollups_with_evidence_batch(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     work: &[(
         (Uuid, Uuid),
         SystemRow,
@@ -4002,7 +4262,7 @@ async fn effective_policy_rollups_with_evidence_batch(
         .iter()
         .flat_map(|(_, _, policies, _, _)| policies.iter().cloned())
         .collect();
-    let materialized = materialize_effective_policies(pool, &effective_policies).await?;
+    let materialized = materialize_effective_policies(&mut **tx, &effective_policies).await?;
     let policies_by_version = materialized
         .into_iter()
         .zip(
@@ -4046,7 +4306,7 @@ async fn effective_policy_rollups_with_evidence_batch(
         "#,
     )
     .bind(&system_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
     let contexts = context_rows.into_iter().fold(
         std::collections::HashMap::<Uuid, AssessmentContext>::new(),
@@ -4063,7 +4323,7 @@ async fn effective_policy_rollups_with_evidence_batch(
         .values()
         .map(|context| context.derivation_id)
         .collect();
-    let scans = latest_completed_cve_scans(pool, &derivation_ids).await?;
+    let scans = latest_completed_cve_scans(&mut **tx, &derivation_ids).await?;
     let assessment_requests = work
         .iter()
         .flat_map(
@@ -4080,7 +4340,7 @@ async fn effective_policy_rollups_with_evidence_batch(
             },
         )
         .collect::<Vec<_>>();
-    let composite_statuses = load_composite_assessment_statuses(pool, &assessment_requests).await?;
+    let composite_statuses = load_composite_assessment_statuses(tx, &assessment_requests).await?;
 
     // Collect all (bundle_id, system_id) pairs for batch assignment loading
     let assignment_pairs: Vec<(Uuid, Uuid)> = work
@@ -4090,7 +4350,7 @@ async fn effective_policy_rollups_with_evidence_batch(
 
     // Load all assignment statuses in one batch query
     let assignment_statuses = if !assignment_pairs.is_empty() {
-        load_assignment_statuses_for_pairs(pool, &assignment_pairs).await?
+        load_assignment_statuses_for_pairs_in_tx(tx, &assignment_pairs).await?
     } else {
         std::collections::HashMap::new()
     };
@@ -4296,8 +4556,8 @@ fn legacy_finding_observation(
     }
 }
 
-async fn latest_completed_cve_scans(
-    pool: &PgPool,
+async fn latest_completed_cve_scans<'e>(
+    pool: impl Executor<'e, Database = Postgres>,
     derivation_ids: &[i32],
 ) -> Result<std::collections::HashMap<i32, CompletedCveScan>> {
     if derivation_ids.is_empty() {
@@ -4320,8 +4580,8 @@ async fn latest_completed_cve_scans(
     .collect())
 }
 
-async fn latest_completed_cve_scan(
-    pool: &PgPool,
+async fn latest_completed_cve_scan<'e>(
+    pool: impl Executor<'e, Database = Postgres>,
     derivation_id: i32,
 ) -> Result<Option<CompletedCveScan>> {
     Ok(latest_completed_cve_scans(pool, &[derivation_id])
@@ -4380,8 +4640,8 @@ fn batch_evidence_status(
 /// keyed by lineage; the version is used only to load exact metadata and the
 /// effective enabled state. Every consumer of effective evidence must use this
 /// helper rather than constructing a `PolicyRow` from a version UUID.
-async fn materialize_effective_policies(
-    pool: &PgPool,
+async fn materialize_effective_policies<'e>(
+    pool: impl Executor<'e, Database = Postgres>,
     effective_policies: &[crate::compliance::resolver::EffectivePolicy],
 ) -> Result<Vec<PolicyRow>> {
     let version_ids: Vec<Uuid> = effective_policies
@@ -4597,7 +4857,7 @@ struct CompositeStatusRequest {
 }
 
 async fn load_composite_assessment_statuses(
-    pool: &PgPool,
+    tx: &mut Transaction<'_, Postgres>,
     requests: &[CompositeStatusRequest],
 ) -> Result<HashMap<(Uuid, Uuid), ComplianceControlStatus>> {
     if requests.is_empty() {
@@ -4639,7 +4899,7 @@ async fn load_composite_assessment_statuses(
            WHERE assignment.id = ANY($1) AND assignment.active"#,
     )
     .bind(&assignment_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?
     .into_iter()
     .collect();
@@ -4674,7 +4934,7 @@ async fn load_composite_assessment_statuses(
     .bind(&effective_set_digests)
     .bind(&policy_version_ids)
     .bind(&legacy_digests)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await?;
     Ok(rows
         .into_iter()
@@ -4738,8 +4998,8 @@ fn composite_status_requests(
         .collect()
 }
 
-async fn load_composite_assessment_results(
-    pool: &PgPool,
+async fn load_composite_assessment_results<'e>(
+    pool: impl Executor<'e, Database = Postgres>,
     system_id: Uuid,
     derivation_id: i32,
     target_store_path: &str,
@@ -4845,8 +5105,8 @@ async fn load_composite_assessment_results(
     Ok(results)
 }
 
-async fn load_current_eval_attempt_results(
-    pool: &PgPool,
+async fn load_current_eval_attempt_results<'e>(
+    pool: impl Executor<'e, Database = Postgres>,
     system_id: Uuid,
     policy_version_ids: &[Uuid],
     attempt_assignments: &[(Uuid, Uuid)],
@@ -4932,7 +5192,10 @@ async fn load_current_eval_attempt_results(
     Ok(results)
 }
 
-async fn assessment_context(pool: &PgPool, system_id: Uuid) -> Result<Option<AssessmentContext>> {
+async fn assessment_context<'e>(
+    pool: impl Executor<'e, Database = Postgres>,
+    system_id: Uuid,
+) -> Result<Option<AssessmentContext>> {
     // INVARIANT: A store path can occur in more than one lineage. Prefer the
     // retained generation's exact derivation. Legacy deployments without that
     // binding can fall back only within the system's flake and configuration.
@@ -6037,9 +6300,11 @@ mod tests {
             .execute(pool)
             .await
             .unwrap();
-        let aggregates = list_bundle_summary_aggregates(pool, summaries)
+        let mut tx = begin_receiver_transaction(pool).await.unwrap();
+        let aggregates = list_bundle_summary_aggregates(&mut tx, summaries)
             .await
             .unwrap();
+        tx.commit().await.unwrap();
         assert_eq!(aggregates.len(), summaries.len());
         sqlx::query_scalar(
             r#"

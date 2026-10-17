@@ -2,6 +2,8 @@ pub mod jobs;
 mod policy_capture;
 #[cfg(test)]
 mod policy_capture_tests;
+#[cfg(test)]
+mod required_inventory_worker_tests;
 
 use crate::builder::run_cve_scan_loop;
 use crate::compliance::canonical::semantic_digest;
@@ -842,7 +844,12 @@ async fn load_policies_by_configuration_for_eval(
 // and retry ownership changes until the plan is durable. Execution starts only
 // after this transaction commits; a duplicate capture never re-resolves a plan
 // and then executes different inputs under the same attempt identity.
-async fn load_and_capture_policies_for_eval(
+/// Resolves executable policy inputs and captures their public attempt provenance.
+///
+/// # Errors
+/// Returns ownership, duplicate-capture, resolution, or database errors. A stored
+/// public plan is never reused as an executable checkpoint after interruption.
+pub(crate) async fn load_and_capture_policies_for_eval(
     pool: &PgPool,
     flake_id: i32,
     attempt: Option<(i32, i32)>,
@@ -1913,6 +1920,30 @@ async fn process_pending_commits(
             }
         };
 
+        // SECURITY: All lifecycle helpers and evaluator/preparation state clones
+        // carry this immutable attempt/generation capability. Never rebind a
+        // failed old worker by resolving a publication-time latest attempt.
+        let cf_state =
+            match crate::handlers::api::commits::bind_eval_producer(cf_state, commit.id, attempt)
+                .await
+            {
+                Ok(producer) => Arc::new(producer),
+                Err(error) => {
+                    // A claim can be cancelled/superseded while binding waits for
+                    // the database. Use the normal exact-attempt failure path; do
+                    // not leave a claimed commit active after a logging error.
+                    return handle_evaluation_attempt_failure(
+                        pool,
+                        cf_state,
+                        &commit,
+                        attempt,
+                        &error.to_string(),
+                        crate::models::retry_policy::RetryFailureClass::Transient,
+                    )
+                    .await;
+                }
+            };
+
         // Get flake info (post-claim; failures now go through retry/defer path)
         let flake = match commit.get_flake(&pool).await {
             Ok(flake) => flake,
@@ -1929,6 +1960,7 @@ async fn process_pending_commits(
                     crate::models::retry_policy::RetryFailureClass::Deterministic,
                 )
                 .await;
+                crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
                 return Ok(());
             }
         };
@@ -1946,6 +1978,7 @@ async fn process_pending_commits(
                     crate::models::retry_policy::RetryFailureClass::Deterministic,
                 )
                 .await;
+                crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
                 return Ok(());
             }
         };
@@ -1988,6 +2021,7 @@ async fn process_pending_commits(
                     failure_class,
                 )
                 .await;
+                crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
                 return Ok(());
             }
         };
@@ -2011,10 +2045,6 @@ async fn process_pending_commits(
             )
             .await;
         }
-
-        // CRITICAL: Create broadcast channel BEFORE eval starts
-        // This ensures WebSocket clients can subscribe before messages are sent
-        crate::handlers::api::commits::ensure_eval_channel(&cf_state, commit.id).await;
 
         // Broadcast eval start status to WebSocket clients
         crate::handlers::api::commits::broadcast_eval_status(
@@ -2042,7 +2072,7 @@ async fn process_pending_commits(
         // (plus their fallback phases) may run simultaneously.  This prevents
         // a burst of incoming commits from each spawning their own full-flake
         // Nix evaluation concurrently and exhausting host memory.
-        let _eval_permit = match commit_evaluation_limiter().acquire_owned().await {
+        let eval_permit = match commit_evaluation_limiter().acquire_owned().await {
             Ok(p) => p,
             Err(_) => {
                 error!(
@@ -2103,6 +2133,15 @@ async fn process_pending_commits(
             )
             .await
         };
+
+        // CONCURRENCY: This slot bounds actual evaluation, not metadata
+        // finalization, which can wait on the snapshot-writer lock. Release it
+        // only after the evaluator returns through its child-cleanup boundary.
+        // Child guards retain both heavy-Nix admission locks if cleanup needs
+        // quarantine; releasing this outer slot cannot admit a replacement Nix
+        // child before reap and process-group absence. Canonical DB ownership
+        // and the unique active-commit index still fence the next worker claim.
+        drop(eval_permit);
 
         // ── Helper: finalize cancellation side effects ──────────────────
         // Shared by both the success and failure SupersededOrCancelled branches.

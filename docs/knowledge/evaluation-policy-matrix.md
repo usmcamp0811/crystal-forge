@@ -171,6 +171,68 @@ Different names, selection, or mode conflict with the immutable first write.
 Updates and direct deletes are forbidden; parent commit/attempt cleanup can
 cascade. Retries have independent inventory and never inherit an older record.
 
+### Required persistence and worker admission
+
+Native and mock producers must persist exact-attempt inventory before evaluator
+admission or mock stage execution. In
+[`required_inventory_persistence.rs`](../../packages/default/crates/cf-server/src/models/required_inventory_persistence.rs),
+one 30-second deadline covers pool acquisition, transaction locks, insertion,
+immutable comparison, and COMMIT acknowledgement. Concurrent ownership and
+cancellation checks each have a 500 ms budget, followed by a two-second polling
+delay. Successful persistence requires one final bounded 500 ms check. Subject
+to executor scheduling, the foreground bound is 30 seconds plus that final check.
+
+Cancellation, supersession, immutable conflict, database/check failure, timeout,
+and unknown COMMIT acknowledgement fail closed. None permits evaluator admission.
+The borrowed write future is dropped on failure; no detached writer can resume.
+SQLx queues rollback, so return does not prove immediate connection or lock
+reclamation, or row absence after an uncertain COMMIT. The later launch ownership
+check remains required.
+
+Before acquiring writer locks, the transaction sets local PostgreSQL
+`lock_timeout` and `statement_timeout` to at most 31 seconds: the foreground write
+budget plus one second for cleanup. Stricter existing database or session limits
+remain effective. An abandoned blocked statement can therefore end
+and process queued rollback without waiting for the external lock holder to
+release its lock. Connection reclamation still requires database communication
+and executor progress.
+
+The process-wide evaluation worker permit bounds evaluation through its child
+cleanup boundary. The worker releases that permit after the evaluator returns,
+before database finalization that can block on the snapshot-writer lock.
+Child-owned heavy-Nix admission guards remain held through reap and process-group
+absence, including quarantined cleanup. Releasing the outer worker permit does
+not bypass those guards or canonical database claim ownership.
+
+### Server-interruption recovery
+
+[`restart_recovery.rs`](../../packages/default/crates/cf-server/src/queries/commits/restart_recovery.rs)
+snapshots the interrupted source UUID before waiting for locks, then revalidates
+the exact commit, active attempt, and absence of a successor. Recovery uses the
+snapshot-writer, queue, commit, then attempt lock order. Source terminalization
+and successor insertion commit atomically; errors roll back the batch. Repeated
+or concurrent recovery cannot reinterpret a newly started child as its source.
+
+An interrupted active attempt becomes `failed`, with a completion timestamp and
+an explicit `Server interruption` diagnostic. It uses the existing `unknown`
+failure class, not a confirmed Nix failure or a new lifecycle state. Recovery
+does not invoke the ordinary failure finalizer or rewrite old evidence.
+
+The queued successor receives a fresh UUID and incremented attempt number,
+`parent_attempt_id` pointing to the interrupted source, and the existing root
+(or source UUID when no root exists). It inherits `automatic_retry_count`
+unchanged: recovery neither charges nor resets the automatic-failure retry
+budget, including zero or exhausted budgets. It sets no
+`automatic_retry_source_id` and adds no hard cap or run budget. Ordinary failure
+retry policy remains in force for later failures.
+
+The commit returns to `pending`; its completion and current error clear, while
+queue position and historical start remain until canonical claim. Old plans,
+inventory, outcomes, and logs remain attached to the source; the child must
+resolve and discover afresh. Cancellation terminalizes as `cancelled` without a
+child. Existing queued work, queued retry children, and delayed backoff timestamps
+remain unchanged. Missing or superseded active ownership cannot create a child.
+
 ### Row reconciliation and configuration gates
 
 Matrix reads load inventory by selected attempt UUID, commit, and number in the
@@ -598,9 +660,31 @@ counts, commit-wide errors, and mutable derivation counts. Log and Graph tabs
 are disabled with explicit reasons because no exact-attempt APIs exist for them.
 Latest evaluation actions require opening the latest evaluations view.
 
+In the Compliance evidence drawer, close, backdrop click, and Escape use the
+same validated exact-return callback as `Back to Evaluation`. The authorized
+pinned response must validate the route, captured per-system bundle contribution,
+and saved commit SHA/attempt identity. A direct route can create safe pinned
+return defaults only after that validation. Invalid or unavailable context cannot
+dismiss into stale/latest evaluation state; the UI offers an explicit action to
+open Compliance without evaluation context. Bundle name and version, framework
+and optional framework version come from the validated captured bundle. Lineage
+and version UUIDs remain secondary identity details.
+
+Ordinary queue/history drawers, pinned drawers, and the evidence drawer use the
+standard `DialogInitialFocus`, `DialogFocusSentinel`, and `DialogFocusRestore`
+helpers for initial focus, focus containment, and opener restoration.
+
 More than 14 distinct controls defaults to Bundles with column trim enabled;
-smaller matrices default to Controls without trim. Mode changes clear bundle
-focus but preserve row filter, sort, and trim. Bundle drilldown selects that exact
+smaller matrices default to Controls without trim. Density initializes once from
+the first usable captured response: distinct captured controls, or authoritative
+empty metadata (`empty_bundle_metadata_complete=true`). A provisional zero-control
+or unavailable response does not consume initialization. Thus the same UUID can
+progress from provisional zero to a large capture and receive dense defaults.
+After initialization, refreshes and request errors preserve operator choices.
+[`MatrixPresentation`](../../packages/web-ui/src/state/evaluation_drawer.rs)
+owns this distinction independently of component/request lifetime.
+Mode changes clear bundle focus but preserve row filter, sort, and trim.
+Bundle drilldown selects that exact
 bundle's Controls without changing those choices. Row filtering and sorting run
 before pagination. Rendering targets 8192 body cells, including the identity and
 health columns. The page size is
@@ -656,6 +740,27 @@ policy IDs or changing bundle/control counts. Missing inventory renders
 `Discovery pending` for an active attempt or `Inventory unavailable for this
 attempt` for retained evidence without discovery, not an empty successful matrix.
 
+### Completed search, selection, and keyboard navigation
+
+Completed requests in
+[`evaluations.rs`](../../packages/web-ui/src/views/evaluations.rs)
+carry a structured key containing search, status, flake, latest-only, fetch limit,
+and refresh generation. Only responses matching the complete current key can
+publish a new page or error. The last accepted window remains mounted during
+polling or limit growth within the same search, status, flake, and latest-only
+scope. A different scope cannot display that window. Accepted errors replace
+cached successes. Older generations cannot publish obsolete results after a
+filter change or refresh.
+
+The server searches authorized configuration names that are absent from the
+Completed row DTO. Its matching page is authoritative; the browser does not
+repeat a narrower text search. One visible row list supplies rendering, selection
+pruning, selected actions, and keyboard indexing. Selection is explicit and
+separate from keyboard focus. Only an accepted successful page may prune it;
+loading gaps do not clear it, and refresh never selects new rows. List shortcuts
+ignore interactive controls and editable ancestors, including inputs, buttons,
+links, selectors, and contenteditable elements.
+
 ## Whole-flake authorization for logs, streams, and graphs
 
 Logs and native dependency graphs are indivisible cross-configuration evidence.
@@ -674,14 +779,52 @@ that no longer map to the current registry.
 
 Authorization and each log/graph evidence read share one read-only REPEATABLE READ
 snapshot. WebSocket authorization rechecks the session, role, and whole-flake
-scope before replay, each outgoing event, and each 20-second heartbeat. Revocation
-or host moves stop subsequent reads/sends; a successful handshake is not a lease.
+scope plus the exact latest owner before replay, each outgoing event, and each
+20-second heartbeat. The owner is `(commit_id, evaluation_attempt_id,
+attempt_number)`, including for admins. Revocation, host moves, or a newer owner
+stop subsequent reads/sends; a successful handshake is not a lease.
 An already authorized response retains snapshot semantics. Text redaction cannot
 substitute for whole-flake authority.
 
-Logs remain commit-scoped history. Graphs expose mutable native closure/build
-state and can include retained derivations; they are not historical snapshots
-of the selected attempt. Inventory, captured provenance, and native sidecar history
+### Attempt-owned live and persistent logs
+
+[`log_registry.rs`](../../packages/default/crates/cf-server/src/handlers/api/commits/log_registry.rs)
+owns the sole broadcast sender and bounded replay history under one state-owned
+mutex. A producer clone carries an immutable exact-owner/generation token, never
+a sender. Binding requires the claimed expected active attempt under database
+commit/attempt locks before the registry mutex. A base request state has no
+publication authority; an old producer cannot bind to its successor.
+
+Subscription and replay capture share the publication mutex, so no event falls
+between replay and live delivery. Publishing requires the matching token and
+cannot create or retarget a channel. Rotation closes old receivers by dropping
+the sole sender. Delayed cleanup removes only its own generation; stale
+publication or cleanup cannot affect a replacement, even for the same owner.
+Replay and channel capacity are bounded. Capacity exhaustion suppresses live
+logging without preventing evaluation or exact-owner persistent logging. This
+atomic handoff is not an unlimited or lossless delivery promise: a lagging
+broadcast receiver can skip events.
+
+Migration
+[`0309_attempt_owned_eval_logs.sql`](../../packages/default/crates/cf-server/migrations/0309_attempt_owned_eval_logs.sql)
+adds nullable attempt UUID/number with complete-or-both-null attribution and a
+composite owner FK. Existing rows remain unattributed; ownership is never guessed
+from the current commit counter or latest attempt. Sequences are unique per
+attributed attempt; legacy unattributed sequences remain unique per commit.
+
+Persistent writes retain the claimed producer owner and serialize with lifecycle
+writes under commit/attempt locks. Terminal diagnostics remain writable until a
+successor exists. Stale, foreign, or queued owners cannot append; a stale batch
+fails as a whole, while duplicate batch sequences within one attempt are ignored.
+Starting a new attempt preserves historical rows and their sequences. Latest-log
+HTTP reads select the exact latest owner in the authorized snapshot and exclude
+previous-attempt and unattributed rows, even for admins. Latest WebSocket replay
+likewise cannot replay another owner's history. Retention and parent cleanup can
+still remove logs; retained storage does not create a pinned log API.
+
+Graphs expose mutable native closure/build state and can include retained
+derivations; they are not historical snapshots of the selected attempt.
+Inventory, captured provenance, and native sidecar history
 are immutable; derivation carriers remain mutable. Pinned reads retain saved
 native sidecar evidence but cannot recover overwritten fallback results, derive
 old assignments from the current catalog, or promote mock inventory into native
@@ -696,23 +839,35 @@ targets return the same 404. Nonadmin single-system reads hold shared target and
 membership locks until the response is materialized. Bundle-system reads lock
 current memberships and authorized system UUIDs, then restrict all candidates,
 evidence, and aggregates to that exact UUID set. Newly created or moved-in hosts
-cannot enter an in-flight response. Guard commit failures return an error without
-returning the prepared payload. Admin fleet reads retain their existing behavior.
+cannot enter an in-flight response.
+
+The scoped receiver guard in
+[`compliance.rs`](../../packages/default/crates/cf-server/src/handlers/api/compliance.rs)
+starts one writable REPEATABLE READ transaction before authorization queries.
+System detail, rollups, complete resolver inputs, deployed evidence, POA&M finding
+materialization, and assignment epoch checks reborrow that transaction/connection;
+they do not acquire another pool connection. The transaction must not be
+`READ ONLY`: evidence can insert stable POA&M finding identities. Shared
+authorization locks remain held through response materialization. Serialization,
+deadlock, database, or commit failure discards the prepared payload and fails
+closed; no query-only retry can mix snapshots. Admin fleet reads retain their
+existing behavior.
+
+Evidence reads acquire the POA&M system sentinel before the system scope lock,
+matching metadata writers. Scope-only detail and rollup reads do not acquire that
+sentinel. A concurrent metadata change can invalidate the repeatable-read
+snapshot; the request then fails closed rather than mixing versions.
 
 ## Verification handoff
 
-The exact library runner registers 36 additional ignored SQLx cases: six in
-`queries::evaluation_inventory::tests`, three in
-`queries::commits::inventory_summary_tests`, nine in
-`handlers::api::commits::visibility::tests`, six in
-`queries::eval_policy_plans::inventory_projection_tests`, six in
-`queries::evaluation_native_outcomes::tests`, plus six receiver authorization
-and scope-lock cases. These cover immutable native history, attributable legacy
-retention, discovery, current scoped summaries, indivisible evidence authority and
-revocation, and discovery/plan reconciliation. Each invocation must satisfy the
-existing named-success and one-passed/zero-failed/zero-ignored guard. The runner
-selects 125 ignored and 83 non-ignored library cases, 208 total. Registration is
-not a runtime verification result.
+The exact library runner selects inventory, scoped-summary, native-history,
+discovery/plan reconciliation, indivisible-evidence authorization, and receiver
+scope-lock cases. Additional source regressions cover attempt-owned registry
+rotation and replay, persistent log attribution, restart recovery, required
+inventory deadlines/cancellation, and worker-permit release before blocked
+finalization. Each selected invocation must satisfy the named-success and
+one-passed/zero-failed/zero-ignored guard. Test definitions and runner registration
+are not runtime verification results.
 
 Pure tests cover missing/stale outcomes, typed statuses, report-only checks,
 partial rows, overlap retention, empty/conflict/skipped/unavailable resolution,

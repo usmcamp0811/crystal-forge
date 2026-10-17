@@ -249,8 +249,14 @@ pub async fn create_system(
 /// Administrators can inspect every system, including systems without an
 /// environment. Other callers need explicit membership in the system's current
 /// environment. Missing and inaccessible systems return the same 404 response.
+///
+/// # Concurrency
 /// Non-admin reads hold shared locks on the target and current memberships
-/// until the response body is materialized.
+/// until the response body is materialized. The detail query reuses the guard's
+/// writable REPEATABLE READ transaction without acquiring another connection.
+/// Commit failure discards the materialized response.
+///
+/// # Errors
 /// Authentication failures return 403; database failures return 500.
 pub async fn get_system(
     State(state): State<CFState>,
@@ -268,7 +274,7 @@ pub async fn get_system(
     // SECURITY: The base response must enforce the same boundary as its
     // configuration subrequests and retain that authorization while loading
     // details. Admin access does not depend on mutable environment scope.
-    let guard = if caller_role == Role::Admin {
+    let mut guard = if caller_role == Role::Admin {
         None
     } else {
         match super::compliance::lock_receiver_read_scope(
@@ -284,7 +290,12 @@ pub async fn get_system(
         }
     };
 
-    let row = match get_system_detail_by_id(&pool, system_id).await {
+    let result = if let Some(tx) = &mut guard {
+        get_system_detail_by_id(&mut **tx, system_id).await
+    } else {
+        get_system_detail_by_id(&pool, system_id).await
+    };
+    let row = match result {
         Ok(Some(value)) => value,
         Ok(None) => return not_found(),
         Err(_) => return internal_error("Failed to load system"),
