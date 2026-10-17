@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-17 14:26'
+updated_date: '2026-10-17 14:44'
 labels:
   - web-ui
   - design-parity
@@ -114,6 +114,8 @@ Latest user audit/correction supersedes the prior population-banner and fixed sp
 Continuation verification: retain existing task worktree/lock and Draft MR. Verify immutable native outcomes0307 and attributable history retention0308 already implemented in this worktree; register their six ignored SQLx tests. Align explicit pending versus unavailable coverage across matrix, queue/history, UI fixtures and technical documentation. Run focused disposable SQLx regressions, UI unit tests and WASM checks before refreshing the owned preview/backend. Preserve all preview records and report freshness explicitly. Continue browser and visual verification; real41/12 reconciliation remains blocked on exact commit/attempt identity. No merge or deployment.
 
 Integration follow-up from authenticated performance inspection: the environment-banner hook still probes the now-protected eval-queue with Fetch's default same-origin credentials, omitting the session across preview ports. Add explicit Include credentials to this existing probe and document its authenticated contract. Keep server authorization unchanged. Verify authenticated browser probe success and mock banners, then rerun UI unit/WASM checks and focused browser workflow. This is required to preserve the existing mock-mode indicator after queue authorization changes.
+
+User-requested continuation: remove the visible 'known' text beside Policy count pills in the Evaluation table. Parent will remove only the decorative span from shared PolicyCounts in packages/web-ui/src/views/evaluations.rs, preserving tooltip, counters, availability and authorization. Retain existing In Progress lock/worktree /home/mcamp/code/crystal-forge/TASK-488-eval-drawer-pixel-parity and same-named branch at reported HEAD 0c180049. Parent reports owned preview PIDs 21950/8633 on localhost:8080/:3445 verified HTTP 200 before UI edits. Verify targeted UI tests/WASM or current preview and inspect the table. This backlog-only handoff changes no code, services, database, Git, MR, status or acceptance criteria.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
