@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:34'
-updated_date: '2026-10-17 17:15'
+updated_date: '2026-10-17 17:25'
 labels:
   - testing
   - integration
@@ -32,7 +32,7 @@ Owning check: integration-access. Contract IDs: access.lifecycle.sessions, acces
 
 Exclusive writes: checks/integration-access/scenarios/lifecycle-session-protection.{nix,py,cjs} and lifecycle-role-restrictions.{nix,py,cjs}. Everything else is read-only. Non-goals: OIDC (490.6), forms (490.3), navigation (490.4), TTL timing, production changes. Follow TASK-490 test-only restrictions.
 
-Corrected organization: checks/integration-access/default.nix is coordinator-owned, uses { lib, inputs, pkgs, ... }, explicitly registers scenarios, and pkgs.linkFarm aggregates ALL registered gates. Shared helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }. Scripts/fixtures/assets remain owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Child integration requires coordinator registration, never child edits to shared lib, owner default.nix, CI or docs. Meaningful WIP may be discoverable. Only Access exists now; no placeholder owners.
+Corrected organization: checks/integration-access/default.nix is coordinator-owned, uses { lib, inputs, pkgs, ... }, explicitly registers scenarios, and pkgs.linkFarm aggregates ALL registered gates. Shared helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }. Scripts/fixtures/assets remain owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Child integration requires coordinator registration, never child edits to shared lib, owner default.nix, CI or docs. Meaningful WIP may be discoverable. Only Access exists now; no placeholder owners.
 
 Authority review: security/session-cookies-and-csrf.md, security/api-authentication-and-authorization.md and ui/admin-console-and-login-views.md under docs/knowledge are as-built evidence only, not accepted D1 authority. Do not label scenario headers Authority: as-built. Obtain accepted owner requirements for uncertain cases; those cases stay blocked pending owner decision.
 
@@ -44,7 +44,7 @@ lifecycle-session-protection: absent CSRF header -> 403 csrf_validation_failed, 
 
 lifecycle-role-restrictions: Operator/Viewer admin create/PATCH/config mutations return 403 with rows unchanged. Assert cross-environment denial only where accepted authority defines the endpoint/scoping; otherwise block pending owner decision. Viewer UI has approved unavailable/absent admin actions and no usable mutation controls on direct /admin; no mutation succeeds. With default allow_registration=false and an existing user, check closed registration/no new user only against accepted owner semantics; uncertain semantics stay blocked. Preserve correct failing assertions and link product bugs.
 
-Candidate commands, NOT verified: nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-session-protection -L and corresponding lifecycle-role-restrictions; append .run for evidence. Coordinator aggregate: nix build .#checks.x86_64-linux.integration-access -L. Explicit registry inspection: nix eval .#checks.x86_64-linux.integration-access.scenarios --apply builtins.attrNames. At most two VM tests concurrently. Verify actual evidence layout in the dependency commit (proposed evidence/result.json, browser/<spec>/, journals/controller/).
+Candidate commands, NOT verified: nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-session-protection -L and corresponding lifecycle-role-restrictions; append .run for evidence. Coordinator aggregate: nix build .#checks.x86_64-linux.integration-access -L. Explicit registry inspection: nix eval .#checks.x86_64-linux.integration-access.scenarios --apply builtins.attrNames. Run one VM test at a time until measured capacity supports a higher limit. Verify actual evidence layout in the dependency commit (proposed evidence/result.json, browser/<spec>/, journals/controller/).
 
 Completion requires explicit coordinator registration and real VM execution with exact revision, commands, outcomes and evidence store paths. Independent expectations come from authored facts/accepted requirements, not CF responses. Correct product failures keep assertions and linked Backlog bug (contract ID, app revision, minimal steps, expected/actual, evidence). Shared-interface gaps and authority conflicts go to the coordinator; never weaken, skip, retry away, or fix product code.
 
