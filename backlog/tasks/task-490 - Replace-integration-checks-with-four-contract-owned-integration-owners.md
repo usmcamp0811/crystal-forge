@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-17 20:35'
+updated_date: '2026-10-17 23:57'
 labels:
   - testing
   - integration
@@ -16,6 +16,8 @@ references:
   - docs/agents/verification.md
   - docs/knowledge/testing/flake-checks.md
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335'
+  - TASK-490.25
+  - TASK-490.26
 priority: high
 type: task
 ordinal: 512000
@@ -62,4 +64,6 @@ Run one VM test at a time until measured capacity supports a higher limit. Found
 Corrected native-layout WIP preserved and pushed: 683c86e03ef14b37e69c00030d6d17660398324d; draft MR !335 (not merge-ready). Only integration-access is discoverable (27 total checks, previous 26 unchanged). No root tests tree/custom discovery/flake-output assembly remains. TASK-491 blocks VM execution; foundation incomplete and Luna children stay Backlog. No Luna dispatch, deployment, merge, Review, or Done transition occurred.
 
 Foundation resumed on 2026-10-17 in the existing dedicated worktree. Integrated tested TASK-491 dependency by cherry-pick `af39284bdf16d56402f01a64c916f17948e43b02` as `a6c8922650bf7f0ff643d181422c0092cfc43242`. The exact Access scenario executed in a VM and failed at startup, preserving its assertion. Generated config evidence reveals product blockers TASK-490.25 (local PostgreSQL socket host becomes empty-authority URI) and TASK-490.26 (local auth_mode omitted; AUTH_MODE unset; route behavior not reached because DB URL failure comes first). Both are Backlog, not fixed. Coverage map now records exact evidence and marks the scenario failing, not passing. Assurance packets .20/.21 were narrowed; .27/.28/.29 split waiver, acceptance register, and verify/closure. Per-scenario fresh DB/VM rule now says task deps never share runtime outputs. All child packets remain Backlog; no Luna dispatch, merge, deploy, or application fix.
+
+Final combined foundation commit is 39a6a54b651a8b77fc3416b73195e363a782fa2e. The focused native Access check executed a VM and failed on fresh startup; exact evidence is in docs/knowledge/testing/integration-coverage-map.md and store output `/nix/store/vcfbia521bjad2a85yca3h3n9i4m4ikf-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. TASK-490.25/.26 are explicit product blockers; no production changes were made. All dependent packets remain Backlog, not ready.
 <!-- SECTION:NOTES:END -->
