@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-17 21:04'
+updated_date: '2026-10-17 21:19'
 labels:
   - web-ui
   - design-parity
@@ -150,6 +150,12 @@ Recovery persistence and eligibility: Use established locks, exact-source valida
 Required focused recovery verification: Add migration-backed SQLx cases inside the existing Snowfall checks for fresh capture and partial source outcomes, zero and exhausted retry budgets, repeated and concurrent recovery, rollback, cancellation, existing queued child, later distinct interruption, and the exact max_retries=1 sequence: initial count0 -> recovery count0 -> actual eligible failure retry count1 -> recovery count1 -> actual eligible failure with no retry -> manual re-evaluation count0. These are planned checks, not executed evidence.
 
 Delegation plan, recorded before any implementation delegation: assign separate owners to (1) attempt-owned streaming across every producer backend, including stderr, cleanup and subscriptions; (2) receiver connection/transaction call graph; (3) recovery queries and focused SQLx cases under the approved constraints above; (4) cancellable write helper and mandatory inventory work; (5) UI behavior fixes; and (6) browser regressions. Parent coordinates interfaces, migration numbering, integration and verification. Continue the other review-fix plans already recorded, except where the approved recovery constraints explicitly supersede the earlier proposal. This entry records ownership boundaries only; it does not start delegation or implementation.
+
+User-directed backlog-only visual parity handoff at reported HEAD a41a96ee. Matched React reference/product captures cover standard 1440px dark/light and 720px dark, in Bundles and Controls, plus maximized 1440px dark. Reference props align actual display metadata; preserve the design without modifications, fake zero values, string hacks, or hidden banners. Reported standard drawer-relative heights match: header 70.938px, stats 68.594px, tabs 37px, toolbar 93px, and row 38.391px. Maximized toolbar remains product 93px versus reference 53px: the extra 40px comes from two forced rows under `.pm-captured .pm-controls` column layout. These are supplied findings, not independently reverified by this backlog-only operation.
+
+Parent continuation: apply minimal CSS to make `.pm-controls` a single wrapping group with `flex-flow: row wrap` and `gap: 8px 10px`; use `.pm-controls-line { display: contents; }` while preserving DOM, roles, buttons, and current ordering. Normal and narrow widths must wrap automatically; maximized width must use one row when controls fit. Add a browser assertion for maximized toolbar height, capture the result, and update affected documentation. No backend or API semantics change. Preserve banners and explicitly report the reference zero-to-1080 and DTG-coupling limitations.
+
+Reported exact-head CI pipeline 2959108766 has both required jobs pending: server 17258917407 and browser 17258917417; integration/OIDC jobs are running. Do not claim passing CI or merge readiness; MR remains Draft. This operation appends only the task plan after reading the execution guide. No code, Git, services, database, MR, task status, or acceptance-criteria changes are authorized.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
