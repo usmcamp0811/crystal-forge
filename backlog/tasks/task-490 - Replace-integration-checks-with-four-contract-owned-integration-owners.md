@@ -1,9 +1,11 @@
 ---
 id: TASK-490
 title: Replace integration checks with four contract-owned integration owners
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - claude-opus-5-5
 created_date: '2026-10-17 16:13'
+updated_date: '2026-10-17 16:14'
 labels:
   - testing
   - integration
@@ -44,3 +46,9 @@ Coordinator-owned (single writer) paths: tests/integration/lib/**, tests/integra
 - [ ] #6 Product defects found by correct assertions are recorded as linked Backlog defects and keep their executable failing assertion; none are fixed in this overhaul
 - [ ] #7 No production code, migration, SQLx metadata, UI asset, or design-handoff file is changed by any child of this task
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-opus-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation (overhaul integration branch TASK-490.1-integration-foundation).
+<!-- SECTION:NOTES:END -->
