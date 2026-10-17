@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-17 17:15'
+updated_date: '2026-10-17 17:26'
 labels:
   - testing
   - integration
@@ -26,7 +26,7 @@ Owning check: integration-delivery. Contract IDs: delivery.evaluation.ingestion,
 
 Scope ingestion: polling and webhooks ingest two authored commits exactly once each; replay deduplicates; force-push rewrite is detected and surfaced in Flakes UI. Identity: two distinguishable commits produce drvPaths matching independent nix eval of those exact commits on services; Evaluations list, /evaluations/:commit_id and EvalDrawer show exact identity; moving head does not rewrite history. Reuse/extend the workflow proven by TASK-490.7 without duplicating it. The coordinator owns its proving scenario; this child writes only its disjoint named files and escalates shared changes. Non-goals: Config Inspector (490.9), build obligations (490.10).
 
-Organization: native checks/integration-delivery/default.nix uses { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns owner default.nix/shared lib/CI/docs and explicitly registers child scenarios. Meaningful WIP can be discoverable. Only Access exists now; Delivery default.nix requires meaningful scenarios from coordinator foundation work, no placeholders.
+Organization: native checks/integration-delivery/default.nix uses { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns owner default.nix/shared lib/CI/docs and explicitly registers child scenarios. Meaningful WIP can be discoverable. Only Access exists now; Delivery default.nix requires meaningful scenarios from coordinator foundation work, no placeholders.
 
 Prerequisite: TASK-490.7 actually integrated. Read cf-server handlers/api/flakes.rs, commits.rs, webhook.rs and evaluation coordinator; web-ui flakes/evaluations/EvalDrawer; approved presentation FlakesView.jsx, EvalsView.jsx, EvalDrawer.jsx; docs/knowledge/evaluation/* and api/flakes-and-evaluation-snapshot-api.md. As-built D1 is evidence, not authority; uncertain expected behavior blocked pending owner decision. TASK-490 test-only scope applies.
 
