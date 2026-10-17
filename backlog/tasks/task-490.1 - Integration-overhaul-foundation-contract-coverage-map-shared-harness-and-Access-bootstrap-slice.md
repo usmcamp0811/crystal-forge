@@ -3,11 +3,11 @@ id: TASK-490.1
 title: >-
   Integration overhaul foundation: contract, coverage map, shared harness, and
   Access bootstrap slice
-status: Backlog
+status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-17 17:14'
+updated_date: '2026-10-17 17:20'
 labels:
   - testing
   - integration
@@ -61,4 +61,6 @@ READINESS: Backlog, blocked by two existing Rust package tests; no VM execution.
 2026-10-17 organization correction: native owner directories and lib/integration-test replace the previous layout and completion-only export proposal. Backlog grooming only. Foundation is blocked by two existing Rust package tests; no VM execution or Luna delegation occurred. Actual foundation dependency commit remains unresolved; do not substitute the historical base hash. All children remain Backlog and none is ready. Future packets require actual dependency commit(s) and verified commands before To Do. Uncertain D1/as-built cases require owner decision.
 
 Historical preflight (not a current lock): branch/worktree TASK-490.1-integration-foundation at /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation was recorded from origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd. Prior notes reported preserved pre-existing dev files, no main worktree, /dev/kvm present, and no live-preview requirement for this test-only task. This correction does not verify those historical environment observations.
+
+Task status correction: foundation remains In Progress under the existing lock and worktree. Layout correction does not retire or restart this active implementation task. Dependent Luna packets remain Backlog pending verified dependency commits. Snowfall helper signature verified during evaluation: lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; } (the check passes inputs because Snowfall's library-loader inputs do not include self).
 <!-- SECTION:NOTES:END -->
