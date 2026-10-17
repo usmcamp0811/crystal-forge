@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
+updated_date: '2026-10-17 17:18'
 labels:
   - testing
   - integration
@@ -16,7 +17,10 @@ references:
   - docs/knowledge/testing/integration-coverage-map.md
   - docs/knowledge/compliance/cf-xccdf-interchange-operator-guide.md
   - docs/design/CrystalForge/components/ImportStigModal.jsx
-  - checks/web-ui/tests/fixtures/U_Anduril_NixOS_STIG_V1R1_Manual-xccdf.xml
+  - >-
+    checks/integration-assurance/fixtures/stig-import-U_Anduril_NixOS_STIG_V1R1_Manual-xccdf.xml
+  - >-
+    checks/integration-assurance/fixtures/stig-import-U_Anduril_NixOS_STIG_V1R2_Manual-xccdf.xml
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -26,44 +30,39 @@ ordinal: 531000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-assurance. Contract ID: assurance.policy.stig-import (see docs/knowledge/testing/integration-coverage-map.md).
+Owning check: integration-assurance. Contract ID: assurance.policy.stig-import. Exclusive writes: checks/integration-assurance/scenarios/policy-stig-import.{nix,py,cjs} and checks/integration-assurance/fixtures/stig-import-*. Controller-only scenario. Legacy canonical STIG/20ad/20aa proofs are buried in the browser monolith; reconciliation uses route mocks. Validate import atomicity using input-derived identities, never CF-derived expected results.
 
-WHY: the strongest legacy proofs (task433-canonical-imported-stig-refinement, 20ad, 20aa) live inside the 26.9k-line web-ui suite with strict baselines; web-ui-reconciliation proves the import UI only against route mocks. Import must be validated and atomic, and its expected identities must come from the input file, not from CF.
+Non-goals: enforcement (490.18), export/interchange round-trip (490.22), evaluation evidence, production changes, visual baselines without approved ImportStigModal state. TASK-490 test-only scope applies.
 
-OBJECTIVE: one scenario tests/integration/assurance/scenarios/policy-stig-import.{nix,py,cjs} that needs only the controller role.
+Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }. All scripts/fixtures/assets are owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; child integration requires explicit registration. Meaningful WIP may be discoverable; only Access exists now; coordinator adds Assurance default.nix with meaningful scenario, never placeholder.
 
-NON-GOALS: enforcement and admission (TASK-490.18); exports and interchange round-trip (TASK-490.22); evidence from evaluations; production changes; visual baselines unless an approved ImportStigModal state applies.
+Authority review: docs/knowledge/compliance/cf-xccdf-interchange-operator-guide.md, cf-xccdf-interchange-profile.md and stig-modules.md are as-built evidence, not accepted D1 authority. XCCDF design review draft is not acceptance authority. Approved presentation references: ImportStigModal.jsx, PoliciesView.jsx, PolicyEditor.jsx, read-only. Uncertain semantics stay blocked pending owner decision; no Authority: as-built header.
 
-BASE: foundation commit in implementation notes (FOUNDATION_COMMIT). Pattern: tests/integration/access/scenarios/lifecycle-local-bootstrap.{nix,py,cjs}.
+Read-only source: cf-server api/compliance.rs xccdf_preview/xccdf_import/MAX_XCCDF_MULTIPART_BYTES, compliance/xccdf/zip_extractor.rs PackageKind and disa_stig_adapter.rs, api/framework_requirements.rs framework/version/search/mapping handlers; /api/v1/compliance/xccdf/{preview,import}, frameworks*, /api/v1/policy-versions/:pv/requirement-mappings; web-ui import and Provenance/Mappings tabs.
 
-AUTHORITY: docs/knowledge/compliance/cf-xccdf-interchange-operator-guide.md; docs/knowledge/compliance/cf-xccdf-interchange-profile.md; docs/knowledge/compliance/stig-modules.md. The XCCDF interchange design doc in docs/design is a review draft and is NOT acceptance authority. Approved presentation reference: docs/design/CrystalForge/components/ImportStigModal.jsx, PoliciesView.jsx, PolicyEditor.jsx. Header: `Authority: as-built (D1)`.
+Inputs: owner-local fixtures stig-import-U_Anduril_NixOS_STIG_V1R1_Manual-xccdf.xml and V1R2 counterpart (Benchmark Anduril_NixOS_STIG), adapted byte-faithfully from legacy input by the future packet; legacy source preservation/retirement remains coordinator-owned. Scenario references only its owner-local fixture paths. Independently compute rule count, rule ids/stable distinct subset and version from XML at Nix build time, e.g. libxml2 xmllint namespace-aware XPath in pkgs.runCommand producing facts JSON. Author malformed truncated XML and non-XCCDF fixture locally; never derive expected counts from CF.
 
-PRODUCTION SOURCE TO READ (read-only): cf-server src/handlers/api/compliance.rs (xccdf_preview ~4649, xccdf_import ~4961; multipart limit MAX_XCCDF_MULTIPART_BYTES), src/compliance/xccdf/zip_extractor.rs (PackageKind Xml|Zip), src/compliance/xccdf/disa_stig_adapter.rs, src/handlers/api/framework_requirements.rs (list_compliance_frameworks, list_compliance_framework_versions, search_framework_requirements, list/create/update_policy_requirement_mapping); routes /api/v1/compliance/xccdf/{preview,import}, /api/v1/compliance/frameworks*, /api/v1/policy-versions/:pv/requirement-mappings; packages/web-ui ImportStigModal and policy editor Provenance/Mappings tabs.
+Verify actual foundation interface first. Pattern checks/integration-access/scenarios/lifecycle-local-bootstrap; controller browser role, API register/login admin setup with named session and CSRF, browser UI import, coverage-map helpers and ctx.download only if concretely available.
 
-INPUT FIXTURES (read-only, legacy location; the coordinator moves them at cutover): checks/web-ui/tests/fixtures/U_Anduril_NixOS_STIG_V1R1_Manual-xccdf.xml and U_Anduril_NixOS_STIG_V1R2_Manual-xccdf.xml (Benchmark id Anduril_NixOS_STIG). Reference them from the scenario .nix with "${harness.inputs.self}/checks/web-ui/tests/fixtures/<file>". Compute the expected facts INDEPENDENTLY at Nix build time with an XML tool (e.g. a pkgs.runCommand using libxml2's xmllint --xpath over the XCCDF namespace) into a facts JSON: rule count, rule ids (or a stable subset with distinct identities), and the version string per file. Do not count from CF output. Exclusive write paths: tests/integration/assurance/scenarios/policy-stig-import.{nix,py,cjs} and tests/integration/assurance/fixtures/stig-import-* (for a deliberately malformed variant you author).
+Scenario: preview V1R1 shows exact independently computed counts/identities and persists no policies/framework requirements. Import V1R1 persists exact rules/provenance; V1R2 is distinguishable and does not rewrite V1R1. Malformed/non-XCCDF rejected visibly with no partial rows. UI mapping of imported rule to framework requirement persists through reload. Viewer enforcement is 490.2. Cover success, validation error and preview loading only when approved state exists.
 
-HARNESS: nodes.controller = harness.roles.controller { browser = true; }; admin setup via API (register + login with an http() session, csrf=True for mutations); browser sign-in in the spec for the UI import; helpers per the coverage map harness section; ctx.download is available if you need to save a preview artifact.
+Candidates, NOT verified: nix build .#checks.x86_64-linux.integration-assurance.scenarios.policy-stig-import -L; append .run for evidence; nix eval .#checks.x86_64-linux.integration-assurance.scenarios --apply builtins.attrNames; aggregate nix build .#checks.x86_64-linux.integration-assurance -L. At most two concurrent VMs. Completion requires explicit registration, real VM execution and revision/commands/outcomes/evidence notes. Preserve correct failing assertions with linked Backlog product bugs; shared/authority gaps escalate to coordinator.
 
-SCENARIO policy-stig-import (actor: admin):
-1. Preview V1R1 through the Import STIG UI: preview shows the expected rule count/identities; DB rows for policies/framework requirements are unchanged after preview (atomic preview, nothing persisted).
-2. Import V1R1: persisted rules equal the independently computed set (count and identities); provenance shows the source benchmark/version.
-3. Import V1R2: the second version is distinguishable; V1R1 records are not rewritten.
-4. Malformed input (authored truncated XML) and a non-XCCDF file are rejected with a visible error and no partial rows (counts before == after).
-5. Create one requirement mapping from an imported rule to a framework requirement through the UI; it persists through reload.
-6. Viewer is not required here (role enforcement is TASK-490.2).
-UI states: success, validation error with no persistence, loading during preview if the design defines it.
-
-COMMANDS: nix build .#integration.assurance.scenarios.policy-stig-import -L ; append .run for evidence after failure; nix eval .#integration.assurance.scenarios --apply builtins.attrNames must list it. At most two VM tests concurrently on this host. Coordinator runs .#integration.assurance.all.
-
-COMPLETION, PRODUCT DEFECT, ESCALATION: same rules as TASK-490.2 (real VM execution; commands/revision/outcome/evidence in notes; correct failing assertions stay failing with a linked Backlog bug; interface or authority problems go to the coordinator, claude-opus-5-5; never edit coordinator-owned files).
+READINESS: actual foundation commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s), implemented helpers/fixtures/registration and verified commands required before To Do. No delegation or executed slice is claimed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 policy-stig-import exists only under tests/integration/assurance/scenarios/ and is discovered
-- [ ] #2 Expected rule counts and identities are computed from the XCCDF files independently of CF
-- [ ] #3 Preview persists nothing; import persists exactly the expected rules with provenance; a second version does not rewrite the first
-- [ ] #4 Malformed and non-XCCDF inputs are rejected with no partial rows
+- [ ] #1 policy-stig-import and its scripts/fixtures/assets live only under checks/integration-assurance/ and the coordinator explicitly registers the scenario in the native owner pkgs.linkFarm aggregate
+- [ ] #2 Expected rule counts and identities are independently computed from owner-local XCCDF fixtures, not CF output
+- [ ] #3 Preview persists nothing; import persists exactly expected rules/provenance; second version does not rewrite first
+- [ ] #4 Malformed and non-XCCDF inputs are visibly rejected with no partial rows
 - [ ] #5 A requirement mapping created in the UI persists through reload
-- [ ] #6 Executed in a real VM with commands, revision, outcome, and evidence paths in task notes
+- [ ] #6 Scenario executes in a real VM with revision, commands, outcomes and .run evidence recorded; uncertain authority cases remain blocked pending owner decision
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-17 organization correction replaces old scenario/fixture paths, commands and D1 authority instructions. Scenario inputs are owner-local, not runtime references to legacy browser fixtures. Coordinator owns owner default.nix/shared lib/CI/docs and explicit registration. Foundation commit unresolved; two existing Rust package tests block foundation; no VM execution. Backlog, not ready; actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
+<!-- SECTION:NOTES:END -->
