@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-17 14:22'
+updated_date: '2026-10-17 14:26'
 labels:
   - web-ui
   - design-parity
@@ -315,4 +315,6 @@ Parent-verified continuation handoff (bookkeeping only; facts supplied by parent
 7. Matched-reference audit completed:dark/light1440x1000 and narrow720 in both modes; source fixture60x128 cell semantics all validated;32 shared controls. Evidence: /tmp/opencode/task488/inventory-current-audit-report.json and paired PNGs/JSON. Pixel parity NOT achieved:mock development banners create28px top/bottom insets(drawer944 versus1000); header2px taller; bundle columns27.875px wider due to version/year metadata; muted-color and legend differences. Reference computes fake1080 derivations from explicit0; production must not copy that behavior. Rounded relative reference DTG drifts from actual timestamp. Intercepted audit browser fixture is not actual persisted proof. Later probe-only fix preserves mock-banner layout, but this audit was not rerun after that tiny fix. Real41/12 reconciliation remains Unverified until the user supplies SHA+attempt ID.
 
 8. OKF command `nix build .#checks.x86_64-linux.okf-knowledge --no-link --builders '' --max-jobs 1 --cores 2 -L` passed:58 tests,216 Mermaid blocks,190 concepts. Log: /tmp/opencode/task488/inventory-current-okf.log; cache401 warning nonfatal. SQL changes use runtime query/query_as only; new tables do not alter checked query shapes; no SQLx metadata changed. Full flake check and authoritative web-ui were not run locally, per user's CI-only boundary. Last pushed CI actually failed: web-ui-check35 FAIL steps plus2700s completion-file timeout; niks3-cache terminal-agent private-mTLS narinfo curl exit7 connection failure. Saved traces: /tmp/opencode/task488/inventory-prior-ci-{webui,niks3}.log. Do not describe this CI as inconclusive or green. Exact latest-source CI is unverified; all latest changes remain uncommitted.
+
+Commit/push receipt (verified details supplied by the user): User explicitly authorized commit and push. Commit `0c1800498d2122e21654c8b4a43cae81567a3b89`, message `TASK-488: Retain exact-attempt inventory and secure historical evidence`, contains 50 files changed, 8952 insertions and 909 deletions. Created with normal `nix develop` Git commit; no hook bypass. Pushed existing branch `TASK-488-eval-drawer-pixel-parity` to `origin`; `git ls-remote` confirmed the exact SHA. Worktree contains only untracked `backlog/.locks/TASK-488.lock`, intentionally not committed. GitLab MR334 was verified opened with Draft=true and the new SHA. Exact-head pipeline2958605251 is running: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2958605251; no passing result is claimed. Preview http://localhost:8080/evaluations returned HTTP200; existing task API/frontend remain alive. No merge or deployment. TASK-488 remains In Progress pending remaining visual, real41/12 and authoritative CI gaps. This bookkeeping append preserves existing notes, status, lock and criteria.
 <!-- SECTION:NOTES:END -->
