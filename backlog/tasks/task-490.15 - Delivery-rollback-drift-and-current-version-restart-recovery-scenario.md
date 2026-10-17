@@ -4,6 +4,7 @@ title: 'Delivery: rollback, drift, and current-version restart recovery scenario
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:37'
+updated_date: '2026-10-17 17:17'
 labels:
   - testing
   - integration
@@ -19,13 +20,17 @@ ordinal: 527000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-delivery. Contract ID: delivery.activation.recovery. Exclusive write path: tests/integration/delivery/scenarios/activation-recovery.{nix,py,cjs}.
+Owning check: integration-delivery. Contract ID: delivery.activation.recovery. Exclusive writes: checks/integration-delivery/scenarios/activation-recovery.{nix,py,cjs}. Legacy rollback preselection/drift steps 12o/12i-12k are mocked; restart recovery otherwise relies on Rust state-machine tests.
 
-WHY: rollback preselection and drift are proven only by mocked steps (12o, 12i-12k); restart recovery is proven only by Rust state-machine tests.
+Scope: System detail UI rollback restores previous generation on targetA, verified through actual /run/current-system and boot entry. Out-of-band local change reports drift with actual running identity. Kill/restart server during evaluation/build and agent during deployment; bounded waits prove consistent recovery at the current version. Non-goal: version-transition recovery (Upgrade 490.23). TASK-490 test-only scope applies.
 
-SCOPE: rollback from the System detail view restores the previous generation on targetA (actual /run/current-system and boot entry); an out-of-band local change on targetA is reported as drift with the actual running identity; restart of the server during an evaluation/build and of the agent during a deployment recovers to a consistent state at the current version (unit_killed, then wait_for the specified state). Non-goals: version-transition recovery (Upgrade, 490.23).
+Organization: native checks/integration-delivery/default.nix has { lib, inputs, pkgs, ... }, explicit coordinator registrations and normal pkgs.linkFarm aggregate of ALL registered gates. Shared lib/integration-test through lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns owner default.nix/shared lib/CI/docs; child integration requires explicit registration and disjoint files. Meaningful WIP can be discoverable; only Access exists now, other owners only with meaningful scenarios, no placeholders.
 
-READY WHEN: TASK-490.14 is integrated. Source to read then: cf-server handlers/api/systems.rs (rollback, rollback-generation, sync, history, agent-events), reset_non_terminal_derivations in bin/server.rs startup, cf-agent system_state.rs; docs/knowledge/deployment/*, docs/knowledge/ui/deployment-history-rendering-rules.md; design SystemDetail.jsx.
+Prerequisite: TASK-490.14 integrated. Read cf-server api/systems.rs rollback/rollback-generation/sync/history/agent-events, startup reset_non_terminal_derivations, cf-agent system_state.rs; docs/knowledge/deployment/* and ui/deployment-history-rendering-rules.md; SystemDetail.jsx. As-built D1 is evidence, not accepted authority; uncertain recovery states stay blocked pending owner decision.
+
+Candidate, NOT verified: nix build .#checks.x86_64-linux.integration-delivery.scenarios.activation-recovery -L; append .run for evidence; aggregate nix build .#checks.x86_64-linux.integration-delivery -L. Completion requires coordinator registration, real VM execution and exact revision/commands/outcomes/evidence notes; independently defined expected states, retained correct failing assertions and linked Backlog product bugs; interface gaps escalate to coordinator.
+
+READINESS: foundation dependency commit unresolved; two existing Rust package tests block foundation; no VM execution. Backlog, not ready. Actual dependency commit(s), implemented interfaces/fixtures/registration and verified commands required before To Do. No delegation or executed slice is claimed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -35,3 +40,9 @@ READY WHEN: TASK-490.14 is integrated. Source to read then: cf-server handlers/a
 - [ ] #3 Server and agent restarts during work recover to the specified state
 - [ ] #4 Executed in real VMs with recorded evidence
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-17 organization correction: native owner-local layout and explicit coordinator registration. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
+<!-- SECTION:NOTES:END -->
