@@ -638,6 +638,8 @@ plus the saved outcome detail, enforcement mode, exact version and lineage
 identifiers, the registry action, and
 one Compliance evidence action per contributing bundle. Expanded details stay
 pinned to the visible scroll width. Missing assertion text has no placeholder.
+Expanded rows do not repeat configuration, operator classification, or assigned
+bundle summary text. Captured metadata and evidence actions remain available.
 
 The header Systems value counts the visible unique planned/discovered configuration
 population after inventory is available; Policy reports configuration-gate coverage,

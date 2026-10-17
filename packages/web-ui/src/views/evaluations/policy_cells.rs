@@ -278,6 +278,8 @@ mod card_tests {
 /// Passed and not-assigned controls stay behind an explicit toggle. Assertion,
 /// path, and detail text is displayed only when saved. Unknown cards
 /// without any saved evidence show one compact unavailable state.
+/// Captured configuration, classification, and assignment metadata is not
+/// repeated in a separate row-summary block.
 #[component]
 pub(super) fn RowDetails(
     row: MatrixRow,
@@ -311,29 +313,6 @@ pub(super) fn RowDetails(
         .policies
         .iter()
         .map(|binding| (binding.policy_version_id, binding))
-        .collect();
-    let mut seen = std::collections::HashSet::new();
-    let contexts: Vec<_> = row
-        .source
-        .assigned_bundles
-        .iter()
-        .filter(|context| seen.insert(context.bundle_version_id))
-        .map(|context| {
-            let source = match context.source {
-                EvalBundleSource::Assignment => "assignment",
-                EvalBundleSource::VirtualBaseline => "virtual baseline",
-            };
-            match bundles
-                .iter()
-                .find(|b| b.bundle_version_id == context.bundle_version_id)
-            {
-                Some(bundle) => format!("{} {} ({source})", bundle.name, bundle.version),
-                None => format!(
-                    "{} (display metadata unavailable, {source})",
-                    context.bundle_version_id
-                ),
-            }
-        })
         .collect();
     let config = row.source.configuration_name.clone();
     rsx! {
@@ -432,17 +411,6 @@ pub(super) fn RowDetails(
                     button { class: "btn btn-ghost xs focus-ring", aria_expanded: show_passed(), onclick: move |_| show_passed.toggle(),
                         if show_passed() { "Hide passed and N/A controls" } else { "Show {secondary} passed and N/A controls" }
                     }
-                }
-            }
-            div { class: "pm-expand-meta",
-                span { "Configuration: ", code { "{row.source.configuration_name}" } }
-                span { "Operator classification: ", match row.source.greenfield { Some(true) => "Greenfield", Some(false) => "Established", None => "Unknown" } }
-                if !row.bundle_metadata_complete {
-                    span { "Bundle context metadata is incomplete; missing contexts do not prove nonassignment." }
-                } else if contexts.is_empty() {
-                    span { "Assigned bundles: none captured" }
-                } else {
-                    span { {format!("Assigned bundles: {}", contexts.join(" · "))} }
                 }
             }
             div { class: "pm-expand-actions",

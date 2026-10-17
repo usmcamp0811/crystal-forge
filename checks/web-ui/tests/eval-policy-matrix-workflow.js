@@ -212,6 +212,11 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
     await expect(stickyHealth.getByTitle('1 failed · 1 warning · 1 unknown',{exact:true})).toBeVisible();
     await drawer.getByRole('table').evaluate(table=>{table.parentElement.scrollLeft=0;});
     await row.getByRole('button',{name:'fixture-host-00',exact:true}).click();
+    const expandedDetails=drawer.locator('.pm-expand');
+    await expect(expandedDetails.locator('.pm-expand-meta')).toHaveCount(0);
+    for(const label of ['Configuration:','Operator classification:','Assigned bundles:']) {
+      await expect(expandedDetails.getByText(label,{exact:false})).toHaveCount(0);
+    }
     await drawer.getByRole('button',{name:'Fixture policy 000 · 1.0',exact:true}).click();
     await expect(drawer.getByText('[FIXTURE] services.openssh.settings.PermitRootLogin must equal no',{exact:true})).toBeVisible();
     await capture('eval-matrix-controls-detail');
