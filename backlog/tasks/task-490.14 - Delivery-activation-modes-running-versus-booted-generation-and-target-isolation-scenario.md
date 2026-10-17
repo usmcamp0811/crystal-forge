@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:37'
-updated_date: '2026-10-17 17:17'
+updated_date: '2026-10-17 17:27'
 labels:
   - testing
   - integration
@@ -26,7 +26,7 @@ Owning check: integration-delivery. Contract ID: delivery.activation.modes. Excl
 
 Scope: manual, auto_latest and pinned policies on targetA. Manual changes /run/current-system only after Deploy; auto_latest follows a new evaluated commit; pinned ignores newer commits. BootOnly changes the boot entry without changing running generation until targetA reboots. BuilderB also runs a real second agent with its own key; deploying targetA leaves builderB generation/services unchanged using output independently absent in builderB store. System detail Deploy/History shows actual running versus booted identity. Non-goals: rollback/drift (490.15). TASK-490 test-only restrictions apply.
 
-Organization: native checks/integration-delivery/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator registrations and pkgs.linkFarm aggregate of ALL registered gates. Shared lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; explicit child registration and disjoint scenario files required. Meaningful WIP may be discoverable; only Access exists now, other owners need meaningful scenarios, no placeholders.
+Organization: native checks/integration-delivery/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator registrations and pkgs.linkFarm aggregate of ALL registered gates. Shared lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; explicit child registration and disjoint scenario files required. Meaningful WIP may be discoverable; only Access exists now, other owners need meaningful scenarios, no placeholders.
 
 Prerequisites: TASK-490.12 integrated; TASK-490.7 targetA and builderB-agent wiring. Read cf-server models/systems.rs DeploymentPolicy, cf-config config/deployment.rs DeploymentStrategy, handlers/agent/*, api/systems.rs deploy/status/generations, cf-agent deployment; docs/knowledge/deployment/*; SystemDetail.jsx/DeployGate.jsx. As-built D1 is evidence, not authority; uncertain cases blocked pending owner decision.
 
