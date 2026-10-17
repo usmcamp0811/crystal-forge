@@ -352,7 +352,7 @@ If the repository already provides documentation lints or rustdoc checks, run th
 - Extract nontrivial state transitions and test them independently when practical.
 - Keep client DTOs aligned with the server contract, but do not duplicate server types when the UI intentionally needs a different representation.
 - Preserve loading, empty, error, authorization, and stale-data behavior when changing views.
-- A user-visible UI change must be exercised by the authoritative `web-ui` check and represented by an MR screenshot. Add a behavioral assertion when practical.
+- A user-visible UI change must be exercised by its owning integration scenario and represented by an MR screenshot. See "Integration test maintenance" below.
 
 ### Database and SQLx
 
@@ -367,9 +367,59 @@ See [docs/agent/database-safety.md](docs/agent/database-safety.md).
 
 Choose the smallest set of commands that proves the acceptance criteria and protects affected interfaces. Prefer targeted checks during implementation and broader checks before review when risk warrants them.
 
-The persistent preview is the early UI feedback loop. Do not run the full `web-ui` VM suite or `nix flake check` merely to start or refresh it. Use focused checks during implementation. Required authoritative browser checks and MR screenshots remain final-review requirements; exact-head CI may provide that evidence when the task permits it. A preview screenshot is not evidence that the authoritative check passed.
+The persistent preview is the early UI feedback loop. Do not run a full integration owner, the legacy `web-ui` VM suite, or `nix flake check` merely to start or refresh it. Use focused checks during implementation. Required owning integration results and MR screenshots remain final-review requirements; exact-head CI may provide that evidence when the task permits it. A preview screenshot is not evidence that an integration check passed.
 
-Use the exact package manifests and flake attributes applicable to the change. The baseline command matrix is in [docs/agent/verification.md](docs/agent/verification.md).
+Use the exact package manifests and flake attributes applicable to the change. The baseline command matrix is in [docs/agents/verification.md](docs/agents/verification.md).
+
+### Integration test maintenance
+
+Read `docs/knowledge/testing/integration-test-contract.md` before changing
+an integration contract, browser-visible behavior, integration tests,
+fixtures, or visual baselines. Owners, scenarios, status, and legacy
+retirement are in `docs/knowledge/testing/integration-coverage-map.md`.
+
+The integration owners are `integration-access`, `integration-delivery`,
+`integration-assurance`, and `integration-upgrade`. Extend the smallest
+existing owning scenario first. Add a scenario only for a distinct
+unproved behavior or state. A new feature, page, component, or regression
+does not authorize a new top-level flake check.
+
+Before editing acceptance expectations, record the approved requirement
+or design revision, affected consumers, owning scenario, and assertion
+disposition in the task/MR impact record. Use the approved design as the
+UI reference. Keep data meaning, identity, permissions, persistence, and
+evidence rules aligned with the accepted domain contract.
+
+Update implementation, affected contract links, fixtures, assertions,
+and approved visual targets together. Retain valid assertions; replace
+or remove obsolete assertions only with an approved requirement reason.
+Do not use current application output to approve its own expected result.
+
+Every user-visible change must be exercised by its owning integration
+check and have the required design comparison and MR images. Use focused
+local checks during implementation, then obtain results for affected
+owners at the review revision. Report failed, blocked, skipped,
+and unverified cases explicitly. A preview is not proof that a check passed.
+
+Only `integration-access` is currently discoverable. Its coordinator-owned
+`checks/integration-access/default.nix` explicitly registers scenarios; the
+normal check uses `pkgs.linkFarm` to build every registered scenario gate.
+Run a focused gate with
+`nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`;
+append `.run` to the scenario attribute for evidence only. Meaningful WIP
+checks may be discoverable without a completeness flag. Record missing
+obligations in the coverage map. Keep legacy checks and CI selection unchanged
+until all required owner scenarios pass.
+
+Shared helpers live in `lib/integration-test/`, exported through Snowfall as
+`lib.crystal-forge.makeIntegrationTestHarness {pkgs}`. Keep owner scenarios,
+fixtures, and assets beneath `checks/integration-<owner>/`. Future Delivery,
+Assurance, and Upgrade owners follow this layout; do not create placeholder
+`default.nix` files or add custom discovery.
+
+Changing the four-check inventory requires an explicit owner-approved
+decision under the integration contract. Cite an approval already present
+in the active task; do not ask for the same approval again.
 
 Run `nix flake check --keep-going` when the task requires it or the change affects flakes, NixOS modules, development shells, packaging, CI/release behavior, or cross-package interfaces that targeted checks cannot adequately prove. Do not run it mechanically for every edit.
 

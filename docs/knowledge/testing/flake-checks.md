@@ -71,14 +71,38 @@ not files or behavior present at the original migration base `3b23d36f`.
 
 Every check below runs with
 `nix build .#checks.x86_64-linux.<name> --print-build-logs`, unless the section
-says otherwise. For the web UI check in depth, see the
+says otherwise.
+
+The integration layer is being replaced by four owners (`integration-access`,
+`integration-delivery`, `integration-assurance`, `integration-upgrade`) under
+the [integration test maintenance contract](integration-test-contract.md). Only
+`integration-access` is currently discoverable. Its coordinator-owned
+`checks/integration-access/default.nix` explicitly registers scenarios, and its
+normal `pkgs.linkFarm` check builds every registered scenario gate. Meaningful
+WIP checks may be discoverable without a completeness flag; missing obligations
+remain in the [coverage map](integration-coverage-map.md), which also
+gives each legacy check below its retirement disposition. For the web UI check in depth, see the
 [Web UI check runbook](web-ui-check.md). For the overall test strategy, see the
 [Crystal Forge testing plan](test-plan.md).
+
+Shared helpers live in `lib/integration-test/`; Snowfall exports
+`lib.crystal-forge.makeIntegrationTestHarness {pkgs}`. Future Delivery,
+Assurance, and Upgrade scenarios, fixtures, and assets belong beneath
+`checks/integration-{delivery,assurance,upgrade}/`. Do not create placeholder
+`default.nix` files or custom discovery. Legacy checks and CI selection remain
+unchanged until all required owner scenarios pass.
+
+Run the focused Access gate with
+`nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`.
+Append `.run` to the scenario attribute for evidence only. Bootstrap execution
+is unverified: two package-build attempts failed in different existing Rust
+tests before any scenario VM executed. No product defect was reproduced.
 
 ## Summary
 
 | Check | Boots a VM | Covers | README |
 | --- | --- | --- | --- |
+| `integration-access` | Yes (controller; execution unverified) | WIP fresh local bootstrap scenario; missing Access obligations remain recorded | [Coverage map](integration-coverage-map.md) |
 | `integration` | Yes (server and git server) | Server, database, and Grafana dashboard behavior through the `cf_test` pytest markers `database`, `dashboard`, and `server` | [README](../../../checks/integration/README.md) |
 | `oidc-auth` | Yes (Keycloak and server) | OIDC login path against a real Keycloak realm | [README](../../../checks/oidc-auth/README.md) |
 | `web-ui` | Yes (server, agent, builder, git server) | Production embedded-UI server through a real browser | [README](../../../checks/web-ui/README.md) |

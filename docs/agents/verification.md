@@ -11,7 +11,7 @@ The examples below reflect common Crystal Forge targets. Confirm current flake a
 | Rust formatting | `nix develop -c cargo fmt --manifest-path <manifest> -- --check` |
 | Server/agent/builder logic | Targeted tests for the affected package or module, then the relevant Nix package build |
 | Dioxus state or component logic | Web UI formatting and targeted tests, then `nix build .#web-ui` |
-| User-visible UI | Relevant UI tests plus authoritative `web-ui` integration check and screenshot |
+| User-visible UI | Relevant UI tests, the owning integration scenario, and screenshot (see "Integration owners" below) |
 | API contract shared across components | Tests/builds for every affected producer and consumer |
 | SQLx checked query | SQLx preparation plus affected server tests/build |
 | Migration/schema | Migration against isolated dev DB, SQLx preparation, and affected integration tests |
@@ -74,16 +74,53 @@ Run `nix flake check --keep-going` when:
 
 If it is not run, state what was run instead and why that is sufficient. Never imply that the full check passed.
 
+## Integration owners
+
+The integration layer is defined by the
+[integration test maintenance contract](../knowledge/testing/integration-test-contract.md).
+Owners, scenarios, status, and legacy retirement are in the
+[integration coverage map](../knowledge/testing/integration-coverage-map.md).
+
+```bash
+# One scenario (gate): fails unless every case passes.
+nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L
+# Evidence of the same run, including after a failure (never a gate).
+nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap.run -L
+# Every registered Access scenario gate.
+nix build .#checks.x86_64-linux.integration-access -L --keep-going
+```
+
+Only Access is currently discoverable. Its coordinator-owned
+`checks/integration-access/default.nix` explicitly registers a `scenarios`
+attribute set. The normal check uses `pkgs.linkFarm` to build all registered
+scenario gates. Meaningful WIP checks may be discoverable; there is no
+completeness flag. A passing registered subset does not prove missing
+obligations. Legacy checks and CI selection remain unchanged until all
+required owner scenarios pass.
+
+Shared helpers live in `lib/integration-test/`; Snowfall exports
+`lib.crystal-forge.makeIntegrationTestHarness {pkgs, inputs}`. Future Delivery,
+Assurance, and Upgrade scenarios, fixtures, and assets belong beneath
+`checks/integration-{delivery,assurance,upgrade}/`. Do not create placeholder
+`default.nix` files or custom discovery.
+
+Bootstrap execution remains unverified: two package-build attempts failed in
+different existing Rust tests before any scenario VM executed. These failures
+do not establish a reproduced product defect.
+
 ## UI evidence
 
 For a user-visible UI change:
 
-1. Update or add an assertion in the authoritative `web-ui` check when practical.
-2. Ensure the check navigates to and renders the changed state.
-3. Capture the screenshot from that check.
+1. Update or add an assertion in the owning integration scenario.
+2. Ensure the scenario navigates to and renders the changed state.
+3. Capture the screenshot and any design comparison from that scenario.
 4. Include it in the MR description or discussion with the tested state identified.
 
-The lightweight `ui-screenshots` helper is useful for iteration but is not a substitute when project policy requires DB-backed `web-ui` evidence.
+While the legacy `web-ui` check is still registered, also keep it passing for
+the behaviors that the coverage map has not yet replaced. The lightweight
+`ui-screenshots` helper is useful for iteration but is not integration
+evidence.
 
 ## Output handling
 
