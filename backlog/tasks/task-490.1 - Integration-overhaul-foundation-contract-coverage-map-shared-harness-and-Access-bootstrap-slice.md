@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-17 20:33'
+updated_date: '2026-10-17 20:34'
 labels:
   - testing
   - integration
@@ -48,10 +48,10 @@ Verification: native Snowfall inventory and scenario/owner drv evaluation passed
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [x] #1 Contract is adopted at docs/knowledge/testing/integration-test-contract.md with implementation_status partial, adopted-versus-implemented distinction, and affected AGENTS.md/agent verification links; D1 is not authority
-- [ ] #2 Coverage map records accepted obligation ID, owner, scenario, independent expected result, evidence and status, plus retirement disposition for every legacy check and CI job
+- [x] #2 Coverage map records accepted obligation ID, owner, scenario, independent expected result, evidence and status, plus retirement disposition for every legacy check and CI job
 - [ ] #3 lib/integration-test exposes lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs } with documented concrete roles, production package selection, facts/receipts, bounded waits, fault injection, pinned rendering and failure artifacts
 - [x] #4 checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicitly registers lifecycle-local-bootstrap and aggregates ALL registered gates with pkgs.linkFarm; scripts/fixtures/assets stay owner-local
-- [ ] #5 Focused checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap executes in a real VM with baseline updating disabled and failure propagation; exact command, revision, outcome and .run evidence are recorded, including linked defects where applicable
+- [x] #5 Focused checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap executes in a real VM with baseline updating disabled and failure propagation; exact command, revision, outcome and .run evidence are recorded, including linked defects where applicable
 - [x] #6 Native discovery exposes meaningful Access WIP without requiring completion; no root tests/, legacyPackages.integration, mkOwner, custom discovery or placeholder Delivery/Assurance/Upgrade owners are added; legacy checks remain until cutover
 - [ ] #7 Future bounded child packets record actual foundation/dependency commit(s), implemented interfaces, disjoint paths, fixtures, explicit coordinator registration and verified commands before To Do; until then all children remain Backlog
 <!-- AC:END -->
@@ -82,4 +82,8 @@ TASK-491 prerequisite repaired in commit af39284bdf16d56402f01a64c916f17948e43b0
 Correction after TASK-491 prerequisite review: the server package build blocker is now resolved by TASK-491 commit af39284bdf16d56402f01a64c916f17948e43b02 (MR !336, status Review). The focused Access scenario still has not been executed on that commit. TASK-490.1's prior note saying it is blocked on package build is historical; current next action is coordinator to integrate/rebase the tested prerequisite and execute the real Access VM/browser slice. No owner result is implied and child packets remain Backlog.
 
 Foundation execution update after integrating tested dependency af39284bdf16d56402f01a64c916f17948e43b02: exact command `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L` executed in the TASK-490.1 worktree. The VM ran and failed on `fresh-startup-applies-migrations`. Evidence is `/nix/store/yfc7pkz5zm8k29b82zzfhm2i8f1gn348-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`; `result.json`, `journals/controller/generated-config-summary.txt`, and `journals/controller/crystal-forge.journal` are authoritative outputs. Generated config: database.host=/run/postgresql, port=5432, user/database crystal_forge (password redacted); [server] has no auth_mode; systemd AUTH_MODE=unset. Server exits `both host and hostaddr are missing` before migrations or HTTP. The module option set to local is not reflected in generated config; runtime auth-mode response was not reached. Assertions remain, no AUTH_MODE override or production change. Linked product defects TASK-490.25 (socket URL) and TASK-490.26 (local auth propagation). TASK-491 package prerequisite pass does not complete this slice. Foundation remains In Progress and children remain Backlog.
+
+Foundation slice execution is now verified as an actual VM run, with a failing correct startup assertion and captured evidence (not a pass): source tested `a6c8922650bf7f0ff643d181422c0092cfc43242-dirty`; exact command `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`; evidence `/nix/store/yfc7pkz5zm8k29b82zzfhm2i8f1gn348-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. Generated config summary states DB host /run/postgresql and AUTH_MODE unset; server fails `both host and hostaddr are missing` before migrations/HTTP. Correct assertions remain. Linked Backlog product defects TASK-490.25 and .26. No application changes or AUTH_MODE override.
+
+Contract/coverage docs now explicitly state each scenario has a fresh VM and DB; dependencies share immutable code/fixture definitions only, never runtime outputs. Map adds contract IDs for finding waivers, acceptance register, POA&M plan entry and POA&M verification/closure; legacy CI manual baseline and screenshot-report jobs are classified. Assurance packets .20/.21 are narrowed and .27/.28/.29 separate their start states/authority; they all remain Backlog. The cutover task depends on product blockers and decomposed scenarios. Remaining foundation blockers: independent role implementations/proving scenario and any further harness defects; local server startup product defects prevent successful Access/browser result.
 <!-- SECTION:NOTES:END -->
