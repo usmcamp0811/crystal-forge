@@ -4,7 +4,7 @@ title: 'Access: OIDC authorization-code sign-in and group-to-role mapping scenar
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-17 16:39'
+updated_date: '2026-10-17 17:15'
 labels:
   - testing
   - integration
@@ -20,13 +20,17 @@ ordinal: 518000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-access. Contract ID: access.lifecycle.oidc. Scenario: tests/integration/access/scenarios/lifecycle-oidc.{nix,py,cjs} plus fixture tests/integration/access/fixtures/oidc-realm.json (exclusive write paths).
+Owning check: integration-access. Contract ID: access.lifecycle.oidc. Exclusive writes: checks/integration-access/scenarios/lifecycle-oidc.{nix,py,cjs} and checks/integration-access/fixtures/oidc-realm.json. Legacy checks/oidc-auth stops at the redirect and does not prove callback, CF session or mapping; retirement map replaces it with this scenario only after evidence passes.
 
-WHY: legacy checks/oidc-auth stops at the 302 redirect; it never completes the callback, never creates a CF session, and never proves group mapping. The retirement map replaces it with this scenario.
+Scope: real browser authorization-code flow against a local services-role OIDC provider. Callback creates user_sessions with auth_source oidc and external_identities. bootstrapAdminGroup and admin-created group mappings yield authored role/environment scope; an unmapped user gets no role. Sign-out invalidates the session. Configure through services.crystal-forge.server.auth_mode = "oidc" and server.oidc.* only. Non-goals: external providers and token-refresh timing. TASK-490 test-only scope applies.
 
-SCOPE: browser authorization-code flow against a local OIDC provider on the services role; callback creates a CF session (user_sessions with auth_source oidc, external_identities row); bootstrapAdminGroup and an admin-created OIDC group mapping produce the expected role and environment scope; a user in no mapped group gets no role; sign-out invalidates the session. Configure the server only through services.crystal-forge.server.auth_mode = "oidc" and server.oidc.* (documented options). Non-goals: external providers; token refresh timing.
+Organization: checks/integration-access/default.nix is native Snowfall { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios, and normal pkgs.linkFarm aggregate of ALL registered gates. Shared helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }. Owner-local scripts/fixtures/assets; no root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns owner default.nix, shared lib and CI/docs; explicit registration required. Meaningful WIP may be discoverable; only Access exists now, no placeholders.
 
-READY WHEN: TASK-490.7 provides the services role with the OIDC provider and a browser-trusted origin for the redirect URI. Source to read then: cf-server src/handlers/api/auth_oidc*.rs, auth/dev_mode.rs (OIDC bootstrap admin group), handlers/api/admin.rs (oidc-mappings), docs/knowledge/security/oidc-role-mapping.md, docs/knowledge/operations/authentication-modes-and-oidc-configuration.md, checks/oidc-auth/realm-crystal-forge.json (legacy fixture to adapt).
+Prerequisite: TASK-490.7 provides OIDC provider and browser-trusted redirect origin. Read cf-server handlers/api/auth_oidc*.rs, auth/dev_mode.rs, admin.rs oidc-mappings, docs/knowledge/security/oidc-role-mapping.md, operations/authentication-modes-and-oidc-configuration.md and legacy checks/oidc-auth/realm-crystal-forge.json as adaptation evidence. As-built D1 is not accepted authority; uncertain cases are blocked pending owner decision.
+
+Candidate, NOT verified: nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-oidc -L; append .run for evidence; coordinator aggregate nix build .#checks.x86_64-linux.integration-access -L. Completion requires explicit registration, real VM execution and exact revision/commands/outcomes/evidence notes; preserve correct product-defect assertions and link Backlog bugs, escalate harness/authority gaps.
+
+READINESS: foundation dependency commit unresolved, two existing Rust package tests block foundation, no VM execution. Backlog, not ready. Actual dependency commit(s), implemented signatures/fixtures/registration and verified commands are required before To Do. No delegation or executed slice is claimed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -36,3 +40,9 @@ READY WHEN: TASK-490.7 provides the services role with the OIDC provider and a b
 - [ ] #3 Sign-out invalidates the OIDC session
 - [ ] #4 Executed in a real VM topology with recorded evidence; legacy oidc-auth assertions are superseded
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-17 organization correction replaces prior paths and registration model. Actual foundation commit unresolved; foundation blocked by two existing Rust package tests, no VM execution. Remain Backlog; actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
+<!-- SECTION:NOTES:END -->
