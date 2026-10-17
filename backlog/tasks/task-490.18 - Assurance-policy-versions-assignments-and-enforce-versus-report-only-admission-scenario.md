@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-17 17:27'
+updated_date: '2026-10-17 20:33'
 labels:
   - testing
   - integration
@@ -48,4 +48,6 @@ READINESS: actual foundation dependency commit unresolved; two existing Rust pac
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction: native owner-local paths, shared lib/integration-test and explicit coordinator registration. Foundation commit unresolved; two existing Rust package tests block foundation; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
+
+Scenario isolation correction: no target/evaluation/deployment output from TASK-490.14 or another scenario is reusable. This scenario must author/publish/assign its own policy and create its own violating evaluation and target state in a fresh VM; the evaluated failure is real setup, not a seeded result. Foundation VM fails on TASK-490.25/.26; remain Backlog.
 <!-- SECTION:NOTES:END -->
