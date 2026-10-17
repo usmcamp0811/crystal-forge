@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-17 20:34'
+updated_date: '2026-10-17 20:38'
 labels:
   - testing
   - integration
@@ -21,6 +21,8 @@ references:
   - packages/web-ui/src/routes.rs
   - checks/web-ui/default.nix
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335'
+  - TASK-490.25
+  - TASK-490.26
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -87,3 +89,12 @@ Foundation slice execution is now verified as an actual VM run, with a failing c
 
 Contract/coverage docs now explicitly state each scenario has a fresh VM and DB; dependencies share immutable code/fixture definitions only, never runtime outputs. Map adds contract IDs for finding waivers, acceptance register, POA&M plan entry and POA&M verification/closure; legacy CI manual baseline and screenshot-report jobs are classified. Assurance packets .20/.21 are narrowed and .27/.28/.29 separate their start states/authority; they all remain Backlog. The cutover task depends on product blockers and decomposed scenarios. Remaining foundation blockers: independent role implementations/proving scenario and any further harness defects; local server startup product defects prevent successful Access/browser result.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-10-17 20:38
+---
+Coordinator handoff note: TASK-491 package test repair is integrated in commit af39284bdf16d56402f01a64c916f17948e43b02; Access VM scenario runs and fails correctly on TASK-490.25/.26 configuration defects. Evidence and source commit are in implementation notes and coverage map. No packet is ready; this is not an owner pass.
+---
+<!-- COMMENTS:END -->
