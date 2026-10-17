@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-17 16:16'
+updated_date: '2026-10-17 16:21'
 labels:
   - web-ui
   - design-parity
@@ -351,4 +351,12 @@ Updated scenario 26b browser fixture to match Completed, Latest button, Shift-cl
 Reported committed and pushed 852b9c4ceddec256102178793135023dead91902, message `TASK-488: Fix completed evaluation row selection`: 2 files, 124 insertions, 84 deletions. Normal hooks passed and remote SHA was verified. Only the untracked task lock remained. Existing MR334 branch updated; no merge or deployment. Preserve existing In Progress task status, Draft MR and remaining gaps.
 
 Preview: ready, per supplied receipt. Review http://localhost:8080/evaluations on sledge using existing task frontend tmux session task488-frontend; API PID8633 remains unchanged, task mock API on port3445. Forward both ports8080 and3445 and browse localhost. This backlog-only operation does not recheck or modify preview processes.
+
+Parent-verified execution receipt (reported by task owner; not independently reverified in this backlog-only operation): pushed 59897728c301fff3cd601cfec379bedf5aa758d1, message `TASK-488: Remove extra policy row metadata summary`, to the existing branch for Draft MR334. Three files changed, 9 insertions and 34 deletions. Normal hooks passed and remote SHA was verified; only the untracked task lock remains.
+
+Removed the expanded-row Configuration / Operator classification / Assigned bundles summary and unused display builder. Captured data, control cards, evidence and Open System behavior remain unchanged. Added absence assertions to the focused workflow and updated contract documentation.
+
+Reported verification: actual persisted-preview browser case without interception passed; log `/tmp/opencode/task488/row-details-no-summary-browser.log`, screenshot `row-details-without-summary.png`. Browser verified absence of all three labels and the summary block, control-card opening, and working View policy / Compliance evidence / Open System actions. One-file Rustfmt, Node syntax check and git diff check passed. Current Dioxus release preview compiled. Full suite and VM were not run, per user preference.
+
+Preview: ready (parent-reported), http://localhost:8080/evaluations on sledge. Frontend runs in tmux session `task488-frontend`; rediscover its current PID when resuming. API PID8633 remains unchanged, task mock API port3445. No merge or deployment. Retain In Progress status, existing lock and Draft MR334. This operation appends notes only; no other mutations.
 <!-- SECTION:NOTES:END -->
