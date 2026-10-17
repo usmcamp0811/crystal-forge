@@ -4,11 +4,13 @@ title: 'Access: OIDC authorization-code sign-in and group-to-role mapping scenar
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
+updated_date: '2026-10-17 16:39'
 labels:
   - testing
   - integration
   - luna
-dependencies: []
+dependencies:
+  - TASK-490.7
 parent_task_id: TASK-490
 priority: high
 type: task
