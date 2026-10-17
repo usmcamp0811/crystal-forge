@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
+updated_date: '2026-10-17 17:19'
 labels:
   - testing
   - integration
@@ -41,18 +42,33 @@ ordinal: 536000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Coordinator-owned (not a Luna packet). Writes checks/integration-{access,delivery,assurance,upgrade}/default.nix, tests/integration/<owner>/default.nix (required, complete), .gitlab-ci.yml integration entry point, legacy check removal, coverage map, contract status, and related docs.
+Coordinator writer task, not a Luna packet. Owns checks/integration-{access,delivery,assurance,upgrade}/default.nix, shared lib/integration-test integration, .gitlab-ci.yml existing integration entry point, legacy check retirement, coverage map, contract status and directly affected testing/agent docs. Children supply disjoint scenario files and owner-local fixtures/assets; coordinator explicitly registers every integrated child.
 
-WHY: the final inventory is exactly four integration checks; legacy registrations and CI selections stay until replacements pass.
+Why: final inventory is exactly four native integration owners. Legacy checks/CI stay until passing replacements or explicit owner-approved scope change. This final cutover requirement does not prohibit discoverable meaningful WIP during foundation/child work.
 
-SCOPE: for each owner whose required set is implemented, set complete = true and add checks/integration-<owner>/default.nix returning the owner's `all`; verify `nix eval .#checks.x86_64-linux --apply builtins.attrNames` shows exactly the four integration names plus the classified non-integration checks; add the four-name allowlist comparison at the start of the existing integration CI entry point; run each owner's complete set and record normal runtime and peak resources; retire each legacy registration and CI selection only after its replacement passes (or an owner-approved scope change exists); move checks/web-ui/tests/fixtures/*.xml to tests/integration/assurance/fixtures/; update docs/knowledge/testing/flake-checks.md, web-ui-check.md, the coverage map, and the contract implementation_status. Final cutover stays blocked while any required replacement fails, including because of a product defect, unless the owner changes scope.
+Corrected architecture: owner default.nix uses native Snowfall signature { lib, inputs, pkgs, ... }, explicit scenario attrsets (Access coordinator-owned), and normal pkgs.linkFarm aggregate of ALL registered gates. Shared entry: lib.crystal-forge.makeIntegrationTestHarness { pkgs } from lib/integration-test. Scripts/fixtures/assets stay within each owning checks/integration-<owner>/ directory. No root tests/, legacyPackages.integration, mkOwner or custom discovery; no complete=true export switch. Only Access exists now. Add Delivery/Assurance/Upgrade default.nix only with meaningful scenarios, never placeholders; do not defer all owner creation to final completion.
+
+Scope: integrate and explicitly register required child scenarios, ensuring every registered gate is a dependency of normal owner build and every failure propagates. Verify nix eval .#checks.x86_64-linux --apply builtins.attrNames identifies exactly the four integration names at final cutover plus classified non-integration checks. Put four-name allowlist comparison at start of existing integration CI entry point, no new validation service. Execute each complete required owner set and record normal runtime/peak resources. Retire legacy registration/job only after passing mapped replacement or explicit owner-approved scope change. Canonical scenario fixtures including STIG XML live under checks/integration-assurance/fixtures/; coordinate legacy fixture preservation/removal without cross-child writes. Update docs/knowledge/testing/flake-checks.md, web-ui-check.md, coverage map, contract implementation_status and directly affected verification/agent links. Final cutover blocked by any required failing replacement, including product defects, unless owner changes scope. No product fixes; TASK-490 test-only restrictions apply.
+
+Candidates, NOT verified: nix build .#checks.x86_64-linux.integration-access -L, integration-delivery, integration-assurance and integration-upgrade through the same checks.x86_64-linux namespace. Focused foundation target: nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L, append .run for evidence. Future packet must provide exact verified commands at actual dependency commits. Record all owner outcomes/resources/evidence; evaluation/build alone does not establish real VM execution.
+
+Authority: D1/as-built docs are implementation evidence, not accepted authority. Uncertain obligations remain blocked pending explicit owner decision. Upgrade D2 must be resolved before its replacement can pass.
+
+READINESS: all predecessor children remain Backlog, none ready. Actual foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. TASK-490.20/.21 additionally need finer splitting of triage versus policy waiver/acceptance versus closure, without scope expansion now. Actual dependency commit(s), resolved packet blockers, concrete registration and verified commands are required before To Do. No delegation or executed slice is claimed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Exactly four integration checks are exported and each runs its complete required scenario set, propagating every failure
-- [ ] #2 CI runs the four owners and checks the four-name allowlist without a new validation service
-- [ ] #3 Each retired legacy check has a passing replacement recorded in the coverage map or an owner-approved scope change
-- [ ] #4 Non-integration checks keep their own attributes and classification
-- [ ] #5 Runtime and peak-resource figures are recorded per owner
+- [ ] #1 At final cutover exactly four native checks/integration-{access,delivery,assurance,upgrade}/default.nix owners use { lib, inputs, pkgs, ... }; each normal pkgs.linkFarm aggregate executes ALL registered gates and its complete required set, propagating every failure
+- [ ] #2 CI runs the four owners through checks.x86_64-linux and checks the four-name allowlist in the existing entry point, without a new validation service
+- [ ] #3 Every retired legacy check/job has a passing replacement recorded in the coverage map or explicit owner-approved scope change; failing product assertions remain executable and linked
+- [ ] #4 Non-integration checks retain their own attributes and explicit classification
+- [ ] #5 Runtime, peak resources, exact commands, revisions, real VM outcomes and .run evidence are recorded per owner
+- [ ] #6 Coordinator explicitly registers child scenarios and maintains shared lib/CI/docs; scripts/fixtures/assets are owner-local, no root tests/, legacyPackages.integration, mkOwner, custom discovery, complete=true export switch or placeholder owners; meaningful WIP discovery is permitted before cutover
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-17 organization correction replaces old registration/layout/commands and incomplete-unexported rule. Coordinator writer, not Luna. Only Access exists now; remaining native owner default.nix files require meaningful scenarios, no placeholders. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. All children Backlog, none ready. Future packets need actual dependency commit(s) and verified commands before To Do. TASK-490.20/.21 finer splitting remains a dispatch blocker without scope expansion now. D1/as-built is not authority; uncertain cases await owner decision. No delegation or executed slice is claimed.
+<!-- SECTION:NOTES:END -->
