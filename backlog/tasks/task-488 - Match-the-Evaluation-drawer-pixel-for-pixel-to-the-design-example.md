@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-17 15:46'
+updated_date: '2026-10-17 15:51'
 labels:
   - web-ui
   - design-parity
@@ -327,4 +327,14 @@ Parent-verified continuation handoff (bookkeeping only; facts supplied by parent
 8. OKF command `nix build .#checks.x86_64-linux.okf-knowledge --no-link --builders '' --max-jobs 1 --cores 2 -L` passed:58 tests,216 Mermaid blocks,190 concepts. Log: /tmp/opencode/task488/inventory-current-okf.log; cache401 warning nonfatal. SQL changes use runtime query/query_as only; new tables do not alter checked query shapes; no SQLx metadata changed. Full flake check and authoritative web-ui were not run locally, per user's CI-only boundary. Last pushed CI actually failed: web-ui-check35 FAIL steps plus2700s completion-file timeout; niks3-cache terminal-agent private-mTLS narinfo curl exit7 connection failure. Saved traces: /tmp/opencode/task488/inventory-prior-ci-{webui,niks3}.log. Do not describe this CI as inconclusive or green. Exact latest-source CI is unverified; all latest changes remain uncommitted.
 
 Commit/push receipt (verified details supplied by the user): User explicitly authorized commit and push. Commit `0c1800498d2122e21654c8b4a43cae81567a3b89`, message `TASK-488: Retain exact-attempt inventory and secure historical evidence`, contains 50 files changed, 8952 insertions and 909 deletions. Created with normal `nix develop` Git commit; no hook bypass. Pushed existing branch `TASK-488-eval-drawer-pixel-parity` to `origin`; `git ls-remote` confirmed the exact SHA. Worktree contains only untracked `backlog/.locks/TASK-488.lock`, intentionally not committed. GitLab MR334 was verified opened with Draft=true and the new SHA. Exact-head pipeline2958605251 is running: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2958605251; no passing result is claimed. Preview http://localhost:8080/evaluations returned HTTP200; existing task API/frontend remain alive. No merge or deployment. TASK-488 remains In Progress pending remaining visual, real41/12 and authoritative CI gaps. This bookkeeping append preserves existing notes, status, lock and criteria.
+
+User-supplied verified execution receipt (recorded by this backlog-only operation; no independent source, Git, runtime, or MR inspection): commit `0f25bcdf1c9272f5ad5c108fc90ab5b6834b91d2`, `TASK-488: Keep bundle controls available for small matrices`, was pushed to origin on the existing task branch. Remote SHA was verified, with normal hooks. Latest MR334 branch is updated. No merge or deployment occurred. Reported diff: 3 files, 16 insertions, 9 deletions, covering `policy_captured.rs`, the browser workflow, and the knowledge document. Only the untracked task lock remains.
+
+Fix: any real captured bundle (bundle count >= 1) now keeps Columns / Bundles / Controls available. Removed the previous >1-bundle or >14-control gate for small real bundles. Tracked-only rows, authorization, API, and persistence remain unchanged.
+
+Focused browser-local fixture test PASSED for one bundle with one control and with two controls. Mode buttons switch successfully; table header counts are 3 in Bundles mode and control count + 2 in Controls mode. Unmapped configurations are excluded. Evidence: `/tmp/opencode/task488/small-bundle-selector-browser.log` and `/tmp/opencode/task488/small-bundle-{1,2}-selector.png`. The authoritative workflow regression was updated. No full suite, VM check, WASM check, or UI unit run was performed in this continuation, per the user's focused-check preference. One-file rustfmt, Node syntax check, and git diff whitespace check passed. Dioxus release compiled the latest source in 160.84 seconds.
+
+Preview: ready, as reported, at `http://localhost:8080/evaluations` on sledge. Existing task-owned tmux frontend has a new PID that must be rediscovered before process operations. API PID8633 on port3445 remains unchanged in task mock mode; the task database is preserved.
+
+Remaining uncertainty: the deployed capture payload was not inspected. The source selector gate is a concrete bug, but the exact deployed case remains unverified, especially if captured bundle metadata is absent. This receipt appends notes only; task status and acceptance criteria are unchanged.
 <!-- SECTION:NOTES:END -->
