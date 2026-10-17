@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-17 16:03'
+updated_date: '2026-10-17 16:10'
 labels:
   - web-ui
   - design-parity
@@ -339,4 +339,12 @@ Focused browser-local fixture test PASSED for one bundle with one control and wi
 Preview: ready, as reported, at `http://localhost:8080/evaluations` on sledge. Existing task-owned tmux frontend has a new PID that must be rediscovered before process operations. API PID8633 on port3445 remains unchanged in task mock mode; the task database is preserved.
 
 Remaining uncertainty: the deployed capture payload was not inspected. The source selector gate is a concrete bug, but the exact deployed case remains unverified, especially if captured bundle metadata is absent. This receipt appends notes only; task status and acceptance criteria are unchanged.
+
+User-supplied verified execution receipt (recorded backlog-only; no independent source, Git, service, database, or MR verification in this operation): Completed Evaluation multi-select was reported broken. Removed hidden auto-select mode, its default-true state, response effect, filter re-enablement, and unused allChecked. History selection starts empty; manual selection changes only through Shift-click, with visibility pruning retained. Clear persists across polling. Checked-row class and aria-selected preserve keyboard focus and attention styling. No checkbox column or range selection was restored. No API/backend changes. Existing unrelated Compare and Download logs actions remain unwired; this limitation was disclosed to the user.
+
+Updated scenario 26b browser fixture to match Completed, Latest button, Shift-click and Retry title. Reported focused host-browser 26b result: 1/1 passed after the real preview release compile (147.50 seconds). Assertions cover empty initial selection, Shift-click exact checked/ARIA states and count, multiple selection, Clear after a counted poll, status and flake filters not selecting rows, search pruning without restoration after clearing search, and ordinary-click drawer behavior. Evidence: /tmp/opencode/task488/completed-selection-browser.log plus two dark/light screenshots. Reported one-file rustfmt, Node syntax check and diff check passed. No full suite, VM, unit or separate WASM checks ran, per user preference; the DX build compiled current WASM.
+
+Reported committed and pushed 852b9c4ceddec256102178793135023dead91902, message `TASK-488: Fix completed evaluation row selection`: 2 files, 124 insertions, 84 deletions. Normal hooks passed and remote SHA was verified. Only the untracked task lock remained. Existing MR334 branch updated; no merge or deployment. Preserve existing In Progress task status, Draft MR and remaining gaps.
+
+Preview: ready, per supplied receipt. Review http://localhost:8080/evaluations on sledge using existing task frontend tmux session task488-frontend; API PID8633 remains unchanged, task mock API on port3445. Forward both ports8080 and3445 and browse localhost. This backlog-only operation does not recheck or modify preview processes.
 <!-- SECTION:NOTES:END -->
