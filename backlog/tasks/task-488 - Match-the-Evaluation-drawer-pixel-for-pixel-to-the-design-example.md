@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-17 20:19'
+updated_date: '2026-10-17 21:04'
 labels:
   - web-ui
   - design-parity
@@ -417,4 +417,25 @@ Preview reported, not freshly verified here: frontend tmux task488-frontend last
 Logs: /tmp/opencode/task488/review-fixes-{sqlx.log,worker-test.log,existing-regressions.log,legacy-commits.log,receiver-lock-order.log,inventory-cleanup.log,ui-current-checks.log,backend-current-build-doc.log,history-browser.log,matrix-browser.log,scroll-debug.log}. Old-head59897728 pipeline2958746451 last known running. /tmp/opencode/task488/review-59897728-server-ci.log shows prior130 integration failure did not recur (130pass0fail), progressed to library phase; neither whole-job pass nor new-source CI evidence.
 
 Future handoff requirement: publish complete TASK-488 acceptance record in MR because reviewer could not find local dev task record. Do not mark ACs complete until all proof. This operation appends notes only; no status/criteria/finalSummary/code/Git/services/DB/MR changes.
+
+User-supplied parent handoff (backlog-only recording; facts below were reported by the parent and were not independently reverified here):
+
+Parent verified and pushed a41a96ee6856a2cc3def212a836291ff4496e817, subject `TASK-488: Close evaluation review security and workflow gaps`: 33 files, 6016 insertions, 785 deletions. Normal hooks and remote SHA were verified; only the untracked task lock remained. MR334 is open as Draft. Exact-head pipeline2959108766 was running: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2959108766. No merge or deployment. All eight primary review fixes are implemented under the user-approved recovery-successor constraints: no recovery hard limit or new run budget.
+
+Reported verification:
+- Current PostgreSQL targeted tests: 35 passed, 0 failed in /tmp/opencode/task488/review-fixes-final-sqlx.log: 7 recovery, 2 persisted-log, 10 visibility (including real WebSocket), 9 receiver (including one-connection and POAM lock-order), 6 required-inventory (including PostgreSQL 31 cleanup blocked with stricter 500ms settings), and 1 actual-worker 30s release case.
+- Manual legacy database tests: 28 passed in /tmp/opencode/task488/review-fixes-legacy-commits.log, using separately migrated task-owned task488_review_legacy_59897728. SQLx used its own databases; no preview reset. Existing pure registry/handler/helper groups passed in previous logs.
+- Current UI: 752 passed, 0 failed, 1 ignored; WASM passed. Log: /tmp/opencode/task488/review-fixes-ui-current-checks.log.
+- Documentation: 2 new log API no-run examples and 1 inventory no-run example passed in /tmp/opencode/task488/review-fixes-backend-final-build-doc.log. cargo doc passed with unrelated baseline warnings.
+- Formatting for all changed Rust, Nix syntax, and diff checks passed after the import-order correction.
+- OKF: 58 tests, 216 Mermaid checks, and 190 concepts passed in /tmp/opencode/task488/review-fixes-okf.log. This predates the latest minor prose changes and should be refreshed for final verification.
+- Final combined preview browser scenarios26b/c/d/e: 4/4 passed, with 22 dark/light screenshots. Log: /tmp/opencode/task488/review-fixes-final-browser.log and its artifact directory. F5 covers all three dismissals across shared bundle A/B, exact-attempt return, Controls/focused Bundle1, trim/filter/sort/open finding, actual pm-scroll and focus. F6 covers true legacy zero ->128 controls with the same UUID, new-UUID reset, and explicit choices. F7 covers configuration-only matching, stale A after B with MutationObserver/list counts and selection. F8 covers readable captured bundle version/framework. Ordinary queue/history modal Tab bounds, initial focus, all three dismissals, fresh pinned/evidence keyboard flow, and direct navigation with no opener using h1 fallback passed.
+
+Actual-browser corrections included Dioxus derived valid_return requiring use_reactive (previous effect dormant); avoiding provisional initialization loops through peek/equality publication; DOM restoration bounded to 3 seconds of render time and interrupted by new input; a shared focus guard with one-frame post-navigation fallback and connected active-focus validation; and keeping FlakeFilter options mounted while data reloads, with selected binding restoring the nondefault value. Browser fixture corrections include realistic preCapture provenance, history phase only after active scenes to avoid contradictory terminal state for the same attempt, alert_occurrence_id, a real pm-scroll short640 viewport with finally restoration, and explicit bundle-focused Controls setup. Temporary tracing exists only at /tmp/opencode/task488/trace-eval-scroll.cjs and is not committed. All user cleanups were preserved.
+
+Remaining gates are incomplete: exact-head server/browser CI, including existing new-run Task440LiveSnapshotEvaluation persisted-v2 OpenSystem success assertions not executed by localhost mocks; current matched React light/dark, narrow/maximized comparisons and MR screenshots; and publication of the authoritative TASK-488 16-criterion checklist for the reviewer, who could not find the local dev backlog record. Parent continues visual/CI work; no ReadyForMerge claim.
+
+Preview was last reported ready at http://localhost:8080/evaluations on sledge; forward both8080 and3445. Last successful current UI was available, but actual backend rebuild, ownership, and freshness must be reverified before handoff (reported 31ms CGU context). Normal database crystal_forge was preserved at migration0309; task PostgreSQL root was verified. Separate native database task488_native_review remains untouched, with migration0309 not yet applied.
+
+This operation appends notes only. It changes no status, acceptance criteria, final summary, source code, Git state, services, databases, or MR state.
 <!-- SECTION:NOTES:END -->
