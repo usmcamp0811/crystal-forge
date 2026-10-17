@@ -4,6 +4,7 @@ title: 'Delivery: Niks3 publication, authentication, and cold retrieval scenario
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:37'
+updated_date: '2026-10-17 17:16'
 labels:
   - testing
   - integration
@@ -19,13 +20,17 @@ ordinal: 524000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-delivery. Contract ID: delivery.publication.niks3. Exclusive write paths: tests/integration/delivery/scenarios/publication-niks3.{nix,py,cjs}.
+Owning check: integration-delivery. Contract ID: delivery.publication.niks3. Exclusive writes: checks/integration-delivery/scenarios/publication-niks3.{nix,py,cjs}. Niks3 (TASK-470) legacy niks3-cache/niks3-write-probe/niks3-ui checks prove pieces with seeded queue rows; replace with real evaluation -> build -> publication -> verified cold retrieval.
 
-WHY: Niks3 is the newest first-class cache (TASK-470). Legacy niks3-cache/niks3-write-probe/niks3-ui prove pieces with seeded queue rows. This scenario replaces them with one real chain: evaluation -> build -> publication -> verified retrieval.
+Scope: configure cache through Caches UI as domain setup, token write auth then mTLS. Fresh builderA output publishes to the destination bound to its ID; independent server read verifies publication. Cold targetA proves output absent first, then retrieves with signature verification. Wrong token/client certificate publishes nothing; other-environment agents receive no read credential. Non-goals: Attic/S3/HTTP/Nix (490.13), activation (490.14). Shared form behavior belongs to Access; cache credentials/Test boundaries remain Delivery. TASK-490 test-only scope applies.
 
-SCOPE: cache configured through the Caches UI (form setup only; form maintenance is Access) with token write auth, then mTLS write auth; a fresh output built on builderA is published to the destination bound to its ID; the server verifies publication by an independent read; targetA (cold store, assert_store_absent first) retrieves it with signature verification; wrong token/client certificate is rejected and publishes nothing; agents in another environment receive no read credential. Non-goals: Attic/S3/HTTP/Nix (490.13); activation (490.14).
+Organization: checks/integration-delivery/default.nix uses native { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Shared lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix, shared lib and CI/docs; child files are disjoint and integration requires explicit registration. Meaningful WIP can be discoverable; only Access exists now, no other owner default.nix until meaningful scenarios, no placeholders.
 
-READY WHEN: TASK-490.10 is integrated and TASK-490.7 provides the Niks3 cache fixture on the services role. Source to read then: cf-protocol src/cache.rs (CacheType, CacheReadAuth, Niks3WriteAuth), cf-server handlers/api/caches.rs, builders.rs (publication, completion), derivations/cache.rs, cf-builder Niks3 push, cf-agent pull path; docs/knowledge/caches/niks3-cache.md; checks/niks3-cache/README.md (legacy assertions to carry forward where authentic); lib/cache-test-node.
+Prerequisites: TASK-490.10 integrated and TASK-490.7 Niks3 services fixture available. Read cf-protocol src/cache.rs CacheType/CacheReadAuth/Niks3WriteAuth, cf-server caches.rs/builders.rs publication/completion, derivations/cache.rs, cf-builder Niks3 push and cf-agent pull; docs/knowledge/caches/niks3-cache.md, checks/niks3-cache/README.md legacy assertions, lib/cache-test-node. As-built D1 is evidence, not authority; uncertain requirements blocked pending owner decision.
+
+Candidate, NOT verified: nix build .#checks.x86_64-linux.integration-delivery.scenarios.publication-niks3 -L; append .run for evidence. Aggregate nix build .#checks.x86_64-linux.integration-delivery -L. Completion requires explicit registration, real VM execution, exact revision/commands/outcomes/evidence, independent facts and retained correct failing assertions with linked Backlog bugs. Escalate helper/authority gaps without product changes.
+
+READINESS: actual foundation dependency commit unresolved; two existing Rust package tests block foundation; no VM execution. Backlog, not ready. Actual dependency commit(s), implemented interfaces/fixtures/registration and verified commands required before To Do. No delegation or executed slice is claimed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -35,3 +40,9 @@ READY WHEN: TASK-490.10 is integrated and TASK-490.7 provides the Niks3 cache fi
 - [ ] #3 Wrong credentials publish nothing; out-of-environment agents get no read credential
 - [ ] #4 Executed in real VMs with recorded evidence; legacy Niks3 checks are mapped as superseded
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+2026-10-17 organization correction replaces prior paths/commands with native owner-local layout. Coordinator owns registration/shared lib/CI/docs. Foundation commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready; actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
+<!-- SECTION:NOTES:END -->
