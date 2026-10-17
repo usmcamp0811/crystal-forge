@@ -339,8 +339,6 @@ pub(super) fn CapturedMatrix(
                                 }
                             }
                         }
-                        // Layout only: absorbs spare width. It is hidden from assistive
-                        // technology and carries no evidence.
                     } }
                     tbody {
                         for row in visible_rows {
@@ -355,8 +353,7 @@ pub(super) fn CapturedMatrix(
                                             "{row.source.system_name}"
                                             if row.configuration_failed { span { class: "pm-config-gate-marker", " !" } }
                                             if let Some(status) = row.status_label() { span { class: "pm-row-status",
-                                                if row.source.system_id.is_none() { " · Config" }
-                                                else if status == "Shared configuration" { " ↔" }
+                                                if status == "Shared configuration" { " ↔" }
                                                 else { " ?" }
                                             } }
                                         } }
@@ -408,7 +405,10 @@ pub(super) fn CapturedMatrix(
                                 }
                             }
                         }
-                        if rows.is_empty() { tr { td { colspan: layout_columns + 2, class: "pm-empty", "No systems match this filter." } } }
+                        if rows.is_empty() { tr { td { colspan: layout_columns + 2, class: "pm-empty",
+                            if matrix.rows.is_empty() { "No captured tracked systems for this attempt." }
+                            else { "No systems match this filter." }
+                        } } }
                     }
                 }
             }

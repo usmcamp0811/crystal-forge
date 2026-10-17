@@ -154,6 +154,9 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
       await expect(drawer.getByText(/^Assertion text unavailable/)).toHaveCount(0);
     };
     await assertNoInventedPanels();
+    const tablePolicyCounts=page.locator('table [title="Known attempt-scoped results; coverage may be partial."]');
+    await expect(tablePolicyCounts).toHaveCount(1,{timeout:12000});
+    await expect(tablePolicyCounts).not.toContainText('known');
     await expect(drawer.locator('.pm-controls-line')).toHaveCount(2);
     await capture('eval-matrix-bundles');
     // Reference geometry uses native minimum widths, not fixed preferred widths.
@@ -239,7 +242,7 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
     await expect(drawer.getByText('Loading policy matrix...',{exact:true})).toBeVisible();
     release();
     pending=null;
-    await expect(drawer.getByText('No systems match this filter.',{exact:true})).toBeVisible();
+    await expect(drawer.getByText('No captured tracked systems for this attempt.',{exact:true})).toBeVisible();
     await expect(drawer.locator('tbody tr.pm-row')).toHaveCount(0);
     await expect(drawer.getByText(/No eligible control columns were captured/)).toHaveCount(0);
     await assertHeaders();
@@ -313,8 +316,8 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
     await drawer.getByRole('button',{name:'Policy matrix',exact:true}).click();
     await drawer.getByRole('button',{name:'Name',exact:true}).click();
 
-    // The API, not this browser, reconciles discovered unregistered configs.
-    // Require its exact appended row and keep unavailable applicability unknown.
+    // Full API discovery still drives the header; only captured tracked systems
+    // belong in matrix rows and configuration filters.
     const unmanaged={system_id:null,system_name:'fixture-unmanaged-config',
       configuration_name:'fixture-unmanaged-config',resolution:'unavailable',
       evaluation_digest:null,assigned_bundles:[],policies:[],
@@ -323,19 +326,24 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
     response={...fixture,matrix:{...fixture.matrix,rows:reconciledRows,
       ...inventoryFixture(reconciledRows,{passed:58,failed:1,evaluation_failed:0,pending:1,unavailable:1,excluded:0})}};
     await reopen();
-    await drawer.getByRole('button',{name:/^All\s+61$/}).click();
-    await assertNames([...expectedNames,'fixture-unmanaged-config']);
+    await drawer.getByRole('button',{name:/^All\s+60$/}).click();
+    await assertNames(expectedNames);
     await assertHeaders();
-    const unmanagedRow=drawer.getByRole('row').filter({has:page.getByRole('button',{name:'fixture-unmanaged-config',exact:true})});
-    await expect(unmanagedRow.getByRole('cell').nth(1)).toHaveText('Unknown');
-    await expect(unmanagedRow.getByText('N/A',{exact:true})).toHaveCount(0);
-    await unmanagedRow.getByRole('button',{name:'fixture-unmanaged-config',exact:true}).click();
-    await expect(drawer.getByRole('button',{name:'Open system',exact:true})).toBeDisabled();
-    await expect(drawer.getByRole('button',{name:/^View in compliance evidence/})).toHaveCount(0);
-    await unmanagedRow.getByRole('button',{name:'fixture-unmanaged-config',exact:true}).click();
+    await expect(drawer.getByRole('button',{name:'fixture-unmanaged-config',exact:true})).toHaveCount(0);
+    await expect(drawer.getByRole('table').getByText(/·\s*Config\b/)).toHaveCount(0);
+    await capture('eval-matrix-tracked-only');
 
-    // Primary coverage is the unique union, while shared host contexts remain
-    // separate rows. One failing context classifies the whole config as failing.
+    // Available discovery without captured system mappings is not filter-zero.
+    response={...fixture,matrix:{...fixture.matrix,rows:[unmanaged],
+      ...inventoryFixture([unmanaged],{passed:0,failed:0,evaluation_failed:0,pending:0,unavailable:1,excluded:0})}};
+    await reopen();
+    await expect(drawer.getByText('No captured tracked systems for this attempt.',{exact:true})).toBeVisible();
+    await expect(drawer.getByText('No systems match this filter.',{exact:true})).toHaveCount(0);
+    await expect(drawer.getByRole('button',{name:'fixture-unmanaged-config',exact:true})).toHaveCount(0);
+    await assertHeaders();
+
+    // Header coverage retains the full union. Matrix filters count three mapped
+    // configurations across four host rows, retaining shared assignments.
     const unionRows=fixture.matrix.rows.slice(4,7).map((r,i)=>({...r,
       cells:r.cells.map((_,c)=>i===2 && c===0 ? 'fail' : 'pass'),details:r.details.map(()=>null)}));
     const shared={...unionRows[2],system_id:id(6999),system_name:'fixture-shared-host',cells:unionRows[2].cells.map(()=> 'pass')};
@@ -345,8 +353,10 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
         selected_configurations:['fixture-config-6','fixture-discovery-only']},
       configuration_summary:{total:4,passed:0,failed:1,evaluation_failed:0,pending:1,unavailable:1,excluded:1}}};
     await reopen();
-    await drawer.getByRole('button',{name:/^All\s+4$/}).click();
-    await assertNames(['fixture-host-04','fixture-host-05','fixture-host-06','fixture-shared-host','fixture-discovery-only']);
+    await drawer.getByRole('button',{name:/^All\s+3$/}).click();
+    await assertNames(['fixture-host-04','fixture-host-05','fixture-host-06','fixture-shared-host']);
+    await expect(drawer.getByRole('button',{name:'fixture-discovery-only',exact:true})).toHaveCount(0);
+    await expect(drawer.getByRole('table').getByText(/·\s*Config\b/)).toHaveCount(0);
     await assertHeaders();
     for(const name of ['fixture-host-04','fixture-host-05']) {
       const unavailable=drawer.getByRole('row').filter({has:page.getByRole('button',{name,exact:true})});
@@ -360,7 +370,7 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
     }
     await drawer.getByRole('button',{name:/^Failing\s+1$/}).click();
     await assertNames(['fixture-host-06','fixture-shared-host']);
-    await expect(drawer.getByRole('button',{name:/^Unavailable \/ N\/A\s+3$/})).toBeVisible();
+    await expect(drawer.getByRole('button',{name:/^Unavailable \/ N\/A\s+2$/})).toBeVisible();
 
     // The absent planned config is already unavailable. Once this exact attempt
     // is terminal, the discovery-only config cannot complete either.

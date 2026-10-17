@@ -413,7 +413,6 @@ fn PolicyCounts(available: bool, passed: i64, failed: i64) -> Element {
             span { title: "Known attempt-scoped results; coverage may be partial.",
                 span { class: "chip chip-healthy", "{passed} ✓" }
                 span { class: if failed > 0 { "chip chip-critical" } else { "chip" }, "{failed} ✗" }
-                span { style: "font-size:10px;color:var(--cf-text-muted)", " known" }
             }
         } else {
             span { class: "chip", title: "Trustworthy attempt-scoped policy counts are unavailable.", "Unavailable" }

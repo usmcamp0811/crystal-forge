@@ -30,7 +30,7 @@ fn fixture() -> EvalPolicyMatrixSnapshot {
         "provenance": "captured", "columns": columns, "bundles": [],
         "empty_bundle_metadata_complete": true,
         "rows": [{
-            "system_id": null, "system_name": "captured-host",
+            "system_id": Uuid::from_u128(61), "system_name": "captured-host",
             "configuration_name": "nixosConfigurations.actual", "resolution": "resolved",
             "evaluation_digest": null, "policies": bindings,
             "cells": ["pass", "warn", "fail"],

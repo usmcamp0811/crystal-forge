@@ -182,8 +182,8 @@ grant historical discovery authority.
 Registry configuration keys are trimmed, with blank keys falling back to hostname;
 discovered names remain exact. A name match does not grant historical host access.
 
-Every authorized captured host keeps its own UUID, applicability, and provenance,
-including hosts sharing one evaluator configuration. A visible discovered name
+In the API, every authorized captured host keeps its own UUID, applicability, and
+provenance, including hosts sharing one evaluator configuration. A visible discovered name
 without a retained captured row adds a row with `system_id=null`, the exact name,
 `resolution=unavailable`, no digest, no policy bindings, and no bundle memberships.
 No current assignment or system ID is invented. Its applicability and control
@@ -193,8 +193,19 @@ Restricted reads omit names without retained authorized captured identities.
 Planned rows absent from discovery, excluded from selection, or read without
 inventory retain captured provenance but expose only Unknown cells and null
 details. Passing or stale outcomes outside selection cannot fill that gap.
-Planless reads clear outcome-derived matrix identities; only exact discovery can
-add rows. Discovery cannot reconstruct missing historical assignments.
+Planless API reads clear outcome-derived matrix identities; only exact discovery
+can add UUID-less API rows. Discovery cannot reconstruct missing historical
+assignments.
+
+The Policy matrix UI includes only captured rows with a system UUID. It excludes
+discovery-only names and UUID-less API rows, including rows with outcomes. Shared
+configuration counts and membership contributions use the same mapped rows.
+Each captured host retains its own assignments; shared configurations do not merge
+host rows. Planned mapped hosts remain visible with Unknown evidence when results
+are missing, not discovered, or not selected. The UI does not consult today's
+catalog to reconstruct mappings. Without captured mappings, an available inventory
+renders `No captured tracked systems for this attempt.` A filter with no matches
+instead renders `No systems match this filter.`
 
 `configuration_summary.total` counts the unique union of visible captured planned
 and discovered configuration names, even when several hosts share one name.
@@ -591,10 +602,9 @@ More than 14 distinct controls defaults to Bundles with column trim enabled;
 smaller matrices default to Controls without trim. Mode changes clear bundle
 focus but preserve row filter, sort, and trim. Bundle drilldown selects that exact
 bundle's Controls without changing those choices. Row filtering and sorting run
-before pagination. Rendering targets 8192 body cells, including the identity,
-health, and any Bundles-only layout filler cells. The page size is
-`clamp(8192 / (visible_columns + 2), 1, 100)`, where `visible_columns` includes
-the filler only in Bundles mode.
+before pagination. Rendering targets 8192 body cells, including the identity and
+health columns. The page size is
+`clamp(8192 / (visible_columns + 2), 1, 100)`. Neither column mode adds filler cells.
 Aggregation, issue counts, and trim use the full relevant row sets, not one page;
 horizontal scrolling retains control columns even when one row exceeds the budget.
 
@@ -607,10 +617,10 @@ never changes health, rollups, applicability, or control counts.
 
 ### Matrix layout and failure-first detail
 
-Controls use native automatic table layout, including sparse matrices. They do
-not use the former fixed sparse geometry or a trailing filler. Bundles retain
-180 px System and 110 px Health width hints, min-content bundle columns with a
-104 px minimum, and a hidden trailing layout-only filler. Bundle names stay on
+Both column modes use native automatic table layout, including sparse matrices.
+They do not use the former fixed sparse geometry or a trailing filler. System
+and Health retain 180 px and 110 px minimum widths. Bundle columns have a
+104 px minimum. Bundle names stay on
 one line with their exact version beside the name; long names truncate and keep
 the full identity in the heading title. A ResizeObserver measures System's actual
 border-box width and positions sticky Health after it as content, fonts, mode,
@@ -622,19 +632,22 @@ row filters with the Bundles/Controls selector, then the control summary, column
 options, and sort. Expanded rows list failed, warning, and unknown controls first
 as collapsible cards. Passed and not-assigned controls stay behind an explicit
 toggle. An open card shows captured assertion and attribute path when present,
-otherwise an explicit unavailable statement, plus the saved outcome detail,
-enforcement mode, exact version and lineage identifiers, the registry action, and
+plus the saved outcome detail, enforcement mode, exact version and lineage
+identifiers, the registry action, and
 one Compliance evidence action per contributing bundle. Expanded details stay
-pinned to the visible scroll width.
+pinned to the visible scroll width. Missing assertion text has no placeholder.
 
 The header Systems value counts the visible unique planned/discovered configuration
 population after inventory is available; Policy reports configuration-gate coverage,
-including distinct pending, unavailable, and excluded states. The matrix
-reconciles discovered names with captured hosts rather than explaining divergent
-populations through a separate scope note. There is no `Matrix scope` banner or
-`Platform evidence` panel. It shows unmanaged/unavailable rows
-and retains planned rows without discovery evidence. Configuration failures are
-integrated into failure-first row detail and health presentation without creating
+including distinct pending, unavailable, and excluded states. These header counts
+retain the full authorized inventory and can exceed mapped matrix configuration
+counts. Matrix filters count mapped configurations once; the table retains each
+captured host context. There is no `Matrix scope` banner or `Platform evidence`
+panel. The matrix excludes discovery-only configurations and retains mapped
+planned rows without discovery evidence. Row names have no `Config` suffix;
+shared contexts keep the ↔ marker and unavailable contexts keep the ? marker.
+Configuration failures are integrated into failure-first row detail and health
+presentation without creating
 policy IDs or changing bundle/control counts. Missing inventory renders
 `Discovery pending` for an active attempt or `Inventory unavailable for this
 attempt` for retained evidence without discovery, not an empty successful matrix.

@@ -196,12 +196,22 @@ pub(super) struct Matrix {
     pub(super) rows: Vec<MatrixRow>,
 }
 
-/// Adapts captured policies or verified inventory without inventing memberships.
-/// Legacy snapshots without either source remain unavailable.
+/// Adapts captured tracked-system rows without inventing identities or memberships.
+/// Inventory alone cannot supply historical system mappings. Legacy snapshots
+/// without capture or inventory remain unavailable.
 pub(super) fn captured(snapshot: &EvalPolicyMatrixSnapshot) -> Option<Matrix> {
     if snapshot.provenance != EvalMatrixProvenance::Captured && snapshot.inventory.is_none() {
         return None;
     }
+    // INVARIANT: Only captured UUID-bearing host contexts contribute rows,
+    // shared-configuration counts, or memberships. Full inventory remains intact
+    // for header coverage; current registry data cannot enrich historical rows.
+    let sources: Vec<_> = snapshot
+        .rows
+        .iter()
+        .filter(|row| row.system_id.is_some())
+        .cloned()
+        .collect();
     let mut seen = HashSet::new();
     let controls: Vec<_> = snapshot
         .columns
@@ -221,7 +231,7 @@ pub(super) fn captured(snapshot: &EvalPolicyMatrixSnapshot) -> Option<Matrix> {
     }
     let mut contributions: HashMap<uuid::Uuid, HashSet<String>> = HashMap::new();
     let mut unbundled_ids = HashSet::new();
-    for policy in snapshot.rows.iter().flat_map(|row| &row.policies) {
+    for policy in sources.iter().flat_map(|row| &row.policies) {
         let id = policy.policy_version_id.to_string();
         if policy.memberships.is_empty() {
             unbundled_ids.insert(id.clone());
@@ -265,9 +275,6 @@ pub(super) fn captured(snapshot: &EvalPolicyMatrixSnapshot) -> Option<Matrix> {
             control_ids: unbundled,
         });
     }
-    // Inventory is server-authorized for this exact attempt. Newly discovered
-    // configurations have no captured system identity or inferred assignments.
-    let mut sources = snapshot.rows.clone();
     let discovered: Option<HashSet<_>> = snapshot.inventory.as_ref().map(|inventory| {
         inventory
             .configurations
@@ -282,28 +289,6 @@ pub(super) fn captured(snapshot: &EvalPolicyMatrixSnapshot) -> Option<Matrix> {
             .map(String::as_str)
             .collect()
     });
-    if let Some(inventory) = &snapshot.inventory {
-        let mut represented: HashSet<_> = sources
-            .iter()
-            .map(|row| row.configuration_name.clone())
-            .collect();
-        for name in &inventory.configurations {
-            if represented.insert(name.clone()) {
-                sources.push(EvalMatrixRow {
-                    system_id: None,
-                    greenfield: None,
-                    system_name: name.clone(),
-                    configuration_name: name.clone(),
-                    resolution: EvalMatrixResolution::Unavailable,
-                    evaluation_digest: None,
-                    assigned_bundles: Vec::new(),
-                    policies: Vec::new(),
-                    cells: Vec::new(),
-                    details: Vec::new(),
-                });
-            }
-        }
-    }
     let mut contexts = HashMap::<&str, usize>::new();
     for source in &sources {
         *contexts
@@ -389,7 +374,7 @@ pub(super) fn captured(snapshot: &EvalPolicyMatrixSnapshot) -> Option<Matrix> {
             let mut row = MatrixRow {
                 // INVARIANT: Visibility changes cannot retarget an expanded
                 // check by shifting row indices. Captured UUIDs identify host
-                // contexts; discovered-only configuration keys are distinct.
+                // contexts independently of shared configuration names.
                 key: match source.system_id {
                     Some(id) => format!("system:{id}:{}", source.configuration_name),
                     None => format!("configuration:{}", source.configuration_name),
@@ -397,7 +382,7 @@ pub(super) fn captured(snapshot: &EvalPolicyMatrixSnapshot) -> Option<Matrix> {
                 source: source.clone(),
                 common_summary: model::aggregate(&ids, &outcomes),
                 // A snapshot-wide completeness flag cannot establish absence
-                // for appended discovery rows or unresolved applicability.
+                // for unresolved applicability.
                 bundle_metadata_complete: snapshot.empty_bundle_metadata_complete
                     && source.resolution == EvalMatrixResolution::Resolved,
                 configuration_failed: availability.is_none()
@@ -437,8 +422,8 @@ pub(super) fn captured(snapshot: &EvalPolicyMatrixSnapshot) -> Option<Matrix> {
 }
 
 /// Classifies each configuration once using its worst visible host context.
-/// Header inventory and row-filter counts therefore use the same primary
-/// population, while the table retains each host's exact captured assignments.
+/// Row filters count mapped configurations, while the table retains each host's
+/// exact captured assignments. Header inventory can include additional names.
 pub(super) fn configuration_health(rows: &[MatrixRow]) -> HashMap<&str, RowHealth> {
     let rank = |health| match health {
         RowHealth::Clean => 0,
@@ -503,7 +488,7 @@ mod tests {
                 {"bundle_version_id": "00000000-0000-0000-0000-000000000021", "bundle_id": "00000000-0000-0000-0000-000000000031", "name": "A", "version": "1", "framework": "F", "framework_version": null},
                 {"bundle_version_id": "00000000-0000-0000-0000-000000000022", "bundle_id": "00000000-0000-0000-0000-000000000032", "name": "B", "version": "2", "framework": "G", "framework_version": "4"}
             ], "empty_bundle_metadata_complete": true,
-            "rows": [{"system_id": null, "system_name": "real-host", "configuration_name": "config", "resolution": "resolved", "evaluation_digest": null,
+            "rows": [{"system_id": "00000000-0000-0000-0000-000000000061", "system_name": "real-host", "configuration_name": "config", "resolution": "resolved", "evaluation_digest": null,
                 "assigned_bundles": [
                     {"bundle_version_id": "00000000-0000-0000-0000-000000000021", "assignment_id": "00000000-0000-0000-0000-000000000041", "assignment_version_id": "00000000-0000-0000-0000-000000000051"},
                     {"bundle_version_id": "00000000-0000-0000-0000-000000000022", "assignment_id": "00000000-0000-0000-0000-000000000042", "assignment_version_id": "00000000-0000-0000-0000-000000000052"}
@@ -599,33 +584,62 @@ mod tests {
     }
 
     #[test]
-    fn discovered_without_capture_has_no_invented_system_or_membership() {
-        let snapshot = with_inventory(
-            &["config", "new-config", "new-config"],
+    fn inventory_only_and_backend_uuidless_rows_are_excluded() {
+        let mut snapshot = with_inventory(
+            &["config", "new-config", "new-config", "inventory-only"],
             &["config", "new-config"],
         );
+        let inventory = snapshot.inventory.clone();
+        let mut unmapped = snapshot.rows[0].clone();
+        unmapped.system_id = None;
+        unmapped.cells = vec![EvalMatrixCell::Fail; 2];
+        // An unmapped context must not mark the mapped configuration shared or
+        // add an unbundled contribution for an otherwise bundled control.
+        unmapped.policies[0].memberships.clear();
+        snapshot.rows.push(unmapped.clone());
+        unmapped.configuration_name = "new-config".into();
+        snapshot.rows.push(unmapped);
         let matrix = captured(&snapshot).unwrap();
-        assert_eq!(matrix.rows.len(), 2);
-        let row = &matrix.rows[1];
-        assert_eq!(row.source.configuration_name, "new-config");
-        assert!(row.source.system_id.is_none());
-        assert_eq!(row.source.resolution, EvalMatrixResolution::Unavailable);
-        assert_eq!(row.status_label(), Some("No captured system"));
-        assert!(row.source.policies.is_empty());
-        assert_eq!(row.common_summary.passed, 0);
-        for bundle in &matrix.bundles {
-            assert_eq!(
-                row.bundle_applicability(bundle),
-                BundleApplicability::Unknown
-            );
-        }
+        assert_eq!(matrix.rows.len(), 1);
+        assert!(!matrix.rows[0].shared_configuration);
+        assert_eq!(matrix.rows[0].common_summary.failed, 0);
+        assert_eq!(configuration_health(&matrix.rows).len(), 1);
+        let bundled_id = snapshot.columns[0].policy_version_id.to_string();
         assert!(
-            row.outcomes
-                .values()
-                .all(|outcome| *outcome == Outcome::Unknown)
+            matrix
+                .bundles
+                .iter()
+                .filter(|b| b.synthetic)
+                .all(|b| !b.control_ids.contains(&bundled_id))
         );
-        // A missing UUID on a captured row is not proof of unmanaged status.
-        assert_eq!(matrix.rows[0].status_label(), Some("No captured system"));
+        assert_eq!(snapshot.inventory, inventory);
+        snapshot.rows[0].system_id = None;
+        assert!(captured(&snapshot).unwrap().rows.is_empty());
+    }
+
+    #[test]
+    fn mapped_missing_results_remain_visible_with_unknown_health() {
+        let mut snapshot = with_inventory(&["config"], &["config"]);
+        snapshot.rows[0].cells.clear();
+        snapshot.rows[0].details.clear();
+        let matrix = captured(&snapshot).unwrap();
+        assert_eq!(matrix.rows.len(), 1);
+        assert_eq!(matrix.rows[0].source.system_id, snapshot.rows[0].system_id);
+        assert_eq!(matrix.rows[0].common_summary.unknown, 2);
+        assert_eq!(matrix.rows[0].health(), RowHealth::Unavailable);
+    }
+
+    #[test]
+    fn unmapped_bundle_memberships_do_not_contribute_to_overlap() {
+        let mut snapshot = fixture();
+        let mut unmapped = snapshot.rows[0].clone();
+        unmapped.system_id = None;
+        snapshot.rows[0].policies[0].memberships.pop();
+        snapshot.rows.push(unmapped);
+        let matrix = captured(&snapshot).unwrap();
+        assert_eq!(matrix.rows.len(), 1);
+        assert_eq!(model::shared_control_count(&matrix.bundles), 0);
+        assert!(matrix.bundles[1].control_ids.is_empty());
     }
 
     #[test]
