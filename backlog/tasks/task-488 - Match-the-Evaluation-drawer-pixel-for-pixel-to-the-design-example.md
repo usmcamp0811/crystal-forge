@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-17 06:23'
+updated_date: '2026-10-17 14:08'
 labels:
   - web-ui
   - design-parity
@@ -112,6 +112,8 @@ Historical navigation delegation: retain existing parent lock/worktree and previ
 Latest user audit/correction supersedes the prior population-banner and fixed sparse-column decisions. Implement immutable exact-attempt discovery in a new0306 inventory extension (never mutate0303 plans); gate writes by active/latest ownership, cancellation and snapshot/commit/attempt lock order. Queue/history and matrix use that inventory and current environment visibility; missing discovery is pending/unavailable rather than cache-derived coverage. Preserve captured per-host assignments; append visible discovered configurations without inventing IDs or memberships; mask undiscovered/unselected results. Scope history and configuration metadata; unstructured logs/WS/graph require complete current flake/configuration authority and WS revocation rechecks. Remove PlatformEvidence and population_notes UI entirely; retain genuine matching-attempt global gate failures in existing configuration row details, not a new panel/control identity. Restore sparse Controls auto geometry per reference. Shareable exact-attempt routes integrate historical evidence as a tray over normal Compliance; disable unavailable pinned Log/Graph tabs deliberately rather than substituting latest. Add migration-backed ownership/inventory/adversarial endpoint regressions, update UI/visual workflows and docs, run native persisted evaluation in isolated preview, target checks, and CI-only authoritative web-ui. Exact live41/12 commit+attempt identity is still unavailable in-session; requested from user and remains Unverified until supplied. Preserve all prior enforcement, authorization, classification and knowledge-validation behavior.
 
 Continuation verification: retain existing task worktree/lock and Draft MR. Verify immutable native outcomes0307 and attributable history retention0308 already implemented in this worktree; register their six ignored SQLx tests. Align explicit pending versus unavailable coverage across matrix, queue/history, UI fixtures and technical documentation. Run focused disposable SQLx regressions, UI unit tests and WASM checks before refreshing the owned preview/backend. Preserve all preview records and report freshness explicitly. Continue browser and visual verification; real41/12 reconciliation remains blocked on exact commit/attempt identity. No merge or deployment.
+
+Integration follow-up from authenticated performance inspection: the environment-banner hook still probes the now-protected eval-queue with Fetch's default same-origin credentials, omitting the session across preview ports. Add explicit Include credentials to this existing probe and document its authenticated contract. Keep server authorization unchanged. Verify authenticated browser probe success and mock banners, then rerun UI unit/WASM checks and focused browser workflow. This is required to preserve the existing mock-mode indicator after queue authorization changes.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
