@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-17 17:59'
+updated_date: '2026-10-17 20:19'
 labels:
   - web-ui
   - design-parity
@@ -389,4 +389,32 @@ Reported GitLab state: parent verified MR334 initially opened with draft=false, 
 Unresolved verification gate: prior server failure at852b9c4c was `unlinked_environment_host_state_publication_precedes_cve_poam_closure` in an unchanged file. Cause remains unproven; do not excuse it as a baseline failure. Obtain and inspect current exact-head CI results. No code changes or tests were executed during this review triage. The complete 16-item acceptance record is in the local dev backlog task; publish its accurate checklist/reference in the later MR handoff.
 
 Backlog-only user-approved recovery and delegation handoff: read the Backlog overview and execution guide, then appended the plan before implementation delegations. The explicit approved recovery constraints supersede the previous proposed hard cap and separate recovery allowance. No implementation or tests have been verified in this operation. Existing implementation/test claims elsewhere in the task are historical context, not new verification. Status, acceptance criteria, source, Git, services, database, and MR remain unchanged.
+
+Current handoff facts (user-supplied; recorded backlog-only, not independently reverified). Execution guide read. Parent HEAD59897728; all eight review fixes UNCOMMITTED. MR marked Draft via API hold; no merge/deployment. Preserve lock/status; do not check acceptance criteria until all proof exists.
+
+Recovery: approved NO recovery cap. Fresh successor UUID/next number; preserve source parent/root; copy automatic_retry_count unchanged. Seven recovery SQLx tests pass, including0 -> recovery0 -> actual failure retry1 -> recovery1 -> actual failure no retry -> manual0. Existing constraints suffice; no extra run-budget/recovery schema.
+
+P1: attempt-owned state registry/fenced tokens, real WS replacement test and persisted HTTP logs ownership migration0309 (no legacy backfill). New WS1+evalLogs2 pass; old visibility10 pass; pure registry4+handler22 pass.
+
+P3: full single-connection transaction-only RR receiver SQLx9 pass, including POAM sentinel-before-system-guard race proof. Nonmutating source-guard read allows writer200; actual metadata change produces RR500 fail-closed.
+
+P4: required whole-write30s deadline+final500 monitor; PG transaction-local statement/lock31s cleanup budget. Helper SQLx5 pass, including same blocked external Global with remaining held connection reclaim (native cancellation+short-timeout mock, ~65s). Actual process_pending worker deadline/cancel/finalizer-failure test1 passes (~37s); permit released before finalizer wait.
+
+DB verification scope: task PG data_directory /home/mcamp/code/crystal-forge/TASK-488-eval-drawer-pixel-parity/.devenv/state/postgres, port5432. SQLx DATABASE_URL uses postgres maintenance DB and creates own DBs; no preview resets. Legacy direct-pool tests require separate CRYSTAL_FORGE_TEST_DATABASE_URL to newly migrated task-owned task488_review_legacy_59897728. Initial wrong manual target (no flakes) corrected. Completed-page fixture corrected to canonical terminal attempt counter+latest branches. Automatic-retry fixture isolated SQLx, waits for backoff expiry via exact child timestamp. Current commits::tests28 pass serially. Other old matrix20/native6/mock3 pass.
+
+Current server build+doc pass with baseline unrelated broken-link warnings/no new links; runtime queries have no SQLx metadata shape changes. checks/server-regressions updated to236 exact=144ignored92pure, including19 additional review SQLx+9 new pure. Worker config host127/port0/execution mock scoped only to exact worker test. No additional schema beyond0309 needed.
+
+UI752pass0fail1ignored+WASMpass after atomic request-scope cache+generation guard/four new pure tests. Browser26b history1/1PASS covers config-only search/list counts, delayedA-afterB mutation monitor, selection clear/poll/filter/status/flake, ordinary history keyboard/focus/all3 close paths.26c/dPASS in combined run.
+
+26e NOT PASS YET. Initial preCapture fixture truthfully legacyUnavailable/emptyMetadata=false. Actual0->128 sameUUID defaults to Bundles correctly after initializer-loop fix using peek/equality-guarded publication. Main failure: roundtrip scroll222 expected0 despite restored semantic mode/filter/sort/finding. Browser-only diagnostic /tmp/opencode/task488/trace-eval-scroll.cjs logs WASM bounded restoreScript marker=true, captureDom correct222, NO restore_dom lookups/calls. Parent found derived valid_return bool captured in plain use_effect initially false had no reactive deps and never reran. Latest patch uses use_effect(use_reactive(&valid_return,...)) and marks dom_restored only when SomeDom+matrix_initialized=true. NOT compiled/refreshed/runtime verified after this final patch.
+
+restore_dom helper: bounded3s render window, cancel on new operator pointer/key input, wait for opener then restore actual .pm-scroll and focus preventScroll. Browser fixture uses real .pm-scroll+legitimate height640 (viewport restored in finally), sets actual Controls+bundle1 focus before all6 closes, preserves trim=false/mode/98 columns. Invalid membership Back disabled; X closes to safe Compliance fallback and fresh reentry rather than expecting invalid rich restore.
+
+Continue26e, then persisted Config success with actualv2 (extension to existing runTask440LiveSnapshotEvaluation remains unexecuted; host mock inappropriate write fixture), current matched React comparisons, keyboard/narrow/maximized verification. Preserve user cleanups: mapped-only rows, single-bundle buttons, no visible known, no expanded-row metadata, no PlatformScope.
+
+Preview reported, not freshly verified here: frontend tmux task488-frontend lastPID30590; server lastPID5918; rediscover ownership. Functional backend current build/doc passed; later core31 build checked. API restarts use freeze-imported-demo guard preserving data. Normal DB crystal_forge upgraded0309, no old-log ownership backfill. Front WASM contains bounded restore helper but latest valid_return reactivity patch NOT rebuilt.
+
+Logs: /tmp/opencode/task488/review-fixes-{sqlx.log,worker-test.log,existing-regressions.log,legacy-commits.log,receiver-lock-order.log,inventory-cleanup.log,ui-current-checks.log,backend-current-build-doc.log,history-browser.log,matrix-browser.log,scroll-debug.log}. Old-head59897728 pipeline2958746451 last known running. /tmp/opencode/task488/review-59897728-server-ci.log shows prior130 integration failure did not recur (130pass0fail), progressed to library phase; neither whole-job pass nor new-source CI evidence.
+
+Future handoff requirement: publish complete TASK-488 acceptance record in MR because reviewer could not find local dev task record. Do not mark ACs complete until all proof. This operation appends notes only; no status/criteria/finalSummary/code/Git/services/DB/MR changes.
 <!-- SECTION:NOTES:END -->
