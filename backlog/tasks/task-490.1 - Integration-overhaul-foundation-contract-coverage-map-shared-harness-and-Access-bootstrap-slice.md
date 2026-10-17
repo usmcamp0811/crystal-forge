@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-17 18:37'
+updated_date: '2026-10-17 20:32'
 labels:
   - testing
   - integration
@@ -80,4 +80,6 @@ Preserved corrected native Snowfall WIP in commit 683c86e03ef14b37e69c00030d6d17
 TASK-491 prerequisite repaired in commit af39284bdf16d56402f01a64c916f17948e43b02; draft/normal MR !336: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/336. The normal production server package build now passes its full check phase (1794 passed, 0 failed, 682 ignored). This does NOT establish the Access VM scenario. TASK-490.1's focused scenario has not yet been rerun at this prerequisite commit; remains In Progress, blocked on executing its real VM/browser slice. TASK-491 is in Review; do not select/delegate dependent packets until coordinator integrates the prerequisite commit and verifies the slice.
 
 Correction after TASK-491 prerequisite review: the server package build blocker is now resolved by TASK-491 commit af39284bdf16d56402f01a64c916f17948e43b02 (MR !336, status Review). The focused Access scenario still has not been executed on that commit. TASK-490.1's prior note saying it is blocked on package build is historical; current next action is coordinator to integrate/rebase the tested prerequisite and execute the real Access VM/browser slice. No owner result is implied and child packets remain Backlog.
+
+Foundation execution update after integrating tested dependency af39284bdf16d56402f01a64c916f17948e43b02: exact command `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L` executed in the TASK-490.1 worktree. The VM ran and failed on `fresh-startup-applies-migrations`. Evidence is `/nix/store/yfc7pkz5zm8k29b82zzfhm2i8f1gn348-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`; `result.json`, `journals/controller/generated-config-summary.txt`, and `journals/controller/crystal-forge.journal` are authoritative outputs. Generated config: database.host=/run/postgresql, port=5432, user/database crystal_forge (password redacted); [server] has no auth_mode; systemd AUTH_MODE=unset. Server exits `both host and hostaddr are missing` before migrations or HTTP. The module option set to local is not reflected in generated config; runtime auth-mode response was not reached. Assertions remain, no AUTH_MODE override or production change. Linked product defects TASK-490.25 (socket URL) and TASK-490.26 (local auth propagation). TASK-491 package prerequisite pass does not complete this slice. Foundation remains In Progress and children remain Backlog.
 <!-- SECTION:NOTES:END -->
