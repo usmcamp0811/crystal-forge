@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-17 17:19'
+updated_date: '2026-10-17 17:28'
 labels:
   - testing
   - integration
@@ -29,7 +29,7 @@ Preserved scope: create POA&Ms from real failed policy evidence (TASK-490.18) an
 
 NOT DISPATCH READY: TASK-490.20/.21 still need finer splitting of finding triage versus policy waiver/acceptance versus verification/closure. Existing separation is not sufficient dispatch preparation. Note blocker without expanding scope or creating new slices now. Integration of 490.16/.18 alone does not make this ready.
 
-Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator registrations and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; explicit registration of disjoint child files required. Meaningful WIP may be discoverable; only Access exists now, other owners require meaningful scenarios, no placeholders.
+Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator registrations and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; explicit registration of disjoint child files required. Meaningful WIP may be discoverable; only Access exists now, other owners require meaningful scenarios, no placeholders.
 
 Read-only source: cf-server api/poam.rs transition/verify/close/reopen/milestones/links/rollups, models/poam.rs PoamStatus/PoamRisk; owner-approved docs/design/CrystalForge cve-poam-evidence-continuity-design-spec.md, docs/knowledge/poam/*; PoamsView.jsx/PoamViews.jsx/PoamRegisterParts.jsx. As-built D1 is evidence, not accepted authority; uncertain lifecycle requirements blocked pending owner decision.
 
