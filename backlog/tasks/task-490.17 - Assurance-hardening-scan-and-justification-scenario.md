@@ -4,7 +4,7 @@ title: 'Assurance: hardening scan and justification scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-17 17:27'
+updated_date: '2026-10-17 20:33'
 labels:
   - testing
   - integration
@@ -45,4 +45,6 @@ READINESS: actual foundation dependency commit unresolved; foundation blocked by
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction: native owner-local paths and explicit coordinator registration. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
+
+Scenario isolation correction: TASK-490.14 target/DB/output cannot be reused. Provision the real target and authored systemd service facts inside this scenario's own fresh VM, then scan. Reuse only immutable fixture definitions. Foundation VM fails on TASK-490.25/.26; remain Backlog.
 <!-- SECTION:NOTES:END -->
