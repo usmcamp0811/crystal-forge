@@ -15,6 +15,8 @@ references:
   - AGENTS.md
   - docs/agents/verification.md
   - docs/knowledge/testing/flake-checks.md
+  - TASK-490.25
+  - TASK-490.26
 priority: high
 type: task
 ordinal: 512000
@@ -35,7 +37,7 @@ STRICT SCOPE: application functionality is read-only. Allowed: integration test 
 
 Overhaul branch: TASK-490.1-integration-foundation; designated historical base origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd. This base is not a foundation dependency commit. Child commits are integrated by the coordinator.
 
-READINESS: the actual foundation dependency commit remains unresolved. Foundation is blocked by two existing Rust package tests; no VM execution has occurred. Every child remains Backlog and none is ready. Future packets require actual foundation/dependency commit(s), implemented helper signatures, exact writable paths, fixtures, registration, and verified commands before To Do. TASK-490.20/.21 also require finer splitting of triage, policy waiver, and closure before dispatch; this correction does not expand or split their scope.
+READINESS: TASK-491's tested package repair is integrated as `a6c8922650bf7f0ff643d181422c0092cfc43242`; the Access VM then executed and failed on the normal module configuration, before migrations/HTTP. TASK-490.25/.26 record the observed product configuration defects. No product fix is authorized or implemented. All child scenario packets remain Backlog until a tested foundation can support their claimed behaviors; no Luna dispatch. TASK-490.20/.21 have been narrowed; .27/.28/.29 split finding waiver, acceptance register and POA&M verify/closure. Each scenario must create its own real starting state in its fresh VM; no cross-scenario runtime reuse. Final cutover still requires complete owner runs to pass or explicit owner scope change.
 
 Prior owner authorization covers this overhaul only and permits dependency-ready task selection and implementation preflight. It does not override these blockers or authorize merging, deploying, unrelated work, product fixes, or marking the overhaul Done without final approval.
 <!-- SECTION:DESCRIPTION:END -->
@@ -61,4 +63,6 @@ Historical coordination context: prior owner claude-opus-5-5 recorded the founda
 LOCK: claude-opus-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation
 
 Run one VM test at a time until measured capacity supports a higher limit. Foundation remains In Progress, blocked pending package build; dependent children remain Backlog. No foundation readiness or verification is claimed.
+
+2026-10-17 resumed foundation update: TASK-491 tested repair `af39284bdf16d56402f01a64c916f17948e43b02` was cherry-picked as `a6c8922650bf7f0ff643d181422c0092cfc43242`. The Access VM scenario executed and failed before migrations because generated `/run/postgresql` host produced an empty-host URI; generated auth_mode was absent and AUTH_MODE was unset. Evidence and exact expected/observed results are in the coverage map. Product bugs TASK-490.25/.26 are Backlog; no fix is implemented. Assurance packets .20/.21 were narrowed and .27-.29 split. Each scenario must reconstruct real setup in its fresh VM; no runtime output sharing. All child tasks remain Backlog and no owner is complete.
 <!-- SECTION:NOTES:END -->

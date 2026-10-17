@@ -10,9 +10,11 @@
 #   Admin role; one active session exists after sign-in and survives reload.
 # Negative condition: a wrong password is rejected with 401 and creates no
 #   session or session cookie.
-# Authority: docs/knowledge/operations/authentication-modes-and-oidc-configuration.md
-#   (module auth_mode selects the server mode; local is the default),
-#   docs/knowledge/security/api-authentication-and-authorization.md.
+# Authority: the owner-approved TASK-490.1 requirement is a fresh first-admin
+#   local-auth bootstrap using the normal NixOS module with
+#   services.crystal-forge.server.auth_mode = "local". The operations/auth
+#   and security/API-auth docs describe current implementation; treat them as
+#   evidence, not independent approval of behavior.
 # Design reference: none. The approved design handoff has no Login or
 #   Register component, so this scenario makes semantic assertions only
 #   (Blocked: design gap for visual comparison of /register and /login).

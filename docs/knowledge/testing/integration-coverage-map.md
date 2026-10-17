@@ -97,13 +97,13 @@ Host resources (`sledge`, inspected 2026-10-17): 32 cores, 123 GiB RAM with abou
 
 ## Obligation map
 
-Scenario paths are relative to `checks/`. "Evidence" names the observation required in addition to `result.json`. Expected results still require the authority review described in D1.
+Scenario paths are relative to `checks/`. "Evidence" names the observation required in addition to `result.json`. Expected results still require the accepted authority review described in D1. Each scenario runs in a fresh VM/database; a prerequisite scenario's runtime output is never reused. A task dependency means code/fixture preparation is integrated, not that another check's live data is available. Every scenario must create its own real starting evidence through setup operations and must not seed the result under test.
 
 ### Access (`integration-access`)
 
 | Contract ID | Scenario | Independent expected result | Evidence | Status |
 | --- | --- | --- | --- | --- |
-| `access.lifecycle.local-bootstrap` | `integration-access/scenarios/lifecycle-local-bootstrap` | Module `auth_mode = "local"` yields local mode; migrations applied = forward migration files in source; first registrant persists with only `admin`; one session after sign-in survives reload; wrong password returns 401 with no session row or cookie. | DB rows, browser trace on failure, screenshot after reload | `unverified`; see [execution record](#foundation-execution-record) |
+| `access.lifecycle.local-bootstrap` | `integration-access/scenarios/lifecycle-local-bootstrap` | Module `auth_mode = "local"` yields local mode; migrations applied = forward migration files in source; first registrant persists with only `admin`; one session after sign-in survives reload; wrong password returns 401 with no session row or cookie. | DB rows, browser trace on failure, screenshot after reload, generated-config summary | `failing: product defect` before migrations/auth; see [execution record](#foundation-execution-record) and TASK-490.25/TASK-490.26 |
 | `access.lifecycle.sessions` | TASK-490.2 | Sign-out invalidates the session row and cookies; missing or mismatched `x-csrf-token` returns 403 with no write; revoked session is rejected on next request. | DB `user_sessions`, protected-row before/after | `planned` |
 | `access.lifecycle.authorization` | TASK-490.2 | Operator and Viewer accounts see the approved unavailable state and receive 403 for admin mutations; denied requests change no protected row. | DB before/after, browser state | `planned` |
 | `access.lifecycle.registration-closed` | TASK-490.2 | With `allow_registration = false` and an existing user, a second registration does not create a user. | DB `users` count | `planned` (code reading suggests a defect; not yet executed) |
@@ -136,8 +136,11 @@ Scenario paths are relative to `checks/`. "Evidence" names the observation requi
 | `assurance.scanning.hardening` | TASK-490.17 | Hardening scan of a real target reports the authored service findings; justification persists. | Target unit facts, DB | `planned` |
 | `assurance.policy.enforcement` | TASK-490.18 | Policy versions and assignments resolve to the expected effective policies; `Enforce` blocks and `ReportOnly` records without blocking an admission decision. | DB decisions, deployment outcome | `planned` |
 | `assurance.policy.stig-import` | TASK-490.19 | Importing the DISA Anduril NixOS STIG XCCDF yields the authored rule count and identities; preview does not persist; malformed input is rejected atomically. | DB rows before/after, browser state | `planned` |
-| `assurance.remediation.triage` | TASK-490.20 | Triage and finding waivers persist with actor and scope; waiver does not mark remediation. | DB rows | `planned` |
-| `assurance.remediation.poam` | TASK-490.21 | POA&M creation from persisted evidence, milestones, verification, closure, and reopen preserve finding identity and evidence continuity. | DB rows, browser state | `planned` |
+| `assurance.remediation.triage` | TASK-490.20 | Single and batch triage persist actor, scope, status, and justification for exactly the authored findings; unauthorized triage changes nothing. | DB before/after, browser identity/navigation | `planned`; regenerate real finding evidence inside this scenario |
+| `assurance.remediation.finding-waiver` | TASK-490.27 | Approved finding-waiver decisions remain distinct from remediation and Current evidence. | DB decision/evidence rows, browser | `planned`; authority may block exact states |
+| `assurance.remediation.acceptance-register` | TASK-490.28 | The register selects exact source-owned acceptance records; renew/convert affects only the selected record and preserves source identity. | DB before/after, download/list and navigation | `planned`; create source record in this scenario |
+| `assurance.remediation.poam-plan` | TASK-490.21 | A POA&M created from real failed evidence retains exact finding identity; notes, milestones, and accepted plan transitions persist. | DB rows, browser reload | `planned`; generate failed evidence in this scenario |
+| `assurance.remediation.poam-verification` | TASK-490.29 | Verification is denied before Current evidence changes; after real remediation, authorized verification/closure/reopen preserves evidence identity and rejects stale writes. | DB state/history, actual target/scanner state, browser | `planned`; construct plan and both evidence states in this scenario |
 | `assurance.interchange` | TASK-490.22 | Downloaded register (CSV, XLSX, OSCAL JSON/XML), POA&M, acceptance, CVE CSV, XCCDF, and policy-interchange exports parse independently and contain the expected records and scope. | Downloaded files, schema validation | `planned` |
 
 ### Upgrade (`integration-upgrade`)
@@ -179,11 +182,12 @@ Shared mechanics (drawer focus/close, confirm dialogs) are tested once in the fi
 
 Verified in code at the baseline: cache types `S3`, `Attic`, `Niks3`, `Http`, `Nix` (`cf-protocol/src/cache.rs`); builder strategies `ServerDerivation`, `SourceReEvaluateVerified`, with source delivery `ServerBundledArchive` only (`cf-protocol/src/builder.rs`); system deployment policies `manual`, `auto_latest`, `pinned` and activation `ImmediatePersist`, `BootOnly`; enforcement `Enforce`, `ReportOnly`; auth modes `local`, `oidc` (module); roles `Admin`, `Operator`, `Viewer`; notification channels `InApp`, `Email`, `Both`; imports XCCDF 1.2 XML/ZIP and policy interchange; server exports register `csv`/`xlsx`/`oscal-json`/`oscal-xml`, POA&M and acceptances `csv`/`xlsx`, CVEs `csv`, XCCDF, policy interchange; client-only CF-JSON, CSV, SARIF, OSCAL, print HTML. No CKL importer exists. A feature named only in a design draft is not in scope.
 
-## Suspected product defects and design gaps
+## Product defects and design gaps
 
 | ID | Kind | Summary | Contract | Task |
 | --- | --- | --- | --- | --- |
-| P1 | Suspected product defect; not reproduced | Code inspection suggests that emitting `AUTH_MODE` only for `oidc` and omitting `auth_mode` from generated TOML could prevent local sign-in under the default module configuration. No scenario VM has executed to verify this suspicion. | `access.lifecycle.local-bootstrap` | See [execution record](#foundation-execution-record) |
+| P1 | Product configuration mismatch observed; route behavior not reached | For `server.auth_mode = "local"`, generated TOML omits `auth_mode` and the server unit has `AUTH_MODE=unset`. At this baseline, cf-config's fallback is `oidc`; the user-mandated local-bootstrap scenario expects local auth. The server failed earlier on the database URL, so no auth-mode HTTP response or registration route behavior was observed. | `access.lifecycle.local-bootstrap` | TASK-490.26 |
+| P2 | Product defect observed | The normal NixOS module's `database.host = "/run/postgresql"` socket default is written to TOML. `DatabaseConfig::to_url` formats it as a URI authority, producing an empty host; the real server logs `both host and hostaddr are missing` and exits before migrations. | `access.lifecycle.local-bootstrap` | TASK-490.25 |
 | G1 | Design gap | No approved design component for `/login`, `/register`, or `/setup`. | `access.lifecycle` visual cases | None; semantic assertions only |
 
 ## Legacy retirement map
@@ -212,9 +216,26 @@ Disposition values: `replace` (retire after the required owner scenarios pass), 
 | `checks/builder-cve-contract`, `oscal-export`, `xccdf-schema`, `stig` | Contracts/unit | `keep` | Non-integration. |
 | `checks/test-keys` | Not a check | `obsolete` | Keys are embedded elsewhere; remove at cutover if unused. |
 | CI `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | DB-backed Rust | `keep` | Non-integration; the fake scanner runner does not satisfy `assurance.scanning.cve`. |
+| CI `web-ui-baseline-candidates` | Manual visual-maintenance job; not a blocking integration gate | `keep` during coexistence; retire or explicitly rebind at cutover | It produces candidate baselines for legacy `web-ui`; it does not establish a passing integration owner. |
+| CI `web-ui-screenshots-mr-comment` | MR artifact/reporting job; not a gate | `keep` during coexistence; update/retire with `web-ui-check` at cutover | Its current screenshot source is legacy `web-ui-check`; replacement owner artifacts need an explicit coordinator update. |
 
 At cutover (TASK-490.24), after all required owner scenarios pass, the integration CI entry point runs the four owners and checks the four-name allowlist; replaced legacy registrations, their CI selections, and the legacy `web-ui` fixtures (`checks/web-ui/tests/fixtures/*.xml` move beneath `checks/integration-assurance/`) are removed in the same change.
 
 ## Foundation execution record
 
-Bootstrap execution is **unverified**. Two package-build attempts failed in different existing Rust tests before any scenario VM executed. Neither attempt establishes a reproduced product defect, a scenario failure, or a passing integration result. No VM execution evidence is available yet. TASK-491 records the package-build failures and evidence logs.
+Bootstrap execution is **failed** at combined source commit `a6c8922650bf7f0ff643d181422c0092cfc43242-dirty` (foundation WIP plus TASK-491 `af39284bdf16d56402f01a64c916f17948e43b02`). Exact command: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. The Nix build failed before browser launch. Scenario output: `/nix/store/yfc7pkz5zm8k29b82zzfhm2i8f1gn348-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. `result.json` reports the required `fresh-startup-applies-migrations` case failed at `controller.wait_for_unit("crystal-forge-server.service", timeout=5)` after a bounded observation found the server restarting. PostgreSQL started and listened on `/run/postgresql`; the server repeatedly exited with `Error: invalid configuration`, caused by `both host and hostaddr are missing` (journal at `journals/controller/crystal-forge.journal`, lines 75–80). No migration ran and no HTTP/auth/browser assertion executed.
+
+The captured, password-redacted generated configuration is `journals/controller/generated-config-summary.txt`:
+
+```text
+[database]
+host = "/run/postgresql"
+name = "crystal_forge"
+password = "[REDACTED]"
+port = 5432
+user = "crystal_forge"
+[server]
+systemd AUTH_MODE=unset
+```
+
+Expected: the module's documented local socket setup starts the server; the `server.auth_mode = "local"` option selects local auth. Observed: the socket path is formatted into a URI with an empty authority host, so server startup fails; generated config contains no `auth_mode` and the systemd environment has no `AUTH_MODE`. The source default is OIDC, but that runtime mode was not directly observed because config loading failed first. The test keeps its startup assertion and adds no `AUTH_MODE` override. TASK-490.25 and TASK-490.26 track the separate product issues. TASK-491 package checks now pass; this VM failure is independent of that prerequisite.

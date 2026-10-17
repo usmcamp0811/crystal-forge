@@ -46,4 +46,5 @@ READINESS: actual foundation commit unresolved; foundation blocked by two existi
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction: native owner-local layout and explicit coordinator registration replace prior paths. Foundation dependency commit unresolved; blocked by two existing Rust package tests, no VM execution. Backlog, not ready; future packet needs actual dependency commit(s) and verified commands before To Do. No Luna delegation or executed slice is claimed.
+Scenario isolation: the TASK-490.11 failing-build run cannot supply notification rows/events. Generate a real failing build in this scenario's own fresh VM; reuse only immutable fixture definitions/helper code. Current TASK-490.1 VM fails on product defects TASK-490.25/.26; remain Backlog.
 <!-- SECTION:NOTES:END -->

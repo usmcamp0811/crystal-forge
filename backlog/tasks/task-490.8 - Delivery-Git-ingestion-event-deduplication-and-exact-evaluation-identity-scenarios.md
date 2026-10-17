@@ -47,4 +47,5 @@ READINESS: actual foundation commit unresolved; foundation blocked by two existi
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction: native owner-local paths and explicit coordinator registration replace old layout. Child files are disjoint from coordinator proving scenario. Foundation commit unresolved; two existing Rust package tests block foundation; no VM execution. Backlog, not ready. Future packet needs actual dependency commit(s) and verified commands before To Do. No Luna delegation or executed slice is claimed.
+Scenario isolation: this task cannot consume runtime Git commits/evaluations from TASK-490.7. Recreate and ingest authored commits in this scenario's fresh VM; reuse only immutable fixture definitions. TASK-490.1's VM fails on TASK-490.25/.26; remain Backlog.
 <!-- SECTION:NOTES:END -->

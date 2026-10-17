@@ -2,6 +2,13 @@
 # actor, starting state, action, outcome, and negative condition.
 # Helpers (case, expect, http, sql_json, run_browser, receipt) come from
 # lib/integration-test/driver.py.
+#
+# Expected: with the normal NixOS module and `server.auth_mode = "local"`,
+# the server starts, applies migrations, and exposes local setup-status.
+# Current observed result (coverage map): startup fails before migrations
+# because the generated socket host produces an empty-URI-host error. The
+# generated config also omits auth_mode and AUTH_MODE is unset, so no local
+# auth response is observed. Keep the assertions and do not add an override.
 
 admin = FACTS["admin"]
 
@@ -9,7 +16,37 @@ start_all()
 
 with case("fresh-startup-applies-migrations"):
     controller.wait_for_unit("postgresql.service", timeout=180)
-    controller.wait_for_unit("crystal-forge-server.service", timeout=300)
+    controller.wait_until_succeeds(
+        "test -s /var/lib/crystal-forge/config.toml", timeout=60
+    )
+    controller.succeed(
+        r'''mkdir -p /tmp/cf-it/diag && {
+          awk '
+            /^\[database\]$/ { section = "database"; print; next }
+            /^\[server\]$/ { section = "server"; print; next }
+            /^\[/ { section = ""; next }
+            section == "database" && /^(host|port|user|name) =/ { print }
+            section == "database" && /^password =/ { print "password = \"[REDACTED]\"" }
+            section == "server" && /^auth_mode =/ { print }
+          ' /var/lib/crystal-forge/config.toml
+          systemctl show crystal-forge-server.service -p Environment --value |
+            tr ' ' '\n' |
+            awk -F= '$1 == "AUTH_MODE" { print "systemd AUTH_MODE=" $2; found = 1 }
+                     END { if (!found) print "systemd AUTH_MODE=unset" }'
+        } > /tmp/cf-it/diag/generated-config-summary.txt'''
+    )
+    # Stop waiting soon after either successful activation or a recorded
+    # service failure. The following wait remains the required startup
+    # assertion; this bounded observation only avoids spending the full unit
+    # timeout in a rapid systemd restart loop.
+    controller.wait_until_succeeds(
+        "systemctl is-active --quiet crystal-forge-server.service "
+        "|| systemctl is-failed --quiet crystal-forge-server.service "
+        "|| test \"$(systemctl show -p NRestarts --value "
+        "crystal-forge-server.service)\" -gt 0",
+        timeout=90,
+    )
+    controller.wait_for_unit("crystal-forge-server.service", timeout=5)
     controller.wait_for_open_port(3000, timeout=300)
     rows = sql_json(
         controller,
