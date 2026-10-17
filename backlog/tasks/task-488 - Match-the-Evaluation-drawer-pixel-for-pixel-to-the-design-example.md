@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-17 16:21'
+updated_date: '2026-10-17 17:52'
 labels:
   - web-ui
   - design-parity
@@ -130,6 +130,18 @@ Completed Evaluation multi-select correction in the existing locked worktree at 
 User-directed expanded Policy matrix correction: remove the undesigned visible row text 'Configuration: chesty / Operator classification: Unknown / Assigned bundles: Demo Bundle 0.1.0-draft (assignment)'. Parent will remove only the pm-expand-meta block and its unused contexts display builder in policy_cells.rs. Preserve captured configuration, classification and bundle data; controls, result cards, evidence buttons, Open System, gating and trim behavior remain intact. Add focused browser absence assertions and a minimal documentation clarification.
 
 Parent retains the existing In Progress task lock and dedicated worktree at reported HEAD 852b9c4c. Parent reports preview PID7607, web8080/API8633/mock3445, with listeners verified before edits; these are supplied context, not independently verified here. Parent owns the frontend-only rebuild and one actual persisted expanded-row browser case. Per user preference, do not run the full suite or VM. Continue the fix, commit and push under the parent's standing instruction. This handoff appends only the task plan via MCP; it performs no source, Git, service, database, MR, status or acceptance-criteria operations.
+
+Review follow-up at HEAD59897728 against base33de73b0 (user-directed backlog-only record; supersedes conflicting earlier continuation instructions): Hold merge pending the P1 attempt-log leak and P2 restart/capture recovery, nested pool-scoped receivers, unbounded mandatory inventory, ordinary evidence-dismissal return, 0-to-dense initial defaults, configuration-name Completed search, and readable captured-bundle context. Also require keyboard/focus behavior, a real persisted SystemConfig success fixture, narrow/maximized and light/dark comparisons, and current exact-head CI evidence. No implementation writes are authorized by this handoff.
+
+P1 attempt isolation: implement an attempt-owned stream registry and fenced tokens for every producer, stderr path, cleanup path and subscription. Add a real WebSocket retry test that replaces the attempt UUID and proves prior-attempt evidence cannot leak. Persistent HTTP logs are currently commit-only and share this P1 defect; add exact-attempt attribution through a new forward migration. Do not guess or backfill legacy attribution.
+
+P2 recovery decision gate — proposal NOT APPROVED: the current public recovery plan is non-executable, and true Resume is unsafe. Present for human approval a distinct recovery successor that takes a fresh capture, preserves prior evidence, and inherits the automatic retry count without charging or resetting it. Use a separate finite recovery allowance, proposed default one per manual evaluation run. This requires new forward-migration metadata and idempotence. Do not implement this recovery proposal before explicit approval.
+
+Backend continuation after applicable approval: convert the full receiver call graph to transaction-only access while retaining locks and REPEATABLE READ consistency; add max_connections=1 regressions that reach nested receivers. Bound mandatory inventory in native and mock paths, make it cancellable, and verify actual worker-permit cleanup. Run isolated native and SQLx workflows only after re-verifying task-owned database identity and paths.
+
+UI continuation: dismiss ordinary evidence through a validated return target and show readable exact captured-bundle context. Apply initial defaults at the first usable captured matrix, including an empty-to-dense transition, while preserving explicit user choices. Make Completed history configuration-name search authoritative and query-keyed without duplicate predicates. Use a dialog focus helper across ordinary, pinned and evidence flows; verify keyboard navigation and consistency with the visible list. Exercise successful persisted SystemConfig navigation with a real fixture, not a nonexistent UUID.
+
+Before Review or merge: complete isolated native/SQLx and focused UI workflows, current exact-head CI, and matched design/render comparisons for narrow/maximized and light/dark states. Publish an accurate acceptance checklist/reference in the MR handoff because the reviewer could not find the full local TASK-488 acceptance record. Preserve all existing 16 acceptance criteria and their check states.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -359,4 +371,12 @@ Removed the expanded-row Configuration / Operator classification / Assigned bund
 Reported verification: actual persisted-preview browser case without interception passed; log `/tmp/opencode/task488/row-details-no-summary-browser.log`, screenshot `row-details-without-summary.png`. Browser verified absence of all three labels and the summary block, control-card opening, and working View policy / Compliance evidence / Open System actions. One-file Rustfmt, Node syntax check and git diff check passed. Current Dioxus release preview compiled. Full suite and VM were not run, per user preference.
 
 Preview: ready (parent-reported), http://localhost:8080/evaluations on sledge. Frontend runs in tmux session `task488-frontend`; rediscover its current PID when resuming. API PID8633 remains unchanged, task mock API port3445. No merge or deployment. Retain In Progress status, existing lock and Draft MR334. This operation appends notes only; no other mutations.
+
+Review-triage handoff: user reports detailed review and source validation at59897728/base33de73b0 confirm all listed findings, including the additional commit-only persistent HTTP-log P1 and need for a new attempt-attribution migration with no guessed legacy backfill. This MCP-only update performs no independent source validation, implementation, tests, Git, services, database or MR operations. Recovery-successor behavior remains a proposal awaiting human approval; no implementation writes before approval.
+
+Reported preview/worktree context, not independently reverified in this backlog-only update: existing locked task worktree /home/mcamp/code/crystal-forge/TASK-488-eval-drawer-pixel-parity at HEAD59897728 is clean except for an untracked lock. Preview ready on sledge at localhost:8080 (web PID22289), API localhost:3445 (PID8633), task PostgreSQL PID16797. Reverify process ownership, database identity and task paths before any future database edits. Preserve this preview arrangement.
+
+Reported GitLab state: parent verified MR334 initially opened with draft=false, then successfully ran `glab mr update 334 --draft`; MR is now Draft and held, with no merge or deployment. Pipeline2958746451 was still running at handoff: server job17256764575 running, web job17256764585 pending. These are supplied point-in-time facts, not current MCP verification.
+
+Unresolved verification gate: prior server failure at852b9c4c was `unlinked_environment_host_state_publication_precedes_cve_poam_closure` in an unchanged file. Cause remains unproven; do not excuse it as a baseline failure. Obtain and inspect current exact-head CI results. No code changes or tests were executed during this review triage. The complete 16-item acceptance record is in the local dev backlog task; publish its accurate checklist/reference in the later MR handoff.
 <!-- SECTION:NOTES:END -->
