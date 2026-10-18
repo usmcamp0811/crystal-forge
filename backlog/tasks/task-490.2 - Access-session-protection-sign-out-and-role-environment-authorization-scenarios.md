@@ -3,10 +3,10 @@ id: TASK-490.2
 title: >-
   Access: session protection, sign-out, and role/environment authorization
   scenarios
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-10-17 16:34'
-updated_date: '2026-10-18 13:56'
+updated_date: '2026-10-18 14:10'
 labels:
   - testing
   - integration
@@ -71,4 +71,6 @@ Current readiness: the user selected the sessions portion against bba718be; coor
 
 ### Historical
 The 2026-10-17 organization review found unresolved foundation/package prerequisites and no VM execution at that time. The former separate session/role scenario proposal was replaced by same-scenario fragments. Earlier bootstrap passed at b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56. After rebase, the actual tested prerequisite is bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab8a7b372e8efe0d2dd21b6f53f0625064. Its recorded runtime is riky1mm0nn185wb26abw7zzshnbml0fp (292 migrations). These are foundation results, not execution of this packet.
+
+User selected the session portion in the current assignment. Execute it in the existing foundation worktree as explicitly requested, not a separate worker worktree. The tested controller prerequisite is bba718befbc183863781656df2df272e5f735d5a; unresolved role/environment/registration assertions do not block this session subset.
 <!-- SECTION:NOTES:END -->
