@@ -37,6 +37,8 @@ Most current behavior is described by `docs/knowledge/` concepts with `implement
 
 No provisional authority is granted by D1. Implemented knowledge concepts are as-built evidence, not accepted requirements. Review-draft design documents also do not approve domain behavior. A scenario must cite an accepted requirement or explicit owner decision for its expectations. Uncertain cases remain `blocked: decision` pending the owner's decision; a `planned` row below identifies intended work, not approval of its expected result. Where an approved source exists, that source controls the expectation even if current code differs.
 
+The owner's explicit TASK-490.2 session-proof selection authorizes the five session cases below. This scoped authority does not resolve D1 for Operator/Viewer admin denials and unavailable UI states, environment-scope restrictions, or closed-registration rejection. Those cases are unimplemented and remain blocked on their exact accepted expectations.
+
 ## Harness interface
 
 Shared helpers and registration points:
@@ -52,6 +54,7 @@ Shared helpers and registration points:
 | `lib/integration-test/driver.py` | Python helpers available in every scenario body. |
 | `checks/integration-access/default.nix` | Coordinator-owned explicit `scenarios` attribute set; normal check builds all registered gates with `pkgs.linkFarm`. |
 | `checks/integration-access/scenarios/<name>.{nix,py,cjs}` | One Access scenario. Coordinator owns the scenario `.nix`, Python composition, and explicit registration. Packet tasks write disjoint Python/browser case fragments and fixtures under `scenarios/fragments/` or `fixtures/`; one packet does not imply one test derivation. |
+| `checks/integration-access/scenarios/fragments/task-490.2-sessions.{py,cjs}` | Selected session cases. The scenario `.nix` appends the Python fragment after bootstrap with `pkgs.writeText` and `builtins.readFile`, and registers the browser fragment as `session-sign-out`. No new DSL, gate, or role. |
 
 Registration is explicit and coordinator-owned; there is no custom discovery or completeness flag. The normal `checks.x86_64-linux.integration-access` check builds every gate in its `scenarios` attribute set. Meaningful WIP checks may be discoverable; only Access currently is. An implementation packet does not automatically get a NixOS test derivation. Compatible packet cases are fragments composed by the coordinator into a shared scenario using the existing Nix, Python, and browser-script structure. Missing obligations remain in this map. Future Delivery, Assurance, and Upgrade scenarios, fixtures, and assets all belong beneath `checks/integration-{delivery,assurance,upgrade}/`. Do not create placeholder `default.nix` files. Legacy checks and CI selection remain unchanged until all required owner scenarios pass.
 
@@ -101,7 +104,7 @@ Scenario paths are relative to `checks/`. "Evidence" names the observation requi
 
 ### Planned packet-to-scenario composition and VM boundaries
 
-The current table records intended case composition, not implemented coverage. The coordinator owns each scenario's `.nix` composition and explicit owner registration. Packet-owned case fragments have disjoint paths under the owner's `scenarios/fragments/` directory; they do not each define or register a NixOS test derivation.
+The current table records intended case composition; only bootstrap and the selected session fragment are implemented and verified. The coordinator owns each scenario's `.nix` composition and explicit owner registration. Packet-owned case fragments have disjoint paths under the owner's `scenarios/fragments/` directory; they do not each define or register a NixOS test derivation.
 
 | Scenario | Packet cases to compose | Why this VM boundary is retained |
 | --- | --- | --- |
@@ -129,10 +132,10 @@ Focused verification attributes are concrete even before their scenario files ar
 
 | Contract ID | Scenario | Independent expected result | Evidence | Status |
 | --- | --- | --- | --- | --- |
-| `access.lifecycle.local-bootstrap` | `integration-access/scenarios/lifecycle-local-bootstrap` | Module `auth_mode = "local"` yields local mode; migrations applied = forward migration files in source; first registrant persists with only `admin`; one session after sign-in survives reload; wrong password returns 401 with no session row or cookie. | DB rows, browser result/trace, screenshot after reload, generated-config summary | `covered` at rebased revision `bba718befbc183863781656df2df272e5f735d5a`; five cases passed, 292 migrations |
-| `access.lifecycle.sessions` | `integration-access/scenarios/lifecycle-local-bootstrap` (TASK-490.2 fragment) | Sign-out invalidates the session row and cookies; missing or mismatched `x-csrf-token` returns 403 with no write; revoked session is rejected on next request. | DB `user_sessions`, protected-row before/after | `planned` |
-| `access.lifecycle.authorization` | `integration-access/scenarios/lifecycle-local-bootstrap` (TASK-490.2 fragment) | Operator and Viewer accounts see the approved unavailable state and receive 403 for admin mutations; denied requests change no protected row. | DB before/after, browser state | `planned` |
-| `access.lifecycle.registration-closed` | `integration-access/scenarios/lifecycle-local-bootstrap` (TASK-490.2 fragment) | With `allow_registration = false` and an existing user, a second registration does not create a user. | DB `users` count | `planned` (code reading suggests a defect; not yet executed) |
+| `access.lifecycle.local-bootstrap` | `integration-access/scenarios/lifecycle-local-bootstrap` | Module `auth_mode = "local"` yields local mode; migrations applied = forward migration files in source; application-role client backends use Unix sockets; first registrant persists with only `admin`; one session after sign-in survives reload; wrong password returns 401 with no session row or cookie. | DB rows, browser result, reload screenshot, generated-config summary, filtered `pg_stat_activity` | `covered` at `81d65be745cc9f9777d368900d01fe0f207cb052`; original five cases unchanged, 292 migrations, 22 socket clients |
+| `access.lifecycle.sessions` | `integration-access/scenarios/lifecycle-local-bootstrap`; `scenarios/fragments/task-490.2-sessions.{py,cjs}` | Owner-selected proof: missing/mismatched CSRF on DELETE returns 403 with session lifecycle rows unchanged; valid CSRF returns 204 and invalidates only the selected row; its next GET returns 401 while the retained session returns 200. Independent browser profile Sign out returns logout 204, persists exact-row invalidation, survives reload at `/login`, rejects protected GET with 401, and redirects protected navigation to `/login`. | Exact `user_sessions` before/after, retained/revoked/browser receipts, browser result and screenshot | `covered` at `81d65be745cc9f9777d368900d01fe0f207cb052`; five appended cases passed under the owner's session selection |
+| `access.lifecycle.authorization` | `integration-access/scenarios/lifecycle-local-bootstrap` (remaining TASK-490.2 cases) | Pending D1: exact Operator/Viewer admin denials and unavailable UI states, environment-scope restrictions, and no protected write on denial. | DB before/after, browser state | `blocked: decision`; cases unimplemented |
+| `access.lifecycle.registration-closed` | `integration-access/scenarios/lifecycle-local-bootstrap` (remaining TASK-490.2 cases) | Pending D1: with `allow_registration = false` and an existing user, a second registration does not create a user. | DB `users` count | `blocked: decision`; case unimplemented (code reading suggests a defect; not executed) |
 | `access.lifecycle.oidc` | `integration-access/scenarios/lifecycle-oidc` (TASK-490.6 fragment) | Authorization-code sign-in through a local OIDC provider creates a CF session; group mapping yields the mapped role and environment scope. | Provider and CF DB rows, browser trace | `planned` (needs `services` role) |
 | `access.configuration.admin` | `integration-access/scenarios/lifecycle-local-bootstrap` (TASK-490.3 fragment) | Admin users, classification, and retry-policy forms persist and survive reload; cancel discards; a failed save keeps the draft. | DB rows, reload read | `planned` |
 | `access.configuration.resources` | `integration-access/scenarios/lifecycle-local-bootstrap` (TASK-490.3 fragment) | Environment create/edit/delete persists through reload; validation errors keep the draft. | DB rows, reload read | `planned` |
@@ -265,6 +268,42 @@ user = "crystal_forge"
 systemd AUTH_MODE=unset
 ```
 
-Expected: the module's documented local socket setup starts the server; `server.auth_mode = "local"` selects local auth. The historical `fc930335` run failed before migrations because the socket URI and unit mode were invalid. TASK-490.25/.26 repaired those issues in separate commits. The scenario passed before rebase at `b1095c8f` and `ade5080c`; after the new `origin/dev` merge (`5ae7feab`), the coordinator reran `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L` at `bba718befbc183863781656df2df272e5f735d5a`. All five cases passed: startup/migrations, fresh local setup-status, first-admin registration/sign-in, persisted admin/session after reload, and rejected wrong password with no new session. Evidence: `/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/` (`result.json`, 292 migrations, redacted generated config, browser result and reload screenshot). The redacted config shows `database.host=/run/postgresql` and `systemd AUTH_MODE=local`. The rebased owner aggregate also passed via `nix build .#checks.x86_64-linux.integration-access -L`; it built `/nix/store/ffri4sfywlfjng818b42y7j10i9jxnad-integration-access` and reused the focused result without another VM. The journal still records TASK-492. No further VM runs are planned for this rebase.
+Expected: the module's documented local socket setup starts the server; `server.auth_mode = "local"` selects local auth. The historical `fc930335` run failed before migrations because the socket URI and unit mode were invalid. TASK-490.25/.26 repaired those issues in separate commits. The scenario passed before rebase at `b1095c8f` and `ade5080c`, then after rebase at `bba718befbc183863781656df2df272e5f735d5a` with five bootstrap cases. That earlier rebased evidence remains at `/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`.
+
+### Current bootstrap and selected session proof
+
+Tested source: `81d65be745cc9f9777d368900d01fe0f207cb052`. Both commands passed:
+
+```bash
+nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L
+nix build .#checks.x86_64-linux.integration-access -L
+```
+
+The focused gate passed ten cases: the original five bootstrap cases, followed by missing-CSRF denial, mismatched-CSRF denial, exact selected-session revocation, revoked-request denial with retained-session success, and independent browser sign-out. The owner aggregate reused this run without another VM. It proves the registered subset, not every Access obligation or the other owners.
+
+Evidence: `/nix/store/i84kvs1lc5nqx0lmsqinwbmvy0ix8mvh-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. Its actual `result.json` reports `status: passed`, no error or faults, and these receipts:
+
+| Receipt | Recorded value |
+| --- | --- |
+| `migrations.applied` | `292` |
+| `database.unixSocketClients` | `22` |
+| `admin.userId` | `0560a10d-20c1-4464-a174-9b1e1eddbaf4` |
+| `sessions.retainedId` | `4734fef6-c3d6-43ee-9a5d-9f2bc66305b0` |
+| `sessions.revokedId` | `9a4e59eb-450b-4105-b54b-6514ba9d307a` |
+| `sessions.browserSignOutId` | `ad65734a-ba57-4935-9273-a70a987b749b` |
+| `sessions.revocationPersisted` | `true` |
+| `sessions.browserSignOutPersisted` | `true` |
+
+The socket assertion observes `pg_stat_activity` filtered by the configured database, configured role, and `backend_type = 'client backend'`. It requires a positive count and every observed connection to have `client_addr IS NULL` and `client_port = -1`; configuration text alone is not socket proof. The SQLx parser table now checks the password recovered from parsed options via `to_url_lossy()` authority, removes SQLx-specific query options, and parses with `tokio_postgres`. The reported targeted parser command passed 2/2 tests; this documentation follow-up does not rerun it.
+
+Reviewer artifacts:
+
+- [Scenario result](https://gitlab.com/-/project/70402481/uploads/2ab7a8febcfb1aa1386364464decc2f2/result.json)
+- [Sign-out browser result](https://gitlab.com/-/project/70402481/uploads/5d551029e97b8b3dd534f312deb35b5f/result.json)
+- [Signed-out protected navigation screenshot](https://gitlab.com/-/project/70402481/uploads/ec258b80b8a107c27d32b9f5c4cf3109/signed-out-protected-navigation.png)
+
+The browser result reports `passed`, the exact browser-session receipt above, final URL `http://localhost:3000/login`, and no visual comparisons. The first session attempt at `537186835956d7af48a0868289e16364625dd85c` failed the last UI case because of the coach overlay and unhandled-promise test mechanics. The correction closes the coach through its real control and coordinates the click/response with `Promise.all`; no assertion was weakened. Failed evidence remains at `/nix/store/i5kgnb35xbywm8wj0k7618n90vhg8swl-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. Do not upload its logs containing a runtime token; the corrected header stays in a VM file.
+
+TASK-490.1 foundation is in `Review`; all seven bounded foundation criteria and documentation validation passed. TASK-490.2 remains `In Progress`: Operator/Viewer cases are unimplemented; exact cross-environment scope and closed-registration policy cases await their accepted decisions. These documentation-only follow-ups occur after the tested source and do not require another VM run.
 
 All runtime journals record a separate `crystal-forge-postgres-jobs.service` first-boot failure because its configured role is not created yet. The module setup creates the role shortly afterward, so the server and Access cases succeed. TASK-492 records this unrelated startup-order defect; it is outside the authorization for TASK-490.25/.26 and is not an Access gate assertion. Do not claim all Access obligations or the other owners are covered by this bootstrap slice.

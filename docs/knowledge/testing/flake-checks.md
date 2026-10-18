@@ -101,9 +101,12 @@ Run the focused Access gate with
 Append `.run` to the scenario attribute for evidence only. The historical
 scenario at `fc930335878279ac426510359c039dfd8961dc13` failed before
 migrations/browser/auth. TASK-490.25/.26 repairs are integrated. After rebase on
-`origin/dev` `5ae7feab`, the focused scenario and `integration-access` aggregate
-both pass at `bba718befbc183863781656df2df272e5f735d5a`. This verifies the
-bootstrap slice, not full Access coverage. The same VM journal records unrelated
+`origin/dev` `5ae7feab`, the latest focused scenario passed ten cases at
+`81d65be745cc9f9777d368900d01fe0f207cb052`: five unchanged bootstrap cases
+and five owner-selected session/CSRF/sign-out cases. The command
+`nix build .#checks.x86_64-linux.integration-access -L` also passed, reusing
+that run. This verifies bootstrap and the selected session proof, not full
+Access coverage or the other owners. The same VM journal records unrelated
 TASK-492. See the
 [foundation execution record](integration-coverage-map.md#foundation-execution-record)
 for the generated configuration, exact output path, expected/actual result,
@@ -114,7 +117,7 @@ legacy gates until full owner cutover conditions pass.
 
 | Check | Boots a VM | Covers | README |
 | --- | --- | --- | --- |
-| `integration-access` | Yes (controller; bootstrap gate passed) | Fresh local bootstrap, migrations, setup-status, browser registration/sign-in/reload, persistence, wrong-password rejection; missing Access obligations remain | [Coverage map](integration-coverage-map.md) |
+| `integration-access` | Yes (controller; ten-case gate passed) | Local bootstrap, 292 migrations, 22 observed socket clients, registration/sign-in/reload, wrong-password rejection, selected-session CSRF/revocation and independent browser sign-out; role/environment/registration cases remain unimplemented | [Coverage map](integration-coverage-map.md) |
 | `integration` | Yes (server and git server) | Server, database, and Grafana dashboard behavior through the `cf_test` pytest markers `database`, `dashboard`, and `server` | [README](../../../checks/integration/README.md) |
 | `oidc-auth` | Yes (Keycloak and server) | OIDC login path against a real Keycloak realm | [README](../../../checks/oidc-auth/README.md) |
 | `web-ui` | Yes (server, agent, builder, git server) | Production embedded-UI server through a real browser | [README](../../../checks/web-ui/README.md) |

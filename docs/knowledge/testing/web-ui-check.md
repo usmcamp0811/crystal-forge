@@ -47,12 +47,23 @@ The focused Access gate is
 append `.run` to the scenario attribute for evidence only. The historical Access
 VM run at `fc930335878279ac426510359c039dfd8961dc13` failed before migrations,
 browser, or auth. After TASK-490.25/.26 repairs and rebase on `origin/dev`
-`5ae7feab`, the focused gate and normal Access owner passed at
-`bba718befbc183863781656df2df272e5f735d5a`. This proves the bootstrap slice
-only; other Access obligations remain. The same run records unrelated TASK-492
+`5ae7feab`, the latest focused gate passed ten cases at
+`81d65be745cc9f9777d368900d01fe0f207cb052`; the normal Access owner passed
+by reusing that run. The five original bootstrap cases remain unchanged,
+followed by five owner-selected session/CSRF/revocation and browser sign-out
+cases. Sign-out proves logout 204, exact persisted session invalidation,
+login after reload, protected GET 401, and protected navigation to `/login`.
+This is semantic coverage, not a visual-parity verdict or full Access coverage.
+Role/environment/closed-registration cases remain unimplemented under D1.
+The same run records unrelated TASK-492
 in the Postgres Jobs journal. See the
 [coverage map execution record](integration-coverage-map.md#foundation-execution-record).
 Do not add a test-only `AUTH_MODE` override or report the historic run as passing.
+The coverage map links the uploaded scenario result, sign-out browser result,
+and signed-out navigation screenshot. The earlier session attempt failed test
+mechanics; the corrected run uses the real coach close control and coordinated
+click/response handling without weakening assertions. This documentation-only
+follow-up does not require another VM run.
 
 ## Layout
 
