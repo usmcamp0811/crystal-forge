@@ -30,4 +30,6 @@ nix eval --impure --raw --expr "$expression" > "$workspace/probe.sh"
 nix eval --impure --json --expr "builtins.attrNames (builtins.getContext ($expression))" \
   | jq -r '.[] | select(endswith(".drv"))' \
   | xargs -r nix-store --realise --builders '' --max-jobs 1 --cores 2 >/dev/null
-bash "$workspace/probe.sh"
+# The rendered script writes wrapper probes using relative paths. Confine
+# those scratch files to this invocation, never the repository worktree.
+(cd "$workspace"; bash "$workspace/probe.sh")
