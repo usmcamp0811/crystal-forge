@@ -314,6 +314,41 @@ accepted coverage, four passing normal aggregates, the exact four-name
 inventory/CI allowlist, execution-cost evidence, and duplicate-execution
 resolution. Source removal and fixture relocation alone do not satisfy it.
 
+## Source-retirement verification
+
+At clean source `0105e512baa80ace5f181918bbb72951bf506a50`, the exact
+inventory evaluation returned `["integration-access"]` (27 attributes before
+this pass; one afterward). This is not the final four-owner suite.
+
+`sh packages/ci/integration-owner-build.sh integration-access` passed all
+16 existing cases. The VM executed anew and recorded that source revision;
+its driver script completed in 24.23 seconds. Evidence is retained at
+`/nix/store/n68lcq6xxab1rhhfymp7yz4pj19hff95-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run`
+and exported beneath `integration-evidence/integration-access/`. Scenario and
+browser assertions are unchanged. No new scenario was registered.
+
+All 17 relocated package `drvPath`s evaluated. Lightweight contract/tool
+packages, CA compatibility (13 selected Rust tests), OSCAL validation, and
+builder module validation passed. The host browser runner selftest, design
+generator tests, browser harness static contracts, and CI cache-policy/routing
+test passed. GitLab CI lint accepted the new package matrix with no errors or
+warnings; no deleted attribute remains in an active CI command.
+
+The full `verify-server-regressions` build exceeded the 600-second local
+command limit after starting isolated PostgreSQL, completing migration
+rehearsals, and passing the 13 assignment-semantics tests and the zombie-repair
+test. It is **not a full passing regression result**. Its definition and
+derivation are identical to the former check, including all selected tests
+and database hooks. The combined `verify-builder-evaluator-packaging` and
+`verify-xccdf-schema` build also exceeded 600 seconds while compiling the
+server dependency. Their full results remain unverified. No test was skipped
+or changed to obtain a pass. Run those package commands with a longer build
+window or use exact-head CI evidence before review completion.
+
+Documentation validation now runs as `nix build .#okf-knowledge -L`; it passed
+after updating relocated links and the fixture README manifest entry. The
+documentation-only follow-up does not require another Access VM run.
+
 ## Foundation execution record
 
 Historical bootstrap execution failed at `fc930335878279ac426510359c039dfd8961dc13` (TASK-490.1 foundation plus cherry-picked TASK-491 `af39284bdf16d56402f01a64c916f17948e43b02`). Exact command: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. The Nix build failed before browser launch. Scenario output: `/nix/store/1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. `result.json` reports the required `fresh-startup-applies-migrations` case failed at `controller.wait_for_unit("crystal-forge-server.service", timeout=5)` after a bounded observation found the server restarting. PostgreSQL started and listened on `/run/postgresql`; the server repeatedly exited with `Error: invalid configuration`, caused by `both host and hostaddr are missing` (journal at `journals/controller/crystal-forge.journal`, lines 72–79). No migration ran and no HTTP/auth/browser assertion executed.
