@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-18 15:41'
+updated_date: '2026-10-18 15:45'
 labels:
   - testing
   - integration
@@ -84,12 +84,12 @@ Current coverage, stated accurately: the Access scenario `lifecycle-local-bootst
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 [Early CI] The existing CI selection runs `integration-access` automatically and required on merge requests and `main` by building the normal owner aggregate `.#checks.x86_64-linux.integration-access` through packages/ci/public-cache-build.sh with `-L --show-trace --builders '' --max-jobs 1 --cores 2`; a focused scenario or `.run` output is never the gate; no placeholder owner or four-name assertion is added
-- [ ] #2 [Early CI] `integration`, `oidc-auth`, `niks3-cache`, `niks3-write-probe`, `niks3-ui`, `attic-metrics`, `attic-publication` and `web-ui-check` are optional manual jobs with `when: manual` and `allow_failure: true`; their check attributes, commands, assertions and fixtures are preserved
-- [ ] #3 [Early CI] The six retained matrix entries, the three database-backed Rust jobs, coverage-check, complexity-check and the release/version jobs remain automatic; the automatic web-ui-screenshots-mr-comment reporter and its dependency wiring are removed; web-ui-baseline-candidates stays manual
-- [ ] #4 [Early CI] Owner evidence is exported as real files (Nix store symlinks dereferenced) with `artifacts: when: always`; after a failed owner build the script keeps the original exit status, resolves registered scenarios' `.run.outPath` through evaluation, copies only outputs that already exist, keeps the build log, and never launches a `.run` build; a successful build whose evidence is missing fails the job
-- [ ] #5 [Early CI] The contract, coverage map (retirement map distinguishing automatic selection from source retirement, with the automatic coverage gaps), flake-check catalog, web-ui-check runbook, verification guide, Access README, TASK-490 and this task state the early-transition policy accurately; no legacy obligation is marked covered
-- [ ] #6 [Early CI] GitLab lint accepts the file, the effective selection matches the intent for merge-request and main pipelines, script syntax is checked, and the actual Access CI execution path ran once with its evidence inspected and VM-executed versus reused recorded
+- [x] #1 [Early CI] The existing CI selection runs `integration-access` automatically and required on merge requests and `main` by building the normal owner aggregate `.#checks.x86_64-linux.integration-access` through packages/ci/public-cache-build.sh with `-L --show-trace --builders '' --max-jobs 1 --cores 2`; a focused scenario or `.run` output is never the gate; no placeholder owner or four-name assertion is added
+- [x] #2 [Early CI] `integration`, `oidc-auth`, `niks3-cache`, `niks3-write-probe`, `niks3-ui`, `attic-metrics`, `attic-publication` and `web-ui-check` are optional manual jobs with `when: manual` and `allow_failure: true`; their check attributes, commands, assertions and fixtures are preserved
+- [x] #3 [Early CI] The six retained matrix entries, the three database-backed Rust jobs, coverage-check, complexity-check and the release/version jobs remain automatic; the automatic web-ui-screenshots-mr-comment reporter and its dependency wiring are removed; web-ui-baseline-candidates stays manual
+- [x] #4 [Early CI] Owner evidence is exported as real files (Nix store symlinks dereferenced) with `artifacts: when: always`; after a failed owner build the script keeps the original exit status, resolves registered scenarios' `.run.outPath` through evaluation, copies only outputs that already exist, keeps the build log, and never launches a `.run` build; a successful build whose evidence is missing fails the job
+- [x] #5 [Early CI] The contract, coverage map (retirement map distinguishing automatic selection from source retirement, with the automatic coverage gaps), flake-check catalog, web-ui-check runbook, verification guide, Access README, TASK-490 and this task state the early-transition policy accurately; no legacy obligation is marked covered
+- [x] #6 [Early CI] GitLab lint accepts the file, the effective selection matches the intent for merge-request and main pipelines, script syntax is checked, and the actual Access CI execution path ran once with its evidence inspected and VM-executed versus reused recorded
 - [ ] #7 [Final cutover] At final cutover exactly four native checks/integration-{access,delivery,assurance,upgrade}/default.nix owners use { lib, inputs, pkgs, ... }; each normal pkgs.linkFarm aggregate executes ALL registered gates and its complete required set, propagating every failure
 - [ ] #8 [Final cutover] CI runs the four owners through checks.x86_64-linux and checks the four-name allowlist in the existing entry point, without a new validation service
 - [ ] #9 [Final cutover] Every retired legacy check/job has a passing replacement recorded in the coverage map or explicit owner-approved scope change; failing product assertions remain executable and linked; legacy definitions and fixtures are deleted only then
@@ -118,6 +118,9 @@ Unrelated finding: `packages/ci/test_public_cache_build.py` already fails on the
 Remaining automatic coverage gaps (deliberate and temporary): authorization, registration policy, OIDC, forms, preferences, notifications, shell, broad browser/design coverage, and all Delivery, Assurance, and Upgrade obligations now have no automatic integration coverage. Their legacy jobs are manual. Nothing is marked covered.
 
 This early milestone does not complete TASK-490.24. Status stays In Progress. The final cutover criteria (#7 to #12) are unmet and untouched. No merge, deployment, or Done transition is authorized.
+
+Hosted-pipeline status when recorded: the draft MR !335 pipeline for the documentation commit created exactly the intended jobs. `integration-access` and the other automatic jobs were queued (pending, no runner assigned yet), the seven `legacy-flake-check` entries and `web-ui-check` were manual with `allow_failure: true`, and no screenshot reporter existed. The GitLab-hosted `integration-access` result is NOT yet verified; the VM-executed pass recorded above came from running the same job script locally. Early-milestone criteria #1 to #6 are checked on that basis. Final-cutover criteria #7 to #12 remain unchecked and this task stays In Progress.
+
 
 ## Historical (superseded readiness statements)
 
