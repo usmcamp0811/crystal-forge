@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-17 21:35'
+updated_date: '2026-10-18 03:54'
 labels:
   - web-ui
   - design-parity
@@ -460,4 +460,18 @@ Handoff continued — CI and preview (parent-reported, not independently reverif
 Preview: ready at http://localhost:8080/evaluations through sledge forwarding both8080+3445, localhost Secure cookies. Both HTTP200 last verified by parent. API PID26628 executable task-root/packages/default/target/debug/server is a fresh current build. Frontend PID3634 cwd task-root/packages/web-ui, persistent tmux task488-frontend, Dioxus0.7.3 release with pinned wasm-bindgen. Rediscover ownership/freshness if changed. Task root=/home/mcamp/code/crystal-forge/TASK-488-eval-drawer-pixel-parity. Normal crystal_forge DB preserved, upgraded0309; PostgreSQL data_directory verified task-root/.devenv/state/postgres on5432. No reset of shared/user long-running database; only task-owned scopes/test DBs used.
 
 Remaining blockers: required exact-head CI queued, actual persisted SystemConfig V2 success-case execution, human parity review. Next owner must poll current required jobs and inspect full failures; do NOT call green from pipeline aggregate with allow-failure browser job. This operation appends notes only after reading the execution guide. No status/AC/DoD/finalSummary/code/Git/services/DB/MR mutations.
+
+Follow-up review fixes are committed and pushed as 9fd1709fdf15defaa8f874ab4f4fdf6cbcfebb8f; MR !334 remains Draft, no approval/merge/deployment. Exact-head pipeline 2959620890 was pending at handoff.
+
+Reproduced server-regressions failure in queries::dashboard::tests::visibility_scope_handles_ambiguous_systems_cache_pushes_and_eval_attempts: scoped history requires the latest attempt's captured plan. Added that fixture plan. Also corrected the partial-resource test's expected third policy-change attempt, and added verified inventory to the capture test so NotAssigned is not masked to Unknown. Full local Nix server-regressions check passed (237 exact library selections; 11 integration targets; log /tmp/opencode/task488/local-server-regressions-final.log, EXIT=0). Cargo stderr is now capped to a failure tail; README count updated to 145 ignored and 92 nonignored.
+
+Closed review workflow findings in source: Force-cancel now owns modal focus and Escape return; shared Queue/History log pane implements live Auto-scroll and separate Loading/empty/Failed+Retry states; captured Compliance receiver steps only through exact unambiguous memberships, supports filter/j/k/arrows/Open system/View bundle/Expand-Restore, and states grouping metadata is unavailable; 26b Completed-search workflow is critical.
+
+Focused preview browser workflows 26b/26c/26d/26e passed 4/4; latest 26e covers narrow receiver layout and log Loading/empty/error/Retry plus force-confirm keyboard boundary. Unit tests: 4 log-view tests and 6 evidence-navigation tests pass. WASM cargo check and changed-file rustfmt passed.
+
+Isolated NixOS VM workflow 12l-task440-config-lifecycle passed 1/1. The persisted Config Inspector completed and the workflow verified a V2 snapshot and exact Config round trip. Nix test log: /tmp/opencode/task488/local-web-ui-12l-stage.log (EXIT=0; 12l passed). Direct VM DB host removed per-poll sudo PAM lines.
+
+Added browser failure diagnostics retention and bounded CI trace output; the failure archive path was not exercised by a completed negative test. Full Nix flake check and current-head full CI results are still pending. Prior failed browser job's exact failing full-suite step remains unidentified because its trace was capped. The 41-vs-12 live case still needs the user's commit SHA and attempt UUID. Bulk Compare/Download logs remain unwired; in-drawer Download remains the checked-in design placeholder; full pixel parity is not claimed.
+
+Updated MR note 4036046930 with 9fd1709f review results, remaining gates, and eight uploaded receiver/confirmation/log screenshots. Preview ready at http://localhost:8080/evaluations; UI 8080 and API 3445 forwarded to localhost; task-owned mock data; leave the preview running.
 <!-- SECTION:NOTES:END -->
