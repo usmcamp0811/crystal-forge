@@ -1,11 +1,11 @@
 ---
 id: TASK-490.3
 title: 'Access: administration and environment form persistence scenarios'
-status: To Do
+status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-18 19:22'
+updated_date: '2026-10-18 19:23'
 labels:
   - testing
   - integration
@@ -79,4 +79,6 @@ Still Backlog, unselected and unexecuted. Exact authority gaps: draft retention/
 
 ### Historical
 2026-10-17 review recorded unresolved foundation/package blockers and no VM execution at that time. Separate form derivations were a former layout proposal. Bootstrap later passed at b1095c8f and after rebase at bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab; runtime riky1mm0nn185wb26abw7zzshnbml0fp recorded 292 migrations. Those observations did not verify form fragments.
+
+LOCK: openai on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation. Latest owner delegates next runnable coverage progress; bounded Admin success/cancel/disable subset selected now. Prior Backlog/unselected notes are historical. Existing16cases stay first; no new VM.
 <!-- SECTION:NOTES:END -->
