@@ -4,7 +4,7 @@ title: 'Assurance: export downloads and policy/XCCDF interchange round-trip scen
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-17 20:33'
+updated_date: '2026-10-18 02:38'
 labels:
   - testing
   - integration
@@ -12,6 +12,10 @@ labels:
 dependencies:
   - TASK-490.21
   - TASK-490.19
+modified_files:
+  - checks/integration-assurance/scenarios/fragments/task-490.22-exports.py
+  - checks/integration-assurance/scenarios/fragments/task-490.22-exports.cjs
+  - checks/integration-assurance/fixtures/interchange-*
 parent_task_id: TASK-490
 priority: medium
 type: task
@@ -21,30 +25,21 @@ ordinal: 534000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-assurance. Contract ID: assurance.interchange. Exclusive writes: checks/integration-assurance/scenarios/interchange-exports.{nix,py,cjs}, owner-local interchange fixtures only. This packet is separate from remediation because it needs independent parsers/schema validators and real authenticated browser downloads.
+Owning check: integration-assurance. Contract ID: assurance.interchange. This packet owns only checks/integration-assurance/scenarios/fragments/task-490.22-exports.py/.cjs and owner-local parser/schema fixtures. Coordinator owns the shared evidence-remediation-lifecycle.nix scenario, Python composition, browserSpecs mapping and Assurance registration; no packet-specific NixOS derivation.
 
-WHY: legacy OSCAL/SARIF browser phases route-mock bundle data; oscal-export and xccdf-schema validate fixture/writer outputs, not actual downloads from CF records.
+After earlier real import, scan, acceptance and POA&M cases create source records in the same fresh Assurance VM, download the supported CSV/XLSX/OSCAL/XCCDF/policy formats through the production UI and parse them independently. Assert authored source IDs/scope via receipts, validate OSCAL/XCCDF against vendored schemas, and prove policy interchange import is atomic and round-trips identities into a new scope. Do not consume records or downloads from .19/.21/.27/.28 derivations and do not seed the exports under test.
 
-SCOPE: create the small required source records through real UI/API setup within this scenario's own fresh VM (never import rows or outputs from TASK-490.19/.21/.27/.28 runs). Download via the production UI and parse independently: register CSV/XLSX/OSCAL JSON/XML; POA&M CSV/XLSX; acceptance CSV/XLSX; CVE CSV; bundle-version/assignment XCCDF; policy interchange export, preview and atomic import into a new scope; client-side SARIF/OSCAL downloads. Expected record IDs/scope come from authored prerequisite facts and receipts from setup actions, not from the response under test. Validate OSCAL/XCCDF with vendored schemas. Non-goals: repeat full POA&M/CVE/policy workflows, schema-unit coverage, production changes.
-
-DEPENDENCY: TASK-490.19 for accepted supported STIG/import format context and TASK-490.21/.28 for source record semantics only; their live data is NOT shared. Requires the tested TASK-490.1 foundation and integrated helper dependencies. Current Access VM run fails on product defects TASK-490.25/.26; remain Backlog.
-
-Read-only sources: cf-server src/handlers/api/register_export.rs, poam.rs, acceptance_register.rs, cves.rs, compliance.rs (exports and policy_interchange_*); packages/web-ui/src/export/mod.rs and export UI; docs/knowledge/compliance/cf-xccdf-interchange-*.md; approved AtoPackage.jsx only for presentation. Non-integration schema checks oscal-export/xccdf-schema stay intact.
-
-Writable paths: checks/integration-assurance/scenarios/interchange-exports.{nix,py,cjs}, checks/integration-assurance/fixtures/interchange-* only. Owner default.nix registration, lib/integration-test, flake/CI and all production/design sources are read-only; coordinator explicitly registers it.
-
-Harness: `lib.crystal-forge.makeIntegrationTestHarness {pkgs,inputs}`; each run creates its own DB/VM. Focused command `nix build .#checks.x86_64-linux.integration-assurance.scenarios.interchange-exports -L` is a candidate, NOT yet verified; `.run` for evidence only. Coordinator runs complete `nix build .#checks.x86_64-linux.integration-assurance -L`.
-
-Completion requires independent parse/schema assertions, downloads from a real authenticated browser, exact expected record IDs/scope, actual complete-owner registration and execution. Preserve correct failure; link a Backlog product defect. No task readiness until exact integrated foundation commits and focused commands are verified.
+Writable paths are the named fragments and owner-local fixtures. Production, shared helpers, scenario composition, registration, CI and docs are read-only. Requires the evidence-remediation producers and passing TASK-490.1/.25/.26. Coordinator records actual Assurance VM result/evidence.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Every supported server and client export is downloaded through the UI and parsed independently
-- [ ] #2 OSCAL and XCCDF downloads validate against vendored schemas
-- [ ] #3 Exported records and scope equal authored fixture facts
+- [ ] #1 Each supported export is downloaded from the production UI and parsed independently
+- [ ] #2 OSCAL/XCCDF downloads validate against vendored schemas
+- [ ] #3 Exported records and scope match authored facts and same-run receipts
 - [ ] #4 Policy interchange import is atomic and round-trips identities
-- [ ] #5 Executed in real VMs with recorded evidence
+- [ ] #5 The coordinator composes this fragment after its source records are created in evidence-remediation-lifecycle; no packet derivation is added
+- [ ] #6 The coordinator records the single Assurance VM tested revision, command, result and evidence
 <!-- AC:END -->
 
 ## Implementation Notes
