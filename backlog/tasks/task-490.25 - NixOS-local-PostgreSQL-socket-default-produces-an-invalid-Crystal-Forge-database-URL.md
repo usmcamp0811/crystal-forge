@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 02:48'
+updated_date: '2026-10-18 03:27'
 labels:
   - bug
   - nixos
@@ -36,10 +36,10 @@ This repair is separately committed from TASK-490.1 test/doc work. The user expl
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The documented /run/postgresql socket path is serialized and parsed as a Unix socket by tokio_postgres and SQLx
-- [ ] #2 An ordinary network host and nondefault port round-trip through both client parsers
-- [ ] #3 Space, literal plus, URI delimiters and percent in username/password/database/path round-trip as actual values, not a string-only comparison
-- [ ] #4 Database-client dependencies remain in cf-server; cf-config has no tokio_postgres or SQLx dependency
+- [x] #1 The documented /run/postgresql socket path is serialized and parsed as a Unix socket by tokio_postgres and SQLx
+- [x] #2 An ordinary network host and nondefault port round-trip through both client parsers
+- [x] #3 Space, literal plus, URI delimiters and percent in username/password/database/path round-trip as actual values, not a string-only comparison
+- [x] #4 Database-client dependencies remain in cf-server; cf-config has no tokio_postgres or SQLx dependency
 - [ ] #5 The coordinator's combined Access scenario proves startup/migrations and records actual VM evidence
 <!-- AC:END -->
 
