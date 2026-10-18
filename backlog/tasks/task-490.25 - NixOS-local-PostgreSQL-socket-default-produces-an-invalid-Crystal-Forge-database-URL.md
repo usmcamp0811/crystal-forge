@@ -3,9 +3,10 @@ id: TASK-490.25
 title: >-
   NixOS local PostgreSQL socket default produces an invalid Crystal Forge
   database URL
-status: Backlog
+status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
+updated_date: '2026-10-18 02:48'
 labels:
   - bug
   - nixos
@@ -26,6 +27,8 @@ ordinal: 538000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current authorized repair (2026-10-18; supersedes the earlier prohibition below): active `cf_config::config::DatabaseConfig::to_url` percent-encodes URI components and preserves `/run/postgresql` as a Unix socket. Separate commit `ca46cdd5` adds a real-serializer regression table parsed by both tokio_postgres and SQLx (socket, TCP, and encoding-sensitive values). Targeted tests pass. The combined Access VM verification remains pending; the original startup assertion stays executable.
+
 On the TASK-490.1 native Access startup slice, the controller uses the normal NixOS module defaults: local-database=true and database.host=/run/postgresql (documented as the local socket path). The generated config reports [database] host = "/run/postgresql". cf-config DatabaseConfig::to_url formats that string as `postgres://user:password@/run/postgresql:5432/database`, which has no URI host. The real production cf-server-drv exits during startup with `invalid configuration: both host and hostaddr are missing`, before migrations, bootstrap, or HTTP routes.
 
 Observed on final combined test commit fc930335878279ac426510359c039dfd8961dc13 (application baseline 33de73b013b735304dfac9c69745a074a3e76ebd): `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L` fails; scenario evidence /nix/store/1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt shows host /run/postgresql, port 5432, database crystal_forge, user crystal_forge, password redacted. Journal shows PostgreSQL listening on /run/postgresql and server startup error at 7.451s (`crystal-forge.journal`, lines 72-79). Expected: the documented local-database socket configuration starts the server and applies migrations. Actual: URI parsing rejects its empty host.

@@ -28,6 +28,8 @@ ordinal: 514000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18; supersedes the earlier exclusive-path and candidate-command statements below): this task owns only disjoint fragments at `checks/integration-access/scenarios/fragments/task-490.2-{sessions,authorization}.{py,cjs}`. The coordinator owns `lifecycle-local-bootstrap.nix`, Python composition, browserSpecs mapping, and registration. Compose after the real TASK-490.1 local bootstrap in the same fresh VM/database; reuse only same-run identities via receipts. Do not create a packet-specific NixOS derivation. Foundation plus TASK-490.25/.26 combined VM success remains a dispatch prerequisite.
+
 Owning check: integration-access. Contract IDs: access.lifecycle.sessions, access.lifecycle.authorization, access.lifecycle.registration-closed. Session and role boundaries currently rely on mocked steps (13i, 15i, 14d) and isolated Rust tests; this task proves rejected actions have no server-side effect.
 
 Exclusive writes: checks/integration-access/scenarios/lifecycle-session-protection.{nix,py,cjs} and lifecycle-role-restrictions.{nix,py,cjs}. Everything else is read-only. Non-goals: OIDC (490.6), forms (490.3), navigation (490.4), TTL timing, production changes. Follow TASK-490 test-only restrictions.

@@ -32,21 +32,24 @@ approved baselines.
 Only `integration-access` is currently discoverable. Its coordinator-owned
 `checks/integration-access/default.nix` explicitly registers scenarios; the
 normal `pkgs.linkFarm` check builds all registered gates. Meaningful WIP checks
-may be discoverable without a completeness flag. Shared helpers live in
-`lib/integration-test/`, exported through Snowfall as
-`lib.crystal-forge.makeIntegrationTestHarness {pkgs, inputs}`. Future Delivery,
-Assurance, and Upgrade scenarios, fixtures, and assets belong beneath
+may be discoverable without a completeness flag. Native checks call
+`lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }`. A
+packet does not automatically receive a NixOS derivation; the coordinator
+composes compatible case fragments and registers the shared scenario. Each
+separately built scenario gets a fresh VM/database; same-scenario cases may use
+receipts from earlier real workflows. Future Delivery, Assurance, and Upgrade
+scenarios, fixtures, and assets belong beneath
 `checks/integration-{delivery,assurance,upgrade}/`; do not create placeholder
 `default.nix` files or custom discovery.
 
 The focused Access gate is
 `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`;
-append `.run` to the scenario attribute for evidence only. The Access VM
-scenario executed at `fc930335878279ac426510359c039dfd8961dc13` and failed at
-the fresh-server startup assertion before migrations/browser/auth. The normal
-module-generated socket-host URL is invalid; generated local auth mode is also
-absent. See the [coverage map execution record](integration-coverage-map.md#foundation-execution-record).
-Do not add a test-only `AUTH_MODE` override or report this run as passing.
+append `.run` to the scenario attribute for evidence only. The historical Access
+VM run at `fc930335878279ac426510359c039dfd8961dc13` failed before migrations,
+browser, or auth. TASK-490.25/.26 repairs are integrated and their targeted
+checks pass; the combined VM rerun is pending. See the
+[coverage map execution record](integration-coverage-map.md#foundation-execution-record).
+Do not add a test-only `AUTH_MODE` override or report the historic run as passing.
 
 ## Layout
 

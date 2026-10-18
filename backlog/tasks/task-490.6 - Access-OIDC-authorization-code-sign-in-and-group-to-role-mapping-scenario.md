@@ -20,6 +20,8 @@ ordinal: 518000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18): this task owns only OIDC Python/browser fragments and the local provider fixture under owner-local fragment/fixture paths. The coordinator owns `lifecycle-oidc.nix`, composition, browserSpecs mapping, and registration. A distinct fresh VM remains necessary because `auth_mode=oidc` and provider/redirect configuration differ from the local-auth bootstrap. Do not create a derivation per packet or reuse local-bootstrap runtime state.
+
 Owning check: integration-access. Contract ID: access.lifecycle.oidc. Exclusive writes: checks/integration-access/scenarios/lifecycle-oidc.{nix,py,cjs} and checks/integration-access/fixtures/oidc-realm.json. Legacy checks/oidc-auth stops at the redirect and does not prove callback, CF session or mapping; retirement map replaces it with this scenario only after evidence passes.
 
 Scope: real browser authorization-code flow against a local services-role OIDC provider. Callback creates user_sessions with auth_source oidc and external_identities. bootstrapAdminGroup and admin-created group mappings yield authored role/environment scope; an unmapped user gets no role. Sign-out invalidates the session. Configure through services.crystal-forge.server.auth_mode = "oidc" and server.oidc.* only. Non-goals: external providers and token-refresh timing. TASK-490 test-only scope applies.

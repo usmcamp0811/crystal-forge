@@ -21,6 +21,8 @@ ordinal: 541000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18): this task owns acceptance-register Python/browser fragments only. The coordinator owns the shared `evidence-remediation-lifecycle.nix`, composition and registration. Create the source acceptance earlier in that same fresh Assurance VM and pass generated IDs via receipts; no packet-specific derivation or runtime reuse from .27/.21.
+
 Owning check: integration-assurance. Contract ID: assurance.remediation.acceptance-register. Exclusive paths: checks/integration-assurance/scenarios/remediation-acceptance-register.{nix,py,cjs}.
 
 WHY: renew/convert in the accepted-register API are a distinct projection and actor flow from finding triage and from a policy finding-waiver request. They were previously bundled into TASK-490.20 without an authority/starting-state boundary.

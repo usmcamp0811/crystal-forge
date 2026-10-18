@@ -21,6 +21,8 @@ ordinal: 534000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18): this task owns only export Python/browser fragments and parser/schema fixtures beneath `checks/integration-assurance/scenarios/fragments/` and `fixtures/`. The coordinator owns `evidence-remediation-lifecycle.nix`, composition and registration. Export real records created earlier in that same fresh VM; do not create a packet-specific derivation or reuse another run's records/downloads.
+
 Owning check: integration-assurance. Contract ID: assurance.interchange. Exclusive writes: checks/integration-assurance/scenarios/interchange-exports.{nix,py,cjs} and checks/integration-assurance/fixtures/interchange-*. Separate from remediation: independent parsers/schema validators. Legacy OSCAL/SARIF phases mock bundle API; oscal-export/xccdf-schema validate fixture output, not real-record downloads.
 
 Scope: reuse records produced by TASK-490.19/.21 fixtures. UI-download and independently parse register csv/xlsx/oscal-json/oscal-xml; validate OSCAL with pkgs.crystal-forge.oscal-1-1-2-schemas. Parse POA&M/acceptance csv/xlsx and CVE csv; bundle-version/assignment XCCDF validates with xmllint against vendored XCCDF and schemas/cf-xccdf-1. Policy interchange export/import into fresh scope: preview persists nothing, import atomic, identities round-trip. Client-side SARIF/OSCAL contains expected records/scope. Expected sets derive from authored fixture facts, never CF lists. Scenario-specific schema/data assets remain owner-local or consume existing immutable package inputs. Non-goals: schema-unit coverage in retained non-integration oscal-export/xccdf-schema. TASK-490 test-only restrictions apply.

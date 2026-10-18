@@ -22,6 +22,8 @@ ordinal: 526000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18; supersedes the earlier BootOnly wording and per-packet derivation implication): TASK-490.14 owns only activation Python/browser fragments under `checks/integration-delivery/scenarios/fragments/`; the coordinator owns the scenario composition and registration. Before BootOnly action, record boot selection, `/run/current-system`, and `/run/booted-system` separately. Before reboot, assert boot selection changed while each running/booted identity still equals its own pre-action value. After reboot assert target boots/runs the selected deployment. Do not infer boot selection from `/run/booted-system` or assume the two pre-action identities were equal.
+
 Owning check: integration-delivery. Contract ID: delivery.activation.modes. Exclusive writes: checks/integration-delivery/scenarios/activation-modes.{nix,py,cjs}. Real deploy is excluded from legacy browser manifest; mocked UI and seeded deployment rows cannot prove activation.
 
 Scope: manual, auto_latest and pinned policies on targetA. Manual changes /run/current-system only after Deploy; auto_latest follows a new evaluated commit; pinned ignores newer commits. BootOnly changes the boot entry without changing running generation until targetA reboots. BuilderB also runs a real second agent with its own key; deploying targetA leaves builderB generation/services unchanged using output independently absent in builderB store. System detail Deploy/History shows actual running versus booted identity. Non-goals: rollback/drift (490.15). TASK-490 test-only restrictions apply.

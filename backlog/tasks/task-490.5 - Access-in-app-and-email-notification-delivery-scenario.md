@@ -21,6 +21,8 @@ ordinal: 517000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18): this task owns only notification Python/browser fragments under `checks/integration-access/scenarios/fragments/task-490.5-*`. The coordinator owns `configuration-notifications.nix`, composition, browserSpecs mapping, and registration. One separate fresh VM is justified by email-enabled module settings, local receiver service, and a real notification-producing build/deploy event. Recreate the event; TASK-490.11 runtime rows/output are not reusable. This packet does not define its own derivation.
+
 Owning check: integration-access. Contract ID: access.configuration.notifications. Exclusive writes: checks/integration-access/scenarios/configuration-notifications.{nix,py,cjs}. Existing bell-feed coverage (09g-09i) is mocked; notifications must originate in a real domain event, not seeded rows.
 
 Scope: a real BuildFailures (or DeployFailures) event from the Delivery fixture creates an in-app notification for a subscribed user and none for an unsubscribed user. Read, read-all, dismiss and delete persist. Enable server.notificationEmail toward the services-role local receiver: exactly the subscribed user's message arrives; email disabled produces none. Non-goals: digest timing and external providers. TASK-490 test-only restrictions apply.

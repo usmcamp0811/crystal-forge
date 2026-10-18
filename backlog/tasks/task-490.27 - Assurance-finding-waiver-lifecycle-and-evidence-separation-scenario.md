@@ -20,6 +20,8 @@ ordinal: 540000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18): this task owns waiver Python/browser fragments only. The coordinator owns the shared `evidence-remediation-lifecycle.nix`, composition and registration. Use real finding receipts from earlier same-run scan cases; do not reuse another derivation or create a separate VM test. Acceptance and POA&M work remains in .28/.21/.29 fragments.
+
 Owning check: integration-assurance. Contract ID: assurance.remediation.finding-waiver. Exclusive paths: checks/integration-assurance/scenarios/remediation-finding-waiver.{nix,py,cjs}; owner-local fixtures only if needed.
 
 WHY: the old TASK-490.20 packet mixed triage, waiver, and acceptance-register flows with different starting states and authority. This packet isolates finding waivers. Triage is TASK-490.20; acceptances register is TASK-490.28.

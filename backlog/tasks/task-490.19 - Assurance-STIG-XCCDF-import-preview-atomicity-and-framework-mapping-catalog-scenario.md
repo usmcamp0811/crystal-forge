@@ -30,6 +30,8 @@ ordinal: 531000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18): this task owns only XCCDF-import Python/browser fragments and owner-local XML fixtures under `checks/integration-assurance/scenarios/fragments/` and `fixtures/`. The coordinator owns `evidence-remediation-lifecycle.nix`, composition and registration. No packet-specific NixOS derivation; later same-run cases may use imported policy/evidence identities via receipts.
+
 Owning check: integration-assurance. Contract ID: assurance.policy.stig-import. Exclusive writes: checks/integration-assurance/scenarios/policy-stig-import.{nix,py,cjs} and checks/integration-assurance/fixtures/stig-import-*. Controller-only scenario. Legacy canonical STIG/20ad/20aa proofs are buried in the browser monolith; reconciliation uses route mocks. Validate import atomicity using input-derived identities, never CF-derived expected results.
 
 Non-goals: enforcement (490.18), export/interchange round-trip (490.22), evaluation evidence, production changes, visual baselines without approved ImportStigModal state. TASK-490 test-only scope applies.

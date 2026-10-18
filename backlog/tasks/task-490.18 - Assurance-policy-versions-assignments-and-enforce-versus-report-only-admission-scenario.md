@@ -22,6 +22,8 @@ ordinal: 530000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18): this task owns only policy Python/browser fragments under `checks/integration-assurance/scenarios/fragments/`. The coordinator owns `evidence-remediation-lifecycle.nix`, composition, browserSpecs mapping and registration. Create authored policy/evaluation evidence in the same fresh Assurance VM and pass same-run identities by receipts; no per-packet derivation or external VM state.
+
 Owning check: integration-assurance. Contract ID: assurance.policy.enforcement. Exclusive writes: checks/integration-assurance/scenarios/policy-enforcement.{nix,py,cjs}. Existing 19-20e/20ab2 prove policy persistence but not real Enforce versus ReportOnly admission.
 
 Scope: admin creates/publishes version with one or two authored-fixture-violable composite rule kinds (e.g. packages_absent and nixos_option), assigns versioned environment/system scope. Evaluating violating commit produces expected failed evidence. Enforce blocks real deployment and leaves target unchanged; ReportOnly records violation and permits deployment. New policy version never rewrites old-version evidence. Non-goals: every rule kind (Rust/unit tests), STIG import (490.19). TASK-490 test-only restrictions apply.

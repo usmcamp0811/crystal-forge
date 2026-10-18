@@ -98,19 +98,23 @@ completeness flag. A passing registered subset does not prove missing
 obligations. Legacy checks and CI selection remain unchanged until all
 required owner scenarios pass.
 
-Shared helpers live in `lib/integration-test/`; Snowfall exports
-`lib.crystal-forge.makeIntegrationTestHarness {pkgs, inputs}`. Future Delivery,
-Assurance, and Upgrade scenarios, fixtures, and assets belong beneath
-`checks/integration-{delivery,assurance,upgrade}/`. Do not create placeholder
-`default.nix` files or custom discovery.
+Shared helpers live in `lib/integration-test/`; native Snowfall checks call
+`lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }`. An
+implementation packet does not automatically receive a NixOS derivation.
+Compatible case fragments use the existing Nix/Python/browser-script structure;
+the coordinator composes and registers the scenario. Each separately built
+scenario gets a fresh VM/database; cases within one scenario may use real earlier
+records through receipts. Future Delivery, Assurance, and Upgrade scenarios,
+fixtures, and assets belong beneath `checks/integration-{delivery,assurance,upgrade}/`.
+Do not create placeholder `default.nix` files or custom discovery.
 
 The Access scenario executed at commit
 `fc930335878279ac426510359c039dfd8961dc13` and failed at the retained server
-startup assertion before migrations or HTTP. The generated database socket
-host produced `both host and hostaddr are missing`; the generated auth mode
-was absent and `AUTH_MODE` was unset. The [coverage map](../knowledge/testing/integration-coverage-map.md#foundation-execution-record)
-records the expected/actual configuration, evidence path, and linked defects.
-This result is a product-configuration failure, not a passing Access check.
+startup assertion before migrations or HTTP. Separate WIP repairs for TASK-490.25
+and TASK-490.26 now pass their targeted checks and are integrated. The combined
+Access VM rerun remains pending; the historic failure is not a passing Access
+check. The [coverage map](../knowledge/testing/integration-coverage-map.md#foundation-execution-record)
+records the old evidence and current verification state.
 
 ## UI evidence
 

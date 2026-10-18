@@ -20,6 +20,8 @@ ordinal: 529000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18): this task owns only hardening Python/browser fragments under `checks/integration-assurance/scenarios/fragments/`. The coordinator owns the shared `evidence-remediation-lifecycle.nix`, composition, browserSpecs mapping and registration. Compose with actual target/CVE/policy evidence in the same fresh Assurance VM; no per-packet derivation or external run state.
+
 Owning check: integration-assurance. Contract ID: assurance.scanning.hardening. Exclusive writes: checks/integration-assurance/scenarios/scanning-hardening.{nix,py,cjs}. Separate from CVEs because this uses hardening worker/target service facts. Legacy hardening steps 27/28 are mocked and knownIssue.
 
 Scope: targetA runs authored services with distinct systemd hardening settings; real scan produces expected per-service findings independently derived from authored unit settings, not CF output. Justification persists and survives reload. Rescan after real deployment changing one service updates only that service. Non-goals: STIG controls (490.19), CVEs. TASK-490 test-only scope applies.

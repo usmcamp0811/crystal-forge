@@ -23,6 +23,8 @@ ordinal: 542000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18): this task owns POA&M verification Python/browser fragments only. The coordinator owns the shared `evidence-remediation-lifecycle.nix`, composition and registration. Use the plan and actual remediation evidence created earlier in that same fresh Assurance VM; no per-packet derivation, seeded verification result, or other VM state.
+
 Owning check: integration-assurance. Contract ID: assurance.remediation.poam-verification. Exclusive scenario writes: checks/integration-assurance/scenarios/remediation-poam-verification.{nix,py,cjs}.
 
 WHY: verification and closure begin with an existing POA&M and have higher authority requirements than triage or plan entry. Legacy 29g-29m and canonical POA&M lifecycle use SQL-seeded failure evidence; close/verify must instead follow real Current evidence after remediation.

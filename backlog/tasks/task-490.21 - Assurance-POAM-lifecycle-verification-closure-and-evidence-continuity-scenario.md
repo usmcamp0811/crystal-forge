@@ -23,6 +23,8 @@ ordinal: 533000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18; supersedes older independent-scenario wording below): TASK-490.21 owns POA&M plan Python/browser fragments only. The coordinator owns the shared `evidence-remediation-lifecycle.nix`, composition and registration. Compose with earlier actual evidence and TASK-490.29 verification/closure in one fresh Assurance VM; generated identities pass through receipts. No per-packet derivation or external runtime rows.
+
 Owning check: integration-assurance. Contract ID: assurance.remediation.poam-plan. Exclusive scenario writes: checks/integration-assurance/scenarios/remediation-poam-plan.{nix,py,cjs}. Legacy 29g-29m and canonical POA&M lifecycle start from SQL-seeded FAIL evidence; this scenario must generate real failed scan/policy evidence during setup.
 
 Scope: POA&M create/link/milestones/notes and accepted non-terminal plan edits only. Verification, closure and reopen are TASK-490.29; triage is TASK-490.20; finding waiver and acceptance register are TASK-490.27/.28. Task dependencies provide implementation knowledge only; no runtime records or outputs are shared across fresh scenario VMs.

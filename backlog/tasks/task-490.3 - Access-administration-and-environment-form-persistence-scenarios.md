@@ -25,6 +25,8 @@ ordinal: 515000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18; supersedes the earlier exclusive-path and candidate-command statements below): this task owns only disjoint admin/environment Python and browser case fragments under `checks/integration-access/scenarios/fragments/task-490.3-*`. The coordinator owns `lifecycle-local-bootstrap.nix`, composition, browserSpecs mapping, and registration. Compose after the real first-admin workflow in the same local-auth VM/database as TASK-490.2/.4. No packet-specific NixOS derivation. Foundation plus TASK-490.25/.26 combined VM success remains a dispatch prerequisite.
+
 Owning check: integration-access. Contract IDs: access.configuration.admin, access.configuration.resources. Mocked steps 14a-14c, 30c and 12e dominate existing persistence coverage; only 30b proves a real admin save. Prove browser action, authoritative effect and reload, plus failed-save draft preservation using real failures.
 
 Exclusive writes: checks/integration-access/scenarios/configuration-admin-forms.{nix,py,cjs} and configuration-environment-forms.{nix,py,cjs}. Other paths are read-only. Non-goals: cache/builder/flake/system forms (domain setup), cache Test/credentials (490.12/.13), OIDC execution (490.6), role enforcement (490.2), unapproved visual baselines, production changes. TASK-490 test-only scope applies.

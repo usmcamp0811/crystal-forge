@@ -85,22 +85,27 @@ gives each legacy check below its retirement disposition. For the web UI check i
 [Web UI check runbook](web-ui-check.md). For the overall test strategy, see the
 [Crystal Forge testing plan](test-plan.md).
 
-Shared helpers live in `lib/integration-test/`; Snowfall exports
-`lib.crystal-forge.makeIntegrationTestHarness {pkgs, inputs}`. Future Delivery,
-Assurance, and Upgrade scenarios, fixtures, and assets belong beneath
-`checks/integration-{delivery,assurance,upgrade}/`. Do not create placeholder
-`default.nix` files or custom discovery. Legacy checks and CI selection remain
-unchanged until all required owner scenarios pass.
+Shared helpers live in `lib/integration-test/`; native Snowfall checks call
+`lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }`. A
+packet does not automatically get a NixOS derivation. Compatible packet cases
+are fragments composed and registered by the coordinator using the existing
+Nix/Python/browser-script structure. A separately built scenario gets a fresh
+VM/database; same-scenario cases may use receipts from earlier real workflows.
+Future Delivery, Assurance, and Upgrade scenarios, fixtures, and assets belong
+beneath `checks/integration-{delivery,assurance,upgrade}/`. Do not create
+placeholder `default.nix` files or custom discovery. Legacy checks and CI
+selection remain unchanged until all required owner scenarios pass.
 
 Run the focused Access gate with
 `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`.
-Append `.run` to the scenario attribute for evidence only. The scenario ran at
-`fc930335878279ac426510359c039dfd8961dc13` and failed on server startup before
-migrations/browser/auth. See the
+Append `.run` to the scenario attribute for evidence only. The historical
+scenario run at `fc930335878279ac426510359c039dfd8961dc13` failed on server
+startup before migrations/browser/auth. TASK-490.25/.26 repairs are integrated;
+the combined rerun is pending. See the
 [foundation execution record](integration-coverage-map.md#foundation-execution-record)
 for the generated configuration, exact output path, expected/actual result,
-and Backlog defect links. TASK-491's package test prerequisite is resolved;
-the NixOS module product defects still block Access.
+and task links. TASK-491's package test prerequisite is resolved. The Access
+scenario remains unverified until the combined VM rerun passes.
 
 ## Summary
 

@@ -27,6 +27,8 @@ ordinal: 516000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18; supersedes the earlier exclusive-path and candidate-command statements below): this task owns only disjoint shell/navigation and preference Python/browser fragments under `checks/integration-access/scenarios/fragments/task-490.4-*`. The coordinator owns `lifecycle-local-bootstrap.nix`, composition, browserSpecs mapping, and registration. Compose with TASK-490.1/.2/.3 in the same local-auth VM/database; no packet-specific NixOS derivation. Foundation plus TASK-490.25/.26 combined VM success remains a dispatch prerequisite.
+
 Owning check: integration-access. Contract IDs: access.shell, access.configuration.preferences. Existing steps 07-11a, 09g-09i, 17 and 31 are mocked. Prove real shell/navigation and per-user persistence; first design-reference comparison belongs here because Shell.jsx is approved.
 
 Exclusive writes: checks/integration-access/scenarios/shell-navigation.{nix,py,cjs} and configuration-preferences.{nix,py,cjs}. Non-goals: event notification delivery (490.5), dashboard domain values (Delivery/Assurance), all viewport/theme combinations, production changes. All other paths remain read-only under TASK-490 test-only scope.

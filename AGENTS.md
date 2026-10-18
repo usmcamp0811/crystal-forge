@@ -412,10 +412,17 @@ obligations in the coverage map. Keep legacy checks and CI selection unchanged
 until all required owner scenarios pass.
 
 Shared helpers live in `lib/integration-test/`, exported through Snowfall as
-`lib.crystal-forge.makeIntegrationTestHarness {pkgs}`. Keep owner scenarios,
-fixtures, and assets beneath `checks/integration-<owner>/`. Future Delivery,
-Assurance, and Upgrade owners follow this layout; do not create placeholder
-`default.nix` files or add custom discovery.
+`lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }`.
+An implementation packet does not automatically receive a NixOS test
+derivation. Compatible case fragments use the existing Nix, Python, and browser
+script structure; the coordinator composes them into the owning scenario and
+registers that scenario. Each separately built scenario still runs in its own
+fresh VM and database. Later cases inside one scenario MAY use real records and
+identities created by earlier cases through the receipt mechanism. Never reuse
+runtime state from another scenario derivation. Keep owner scenarios, fixtures,
+and assets beneath `checks/integration-<owner>/`. Future Delivery, Assurance,
+and Upgrade owners follow this layout; do not create placeholder `default.nix`
+files or add custom discovery.
 
 Changing the four-check inventory requires an explicit owner-approved
 decision under the integration contract. Cite an approval already present

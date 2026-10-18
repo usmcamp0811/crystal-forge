@@ -20,6 +20,8 @@ ordinal: 532000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18; supersedes older independent-scenario wording below): TASK-490.20 owns triage Python/browser fragments only. The coordinator owns the shared `evidence-remediation-lifecycle.nix`, composition and registration. Real findings created earlier in this same fresh Assurance VM are passed through receipts. TASK-490.27 waiver and .28 acceptance are separate fragments, not this packet's writable paths. No per-packet VM derivation.
+
 Owning check: integration-assurance. Contract ID: assurance.remediation.triage. Exclusive scenario writes: checks/integration-assurance/scenarios/remediation-triage.{nix,py,cjs}.
 
 Start from real scan-produced findings created as setup in this scenario's own fresh VM. Single/fleet triage and batch triage persist actor, exact scope, status and justification; the unselected findings remain unchanged. Viewer is denied with no row change. Browser navigation reaches the exact CVE/system identity. No finding waiver or acceptance-register lifecycle here; those are TASK-490.27 and .28. POA&M plan creation is TASK-490.21; verification/closure is TASK-490.29.

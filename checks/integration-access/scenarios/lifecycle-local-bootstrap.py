@@ -5,10 +5,10 @@
 #
 # Expected: with the normal NixOS module and `server.auth_mode = "local"`,
 # the server starts, applies migrations, and exposes local setup-status.
-# Current observed result (coverage map): startup fails before migrations
-# because the generated socket host produces an empty-URI-host error. The
-# generated config also omits auth_mode and AUTH_MODE is unset, so no local
-# auth response is observed. Keep the assertions and do not add an override.
+# Historical result at fc930335: startup failed before migrations because the
+# socket URI was invalid; local auth was not reached. TASK-490.25/.26 repairs
+# are now integrated. The next combined VM run must prove the assertions below;
+# do not add a test-only AUTH_MODE override or weaken the startup assertion.
 
 admin = FACTS["admin"]
 

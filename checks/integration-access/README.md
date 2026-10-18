@@ -12,15 +12,15 @@ startup migrations and local setup, registers the first administrator in
 the browser, signs in, reloads, and reads persisted identity and session
 state. Wrong-password rejection must not create a session.
 
-The scenario executed but **failed** at server startup. It records the
-redacted module-generated configuration and server/PostgreSQL journals in
-the evidence output. The default PostgreSQL socket path is formatted as a
-URI with no host, so the server exits before migrations or auth routes.
-The generated configuration also omits `auth_mode` and the unit has no
-`AUTH_MODE`; the local-auth request is not reached. Keep the startup and
-local-mode assertions. Do not add an `AUTH_MODE` test override. Product
-defects are tracked by TASK-490.25 and TASK-490.26. TASK-491 resolves only
-the Rust package-check failure; see MR !336.
+The historical scenario at `fc930335878279ac426510359c039dfd8961dc13`
+failed at server startup. It recorded the redacted generated configuration and
+server/PostgreSQL journals. TASK-490.25 now fixes shared URI serialization while
+preserving the Unix socket; TASK-490.26 now passes the selected local/OIDC mode
+from the normal module to the production unit. Targeted parser/evaluation checks
+and the normal server package build pass. The combined Access VM rerun is
+pending. Keep startup, migration, setup-status, browser, persistence, and
+rejected-login assertions. Do not add an `AUTH_MODE` test override. TASK-491
+resolves the separate Rust test race; see MR !336.
 
 Failure evidence from tested commit
 `fc930335878279ac426510359c039dfd8961dc13`:
