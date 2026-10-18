@@ -3,10 +3,10 @@ id: TASK-490.25
 title: >-
   NixOS local PostgreSQL socket default produces an invalid Crystal Forge
   database URL
-status: Backlog
+status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 00:22'
+updated_date: '2026-10-18 02:15'
 labels:
   - bug
   - nixos
@@ -45,4 +45,6 @@ Reproduced by the native Access VM at final combined commit fc930335878279ac4265
 Final clean combined source commit 39a6a54b651a8b77fc3416b73195e363a782fa2e reproduces the same result. Evidence output is /nix/store/vcfbia521bjad2a85yca3h3n9i4m4ikf-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt and crystal-forge.journal lines 72-79. Test remains failing, no production fix.
 
 Final exact-head rerun on combined commit fc930335878279ac426510359c039dfd8961dc13 reproduces the startup failure. Evidence: /nix/store/1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt and crystal-forge.journal lines 72-79. The socket-path-to-empty-host URI defect remains unmodified.
+
+LOCK: claude-sonnet-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation. The user explicitly authorized this narrow production repair on 2026-10-17 and directed that it be committed separately on the TASK-490.1 foundation branch (not a separate worktree). Active type is cf_config::config::DatabaseConfig; cf-server/src/config/database.rs is an uncompiled duplicate.
 <!-- SECTION:NOTES:END -->
