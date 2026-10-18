@@ -15,7 +15,24 @@ generated:
 
 # Crystal Forge integration test maintenance contract
 
-**Status:** Adopted by the owner on 2026-10-17 through TASK-490. The maintenance rules below are in force. `implementation_status: partial` describes the checks, not the rules. The shared harness exists under `lib/integration-test/`; `integration-access` is explicitly registered. Its focused local-bootstrap scenario passed ten cases at `81d65be745cc9f9777d368900d01fe0f207cb052`: the original five bootstrap cases and five owner-selected session/CSRF/sign-out cases. The normal owner aggregate passed by reusing that run. This proves `access.lifecycle.local-bootstrap` and the selected `access.lifecycle.sessions` proof, not full Access coverage, other owners, or the overhaul. TASK-490.25/.26 startup repairs remain integrated; unrelated TASK-492 Postgres Jobs role ordering remains a separate defect. TASK-490.1 foundation and the two repairs are in `Review`; documentation validation passed. TASK-490.2 remains `In Progress` with the selected Operator/Viewer admin-denial cases implemented and executed, and the exact environment-scope and registration-policy cases unimplemented pending their own decisions. The [integration coverage map](integration-coverage-map.md) records actual receipts, reviewer artifacts, history, packet groupings, and missing obligations. The TASK-490.24 early CI transition makes `integration-access` an automatic required GitLab check. Its job script passed the same ten cases at `2c494ac4bf8cc7155899723ee69fcf879ac49248` and all 16 cases (adding six Operator/Viewer authorization cases) at `8a857bc872cf331a19036b97a93f2b7741e9728b`, with the VM executed newly each time. The legacy integration checks are optional manual jobs. That change does not complete authorization, registration-policy, OIDC, broad UI, Delivery, Assurance, or Upgrade coverage, and it does not retire any legacy check. This documentation follow-up does not require another VM run.
+**Status:** Adopted by the owner on 2026-10-17 through TASK-490. The maintenance
+rules below are in force. `implementation_status: partial` describes coverage,
+not the rules. The harness exists under `lib/integration-test/`; only
+`integration-access` is registered and runs automatically in GitLab. Its
+unchanged local-bootstrap scenario passed all 16 cases through the CI job script
+at `8a857bc872cf331a19036b97a93f2b7741e9728b`: five bootstrap, five session,
+and six selected Operator/Viewer admin-denial authorization cases. The VM
+executed newly. Earlier ten-case results at `81d65be7` and `2c494ac4` remain
+in the execution history. This proves the selected subset, not complete Access,
+Delivery, Assurance, Upgrade, or the overhaul. TASK-490.25/.26 startup repairs
+remain integrated; unrelated TASK-492 is separate. TASK-490.1 and the repairs
+are in `Review`; TASK-490.2 and TASK-490.24 remain `In Progress`. Exact
+environment scope and registration policy still await their own decisions.
+The owner now authorizes legacy source retirement before replacement coverage
+is complete. The former optional-manual coexistence policy is superseded.
+The [coverage map](integration-coverage-map.md) preserves receipts, reviewer
+artifacts, execution history, packet groupings, source dispositions and gaps.
+Documentation-only changes do not require another VM run.
 
 **Source baseline:** Crystal Forge `origin/dev` at `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064` after TASK-488 merged. Earlier execution records identify their pre-rebase base where relevant. Source links appear at the end of this document. The existing check implementations were not used to choose the four-check structure.
 
@@ -34,7 +51,31 @@ Crystal Forge has four integration check owners. Browser tests run inside the ow
 | `integration-assurance` | CVE scanning, evidence authority, policy evaluation and enforcement, compliance, STIG controls, hardening, triage, waivers, POA&M, and assurance imports/exports. | Real inputs produce independently expected evidence and decisions. UI, stored records, enforcement, and exported records agree on identity and scope. |
 | `integration-upgrade` | The supported upgrade path, migrations, persisted identities and history, recovery of migrated or in-flight state across the version transition, and the explicitly supported agent/builder compatibility window. | A real supported older version creates data; the new version migrates and uses it, then completes a representative new operation. |
 
-The check count is fixed at four for the proposed product scope. The number of assertions is not fixed. New supported behavior can require more assertions.
+The final `checks.x86_64-linux` inventory is exactly four TOTAL attributes, with
+the names in the table above. Lower-level verification and developer tools
+belong outside `checks`, in package or app outputs. The number of assertions is
+not fixed. New supported behavior can require more assertions.
+
+TASK-490.24 source-retirement decision (2026-10-18) supersedes the earlier
+retain-until-four-pass policy and the optional-manual coexistence policy.
+The nine legacy suites are retired with owner approval before replacement
+coverage is complete. All 17 non-integration definitions move to packages.
+The current inventory is only `integration-access` (one versus 27), with its
+unchanged 16 executed cases. Delivery, Assurance, and Upgrade are absent.
+This is not final four-owner completion. No placeholder owner is permitted.
+The earlier optional-manual CI transition remains in the execution history;
+it does not describe the current source-retirement policy.
+
+Final inventory verification evaluates the complete attribute set:
+
+```bash
+nix eval --json .#checks.x86_64-linux --apply builtins.attrNames
+nix eval --json .#checks.x86_64-linux --apply 'c: builtins.attrNames c == [ "integration-access" "integration-assurance" "integration-delivery" "integration-upgrade" ]'
+```
+
+Final acceptance requires the predicate to return `true`, all four real owner
+aggregates to pass, and complete accepted coverage. Attribute count alone does
+not establish execution, completeness, or absence of duplicate work.
 
 An agent MUST use the smallest change that proves the affected contract, in this order:
 
@@ -162,7 +203,7 @@ A small fixture subset or adapter is acceptable if it preserves identity and mea
 
 ### Step 5: Implement and verify the changed result
 
-Use the normal production UI, APIs, and services for the claimed workflow. Maintain the task's live preview according to the existing repository instructions. Use focused local scenarios during implementation, then obtain a successful result for each affected owning check at the source revision submitted for review. During construction, retain the legacy gates and report missing obligations explicitly.
+Use the normal production UI, APIs, and services for the claimed workflow. Maintain the task's live preview according to the existing repository instructions. Use focused local scenarios during implementation, then obtain a successful result for each affected owning check at the source revision submitted for review. Report missing obligations explicitly. The authorized TASK-490.24 source retirement does not establish replacement coverage.
 
 Local results or CI can supply that final evidence. A focused run does not establish that the full owner passed. If a later edit changes a check's relevant inputs, earlier execution is insufficient. A valid Nix result for identical declared inputs can be reused; do not rebuild unchanged inputs for ceremony.
 
@@ -359,9 +400,25 @@ TASK-490.1 added this section to `AGENTS.md`, replaced the instruction that ever
 
 **Transition rule.** Meaningful WIP owner checks may be discoverable before their full obligation set is implemented. Run the affected registered scenarios and owner check, and report missing obligations.
 
-Implemented integration owners run automatically in GitLab. Retiring legacy integration checks remain available for optional manual execution while replacements are constructed. Removing a legacy check from automatic CI does not mark its obligations covered. Delete its definition and fixtures after passing replacement coverage is recorded, or after an explicit decision removes the underlying requirement. Discoverability or a passing subset does not authorize deleting a legacy check. The coverage map records the current GitLab selection and the obligations without automatic integration coverage.
+Implemented integration owners run automatically in GitLab. Under the explicit
+TASK-490.24 decision, the nine legacy suite sources and their manual jobs are
+retired now, before all four owners pass. This supersedes prior source-retention
+conditions; it does not remove accepted requirements. Obsolete mocked or seeded
+implementations do not become mandatory replacement requirements. The coverage
+map distinguishes executed coverage, missing accepted obligations, obsolete
+implementations, and lower-level assertions preserved outside `checks`.
 
-**Final minimization rule.** Every remaining independent flake check or CI test job must have a distinct necessary purpose. Preserve useful assertions, assign their primary execution ownership, consolidate duplicate execution, and keep developer tools available through appropriate package or app outputs. Classification as "non-integration" alone does not justify a separate check. Keeping a check during migration is temporary retention, not a final decision. The final cutover must establish exactly four product integration owners with complete accepted coverage, the removal of replaced legacy integration definitions and obsolete manual jobs, no task-specific VM proliferation hidden beneath the four aggregate names, a reason for any repeated Rust or database test execution, a reason for every remaining separate non-integration check, and the actual final flake inventory with measured execution and resource costs. The [retirement map](integration-coverage-map.md#legacy-retirement-map) records each decision as provisional or justified.
+**Final minimization rule.** The final flake check inventory contains only the
+four product integration owners. Every independent verification package or CI
+test job must have a distinct necessary purpose. Preserve useful assertions,
+assign primary execution ownership, and consolidate or justify duplicate
+execution. Developer tools remain package or app outputs. Final completion
+requires complete accepted coverage, no task-specific VM proliferation hidden
+beneath four aggregate names, and measured execution and resource costs.
+`verify-server-regressions` and `state-machine-tests` still overlap; resolution
+remains complex outstanding TASK-490.24 work. Relocation does not resolve it.
+The [retirement map](integration-coverage-map.md#legacy-retirement-map) records
+source dispositions separately from coverage and CI selection.
 
 The automatic owner job builds the normal owner aggregate, because a `.run` output can build successfully while its result records a failed scenario. It exports evidence from the scenarios that the owner registers and keeps the original build exit status when evidence collection follows a failed build.
 

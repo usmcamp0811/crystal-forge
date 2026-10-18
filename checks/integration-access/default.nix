@@ -3,9 +3,9 @@
 # are listed in docs/knowledge/testing/integration-coverage-map.md.
 #
 # CI: GitLab builds this normal aggregate automatically and requires it (job
-# `integration-access`). The legacy integration/oidc-auth/niks3/attic/web-ui
-# checks stay defined but run only as optional manual jobs. That scheduling
-# change does not mean this partial owner covers their obligations.
+# `integration-access`). TASK-490.24 retires legacy suite sources with explicit
+# owner approval before replacement coverage is complete. This partial owner
+# still proves only its 16 cases; the coverage map records missing obligations.
 {lib, inputs, pkgs, ...}: let
   harness = lib.crystal-forge.makeIntegrationTestHarness {inherit pkgs inputs;};
   scenarios = {

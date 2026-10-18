@@ -293,7 +293,8 @@ For changes that affect `docs/knowledge/`, run the repository-owned
 documentation validation through Nix:
 
 ```bash
-nix build .#checks.x86_64-linux.okf-knowledge -L
+nix build .#okf-knowledge -L
+```
 #### Technical writing standard
 
 Technical prose MUST follow ASD-STE100 principles to the extent that they are compatible with exact software terminology.
@@ -367,7 +368,7 @@ See [docs/agent/database-safety.md](docs/agent/database-safety.md).
 
 Choose the smallest set of commands that proves the acceptance criteria and protects affected interfaces. Prefer targeted checks during implementation and broader checks before review when risk warrants them.
 
-The persistent preview is the early UI feedback loop. Do not run a full integration owner, the legacy `web-ui` VM suite, or `nix flake check` merely to start or refresh it. Use focused checks during implementation. Required owning integration results and MR screenshots remain final-review requirements; exact-head CI may provide that evidence when the task permits it. A preview screenshot is not evidence that an integration check passed.
+The persistent preview is the early UI feedback loop. Do not run a full integration owner or `nix flake check` merely to start or refresh it. Use focused checks during implementation. Required owning integration results and MR screenshots remain final-review requirements; exact-head CI may provide that evidence when the task permits it. A preview screenshot is not evidence that an integration check passed.
 
 Use the exact package manifests and flake attributes applicable to the change. The baseline command matrix is in [docs/agents/verification.md](docs/agents/verification.md).
 
@@ -409,12 +410,15 @@ Run a focused gate with
 append `.run` to the scenario attribute for evidence only. Meaningful WIP
 checks may be discoverable without a completeness flag. Record missing
 obligations in the coverage map. Implemented integration owners run
-automatically in GitLab (`integration-access` today). Retiring legacy
-integration checks remain available as optional manual jobs while replacements
-are constructed. Removing a legacy check from automatic CI does not mark its
-obligations covered; delete its definition and fixtures only after passing
-replacement coverage is recorded or an explicit decision removes the
-requirement.
+automatically in GitLab (`integration-access` today). TASK-490.24 explicitly
+authorizes legacy source retirement before replacement coverage is complete.
+The nine legacy suites and their manual jobs are retired; missing accepted
+obligations remain gaps. Lower-level verification and developer tools live in
+package outputs. The current inventory is one total check (formerly 27), not
+completed four-owner coverage. Final `checks.x86_64-linux` MUST contain exactly
+`integration-access`, `integration-assurance`, `integration-delivery`, and
+`integration-upgrade`, with no additional checks or placeholders. Verify the
+final names with `nix eval --json .#checks.x86_64-linux --apply builtins.attrNames`.
 
 Shared helpers live in `lib/integration-test/`. Native Snowfall checks call:
 
@@ -486,4 +490,3 @@ Be precise and concise. Distinguish among:
 For browser-visible work, include `Preview: ready | rebuilding | blocked | stopped` in meaningful progress reports and handoff. When ready, include the URL and review path. State when the browser still shows the last successful build. Preview health does not change the backlog task status or establish merge readiness.
 
 Never fabricate command output, test results, task state, commits, pushes, MR state, or screenshots.
-```

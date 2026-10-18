@@ -17,29 +17,42 @@ tags:
 | `docs/fixture-seeding.md` | [testing/fixture-seeding.md](../../testing/fixture-seeding.md) | moved | complete |
 | `TESTING.md` | [historical/multi-builder-api-testing-guide.md](../../historical/multi-builder-api-testing-guide.md) | moved | complete |
 | `docs/mock-execution-mode.md` | [operations/mock-execution-mode.md](../../operations/mock-execution-mode.md) | moved | complete |
-| `checks/integration/README.md` | retained in place; see [integration section](../../testing/flake-checks.md#integration) | retained | complete |
+| `checks/integration/README.md` | historical scope in [integration section](../../testing/flake-checks.md#integration); source retired by TASK-490.24 | merged | complete |
 | `checks/integration-access/README.md` | new TASK-490.1 runbook retained beside the native check; see [coverage map](../../testing/integration-coverage-map.md) | retained | complete |
-| `checks/builder-evaluator-packaging/README.md` | retained in place; see [builder-evaluator-packaging section](../../testing/flake-checks.md#builder-evaluator-packaging) | retained | complete |
-| `checks/niks3-cache/README.md` | retained in place; see [niks3-cache section](../../testing/flake-checks.md#niks3-cache) | retained | complete |
-| `checks/niks3-write-probe/README.md` | retained in place at [the native write-probe runbook](../../../../checks/niks3-write-probe/README.md) | retained | complete |
-| `checks/niks3-ca-bundle/README.md` | retained in place; see [CA compatibility operator contract](../../caches/niks3-ca-bundle-compatibility.md) | retained | complete |
-| `checks/attic-metrics/README.md` | retained in place at [the native inventory runbook](../../../../checks/attic-metrics/README.md); see [storage observation contract](../../caches/niks3-cache.md#response-only-storage-observations) | retained | complete |
-| `checks/attic-publication/README.md` | retained in place at [the native publication runbook](../../../../checks/attic-publication/README.md) | retained | complete |
+| `checks/integration-assurance/fixtures/xccdf/README.md` | retained fixture provenance for planned Assurance import coverage; [retirement map](../../testing/integration-coverage-map.md#legacy-retirement-map) | retained | complete |
+| `checks/builder-evaluator-packaging/README.md` | relocated source cataloged in [builder-evaluator-packaging section](../../testing/flake-checks.md#builder-evaluator-packaging) | merged | complete |
+| `checks/niks3-cache/README.md` | historical scope in [niks3-cache section](../../testing/flake-checks.md#niks3-cache); source retired by TASK-490.24 | merged | complete |
+| `checks/niks3-write-probe/README.md` | source retired by TASK-490.24; [retirement disposition](../../testing/integration-coverage-map.md#legacy-retirement-map) | merged | complete |
+| `checks/niks3-ca-bundle/README.md` | relocated source cataloged in [CA compatibility operator contract](../../caches/niks3-ca-bundle-compatibility.md) | merged | complete |
+| `checks/attic-metrics/README.md` | source retired by TASK-490.24; [retirement disposition](../../testing/integration-coverage-map.md#legacy-retirement-map) and [storage observation contract](../../caches/niks3-cache.md#response-only-storage-observations) | merged | complete |
+| `checks/attic-publication/README.md` | source retired by TASK-490.24; [retirement disposition](../../testing/integration-coverage-map.md#legacy-retirement-map) | merged | complete |
 | `packages/attic-metrics/README.md` | retained in place at [the adapter operator runbook](../../../../packages/attic-metrics/README.md); see [storage observation contract](../../caches/niks3-cache.md#response-only-storage-observations) | retained | complete |
-| `checks/nixos-options-metadata/README.md` | retained in place; see [nixos-options-metadata section](../../testing/flake-checks.md#nixos-options-metadata) | retained | complete |
-| `checks/nixos-discovery-reliability/README.md` | retained in place; see [cold-input evidence and limits](../../evaluation/bulk-evaluator-resource-planning.md#cold-input-evidence-and-limits) | retained | complete |
-| `checks/oidc-auth/README.md` | retained in place; see [oidc-auth section](../../testing/flake-checks.md#oidc-auth) | retained | complete |
-| `checks/oscal-export/README.md` | retained in place; see [oscal-export section](../../testing/flake-checks.md#oscal-export) | retained | complete |
-| `checks/run-ui-dev-db-check/README.md` | retained in place; see [run-ui-dev-db-check section](../../testing/flake-checks.md#run-ui-dev-db-check) | retained | complete |
-| `checks/server-regressions/README.md` | retained in place; see [server-regressions section](../../testing/flake-checks.md#server-regressions) | retained | complete |
-| `checks/stig/README.md` | retained in place; see [stig section](../../testing/flake-checks.md#stig) | retained | complete |
-| `checks/ui-screenshots/README.md` | retained in place; see [ui-screenshots section](../../testing/flake-checks.md#ui-screenshots) | retained | complete |
-| `checks/web-ui/README.md` | retained in place; see [web-ui section](../../testing/flake-checks.md#web-ui) | retained | complete |
-| `checks/web-ui/baselines/README.md` | retained in place; see [web-ui/baselines section](../../testing/flake-checks.md#web-uibaselines) | retained | complete |
-| `checks/web-ui/design-parity/eval-drawer.md` | retained in place at [the evaluation drawer comparison runbook](../../../../checks/web-ui/design-parity/eval-drawer.md); see [testing index](../../testing/index.md) | retained | complete |
-| `checks/web-ui-reconciliation/README.md` | retained in place; see [web-ui-reconciliation section](../../testing/flake-checks.md#web-ui-reconciliation) | retained | complete |
-| `checks/web-ui-test-runner/README.md` | retained in place; see [web-ui-test-runner section](../../testing/flake-checks.md#web-ui-test-runner) | retained | complete |
-| `checks/xccdf-schema/README.md` | retained in place; see [xccdf-schema section](../../testing/flake-checks.md#xccdf-schema) | retained | complete |
+| `checks/nixos-options-metadata/README.md` | relocated source cataloged in [nixos-options-metadata section](../../testing/flake-checks.md#nixos-options-metadata) | merged | complete |
+| `checks/nixos-discovery-reliability/README.md` | relocated source cataloged in [cold-input evidence and limits](../../evaluation/bulk-evaluator-resource-planning.md#cold-input-evidence-and-limits) | merged | complete |
+| `checks/oidc-auth/README.md` | historical scope in [oidc-auth section](../../testing/flake-checks.md#oidc-auth); source retired by TASK-490.24 | merged | complete |
+| `checks/oscal-export/README.md` | relocated source cataloged in [oscal-export section](../../testing/flake-checks.md#oscal-export) | merged | complete |
+| `checks/run-ui-dev-db-check/README.md` | relocated source cataloged in [run-ui-dev-db-check section](../../testing/flake-checks.md#run-ui-dev-db-check) | merged | complete |
+| `checks/server-regressions/README.md` | relocated source cataloged in [server-regressions section](../../testing/flake-checks.md#server-regressions) | merged | complete |
+| `checks/stig/README.md` | relocated source cataloged in [stig section](../../testing/flake-checks.md#stig) | merged | complete |
+| `checks/ui-screenshots/README.md` | relocated source cataloged in [ui-screenshots section](../../testing/flake-checks.md#ui-screenshots) | merged | complete |
+| `checks/web-ui/README.md` | historical scope in [web-ui section](../../testing/flake-checks.md#web-ui); source retired by TASK-490.24 | merged | complete |
+| `checks/web-ui/baselines/README.md` | historical [baseline process](../../testing/web-ui-check.md#visual-baselines); source retired by TASK-490.24 | merged | complete |
+| `checks/web-ui/design-parity/eval-drawer.md` | relocation recorded in [testing index](../../testing/index.md) | merged | complete |
+| `checks/web-ui-reconciliation/README.md` | historical scope in [web-ui-reconciliation section](../../testing/flake-checks.md#web-ui-reconciliation); source retired by TASK-490.24 | merged | complete |
+| `checks/web-ui-test-runner/README.md` | relocated source cataloged in [web-ui-test-runner section](../../testing/flake-checks.md#web-ui-test-runner) | merged | complete |
+| `checks/xccdf-schema/README.md` | relocated source cataloged in [xccdf-schema section](../../testing/flake-checks.md#xccdf-schema) | merged | complete |
+| `packages/verify-builder-evaluator-packaging/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#builder-evaluator-packaging) | retained | complete |
+| `packages/verify-niks3-ca-bundle/README.md` | retained at relocated package source; [operator contract](../../caches/niks3-ca-bundle-compatibility.md) | retained | complete |
+| `packages/verify-nixos-options-metadata/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#nixos-options-metadata) | retained | complete |
+| `packages/verify-nixos-discovery-reliability/README.md` | retained at relocated package source; [cold-input evidence](../../evaluation/bulk-evaluator-resource-planning.md#cold-input-evidence-and-limits) | retained | complete |
+| `packages/verify-oscal-export/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#oscal-export) | retained | complete |
+| `packages/verify-run-ui-dev-db-check/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#run-ui-dev-db-check) | retained | complete |
+| `packages/verify-server-regressions/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#server-regressions) | retained | complete |
+| `packages/verify-stig/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#stig) | retained | complete |
+| `packages/ui-screenshots/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#ui-screenshots) | retained | complete |
+| `packages/devScripts/web-ui/design-parity/eval-drawer.md` | retained at relocated developer-tool source; [testing index](../../testing/index.md) | retained | complete |
+| `packages/verify-web-ui-test-runner/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#web-ui-test-runner) | retained | complete |
+| `packages/verify-xccdf-schema/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#xccdf-schema) | retained | complete |
 | `packages/cf-test-suite/README.md` | retained in place; see [scenario runner section](../../testing/flake-checks.md#scenario-runner-packagescf-test-suite) | retained | complete |
 | `docs/design/CrystalForge/fixtures/README.md` | retained in place; see [pointer](../../testing/design-golden-fixtures.md) | retained | complete |
 | `backlog/docs/doc-1 - Task-Template.md` | retained in place; see [pointer](../../operations/backlog-process-documents.md) | retained | complete |
@@ -47,17 +60,29 @@ tags:
 
 ## Source inventory
 
+### TASK-490.24 source-retirement disposition
+
+The table preserves original source identities and migration-base provenance.
+`merged` records the current catalog or retirement disposition after the original
+path is removed; new `retained` rows identify the relocated live Markdown sources.
+The historical source inventory below describes the earlier migration, not the
+current filesystem. Its original titles, purposes and source paths remain as
+provenance. Source retirement is explicitly authorized before replacement
+coverage is complete; `Coverage: complete` here records a document disposition,
+not completed integration coverage. No original baseline blob or inventory hash
+is rewritten. Retired suite source remains available in Git history at `5fa1f4fa`.
+
 ### `checks/web-ui/design-parity/eval-drawer.md`
 
 - Title: Evaluation drawer comparison
 - Purpose: Defines the task-owned drawer shell comparison inputs, commands, assertions, structured matrix workflow, and visual acceptance limits.
-- Action: retained at its check-local path and cataloged in the [testing index](../../testing/index.md).
+- Action: retained at `packages/devScripts/web-ui/design-parity/eval-drawer.md` and cataloged in the [testing index](../../testing/index.md); original path retained here as provenance.
 - Sections:
   | Source section | Destination |
   | --- | --- |
-  | `## Inputs` | [Inputs](../../../../checks/web-ui/design-parity/eval-drawer.md#inputs) |
-  | `## Current contract` | [Current contract](../../../../checks/web-ui/design-parity/eval-drawer.md#current-contract) |
-  | `## Structured matrix workflow` | [Structured matrix workflow](../../../../checks/web-ui/design-parity/eval-drawer.md#structured-matrix-workflow) |
+  | `## Inputs` | [Inputs](../../../../packages/devScripts/web-ui/design-parity/eval-drawer.md#inputs) |
+  | `## Current contract` | [Current contract](../../../../packages/devScripts/web-ui/design-parity/eval-drawer.md#current-contract) |
+  | `## Structured matrix workflow` | [Structured matrix workflow](../../../../packages/devScripts/web-ui/design-parity/eval-drawer.md#structured-matrix-workflow) |
 
 ### `docs/test_plan.md`
 
@@ -217,7 +242,7 @@ OKF knowledge bundle. Neither README existed at the original migration base
 - Action: retained. The new runbook remains authoritative beside its check. It
   did not exist at the original migration base `3b23d36f`; no historical baseline
   blob is claimed or added to `source-inventory.tsv`.
-- Destination: [native write-probe runbook](../../../../checks/niks3-write-probe/README.md).
+- Destination: [native write-probe runbook](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/niks3-write-probe/README.md) (historical; retired by TASK-490.24).
 - Unmapped content: none. All source sections remain in place, including the
   distinction between protected-handler evidence and actual publication proof.
 
@@ -242,7 +267,7 @@ OKF knowledge bundle. Neither README existed at the original migration base
 - Action: retained. Both newly authored runbooks remain authoritative at their
   original paths. Neither existed at the original migration base `3b23d36f`.
   No historical baseline blob is claimed or added to `source-inventory.tsv`.
-- Destinations: [native inventory runbook](../../../../checks/attic-metrics/README.md), [adapter operator runbook](../../../../packages/attic-metrics/README.md), and [storage observation contract](../../caches/niks3-cache.md#response-only-storage-observations).
+- Destinations: [native inventory runbook](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/attic-metrics/README.md) (historical; retired by TASK-490.24), [adapter operator runbook](../../../../packages/attic-metrics/README.md), and [storage observation contract](../../caches/niks3-cache.md#response-only-storage-observations).
 - Unmapped content: none. All source sections remain in place. Coverage records
   document retention, not a claim that a verification command passed.
 
@@ -255,7 +280,7 @@ OKF knowledge bundle. Neither README existed at the original migration base
 - Action: retained. The newly authored runbook remains authoritative beside the
   check. It did not exist at the original migration base `3b23d36f`; no historical
   baseline blob is claimed or added to `source-inventory.tsv`.
-- Destination: [native publication runbook](../../../../checks/attic-publication/README.md).
+- Destination: [native publication runbook](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/attic-publication/README.md) (historical; retired by TASK-490.24).
 - Unmapped content: none. Every source section remains in place. The fixture's
   documented limits remain explicit; final-head CI execution is pending.
 

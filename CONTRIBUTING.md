@@ -50,11 +50,20 @@ Crystal Forge has comprehensive testing across multiple levels. When contributin
 
 **For component integration**:
 
-- Server regression tests: `nix build .#checks.x86_64-linux.server-regressions`
-- Integration VM: `nix build .#checks.x86_64-linux.integration`
+- Server regression tests: `nix build .#verify-server-regressions`
+- Registered integration owner: `nix build .#checks.x86_64-linux.integration-access`
 - Python server, builder, cache, and database tests:
   `nix run .#cf-test-suite.runTests -- -vvv`
-- Full flake checks: `nix flake check`
+- Full registered flake checks: `nix flake check`
+
+TASK-490.24 retires the legacy suites before replacement coverage is complete.
+Only Access exists today, with 16 executed cases; missing Access, Delivery,
+Assurance, and Upgrade obligations remain in the coverage map. The current
+inventory is one total check, formerly 27. The final target is exactly four
+total check attributes, without placeholders. Lower-level verification now
+uses package targets (`verify-<name>`, except `okf-knowledge` and `ui-screenshots`).
+The host `web-ui-test` developer command remains available; the legacy `web-ui`
+VM gate and baseline-candidate CI job are retired.
 
 See the [testing guide](docs/knowledge/testing/test-plan.md) and
 [flake-check catalog](docs/knowledge/testing/flake-checks.md) for current

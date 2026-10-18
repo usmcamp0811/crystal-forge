@@ -64,14 +64,14 @@
         };
 
         # nix build .#ui-screenshots  → ./result/<view>--<theme>.png (Dioxus UI, fixture-driven)
-        packages.ui-screenshots = import ./checks/ui-screenshots/default.nix {
+        packages.ui-screenshots = import ./packages/ui-screenshots/default.nix {
           lib = channels.nixpkgs.lib;
           pkgs = channels.nixpkgs;
           inherit inputs;
         };
 
         # nix build .#okf-knowledge  → validates docs/knowledge/ OKF bundle
-        packages.okf-knowledge = import ./checks/okf-knowledge/default.nix {
+        packages.okf-knowledge = import ./packages/okf-knowledge/default.nix {
           lib = channels.nixpkgs.lib;
           pkgs = channels.nixpkgs;
           inherit inputs;
@@ -84,7 +84,7 @@
           name = "okf-mermaid-renderer";
           runtimeInputs = [ channels.nixpkgs.python3 channels.nixpkgs.mermaid-cli ];
           text = ''
-            exec python3 ${./checks/okf-knowledge/render_mermaid.py} \
+            exec python3 ${./packages/okf-knowledge/render_mermaid.py} \
               --repo-root "$PWD" --renderer mmdc "$@"
           '';
           meta.mainProgram = "okf-mermaid-renderer";

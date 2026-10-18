@@ -236,7 +236,7 @@ in
   # of a `nix run` alias, unmodified. It already reads `CF_UI_DEV_BASE_URL`
   # / `CF_UI_DEV_API_BASE_URL` / `DB_HOST` / `DB_PORT` / `DB_USER` /
   # `DB_PASSWORD` / `DB_NAME` as overrides (see
-  # checks/web-ui/tests/web-ui-test.sh), all exported above via `env`.
+  # packages/devScripts/web-ui/tests/web-ui-test.sh), exported above via `env`.
   # `wasm-bindgen-cli_0_2_108`/`binaryen`/`lld` must be on `PATH` for `dx
   # serve` to find the pinned wasm-bindgen version instead of whatever
   # version its own dependency closure would otherwise resolve first,
@@ -352,7 +352,7 @@ in
 
   # Exported through `devenv shell`/`devenv up` into this worktree's own
   # environment (TASK-462.1 AC #7 and the web-ui-test.sh preconditions it
-  # reads, see checks/web-ui/tests/web-ui-test.sh): `CF_UI_DEV_BASE_URL`
+  # reads, see packages/devScripts/web-ui/tests/web-ui-test.sh): `CF_UI_DEV_BASE_URL`
   # and `CF_UI_DEV_API_BASE_URL` are the same variables that script already
   # accepts as overrides, and `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`/
   # `DB_NAME` are what it falls back to for its fixture-backed workflows'

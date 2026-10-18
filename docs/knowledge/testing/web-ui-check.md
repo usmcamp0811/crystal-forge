@@ -1,7 +1,7 @@
 ---
 type: Runbook
 title: Web UI check runbook
-description: Runbook for the web-ui Nix check and the host-side web-ui-test loop, covering layout, phases and gates, visual baselines, design-parity evidence, adding coverage, debugging, CI integration, and known issues.
+description: Documents the retained host-side web-ui-test loop and developer assets, with historical provenance for the retired legacy VM suite and baseline process.
 tags:
   - crystal-forge
   - testing
@@ -17,18 +17,46 @@ sources:
 
 # Web UI Check — Runbook
 
-The `web-ui` Nix check verifies the web UI end-to-end against a real Crystal
+## Current status: legacy suite retired
+
+TASK-490.24 explicitly authorizes retirement of `checks/web-ui` and the other
+eight legacy suite directories before replacement coverage is complete. The
+`web-ui-check` and `web-ui-baseline-candidates` jobs are removed, as is the
+legacy matrix. There is no legacy VM command or baseline-approval fallback.
+Accepted requirements remain in the [coverage map](integration-coverage-map.md);
+legacy mocked or seeded workflows are not automatically mandatory requirements.
+
+`web-ui-test` remains a developer command. Its host harness, imported workflow
+helpers, `coverage-manifest.json`, `design-fixtures.json`, and retained design
+generator/manifest/tests/drawer capture tools now live beneath
+`packages/devScripts/web-ui/`. Both V1R1 and V1R2 XCCDF XML fixtures move to
+`checks/integration-assurance/fixtures/xccdf/`, without an owner registration.
+The approved design reference is unchanged.
+
+The current check inventory is one total attribute, `integration-access`,
+versus 27 previously. Its unchanged 16 executed cases are a partial Access
+proof. Delivery, Assurance, and Upgrade owners are absent. Final completion
+requires exactly four total check names and complete accepted coverage. See
+the [contract's final inventory command](integration-test-contract.md#1-fixed-check-inventory).
+
+The historical suite and baseline instructions below are retained as migration
+provenance, not current verification requirements. **Only the Fast development
+loop section is a current host command guide.** Current authoritative workflow
+verification belongs to real owning integration scenarios; report missing
+scenarios as gaps rather than invoking a removed suite.
+
+## Historical suite overview
+
+The `web-ui` Nix check verified the web UI end-to-end against a real Crystal
 Forge server inside a NixOS VM: build verification, manifest-driven Playwright
 steps with semantic assertions, screenshots, and visual regression against
 approved baselines.
 
-> **Transition:** under the [integration test maintenance contract](integration-test-contract.md),
-> browser workflows move into the four integration owners. This check remains
-> a legacy check that runs only as the optional manual `web-ui-check` GitLab
-> job (`allow_failure: true`). Removing it from automatic CI does not mark its
-> obligations covered. Delete its definition and fixtures after passing
-> replacement coverage is recorded, or after an explicit decision removes the
-> underlying requirement. See the
+> **Historical transition:** before source retirement, browser workflows were
+> assigned to the four integration owners and the legacy check ran as an
+> optional manual `web-ui-check` GitLab job (`allow_failure: true`). The owner's
+> TASK-490.24 source-retirement decision supersedes that coexistence policy.
+> Source removal does not mark accepted obligations covered. See the
 > [coverage map](integration-coverage-map.md#legacy-retirement-map) and
 > [current GitLab selection](integration-coverage-map.md#current-gitlab-selection).
 > Do not add new workflows here; add them to the owning scenario instead.
@@ -73,17 +101,23 @@ follow-up does not require another VM run.
 
 | Path | Purpose |
 | --- | --- |
-| `checks/web-ui/default.nix` | NixOS VM test definition (server, gitserver, phases, gates) |
-| `checks/web-ui/coverage-manifest.json` | Single source of truth: steps, profiles, routes, design refs, baseline policies, exclusions |
-| `checks/web-ui/design-fixtures.json` | Canonical non-secret fixture data for aligning design examples with representative checked UI states |
-| `checks/web-ui/tests/integration-test.js` | Playwright steps (must stay in sync with the manifest) |
-| `checks/web-ui/baselines/` | Approved golden screenshots (`<step>--dark.png` and `<step>--light.png`) |
-| `checks/web-ui/approve-baselines.sh` | Copies captured screenshots into `baselines/` |
+| `packages/devScripts/web-ui/coverage-manifest.json` | Retained host workflow catalog, profiles, routes, design refs and historical baseline metadata |
+| `packages/devScripts/web-ui/design-fixtures.json` | Retained non-secret representative design data |
+| `packages/devScripts/web-ui/tests/integration-test.js` | Retained browser workflows and imported helpers; host supports only its explicit compatible subset |
+| `packages/devScripts/web-ui/tests/web-ui-test.sh` | Host selection, readiness and artifact runner |
+| `packages/devScripts/web-ui/design-parity/` | Retained generator, manifest, generator tests and drawer comparison tools |
+| `checks/integration-assurance/fixtures/xccdf/` | V1R1 and V1R2 XML source fixtures; no placeholder owner |
+| Retired `checks/web-ui/default.nix`, `baselines/`, `approve-baselines.sh` | Historical VM, golden images and approval workflow; no current command |
 | `docs/design/CrystalForge/` | Mocked JSX design reference (gold standard); steps map to it via `designRef` |
 
 ## Running locally
 
 ### Fast development loop
+
+This subsection describes the retained developer command. Start the stack with
+a task-owned isolated database, following the [live-preview guide](../../agents/live-preview.md).
+The runner implementation is `packages/devScripts/web-ui/tests/web-ui-test.sh`;
+its manifest is `packages/devScripts/web-ui/coverage-manifest.json`.
 
 Enter the development shell and start the persistent development stack once:
 
@@ -113,11 +147,9 @@ the Nix-provided Playwright and Chromium versions from the development shell.
 It does not download a browser or restart PostgreSQL, the Crystal Forge server,
 or Dioxus.
 
-The host loop asserts semantics and captures screenshots, but it does not
-compare against approved baselines. Baseline comparison belongs to the
-authoritative check, which renders the packaged UI in a fixed environment. Set
-`CF_UI_BASELINES_DIR` to opt in locally, and expect environment-related
-differences.
+The host loop asserts semantics and captures screenshots. It does not establish
+integration-owner coverage or approved design parity. Legacy baseline comparison
+is no longer an authoritative gate.
 
 The `settings.devStackWorkflows` object in `coverage-manifest.json` lists the
 workflows that are repeat-safe against the persistent development stack. It is
@@ -137,24 +169,28 @@ an object keyed by workflow name. Each entry has a `category`:
 At commit `3b23d36f` the object lists 17 workflows, for example `12-systems`,
 `12a-systems-empty-state`, `16-cves`, and `06i-security-workflows-role-coach`.
 Read the manifest for the current list. A workflow that is not in the object
-fails with the command for the authoritative VM harness. Every other workflow
-is VM-only.
+fails with an explicit legacy-harness-retired message. The host runner does not
+make retired VM-only infrastructure available.
 
 Add a workflow only after confirming that it does not depend on VM services,
 ordered predecessor workflows, or state left by an earlier run.
 
-> `web-ui-test` is the fast development feedback loop. The NixOS Web UI check
-> remains the reproducible authoritative verification boundary.
+> `web-ui-test` is development feedback. Owning integration scenarios supply
+> authoritative proof; absent owner scenarios remain coverage gaps.
 
 The runner's own contract (selection, rejection of VM-only workflows,
 readiness reporting, artifact creation, exit-status propagation) is covered by
 a separate lightweight check that starts no services:
 
 ```bash
-nix build .#checks.x86_64-linux.web-ui-test-runner --no-link -L
+nix build .#verify-web-ui-test-runner --no-link -L
 ```
 
-### Authoritative verification
+### Authoritative verification (historical)
+
+All instructions from this heading onward describe the retired suite. The
+commands are preserved for provenance and do not resolve in the current flake.
+They must not be used as current acceptance requirements.
 
 Before claiming a Web UI implementation complete, run each relevant workflow
 through the authoritative NixOS check:

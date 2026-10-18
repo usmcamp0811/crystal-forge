@@ -567,7 +567,7 @@ S3 upload permission or trust, signing, object integrity, or completed publicati
 The compatibility gate is not server-version detection. A certificate-required
 ingress control establishes its certificate gate, not native Go subject
 enforcement; the diagnostic states that limitation. The
-[native check](../../../checks/niks3-write-probe/README.md) covers known versions,
+[historical native check](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/niks3-write-probe/README.md) covered known versions,
 credential isolation, negative controls, domain/storage immutability, and genuine
 uploads as a separate disposable-fixture phase. Confirm publication with a real
 authorized job, never an ordinary connection-test button.
@@ -812,7 +812,7 @@ must return a safe HTTP 400 with zero provider requests. Stale collection flags 
 fresh ID loading; false or absent ID flags must permit stored-ID Test without
 including `attic_token`. Private database checkpoints require exact Test/Cancel
 non-mutation and credential retention across unrelated Save. See the
-[native legacy-row workflow](../../../checks/web-ui/README.md#existing-legacy-attic-rows)
+[historical native legacy-row workflow](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/web-ui/README.md#existing-legacy-attic-rows)
 for fixture isolation and evidence limits. These fixture contracts do not
 establish a cause or recovery for any deployed destination. Use safe destination
 GET metadata and credential-free diagnostics to investigate an actual failure;
@@ -840,8 +840,8 @@ storage migration.
 
 ## Local verification
 
-Run from the repository root. These commands use the pinned flake and disposable
-VM databases; they do not require starting host application services. Use
+Run from the repository root. These commands use the pinned flake; they do not
+require starting host application services. Use
 `path:.#` while required source files are untracked; Git-backed `.#` omits them.
 
 ```sh
@@ -855,24 +855,31 @@ nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/default
 # Server and builder are PACKAGES, not checks.
 nix build --no-link -L path:.#packages.x86_64-linux.server path:.#packages.x86_64-linux.builder
 
-# Packaging contract, smaller fixture, then full remote-builder/agent gate.
-nix build --no-link -L path:.#checks.x86_64-linux.builder-evaluator-packaging
-nix build --no-link -L path:.#checks.x86_64-linux.niks3-cache.fixture
-nix build --no-link -L path:.#checks.x86_64-linux.niks3-cache
+# Preserved lower-level packaging contract, outside checks.
+nix build --no-link -L path:.#verify-builder-evaluator-packaging
 ```
 
 Ignored SQLx integration tests are not run by the Rust commands above. Run those
-only against a separately verified isolated test database. VM checks require KVM
-access for the Nix builder. Packaging retains pinned **Niks3 1.6.0** and binds its
+only against a separately verified isolated test database. The legacy Niks3 VM
+gate and its fixture target are retired under TASK-490.24; accepted Delivery
+requirements remain unimplemented coverage gaps. Packaging retains pinned
+**Niks3 1.6.0** and binds its
 child Nix, the server, and the builder to evaluator **Nix 2.34.8** through
 `pkgs.nix-eval-jobs.nix`; do not replace this with an unrelated Nix on `PATH`.
 
-The [packaging gate](../../../checks/builder-evaluator-packaging/README.md) probes
-wrappers and service PATH. The [Niks3 VM gate](../../../checks/niks3-cache/README.md)
-exercises token/public, mTLS/public, token/private, mTLS/private, and token/public
+The [packaging gate](../../../packages/verify-builder-evaluator-packaging/README.md) probes
+wrappers and service PATH. The [historical Niks3 VM gate](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/niks3-cache/README.md)
+exercised token/public, mTLS/public, token/private, mTLS/private, and token/public
 read-proxy variants with real remote builds, signed completion, server verification,
 agent pulls, environment denial, local CVE materialization, and secret/cleanup
-audits. A fixture pass alone does not satisfy the full gate.
+audits. TASK-490.24 retires this suite before replacement coverage is complete;
+planned Delivery scenarios own the accepted boundaries. Neither fixture passes
+nor source retirement establish replacement integration coverage.
+
+### Historical retired VM proof boundaries
+
+The following records describe the retired suite, not current mandatory test
+procedures or replacement execution evidence.
 
 The VM gate seeds evaluation identities and queues; it does not test flake
 evaluation or verified-source re-evaluation. Its no-op activation tests agent

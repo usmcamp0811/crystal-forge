@@ -1,7 +1,7 @@
 ---
 type: Testing Guide
 title: Crystal Forge flake checks catalog
-description: "Catalogs the current Nix flake-check matrix, standalone Web UI job, documentation and schema checks, and the cf-test-suite scenario runner; states what each verifies, how to run it, and where its README lives."
+description: "Catalogs the integration owner, relocated verification packages, and historical retired suites, preserving migration provenance and distinguishing coverage gaps from source retirement."
 tags:
   - crystal-forge
   - testing
@@ -59,7 +59,72 @@ sources:
 
 # Crystal Forge flake checks catalog
 
-This concept is a catalog and pointer record. Each check keeps its own
+## Current inventory and commands
+
+TASK-490.24 authorizes source retirement before four-owner completion. The
+current `checks.x86_64-linux` inventory contains only `integration-access`
+(one total attribute, previously 27). Its unchanged 16 executed cases do not
+complete Access. Delivery, Assurance, and Upgrade are absent. No placeholders
+are registered, including beneath the retained Assurance fixture directory.
+
+The final inventory must contain exactly four TOTAL names. Verify the full set:
+
+```bash
+nix eval --json .#checks.x86_64-linux --apply builtins.attrNames
+nix eval --json .#checks.x86_64-linux --apply 'c: builtins.attrNames c == [ "integration-access" "integration-assurance" "integration-delivery" "integration-upgrade" ]'
+```
+
+Final acceptance requires `true`, complete accepted coverage, and passing real
+aggregates. See the [contract](integration-test-contract.md) and
+[retirement map](integration-coverage-map.md#legacy-retirement-map).
+
+All 17 lower-level definitions are preserved outside `checks`:
+
+| Former name | Current package target | Purpose |
+| --- | --- | --- |
+| `builder-cve-contract` | `.#verify-builder-cve-contract` | Builder CVE contract |
+| `builder-evaluator-packaging` | `.#verify-builder-evaluator-packaging` | Wrapper and module packaging |
+| `config-inspector` | `.#verify-config-inspector` | Option inspection contracts |
+| `config-observer` | `.#verify-config-observer` | Observer contracts |
+| `evaluator-snapshot-isolation` | `.#verify-evaluator-snapshot-isolation` | Evaluator failure isolation |
+| `niks3-ca-bundle` | `.#verify-niks3-ca-bundle` | CA compatibility |
+| `nixos-discovery-reliability` | `.#verify-nixos-discovery-reliability` | Evaluator discovery |
+| `nixos-options-metadata` | `.#verify-nixos-options-metadata` | Option metadata |
+| `oscal-export` | `.#verify-oscal-export` | Fixture schema validation |
+| `run-ui-dev-db-check` | `.#verify-run-ui-dev-db-check` | Development database scripts |
+| `server-regressions` | `.#verify-server-regressions` | Preserved PostgreSQL hook and exact Cargo selections |
+| `stig` | `.#verify-stig` | STIG module semantics |
+| `verified-source-evaluator-parity` | `.#verify-verified-source-evaluator-parity` | Source verification parity |
+| `web-ui-test-runner` | `.#verify-web-ui-test-runner` | Retained host runner contract |
+| `xccdf-schema` | `.#verify-xccdf-schema` | Schema and writer fixtures |
+| `ui-screenshots` | `.#ui-screenshots` | Mocked design iteration; no semantic proof |
+| `okf-knowledge` | `.#okf-knowledge` | Documentation, provenance and diagram validation |
+
+Run `nix build <target> -L`. Sources are `packages/verify-<former-name>/`,
+except `packages/ui-screenshots/` and `packages/okf-knowledge/`.
+The six retained automatic matrix entries now run as `package-verification`
+using native package targets. The three process-compose database Rust jobs
+remain. Overlap between `verify-server-regressions` and `state-machine-tests`
+is unresolved complex TASK-490.24 work; relocation does not deduplicate them.
+
+The nine legacy integration suite directories are retired. CI jobs
+`legacy-flake-check`, `web-ui-check`, and `web-ui-baseline-candidates` are
+removed. Useful browser developer assets live in `packages/devScripts/web-ui/`.
+Both XCCDF XML revisions live in `checks/integration-assurance/fixtures/xccdf/`.
+Unused `test-keys` placeholders are removed. These actions do not establish
+replacement integration coverage or turn legacy implementation details into
+mandatory requirements.
+
+## Historical catalog (before source retirement)
+
+The remainder preserves the migration-base catalog and subsequent historical
+scope notes. Old `checks` commands, CI memberships, paths and baseline procedures
+below describe retired or relocated implementations and are not current run
+instructions. Use the package table above for retained verification. Historical
+README links for retired suites resolve to the last retained source revision;
+current package README links identify relocated sources.
+
+This concept was a catalog and pointer record. Each check kept its own
 `README.md` next to its `default.nix`. Those README files are the
 authoritative text and stay in place, because each check and package uses its
 README as its ecosystem entry point. This catalog records, for each README, what
@@ -135,27 +200,27 @@ Keep the legacy gate definitions until full owner cutover conditions pass.
 | Check | Boots a VM | Covers | README |
 | --- | --- | --- | --- |
 | `integration-access` | Yes (controller; 16-case gate passed; automatic and required in GitLab) | Local bootstrap, 292 migrations, observed Unix-socket clients, registration/sign-in/reload, wrong-password rejection, selected-session CSRF/revocation and independent browser sign-out, and Operator/Viewer denial (403, no protected change) of admin-only user create, user PATCH and server configuration plus the Viewer `/admin` Access Denied UI; cross-environment scope and closed-registration cases remain unimplemented | [Coverage map](integration-coverage-map.md) |
-| `integration` | Yes (server and git server) | Server, database, and Grafana dashboard behavior through the `cf_test` pytest markers `database`, `dashboard`, and `server` | [README](../../../checks/integration/README.md) |
-| `oidc-auth` | Yes (Keycloak and server) | OIDC login path against a real Keycloak realm | [README](../../../checks/oidc-auth/README.md) |
-| `web-ui` | Yes (server, agent, builder, git server) | Production embedded-UI server through a real browser | [README](../../../checks/web-ui/README.md) |
-| `web-ui-reconciliation` | Yes (nginx only) | One STIG import reconciliation workflow with mocked API routes | [README](../../../checks/web-ui-reconciliation/README.md) |
-| `web-ui-test-runner` | No | The `web-ui-test` wrapper script logic | [README](../../../checks/web-ui-test-runner/README.md) |
-| `ui-screenshots` | No | Fixture-driven screenshots of every view in two themes | [README](../../../checks/ui-screenshots/README.md) |
-| `server-regressions` | No | PostgreSQL-backed Rust regression tests and a migration upgrade rehearsal | [README](../../../checks/server-regressions/README.md) |
-| `builder-evaluator-packaging` | No | Evaluator-bound Nix/Niks3 wrappers, service PATH, proxy assertions, and generated configuration | [README](../../../checks/builder-evaluator-packaging/README.md) |
-| `niks3-cache` | Yes (cache, server, builder, agent) | Real cache publication, proxy claims, capability gates, agent pulls, and local CVE materialization | [README](../../../checks/niks3-cache/README.md) |
+| `integration` | Yes (server and git server) | Server, database, and Grafana dashboard behavior through the `cf_test` pytest markers `database`, `dashboard`, and `server` | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/integration/README.md) |
+| `oidc-auth` | Yes (Keycloak and server) | OIDC login path against a real Keycloak realm | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/oidc-auth/README.md) |
+| `web-ui` | Yes (server, agent, builder, git server) | Production embedded-UI server through a real browser | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/web-ui/README.md) |
+| `web-ui-reconciliation` | Yes (nginx only) | One STIG import reconciliation workflow with mocked API routes | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/web-ui-reconciliation/README.md) |
+| `web-ui-test-runner` | No | The `web-ui-test` wrapper script logic | [README](../../../packages/verify-web-ui-test-runner/README.md) |
+| `ui-screenshots` | No | Fixture-driven screenshots of every view in two themes | [README](../../../packages/ui-screenshots/README.md) |
+| `server-regressions` | No | PostgreSQL-backed Rust regression tests and a migration upgrade rehearsal | [README](../../../packages/verify-server-regressions/README.md) |
+| `builder-evaluator-packaging` | No | Evaluator-bound Nix/Niks3 wrappers, service PATH, proxy assertions, and generated configuration | [README](../../../packages/verify-builder-evaluator-packaging/README.md) |
+| `niks3-cache` | Yes (cache, server, builder, agent) | Real cache publication, proxy claims, capability gates, agent pulls, and local CVE materialization | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/niks3-cache/README.md) |
 | `okf-knowledge` | No | OKF structural validation, checker unit tests, exact diagram audit, and a pinned Mermaid syntax parse of every diagram (no browser render; `nix run .#okf-mermaid-renderer` renders SVG manually) | — |
-| `oscal-export` | No | OSCAL 1.1.2 schema validation of fixture output | [README](../../../checks/oscal-export/README.md) |
-| `xccdf-schema` | No | XCCDF 1.2 and `cf-xccdf-1` schema validation | [README](../../../checks/xccdf-schema/README.md) |
-| `stig` | No | `mkStigModule` override and merge semantics | [README](../../../checks/stig/README.md) |
-| `nixos-options-metadata` | No | Extracted NixOS option type metadata | [README](../../../checks/nixos-options-metadata/README.md) |
-| `run-ui-dev-db-check` | No | `run-ui-dev` database probe and start scripts | [README](../../../checks/run-ui-dev-db-check/README.md) |
+| `oscal-export` | No | OSCAL 1.1.2 schema validation of fixture output | [README](../../../packages/verify-oscal-export/README.md) |
+| `xccdf-schema` | No | XCCDF 1.2 and `cf-xccdf-1` schema validation | [README](../../../packages/verify-xccdf-schema/README.md) |
+| `stig` | No | `mkStigModule` override and merge semantics | [README](../../../packages/verify-stig/README.md) |
+| `nixos-options-metadata` | No | Extracted NixOS option type metadata | [README](../../../packages/verify-nixos-options-metadata/README.md) |
+| `run-ui-dev-db-check` | No | `run-ui-dev` database probe and start scripts | [README](../../../packages/verify-run-ui-dev-db-check/README.md) |
 
 ## Server and database checks
 
 ### `integration`
 
-README: [checks/integration/README.md](../../../checks/integration/README.md).
+Historical README: [checks/integration/README.md](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/integration/README.md).
 
 - **What it verifies.** The check boots a NixOS VM with the Crystal Forge
   server, its embedded PostgreSQL database, an agent, and Grafana, plus a
@@ -177,7 +242,7 @@ README: [checks/integration/README.md](../../../checks/integration/README.md).
 
 ### `oidc-auth`
 
-README: [checks/oidc-auth/README.md](../../../checks/oidc-auth/README.md).
+Historical README: [checks/oidc-auth/README.md](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/oidc-auth/README.md).
 
 - **What it verifies.** The check boots a Keycloak VM with an imported
   `crystal-forge` realm and a Crystal Forge server VM with
@@ -198,7 +263,7 @@ README: [checks/oidc-auth/README.md](../../../checks/oidc-auth/README.md).
 
 ### `server-regressions`
 
-README: [checks/server-regressions/README.md](../../../checks/server-regressions/README.md).
+README: [packages/verify-server-regressions/README.md](../../../packages/verify-server-regressions/README.md).
 
 - **What it verifies.** The check builds `cf-server` test targets with
   `buildRustPackage` and runs them against a disposable PostgreSQL instance from
@@ -222,7 +287,7 @@ README: [checks/server-regressions/README.md](../../../checks/server-regressions
   directly, check independent `enc:v1` compatibility, exact Test/Cancel snapshots,
   raw credential retention on unrelated Save, and pre-probe NULL/empty refusal.
   Synthetic Rust tokens do not prove native Bearer authentication. The separate
-  [native browser fixture](../../../checks/web-ui/README.md#existing-legacy-attic-rows)
+   [historical native browser fixture](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/web-ui/README.md#existing-legacy-attic-rows)
   requires real private Attic metadata reads for plaintext/historical rows and
   zero provider requests for the NULL row. Neither catalog membership nor this
   scope description establishes a pass for the current revision.
@@ -323,7 +388,7 @@ baseline action is implied by this catalog entry.
 
 ### `builder-evaluator-packaging`
 
-README: [checks/builder-evaluator-packaging/README.md](../../../checks/builder-evaluator-packaging/README.md).
+README: [packages/verify-builder-evaluator-packaging/README.md](../../../packages/verify-builder-evaluator-packaging/README.md).
 
 - **What it verifies.** Sandbox probes check component/public wrappers and service
   PATH for the exact evaluator Nix and evaluator-bound Niks3 1.6.0. The dependent
@@ -339,7 +404,7 @@ README: [checks/builder-evaluator-packaging/README.md](../../../checks/builder-e
 
 ### `niks3-cache`
 
-README: [checks/niks3-cache/README.md](../../../checks/niks3-cache/README.md).
+Historical README: [checks/niks3-cache/README.md](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/niks3-cache/README.md).
 
 - **What it verifies.** Four isolated VMs exercise five token/mTLS write and
   public/private read variants with real remote builds, signed destination-bound
@@ -380,7 +445,7 @@ remains pending owner evidence. No current-head CI pass is established here.
 
 ### `web-ui`
 
-README: [checks/web-ui/README.md](../../../checks/web-ui/README.md). The
+Historical README: [checks/web-ui/README.md](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/web-ui/README.md). The
 procedural guide is the [Web UI check runbook](web-ui-check.md).
 
 - **What it verifies.** This is the authoritative pre-merge gate for the web UI.
@@ -419,7 +484,7 @@ matrix is `integration`, `oidc-auth`, `niks3-cache`, `niks3-write-probe`,
 
 ### `web-ui/baselines`
 
-README: [checks/web-ui/baselines/README.md](../../../checks/web-ui/baselines/README.md).
+Historical README: [checks/web-ui/baselines/README.md](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/web-ui/baselines/README.md).
 
 This directory holds reviewed visual baselines for `strict` manifest steps. It
 is not a check. Generate captures through the `web-ui` check and approve them
@@ -430,7 +495,7 @@ export-test screenshots to this directory. The approval procedure is in the
 
 ### `web-ui-reconciliation`
 
-README: [checks/web-ui-reconciliation/README.md](../../../checks/web-ui-reconciliation/README.md).
+Historical README: [checks/web-ui-reconciliation/README.md](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/web-ui-reconciliation/README.md).
 
 - **What it verifies.** One VM runs nginx and serves only the static production
   web UI build, with no server, database, or backend. The check asserts that
@@ -450,7 +515,7 @@ README: [checks/web-ui-reconciliation/README.md](../../../checks/web-ui-reconcil
 
 ### `web-ui-test-runner`
 
-README: [checks/web-ui-test-runner/README.md](../../../checks/web-ui-test-runner/README.md).
+README: [packages/verify-web-ui-test-runner/README.md](../../../packages/verify-web-ui-test-runner/README.md).
 
 - **What it verifies.** The check tests the host-side `web-ui-test` wrapper
   (`checks/web-ui/tests/web-ui-test.sh`) with
@@ -465,7 +530,7 @@ README: [checks/web-ui-test-runner/README.md](../../../checks/web-ui-test-runner
 
 ### `ui-screenshots`
 
-README: [checks/ui-screenshots/README.md](../../../checks/ui-screenshots/README.md).
+README: [packages/ui-screenshots/README.md](../../../packages/ui-screenshots/README.md).
 
 - **What it verifies.** `capture.js` drives Playwright against the served
   production WASM bundle, intercepts every `/api/v1/` call with JSON built from
@@ -488,7 +553,7 @@ data this check reads.
 
 ### `oscal-export`
 
-README: [checks/oscal-export/README.md](../../../checks/oscal-export/README.md).
+README: [packages/verify-oscal-export/README.md](../../../packages/verify-oscal-export/README.md).
 
 - **What it verifies.** `crystal-forge-oscal-fixture` produces a deterministic
   OSCAL Assessment Results document. `validate.py` validates that document and
@@ -502,7 +567,7 @@ README: [checks/oscal-export/README.md](../../../checks/oscal-export/README.md).
 
 ### `xccdf-schema`
 
-README: [checks/xccdf-schema/README.md](../../../checks/xccdf-schema/README.md).
+README: [packages/verify-xccdf-schema/README.md](../../../packages/verify-xccdf-schema/README.md).
 
 - **What it verifies.** The check validates the vendored XCCDF 1.2 schema and
   the repository's `cf-xccdf-1` extension schema (`schemas/cf-xccdf-1/`). It uses
@@ -519,7 +584,7 @@ README: [checks/xccdf-schema/README.md](../../../checks/xccdf-schema/README.md).
 
 ### `stig`
 
-README: [checks/stig/README.md](../../../checks/stig/README.md).
+README: [packages/verify-stig/README.md](../../../packages/verify-stig/README.md).
 
 - **What it verifies.** A pure Nix evaluation tests
   `lib.crystal-forge.mkStigModule`, the helper that sets NixOS option values at a
@@ -542,7 +607,7 @@ README: [checks/stig/README.md](../../../checks/stig/README.md).
 
 ### `nixos-options-metadata`
 
-README: [checks/nixos-options-metadata/README.md](../../../checks/nixos-options-metadata/README.md).
+README: [packages/verify-nixos-options-metadata/README.md](../../../packages/verify-nixos-options-metadata/README.md).
 
 - **What it verifies.** A pure Nix evaluation over the `nixos-options-metadata`
   package asserts that the metadata list is sorted by option path, that five
@@ -561,7 +626,7 @@ README: [checks/nixos-options-metadata/README.md](../../../checks/nixos-options-
 
 ### `run-ui-dev-db-check`
 
-README: [checks/run-ui-dev-db-check/README.md](../../../checks/run-ui-dev-db-check/README.md).
+README: [packages/verify-run-ui-dev-db-check/README.md](../../../packages/verify-run-ui-dev-db-check/README.md).
 
 - **What it verifies.** The check runs two bash tests against the real scripts
   in `packages/devScripts/`. `db-usability-check.sh` must tell apart a

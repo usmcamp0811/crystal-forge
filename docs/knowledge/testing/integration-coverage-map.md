@@ -56,7 +56,7 @@ Shared helpers and registration points:
 | `checks/integration-access/scenarios/<name>.{nix,py,cjs}` | One Access scenario. Coordinator owns the scenario `.nix`, Python composition, and explicit registration. Packet tasks write disjoint Python/browser case fragments and fixtures under `scenarios/fragments/` or `fixtures/`; one packet does not imply one test derivation. |
 | `checks/integration-access/scenarios/fragments/task-490.2-sessions.{py,cjs}` | Selected session cases. The scenario `.nix` appends the Python fragment after bootstrap with `pkgs.writeText` and `builtins.readFile`, and registers the browser fragment as `session-sign-out`. No new DSL, gate, or role. |
 
-Registration is explicit and coordinator-owned; there is no custom discovery or completeness flag. The normal `checks.x86_64-linux.integration-access` check builds every gate in its `scenarios` attribute set. Meaningful WIP checks may be discoverable; only Access currently is. An implementation packet does not automatically get a NixOS test derivation. Compatible packet cases are fragments composed by the coordinator into a shared scenario using the existing Nix, Python, and browser-script structure. Missing obligations remain in this map. Future Delivery, Assurance, and Upgrade scenarios, fixtures, and assets all belong beneath `checks/integration-{delivery,assurance,upgrade}/`. Do not create placeholder `default.nix` files. GitLab runs each implemented owner automatically (today only `integration-access`). The retiring legacy checks are optional manual jobs; see [Current GitLab selection](#current-gitlab-selection). Source retirement waits until all required owner scenarios pass.
+Registration is explicit and coordinator-owned; there is no custom discovery or completeness flag. The normal `checks.x86_64-linux.integration-access` check builds every gate in its `scenarios` attribute set. Meaningful WIP checks may be discoverable; only Access currently is. An implementation packet does not automatically get a NixOS test derivation. Compatible packet cases are fragments composed by the coordinator into a shared scenario using the existing Nix, Python, and browser-script structure. Missing obligations remain in this map. Future Delivery, Assurance, and Upgrade scenarios, fixtures, and assets all belong beneath `checks/integration-{delivery,assurance,upgrade}/`. Do not create placeholder `default.nix` files. GitLab runs each implemented owner automatically (today only `integration-access`). TASK-490.24 authorizes source retirement now; see [Current GitLab selection](#current-gitlab-selection). Retirement does not establish passing replacement coverage.
 
 Scenario file contract (`<name>.nix`):
 
@@ -222,64 +222,97 @@ Verified in code at the baseline: cache types `S3`, `Attic`, `Niks3`, `Http`, `N
 
 ## Legacy retirement map
 
-Disposition values: `replace` (retire after the required owner scenarios pass), `keep (provisional)` (non-integration check retained during migration; its separate execution is not yet justified), `keep (justified)` (a recorded distinct purpose; no row has this value yet), `duplicate`, `obsolete`. A disposition describes final source retirement. It does not describe the current GitLab selection, which is a separate decision recorded in [Current GitLab selection](#current-gitlab-selection).
+The owner explicitly authorized source retirement in TASK-490.24 on 2026-10-18,
+before replacement coverage is complete. This supersedes retention until all
+four owners pass. The dispositions below describe source removal or relocation,
+not coverage. Accepted requirements remain in the obligation map. Legacy test
+mechanics, mocked responses, seeded successes, and incidental Grafana checks
+do not become mandatory requirements merely because they once ran.
 
-Final minimization rule: every remaining independent flake check or CI test job must have a distinct necessary purpose. Preserve useful assertions, assign their primary execution ownership, consolidate duplicate execution, and keep developer tools available through appropriate package or app outputs. Classification as "non-integration" alone does not justify a separate check.
+Final minimization rule: `checks.x86_64-linux` contains exactly four TOTAL
+attributes: `integration-access`, `integration-assurance`, `integration-delivery`,
+and `integration-upgrade`. Every separate verification package or CI test job
+must have a distinct necessary purpose. Preserve useful assertions, assign
+primary execution ownership, and consolidate or justify duplicate execution.
 
-A `keep (provisional)` row is temporary retention during migration. It is not a final retention decision. A row becomes `keep (justified)` only when its distinct purpose and primary execution ownership are recorded. The final cutover must establish: exactly four product integration owners; complete accepted coverage under them; removal of replaced legacy integration definitions and obsolete manual jobs; no task-specific VM proliferation hidden beneath the four aggregate names; a reason for any repeated Rust or database test execution; a reason for every remaining separate non-integration check; and the actual final flake inventory with measured execution and resource costs. Multiple attributes can share one Nix derivation, so attribute count alone does not measure duplicate execution. Do not delete a check before its assertions have a primary owner, and do not merge checks only to reduce names while the same work still runs underneath.
+Current inventory after retirement: one attribute, `integration-access`, versus
+27 before retirement. Its 16 cases are unchanged. Delivery, Assurance, and Upgrade
+are absent. XML fixtures alone do not constitute an Assurance owner. This is
+not final completion. Final acceptance also needs complete accepted coverage,
+passing aggregates, justified scenario isolation, and measured execution and
+resource costs. Multiple attributes can share a derivation; a smaller name
+count does not by itself remove duplicate work.
 
-Policy: implemented integration owners run automatically in GitLab. Retiring legacy integration checks remain available for optional manual execution while replacements are constructed. Removing a legacy check from automatic CI does not mark its obligations covered. Delete its definition and fixtures after passing replacement coverage is recorded, or after an explicit decision removes the underlying requirement.
+Verify the final full inventory explicitly:
+
+```bash
+nix eval --json .#checks.x86_64-linux --apply builtins.attrNames
+nix eval --json .#checks.x86_64-linux --apply 'c: builtins.attrNames c == [ "integration-access" "integration-assurance" "integration-delivery" "integration-upgrade" ]'
+```
+
+The predicate must return `true` for final acceptance; successful evaluation
+with `false` is not completion. No placeholders may fill missing names.
 
 | Legacy check or job | Kind | Disposition | Replacement owner / scenario or reason |
 | --- | --- | --- | --- |
-| `checks/web-ui` (CI `web-ui-check`, manual, allow_failure) | Integration, browser | `replace` | Access, Delivery, Assurance browser scenarios. 105 of 181 steps use route mocks; mocked steps are not carried forward as integration proof. Authentic real-API steps (03/05 registration and login, 13h force-push, 20aa/20ab/20ad/20af, 21–25, 29g–29m, 30b/30d/30e) map to `access.*`, `delivery.evaluation.ingestion`, `delivery.publication.*`, `assurance.*`. |
-| `checks/niks3-ui` (CI manual) | Integration | `duplicate` | Re-runs web-ui step 25 and export phases; replaced by `delivery.publication.niks3`. |
-| `checks/web-ui-reconciliation` | Browser, fully mocked | `obsolete` | Every API response mocked; replaced by `assurance.policy.stig-import`. |
-| `checks/integration` (CI manual) | Integration | `replace` | `delivery.evaluation.ingestion` (polling, webhook, branches), `delivery.activation.*` (agent accept, desired target). Grafana and SQL-view assertions are not product integration obligations (Grafana is optional/legacy). |
-| `checks/oidc-auth` (CI manual) | Integration, shallow | `replace` | `access.lifecycle.oidc` (adds callback, session, mapping). |
-| `checks/niks3-cache` (CI manual) | Integration | `replace` | `delivery.publication.niks3`, `delivery.build.strategies`. Seeded queue rows are replaced by real evaluation. |
-| `checks/niks3-write-probe` (CI manual) | Integration | `replace` | `delivery.publication.niks3` (connection Test boundary). |
-| `checks/attic-metrics` (CI manual) | Integration | `replace` | `delivery.publication.variants` (Attic). |
-| `checks/attic-publication` (CI manual) | Component | `replace` | `delivery.publication.variants` (Attic publication scope). |
-| `checks/nixos-discovery-reliability` (CI matrix) | Nix contract, no VM | `keep` (provisional) | Non-integration evaluator contract. |
-| `checks/server-regressions` (CI matrix) | DB-backed Rust | `keep` (provisional) | Non-integration. Migration-prefix rehearsals do not satisfy `upgrade.continuity`. Reported to select some of the same ignored commit tests as `state-machine-tests`; the overlap is unaudited and must be consolidated or justified at final cleanup. |
-| `checks/builder-evaluator-packaging` (CI matrix) | Packaging | `keep` (provisional) | Non-integration. |
-| `checks/web-ui-test-runner` (CI matrix) | Dev tooling | `keep` until `web-ui` retires, then `obsolete` | Tests the legacy host runner. |
-| `checks/run-ui-dev-db-check` (CI matrix) | Dev tooling | `keep` (provisional) | Non-integration. |
-| `checks/okf-knowledge` (CI matrix) | Documentation | `keep` (provisional) | Non-integration. |
-| `checks/ui-screenshots` | Mocked screenshots | `keep` (provisional) | Design iteration aid; no semantic assertions. It is already built as `packages.x86_64-linux.ui-screenshots`, so a separate check is a candidate for removal while the package output stays. |
-| `checks/config-inspector`, `config-observer`, `evaluator-snapshot-isolation`, `verified-source-evaluator-parity`, `nixos-options-metadata`, `niks3-ca-bundle` | Nix/Rust contracts | `keep` (provisional) | Non-integration. |
-| `checks/builder-cve-contract`, `oscal-export`, `xccdf-schema`, `stig` | Contracts/unit | `keep` (provisional) | Non-integration. |
-| `checks/test-keys` | Not a check | `obsolete` | Keys are embedded elsewhere; remove at cutover if unused. |
-| CI `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | DB-backed Rust | `keep` (provisional) | Non-integration; the fake scanner runner does not satisfy `assurance.scanning.cve`. These jobs need a disposable database for `--ignored` Rust tests, so a package build does not replace them. `state-machine-tests` reportedly repeats ignored commit tests that `server-regressions` selects (unaudited); one primary execution owner must be chosen. |
-| CI `web-ui-baseline-candidates` | Manual visual-maintenance job; not a blocking integration gate | `keep` during coexistence; retire or explicitly rebind at cutover | It produces candidate baselines for legacy `web-ui`; it does not establish a passing integration owner. |
-| CI `web-ui-screenshots-mr-comment` | MR artifact/reporting job; not a gate | `obsolete`; removed from `.gitlab-ci.yml` by the TASK-490.24 early transition | Its only screenshot source was `web-ui-check`, which is now manual. The manual job keeps its downloadable artifacts, and `integration-access` exports its own evidence. No replacement comment bot exists. |
+| `checks/web-ui` | Integration, browser | retired by owner decision | Accepted Access, Delivery, and Assurance obligations remain gaps except the executed Access subset. Of 181 legacy steps, 105 used route mocks; these are not integration proof. Useful host workflows, manifest, design fixtures, generator and drawer tools survive under `packages/devScripts/web-ui/`; VM phases, baselines and approval tooling are retired. |
+| `checks/niks3-ui` | Duplicate integration | retired | Repeated legacy browser/cache phases; accepted publication proof belongs to planned Delivery. |
+| `checks/web-ui-reconciliation` | Fully mocked browser | retired as obsolete implementation | No real backend proof. Accepted import behavior remains planned Assurance work. |
+| `checks/integration` | Integration | retired by owner decision | Accepted ingestion and activation obligations remain planned Delivery work. Incidental Grafana/SQL-view assertions are not mandatory product integration requirements. |
+| `checks/oidc-auth` | Shallow integration | retired by owner decision | Real authorization-code/session/mapping proof remains planned Access work. |
+| `checks/niks3-cache` | Integration | retired by owner decision | Planned Delivery owns publication and builder boundaries; seeded queue success is not carried forward as proof. |
+| `checks/niks3-write-probe` | Integration | retired by owner decision | Accepted connection Test boundary remains planned Delivery work. |
+| `checks/attic-metrics` | Integration | retired by owner decision | Accepted adapter observations belong to planned Delivery variants. Production adapter package remains. |
+| `checks/attic-publication` | Component fixture | retired by owner decision | Accepted native publication belongs to planned Delivery variants. |
+| `checks/nixos-discovery-reliability` | Nix contract | relocated | `packages/verify-nixos-discovery-reliability`; evaluator contract assertions preserved. |
+| `checks/server-regressions` | DB-backed Rust | relocated; deduplication unresolved | `packages/verify-server-regressions`; PostgreSQL hook and exact Cargo selections preserved. Migration-prefix rehearsals do not satisfy Upgrade. Overlap with `state-machine-tests` remains complex TASK-490.24 work, not solved by relocation. |
+| `checks/builder-evaluator-packaging` | Packaging | relocated | `packages/verify-builder-evaluator-packaging`; wrapper/module contracts preserved. |
+| `checks/web-ui-test-runner` | Dev tooling | relocated | `packages/verify-web-ui-test-runner`; tests the retained host runner without services. |
+| `checks/run-ui-dev-db-check` | Dev tooling | relocated | `packages/verify-run-ui-dev-db-check`; database readiness/worktree script assertions preserved. |
+| `checks/okf-knowledge` | Documentation | relocated | `packages/okf-knowledge`; validation, provenance and diagram audits preserved. |
+| `checks/ui-screenshots` | Mocked screenshots | relocated | `packages/ui-screenshots`; design iteration aid without semantic assertions. |
+| `checks/config-inspector`, `config-observer`, `evaluator-snapshot-isolation`, `verified-source-evaluator-parity`, `nixos-options-metadata`, `niks3-ca-bundle` | Nix/Rust contracts | relocated | Each becomes `packages/verify-<name>`; lower-level assertions preserved outside `checks`. |
+| `checks/builder-cve-contract`, `oscal-export`, `xccdf-schema`, `stig` | Contracts/unit | relocated | Each becomes `packages/verify-<name>`; lower-level assertions preserved outside `checks`. |
+| `checks/test-keys` | Unused placeholders | removed | No executable consumers; not a coverage obligation. |
+| Legacy browser XCCDF XML V1R1 and V1R2 | Immutable fixtures | relocated | `checks/integration-assurance/fixtures/xccdf/`; no `default.nix` and no placeholder check. |
+| CI `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | DB-backed Rust | retained; execution justification provisional | Three process-compose database jobs remain. Fake scanning does not prove real Assurance scanning. Repeated ignored commit tests with `verify-server-regressions` still need consolidation or justification. |
+| CI `legacy-flake-check`, `web-ui-check`, `web-ui-baseline-candidates` | Legacy/manual jobs | removed | Sources and candidate-baseline workflow retired; no replacement pass claimed. |
+| CI `web-ui-screenshots-mr-comment` | Reporter | already removed in early transition | No replacement comment bot. Access exports its own evidence. |
 
 ### Current GitLab selection
 
-The TASK-490.24 early transition changed only the GitLab selection. It deleted no legacy check definition or fixture, and it marked no legacy obligation covered.
+The early transition retained optional manual legacy jobs. The subsequent
+owner-authorized TASK-490.24 source-retirement pass removes them and relocates
+lower-level verification to packages. Neither milestone marks missing coverage
+complete.
 
 | GitLab job | Selection now | Notes |
 | --- | --- | --- |
 | `integration-access` | Automatic and required on merge requests and `main` | Builds the normal owner aggregate `checks.x86_64-linux.integration-access`. Exports `integration-evidence/integration-access/` even when the build fails. |
-| `legacy-flake-check: [integration]`, `[oidc-auth]`, `[niks3-cache]`, `[niks3-write-probe]`, `[niks3-ui]`, `[attic-metrics]`, `[attic-publication]` | Manual, `allow_failure: true` | Same `flake-check` definition and commands. They were `flake-check: [<name>]` before. |
-| `web-ui-check` | Manual, `allow_failure: true` | Same command and artifacts. |
-| `web-ui-baseline-candidates` | Manual, `allow_failure: true` | Unchanged. |
-| `flake-check: [run-ui-dev-db-check]`, `[server-regressions]`, `[nixos-discovery-reliability]`, `[builder-evaluator-packaging]`, `[web-ui-test-runner]`, `[okf-knowledge]` | Automatic | Non-integration checks; unchanged. Temporary retention during migration (`keep (provisional)`), not a final decision. |
+| `legacy-flake-check`, `web-ui-check`, `web-ui-baseline-candidates` | Removed | No optional legacy execution remains. |
+| `package-verification`: `verify-run-ui-dev-db-check`, `verify-server-regressions`, `verify-nixos-discovery-reliability`, `verify-builder-evaluator-packaging`, `verify-web-ui-test-runner`, `okf-knowledge` | Automatic | Native `packages.x86_64-linux.<name>` targets; preserved lower-level verification outside `checks`. |
 | `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | Automatic | Disposable-database and `--ignored` Rust tests; a package build does not replace them. Temporary retention (`keep (provisional)`): any repeated test execution between these jobs and `server-regressions` needs one primary owner or a recorded reason. |
 | `coverage-check`, `complexity-check`, `auto-bump-patch` | Unchanged | Release and version behavior is unchanged. |
 
-Automatic integration coverage is now exactly the sixteen Access cases: five bootstrap cases, five session cases, and six authorization cases (admin-only create, PATCH and configuration denials for Operator and Viewer, and the Viewer UI denial). These obligations have **no automatic integration coverage** until their replacements exist. A person must start the matching manual legacy job to run them:
+Executed automatic integration coverage is exactly the sixteen Access cases:
+five bootstrap, five session, and six authorization cases. The following
+accepted obligations have **no integration owner coverage** until implemented;
+there is no longer a manual legacy fallback:
 
-- Access: registration policy, cross-environment scope, OIDC, forms, preferences, notifications, and shell behavior; authorization beyond the selected admin-only operations. The legacy `oidc-auth` and `web-ui` checks cover part of this.
-- Browser and design breadth that the legacy `web-ui` check exercises.
+- Access: registration policy, cross-environment scope, OIDC, forms, preferences, notifications, shell behavior, and authorization beyond the selected admin-only operations.
+- Accepted browser and design behavior beyond the selected Access proof. Legacy mocked steps are not automatically mandatory requirements.
 - All Delivery obligations: ingestion, builder strategies, Niks3 and Attic publication, activation, rollback.
 - All Assurance obligations.
 - All Upgrade obligations.
 
-This is a deliberate, temporary reduction in automatic coverage. It does not change the dispositions above. Final retirement of a legacy check needs a recorded passing replacement or an explicit decision that removes the requirement.
+This is an explicit owner-authorized coverage gap during construction. Source
+retirement removes implementations; it does not remove accepted obligations or
+claim their replacement passed.
 
-At final cutover (the remaining TASK-490.24 work), after all required owner scenarios pass, the integration CI entry point runs the four owners and checks the four-name allowlist; replaced legacy registrations, their CI selections, and the legacy `web-ui` fixtures (`checks/web-ui/tests/fixtures/*.xml` move beneath `checks/integration-assurance/`) are removed in the same change.
+Final TASK-490.24 completion still requires the three absent owners, complete
+accepted coverage, four passing normal aggregates, the exact four-name
+inventory/CI allowlist, execution-cost evidence, and duplicate-execution
+resolution. Source removal and fixture relocation alone do not satisfy it.
 
 ## Foundation execution record
 

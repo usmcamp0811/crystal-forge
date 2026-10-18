@@ -7,7 +7,6 @@ base and extra settings. A fresh instance of the integration test-flake builder
 proves source realization without running a VM gate. No runner settings are printed.
 """
 
-import copy
 import json
 import os
 from pathlib import Path
@@ -33,32 +32,13 @@ POLICY = [
 ]
 LOCAL_EXECUTION = ["--builders", "", "--max-jobs", "1", "--cores", "2"]
 
-old = yaml.safe_load(subprocess.check_output(
-    ["git", "show", "HEAD:.gitlab-ci.yml"], cwd=ROOT, text=True))
 new = yaml.safe_load((ROOT / ".gitlab-ci.yml").read_text())
-# The manual `legacy-flake-check` job shares the `flake-check` definition, so
-# its routing is still checked here. Only its matrix and scheduling differ.
-MATRIX_NAMES = (new["flake-check"]["parallel"]["matrix"][0]["CHECK_NAME"]
-                + new["legacy-flake-check"]["parallel"]["matrix"][0]["CHECK_NAME"])
+MATRIX_NAMES = new["package-verification"]["parallel"]["matrix"][0]["PACKAGE_NAME"]
 LOCAL_CHECKS = set(MATRIX_NAMES)
-changed = {"flake-check", "web-ui-check", "web-ui-baseline-candidates",
-           "complexity-check", "coverage-check"}
-assert old.keys() == new.keys()
-for job in old:
-    if job not in changed:
-        assert old[job] == new[job], job
-    else:
-        expected = copy.deepcopy({k: v for k, v in old[job].items() if k != "script"})
-        assert expected == {
-            k: v for k, v in new[job].items() if k != "script"}, job
-        expected_scripts = copy.deepcopy(old[job]["script"][1:])
-        if job == "flake-check":
-            # Only the new shipped-UI alias also exports the existing artifacts.
-            # The replacement is idempotent after the CI source is committed.
-            expected_scripts[1] = expected_scripts[1].replace(
-                'if [ "$CHECK_NAME" = "web-ui" ]; then',
-                'if [ "$CHECK_NAME" = "web-ui" ] || [ "$CHECK_NAME" = "niks3-ui" ]; then')
-        assert expected_scripts == new[job]["script"][1:], job
+# Source retirement removes the legacy jobs, not their accepted replacement
+# obligations. Only integration owners belong in the flake check namespace.
+assert not {"flake-check", "legacy-flake-check", "web-ui-check",
+            "web-ui-baseline-candidates"}.intersection(new)
 
 with tempfile.TemporaryDirectory(prefix="cf-ci-policy-") as temporary:
     directory = Path(temporary)
@@ -141,20 +121,19 @@ cores = 4
         assert "127.0.0.1" not in result.stdout + result.stderr
         return result
 
-    route = new["flake-check"]["script"][0]
-    assert new["legacy-flake-check"]["script"][0] == route
+    route = new["package-verification"]["script"][0]
     for name in MATRIX_NAMES:
         result = subprocess.run(["sh", "-euc", route], cwd=ROOT,
-                                env=dict(env, CHECK_NAME=name), capture_output=True, text=True)
+                                env=dict(env, PACKAGE_NAME=name), capture_output=True, text=True)
         assert result.returncode == 0, name
         recorded = json.loads((directory / "argv").read_text())
-        arguments = [f".#checks.x86_64-linux.{name}", "-L", "--show-trace"]
+        arguments = [f".#{name}", "-L", "--show-trace"]
         local = name in LOCAL_CHECKS
         if local:
             arguments.extend(LOCAL_EXECUTION)
-        scoped = name in {"integration", "oidc-auth", "server-regressions", "niks3-cache", "niks3-write-probe", "niks3-ui",
-                          "nixos-discovery-reliability", "attic-metrics", "attic-publication",
-                          "builder-evaluator-packaging"}
+        scoped = name in {"verify-server-regressions",
+                          "verify-nixos-discovery-reliability",
+                          "verify-builder-evaluator-packaging"}
         assert recorded == ["build", *(POLICY if scoped else []), *arguments], name
         assert result.stdout.count("InheritedInternalCache=") == int(scoped), name
         # Query real Nix with the recorded build's exact configuration flags.
@@ -169,21 +148,6 @@ cores = 4
                         .get(setting, inherited_controls[setting]) if local
                         else inherited_controls[setting])
             assert effective == expected, (name, setting)
-    for job in ("web-ui-check", "web-ui-baseline-candidates"):
-        result = subprocess.run(["sh", "-euc", new[job]["script"][0]], cwd=ROOT,
-                                env=env, capture_output=True, text=True)
-        assert result.returncode == 0, job
-        impure = ["--impure"] if job.endswith("candidates") else []
-        local = LOCAL_EXECUTION if job == "web-ui-check" else []
-        assert json.loads((directory / "argv").read_text()) == [
-            "build", *POLICY, *impure, ".#checks.x86_64-linux.web-ui", "-L", "--show-trace", *local]
-        assert result.stdout.count("InheritedInternalCache=true") == 1
-        for setting, inherited in inherited_controls.items():
-            effective = subprocess.check_output(
-                [real_nix, *POLICY, *local, "config", "show", setting], env=env)
-            expected = ({"builders": b"\n", "max-jobs": b"1\n", "cores": b"2\n"}
-                        .get(setting, inherited) if local else inherited)
-            assert effective == expected, (job, setting)
     for job, installable in (("complexity-check", ".#code-metrics.complexity-report"),
                              ("coverage-check", ".#coverage.coverage-report")):
         script = new[job]["script"]
@@ -208,20 +172,20 @@ cores = 4
     for setting in ("require-sigs=true", "fallback=true"):
         assert f"Effective {setting}" in configured.stdout
     (directory / "argv").unlink()
-    assert run([".#checks.x86_64-linux.niks3-cache"], BAD_EFFECTIVE="1").returncode == 1
+    assert run([".#checks.x86_64-linux.integration-access"], BAD_EFFECTIVE="1").returncode == 1
     assert not (directory / "argv").exists()
-    assert run([".#checks.x86_64-linux.niks3-cache"], BUILD_EXIT="17").returncode == 17
+    assert run([".#checks.x86_64-linux.integration-access"], BUILD_EXIT="17").returncode == 17
     # An old CLI rejects config show but supports legacy show-config. Exercise
     # real legacy configuration parsing, including the exact same build argv.
-    result = run([".#checks.x86_64-linux.builder-evaluator-packaging", "-L"], OLD_CLI="1")
+    result = run([".#verify-builder-evaluator-packaging", "-L"], OLD_CLI="1")
     assert result.returncode == 0
     assert result.stdout.count("InheritedInternalCache=true") == 1
     assert json.loads((directory / "argv").read_text()) == [
-        "build", *POLICY, ".#checks.x86_64-linux.builder-evaluator-packaging", "-L"]
+        "build", *POLICY, ".#verify-builder-evaluator-packaging", "-L"]
     assert run(["--check-config"], OLD_CLI="1").returncode == 0
     for mode in ("missing", "empty", "duplicate", "conflict", "malformed", "unsupported"):
         (directory / "argv").unlink(missing_ok=True)
-        assert run([".#checks.x86_64-linux.niks3-cache"],
+        assert run([".#checks.x86_64-linux.integration-access"],
                    OLD_CLI="1", LEGACY_MODE=mode).returncode == 1, mode
         assert not (directory / "argv").exists(), mode
 
@@ -263,7 +227,7 @@ cores = 4
     assert "Effective fallback=true" in built.stdout
 
 print("PASS: modern/legacy Nix policy, inherited builder controls equal=true, "
-      "all matrix and web-ui-check local execution cases equal=true, "
-      "manual baseline inherited controls equal=true, scoped argv, secret redaction, "
+      "package matrix local execution cases equal=true, "
+      "scoped argv, secret redaction, "
       "missing/empty/duplicate/conflicting/unsupported settings, exit status, "
       "real integration fixture source build with signatures and fallback enabled")

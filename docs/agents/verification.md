@@ -29,8 +29,9 @@ nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml -- --check
 nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml
 nix build .#packages.x86_64-linux.server --no-link
 nix build .#packages.x86_64-linux.web-ui --no-link
-nix build .#checks.x86_64-linux.web-ui --no-link
-nix build .#checks.x86_64-linux.ui-screenshots --no-link
+nix build .#checks.x86_64-linux.integration-access --no-link
+nix build .#ui-screenshots --no-link
+nix build .#okf-knowledge --no-link
 nix flake check --keep-going
 ```
 
@@ -51,12 +52,12 @@ web-ui-test 12-systems
 
 Pass more workflow names as separate arguments. The command keeps PostgreSQL,
 the Crystal Forge server, and Dioxus running between invocations. If a workflow
-requires VM-only infrastructure, the command rejects it and prints the
-authoritative NixOS invocation.
+requires retired VM-only infrastructure, the command rejects it and reports
+that the legacy harness is retired.
 
-`web-ui-test` is the fast development feedback loop. The NixOS Web UI check
-remains the reproducible authoritative verification boundary. Host-side
-success does not replace the relevant focused NixOS check before completion.
+`web-ui-test` is the retained development feedback loop, implemented under
+`packages/devScripts/web-ui/`. Its supported host workflows do not replace
+owning integration evidence. The legacy `web-ui` NixOS check is retired.
 
 ### Feature integration
 
@@ -102,13 +103,12 @@ Implemented integration owners run automatically in GitLab. The
 `sh packages/ci/integration-owner-build.sh integration-access`, which builds the
 normal owner aggregate (never a `.run` output) and exports evidence files to
 `integration-evidence/integration-access/`, including after a failed build.
-Retiring legacy integration checks remain available for optional manual
-execution while replacements are constructed: `legacy-flake-check` for
-`integration`, `oidc-auth`, `niks3-cache`, `niks3-write-probe`, `niks3-ui`,
-`attic-metrics`, and `attic-publication`, and `web-ui-check`. Removing a legacy
-check from automatic CI does not mark its obligations covered. Delete its
-definition and fixtures after passing replacement coverage is recorded, or after
-an explicit decision removes the underlying requirement. The
+TASK-490.24 authorizes retirement of the nine legacy suite directories before
+replacement coverage is complete. `legacy-flake-check`, `web-ui-check`, and
+`web-ui-baseline-candidates` are removed. The six retained matrix entries now
+run as `package-verification` using native package targets; the three
+process-compose database Rust jobs remain. The `verify-server-regressions`
+and `state-machine-tests` overlap remains unresolved in TASK-490.24. The
 [coverage map](../knowledge/testing/integration-coverage-map.md#current-gitlab-selection)
 lists the obligations that have no automatic integration coverage.
 
@@ -148,7 +148,7 @@ cases wait for accepted decisions. The Access scenario passed all 16 cases
 `8a857bc872cf331a19036b97a93f2b7741e9728b`, with the VM executed newly; see the
 [authorization record](../knowledge/testing/integration-coverage-map.md#access-authorization-cases-task-4902).
 Validate this
-documentation follow-up with `nix build .#checks.x86_64-linux.okf-knowledge -L`;
+documentation follow-up with `nix build .#okf-knowledge -L`;
 do not rerun a VM merely because documentation follows the tested source.
 
 ## UI evidence
@@ -160,12 +160,28 @@ For a user-visible UI change:
 3. Capture the screenshot and any design comparison from that scenario.
 4. Include it in the MR description or discussion with the tested state identified.
 
-While the legacy `web-ui` check is still registered, also keep it passing for
-the behaviors that the coverage map has not yet replaced. GitLab no longer runs
-it automatically, so start the manual `web-ui-check` job or run the check
-locally when your change touches those behaviors. The lightweight
-`ui-screenshots` helper is useful for iteration but is not integration
-evidence.
+The legacy `web-ui` suite and baseline-candidate job are retired. Its historical
+workflow list is not a mandatory replacement catalog. Accepted requirements
+in the coverage map govern new owner scenarios. `ui-screenshots` remains a
+package for design iteration, without semantic integration proof.
+
+## Final inventory verification
+
+Current inventory after source retirement: one check, `integration-access`,
+versus 27 before retirement. Its 16 executed cases remain unchanged. Delivery,
+Assurance, and Upgrade are absent; retained XML fixtures create no check.
+Final completion requires exactly four TOTAL attributes, plus complete accepted
+coverage and execution evidence. Evaluate the full set (not a filtered subset):
+
+```bash
+nix eval --json .#checks.x86_64-linux --apply builtins.attrNames
+nix eval --json .#checks.x86_64-linux --apply 'c: builtins.attrNames c == [ "integration-access" "integration-assurance" "integration-delivery" "integration-upgrade" ]'
+```
+
+The final predicate must return `true`; a successful evaluation returning
+`false` does not pass final acceptance. Lower-level verification uses
+`nix build .#verify-<name> -L`, with `.#okf-knowledge` and `.#ui-screenshots`
+as the two naming exceptions. These packages are outside `checks`.
 
 ## Output handling
 

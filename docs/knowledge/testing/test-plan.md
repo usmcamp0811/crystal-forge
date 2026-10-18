@@ -212,13 +212,18 @@ nix flake check
 
 ### CI Pipeline
 
-CI runs the `flake-check` matrix and the `integration-access` owner job for
-merge requests and the configured integration branch. The legacy integration
-VM checks (`legacy-flake-check` and `web-ui-check`) are optional manual jobs
-with `allow_failure: true`. See [Crystal Forge flake checks](flake-checks.md) and
+CI runs the `package-verification` matrix and the `integration-access` owner job
+for merge requests and the configured integration branch. TASK-490.24 retires
+the nine legacy suites and removes `legacy-flake-check`, `web-ui-check`, and
+`web-ui-baseline-candidates` with explicit owner approval before replacement
+coverage is complete. The three process-compose database Rust jobs remain;
+overlap with `verify-server-regressions` is unresolved TASK-490.24 work.
+Only Access exists (16 executed cases; one total check versus 27 previously).
+The final target is exactly four total check names and complete accepted
+coverage, without placeholders. See [Crystal Forge flake checks](flake-checks.md) and
 [Web UI check runbook](web-ui-check.md) for the current matrix and browser test
-workflow. CI job configuration is not a test level: the matrix combines
-package builds and NixOS VM checks.
+workflow. CI job configuration is not a test level: the matrix builds native
+verification packages; the owner job builds the registered VM scenario gates.
 
 ### Test Markers
 

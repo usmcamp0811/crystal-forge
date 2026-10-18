@@ -19,7 +19,7 @@ The public onboarding recipe concatenates a private issuing CA and the full
 `pkgs.cacert` OpenSSL/NSS bundle. That union is intentional: the private root
 can authenticate the Niks3 API while public roots authenticate presigned HTTPS
 object-storage targets. This guide does not inspect a deployed private CA or
-its key. See the [reproduction check](../../../checks/niks3-ca-bundle/README.md)
+its key. See the [reproduction check](../../../packages/verify-niks3-ca-bundle/README.md)
 for the public recipe, package origins, measured structure, and verification
 history.
 
@@ -164,8 +164,11 @@ not evidence of malformed certificates. The old ordinary-only reconstruction's
 4942 unexpected lines consist of those 605 annotations, 344 trusted framing
 lines, and 3993 trusted Base64 lines. That number describes parser limitations.
 
-The separate [native integration fixture](../../../checks/niks3-cache/README.md)
-uses three synthetic private roots plus 121 public ordinary roots. Its Save,
+The separate [historical native integration fixture](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/niks3-cache/README.md)
+used three synthetic private roots plus 121 public ordinary roots. TASK-490.24
+retires that suite before replacement coverage is complete. The following
+describes its historical proof boundaries, not an executed Delivery replacement.
+Its Save,
 GET, and CLI-file checks compare the complete canonical 124-root bundle while
 validating and excluding 172 trusted blocks. Zero trusted-only roots may be
 promoted. The fixture also distinguishes ambient trust from selected custom

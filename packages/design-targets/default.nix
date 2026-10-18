@@ -44,7 +44,7 @@ let
       $out/crystal-forge.html
   '';
 
-  parityDir = "${inputs.self}/checks/web-ui/design-parity";
+  parityDir = "${inputs.self}/packages/devScripts/web-ui/design-parity";
 
 # __noChroot = true: Chromium needs /proc and clone(2) which the Nix sandbox
 # blocks. All inputs are still pinned store paths so the result is

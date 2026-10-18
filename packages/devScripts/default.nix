@@ -644,7 +644,7 @@ let
     text = ''
       export NODE_PATH="${pkgs.playwright-test}/lib/node_modules"
       export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
-      exec ${pkgs.bash}/bin/bash ${../../checks/web-ui/tests/web-ui-test.sh} "$@"
+      exec ${pkgs.bash}/bin/bash ${./web-ui/tests/web-ui-test.sh} "$@"
     '';
   };
 

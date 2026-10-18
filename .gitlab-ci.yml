@@ -202,7 +202,9 @@ integration-access:
     - merge_requests
     - main
 
-flake-check: &flake-check
+# Lower-level verification remains automatic without exporting flake checks.
+# The package derivations preserve their test selections and isolated DB hooks.
+package-verification:
   stage: check
   tags:
     - nix
@@ -212,12 +214,12 @@ flake-check: &flake-check
       - runner_system_failure
   parallel:
     matrix:
-      - CHECK_NAME:
-          - run-ui-dev-db-check
-          - server-regressions
-          - nixos-discovery-reliability
-          - builder-evaluator-packaging
-          - web-ui-test-runner
+      - PACKAGE_NAME:
+          - verify-run-ui-dev-db-check
+          - verify-server-regressions
+          - verify-nixos-discovery-reliability
+          - verify-builder-evaluator-packaging
+          - verify-web-ui-test-runner
           - okf-knowledge
   before_script:
     # Create .netrc using CI job token (more secure)
@@ -227,136 +229,18 @@ flake-check: &flake-check
     - chmod 600 ~/.netrc
   script:
     - |
-      case "$CHECK_NAME" in
-        integration|oidc-auth|server-regressions|nixos-discovery-reliability|niks3-cache|niks3-write-probe|niks3-ui|attic-metrics|attic-publication|builder-evaluator-packaging)
+      case "$PACKAGE_NAME" in
+        verify-server-regressions|verify-nixos-discovery-reliability|verify-builder-evaluator-packaging)
           # Bound matrix execution locally while remote Query/Fetch is unhealthy.
-          sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace --builders '' --max-jobs 1 --cores 2
+          sh packages/ci/public-cache-build.sh ".#${PACKAGE_NAME}" -L --show-trace --builders '' --max-jobs 1 --cores 2
           ;;
         *)
-          nix build ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace --builders '' --max-jobs 1 --cores 2
+          nix build ".#${PACKAGE_NAME}" -L --show-trace --builders '' --max-jobs 1 --cores 2
           ;;
       esac
-    # Copy web-ui screenshots out of the Nix build result into the CI workspace
-    - mkdir -p web-ui-screenshots
-    - |
-      if [ "$CHECK_NAME" = "web-ui" ] || [ "$CHECK_NAME" = "niks3-ui" ]; then
-        STORE_PATH=$(readlink -f result)
-        if [ -d "$STORE_PATH/screenshots" ]; then
-          cp -r "$STORE_PATH/screenshots/"* web-ui-screenshots/
-          echo "Copied web-ui screenshots to workspace"
-        else
-          echo "No screenshots found in build result (tests may have failed)"
-        fi
-      fi
-  artifacts:
-    when: always
-    expire_in: 30 days
-    paths:
-      - web-ui-screenshots/
-    expose_as: "Web UI Screenshots"
   only:
     - merge_requests
     - main
-
-# Legacy integration VM checks that the integration owners replace. They stay
-# defined and playable while replacements are built. Skipping them in automatic
-# pipelines does not mean their obligations are covered; see the retirement map
-# in docs/knowledge/testing/integration-coverage-map.md. The job reuses the
-# `flake-check` definition and replaces only its matrix and scheduling.
-legacy-flake-check:
-  <<: *flake-check
-  when: manual
-  allow_failure: true
-  parallel:
-    matrix:
-      - CHECK_NAME:
-          - integration
-          - oidc-auth
-          - niks3-cache
-          - niks3-write-probe
-          - niks3-ui
-          - attic-metrics
-          - attic-publication
-
-# The full VM browser suite remains available for visual regression evidence.
-# It is a legacy check that the integration owners replace, so it runs only when
-# a person starts it. A transient visual baseline failure must not block CI.
-web-ui-check:
-  stage: check
-  tags:
-    - nix
-  when: manual
-  allow_failure: true
-  before_script:
-    - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
-    - echo "login gitlab-ci-token" >> ~/.netrc
-    - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
-    - chmod 600 ~/.netrc
-  script:
-    - |
-      mkdir -p web-ui-screenshots
-      set +e
-      sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.web-ui" -L --show-trace --keep-failed --builders '' --max-jobs 1 --cores 2 \
-        > web-ui-screenshots/nix-build.log 2>&1
-      build_status=$?
-      set -e
-      if [ "$build_status" -ne 0 ]; then
-        build_dir=$(awk -F '"' '/note: keeping build directory/ { path=$2 } END { print path }' web-ui-screenshots/nix-build.log)
-        if [ -n "$build_dir" ] && [ -d "$build_dir/screenshots" ]; then
-          cp -r "$build_dir/screenshots/." web-ui-screenshots/
-          echo "Copied partial web-ui screenshots and browser diagnostics from the failed Nix build"
-        else
-          echo "The failed Nix build did not retain a screenshot directory"
-        fi
-        echo "Web UI Nix check failed with exit $build_status; full build log is an artifact"
-        tail -n 100 web-ui-screenshots/nix-build.log
-        exit "$build_status"
-      fi
-      rm -f web-ui-screenshots/nix-build.log
-      STORE_PATH=$(readlink -f result)
-      if [ -d "$STORE_PATH/screenshots" ]; then
-        cp -r "$STORE_PATH/screenshots/." web-ui-screenshots/
-        echo "Copied web-ui screenshots to workspace"
-      else
-        echo "No screenshots found in successful build result"
-      fi
-  artifacts:
-    when: always
-    expire_in: 30 days
-    paths:
-      - web-ui-screenshots/
-    expose_as: "Web UI Screenshots"
-  only:
-    - merge_requests
-    - main
-
-# Generates reviewable strict-baseline candidates without weakening the normal
-# Web UI gate. Start this job only after a strict visual failure is confirmed as
-# intentional; semantic and critical-workflow failures still fail the job.
-web-ui-baseline-candidates:
-  stage: check
-  tags:
-    - nix
-  allow_failure: true
-  when: manual
-  before_script:
-    - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
-    - echo "login gitlab-ci-token" >> ~/.netrc
-    - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
-    - chmod 600 ~/.netrc
-  script:
-    - CF_UI_UPDATE_BASELINES=1 sh packages/ci/public-cache-build.sh --impure ".#checks.x86_64-linux.web-ui" -L --show-trace
-    - mkdir -p web-ui-baseline-candidates
-    - STORE_PATH=$(readlink -f result)
-    - test -d "$STORE_PATH/screenshots"
-    - cp -r "$STORE_PATH/screenshots/"* web-ui-baseline-candidates/
-  artifacts:
-    expire_in: 30 days
-    paths:
-      - web-ui-baseline-candidates/
-    expose_as: "Web UI Baseline Candidates"
-  only:
-    - merge_requests
 
 # Runs the CVE scan loop processing test (scan_cycle_processes_target_with_fake_runner)
 # via the repo-owned `devScripts.cve-test` process-compose project. That target

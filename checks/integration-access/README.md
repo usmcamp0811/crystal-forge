@@ -87,9 +87,13 @@ decision. An Operator browser view, other Admin routes and visual comparison
 are not covered. OIDC, forms, preferences, notifications, and shell behavior
 also remain in the
 [coverage map](../../docs/knowledge/testing/integration-coverage-map.md).
-GitLab runs this owner automatically and requires it (see below). The legacy
-integration checks are optional manual jobs, and that does not mark their
-obligations covered.
+GitLab runs this owner automatically and requires it (see below). TASK-490.24
+retires the nine legacy suite directories and their manual CI jobs with explicit
+owner approval before replacement coverage is complete. Their removal does not
+mark obligations covered. The current inventory is one total check, down from
+27; the final target is exactly four total `checks.x86_64-linux` attributes.
+Delivery, Assurance, and Upgrade owners are absent. Retained Assurance XML
+fixtures do not register an owner. No placeholder checks are permitted.
 
 The coordinator composes `scenarios/fragments/task-490.2-sessions.py` after
 the five bootstrap cases using `pkgs.writeText` and `builtins.readFile` in
