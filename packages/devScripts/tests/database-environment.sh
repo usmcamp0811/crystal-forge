@@ -7,9 +7,13 @@ set -euo pipefail
 # legacy map-shaped flakes.watched value. They are not test inputs and can
 # override a scoped worker fixture or point it at development services. Remove
 # their names without printing values before configuring this isolated run.
-while IFS= read -r variable; do
+# The SQLx shell's Bash does not provide compgen. A failed command inside
+# process substitution does not fail the consuming loop, so compgen would leave
+# all development overrides intact. Enumerate exported names with coreutils;
+# NUL delimiters preserve values with newlines without printing any values.
+while IFS='=' read -r -d '' variable _; do
   case "$variable" in CRYSTAL_FORGE__*) unset "$variable" ;; esac
-done < <(compgen -v)
+done < <(env -0)
 : "${CF_STATE_MACHINE_DATA_DIR:?Use devScripts.state-machine-test}"
 : "${CF_STATE_MACHINE_PORT:?Use devScripts.state-machine-test}"
 export PGHOST=127.0.0.1 PGPORT="$CF_STATE_MACHINE_PORT"

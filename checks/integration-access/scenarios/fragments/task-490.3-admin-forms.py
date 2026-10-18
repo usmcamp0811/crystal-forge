@@ -19,7 +19,7 @@ def admin_forms_user_state():
     """Reads exact business state, including role and environment assignments."""
     return sql_json(
         controller,
-        "SELECT u.id::text AS id, u.username, u.email, u.is_active, "
+        "SELECT u.id::text AS id, u.username, u.email, u.first_name, u.last_name, u.is_active, "
         "(SELECT coalesce(json_agg(r.role::text ORDER BY r.role), '[]'::json) "
         " FROM user_role_assignments r WHERE r.user_id = u.id) AS roles, "
         "(SELECT coalesce(json_agg(m.environment_id::text ORDER BY m.environment_id), '[]'::json) "
@@ -32,6 +32,7 @@ def admin_forms_assert_user(role, enabled):
     expect_equal(admin_forms_user_state(), [{
         "id": receipts()["adminForms.userId"],
         "username": admin_form_user["username"], "email": admin_form_user["email"],
+        "first_name": admin_form_user["firstName"], "last_name": admin_form_user["lastName"],
         "is_active": enabled, "roles": [role], "environments": [],
     }], "exact persisted Admin-form account, role and all-environment assignment")
 

@@ -120,18 +120,20 @@ exports.run = async (ctx) => {
       await serverTab();
       if (phase === "retry") {
         const policy = config.retryPolicy;
-        await page.getByLabel("Max build retries", { exact: true }).selectOption(String(policy.max_build_retries));
-        await page.getByLabel("Max eval retries", { exact: true }).selectOption(String(policy.max_evaluation_retries));
-        await page.getByLabel("Backoff between attempts", { exact: true }).selectOption(String(policy.backoff_seconds));
+        // These wrapping labels include their select's option text in the
+        // accessible name. Match the authored label prefix, not that suffix.
+        await page.getByLabel(/^Max build retries/).selectOption(String(policy.max_build_retries));
+        await page.getByLabel(/^Max eval retries/).selectOption(String(policy.max_evaluation_retries));
+        await page.getByLabel(/^Backoff between attempts/).selectOption(String(policy.backoff_seconds));
         await page.getByRole("checkbox", { name: /Only retry transient failures/ }).setChecked(policy.transient_only);
         const saved = await mutate("PUT", "/api/v1/admin/automatic-retry-policy",
           () => page.getByRole("button", { name: "Save retry config", exact: true }).click(), 200, phase);
         expect(saved).toEqual(policy);
         await page.reload();
         await serverTab();
-        await expect(page.getByLabel("Max build retries", { exact: true })).toHaveValue(String(policy.max_build_retries));
-        await expect(page.getByLabel("Max eval retries", { exact: true })).toHaveValue(String(policy.max_evaluation_retries));
-        await expect(page.getByLabel("Backoff between attempts", { exact: true })).toHaveValue(String(policy.backoff_seconds));
+        await expect(page.getByLabel(/^Max build retries/)).toHaveValue(String(policy.max_build_retries));
+        await expect(page.getByLabel(/^Max eval retries/)).toHaveValue(String(policy.max_evaluation_retries));
+        await expect(page.getByLabel(/^Backoff between attempts/)).toHaveValue(String(policy.backoff_seconds));
         await expect(page.getByRole("checkbox", { name: /Only retry transient failures/ })).toBeChecked({ checked: policy.transient_only });
       } else {
         const toggle = page.getByRole("switch");

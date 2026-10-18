@@ -677,7 +677,11 @@ let
       set -euo pipefail
 
       export PROJECT_ROOT="''${PROJECT_ROOT:-$PWD}"
-      nix develop "$PROJECT_ROOT#sqlx" -c bash ${./tests/state-machine-tests.sh}
+      : "''${CF_STATE_MACHINE_STATUS_FILE:?Use the isolated state-machine-test launcher}"
+      status=0
+      nix develop "$PROJECT_ROOT#sqlx" -c bash ${./tests/state-machine-tests.sh} || status=$?
+      printf '%s\n' "$status" > "$CF_STATE_MACHINE_STATUS_FILE"
+      exit "$status"
     '';
   };
 
