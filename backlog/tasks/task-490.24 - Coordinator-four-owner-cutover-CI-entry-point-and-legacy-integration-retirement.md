@@ -101,13 +101,29 @@ Current coverage, stated accurately: the Access scenario `lifecycle-local-bootst
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-10-17 organization correction replaces old registration/layout/commands and incomplete-unexported rule. Coordinator writer, not Luna. Only Access exists now; remaining native owner default.nix files require meaningful scenarios, no placeholders. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. All children Backlog, none ready. Future packets need actual dependency commit(s) and verified commands before To Do. TASK-490.20/.21 finer splitting remains a dispatch blocker without scope expansion now. D1/as-built is not authority; uncertain cases await owner decision. No delegation or executed slice is claimed.
+## Current (2026-10-18): early CI transition
 
-Cutover dependencies expanded 2026-10-17 to include the two product blockers discovered by the correct Access foundation slice (TASK-490.25/.26) and the decomposed Assurance work packets (.27-.29). Passing or explicit owner scope approval is still required before retiring the legacy gates. No dependent task is ready.
+Selected and authorized by the owner within this task. Implemented on branch TASK-490.1-integration-foundation (draft MR !335): commit `5e9ee7dfbe2051f8c5cfac157d778076da427687` (CI selection, `packages/ci/integration-owner-build.sh`, Access registration comment) and `2c494ac4bf8cc7155899723ee69fcf879ac49248` (existing CI routing test kept runnable). Later commits are documentation and task records only.
 
-At tested source revision b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56, focused Access VM and `nix build .#checks.x86_64-linux.integration-access -L` both passed. Current runtime evidence is `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. Only the bootstrap slice is covered. TASK-492 records the unrelated one-shot Postgres Jobs first-boot role race; no Access assertion failed.
+Real validation at clean tested revision `2c494ac4bf8cc7155899723ee69fcf879ac49248`:
+- `sh packages/ci/integration-owner-build.sh integration-access` exited 0. The VM was executed newly (24 derivations built, driver log shows `source 2c494ac4…`), not reused. Wall time about 49 s with production packages already in the store.
+- Result: 10 of 10 cases passed (5 bootstrap, 5 session); 292 migrations; `database.unixSocketClients` 25; browser results passed; evidence 994 KB of real files under `integration-evidence/integration-access/`. Run output `/nix/store/cmvnmvc7sbdhd64vj9rd0yqz0iq9lzac-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run`; aggregate `/nix/store/7yijp3qqr4iw6zk2zq1dps1r6f6wqrp7-integration-access`.
+- No real runtime token appears in the exported log or evidence.
+- GitLab's CI linter accepted the file (valid, 23 jobs; the unchanged baseline also has 23). Job table: `integration-access` on_success; 6 `flake-check` entries on_success; 7 `legacy-flake-check` entries manual and `allow_failure: true`; `web-ui-check` and `web-ui-baseline-candidates` manual and `allow_failure: true`; no `web-ui-screenshots-mr-comment`. The linter's dry-run mode returns an empty pipeline for the unchanged baseline too, so it is not usable for simulating `only:` selection.
+- Failure handling exercised with a local `nix` shim (no VM): failed build keeps exit status 17 and copies only existing run outputs; a build with no existing outputs keeps only the log and exits 17; a successful build with a missing evidence link exits 1; the only `nix build` target is the owner aggregate.
+- shellcheck, `sh -n`, and busybox `ash -n` pass on the script. `okf-knowledge` validation is run for the documentation changes.
 
-The Access focused scenario and owner aggregate were repeated at final documentation/comment revision `ade5080cd84c7be057b8f0a9d9c490ed8b1fd3d5`; both pass. The evidence output is `/nix/store/0aavcw4vk32c83gljg8y4mz7gi5pqrn4-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. This repeat verifies the final exact head; it is not evidence for any missing Access contract or other owner.
+Unrelated finding: `packages/ci/test_public_cache_build.py` already fails on the unmodified baseline at its `web-ui-check` argv assertion (stale `--keep-failed` expectation). Its all-13-entry matrix routing loop passes first. Recorded as TASK-493 (Backlog); not fixed here.
 
-After rebase, the current origin/dev base is `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064`. Both focused Access and owner aggregate passed at rebased source `bba718befbc183863781656df2df272e5f735d5a`; evidence `/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. Cutover remains blocked by incomplete Delivery/Assurance/Upgrade owners and D1/D2, not by the Access bootstrap.
+Remaining automatic coverage gaps (deliberate and temporary): authorization, registration policy, OIDC, forms, preferences, notifications, shell, broad browser/design coverage, and all Delivery, Assurance, and Upgrade obligations now have no automatic integration coverage. Their legacy jobs are manual. Nothing is marked covered.
+
+This early milestone does not complete TASK-490.24. Status stays In Progress. The final cutover criteria (#7 to #12) are unmet and untouched. No merge, deployment, or Done transition is authorized.
+
+## Historical (superseded readiness statements)
+
+Before the early transition, the recorded policy was to keep all legacy CI scheduling unchanged until all four owners passed. The owner superseded that for the early milestone. Older records follow.
+
+2026-10-17 organization correction replaced old registration/layout/commands and the incomplete-unexported rule. At that time only Access existed, the foundation was blocked by two Rust package tests, no VM had executed, and all children were Backlog. D1/as-built is not authority; uncertain cases await owner decision. Cutover dependencies were expanded to include TASK-490.25/.26 and the Assurance packets .27 to .29.
+
+Access execution history: bootstrap passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56` (evidence `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-…`), at `ade5080cd84c7be057b8f0a9d9c490ed8b1fd3d5` (`/nix/store/0aavcw4vk32c83gljg8y4mz7gi5pqrn4-…`), and after rebase on `origin/dev` `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064` at `bba718befbc183863781656df2df272e5f735d5a` (`/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-…`). The ten-case result is at `81d65be745cc9f9777d368900d01fe0f207cb052` (`/nix/store/i84kvs1lc5nqx0lmsqinwbmvy0ix8mvh-…`). TASK-492 records the unrelated Postgres Jobs first-boot role race; no Access assertion failed.
 <!-- SECTION:NOTES:END -->
