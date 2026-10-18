@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-18 03:31'
+updated_date: '2026-10-18 13:47'
 labels:
   - testing
   - integration
@@ -26,11 +26,11 @@ ordinal: 512000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-This parent tracks the owner-approved integration-check overhaul into exactly four native Snowfall owners: `integration-access`, `integration-delivery`, `integration-assurance`, and `integration-upgrade`. The coordinator owns contract, coverage/retirement map, shared harness, scenario composition, owner registration, CI integration and acceptance verification. An implementation packet does not automatically receive its own NixOS test derivation; compatible case fragments are composed into a shared scenario. Each separately built scenario has a fresh VM/database. Same-scenario cases may use real prior records/identities through receipts; no runtime state is shared across derivations.
+This parent tracks the owner-approved overhaul into four native Snowfall owners: `integration-access`, `integration-delivery`, `integration-assurance`, and `integration-upgrade`. Coordinator owns contract, coverage/retirement map, shared harness, scenario composition, owner registration, CI integration and acceptance verification. A packet does not automatically get a NixOS derivation; compatible case fragments compose into shared scenarios. Separate scenarios have fresh VMs/databases; same-scenario cases may use earlier real records/identities through receipts; no cross-derivation runtime state is shared.
 
-Normal overhaul scope is test-only. The owner explicitly authorizes only the narrowly bounded production repairs in existing TASK-490.25 and TASK-490.26; keep each in its own commit. No other production functionality, auth policy, migrations, SQLx metadata, UI/assets, or design-handoff change is authorized by this exception. Correct defects remain linked and their assertions executable.
+Normal overhaul scope is test-only. The owner authorized only the bounded production repairs TASK-490.25 and TASK-490.26, separately committed as `52128b3a63175b712f7a83860355fdeec658a230` and `76e514644505f232e4e47f085db801913d8449ab`. No other production, authentication-policy, migration, SQLx, UI or design-handoff changes are authorized by this exception.
 
-Current milestone: TASK-490.25/.26 repairs are separately integrated at `ca46cdd5` / `136348e8`; the focused local bootstrap scenario and `integration-access` owner aggregate passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. Runtime evidence and an independent Postgres Jobs first-boot ordering defect (TASK-492) are recorded in the coverage map. This is only a bootstrap slice, not full Access or four-owner coverage. Access session/forms/navigation/preferences packets and Assurance triage/waiver/register/plan/verification packets are grouped into fewer scenarios with disjoint fragments; the coordinator owns composition. TASK-490.7 owns future roles and Delivery proving work. All child packets remain Backlog until their dependencies, writable paths, placement, interface and command are concrete. Keep all legacy checks until four-owner cutover conditions pass. No merge/deploy/cutover is authorized here.
+After rebasing on `origin/dev` `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064`, the focused Access bootstrap and owner aggregate passed at source `bba718befbc183863781656df2df272e5f735d5a`. This covers only the bootstrap slice. TASK-490.7 owns future shared Delivery roles and proof; D1/D2 remain applicable. TASK-492 is an unrelated Postgres Jobs first-boot role race and is not an Access gate failure. Keep all legacy checks until all four owner aggregates pass. No merge/deploy/cutover is authorized.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
