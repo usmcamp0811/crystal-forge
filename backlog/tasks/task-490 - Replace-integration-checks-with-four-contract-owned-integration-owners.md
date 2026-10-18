@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-18 15:42'
+updated_date: '2026-10-18 17:26'
 labels:
   - testing
   - integration
@@ -39,10 +39,10 @@ CI policy (updated 2026-10-18 by an owner-authorized early transition in TASK-49
 <!-- AC:BEGIN -->
 - [ ] #1 The contract is adopted at docs/knowledge/testing/integration-test-contract.md with accurate implementation_status and directly affected AGENTS.md/verification guidance; as-built D1 is not accepted authority and uncertain cases require an owner decision
 - [ ] #2 The coverage map assigns every accepted obligation one primary owner/scenario, independent expected result, evidence and status; records legacy retirement; states task fragments do not imply VM derivations and explains every separate VM boundary
-- [ ] #3 At final cutover exactly four native Snowfall integration owners exist under checks/integration-{access,delivery,assurance,upgrade}/default.nix using { lib, inputs, pkgs, ... }; non-integration checks retain their attributes and classification
+- [ ] #3 At final cutover exactly four native Snowfall integration owners exist under checks/integration-{access,delivery,assurance,upgrade}/default.nix using { lib, inputs, pkgs, ... } with complete accepted coverage; every other independent flake check or CI test job has a recorded distinct necessary purpose, or is consolidated or removed
 - [ ] #4 Each normal owner is a pkgs.linkFarm aggregate of all explicitly registered scenario gates and propagates every failure; meaningful WIP may be discoverable, with no placeholder owners
 - [ ] #5 Shared helpers use lib/integration-test through lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }; coordinator owns composition/registration and packet case fragments are owner-local/disjoint
-- [ ] #6 Implemented owners run automatically in GitLab and retiring legacy integration checks are optional manual jobs while replacements are built (early transition, TASK-490.24); legacy definitions and fixtures are deleted only after passing replacements are recorded or an explicit decision removes the requirement; correct product assertions stay executable and linked
+- [ ] #6 Implemented owners run automatically in GitLab and retiring legacy integration checks are optional manual jobs while replacements are built (early transition, TASK-490.24); replaced legacy definitions, fixtures and obsolete manual jobs are removed only after passing replacements are recorded or an explicit decision removes the requirement; correct product assertions stay executable and linked
 - [ ] #7 No production code/migration/SQLx/UI/design changes except the separately committed narrow repairs explicitly authorized for TASK-490.25 and TASK-490.26; those repairs do not authorize unrelated product changes
 <!-- AC:END -->
 
@@ -66,4 +66,6 @@ Corrected native-layout WIP was preserved and pushed at `683c86e03ef14b37e69c000
 The foundation resumed on 2026-10-17 in the existing dedicated worktree. It integrated the tested TASK-491 dependency by cherry-pick `af39284bdf16d56402f01a64c916f17948e43b02` as `a6c8922650bf7f0ff643d181422c0092cfc43242`. The exact Access scenario executed in a VM and failed at startup, preserving its assertion. Generated config evidence revealed product blockers TASK-490.25 (local PostgreSQL socket host becomes empty-authority URI) and TASK-490.26 (local auth_mode omitted; AUTH_MODE unset). Assurance packets .20/.21 were narrowed; .27/.28/.29 split waiver, acceptance register, and verify/closure. The per-scenario fresh DB/VM rule says task dependencies never share runtime outputs.
 
 Final combined foundation commit then was `39a6a54b651a8b77fc3416b73195e363a782fa2e`; its focused Access check failed on fresh startup with evidence in `/nix/store/vcfbia521bjad2a85yca3h3n9i4m4ikf-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. The milestone then advanced at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`: the focused Access bootstrap and the owner aggregate passed. TASK-492 records the independent Postgres Jobs first-boot role race found in the journal, outside the .25/.26 exception.
+
+2026-10-18 final minimization rule (recorded in TASK-490.24, the contract and the coverage map): every remaining independent flake check or CI test job must have a distinct necessary purpose. Preserve useful assertions, assign their primary execution ownership, consolidate duplicate execution, and keep developer tools available through package or app outputs. Classification as non-integration alone does not justify a separate check. Checks kept during migration are provisional, not final. Cutover must also show no task-specific VM proliferation under the four aggregates, a reason for repeated Rust/database execution, and the final flake inventory with measured runtime and resource cost. Nothing is deleted arbitrarily before then.
 <!-- SECTION:NOTES:END -->
