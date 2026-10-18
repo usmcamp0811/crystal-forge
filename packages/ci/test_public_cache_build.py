@@ -36,7 +36,11 @@ LOCAL_EXECUTION = ["--builders", "", "--max-jobs", "1", "--cores", "2"]
 old = yaml.safe_load(subprocess.check_output(
     ["git", "show", "HEAD:.gitlab-ci.yml"], cwd=ROOT, text=True))
 new = yaml.safe_load((ROOT / ".gitlab-ci.yml").read_text())
-LOCAL_CHECKS = set(new["flake-check"]["parallel"]["matrix"][0]["CHECK_NAME"])
+# The manual `legacy-flake-check` job shares the `flake-check` definition, so
+# its routing is still checked here. Only its matrix and scheduling differ.
+MATRIX_NAMES = (new["flake-check"]["parallel"]["matrix"][0]["CHECK_NAME"]
+                + new["legacy-flake-check"]["parallel"]["matrix"][0]["CHECK_NAME"])
+LOCAL_CHECKS = set(MATRIX_NAMES)
 changed = {"flake-check", "web-ui-check", "web-ui-baseline-candidates",
            "complexity-check", "coverage-check"}
 assert old.keys() == new.keys()
@@ -152,7 +156,8 @@ cores = 4
         return result
 
     route = new["flake-check"]["script"][0]
-    for name in new["flake-check"]["parallel"]["matrix"][0]["CHECK_NAME"]:
+    assert new["legacy-flake-check"]["script"][0] == route
+    for name in MATRIX_NAMES:
         result = subprocess.run(["sh", "-euc", route], cwd=ROOT,
                                 env=dict(env, CHECK_NAME=name), capture_output=True, text=True)
         assert result.returncode == 0, name
