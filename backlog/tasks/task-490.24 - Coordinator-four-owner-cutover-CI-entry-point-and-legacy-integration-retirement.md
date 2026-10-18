@@ -118,6 +118,8 @@ Source-retirement pass selected by the owner. Resume existing TASK-490.1-integra
 5. Commit and push bounded changes to draft MR !335. Leave final task requirements open; do not merge or deploy.
 
 Delegated browser-asset relocation: move the minimal host web-ui-test and design generator dependency closure from checks/web-ui into packages/devScripts/web-ui; adjust only developer runner and design output references. Preserve imported workflow modules and referenced standalone eval-drawer capture tooling. Remove the static dependency on retired VM default.nix. Run host runner selftest through nix develop plus generator selftests and syntax checks; stage owned files only. Coordinator owns legacy deletion, XML fixture relocation, CI/docs/shared harness and task state.
+
+Scoped package-relocation worker: move the 17 nonintegration definitions to packages/verify-<oldname>, except packages/ui-screenshots and packages/okf-knowledge. Preserve assertions and exact server-regressions PostgreSQL/Cargo selection. Inspect test-key consumers before removal. Update only owned executable references and the three root flake imports for UI screenshots/OKF; report other consumers. Stage new package files; evaluate every drvPath and run feasible lightweight package builds without VM/database services, server-regressions, or screenshot builds. Baseline server-regressions drvPath: /nix/store/cj9yfsfs54v821m2zv659lj8wbl9pxl1-crystal-forge-server-regressions-0.1.0.drv.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
