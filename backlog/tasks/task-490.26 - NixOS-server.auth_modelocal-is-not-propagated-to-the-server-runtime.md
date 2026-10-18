@@ -4,7 +4,7 @@ title: NixOS server.auth_mode=local is not propagated to the server runtime
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 02:47'
+updated_date: '2026-10-18 02:48'
 labels:
   - bug
   - nixos
@@ -47,4 +47,6 @@ Final clean combined source commit 39a6a54b651a8b77fc3416b73195e363a782fa2e repr
 Final exact-head rerun on combined commit fc930335878279ac426510359c039dfd8961dc13 confirms generated [server] omits auth_mode and systemd AUTH_MODE is unset: /nix/store/1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt. The DB URL defect prevented route registration; runtime auth response remains unobserved.
 
 LOCK: claude-sonnet-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation. The user explicitly authorized this narrow production repair on 2026-10-17 and directed that it be committed separately on the TASK-490.1 foundation branch (not a separate worktree).
+
+Repair commit 136348e8 integrates the module-derived AUTH_MODE in the production server unit for both auth choices. Targeted NixOS evaluation returned `{"local":"local","oidc":"oidc"}`. Combined Access VM proof remains pending.
 <!-- SECTION:NOTES:END -->
