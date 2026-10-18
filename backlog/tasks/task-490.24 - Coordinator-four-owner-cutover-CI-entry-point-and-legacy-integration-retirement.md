@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-18 18:36'
+updated_date: '2026-10-18 18:52'
 labels:
   - testing
   - integration
@@ -96,16 +96,12 @@ Final construction remains six planned scenarios across four owners. Extend comp
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-Source-retirement pass selected by the owner. Resume existing TASK-490.1-integration-foundation worktree at 5fa1f4fa; existing openai coordinator lock remains owned by this session. No application changes.
-1. Inspect all external consumers of the nine named legacy suites before deletion. Preserve needed browser developer assets and XCCDF fixtures; remove obsolete suite implementations and manual CI jobs.
-2. Relocate standalone non-integration verification from checks/ to native package outputs with explicit CI commands. Preserve PostgreSQL hooks and all selected Rust regressions; retain only integration owners in checks/. Do not add placeholders or custom discovery.
-3. Update TASK-490, this task, contract and retirement map: final checks.x86_64-linux attrNames must equal the four approved names exactly. Retirement is authorized now without completed replacement coverage; missing accepted obligations remain gaps.
-4. Validate moved imports, retained browser tooling, documentation/schema/Nix package commands, database-regression path and unchanged Access aggregate. Capture actual inventory and any complex deduplication left for this task.
-5. Commit and push bounded changes to draft MR !335. Leave final task requirements open; do not merge or deploy.
-
-Delegated browser-asset relocation: move the minimal host web-ui-test and design generator dependency closure from checks/web-ui into packages/devScripts/web-ui; adjust only developer runner and design output references. Preserve imported workflow modules and referenced standalone eval-drawer capture tooling. Remove the static dependency on retired VM default.nix. Run host runner selftest through nix develop plus generator selftests and syntax checks; stage owned files only. Coordinator owns legacy deletion, XML fixture relocation, CI/docs/shared harness and task state.
-
-Scoped package-relocation worker: move the 17 nonintegration definitions to packages/verify-<oldname>, except packages/ui-screenshots and packages/okf-knowledge. Preserve assertions and exact server-regressions PostgreSQL/Cargo selection. Inspect test-key consumers before removal. Update only owned executable references and the three root flake imports for UI screenshots/OKF; report other consumers. Stage new package files; evaluate every drvPath and run feasible lightweight package builds without VM/database services, server-regressions, or screenshot builds. Baseline server-regressions drvPath: /nix/store/cj9yfsfs54v821m2zv659lj8wbl9pxl1-crystal-forge-server-regressions-0.1.0.drv.
+Clean-slate consolidation iteration selected by latest owner request. Baseline2c34186e, clean existing worktree, same coordinator lock. Earlier one-for-one verify package relocation is rejected and superseded.
+1. Review all15verify packages for unique assertions vs Rust/component/CI owners; measure exact duplicate selections and before drv inventory.
+2. Eliminate verify public outputs. Keep unique component assertions in corresponding ordinary build/test mechanisms or explicit existing CI commands; no new registry/aggregator. Consolidate PostgreSQL regressions into existing isolated state-machine workflow, remove exact repeated work and preserve SQLx privileges/migration rehearsals.
+3. Inventory actual API, Dioxus, configuration, agent/builder/cache/evidence/upgrade product surfaces against accepted authorities; update existing coverage map with truthful dispositions, exact decisions and no old suite authority.
+4. Preserve and execute existing Access scenario. Check dependencies and implement one next runnable existing child coverage slice (Access form success if Delivery prerequisite roles cannot be completed safely in this bounded iteration).
+5. Verify all real commands/statuses; record check/package/job counts, derivation reduction and repeated work removed. Commit bounded changes to draft !335; keep parent and final requirements incomplete.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
