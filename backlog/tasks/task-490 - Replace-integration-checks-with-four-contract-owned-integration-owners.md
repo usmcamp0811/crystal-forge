@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-18 13:47'
+updated_date: '2026-10-18 15:42'
 labels:
   - testing
   - integration
@@ -30,7 +30,9 @@ This parent tracks the owner-approved overhaul into four native Snowfall owners:
 
 Normal overhaul scope is test-only. The owner authorized only the bounded production repairs TASK-490.25 and TASK-490.26, separately committed as `52128b3a63175b712f7a83860355fdeec658a230` and `76e514644505f232e4e47f085db801913d8449ab`. No other production, authentication-policy, migration, SQLx, UI or design-handoff changes are authorized by this exception.
 
-After rebasing on `origin/dev` `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064`, the focused Access bootstrap and owner aggregate passed at source `bba718befbc183863781656df2df272e5f735d5a`. This covers only the bootstrap slice. TASK-490.7 owns future shared Delivery roles and proof; D1/D2 remain applicable. TASK-492 is an unrelated Postgres Jobs first-boot role race and is not an Access gate failure. Keep all legacy checks until all four owner aggregates pass. No merge/deploy/cutover is authorized.
+After rebasing on `origin/dev` `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064`, the focused Access scenario and owner aggregate passed ten cases (five bootstrap, five session) at `81d65be745cc9f9777d368900d01fe0f207cb052`. This covers only the Access bootstrap and selected session slice. TASK-490.7 owns future shared Delivery roles and proof; D1/D2 remain applicable. TASK-492 is an unrelated Postgres Jobs first-boot role race and is not an Access gate failure.
+
+CI policy (updated 2026-10-18 by an owner-authorized early transition in TASK-490.24): implemented integration owners run automatically in GitLab (`integration-access` today, required). Retiring legacy integration checks remain available as optional manual jobs while replacements are constructed. Removing a legacy check from automatic CI does not mark its obligations covered. Delete its definition and fixtures only after passing replacement coverage is recorded, or after an explicit decision removes the underlying requirement. This supersedes the earlier instruction to keep all legacy CI scheduling unchanged until all four owners pass. It is a deliberate, temporary reduction in automatic integration coverage; the gaps are listed in the coverage map. The final four-owner cutover and legacy source retirement remain outstanding in TASK-490.24. No merge, deployment or Done transition is authorized.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -40,7 +42,7 @@ After rebasing on `origin/dev` `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064`, the f
 - [ ] #3 At final cutover exactly four native Snowfall integration owners exist under checks/integration-{access,delivery,assurance,upgrade}/default.nix using { lib, inputs, pkgs, ... }; non-integration checks retain their attributes and classification
 - [ ] #4 Each normal owner is a pkgs.linkFarm aggregate of all explicitly registered scenario gates and propagates every failure; meaningful WIP may be discoverable, with no placeholder owners
 - [ ] #5 Shared helpers use lib/integration-test through lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }; coordinator owns composition/registration and packet case fragments are owner-local/disjoint
-- [ ] #6 Legacy checks and CI are retired only after passing replacements or owner-approved scope change; correct product assertions stay executable and linked
+- [ ] #6 Implemented owners run automatically in GitLab and retiring legacy integration checks are optional manual jobs while replacements are built (early transition, TASK-490.24); legacy definitions and fixtures are deleted only after passing replacements are recorded or an explicit decision removes the requirement; correct product assertions stay executable and linked
 - [ ] #7 No production code/migration/SQLx/UI/design changes except the separately committed narrow repairs explicitly authorized for TASK-490.25 and TASK-490.26; those repairs do not authorize unrelated product changes
 <!-- AC:END -->
 
@@ -62,4 +64,6 @@ Foundation resumed on 2026-10-17 in the existing dedicated worktree. Integrated 
 Final combined foundation commit is 39a6a54b651a8b77fc3416b73195e363a782fa2e. The focused native Access check executed a VM and failed on fresh startup; exact evidence is in docs/knowledge/testing/integration-coverage-map.md and store output `/nix/store/vcfbia521bjad2a85yca3h3n9i4m4ikf-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. TASK-490.25/.26 are explicit product blockers; no production changes were made. All dependent packets remain Backlog, not ready.
 
 The milestone advanced at b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56: both the focused Access bootstrap and current Access owner aggregate passed, using one VM result. Only the local bootstrap slice is covered; all other owner obligations remain outstanding. TASK-492 records the independent Postgres Jobs first-boot role race found in the journal, outside the .25/.26 exception. The canonical description now corrects the historic scope and readiness notes.
+
+2026-10-18 early CI transition (TASK-490.24, owner-authorized): `integration-access` is an automatic required GitLab job; `integration`, `oidc-auth`, `niks3-cache`, `niks3-write-probe`, `niks3-ui`, `attic-metrics`, `attic-publication` and `web-ui-check` are optional manual jobs. The job script passed all ten Access cases with the VM executed newly at `2c494ac4bf8cc7155899723ee69fcf879ac49248`. Authorization, registration-policy, OIDC, broad UI/design, Delivery, Assurance and Upgrade now have no automatic integration coverage; TASK-490.2 and the other owners remain incomplete. Final four-owner cutover and legacy source retirement are outstanding. The earlier note that all legacy checks are kept until all four owners pass applies to source retirement only.
 <!-- SECTION:NOTES:END -->
