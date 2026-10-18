@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-17 23:57'
+updated_date: '2026-10-18 00:15'
 labels:
   - testing
   - integration
@@ -28,15 +28,15 @@ ordinal: 512000
 <!-- SECTION:DESCRIPTION:BEGIN -->
 The current integration layer mixes about 14 VM checks and a 26.9k-line browser suite. Many browser steps use route mocks; OIDC completion, real scanner evidence, real activation, and a binary old-version upgrade are incomplete. This parent tracks the owner-approved test-only overhaul into exactly four native Snowfall owners: integration-access, integration-delivery, integration-assurance, integration-upgrade.
 
-Contract source: /home/mcamp/code/crystal-forge/crystal-forge-integration-test-contract.md, adopted at docs/knowledge/testing/integration-test-contract.md. The corrected organization is native Snowfall: checks/integration-{access,delivery,assurance,upgrade}/default.nix with {lib,inputs,pkgs,...}; child scenarios and assets are owner-local; shared helpers are lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness {pkgs,inputs}. Explicit coordinator registration and normal pkgs.linkFarm aggregation are required. No root tests/, legacyPackages, custom discovery or placeholder owners. Non-integration checks and legacy CI gates remain.
+Contract source: /home/mcamp/code/crystal-forge/crystal-forge-integration-test-contract.md, adopted at docs/knowledge/testing/integration-test-contract.md. Native organization: checks/integration-{access,delivery,assurance,upgrade}/default.nix with {lib,inputs,pkgs,...}; scenarios/assets are owner-local; shared helpers at lib/integration-test through lib.crystal-forge.makeIntegrationTestHarness {pkgs,inputs}. Explicit coordinator registration and pkgs.linkFarm aggregate all registered gates. No root tests/, legacyPackages, custom discovery or placeholder owners. Existing legacy CI gates remain.
 
-Test-only boundary: no production functionality changes, Rust implementation changes, migrations, SQLx metadata, module semantics, UI assets, or docs/design/CrystalForge edits. Production defects remain linked Backlog tasks with executable assertions; they are not fixed by this parent.
+Strict scope: test-only. No production functionality, Rust implementation, migrations, SQLx metadata, NixOS module behavior, UI assets, or docs/design/CrystalForge changes. Correct product defects stay executable and linked to Backlog bugs, not fixed in this overhaul.
 
-Current foundation: native Access scenario has executed on combined source commit a6c8922650bf7f0ff643d181422c0092cfc43242 (TASK-491 prerequisite cherry-picked). The run fails before migrations/HTTP: generated database host `/run/postgresql` becomes an empty-authority PostgreSQL URI; generated config also omits auth_mode and the service has AUTH_MODE unset. Evidence and exact command are recorded in docs/knowledge/testing/integration-coverage-map.md. Product defects TASK-490.25/.26 are Backlog and not implemented. The Access assertion remains. TASK-491 package repair is in MR !336; normal package check passes, but this does not make the Access scenario pass.
+Current foundation: clean combined commit fc930335878279ac426510359c039dfd8961dc13 integrates tested TASK-491 prerequisite af39284bdf16d56402f01a64c916f17948e43b02. The exact Access VM command ran but failed before migrations/HTTP on the normal NixOS module configuration. Evidence: /nix/store/1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/. Generated PostgreSQL socket host causes an empty-host URI; generated auth_mode is absent and AUTH_MODE unset. Product blockers TASK-490.25/.26 are Backlog and not implemented. The Access assertion remains correct and failing; this is not a passing owner.
 
-Packet corrections: all scenario runs have fresh VM/database state; dependencies provide code or fixture definitions, never runtime rows, sessions, IDs, or outputs. Assurance triage (.20), plan creation (.21), finding waiver (.27), acceptance register (.28), and POA&M verification/closure (.29) have distinct task boundaries. All child packets remain Backlog; none is dispatch-ready until the product configuration blockers, a successful tested foundation dependency, accepted authority, implemented helpers/roles, explicit registration and focused commands are verified.
+Every scenario runs with a fresh VM/database. Task dependencies provide code/fixture prerequisites only; runtime rows, sessions, receipts, and successful outputs are never shared. Assurance task boundaries .20/.21/.27/.28/.29 separate triage, POA&M plan entry, finding waiver, acceptance register, and verification/closure. All child tasks remain Backlog; no Luna dispatch or readiness. Upgrade support decision remains blocked.
 
-Coordinator-owned paths: owner default.nix registration, lib/integration-test, flake/CI, canonical contract/map and directly affected agent/testing docs. Child writers use exclusive scenario and fixture paths. TASK-490.7 and .24 are coordinator tasks. Overhaul branch: TASK-490.1-integration-foundation, based on origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd; current combined work is in the dedicated TASK-490.1 branch. No merge/deploy is authorized. Parent remains In Progress; final cutover and Done are blocked until all required owners pass or the owner explicitly changes scope.
+Coordinator owns owner registrations, shared lib, flake/CI wiring, canonical contract/map and affected docs. TASK-490.7/.24 are coordinator tasks. Branch TASK-490.1-integration-foundation is based on origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd. No merge or deployment is authorized. Parent remains In Progress; cutover requires every complete owner to pass or explicit owner scope change.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
