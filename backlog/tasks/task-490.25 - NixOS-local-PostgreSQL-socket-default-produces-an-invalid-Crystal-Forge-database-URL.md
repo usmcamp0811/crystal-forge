@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 03:30'
+updated_date: '2026-10-18 03:33'
 labels:
   - bug
   - nixos
@@ -27,11 +27,11 @@ ordinal: 538000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Repair the active `cf_config::config::DatabaseConfig` serializer used by the running cf-server. Preserve the documented NixOS Unix socket default `/run/postgresql`; do not switch to TCP. The server config module reexports this cf-config type. The similarly named `cf-server/src/config/database.rs` is not in the active module graph and must remain untouched unless the import graph proves otherwise.
+Repair the active `cf_config::config::DatabaseConfig` serializer used by the running cf-server. Preserve the documented NixOS Unix socket default `/run/postgresql`; do not switch to TCP. The server config module reexports this cf-config type. The similarly named `cf-server/src/config/database.rs` is not in the active module graph and remains untouched.
 
-The fix belongs in the shared serializer so both tokio_postgres connection validation and SQLx pool creation receive the intended configuration. Keep database clients in cf-server; cf-config may use URI encoding support but must not depend on either DB client. The regression table must call the real serializer, parse each result with both clients, and assert recovered values for socket, ordinary TCP, and space/literal-plus/reserved-character values on a nondefault port. Do not change NixOS database.host to TCP.
+The shared serializer serves both tokio_postgres connection validation and the SQLx pool. Database-client dependencies remain in cf-server; cf-config uses only URI encoding support. The regression table calls the real serializer, parses each output through both clients, and asserts recovered socket, ordinary TCP, and encoding-sensitive values including space/literal-plus/reserved characters with nondefault port.
 
-This repair is separately committed from TASK-490.1 test/doc work. The user explicitly authorized it on 2026-10-17. Current commits: `ca46cdd5` serializer + two-client round-trip tests; combined package/Access verification remains in progress. Keep the original startup assertion; coordinator owns combined VM and owner verification.
+Separately committed as `ca46cdd584c7cef6071d1ee3662453faa51912b6`. Targeted two-client tests passed. The combined Access scenario passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`; evidence `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/` shows the production module's `/run/postgresql` host, successful startup and migrations. The normal Access aggregate also passed. The coordinator recorded unrelated first-boot Postgres Jobs defect TASK-492; it is not authorized under this repair.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
