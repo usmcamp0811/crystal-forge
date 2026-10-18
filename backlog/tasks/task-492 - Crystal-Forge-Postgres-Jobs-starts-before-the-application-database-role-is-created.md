@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-18 03:24'
+updated_date: '2026-10-18 13:45'
 labels:
   - bug
   - nixos
@@ -35,3 +36,9 @@ Observed during the real Access VM at tested revision `b1095c8f2bb2db16d79a2980b
 - [ ] #2 The Postgres jobs service completes successfully after normal module database setup
 - [ ] #3 The fix preserves the job runner's intended execution behavior without silently dropping or duplicating jobs
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+The same one-shot role-setup failure was observed again in the rebased Access VM at `bba718befbc183863781656df2df272e5f735d5a`: `/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/crystal-forge.journal`. The Access gate still passes because the normal setup creates the role immediately afterward; no repair is in TASK-490 scope.
+<!-- SECTION:NOTES:END -->
