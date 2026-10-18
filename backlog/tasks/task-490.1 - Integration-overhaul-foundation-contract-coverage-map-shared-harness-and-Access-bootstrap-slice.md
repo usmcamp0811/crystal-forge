@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-18 03:27'
+updated_date: '2026-10-18 03:31'
 labels:
   - testing
   - integration
@@ -86,6 +86,10 @@ Foundation slice execution is now verified as an actual VM run, with a failing c
 Contract/coverage docs now explicitly state each scenario has a fresh VM and DB; dependencies share immutable code/fixture definitions only, never runtime outputs. Map adds contract IDs for finding waivers, acceptance register, POA&M plan entry and POA&M verification/closure; legacy CI manual baseline and screenshot-report jobs are classified. Assurance packets .20/.21 are narrowed and .27/.28/.29 separate their start states/authority; they all remain Backlog. The cutover task depends on product blockers and decomposed scenarios. Remaining foundation blockers: independent role implementations/proving scenario and any further harness defects; local server startup product defects prevent successful Access/browser result.
 
 Final recorded scenario run at committed combined source revision 39a6a54b651a8b77fc3416b73195e363a782fa2e (not dirty): exact command `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`; VM exit was failure at `fresh-startup-applies-migrations`, after ~19s. Evidence `/nix/store/vcfbia521bjad2a85yca3h3n9i4m4ikf-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. Generated config summary and system journal confirm TASK-490.25 database URI failure and absent AUTH_MODE; migrations, browser, and HTTP did not run. No local auth HTTP response claimed. Correct assertion retained and linked defects remain Backlog. Final `okf-knowledge` passed (58 tests, 191 concepts, 216 Mermaid blocks); native check inventory remains 27 with only integration-access new; flake wiring unchanged. Foundation remains In Progress and not passing.
+
+Combined Access milestone passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. Focused command `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L` passed; aggregate command `nix build .#checks.x86_64-linux.integration-access -L` passed and reused the focused gate (no extra VM). Evidence `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`: all five cases pass, 285 migrations, module socket `/run/postgresql`, unit `AUTH_MODE=local`, setup-status local/empty, first Admin browser register/sign-in/reload, one persisted session, wrong password rejected without new session/cookie. Screenshot `browser/bootstrap-sign-in/signed-in-after-reload.png`.
+
+The same journal shows independent `crystal-forge-postgres-jobs.service` failure before module role setup (`FATAL: role \"crystal_forge\" does not exist`); task TASK-492 records it. This does not fail the Access gate and is outside the .25/.26 authorization. Access bootstrap alone does not complete the Access contract or other owners.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
