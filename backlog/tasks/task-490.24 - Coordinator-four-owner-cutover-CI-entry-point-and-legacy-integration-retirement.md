@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-18 17:43'
+updated_date: '2026-10-18 18:00'
 labels:
   - testing
   - integration
@@ -107,6 +107,17 @@ Current coverage, stated accurately: the Access scenario `lifecycle-local-bootst
 - [ ] #12 [Final cutover] Coordinator explicitly registers child scenarios and maintains shared lib/CI/docs; scripts/fixtures/assets are owner-local, no root tests/, legacyPackages.integration, mkOwner, custom discovery, complete=true export switch or placeholder owners; meaningful WIP discovery is permitted before cutover
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Source-retirement pass selected by the owner. Resume existing TASK-490.1-integration-foundation worktree at 5fa1f4fa; existing openai coordinator lock remains owned by this session. No application changes.
+1. Inspect all external consumers of the nine named legacy suites before deletion. Preserve needed browser developer assets and XCCDF fixtures; remove obsolete suite implementations and manual CI jobs.
+2. Relocate standalone non-integration verification from checks/ to native package outputs with explicit CI commands. Preserve PostgreSQL hooks and all selected Rust regressions; retain only integration owners in checks/. Do not add placeholders or custom discovery.
+3. Update TASK-490, this task, contract and retirement map: final checks.x86_64-linux attrNames must equal the four approved names exactly. Retirement is authorized now without completed replacement coverage; missing accepted obligations remain gaps.
+4. Validate moved imports, retained browser tooling, documentation/schema/Nix package commands, database-regression path and unchanged Access aggregate. Capture actual inventory and any complex deduplication left for this task.
+5. Commit and push bounded changes to draft MR !335. Leave final task requirements open; do not merge or deploy.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
@@ -133,4 +144,6 @@ Before the early transition, the recorded policy was to keep all legacy CI sched
 2026-10-17 organization correction replaced old registration/layout/commands and the incomplete-unexported rule. At that time only Access existed, the foundation was blocked by two Rust package tests, no VM had executed, and all children were Backlog. D1/as-built is not authority; uncertain cases await owner decision. Cutover dependencies were expanded to include TASK-490.25/.26 and the Assurance packets .27 to .29.
 
 Access execution history: bootstrap passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56` (evidence `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-…`), at `ade5080cd84c7be057b8f0a9d9c490ed8b1fd3d5` (`/nix/store/0aavcw4vk32c83gljg8y4mz7gi5pqrn4-…`), and after rebase on `origin/dev` `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064` at `bba718befbc183863781656df2df272e5f735d5a` (`/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-…`). The ten-case result is at `81d65be745cc9f9777d368900d01fe0f207cb052` (`/nix/store/i84kvs1lc5nqx0lmsqinwbmvy0ix8mvh-…`); the first CI-script run of ten cases is at `2c494ac4` (`/nix/store/cmvnmvc7sbdhd64vj9rd0yqz0iq9lzac-…`). TASK-492 records the unrelated Postgres Jobs first-boot role race; no Access assertion failed.
+
+The owner now explicitly authorizes deleting legacy check definitions before all four owners are complete. Prior retention-until-passing-replacement instructions are superseded for this source-removal pass. Final inventory means exactly four TOTAL flake check attributes, not four owners plus non-integration checks. Baseline eval count: 27; active worktree clean at 5fa1f4fa.
 <!-- SECTION:NOTES:END -->
