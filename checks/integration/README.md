@@ -67,14 +67,17 @@ Phase END runs in `finally`; pytest failures retain their original exit status.
 
 ## CI
 
-Part of the `.gitlab-ci.yml` `flake-check` matrix (`CHECK_NAME: integration`),
-so it runs on every merge request and on `main`.
+An optional manual job in `.gitlab-ci.yml`: `legacy-flake-check: [integration]`
+(`CHECK_NAME: integration`, `allow_failure: true`). It no longer runs
+automatically on merge requests or `main`. The integration-owner overhaul
+replaces this check; the automatic `integration-access` job does not cover its
+obligations. See the [current GitLab selection](../../docs/knowledge/testing/integration-coverage-map.md#current-gitlab-selection).
 
-CI runs this same attribute through `packages/ci/public-cache-build.sh` with
-`--builders '' --max-jobs 1 --cores 2`. All `flake-check` matrix entries receive
-these local execution arguments, preserving each entry's existing cache policy.
-The required complexity and coverage launchers and the optional `web-ui-check`
-job use the same local limits. Their execution must not depend on output retrieval
+When started, CI runs this same attribute through `packages/ci/public-cache-build.sh` with
+`--builders '' --max-jobs 1 --cores 2`. All `flake-check` and `legacy-flake-check`
+matrix entries receive these local execution arguments, preserving each entry's
+existing cache policy. The required complexity and coverage launchers and the
+optional `web-ui-check` job use the same local limits. Their execution must not depend on output retrieval
 from the failing remote builder. The Web UI job retains its public-cache wrapper;
 the manual baseline and separate functional jobs retain inherited builder controls.
 These limits apply only to the named CI commands. Production builders are unaffected.

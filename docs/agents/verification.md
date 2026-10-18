@@ -95,8 +95,22 @@ Only Access is currently discoverable. Its coordinator-owned
 attribute set. The normal check uses `pkgs.linkFarm` to build all registered
 scenario gates. Meaningful WIP checks may be discoverable; there is no
 completeness flag. A passing registered subset does not prove missing
-obligations. Legacy checks and CI selection remain unchanged until all
-required owner scenarios pass.
+obligations.
+
+Implemented integration owners run automatically in GitLab. The
+`integration-access` job is required on merge requests and `main`. It runs
+`sh packages/ci/integration-owner-build.sh integration-access`, which builds the
+normal owner aggregate (never a `.run` output) and exports evidence files to
+`integration-evidence/integration-access/`, including after a failed build.
+Retiring legacy integration checks remain available for optional manual
+execution while replacements are constructed: `legacy-flake-check` for
+`integration`, `oidc-auth`, `niks3-cache`, `niks3-write-probe`, `niks3-ui`,
+`attic-metrics`, and `attic-publication`, and `web-ui-check`. Removing a legacy
+check from automatic CI does not mark its obligations covered. Delete its
+definition and fixtures after passing replacement coverage is recorded, or after
+an explicit decision removes the underlying requirement. The
+[coverage map](../knowledge/testing/integration-coverage-map.md#current-gitlab-selection)
+lists the obligations that have no automatic integration coverage.
 
 Shared helpers live in `lib/integration-test/`; native Snowfall checks call
 `lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }`. An
@@ -127,8 +141,11 @@ Postgres Jobs ordering defect that does not fail the Access gate. The
 [coverage map](../knowledge/testing/integration-coverage-map.md#foundation-execution-record)
 records the failures, current receipts, and uploaded reviewer artifacts.
 TASK-490.1 foundation is in `Review`; its documentation validation passed.
-TASK-490.2 remains `In Progress` with role/environment/closed-registration cases
-unimplemented and their exact expectations blocked under D1. Validate this
+TASK-490.2 remains `In Progress`: the Operator/Viewer cases are unimplemented,
+and only the exact environment-scope and closed-registration cases wait for
+accepted decisions. The same Access scenario passed ten cases through the CI job
+script at `2c494ac4bf8cc7155899723ee69fcf879ac49248`, with the VM executed
+newly. Validate this
 documentation follow-up with `nix build .#checks.x86_64-linux.okf-knowledge -L`;
 do not rerun a VM merely because documentation follows the tested source.
 
@@ -142,7 +159,9 @@ For a user-visible UI change:
 4. Include it in the MR description or discussion with the tested state identified.
 
 While the legacy `web-ui` check is still registered, also keep it passing for
-the behaviors that the coverage map has not yet replaced. The lightweight
+the behaviors that the coverage map has not yet replaced. GitLab no longer runs
+it automatically, so start the manual `web-ui-check` job or run the check
+locally when your change touches those behaviors. The lightweight
 `ui-screenshots` helper is useful for iteration but is not integration
 evidence.
 

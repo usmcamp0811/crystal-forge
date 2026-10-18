@@ -50,8 +50,11 @@ directly against Keycloak and the server's HTTP API, not through a browser.
 
 ## CI
 
-Part of the `.gitlab-ci.yml` `flake-check` matrix (`CHECK_NAME: oidc-auth`),
-so it runs on every merge request and on `main`.
+An optional manual job in `.gitlab-ci.yml`: `legacy-flake-check: [oidc-auth]`
+(`CHECK_NAME: oidc-auth`, `allow_failure: true`). It no longer runs
+automatically on merge requests or `main`. The planned `access.lifecycle.oidc`
+scenario will replace it, and the automatic `integration-access` job does not
+cover its obligations.
 
 ## Related files
 

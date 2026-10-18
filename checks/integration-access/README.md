@@ -78,7 +78,11 @@ restrictions, and closed-registration cases are unimplemented, with exact
 expectations blocked under D1. OIDC, forms, preferences, notifications,
 and shell behavior also remain in the
 [coverage map](../../docs/knowledge/testing/integration-coverage-map.md).
-Legacy checks and required CI selection remain unchanged.
+In Operator/Viewer terms, the denial cases are unimplemented; only the exact
+environment-scope and closed-registration expectations wait for decisions.
+GitLab runs this owner automatically and requires it (see below). The legacy
+integration checks are optional manual jobs, and that does not mark their
+obligations covered.
 
 The coordinator composes `scenarios/fragments/task-490.2-sessions.py` after
 the five bootstrap cases using `pkgs.writeText` and `builtins.readFile` in
@@ -91,8 +95,42 @@ failed the last UI case due to the coach overlay and unhandled-promise test
 mechanics. The passing correction closes the real coach control and uses
 `Promise.all` for click/response coordination; assertions remain intact.
 Keep runtime-token logs private; the corrected header stays in a VM file.
-TASK-490.1 foundation is ready for review pending final documentation validation.
-This documentation-only follow-up does not require another VM run.
+TASK-490.1 foundation is in `Review`; its documentation validation passed.
+Documentation follow-ups do not require another VM run.
+
+## GitLab CI
+
+The `integration-access` job in `.gitlab-ci.yml` runs automatically on merge
+requests and `main` and is required. It runs:
+
+```bash
+sh packages/ci/integration-owner-build.sh integration-access
+```
+
+The script builds the normal owner aggregate with
+`sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.integration-access" -L --show-trace --builders '' --max-jobs 1 --cores 2`.
+It never builds a `.run` output as the gate. A `.run` output can build
+successfully while its `result.json` records a failed scenario.
+
+Evidence goes to `integration-evidence/integration-access/`, uploaded with
+`artifacts: when: always`:
+
+- `nix-build.log` — the complete build output.
+- `<scenario>/` — real files, not Nix store symlinks: `result.json`,
+  `meta.json`, `browser/` (results, screenshots, console logs), and
+  `journals/`.
+
+After a successful build, the script copies `result/<scenario>/evidence/`. If
+the build succeeded but evidence is missing, the job fails. After a failed
+build, the `result` link does not exist. The script then resolves each
+registered scenario's `.run.outPath` through evaluation and copies only outputs
+that already exist. It never builds a `.run` derivation, because a crash or
+timeout could run the VM again and replace the original attempt's evidence. It
+always exits with the original build status. The scenario names come from the
+owner's own `scenarios` attribute set; the script keeps no second list.
+
+Run the same script locally from the repository root. It removes a stale
+`result` link and writes `integration-evidence/`, which Git ignores.
 
 Shared mechanics live under `lib/integration-test/`, exposed through
 `lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }`.

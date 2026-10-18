@@ -37,7 +37,7 @@ Most current behavior is described by `docs/knowledge/` concepts with `implement
 
 No provisional authority is granted by D1. Implemented knowledge concepts are as-built evidence, not accepted requirements. Review-draft design documents also do not approve domain behavior. A scenario must cite an accepted requirement or explicit owner decision for its expectations. Uncertain cases remain `blocked: decision` pending the owner's decision; a `planned` row below identifies intended work, not approval of its expected result. Where an approved source exists, that source controls the expectation even if current code differs.
 
-The owner's explicit TASK-490.2 session-proof selection authorizes the five session cases below. This scoped authority does not resolve D1 for Operator/Viewer admin denials and unavailable UI states, environment-scope restrictions, or closed-registration rejection. Those cases are unimplemented and remain blocked on their exact accepted expectations.
+The owner's explicit TASK-490.2 session-proof selection authorizes the five session cases below. The concrete Operator/Viewer admin-denial cases (create, PATCH, and config requests rejected without row changes; no usable Viewer admin mutation in the UI) are unimplemented. They are not blocked as a group. Two decisions remain unresolved, and each blocks only its own case: the exact cross-environment endpoint and scope rule, and the closed-registration policy for an existing user with `allow_registration = false`.
 
 ## Harness interface
 
@@ -56,7 +56,7 @@ Shared helpers and registration points:
 | `checks/integration-access/scenarios/<name>.{nix,py,cjs}` | One Access scenario. Coordinator owns the scenario `.nix`, Python composition, and explicit registration. Packet tasks write disjoint Python/browser case fragments and fixtures under `scenarios/fragments/` or `fixtures/`; one packet does not imply one test derivation. |
 | `checks/integration-access/scenarios/fragments/task-490.2-sessions.{py,cjs}` | Selected session cases. The scenario `.nix` appends the Python fragment after bootstrap with `pkgs.writeText` and `builtins.readFile`, and registers the browser fragment as `session-sign-out`. No new DSL, gate, or role. |
 
-Registration is explicit and coordinator-owned; there is no custom discovery or completeness flag. The normal `checks.x86_64-linux.integration-access` check builds every gate in its `scenarios` attribute set. Meaningful WIP checks may be discoverable; only Access currently is. An implementation packet does not automatically get a NixOS test derivation. Compatible packet cases are fragments composed by the coordinator into a shared scenario using the existing Nix, Python, and browser-script structure. Missing obligations remain in this map. Future Delivery, Assurance, and Upgrade scenarios, fixtures, and assets all belong beneath `checks/integration-{delivery,assurance,upgrade}/`. Do not create placeholder `default.nix` files. Legacy checks and CI selection remain unchanged until all required owner scenarios pass.
+Registration is explicit and coordinator-owned; there is no custom discovery or completeness flag. The normal `checks.x86_64-linux.integration-access` check builds every gate in its `scenarios` attribute set. Meaningful WIP checks may be discoverable; only Access currently is. An implementation packet does not automatically get a NixOS test derivation. Compatible packet cases are fragments composed by the coordinator into a shared scenario using the existing Nix, Python, and browser-script structure. Missing obligations remain in this map. Future Delivery, Assurance, and Upgrade scenarios, fixtures, and assets all belong beneath `checks/integration-{delivery,assurance,upgrade}/`. Do not create placeholder `default.nix` files. GitLab runs each implemented owner automatically (today only `integration-access`). The retiring legacy checks are optional manual jobs; see [Current GitLab selection](#current-gitlab-selection). Source retirement waits until all required owner scenarios pass.
 
 Scenario file contract (`<name>.nix`):
 
@@ -134,7 +134,7 @@ Focused verification attributes are concrete even before their scenario files ar
 | --- | --- | --- | --- | --- |
 | `access.lifecycle.local-bootstrap` | `integration-access/scenarios/lifecycle-local-bootstrap` | Module `auth_mode = "local"` yields local mode; migrations applied = forward migration files in source; application-role client backends use Unix sockets; first registrant persists with only `admin`; one session after sign-in survives reload; wrong password returns 401 with no session row or cookie. | DB rows, browser result, reload screenshot, generated-config summary, filtered `pg_stat_activity` | `covered` at `81d65be745cc9f9777d368900d01fe0f207cb052`; original five cases unchanged, 292 migrations, 22 socket clients |
 | `access.lifecycle.sessions` | `integration-access/scenarios/lifecycle-local-bootstrap`; `scenarios/fragments/task-490.2-sessions.{py,cjs}` | Owner-selected proof: missing/mismatched CSRF on DELETE returns 403 with session lifecycle rows unchanged; valid CSRF returns 204 and invalidates only the selected row; its next GET returns 401 while the retained session returns 200. Independent browser profile Sign out returns logout 204, persists exact-row invalidation, survives reload at `/login`, rejects protected GET with 401, and redirects protected navigation to `/login`. | Exact `user_sessions` before/after, retained/revoked/browser receipts, browser result and screenshot | `covered` at `81d65be745cc9f9777d368900d01fe0f207cb052`; five appended cases passed under the owner's session selection |
-| `access.lifecycle.authorization` | `integration-access/scenarios/lifecycle-local-bootstrap` (remaining TASK-490.2 cases) | Pending D1: exact Operator/Viewer admin denials and unavailable UI states, environment-scope restrictions, and no protected write on denial. | DB before/after, browser state | `blocked: decision`; cases unimplemented |
+| `access.lifecycle.authorization` | `integration-access/scenarios/lifecycle-local-bootstrap` (remaining TASK-490.2 cases) | Operator/Viewer admin create, PATCH, and config requests are rejected without row changes, and Viewer has no usable admin mutation in the UI. Cross-environment denials need the exact endpoint and scope rule (pending D1). No protected write on denial. | DB before/after, browser state | `planned`: Operator/Viewer cases unimplemented. `blocked: decision`: only the exact environment-scope cases |
 | `access.lifecycle.registration-closed` | `integration-access/scenarios/lifecycle-local-bootstrap` (remaining TASK-490.2 cases) | Pending D1: with `allow_registration = false` and an existing user, a second registration does not create a user. | DB `users` count | `blocked: decision`; case unimplemented (code reading suggests a defect; not executed) |
 | `access.lifecycle.oidc` | `integration-access/scenarios/lifecycle-oidc` (TASK-490.6 fragment) | Authorization-code sign-in through a local OIDC provider creates a CF session; group mapping yields the mapped role and environment scope. | Provider and CF DB rows, browser trace | `planned` (needs `services` role) |
 | `access.configuration.admin` | `integration-access/scenarios/lifecycle-local-bootstrap` (TASK-490.3 fragment) | Admin users, classification, and retry-policy forms persist and survive reload; cancel discards; a failed save keeps the draft. | DB rows, reload read | `planned` |
@@ -222,19 +222,21 @@ Verified in code at the baseline: cache types `S3`, `Attic`, `Niks3`, `Http`, `N
 
 ## Legacy retirement map
 
-Disposition values: `replace` (retire after the required owner scenarios pass), `keep` (non-integration check; keeps its own attribute), `duplicate`, `obsolete`. Legacy checks and CI selection remain unchanged until all required owner scenarios pass.
+Disposition values: `replace` (retire after the required owner scenarios pass), `keep` (non-integration check; keeps its own attribute), `duplicate`, `obsolete`. A disposition describes final source retirement. It does not describe the current GitLab selection, which is a separate decision recorded in [Current GitLab selection](#current-gitlab-selection).
+
+Policy: implemented integration owners run automatically in GitLab. Retiring legacy integration checks remain available for optional manual execution while replacements are constructed. Removing a legacy check from automatic CI does not mark its obligations covered. Delete its definition and fixtures after passing replacement coverage is recorded, or after an explicit decision removes the underlying requirement.
 
 | Legacy check or job | Kind | Disposition | Replacement owner / scenario or reason |
 | --- | --- | --- | --- |
-| `checks/web-ui` (CI `web-ui-check`, allow_failure) | Integration, browser | `replace` | Access, Delivery, Assurance browser scenarios. 105 of 181 steps use route mocks; mocked steps are not carried forward as integration proof. Authentic real-API steps (03/05 registration and login, 13h force-push, 20aa/20ab/20ad/20af, 21–25, 29g–29m, 30b/30d/30e) map to `access.*`, `delivery.evaluation.ingestion`, `delivery.publication.*`, `assurance.*`. |
-| `checks/niks3-ui` (CI matrix) | Integration | `duplicate` | Re-runs web-ui step 25 and export phases; replaced by `delivery.publication.niks3`. |
+| `checks/web-ui` (CI `web-ui-check`, manual, allow_failure) | Integration, browser | `replace` | Access, Delivery, Assurance browser scenarios. 105 of 181 steps use route mocks; mocked steps are not carried forward as integration proof. Authentic real-API steps (03/05 registration and login, 13h force-push, 20aa/20ab/20ad/20af, 21–25, 29g–29m, 30b/30d/30e) map to `access.*`, `delivery.evaluation.ingestion`, `delivery.publication.*`, `assurance.*`. |
+| `checks/niks3-ui` (CI manual) | Integration | `duplicate` | Re-runs web-ui step 25 and export phases; replaced by `delivery.publication.niks3`. |
 | `checks/web-ui-reconciliation` | Browser, fully mocked | `obsolete` | Every API response mocked; replaced by `assurance.policy.stig-import`. |
-| `checks/integration` (CI matrix) | Integration | `replace` | `delivery.evaluation.ingestion` (polling, webhook, branches), `delivery.activation.*` (agent accept, desired target). Grafana and SQL-view assertions are not product integration obligations (Grafana is optional/legacy). |
-| `checks/oidc-auth` (CI matrix) | Integration, shallow | `replace` | `access.lifecycle.oidc` (adds callback, session, mapping). |
-| `checks/niks3-cache` (CI matrix) | Integration | `replace` | `delivery.publication.niks3`, `delivery.build.strategies`. Seeded queue rows are replaced by real evaluation. |
-| `checks/niks3-write-probe` (CI matrix) | Integration | `replace` | `delivery.publication.niks3` (connection Test boundary). |
-| `checks/attic-metrics` (CI matrix) | Integration | `replace` | `delivery.publication.variants` (Attic). |
-| `checks/attic-publication` (CI matrix) | Component | `replace` | `delivery.publication.variants` (Attic publication scope). |
+| `checks/integration` (CI manual) | Integration | `replace` | `delivery.evaluation.ingestion` (polling, webhook, branches), `delivery.activation.*` (agent accept, desired target). Grafana and SQL-view assertions are not product integration obligations (Grafana is optional/legacy). |
+| `checks/oidc-auth` (CI manual) | Integration, shallow | `replace` | `access.lifecycle.oidc` (adds callback, session, mapping). |
+| `checks/niks3-cache` (CI manual) | Integration | `replace` | `delivery.publication.niks3`, `delivery.build.strategies`. Seeded queue rows are replaced by real evaluation. |
+| `checks/niks3-write-probe` (CI manual) | Integration | `replace` | `delivery.publication.niks3` (connection Test boundary). |
+| `checks/attic-metrics` (CI manual) | Integration | `replace` | `delivery.publication.variants` (Attic). |
+| `checks/attic-publication` (CI manual) | Component | `replace` | `delivery.publication.variants` (Attic publication scope). |
 | `checks/nixos-discovery-reliability` (CI matrix) | Nix contract, no VM | `keep` | Non-integration evaluator contract. |
 | `checks/server-regressions` (CI matrix) | DB-backed Rust | `keep` | Non-integration. Migration-prefix rehearsals do not satisfy `upgrade.continuity`. |
 | `checks/builder-evaluator-packaging` (CI matrix) | Packaging | `keep` | Non-integration. |
@@ -247,9 +249,33 @@ Disposition values: `replace` (retire after the required owner scenarios pass), 
 | `checks/test-keys` | Not a check | `obsolete` | Keys are embedded elsewhere; remove at cutover if unused. |
 | CI `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | DB-backed Rust | `keep` | Non-integration; the fake scanner runner does not satisfy `assurance.scanning.cve`. |
 | CI `web-ui-baseline-candidates` | Manual visual-maintenance job; not a blocking integration gate | `keep` during coexistence; retire or explicitly rebind at cutover | It produces candidate baselines for legacy `web-ui`; it does not establish a passing integration owner. |
-| CI `web-ui-screenshots-mr-comment` | MR artifact/reporting job; not a gate | `keep` during coexistence; update/retire with `web-ui-check` at cutover | Its current screenshot source is legacy `web-ui-check`; replacement owner artifacts need an explicit coordinator update. |
+| CI `web-ui-screenshots-mr-comment` | MR artifact/reporting job; not a gate | `obsolete`; removed from `.gitlab-ci.yml` by the TASK-490.24 early transition | Its only screenshot source was `web-ui-check`, which is now manual. The manual job keeps its downloadable artifacts, and `integration-access` exports its own evidence. No replacement comment bot exists. |
 
-At cutover (TASK-490.24), after all required owner scenarios pass, the integration CI entry point runs the four owners and checks the four-name allowlist; replaced legacy registrations, their CI selections, and the legacy `web-ui` fixtures (`checks/web-ui/tests/fixtures/*.xml` move beneath `checks/integration-assurance/`) are removed in the same change.
+### Current GitLab selection
+
+The TASK-490.24 early transition changed only the GitLab selection. It deleted no legacy check definition or fixture, and it marked no legacy obligation covered.
+
+| GitLab job | Selection now | Notes |
+| --- | --- | --- |
+| `integration-access` | Automatic and required on merge requests and `main` | Builds the normal owner aggregate `checks.x86_64-linux.integration-access`. Exports `integration-evidence/integration-access/` even when the build fails. |
+| `legacy-flake-check: [integration]`, `[oidc-auth]`, `[niks3-cache]`, `[niks3-write-probe]`, `[niks3-ui]`, `[attic-metrics]`, `[attic-publication]` | Manual, `allow_failure: true` | Same `flake-check` definition and commands. They were `flake-check: [<name>]` before. |
+| `web-ui-check` | Manual, `allow_failure: true` | Same command and artifacts. |
+| `web-ui-baseline-candidates` | Manual, `allow_failure: true` | Unchanged. |
+| `flake-check: [run-ui-dev-db-check]`, `[server-regressions]`, `[nixos-discovery-reliability]`, `[builder-evaluator-packaging]`, `[web-ui-test-runner]`, `[okf-knowledge]` | Automatic | Non-integration checks; unchanged. |
+| `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | Automatic | Disposable-database and `--ignored` Rust tests; a package build does not replace them. |
+| `coverage-check`, `complexity-check`, `auto-bump-patch` | Unchanged | Release and version behavior is unchanged. |
+
+Automatic integration coverage is now exactly the ten Access cases: five bootstrap cases and five session cases. These obligations have **no automatic integration coverage** until their replacements exist. A person must start the matching manual legacy job to run them:
+
+- Access: authorization, registration policy, OIDC, forms, preferences, notifications, and shell behavior. The legacy `oidc-auth` and `web-ui` checks cover part of this.
+- Browser and design breadth that the legacy `web-ui` check exercises.
+- All Delivery obligations: ingestion, builder strategies, Niks3 and Attic publication, activation, rollback.
+- All Assurance obligations.
+- All Upgrade obligations.
+
+This is a deliberate, temporary reduction in automatic coverage. It does not change the dispositions above. Final retirement of a legacy check needs a recorded passing replacement or an explicit decision that removes the requirement.
+
+At final cutover (the remaining TASK-490.24 work), after all required owner scenarios pass, the integration CI entry point runs the four owners and checks the four-name allowlist; replaced legacy registrations, their CI selections, and the legacy `web-ui` fixtures (`checks/web-ui/tests/fixtures/*.xml` move beneath `checks/integration-assurance/`) are removed in the same change.
 
 ## Foundation execution record
 
@@ -307,3 +333,19 @@ The browser result reports `passed`, the exact browser-session receipt above, fi
 TASK-490.1 foundation is in `Review`; all seven bounded foundation criteria and documentation validation passed. TASK-490.2 remains `In Progress`: Operator/Viewer cases are unimplemented; exact cross-environment scope and closed-registration policy cases await their accepted decisions. These documentation-only follow-ups occur after the tested source and do not require another VM run.
 
 All runtime journals record a separate `crystal-forge-postgres-jobs.service` first-boot failure because its configured role is not created yet. The module setup creates the role shortly afterward, so the server and Access cases succeed. TASK-492 records this unrelated startup-order defect; it is outside the authorization for TASK-490.25/.26 and is not an Access gate assertion. Do not claim all Access obligations or the other owners are covered by this bootstrap slice.
+
+### Access through the GitLab job script
+
+Tested source: `2c494ac4bf8cc7155899723ee69fcf879ac49248`, the TASK-490.24 early CI transition on a clean tree. The exact script that the `integration-access` job runs:
+
+```bash
+sh packages/ci/integration-owner-build.sh integration-access
+```
+
+It builds the normal owner aggregate through `packages/ci/public-cache-build.sh` and exited 0. This run **executed the VM**; it did not reuse an earlier result. The source revision changed, so Nix built 24 derivations including the scenario `vm-test-run` derivation. The driver log records `source 2c494ac4…`. The whole job took about 49 seconds because the production packages were already in the Nix store. The scenario recorded 17.6 seconds of case time.
+
+The scenario `result.json` reports `status: passed` with the same ten cases as above, 292 migrations, and fresh runtime identities. `database.unixSocketClients` was 25 in this run, and `admin.userId` was `893003e2-edb7-4513-a6c7-f2f2e44d451f`. Both browser results report `passed`. The owner aggregate is `/nix/store/7yijp3qqr4iw6zk2zq1dps1r6f6wqrp7-integration-access`. Its run output is `/nix/store/cmvnmvc7sbdhd64vj9rd0yqz0iq9lzac-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run`.
+
+The exported workspace directory `integration-evidence/integration-access/` held 994 KB of real files: `nix-build.log` and, under `lifecycle-local-bootstrap/`, `result.json`, `meta.json`, both browser results, both screenshots, console logs, and the controller journals. A search found no real runtime token in the build log or evidence. The only inline `x-csrf-token` value is the deliberately fake mismatched-token literal; the real header stays in a VM file. The script also passed three local exercises with a `nix` shim: a failed build keeps its exit status, copies only run outputs that already exist, and never builds a `.run` derivation; a successful build with a missing evidence link exits 1.
+
+This record covers only the CI path for the Access subset. It is not evidence for the legacy checks' obligations or for any other owner.

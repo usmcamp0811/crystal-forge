@@ -212,9 +212,10 @@ nix flake check
 
 ### CI Pipeline
 
-CI runs the `flake-check` matrix for merge requests and the configured
-integration branch. It also defines a separate `web-ui-check` job with
-`allow_failure: true`. See [Crystal Forge flake checks](flake-checks.md) and
+CI runs the `flake-check` matrix and the `integration-access` owner job for
+merge requests and the configured integration branch. The legacy integration
+VM checks (`legacy-flake-check` and `web-ui-check`) are optional manual jobs
+with `allow_failure: true`. See [Crystal Forge flake checks](flake-checks.md) and
 [Web UI check runbook](web-ui-check.md) for the current matrix and browser test
 workflow. CI job configuration is not a test level: the matrix combines
 package builds and NixOS VM checks.

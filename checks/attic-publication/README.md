@@ -86,7 +86,9 @@ outside this check's changes.
 
 ## CI and current verification status
 
-`flake-check: [attic-publication]` is a blocking matrix job. It uses the existing
+`legacy-flake-check: [attic-publication]` is an optional manual job
+(`allow_failure: true`); it was a blocking `flake-check` matrix job before the
+TASK-490.24 early CI transition. It uses the existing
 command-local public-cache wrapper with bounded downloads, source fallback, and
 required signatures. This policy does not change native fixture authentication.
 

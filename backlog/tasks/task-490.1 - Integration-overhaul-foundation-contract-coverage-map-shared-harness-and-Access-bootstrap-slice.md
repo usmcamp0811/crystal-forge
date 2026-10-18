@@ -7,7 +7,7 @@ status: Review
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-18 14:39'
+updated_date: '2026-10-18 15:42'
 labels:
   - testing
   - integration
@@ -50,7 +50,7 @@ AC #7 is complete for the immediately reachable controller Access packets .2/.3/
 - [x] #3 lib/integration-test exposes lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs } with a documented controller role, production package selection, facts/receipts, bounded waits, fault injection, pinned rendering and failure artifacts; future services/builder/target roles and proving remain in TASK-490.7
 - [x] #4 checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicitly registers lifecycle-local-bootstrap and aggregates all registered gates with pkgs.linkFarm; scripts/fixtures/assets stay owner-local
 - [x] #5 Focused checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap executes in a real VM with baseline updating disabled and failure propagation; exact command, revision, outcome and evidence are recorded, including linked defects where applicable
-- [x] #6 Native discovery exposes meaningful Access WIP without requiring completion; no root tests/, legacyPackages.integration, mkOwner, custom discovery or placeholder owners are added; legacy checks remain until cutover
+- [x] #6 Native discovery exposes meaningful Access WIP without requiring completion; no root tests/, legacyPackages.integration, mkOwner, custom discovery or placeholder owners are added; legacy check definitions and fixtures remain until final retirement (their automatic CI selection was changed separately by the owner-authorized TASK-490.24 early transition)
 - [x] #7 Immediately reachable controller Access packets .2/.3/.4 are inspected and record tested pin 81d65be745cc9f9777d368900d01fe0f207cb052, concrete harness/facts/receipts, disjoint fragments, lifecycle-local-bootstrap placement, coordinator composition/registration ownership, focused command and exact readiness gaps; .2 sessions is verified under explicit user authority; preparation does not require future Delivery/Assurance/Upgrade dependencies
 <!-- AC:END -->
 
@@ -98,6 +98,12 @@ Coordinator handoff note: TASK-491 package test repair is integrated in commit a
 created: 2026-10-18 14:39
 ---
 Current review record (2026-10-18): the earlier 2026-10-17 failure comment is historical. Focused Access and owner aggregate PASS at 81d65be745cc9f9777d368900d01fe0f207cb052 with 10 cases, 292 migrations and database.unixSocketClients=22. All seven foundation criteria, including inspected .2/.3/.4 controller packets, are verified. TASK-490.1 is Review in existing draft MR !335, not Done. .2 remains In Progress for unimplemented authorization; .3/.4 remain unselected Backlog. Final evidence and uploaded artifacts are recorded in notes.
+---
+
+author: openai
+created: 2026-10-18 15:42
+---
+Early CI transition note (2026-10-18): AC #6 means legacy check definitions and fixtures remain until final retirement. Their automatic CI selection was changed separately by the owner-authorized TASK-490.24 early transition (integration-access automatic and required; the legacy integration jobs optional manual). The 2026-10-17 comment above that says no packet is ready is historical. This does not change the foundation's seven verified criteria.
 ---
 <!-- COMMENTS:END -->
 

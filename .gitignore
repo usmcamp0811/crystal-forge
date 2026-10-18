@@ -167,3 +167,5 @@ packages/slides/themes/slidev-theme-neversink
 design-shots/
 .tmp/
 test-results/
+# Integration owner evidence exported by packages/ci/integration-owner-build.sh.
+integration-evidence/

@@ -93,8 +93,19 @@ Nix/Python/browser-script structure. A separately built scenario gets a fresh
 VM/database; same-scenario cases may use receipts from earlier real workflows.
 Future Delivery, Assurance, and Upgrade scenarios, fixtures, and assets belong
 beneath `checks/integration-{delivery,assurance,upgrade}/`. Do not create
-placeholder `default.nix` files or custom discovery. Legacy checks and CI
-selection remain unchanged until all required owner scenarios pass.
+placeholder `default.nix` files or custom discovery.
+
+GitLab runs each implemented owner automatically: the `integration-access`
+job builds the normal owner aggregate and is required on merge requests and
+`main`. The retiring legacy integration checks stay defined and playable as
+optional manual jobs: `integration`, `oidc-auth`, `niks3-cache`,
+`niks3-write-probe`, `niks3-ui`, `attic-metrics`, and `attic-publication` run
+as `legacy-flake-check: [<name>]`, and `web-ui` runs as `web-ui-check`. Removing a legacy
+check from automatic CI does not mark its obligations covered. Delete its
+definition and fixtures after passing replacement coverage is recorded, or
+after an explicit decision removes the underlying requirement. The
+[coverage map](integration-coverage-map.md#current-gitlab-selection) lists the
+automatic coverage gaps.
 
 Run the focused Access gate with
 `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`.
@@ -110,14 +121,18 @@ Access coverage or the other owners. The same VM journal records unrelated
 TASK-492. See the
 [foundation execution record](integration-coverage-map.md#foundation-execution-record)
 for the generated configuration, exact output path, expected/actual result,
-and task links. TASK-491's package test prerequisite is resolved. Keep all
-legacy gates until full owner cutover conditions pass.
+and task links. TASK-491's package test prerequisite is resolved. The CI job
+script `sh packages/ci/integration-owner-build.sh integration-access` also
+executed the VM and passed the same ten cases at
+`2c494ac4bf8cc7155899723ee69fcf879ac49248`; it exports real evidence files
+to `integration-evidence/integration-access/`, including after a failed build.
+Keep the legacy gate definitions until full owner cutover conditions pass.
 
 ## Summary
 
 | Check | Boots a VM | Covers | README |
 | --- | --- | --- | --- |
-| `integration-access` | Yes (controller; ten-case gate passed) | Local bootstrap, 292 migrations, 22 observed socket clients, registration/sign-in/reload, wrong-password rejection, selected-session CSRF/revocation and independent browser sign-out; role/environment/registration cases remain unimplemented | [Coverage map](integration-coverage-map.md) |
+| `integration-access` | Yes (controller; ten-case gate passed; automatic and required in GitLab) | Local bootstrap, 292 migrations, 22 observed socket clients, registration/sign-in/reload, wrong-password rejection, selected-session CSRF/revocation and independent browser sign-out; role/environment/registration cases remain unimplemented | [Coverage map](integration-coverage-map.md) |
 | `integration` | Yes (server and git server) | Server, database, and Grafana dashboard behavior through the `cf_test` pytest markers `database`, `dashboard`, and `server` | [README](../../../checks/integration/README.md) |
 | `oidc-auth` | Yes (Keycloak and server) | OIDC login path against a real Keycloak realm | [README](../../../checks/oidc-auth/README.md) |
 | `web-ui` | Yes (server, agent, builder, git server) | Production embedded-UI server through a real browser | [README](../../../checks/web-ui/README.md) |
@@ -154,7 +169,9 @@ README: [checks/integration/README.md](../../../checks/integration/README.md).
   does not exercise OIDC.
 - **Run it.** `nix build .#checks.x86_64-linux.integration --print-build-logs`.
   The global timeout in `default.nix` is 1200 seconds.
-- **CI.** Listed in the `.gitlab-ci.yml` `flake-check` matrix.
+- **CI.** Optional manual `legacy-flake-check: [integration]` job
+  (`allow_failure: true`) in `.gitlab-ci.yml`. It does not run automatically.
+  Its obligations are not covered by `integration-access`.
 
 ### `oidc-auth`
 
@@ -173,7 +190,9 @@ README: [checks/oidc-auth/README.md](../../../checks/oidc-auth/README.md).
   `checks/oidc-auth/realm-crystal-forge.json`.
 - **Run it.** `nix build .#checks.x86_64-linux.oidc-auth --print-build-logs`.
   The global timeout in `default.nix` is 600 seconds.
-- **CI.** Listed in the `.gitlab-ci.yml` `flake-check` matrix.
+- **CI.** Optional manual `legacy-flake-check: [oidc-auth]` job
+  (`allow_failure: true`) in `.gitlab-ci.yml`. It does not run automatically.
+  Its obligations are not covered by `integration-access`.
 
 ### `server-regressions`
 
@@ -282,13 +301,13 @@ exact-test guard. Progress adds no heartbeat, command-argument dump, environment
 dump, or `--nocapture`. Earlier aggregate compilation output did not identify a
 hung target or the cause of a remote failure; these boundaries aid future diagnosis.
 
-For the three matrix entries `server-regressions`, `niks3-cache`, and
+For the checks `server-regressions`, `niks3-cache`, and
 `builder-evaluator-packaging`, current CI invokes
 `bash packages/ci/public-cache-build.sh` before the normal build attribute.
-The full `web-ui-check` and optional manual `web-ui-baseline-candidates` jobs use
-the same wrapper; the full browser job remains `allow_failure: true`, and the
-candidate job remains manual and optional. Other matrix entries keep their
-existing commands. This is command-local policy, not removal of organization
+The `integration-access` job, the full `web-ui-check` job, and the
+`web-ui-baseline-candidates` job use the same wrapper. The full browser job and
+the candidate job are manual and optional (`allow_failure: true`).
+Other matrix entries keep their existing commands. This is command-local policy, not removal of organization
 caches from global configuration or a change to the application's Attic access.
 The wrapper validates public-only substituters, empty extra substituters, and
 rejection of flake-supplied cache settings. It bounds connection attempts to
@@ -338,9 +357,12 @@ README: [checks/niks3-cache/README.md](../../../checks/niks3-cache/README.md).
    certificate and log-audit limits and the
    [completion API](../api/builder-job-lifecycle-api.md#post-apiv1buildersidjobsjob_idcomplete)
    for guarded HTTP 200/202 receipts and bounded callback recovery.
-- **CI.** Blocking `flake-check: [niks3-cache]` matrix job on merge requests and
-  `main`, using the `nix` runner tag in `.gitlab-ci.yml`; its runner must supply KVM.
-  Matrix membership establishes neither check's pass for a particular commit.
+- **CI.** Optional manual `legacy-flake-check: [niks3-cache]` job
+  (`allow_failure: true`) on merge requests and `main`, using the `nix` runner
+  tag in `.gitlab-ci.yml`; its runner must supply KVM. It was a blocking
+  `flake-check` matrix job before the TASK-490.24 early transition. A manual
+  job establishes no pass for a particular commit, and its obligations are not
+  covered by `integration-access`.
 
 ## Web UI checks
 
@@ -380,14 +402,18 @@ procedural guide is the [Web UI check runbook](web-ui-check.md).
   (interactive only; boots Attic and S3 cache VMs and runs legacy pytest
   phases).
 - **CI.** The check runs through the separate `web-ui-check` job. That job is
-  currently `allow_failure: true`.
+  an optional manual job with `allow_failure: true`; it does not run
+  automatically. The automatic `web-ui-screenshots-mr-comment` reporter was
+  removed. Its obligations are not covered by `integration-access`.
 
 `checks/web-ui/default.nix` sets `globalTimeout = 3000` and
 `playwrightResultTimeout ? 2700`. `.gitlab-ci.yml` runs the Web UI check as a
-separate `web-ui-check` job with `allow_failure: true`. The `flake-check`
-matrix includes `integration`, `oidc-auth`, `run-ui-dev-db-check`,
-`server-regressions`, `niks3-cache`, `builder-evaluator-packaging`,
-`web-ui-test-runner`, and `okf-knowledge`.
+separate manual `web-ui-check` job with `allow_failure: true`. The automatic
+`flake-check` matrix is `run-ui-dev-db-check`, `server-regressions`,
+`nixos-discovery-reliability`, `builder-evaluator-packaging`,
+`web-ui-test-runner`, and `okf-knowledge`. The manual `legacy-flake-check`
+matrix is `integration`, `oidc-auth`, `niks3-cache`, `niks3-write-probe`,
+`niks3-ui`, `attic-metrics`, and `attic-publication`.
 
 ### `web-ui/baselines`
 

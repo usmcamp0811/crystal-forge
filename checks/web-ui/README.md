@@ -779,10 +779,13 @@ upload suite passed. Existing review exceptions remain unchanged.
 
 ## CI
 
-Part of the `.gitlab-ci.yml` `flake-check` matrix (`CHECK_NAME: web-ui`), so
-it runs on every merge request and on `main`. Its screenshots are copied
-into CI artifacts and posted as an MR comment by the separate
-`web-ui-screenshots-mr-comment` job. `web-ui-baseline-candidates` is a
+Runs in CI as the separate `web-ui-check` job, which is optional and manual
+(`when: manual`, `allow_failure: true`) since the TASK-490.24 early CI
+transition; it no longer runs automatically on merge requests or `main`. Its
+screenshots are copied into that job's CI artifacts. The automatic
+`web-ui-screenshots-mr-comment` job was removed, and no replacement comment bot
+exists. The automatic `integration-access` job does not cover this check's
+obligations. `web-ui-baseline-candidates` is a
 manual, allow-failure job that runs this same check with
 `CF_UI_UPDATE_BASELINES=1` to produce reviewable baseline candidates.
 The full browser job log is retained as an artifact if the Nix build fails.
@@ -809,7 +812,9 @@ size cap.
 
 ## Blocking Niks3 UI acceptance alias
 
-`flake-check: [niks3-ui]` is a blocking job that imports this same production
+`legacy-flake-check: [niks3-ui]` is an optional manual job (`allow_failure: true`;
+it was a blocking `flake-check` job before the TASK-490.24 early CI transition)
+that imports this same production
 embedded-Dioxus UI check with `testSteps = "25-caches-modal-attic"`. The existing
 argument controls native provider startup, late fixture seeding, browser selection,
 semantic assertions, and captures together. The alias preserves all Attic and

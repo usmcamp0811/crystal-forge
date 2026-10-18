@@ -17,13 +17,16 @@ and preserves the exact evaluator Nix when the CLI starts a child process.
 
 ## CI
 
-The `.gitlab-ci.yml` `flake-check` matrix includes `CHECK_NAME: niks3-cache`.
-The generated job `flake-check: [niks3-cache]` is blocking on merge requests and
-`main`, uses the existing `nix` runner tag, and builds
-`.#checks.x86_64-linux.niks3-cache`. The assigned runner must provide KVM to the
-Nix builder. Report the exact job's runner or KVM failure; a fixture run or
-another check does not replace this gate. Matrix membership and earlier local
-runs do not establish a pass for the exact commit under review.
+The `.gitlab-ci.yml` `legacy-flake-check` matrix includes `CHECK_NAME: niks3-cache`.
+The generated job `legacy-flake-check: [niks3-cache]` is optional and manual
+(`allow_failure: true`) on merge requests and `main`. It was a blocking
+`flake-check` job before the TASK-490.24 early CI transition. It uses the
+existing `nix` runner tag and builds `.#checks.x86_64-linux.niks3-cache`. The
+assigned runner must provide KVM to the Nix builder. Report the exact job's
+runner or KVM failure; a fixture run or another check does not replace this
+check. Matrix membership and earlier local runs do not establish a pass for the
+exact commit under review. The automatic `integration-access` job does not cover
+this check's obligations.
 
 ## Full integration gate
 

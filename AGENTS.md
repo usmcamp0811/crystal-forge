@@ -408,8 +408,13 @@ Run a focused gate with
 `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`;
 append `.run` to the scenario attribute for evidence only. Meaningful WIP
 checks may be discoverable without a completeness flag. Record missing
-obligations in the coverage map. Keep legacy checks and CI selection unchanged
-until all required owner scenarios pass.
+obligations in the coverage map. Implemented integration owners run
+automatically in GitLab (`integration-access` today). Retiring legacy
+integration checks remain available as optional manual jobs while replacements
+are constructed. Removing a legacy check from automatic CI does not mark its
+obligations covered; delete its definition and fixtures only after passing
+replacement coverage is recorded or an explicit decision removes the
+requirement.
 
 Shared helpers live in `lib/integration-test/`. Native Snowfall checks call:
 

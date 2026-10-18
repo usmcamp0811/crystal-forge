@@ -24,10 +24,14 @@ approved baselines.
 
 > **Transition:** under the [integration test maintenance contract](integration-test-contract.md),
 > browser workflows move into the four integration owners. This check remains
-> a required legacy gate. Legacy checks and CI selection remain unchanged until
-> all required owner scenarios pass, as recorded in the
-> [coverage map](integration-coverage-map.md#legacy-retirement-map). Do not add new workflows here;
-> add them to the owning scenario instead.
+> a legacy check that runs only as the optional manual `web-ui-check` GitLab
+> job (`allow_failure: true`). Removing it from automatic CI does not mark its
+> obligations covered. Delete its definition and fixtures after passing
+> replacement coverage is recorded, or after an explicit decision removes the
+> underlying requirement. See the
+> [coverage map](integration-coverage-map.md#legacy-retirement-map) and
+> [current GitLab selection](integration-coverage-map.md#current-gitlab-selection).
+> Do not add new workflows here; add them to the owning scenario instead.
 
 Only `integration-access` is currently discoverable. Its coordinator-owned
 `checks/integration-access/default.nix` explicitly registers scenarios; the
@@ -421,16 +425,20 @@ The separate `web-ui-check` CI job builds the check and exposes
 `web-ui-screenshots/` (screenshots, `results.json`, `visual-report.json`,
 `visual-summary.md`, `diffs/`, plus `design-drift-report.json`,
 `design-drift-summary.md`, `montages/`, `design-targets/`, `design-parity/`) as
-artifacts. The `web-ui-screenshots-mr-comment` job posts/updates an MR comment
-with the coverage + visual + design-parity summary, all themed step
-screenshots, up to 20 diff images, and up to 26 design-parity montages.
+artifacts. The `.gitlab-ci.yml` job is `when: manual` with
+`allow_failure: true`. It runs only when a person starts it, and an unplayed or
+failed job does not block the pipeline.
+
+The automatic `web-ui-screenshots-mr-comment` job that posted a screenshot
+summary to the merge request was removed with the TASK-490.24 early CI
+transition. Its only source was this job. The manual job keeps its downloadable
+artifacts, and the automatic `integration-access` job exports its own evidence
+under `integration-evidence/integration-access/`. No replacement comment bot
+exists.
+
 The manual `web-ui-baseline-candidates` job publishes equivalent candidate
 artifacts after semantic and critical-workflow gates pass in baseline update
 mode. It does not replace the normal `web-ui-check` job.
-
-The `.gitlab-ci.yml` job sets `allow_failure: true`. A failed browser check
-therefore does not block the pipeline. The MR-comment job may still publish
-artifacts when the browser job fails before it creates screenshots.
 
 ## Known issues
 
