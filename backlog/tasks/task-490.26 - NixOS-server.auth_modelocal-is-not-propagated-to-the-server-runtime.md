@@ -4,7 +4,7 @@ title: NixOS server.auth_mode=local is not propagated to the server runtime
 status: Backlog
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-17 23:57'
+updated_date: '2026-10-18 00:15'
 labels:
   - bug
   - nixos
@@ -26,11 +26,9 @@ ordinal: 539000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The TASK-490.1 Access scenario configures the normal module option services.crystal-forge.server.auth_mode = "local". The generated config summary contains [server] but no auth_mode key, and `systemctl show crystal-forge-server.service -p Environment --value` reports `AUTH_MODE=unset`. At the reviewed baseline, cf-config `default_auth_mode()` selects the AUTH_MODE environment variable and defaults to "oidc". The module Nix option defaults to local but its generated config/systemd environment does not convey local mode. This conflicts with the accepted local bootstrap expectation and current operations guide.
+The TASK-490.1 Access scenario uses the normal module option services.crystal-forge.server.auth_mode = "local". Generated config contains [server] without auth_mode; `systemctl show crystal-forge-server.service -p Environment --value` reports AUTH_MODE=unset. cf-config default_auth_mode() reads AUTH_MODE and defaults to oidc, so the module's local choice is not represented in generated runtime configuration.
 
-Evidence from combined test source commit a6c8922650bf7f0ff643d181422c0092cfc43242 (application baseline 33de73b013b735304dfac9c69745a074a3e76ebd): `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`; generated configuration capture: /nix/store/yfc7pkz5zm8k29b82zzfhm2i8f1gn348-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt. Expected: generated runtime configuration selects local auth. Actual generated config omits auth_mode and the service environment leaves AUTH_MODE unset. The server did not reach route registration or respond to setup-status in this run because the separate TASK-490.25 database socket URL failure occurred first; do not claim an observed OIDC HTTP response. The scenario's local-mode/startup assertion remains executable.
-
-This is a product fix, explicitly out of scope for TASK-490.1. Do not add a test-only AUTH_MODE override or change application behavior as part of the integration overhaul.
+Observed configuration in the native Access VM at final combined commit fc930335878279ac426510359c039dfd8961dc13: /nix/store/1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt. The same run failed first on TASK-490.25's malformed database URL; no route registration, setup-status response, or OIDC HTTP behavior was observed. Expected: normal module auth_mode=local selects local auth. Actual: generated TOML omits the key and systemd env omits AUTH_MODE. Keep the local-mode assertion executable. No test-only override or production fix belongs in TASK-490.1.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
