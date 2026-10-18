@@ -4,7 +4,7 @@ title: NixOS server.auth_mode=local is not propagated to the server runtime
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 03:27'
+updated_date: '2026-10-18 03:30'
 labels:
   - bug
   - nixos
@@ -33,10 +33,10 @@ This repair is separately committed from TASK-490.1 test/doc work. The user expl
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The normal module's local selection produces systemd AUTH_MODE=local and the effective server reports local mode
-- [ ] #2 The normal module's OIDC selection produces systemd AUTH_MODE=oidc and preserves OIDC-only variables/selection
+- [x] #1 The normal module's local selection produces systemd AUTH_MODE=local and the effective server reports local mode
+- [x] #2 The normal module's OIDC selection produces systemd AUTH_MODE=oidc and preserves OIDC-only variables/selection
 - [x] #3 Targeted evaluation verifies both module choices without a test-only override
-- [ ] #4 The combined Access VM proves empty-database setup-status, real local registration/sign-in, persistent admin/session and rejected wrong password with no new session
+- [x] #4 The combined Access VM proves empty-database setup-status, real local registration/sign-in, persistent admin/session and rejected wrong password with no new session
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -49,4 +49,6 @@ Final exact-head rerun on combined commit fc930335878279ac426510359c039dfd8961dc
 LOCK: claude-sonnet-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation. The user explicitly authorized this narrow production repair on 2026-10-17 and directed that it be committed separately on the TASK-490.1 foundation branch (not a separate worktree).
 
 Repair commit 136348e8 integrates the module-derived AUTH_MODE in the production server unit for both auth choices. Targeted NixOS evaluation returned `{"local":"local","oidc":"oidc"}`. Combined Access VM proof remains pending.
+
+Combined runtime proof passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. Setup-status returned local mode with `requires_setup=true` on the empty database; the embedded-UI browser registered the first Admin, signed in, reloaded with the persistent session, and the wrong password was rejected without creating another session. Evidence: `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/` (`result.json`, `browser/bootstrap-sign-in/result.json`, `browser/bootstrap-sign-in/signed-in-after-reload.png`, generated-config-summary.txt). No test-only environment override was used.
 <!-- SECTION:NOTES:END -->
