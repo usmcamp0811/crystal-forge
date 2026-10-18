@@ -88,7 +88,7 @@ component homes. This table documents ownership; it is not an execution registry
 | `config-observer` | [config-observation.nix](../../../packages/default/crates/cf-server/tests/nix/config-observation.nix), normal core server `postCheck` |
 | `evaluator-snapshot-isolation` | [primary-isolation.nix](../../../packages/default/crates/cf-server/tests/nix/primary-isolation.nix), normal core server `postCheck` |
 | `verified-source-evaluator-parity` | [source-parity.nix](../../../packages/default/crates/cf-server/tests/nix/source-parity.nix), normal core server `postCheck`, with its locked verified-source fixture |
-| `niks3-ca-bundle` | All thirteen unchanged `cf-config` library tests in the normal core build; [compatibility.nix](../../../packages/default/crates/cf-config/tests/ca-bundle/compatibility.nix) compares Go/Rust full-DER identities on three datasets in core `postCheck` |
+| `niks3-ca-bundle` | All thirteen unchanged `cf-config` library tests in the normal core build; [compatibility.nix](../../../packages/default/crates/cf-config/test-support/ca-bundle/compatibility.nix) compares Go/Rust full-DER identities on three datasets in core `postCheck` |
 | `server-regressions` | Existing `devScripts.state-machine-test`; [database-regressions.sh](../../../packages/devScripts/tests/database-regressions.sh) and [state-machine-tests.sh](../../../packages/devScripts/tests/state-machine-tests.sh) |
 | `builder-cve-contract` | [builder-cve.nix](../../../modules/nixos/crystal-forge/tests/builder-cve.nix), explicit boolean Nix evaluation |
 | `stig` | [stig.nix](../../../modules/nixos/crystal-forge/tests/stig.nix), explicit boolean Nix evaluation |

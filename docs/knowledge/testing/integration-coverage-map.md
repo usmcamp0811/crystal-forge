@@ -103,7 +103,7 @@ Browser `ctx` (`cf-browser.cjs`): `page`, `context`, `browser`, `expect` (bounde
 
 Render profile `cf-it-render-v1`: Playwright 1.59.1 and its Chromium from the locked `nixpkgs`; fonts DejaVu Sans/Serif and JetBrains Mono only; locale `en-US`; timezone `UTC`; color scheme dark; reduced motion; device scale 1; viewports `desktop` 1440×900 and `narrow` 375×812.
 
-Evidence: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L` builds a gate. The gate's `evidence` link is the run output: `result.json` (status, cases, durations, faults, receipts, error, traceback), `meta.json` (source revision, contracts, render profile, design reference and fixture hash), `browser/<spec>/` (`result.json`, `console.log`, screenshots, `trace.zip` and `failure.png` on failure, downloads, visual images), `journals/<node>/` (`crystal-forge*` and PostgreSQL journal, warnings, failed units). On scenario failure, run `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap.run -L` to obtain the evidence path; that derivation is evidence only and is never a gate. A package-build failure before VM execution produces no scenario execution evidence.
+Evidence: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L` builds a gate. The gate's `evidence` link is the run output: `result.json` (status, cases, durations, faults, receipts, error, traceback), `meta.json` (source revision, contracts, render profile, design reference and fixture hash), `browser/<spec>/` (`result.json`, `console.log`, screenshots, `trace.zip` and `failure.png` on failure, downloads, visual images), `journals/<node>/` (`crystal-forge*` and PostgreSQL journal, warnings, failed units). After failure, evaluate the registered scenarios' `.run.outPath` and inspect only outputs that already exist. Do not build `.run` to recover evidence: a crash or timeout could otherwise execute a second VM and replace the failed attempt. A package-build failure before VM execution produces no scenario execution evidence.
 
 Isolation and shared store: each separately built scenario is its own NixOS test with fresh VMs and databases. Later cases in one scenario may use identities and rows created by earlier real workflows, carried through receipts. A task dependency never provides live state from another scenario. VMs see host store files through a read-only mount but register only their own closure. A build, publication, or copy proof MUST use an output first produced inside that scenario (per-run nonce) and MUST call `assert_store_absent` at the destination first.
 
@@ -579,13 +579,34 @@ slice decreases 5,428 → 4,432 (996 fewer). No runtime speedup is claimed witho
 measurement. Go dataset invocations decrease 9 → 3 and OpenSSL parses
 1,758 → 879; all thirteen unchanged CA library tests run in normal core tests.
 
-The full database/core runs were launched with logs at
-`/tmp/opencode/task490-db-full.log` and
-`/tmp/opencode/task490-config-core-staged.log`; their corresponding `.status`
-files must show success before recording a pass. The newly composed TASK-490.3
-Admin-form fragments await coordinator execution. They do not change the 79-row
-inventory: three covered subsets (sixteen cases), 67 planned rows and nine
-decision-blocked rows. No new covered or lower-level-covered row is asserted.
+A broader dependency-recipe comparison includes the fifteen former wrappers
+and seven ordinary component/database/documentation roots before consolidation,
+versus their surviving roots plus all direct-CI tools and generated module
+script contexts afterward. `nix derivation show --recursive` reports
+7,563 → 7,547 unique recipes: **16 fewer overall in that comparison set**.
+The 996 figure is only the narrower five-adapter slice, not the total pipeline.
+Neither figure measures builds actually executed, cache hits, or elapsed time.
+The unchanged core/embedded feature variants still test their distinct build
+configurations; no Rust package tests were disabled.
+
+The ordinary core build passed (status 0 in
+`/tmp/opencode/task490-config-core-staged.status`), including the retained Nix
+protocol fragments, config library tests and CA comparison. Pure module tests,
+installed-wrapper/config probes, actual writer XCCDF/OpenSCAP validation and
+tool selftests also passed through the exact component CI commands.
+
+The merged database workflow exposed two runner-fixture defects, not waived
+assertions: its worker config lacked required database fields, then inherited
+SQLx-shell example settings changed `flakes.watched` into an invalid map.
+Both were corrected in the test runner. The complete isolated workflow is
+running again with logs at `/tmp/opencode/task490-db-isolated.log`; require its
+actual exit status before claiming a full pass. No product code was changed.
+The newly composed TASK-490.3 Admin-form fragments await execution while the
+embedded server rebuilds after metadata-package verification changed its input
+store identity. No VM had started in the interrupted 300-second build attempt.
+The persistent aggregate run is `/tmp/opencode/task490-access-admin.log`.
+Pending those results, the 79-row inventory has three covered subsets (sixteen
+cases), 67 planned rows and nine decision-blocked rows.
 
 ## Source-retirement verification (historical milestone)
 
