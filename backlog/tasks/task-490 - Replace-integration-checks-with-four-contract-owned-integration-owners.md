@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-18 18:36'
+updated_date: '2026-10-18 20:48'
 labels:
   - testing
   - integration
@@ -26,15 +26,15 @@ ordinal: 512000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Final result: checks.x86_64-linux contains exactly FOUR TOTAL native Snowfall attributes: integration-access, integration-delivery, integration-assurance, integration-upgrade. This does not restrict verification to four commands: Rust unit and isolated PostgreSQL regressions, packaging, schema, documentation and developer utilities remain through package/app/CI mechanisms outside checks. Non-integration classification does not authorize retaining a top-level check attribute.
+Clean-slate product testing overhaul. Final checks.x86_64-linux contains exactly FOUR TOTAL native Snowfall owners: integration-access, integration-delivery, integration-assurance, integration-upgrade. Minimize meaningful scenarios, duplicate tests/builds and CI overhead while proving accepted CF contracts. Rust/unit/isolated-database/module/schema/doc/tool tests may run outside these attributes, but not as one public wrapper per historical suite.
 
-Coordinator owns contract, retirement map, shared harness, composition/registration, CI and acceptance verification. Keep the six-scenario starting topology and extend compatible cases rather than creating packet-specific VMs. Separate scenarios have fresh VMs/databases; later cases may use earlier real records through same-scenario receipts only. The accepted contract/current CF architecture defines product obligations; historical test inventory does not.
+The preservation-first architecture is superseded. Nine legacy suites are retired and all fifteen packages/verify-* wrappers are eliminated. Unique assertions now execute in ordinary component builds, the existing consolidated DB workflow and explicit CI/module/tool commands; no new aggregator framework, registry or fifth check. Counts currently: one check, zero verify packages,28public package attributes (was43),9expanded CI jobs (was14). The three future owners remain absent, not placeholders.
 
-Owner-authorized source retirement in TASK-490.24 supersedes both retain-until-replacement and optional-manual coexistence. Nine legacy suite definitions and obsolete CI jobs are removed now; required assets and lower-level tests are relocated before deletion. Missing accepted owner coverage remains a gap, not obsolete or covered merely because old implementation is deleted. The current inventory is one implemented owner, Access, versus 27 previous attributes. Final acceptance is `nix eval .#checks.x86_64-linux --apply builtins.attrNames --json`, with exactly the four names above once their real scenarios exist. Do not add placeholders.
+Coverage is defined from accepted requirements/approved design and the current product surface, not old suite names. The existing integration coverage map inventories HTTP methods/routes/auth/mutations, Dioxus interactions, production config, Git/evaluation, builders, agents/deployment, caches, scans/compliance/remediation, interchange/history and upgrades.79obligation rows across12families: five have executed subsets (23Access cases),65planned,9decisionblocked. These are not endpoint percentages or full row completion.
 
-Access retains sixteen executed bootstrap/session/Operator-Viewer admin-denial cases; forms, preferences, notifications, OIDC, environment-scope and registration-policy work remains in the existing child tasks. Delivery/Assurance/Upgrade are unfinished. Consolidation of duplicate Rust/database selections is tracked in TASK-490.24 with exact primary-execution targets and dependencies; moving a check to a package does not by itself remove repeated work.
+Access proves bootstrap, sessions, selected Operator/Viewer denials and a bounded Admin-form subset. At clean c254b1c54e0f40adfaa9d05b5766cfeffae9bb89 the normal owner CI path passed23cases with a new single controller VM; original16 unchanged first. .3 remains In Progress for environment CRUD/nonempty bindings and exact missing failed-save states. .7 is next shared-role/real Git->evaluation->build foundation for Delivery and later OIDC/notifications. It is not blocked by historical Access failures or blanket D1. All later accepted work remains in existing children and six initial scenario boundaries; no one-VM-per-packet design.
 
-This remains a test-only overhaul except the previously authorized prerequisite configuration repairs TASK-490.25 and .26 (52128b3a and 76e51464). No further product, authorization-policy, schema, migration, SQLx or design change is authorized. D1/D2 and separate TASK-492/493/494 remain scoped. Existing draft MR !335; no merge/deployment/Done authorization.
+Final acceptance requires the four exact attrNames and complete passing accepted coverage or approved scope dispositions, not a green partial pipeline. Current inventory remains [integration-access]. Critical DB tests retain fresh isolated PG privileges, schema, transaction and concurrency assertions; normal Rust package tests remain. Source/recipe and repeated-work measurements are recorded in .24, with a final canonical DB run still requiring its actual status before full-pass claims. No product/UI/API/schema/design changes, merge or deployment. Prior .25/.26 repairs remain the only authorized production exception.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -51,17 +51,20 @@ This remains a test-only overhaul except the previously authorized prerequisite 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-## Current source retirement (2026-10-18)
+## Current clean-slate iteration
 
-The owner's source-removal instruction supersedes all prior legacy-retention and optional-manual coexistence rules. Implementation 0105e512 removes nine suites and their manual jobs, relocates needed browser/XCCDF assets, and moves 17 lower-level definitions to native packages. Actual checks.x86_64-linux attrNames: ["integration-access"], down from27. The final criterion remains exactly FOUR TOTAL attributes, not four owners plus retained utility checks. Native Snowfall discovery unchanged; no placeholder owners.
+Active implementation uses the existing TASK-490.1-integration-foundation branch/worktree and draft !335. .24 owns lower-level consolidation and current product inventory; .3 bounded Admin forms are implemented/executed. .1/.25/.26 remain Review; .2/.3/.24 remain In Progress. Future owners and final acceptance are incomplete.
 
-Access's unchanged16-case aggregate passed at clean0105e512 with a fresh VM execution (24.23s driver); source evidence /nix/store/n68lcq6xxab1rhhfymp7yz4pj19hff95-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run. No new cases this source-retirement pass. No product/UI/schema/design changes.
+All15verify public outputs gone; no renamed wrappers. Unique tests now belong to normal core/metadata/OSCAL builds, direct module/runtime/tool CI, and the existing isolated state-machine database workflow. Six ignored overlaps,94 repeated normal-library selections and2 repeated integration cases removed. Counts43->28package attrs,15->0verify attrs,14->9expandedjobs; checkcount1->1. Broader recursive derivation recipe union including required direct runtime inputs7563->7547; no total runtime speedup claim. Remaining CVE/dashboard consolidation/cache reuse and identical CA provenance input dedup are explicit .24 follow-ups, not hidden as finished.
 
-TASK-490.24 records exact verification results and two600second local command timeouts (full DB regressions and builder-packaging/XCCDF dependency compilation), so full verification is incomplete. Lightweight contracts, tooling, docs, OSCAL, module validation, CI routing/lint passed. Preserved DB regression definition/derivation is identical and actual isolated PostgreSQL execution was observed. Duplicate ignored Rust/DB selections between verify-server-regressions and state-machine-tests remain to map/consolidate here before final completion.
+Accepted product inventory79rows/12families now has5rows with covered subsets,65planned and9decisionblocked. Every row records actor/start/action/independent result/observation/status and primary owner/scenario. Current code is discovery evidence, not approval. Some newly discovered cases need assignment within existing packets before implementation.
 
-Child states: .1/.25/.26 Review; .2/.24 In Progress. Other coverage children remain Backlog, not silently selected. Continue accepted coverage through existing tasks, smallest same-scenario fragments and six planned scenario boundaries. Forms .3/.4, notifications .5, OIDC .6, roles .7, Delivery/Assurance/Upgrade are not implemented merely because old suites were deleted. Environment-scope/registration and Upgrade decisions remain scoped to their own cases. Final four-owner inventory/coverage not satisfied. Existing MR !335 stays draft; no merge/deploy/Done.
+Normal Access CI path passed23/23 at clean c254b1c54e0f40adfaa9d05b5766cfeffae9bb89. Original16 preserved, seven new real Admin form cases. One controller VM perrun; successfuldriver50.72s and startup10.5s reusedonce. No extra VMderivation. Evidence /nix/store/nv2rpc4szk7525aa9fpb4289nz1hpbqv-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run. .3 has only AC5/6checked; remainingforms/environment/failure states open.
 
-## Historical milestones
+Normalcore build/protocols/configtests and module/runtime/schema/tool commands passed. DB prefix, focused fixed worker,116tailtests and51broad groups passed in isolated runs. Final full canonical .state-machine-test run status /tmp/opencode/task490-db-final.status must be inspected before claiming complete DB verification. Supervisor-child failure is independently propagated via invocation-owned receipt. .24 remains In Progress.
 
-Foundation organization started at683c86e0; correct Access startup assertion exposed .25/.26. Authorized prerequisite repairs52128b3a and76e51464 enabled bootstrap; sessions passed81d65be7 and CI-path2c494ac4. Selected Operator/Viewer cases extended the same scenario to16 at8a857bc8; hosted job passed08a79037. Interim early-CI manual-coexistence policy and source-retention rules applied at those revisions only, and are now superseded. Historical records/receipts remain in the coverage map and child tasks. TASK-492/493/494 are unrelated recorded issues, not authorization for product fixes.
+Next runnable shared infrastructure work is .7 real service/builder/target roles and commit->eval->actualbuild proof, extending one Delivery lifecycle. Current controller dependency is verified; no old startup failure or blanket D1 gate. .3 environment success cases also runnable. Exact pending decisions apply only to environment-scope/registration, selected failure/presentation states, remaining transport/interchange policies and genuine supported old-version compatibility.
+
+## Historical
+Nine legacy suites source-retired0105e512. The17lower-level relocation and15verify wrappers were rejected as final architecture and removed this iteration. Prior manual-coexistence and preservation-until-four-owner rules are superseded. .25/.26 repaired startup under explicit prior authority; bootstrap/session/role evidence progressed10->16cases before this23-case slice. TASK-492/493/494 remain unrelated recorded issues. No merge/deploy/Done.
 <!-- SECTION:NOTES:END -->
