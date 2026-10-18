@@ -56,11 +56,11 @@ ordinal: 536000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Coordinator-owned cutover task. Owns the four native Snowfall owner registrations, CI entry point, legacy-gate retirement, coverage/retirement map, and acceptance verification. Do not delegate owner registration/shared library/CI edits or add placeholder owners.
+Coordinator-owned cutover task. Owns the four native Snowfall owner registrations, CI entry point, legacy-gate retirement, coverage/retirement map, and acceptance verification. Do not delegate owner registration/shared-library/CI edits or add placeholder owners.
 
-The TASK-490.25 and TASK-490.26 repairs are separate rebased commits `52128b3a` and `76e51464`. After rebasing on `origin/dev` `5ae7feab`, the focused Access scenario and current Access owner aggregate passed at `bba718befbc183863781656df2df272e5f735d5a`; evidence is in the coverage map. This proves only the bootstrap slice. TASK-490.7 role implementation and Delivery proof remain pending. Packet fragments and VM groupings are corrected, but all children remain Backlog and no packet is ready while TASK-490.1 remains In Progress and authority decisions remain unresolved.
+The TASK-490.25/.26 repairs are separately integrated at rebased commits `52128b3a63175b712f7a83860355fdeec658a230` and `76e514644505f232e4e47f085db801913d8449ab`. After rebasing on `origin/dev` `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064`, the focused Access scenario and owner aggregate passed at `bba718befbc183863781656df2df272e5f735d5a`; evidence is in the coverage map. This proves only the bootstrap slice. TASK-490.7 role implementation/Delivery proving remains pending. All child packets remain Backlog and none is ready while TASK-490.1 remains In Progress and authority decisions remain unresolved.
 
-Cutover is not ready: only `integration-access` exists and is a subset of its obligations. Delivery, Assurance, and Upgrade remain incomplete. Keep all legacy checks/CI until all four owner aggregates pass the accepted map or an owner approves a scope change. D1 and Upgrade D2 remain applicable. TASK-492 is a separate Postgres Jobs first-boot role-ordering defect outside the .25/.26 authorization. No merge, deployment, or cutover is authorized by this update.
+Cutover is not ready: only Access exists and it covers a subset. Delivery, Assurance and Upgrade remain incomplete. Keep legacy checks/CI until all four owner aggregates pass the accepted map or the owner approves a scope change. D1 and Upgrade D2 remain applicable. TASK-492 is separate and outside the .25/.26 authorization. No merge, deployment, or cutover is authorized.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
