@@ -3,6 +3,13 @@
 # database operation. Check the server's actual path and privileges before
 # migrations; a racing foreign listener must never become a test database.
 set -euo pipefail
+# The SQLx development shell exports example application settings, including a
+# legacy map-shaped flakes.watched value. They are not test inputs and can
+# override a scoped worker fixture or point it at development services. Remove
+# their names without printing values before configuring this isolated run.
+while IFS= read -r variable; do
+  case "$variable" in CRYSTAL_FORGE__*) unset "$variable" ;; esac
+done < <(compgen -v)
 : "${CF_STATE_MACHINE_DATA_DIR:?Use devScripts.state-machine-test}"
 : "${CF_STATE_MACHINE_PORT:?Use devScripts.state-machine-test}"
 export PGHOST=127.0.0.1 PGPORT="$CF_STATE_MACHINE_PORT"
