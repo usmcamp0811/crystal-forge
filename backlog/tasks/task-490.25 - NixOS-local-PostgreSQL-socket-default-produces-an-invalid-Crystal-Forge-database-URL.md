@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-17 23:57'
+updated_date: '2026-10-18 00:15'
 labels:
   - bug
   - nixos
@@ -27,11 +27,9 @@ ordinal: 538000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-On the TASK-490.1 native Access startup slice, the controller uses the normal NixOS module defaults: local-database=true and database.host=/run/postgresql (documented as the local socket path). The generated config reports [database] host = "/run/postgresql". cf-config DatabaseConfig::to_url formats that string as `postgres://user:password@/run/postgresql:5432/database`, which has no URI host. The real production cf-server-drv exits during startup with `invalid configuration: both host and hostaddr are missing`, before migrations, bootstrap, or HTTP routes.
+The normal NixOS module defaults local-database=true and database.host=/run/postgresql, documented as a local socket. The generated TOML contains [database] host = "/run/postgresql". cf-config DatabaseConfig::to_url formats the value as a PostgreSQL authority URI with no host, and production cf-server-drv exits before migrations with `both host and hostaddr are missing`.
 
-Observed on combined test source commit a6c8922650bf7f0ff643d181422c0092cfc43242 (application baseline 33de73b013b735304dfac9c69745a074a3e76ebd): `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L` fails; scenario evidence /nix/store/yfc7pkz5zm8k29b82zzfhm2i8f1gn348-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt shows host /run/postgresql, port 5432, database crystal_forge, user crystal_forge, password redacted. Journal shows PostgreSQL listening on /run/postgresql and server startup error at 7.709s (`crystal-forge.journal`, lines 75-80). Expected: the documented local-database socket configuration starts the server and applies migrations. Actual: URI parsing rejects its empty host.
-
-Test-only overhaul must not fix production code. Keep the Access scenario's startup assertion executable and failing until a separately authorized product fix. Do not replace the configuration with an AUTH_MODE workaround. Production correction needs its own task/review; TASK-490.1 may use only a documented non-socket database host as test setup if the owner accepts that it no longer proves the module's default socket path.
+Reproduced by the native Access VM at final combined commit fc930335878279ac426510359c039dfd8961dc13. Command: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. Evidence: /nix/store/1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt and crystal-forge.journal (server failure at 7.451s). Expected: the documented local socket configuration starts the server and applies migrations. Actual: URI parser rejects empty host. The test assertion remains failing. This is a product fix outside TASK-490.1; do not change it in the test overhaul.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
