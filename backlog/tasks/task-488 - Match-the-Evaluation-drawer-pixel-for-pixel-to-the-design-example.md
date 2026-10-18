@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-18 03:54'
+updated_date: '2026-10-18 04:23'
 labels:
   - web-ui
   - design-parity
@@ -474,4 +474,6 @@ Isolated NixOS VM workflow 12l-task440-config-lifecycle passed 1/1. The persiste
 Added browser failure diagnostics retention and bounded CI trace output; the failure archive path was not exercised by a completed negative test. Full Nix flake check and current-head full CI results are still pending. Prior failed browser job's exact failing full-suite step remains unidentified because its trace was capped. The 41-vs-12 live case still needs the user's commit SHA and attempt UUID. Bulk Compare/Download logs remain unwired; in-drawer Download remains the checked-in design placeholder; full pixel parity is not claimed.
 
 Updated MR note 4036046930 with 9fd1709f review results, remaining gates, and eight uploaded receiver/confirmation/log screenshots. Preview ready at http://localhost:8080/evaluations; UI 8080 and API 3445 forwarded to localhost; task-owned mock data; leave the preview running.
+
+Post-push status at 9fd1709f: MR !334 is still Draft. Pipeline 2959620890 was pending; required jobs 17261662139 (server-regressions) and 17261662149 (web-ui-check) had no runner assigned and had been queued for about 29 minutes. Local Nix `nix flake check --keep-going --builders '' --max-jobs 1 --cores 2 -L` is running at /tmp/opencode/task488/local-flake-check-9fd1709f.log; no result recorded yet. The exact-head focused browser 26b-e workflows pass locally and the isolated 12l NixOS VM V2 Config workflow passed 1/1. Keep task In Progress and do not lift merge hold until required exact-head jobs finish.
 <!-- SECTION:NOTES:END -->
