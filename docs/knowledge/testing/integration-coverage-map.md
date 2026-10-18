@@ -222,7 +222,11 @@ Verified in code at the baseline: cache types `S3`, `Attic`, `Niks3`, `Http`, `N
 
 ## Legacy retirement map
 
-Disposition values: `replace` (retire after the required owner scenarios pass), `keep` (non-integration check; keeps its own attribute), `duplicate`, `obsolete`. A disposition describes final source retirement. It does not describe the current GitLab selection, which is a separate decision recorded in [Current GitLab selection](#current-gitlab-selection).
+Disposition values: `replace` (retire after the required owner scenarios pass), `keep (provisional)` (non-integration check retained during migration; its separate execution is not yet justified), `keep (justified)` (a recorded distinct purpose; no row has this value yet), `duplicate`, `obsolete`. A disposition describes final source retirement. It does not describe the current GitLab selection, which is a separate decision recorded in [Current GitLab selection](#current-gitlab-selection).
+
+Final minimization rule: every remaining independent flake check or CI test job must have a distinct necessary purpose. Preserve useful assertions, assign their primary execution ownership, consolidate duplicate execution, and keep developer tools available through appropriate package or app outputs. Classification as "non-integration" alone does not justify a separate check.
+
+A `keep (provisional)` row is temporary retention during migration. It is not a final retention decision. A row becomes `keep (justified)` only when its distinct purpose and primary execution ownership are recorded. The final cutover must establish: exactly four product integration owners; complete accepted coverage under them; removal of replaced legacy integration definitions and obsolete manual jobs; no task-specific VM proliferation hidden beneath the four aggregate names; a reason for any repeated Rust or database test execution; a reason for every remaining separate non-integration check; and the actual final flake inventory with measured execution and resource costs. Multiple attributes can share one Nix derivation, so attribute count alone does not measure duplicate execution. Do not delete a check before its assertions have a primary owner, and do not merge checks only to reduce names while the same work still runs underneath.
 
 Policy: implemented integration owners run automatically in GitLab. Retiring legacy integration checks remain available for optional manual execution while replacements are constructed. Removing a legacy check from automatic CI does not mark its obligations covered. Delete its definition and fixtures after passing replacement coverage is recorded, or after an explicit decision removes the underlying requirement.
 
@@ -237,17 +241,17 @@ Policy: implemented integration owners run automatically in GitLab. Retiring leg
 | `checks/niks3-write-probe` (CI manual) | Integration | `replace` | `delivery.publication.niks3` (connection Test boundary). |
 | `checks/attic-metrics` (CI manual) | Integration | `replace` | `delivery.publication.variants` (Attic). |
 | `checks/attic-publication` (CI manual) | Component | `replace` | `delivery.publication.variants` (Attic publication scope). |
-| `checks/nixos-discovery-reliability` (CI matrix) | Nix contract, no VM | `keep` | Non-integration evaluator contract. |
-| `checks/server-regressions` (CI matrix) | DB-backed Rust | `keep` | Non-integration. Migration-prefix rehearsals do not satisfy `upgrade.continuity`. |
-| `checks/builder-evaluator-packaging` (CI matrix) | Packaging | `keep` | Non-integration. |
+| `checks/nixos-discovery-reliability` (CI matrix) | Nix contract, no VM | `keep` (provisional) | Non-integration evaluator contract. |
+| `checks/server-regressions` (CI matrix) | DB-backed Rust | `keep` (provisional) | Non-integration. Migration-prefix rehearsals do not satisfy `upgrade.continuity`. Reported to select some of the same ignored commit tests as `state-machine-tests`; the overlap is unaudited and must be consolidated or justified at final cleanup. |
+| `checks/builder-evaluator-packaging` (CI matrix) | Packaging | `keep` (provisional) | Non-integration. |
 | `checks/web-ui-test-runner` (CI matrix) | Dev tooling | `keep` until `web-ui` retires, then `obsolete` | Tests the legacy host runner. |
-| `checks/run-ui-dev-db-check` (CI matrix) | Dev tooling | `keep` | Non-integration. |
-| `checks/okf-knowledge` (CI matrix) | Documentation | `keep` | Non-integration. |
-| `checks/ui-screenshots` | Mocked screenshots | `keep` (non-integration) | Design iteration aid; no semantic assertions. |
-| `checks/config-inspector`, `config-observer`, `evaluator-snapshot-isolation`, `verified-source-evaluator-parity`, `nixos-options-metadata`, `niks3-ca-bundle` | Nix/Rust contracts | `keep` | Non-integration. |
-| `checks/builder-cve-contract`, `oscal-export`, `xccdf-schema`, `stig` | Contracts/unit | `keep` | Non-integration. |
+| `checks/run-ui-dev-db-check` (CI matrix) | Dev tooling | `keep` (provisional) | Non-integration. |
+| `checks/okf-knowledge` (CI matrix) | Documentation | `keep` (provisional) | Non-integration. |
+| `checks/ui-screenshots` | Mocked screenshots | `keep` (provisional) | Design iteration aid; no semantic assertions. It is already built as `packages.x86_64-linux.ui-screenshots`, so a separate check is a candidate for removal while the package output stays. |
+| `checks/config-inspector`, `config-observer`, `evaluator-snapshot-isolation`, `verified-source-evaluator-parity`, `nixos-options-metadata`, `niks3-ca-bundle` | Nix/Rust contracts | `keep` (provisional) | Non-integration. |
+| `checks/builder-cve-contract`, `oscal-export`, `xccdf-schema`, `stig` | Contracts/unit | `keep` (provisional) | Non-integration. |
 | `checks/test-keys` | Not a check | `obsolete` | Keys are embedded elsewhere; remove at cutover if unused. |
-| CI `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | DB-backed Rust | `keep` | Non-integration; the fake scanner runner does not satisfy `assurance.scanning.cve`. |
+| CI `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | DB-backed Rust | `keep` (provisional) | Non-integration; the fake scanner runner does not satisfy `assurance.scanning.cve`. These jobs need a disposable database for `--ignored` Rust tests, so a package build does not replace them. `state-machine-tests` reportedly repeats ignored commit tests that `server-regressions` selects (unaudited); one primary execution owner must be chosen. |
 | CI `web-ui-baseline-candidates` | Manual visual-maintenance job; not a blocking integration gate | `keep` during coexistence; retire or explicitly rebind at cutover | It produces candidate baselines for legacy `web-ui`; it does not establish a passing integration owner. |
 | CI `web-ui-screenshots-mr-comment` | MR artifact/reporting job; not a gate | `obsolete`; removed from `.gitlab-ci.yml` by the TASK-490.24 early transition | Its only screenshot source was `web-ui-check`, which is now manual. The manual job keeps its downloadable artifacts, and `integration-access` exports its own evidence. No replacement comment bot exists. |
 
@@ -261,8 +265,8 @@ The TASK-490.24 early transition changed only the GitLab selection. It deleted n
 | `legacy-flake-check: [integration]`, `[oidc-auth]`, `[niks3-cache]`, `[niks3-write-probe]`, `[niks3-ui]`, `[attic-metrics]`, `[attic-publication]` | Manual, `allow_failure: true` | Same `flake-check` definition and commands. They were `flake-check: [<name>]` before. |
 | `web-ui-check` | Manual, `allow_failure: true` | Same command and artifacts. |
 | `web-ui-baseline-candidates` | Manual, `allow_failure: true` | Unchanged. |
-| `flake-check: [run-ui-dev-db-check]`, `[server-regressions]`, `[nixos-discovery-reliability]`, `[builder-evaluator-packaging]`, `[web-ui-test-runner]`, `[okf-knowledge]` | Automatic | Non-integration checks; unchanged. |
-| `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | Automatic | Disposable-database and `--ignored` Rust tests; a package build does not replace them. |
+| `flake-check: [run-ui-dev-db-check]`, `[server-regressions]`, `[nixos-discovery-reliability]`, `[builder-evaluator-packaging]`, `[web-ui-test-runner]`, `[okf-knowledge]` | Automatic | Non-integration checks; unchanged. Temporary retention during migration (`keep (provisional)`), not a final decision. |
+| `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | Automatic | Disposable-database and `--ignored` Rust tests; a package build does not replace them. Temporary retention (`keep (provisional)`): any repeated test execution between these jobs and `server-regressions` needs one primary owner or a recorded reason. |
 | `coverage-check`, `complexity-check`, `auto-bump-patch` | Unchanged | Release and version behavior is unchanged. |
 
 Automatic integration coverage is now exactly the ten Access cases: five bootstrap cases and five session cases. These obligations have **no automatic integration coverage** until their replacements exist. A person must start the matching manual legacy job to run them:
