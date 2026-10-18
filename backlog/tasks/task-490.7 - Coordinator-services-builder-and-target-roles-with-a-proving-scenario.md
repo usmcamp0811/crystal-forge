@@ -4,7 +4,7 @@ title: 'Coordinator: services, builder, and target roles with a proving scenario
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-18 13:45'
+updated_date: '2026-10-18 13:47'
 labels:
   - testing
   - integration
@@ -27,11 +27,11 @@ ordinal: 519000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Coordinator-owned shared interface and single Delivery proof. Writable coordinator paths: `lib/integration-test/roles.nix`, related role-interface documentation, `checks/integration-delivery/scenarios/delivery-lifecycle.nix`, Python composition/browserSpecs, and `checks/integration-delivery/default.nix` registration. This is not a Luna child packet.
+Coordinator-owned shared-interface and Delivery proving task. Writable coordinator paths include `lib/integration-test/roles.nix`, role-interface documentation, `checks/integration-delivery/scenarios/delivery-lifecycle.nix`, its Python composition/browserSpecs, and `checks/integration-delivery/default.nix` registration.
 
-Implement the documented `services`, `builderA`, `builderB`, and `targetA` role interfaces under `lib/integration-test/`, and prove them with a real in-scenario commit→evaluation→build case in `delivery-lifecycle`. Use production packages, separate builder/agent credentials, real service fixtures, and a fresh output independently proven absent. No speculative roles or abstractions. The coordinator owns scenario composition/registration. TASK-490.8-.15 contribute disjoint Python/browser case fragments to this one fresh Delivery VM; do not create a NixOS test derivation per task. Cases use same-run commits, outputs, jobs, targets and receipts as they become available; no other derivation's live state is reused.
+Implement the documented `services`, `builderA`, `builderB`, and `targetA` interfaces. Prove them with a real commit→evaluation→build case in the registered `delivery-lifecycle` scenario. Use production packages, separate credentials, real service fixtures, and a fresh output that was absent before build. Do not add speculative roles. TASK-490.8-.15 contribute disjoint case fragments to that same fresh Delivery VM; no NixOS derivation per packet. Later cases use same-run commits, outputs, jobs, targets and receipts. Independent derivations never share runtime state.
 
-Current prerequisites: TASK-490.1 Access bootstrap and TASK-490.25/.26 fixes are integrated; the focused Access scenario and current owner pass at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. Production server package and delivery roles must be tested through the proving scenario. No unrelated module/application changes. Owner-level D1 authority still blocks uncertain domain expectations.
+The TASK-490.1 focused Access scenario and owner now pass after rebase at `bba718befbc183863781656df2df272e5f735d5a`. This is a real prerequisite, but roles and Delivery proof remain unimplemented. Focused command after implementation: `nix build .#checks.x86_64-linux.integration-delivery.scenarios.delivery-lifecycle -L`; aggregate: `nix build .#checks.x86_64-linux.integration-delivery -L`. This is the existing coordinator task, not a new packet.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
