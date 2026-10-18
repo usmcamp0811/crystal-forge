@@ -15,6 +15,14 @@
 #   that session's next operation. An independent browser signs in and out;
 #   its exact persisted session is invalidated. These cases run only after
 #   the five bootstrap cases, under the owner's TASK-490.2 selection.
+# Appended authorization cases (TASK-490.2, selected by the owner): Operator
+#   and Viewer actors, created through the Admin API, are denied the
+#   admin-only user create, user PATCH and server-configuration mutations with
+#   403 and no protected state change. A Viewer browser context finds no
+#   administration entry and the production "Access Denied" state at /admin.
+#   Authority: the approved design's role catalogue (Admin: "Manage users &
+#   OIDC", "Edit server config") and its Server Management page ("Admin-only").
+#   Not covered here: cross-environment scope and closed registration.
 # Authority: the owner-approved TASK-490.1 requirement is a fresh first-admin
 #   local-auth bootstrap using the normal NixOS module with
 #   services.crystal-forge.server.auth_mode = "local". The operations/auth
@@ -54,17 +62,77 @@ in
       adminRoleWire = "Admin";
       # Database value of the Admin role (`auth_role` enum).
       adminRoleDb = "admin";
+
+      # TASK-490.2 authorization actors. Identity, display name, email and
+      # role come from the approved design fixture by stable ID (u2 is an
+      # Operator, u4 a Viewer, u7 a Viewer that serves as the protected
+      # target). The server derives a local username from the email's local
+      # part, so the authored username below is a checked expectation, not
+      # an input. `roleWire` is the PascalCase role in /api/auth/whoami.
+      operator = harness.facts.localUserFromDesign {
+        id = "u2";
+        username = "jpark";
+        password = "cf-it-access-operator-1";
+      } // { roleWire = "Operator"; };
+      viewer = harness.facts.localUserFromDesign {
+        id = "u4";
+        username = "kthomas";
+        password = "cf-it-access-viewer-1";
+      } // { roleWire = "Viewer"; };
+      target = harness.facts.localUserFromDesign {
+        id = "u7";
+        username = "audit";
+        password = "cf-it-access-target-1";
+      } // { roleWire = "Viewer"; };
+
+      # Authored request payloads for the admin-only operations. Each denied
+      # request uses a payload that the Admin control case first proves is
+      # accepted, so a 403 can only be caused by the actor's role.
+      authorization = {
+        # Role escalation by account creation. One address per actor, and one
+        # for the Admin control, so a wrongly accepted request is attributable.
+        createEmails = {
+          control = "escalation-control@acme.io";
+          operator = "escalation-by-operator@acme.io";
+          viewer = "escalation-by-viewer@acme.io";
+        };
+        createProbe = {
+          display_name = "Escalation Probe";
+          password = "cf-it-access-escalation-1";
+          role = "Admin";
+          environments = [];
+        };
+        # Role escalation and disablement of an existing account.
+        patchProbe = { role = "Admin"; enabled = false; };
+        patchRestore = { role = "Viewer"; enabled = true; };
+        # Server configuration values that differ from the installed defaults.
+        retryPolicy = {
+          max_build_retries = 3;
+          max_evaluation_retries = 2;
+          backoff_seconds = 60;
+          transient_only = false;
+        };
+        classification = {
+          enabled = true;
+          level = "CUI";
+          custom_text = "CF-IT AUTHORIZATION PROBE";
+        };
+      };
     };
     # Ordering is deliberate: bootstrap asserts a fresh user and one session
-    # before the selected session fragment creates additional sessions.
+    # before the selected session fragment creates additional sessions, and
+    # the authorization fragment creates further users only after both.
     script = harness.pkgs.writeText "access-local-lifecycle.py" (
       builtins.readFile ./lifecycle-local-bootstrap.py
       + "\n"
       + builtins.readFile ./fragments/task-490.2-sessions.py
+      + "\n"
+      + builtins.readFile ./fragments/task-490.2-authorization.py
     );
     browserSpecs = {
       bootstrap-sign-in = ./lifecycle-local-bootstrap.cjs;
       session-sign-out = ./fragments/task-490.2-sessions.cjs;
+      viewer-admin-denied = ./fragments/task-490.2-authorization.cjs;
     };
     timeout = 900;
   }
