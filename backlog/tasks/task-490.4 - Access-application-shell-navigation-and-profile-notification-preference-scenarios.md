@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-18 02:37'
+updated_date: '2026-10-18 03:32'
 labels:
   - testing
   - integration
@@ -33,11 +33,11 @@ ordinal: 516000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-access. Contract IDs: access.shell and access.configuration.preferences. This packet owns disjoint case fragments only: checks/integration-access/scenarios/fragments/task-490.4-shell-navigation.py/.cjs and task-490.4-preferences.py/.cjs. The coordinator owns lifecycle-local-bootstrap.nix, Python composition, browserSpecs mapping, and owner registration. Do not create packet-specific NixOS test derivations.
+Owning check: integration-access. Contract IDs: access.shell and access.configuration.preferences. This packet owns disjoint shell/navigation and preference Python/browser fragments only: `checks/integration-access/scenarios/fragments/task-490.4-shell-navigation.py/.cjs` and `task-490.4-preferences.py/.cjs`. The coordinator owns `lifecycle-local-bootstrap.nix`, Python composition, browserSpecs mapping and owner registration. No packet-specific NixOS derivations.
 
-Compose these local-auth workflows with the TASK-490.1 bootstrap and TASK-490.2/.3 cases in the same fresh VM/database. Verify AppShell routes, unknown-route behavior, keyboard/sidebar/narrow navigation and per-user profile/notification preferences. User A changes must persist through reload and leave User B unchanged. Compare shell presentation with the approved Shell.jsx state using a justified threshold; missing approved states remain blocked: design gap. Use the existing receipt mechanism for generated users.
+Compose local-auth workflows with TASK-490.1/.2/.3 in the same fresh VM/database. Verify AppShell routes, unknown-route behavior, keyboard/sidebar/narrow navigation and per-user profile/notification preferences. User A changes persist and leave User B unchanged. Compare shell presentation to the approved Shell.jsx state with a justified threshold; missing approved states remain blocked: design gap. Reuse same-run user receipts.
 
-Read-only sources: web-ui routes/AppShell/sidebar/profile, user_preferences API/model, approved Shell.jsx and ProfileView.jsx. As-built docs do not establish D1 authority. No production, shared harness, scenario composition, owner registration, CI, or docs writes. Foundation and TASK-490.25/.26 must pass before dispatch. The coordinator records actual VM evidence.
+The base scenario passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`; TASK-490.25/.26 are integrated. Remaining dependency is TASK-490.1 review/selection and approved UI states. Focused verification after composition: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`; aggregate: `nix build .#checks.x86_64-linux.integration-access -L`. The future fragment composition has not run; keep Backlog until selected and blocked design states are resolved.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
