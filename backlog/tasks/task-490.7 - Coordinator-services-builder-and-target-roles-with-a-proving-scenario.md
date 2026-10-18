@@ -4,7 +4,7 @@ title: 'Coordinator: services, builder, and target roles with a proving scenario
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-18 03:26'
+updated_date: '2026-10-18 13:45'
 labels:
   - testing
   - integration
@@ -48,4 +48,6 @@ Current prerequisites: TASK-490.1 Access bootstrap and TASK-490.25/.26 fixes are
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction: shared roles move to lib/integration-test; meaningful Delivery proving scenario is owner-local and explicitly coordinator-registered. Coordinator writer, not Luna. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands required before To Do. No delegation or proving-slice execution is claimed.
+
+The TASK-490.1 prerequisite passed again after rebase at `bba718befbc183863781656df2df272e5f735d5a`, with the current `integration-access` aggregate passing. This is not the Delivery roles/proving scenario; TASK-490.7 remains Backlog until its interfaces and delivery-lifecycle proof are implemented and executed.
 <!-- SECTION:NOTES:END -->
