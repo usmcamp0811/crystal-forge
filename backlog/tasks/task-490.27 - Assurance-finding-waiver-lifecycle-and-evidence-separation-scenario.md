@@ -4,7 +4,7 @@ title: 'Assurance: finding-waiver lifecycle and evidence separation scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 20:31'
-updated_date: '2026-10-18 02:37'
+updated_date: '2026-10-18 14:00'
 labels:
   - testing
   - integration
@@ -23,25 +23,38 @@ ordinal: 540000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-assurance. Contract ID: assurance.remediation.finding-waiver. This packet owns only checks/integration-assurance/scenarios/fragments/task-490.27-waiver.py and task-490.27-waiver.cjs plus optional owner-local fixtures. Coordinator owns evidence-remediation-lifecycle.nix, Python composition, browserSpecs mapping and owner registration. No NixOS derivation is assigned to this packet.
+Owning check: integration-assurance. Contract ID: assurance.remediation.finding-waiver. Goal: prove the approved waiver lifecycle separately from remediation. Risk: high (decision authority/evidence separation). Non-goals: triage (.20), acceptance-register renewal/conversion (.28), POA&M (.21/.29), product changes.
 
-Compose after an actual finding workflow earlier in the same fresh Assurance VM; reuse generated finding identities through receipts. Never read findings, output rows or receipts from TASK-490.16's separate derivation and never seed findings or waiver states. Assert only waiver transitions supported by accepted authority; a waiver remains distinct from remediation and Current evidence, and unauthorized actions have no side effect. If exact waiver authority/UI states are not approved, retain the case as blocked: decision/design gap.
+Writable paths (only):
+- checks/integration-assurance/scenarios/fragments/task-490.27-waiver.py
+- checks/integration-assurance/scenarios/fragments/task-490.27-waiver.cjs
 
-The same scenario composes TASK-490.16/.17/.18/.19 evidence producers and TASK-490.20/.21/.28/.29 remediation cases, then exports with .22. Writable paths are the named waiver fragments and owner-local fixtures only. Production, shared helpers, scenario composition, owner registration, CI and docs are read-only. Foundation and TASK-490.25/.26 must pass before dispatch; the coordinator records the one composed VM result/evidence.
+Composition target: checks/integration-assurance/scenarios/evidence-remediation-lifecycle.nix. Coordinator owns Nix/Python composition, browserSpecs and explicit registration/normal aggregation. Use real .16 scan-produced findings earlier in this fresh Assurance VM/database through receipts. Earlier real same-scenario findings MAY be consumed; another derivation's live findings, outputs, rows or receipts MUST NOT be consumed. No packet-specific derivation; never seed findings or waiver states. No additional fixture path is granted; author needed waiver facts in these fragments.
+
+Starting with a distinct real finding, an approved actor submits a waiver request and an authorizer reviews Accepted or Rejected as applicable; revoke an accepted waiver. Assert expiry using an authored due time or deterministic clock only if an existing approved API/test boundary supports it; do not add test clocks. Independently read persistence and UI. Accepted/rejected/revoked/expired decisions remain separate from remediation: waiver acceptance never marks the finding remediated, changes scan evidence or changes Current status. Unauthorized actions/review have no side effect. Exact actor/scope/UI and transitions must be approved; otherwise retain blocked: decision/design gap.
+
+Dependencies/readiness: TASK-490.16 real finding producer and its tested role/setup interfaces must be integrated at recorded revisions. Foundation bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab passed with .25/.26. Await selection, accepted waiver/expiry/actor/UI authority and coordinator ordering. Foundation startup failures and prior mixed remediation scope are historical. No waiver fragment run is claimed.
+
+Authority/read-only sources: first read docs/design/CrystalForge/docs/crystal-forge-systems-design/cve-poam-evidence-continuity-design-spec.md and confirm approval covers these exact interactions. docs/knowledge/cves/* and poam/* are as-built evidence only. Inspect cf-server handlers/api/poam.rs finding-waiver routes, models/poam.rs WaiverDecision, server router; UI waiver/modal caller and approved PoamViews.jsx/CveBatchTriage.jsx. Do not infer requirements from enum variants. Use documented case/expect/expect_equal/receipt/http/sql_json/run_browser interfaces; production, shared helpers, composition, registration, CI, docs and design are read-only.
+
+Focused verification after composition: `nix build .#checks.x86_64-linux.integration-assurance.scenarios.evidence-remediation-lifecycle -L`. Coordinator records exact tested revision, command, result and evidence. Preserve correct failures and linked defects; escalate helper/authority gaps.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A real scan-produced finding earlier in the Assurance scenario is used; waiver state is never seeded
-- [ ] #2 Only approved waiver request/review/revoke/expiry transitions are asserted; unresolved authority remains blocked
-- [ ] #3 Accepting a waiver never marks the finding remediated or changes Current scan evidence
-- [ ] #4 Unauthorized waiver actions are rejected with no side effect
-- [ ] #5 The coordinator composes this fragment in evidence-remediation-lifecycle; no packet-specific VM derivation is added
-- [ ] #6 The coordinator records the actual Assurance VM revision, command, result and evidence
+- [ ] #1 Real .16 scan-produced findings earlier in the same Assurance scenario are consumed through receipts; no finding/waiver state is seeded or read from another derivation
+- [ ] #2 Approved request, Accepted/Rejected review, revoke and expiry transitions are proved against independent facts and persistence; expiry uses only an existing approved boundary, with no new test clock
+- [ ] #3 Accepting a waiver never marks the finding remediated or changes scan evidence/Current status; other waiver decisions remain distinct from remediation
+- [ ] #4 Unauthorized waiver actions/review are rejected with no side effect
+- [ ] #5 Required actor/scope/UI states are exercised only under approved authority; unresolved cases stay blocked: decision/design gap; coordinator composes only named fragments into evidence-remediation-lifecycle without a packet derivation
+- [ ] #6 Coordinator executes the focused evidence-remediation-lifecycle gate and records exact tested revision, command, result and evidence
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Isolation clarification: TASK-490.16 is a code/setup dependency only; its VM, scan rows, receipts, or outputs cannot be reused. This scenario must produce the real scan finding it needs in its own fresh VM as setup, without asserting the complete scan contract a second time and without seeding the finding/waiver. Remain Backlog until a passing/tested foundation dependency and accepted waiver authority exist.
+Current readiness: bba718be controller foundation passed. .16 real findings/setup and accepted waiver authority/expiry/UI remain prerequisites for coordinator selection/composition. No waiver run is claimed.
+
+### Historical
+This packet was split from mixed triage/acceptance scope on 2026-10-17. Earlier isolation notes referred to separate scenario runs and unresolved foundation startup. They prohibited cross-derivation findings, not the current use of earlier real .16 cases through receipts inside one Assurance lifecycle.
 <!-- SECTION:NOTES:END -->
