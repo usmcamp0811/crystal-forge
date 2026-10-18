@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-18 03:32'
+updated_date: '2026-10-18 13:45'
 labels:
   - testing
   - integration
@@ -54,4 +54,6 @@ The base scenario passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`; TASK-490
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction replaces prior layout, commands and D1 authority instructions. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s), implemented helpers and verified commands are required before To Do. No Luna delegation or executed slice is claimed. Coordinator owns owner default.nix, shared lib and CI/docs; scenario files stay disjoint.
+
+Rebase verification: the TASK-490.1 local bootstrap passed at rebased source `bba718befbc183863781656df2df272e5f735d5a`; focused and aggregate commands are specified in the current description. This fragment set remains Backlog pending TASK-490.1 review/selection and approved UI states.
 <!-- SECTION:NOTES:END -->
