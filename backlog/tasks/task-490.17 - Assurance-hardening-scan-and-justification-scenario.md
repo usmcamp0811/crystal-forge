@@ -4,13 +4,16 @@ title: 'Assurance: hardening scan and justification scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-17 20:33'
+updated_date: '2026-10-18 02:38'
 labels:
   - testing
   - integration
   - luna
 dependencies:
   - TASK-490.14
+modified_files:
+  - checks/integration-assurance/scenarios/fragments/task-490.17-hardening.py
+  - checks/integration-assurance/scenarios/fragments/task-490.17-hardening.cjs
 parent_task_id: TASK-490
 priority: medium
 type: task
@@ -20,25 +23,20 @@ ordinal: 529000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-assurance. Contract ID: assurance.scanning.hardening. Exclusive writes: checks/integration-assurance/scenarios/scanning-hardening.{nix,py,cjs}. Separate from CVEs because this uses hardening worker/target service facts. Legacy hardening steps 27/28 are mocked and knownIssue.
+Owning check: integration-assurance. Contract ID: assurance.scanning.hardening. This packet owns only checks/integration-assurance/scenarios/fragments/task-490.17-hardening.py and task-490.17-hardening.cjs. The coordinator owns evidence-remediation-lifecycle.nix, Python composition, browserSpecs mapping and Assurance registration; no packet-specific derivation.
 
-Scope: targetA runs authored services with distinct systemd hardening settings; real scan produces expected per-service findings independently derived from authored unit settings, not CF output. Justification persists and survives reload. Rescan after real deployment changing one service updates only that service. Non-goals: STIG controls (490.19), CVEs. TASK-490 test-only scope applies.
+Provision targetA and authored systemd service settings in the same fresh Assurance VM. Run the real hardening scan and compare findings to independently authored unit facts; persist justification and prove a rescan after a real target change updates only the changed service. Use receipts for the real target identity. Do not use another scenario's target, DB or output.
 
-Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; integration requires explicit registration of disjoint child files. Meaningful WIP can be discoverable; only Access exists now, other owners only with meaningful scenarios, no placeholders.
-
-Prerequisite: TASK-490.14 integrated. Read cf-server bin/hardening-worker.rs, api/hardening.rs, systems.rs hardening/inventory/scan/justifications, modules/nixos/crystal-forge hardening options and HardeningTab.jsx. As-built D1 is evidence, not accepted authority; uncertain cases remain blocked pending owner decision.
-
-Candidate, NOT verified: nix build .#checks.x86_64-linux.integration-assurance.scenarios.scanning-hardening -L; append .run for evidence; aggregate nix build .#checks.x86_64-linux.integration-assurance -L. Completion requires explicit registration, real VM execution and exact revision/commands/outcomes/evidence notes. Preserve correct failing assertions and linked Backlog product bugs; escalate interface/authority gaps without product fixes.
-
-READINESS: actual foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s), implemented interfaces/fixtures/registration and verified commands required before To Do. No delegation or executed slice is claimed.
+Compose with CVE, policy, import, triage, waiver, acceptance, POA&M, verification and export fragments in the shared Assurance VM. Writable paths are these fragments and optional owner-local fixtures. Production code, shared helpers, composition, registration, CI and docs are read-only. Requires TASK-490.7 target role and accepted authority; foundation and TASK-490.25/.26 must pass before dispatch. Coordinator records one VM result/evidence.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Hardening findings match authored per-service unit settings on a real target
+- [ ] #1 Hardening findings match independently authored per-service unit settings on real targetA
 - [ ] #2 Justifications persist through reload
-- [ ] #3 A rescan after a real deployment updates only the changed service
-- [ ] #4 Executed in real VMs with recorded evidence
+- [ ] #3 After a real target service change, rescan updates only the changed service
+- [ ] #4 The coordinator composes this fragment into evidence-remediation-lifecycle; no packet derivation is added
+- [ ] #5 The coordinator records the actual Assurance VM tested revision, command, result and evidence
 <!-- AC:END -->
 
 ## Implementation Notes
