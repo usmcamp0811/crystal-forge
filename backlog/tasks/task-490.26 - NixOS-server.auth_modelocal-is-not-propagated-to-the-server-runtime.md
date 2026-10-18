@@ -4,7 +4,7 @@ title: NixOS server.auth_mode=local is not propagated to the server runtime
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 13:45'
+updated_date: '2026-10-18 13:47'
 labels:
   - bug
   - nixos
@@ -26,9 +26,9 @@ ordinal: 539000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Propagate `services.crystal-forge.server.auth_mode` through the normal NixOS production server unit. Set `AUTH_MODE` from the module option for both local and OIDC; keep OIDC-specific variables conditional and preserve existing EnvironmentFile precedence. No test-only override or authentication-policy change.
+Propagate `services.crystal-forge.server.auth_mode` to the effective production server configuration through the normal NixOS unit. Set `AUTH_MODE` from the option for local and OIDC; keep OIDC-specific variables conditional and preserve existing EnvironmentFile precedence. Do not add a test-only override or change authentication policy.
 
-Separately committed as `136348e8f1772372dc96630112902265853e3656`. Targeted NixOS evaluation verified local/OIDC AUTH_MODE and OIDC-only variable presence. The combined Access scenario passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`: empty-DB setup-status reports local mode, the production embedded UI registers/signs in the first administrator, reload preserves the active session, and wrong password is rejected without another session. Evidence: `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. No test-only environment override was used. The separate TASK-492 Postgres Jobs startup-order defect is not included in this authorization.
+Repair is separate commit `76e514644505f232e4e47f085db801913d8449ab` after rebase. Targeted NixOS evaluation verified local/OIDC AUTH_MODE and presence/absence of OIDC-only variables. The combined Access scenario and owner aggregate passed on rebased source `bba718befbc183863781656df2df272e5f735d5a`: setup-status reports local and requires_setup on an empty DB; the production embedded UI registers/signs in the first administrator; reload preserves the session; wrong password is rejected without a new session. Evidence `/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. TASK-492 is a separate unauthorized startup-order issue.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
