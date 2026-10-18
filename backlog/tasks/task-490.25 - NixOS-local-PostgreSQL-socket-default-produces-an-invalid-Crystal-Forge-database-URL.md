@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 03:27'
+updated_date: '2026-10-18 03:30'
 labels:
   - bug
   - nixos
@@ -40,7 +40,7 @@ This repair is separately committed from TASK-490.1 test/doc work. The user expl
 - [x] #2 An ordinary network host and nondefault port round-trip through both client parsers
 - [x] #3 Space, literal plus, URI delimiters and percent in username/password/database/path round-trip as actual values, not a string-only comparison
 - [x] #4 Database-client dependencies remain in cf-server; cf-config has no tokio_postgres or SQLx dependency
-- [ ] #5 The coordinator's combined Access scenario proves startup/migrations and records actual VM evidence
+- [x] #5 The coordinator's combined Access scenario proves startup/migrations and records actual VM evidence
 <!-- AC:END -->
 
 ## Implementation Notes
@@ -53,4 +53,6 @@ Final exact-head rerun on combined commit fc930335878279ac426510359c039dfd8961dc
 LOCK: claude-sonnet-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation. The user explicitly authorized this narrow production repair on 2026-10-17 and directed that it be committed separately on the TASK-490.1 foundation branch (not a separate worktree). Active type is cf_config::config::DatabaseConfig; cf-server/src/config/database.rs is an uncompiled duplicate.
 
 Repair commit ca46cdd5 (full: verify with `git rev-parse ca46cdd5^{commit}` in the foundation worktree) changes the active cf-config serializer and adds the two-client regression table. `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib database_url_tests` passed (2/2). Combined Access VM proof is pending.
+
+Combined runtime proof passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. Exact command: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. Evidence `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`; result.json passes fresh startup/migrations, and redacted generated-config-summary.txt shows `/run/postgresql`. The NixOS test uses the production server through both connection consumers; all five cases passed.
 <!-- SECTION:NOTES:END -->
