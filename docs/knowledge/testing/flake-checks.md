@@ -100,10 +100,11 @@ Run the focused Access gate with
 `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`.
 Append `.run` to the scenario attribute for evidence only. The historical
 scenario at `fc930335878279ac426510359c039dfd8961dc13` failed before
-migrations/browser/auth. TASK-490.25/.26 repairs are integrated; the focused
-scenario and `integration-access` aggregate both pass at
-`b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. This verifies the bootstrap slice,
-not full Access coverage. The same VM journal records unrelated TASK-492. See the
+migrations/browser/auth. TASK-490.25/.26 repairs are integrated. After rebase on
+`origin/dev` `5ae7feab`, the focused scenario and `integration-access` aggregate
+both pass at `bba718befbc183863781656df2df272e5f735d5a`. This verifies the
+bootstrap slice, not full Access coverage. The same VM journal records unrelated
+TASK-492. See the
 [foundation execution record](integration-coverage-map.md#foundation-execution-record)
 for the generated configuration, exact output path, expected/actual result,
 and task links. TASK-491's package test prerequisite is resolved. Keep all

@@ -26,7 +26,7 @@ ordinal: 539000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Current authorized repair (2026-10-18; supersedes the earlier prohibition below): the production server unit now sets `AUTH_MODE = cfg.server.auth_mode` for both local and OIDC; OIDC-only variables remain conditional. Targeted NixOS evaluation returns local for local and oidc for oidc. Separate commit `136348e8` integrates this repair. Combined Access VM verification remains pending; there is no test-only override.
+Current authorized repair (2026-10-18; supersedes the earlier prohibition below): the production server unit now sets `AUTH_MODE = cfg.server.auth_mode` for both local and OIDC; OIDC-only variables remain conditional. Targeted NixOS evaluation verifies both modes. Rebased separate commit `76e51464` integrates this repair. The combined Access VM passed at bba718befbc183863781656df2df272e5f735d5 with local setup-status and browser/session assertions; there is no test-only override.
 
 The TASK-490.1 Access scenario configures the normal module option services.crystal-forge.server.auth_mode = "local". The generated config summary contains [server] but no auth_mode key, and `systemctl show crystal-forge-server.service -p Environment --value` reports `AUTH_MODE=unset`. At the reviewed baseline, cf-config `default_auth_mode()` selects the AUTH_MODE environment variable and defaults to "oidc". The module Nix option defaults to local but its generated config/systemd environment does not convey local mode. This conflicts with the accepted local bootstrap expectation and current operations guide.
 

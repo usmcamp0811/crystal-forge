@@ -27,7 +27,7 @@ ordinal: 538000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Current authorized repair (2026-10-18; supersedes the earlier prohibition below): active `cf_config::config::DatabaseConfig::to_url` percent-encodes URI components and preserves `/run/postgresql` as a Unix socket. Separate commit `ca46cdd5` adds a real-serializer regression table parsed by both tokio_postgres and SQLx (socket, TCP, and encoding-sensitive values). Targeted tests pass. The combined Access VM verification remains pending; the original startup assertion stays executable.
+Current authorized repair (2026-10-18; supersedes the earlier prohibition below): active `cf_config::config::DatabaseConfig::to_url` percent-encodes URI components and preserves `/run/postgresql` as a Unix socket. Rebased separate commit `52128b3a` adds the real-serializer regression table parsed by both tokio_postgres and SQLx. The targeted tests passed before rebase; the combined Access VM passed after rebase at bba718befbc183863781656df2df272e5f735d5, including socket startup and migrations. Keep the startup assertion.
 
 On the TASK-490.1 native Access startup slice, the controller uses the normal NixOS module defaults: local-database=true and database.host=/run/postgresql (documented as the local socket path). The generated config reports [database] host = "/run/postgresql". cf-config DatabaseConfig::to_url formats that string as `postgres://user:password@/run/postgresql:5432/database`, which has no URI host. The real production cf-server-drv exits during startup with `invalid configuration: both host and hostaddr are missing`, before migrations, bootstrap, or HTTP routes.
 
