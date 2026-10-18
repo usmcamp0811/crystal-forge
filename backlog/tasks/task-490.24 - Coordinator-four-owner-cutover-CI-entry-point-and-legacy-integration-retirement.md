@@ -3,10 +3,11 @@ id: TASK-490.24
 title: >-
   Coordinator: four-owner cutover, CI entry point, and legacy integration
   retirement
-status: Backlog
-assignee: []
+status: In Progress
+assignee:
+  - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-18 13:47'
+updated_date: '2026-10-18 15:32'
 labels:
   - testing
   - integration
