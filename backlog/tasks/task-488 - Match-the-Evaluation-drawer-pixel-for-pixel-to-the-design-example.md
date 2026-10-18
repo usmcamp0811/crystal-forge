@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - opencode-claude
 created_date: '2026-10-16 00:27'
-updated_date: '2026-10-18 04:32'
+updated_date: '2026-10-18 04:53'
 labels:
   - web-ui
   - design-parity
@@ -478,4 +478,6 @@ Updated MR note 4036046930 with 9fd1709f review results, remaining gates, and ei
 Post-push status at 9fd1709f: MR !334 is still Draft. Pipeline 2959620890 was pending; required jobs 17261662139 (server-regressions) and 17261662149 (web-ui-check) had no runner assigned and had been queued for about 29 minutes. Local Nix `nix flake check --keep-going --builders '' --max-jobs 1 --cores 2 -L` is running at /tmp/opencode/task488/local-flake-check-9fd1709f.log; no result recorded yet. The exact-head focused browser 26b-e workflows pass locally and the isolated 12l NixOS VM V2 Config workflow passed 1/1. Keep task In Progress and do not lift merge hold until required exact-head jobs finish.
 
 Follow-up: local `nix flake check --keep-going --builders '' --max-jobs 1 --cores 2 -L` was started after 9fd1709f and remains in progress in /tmp/opencode/task488/local-flake-check-9fd1709f.log; no result is claimed. Pipeline 2959620890 still has both required jobs pending with no runner assigned (about 30 minutes queued at last check). Do not change task status or lift the MR Draft hold until exact-head server and browser job results are reviewed.
+
+Latest handoff: HEAD 9fd1709fdf15defaa8f874ab4f4fdf6cbcfebb8f is pushed; MR !334 remains Draft. Pipeline 2959620890 still reports required jobs 17261662139 and 17261662149 as pending with no runner assigned (about 60 minutes queued). Local `nix flake check --keep-going --builders '' --max-jobs 1 --cores 2 -L` is still running; its latest log is /tmp/opencode/task488/local-flake-check-9fd1709f.log. Do not record the full flake check or exact-head CI as passing until both actually finish. Preview remains ready on the task-owned 8080/3445 stack; leave the existing TASK-488 lock and task status unchanged.
 <!-- SECTION:NOTES:END -->
