@@ -1,10 +1,11 @@
 ---
 id: TASK-490.3
 title: 'Access: administration and environment form persistence scenarios'
-status: Backlog
-assignee: []
+status: In Progress
+assignee:
+  - '@openai'
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-18 14:41'
+updated_date: '2026-10-18 20:42'
 labels:
   - testing
   - integration
@@ -32,25 +33,17 @@ ordinal: 515000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-access. Contract IDs: access.configuration.admin, access.configuration.resources. Goal: prove real UI administration/environment persistence, reload, cancel and accepted failed-save behavior. Risk: medium. Non-goals: cache/builder/flake/system forms, cache credentials/Test (.12/.13), OIDC (.6), role enforcement (.2), unapproved visual baselines and product changes.
+Owning check integration-access, contract access.configuration.admin/resources. This controller-only task covers production UI user/settings/environment forms with independent persistence and reload. Latest owner selected runnable coverage progress in the existing TASK-490 iteration; bounded Admin subset is now implemented and executed. Whole task remains In Progress.
 
-Writable paths (only):
-- checks/integration-access/scenarios/fragments/task-490.3-admin-forms.py
-- checks/integration-access/scenarios/fragments/task-490.3-admin-forms.cjs
-- checks/integration-access/scenarios/fragments/task-490.3-environment-forms.py
-- checks/integration-access/scenarios/fragments/task-490.3-environment-forms.cjs
+Implemented paths: checks/integration-access/scenarios/fragments/task-490.3-admin-forms.py/.cjs. Coordinator appends them after the original sixteen cases in lifecycle-local-bootstrap.nix and maps seven browser phases to the same spec file. This uses one existing VM/database; each browser phase signs in independently, records responses/IDs, reloads, then returns to Python for SQL before the next mutation. No packet VM or new owner.
 
-Composition target: checks/integration-access/scenarios/lifecycle-local-bootstrap.nix. Coordinator owns Nix/Python composition, browserSpecs mapping and explicit owner registration/normal aggregation. Compose with .2/.4 after real first-admin bootstrap in one fresh local-auth VM/database. Reuse earlier real users/environments only through same-scenario receipts; never consume another derivation's live state. No packet-specific derivation; shared helpers, production, registration, CI, docs and design sources are read-only.
+Passed cases: UI creation of design user u3 Dana Chen (email, username, first/last name, Operator role, empty explicit memberships verified); role edit to Viewer and reload; cancel both new-account and role/enablement edits with protected rows unchanged; disable persisted/reloaded plus one failed login401/no new session; retry-policy save; classification immediate enable save and marking/level save. All settings use independently authored facts. Requirements: approved AdminView.jsx workflows and existing task criteria. Source code locates controls/DTOs; current output does not approve its own correctness. Screenshots are semantic evidence, not visual parity.
 
-Admin cases: create user through UI and independently read users/user_role_assignments for exact role/environment assignments; edit role and reload; disable persists enabled=false and one sign-in attempt returns 401. Cancel leaves rows unchanged. Classification configuration and automatic retry policy saves persist and survive reload. Use authored values (design admin u1, Jordan Park u2/operator with production/staging where approved) and generated-ID receipts, not CF-derived expected values.
+Remaining paths: task-490.3-environment-forms.py/.cjs, environment create/edit/duplicate/cancel/delete and explicit nonempty environment assignments, plus accepted empty/pending/failed-save states. For a specified failed-save state use a bounded real server outage; no API mocks. Exact missing presentation/retention decisions block only those states (D3); they do not block accepted environment success/validation cases. No cache/builder/flake/system form scope expansion, OIDC or product/UI/schema/design changes.
 
-Environment cases: create/edit/delete through UI, verify environments rows and reload for each operation. Duplicate-name validation retains the draft and creates no row. Cover fresh-install empty list before these cases create records, success, validation, write error/draft preservation and pending/disabled save where accepted design defines those states. For failed-save behavior, use a real bounded server outage via unit_stopped(controller, "crystal-forge-server.service"), restore service and prove no persistence plus retained draft where approved. Missing authority blocks only the exact component/state; do not invent expectations or remove valid success/validation checks.
+Verified at clean c254b1c54e0f40adfaa9d05b5766cfeffae9bb89 through sh packages/ci/integration-owner-build.sh integration-access: exit0, 23/23 cases, VM executed newly. Original16 first and unchanged; seven Admin cases appended. VM driver50.72s, startup10.5s once, configured4GiB/4cores with peak memory unmeasured. Evidence /nix/store/nv2rpc4szk7525aa9fpb4289nz1hpbqv-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run. The aggregate built its registered focused gate; no separate focused execution was needed.
 
-Authority/source reading: approved AdminView.jsx and EnvironmentsView.jsx under docs/design/CrystalForge/components are presentation references. docs/knowledge/ui/admin-console-and-login-views.md, api/builders-queues-environments-dashboard-admin-api.md and ui/flakes-environments-builds-and-evaluations-views.md are as-built evidence, not D1 acceptance authority. Read cf-server handlers/api/admin.rs (users, classification, retry DTOs), environments.rs and routes; web-ui admin/environment tabs and CreateUserModal, EditUserModal, EnvironmentFormModal, EditEnvironmentModal, RemoveEnvironmentDialog.
-
-Dependency/readiness: TASK-490.1 is Review. Current tested controller pin is 81d65be745cc9f9777d368900d01fe0f207cb052 with .25/.26 and the .2 session subset verified. Focused Access and aggregate passed 10 cases (five bootstrap then five sessions), 292 migrations and database.unixSocketClients=22; this is not execution of these form fragments. Use FACTS["admin"] and same-run receipts()["admin.userId"], documented case/expect/receipt/http named-session/CSRF/sql_json/run_browser and fault helpers. Each browser invocation signs in independently. Paths and coordinator composition target above are concrete. This packet remains Backlog/unselected/unexecuted. Exact remaining authority gaps are failed-save draft retention after real outage and any unapproved empty/pending/disabled-save component states; accepted success/cancel/validation obligations remain in scope. Confirm those states and coordinator ordering before dispatch. No future services/builder/target role or global foundation-completion dependency blocks these controller proofs.
-
-Focused verification after composition: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. Record exact revision, command, outcome and evidence; the current bootstrap/session result does not prove form fragments. Keep correct failing assertions and link product defects; escalate helper/authority gaps.
+Use existing case/expect/receipt/http/sql_json/run_browser helpers, same-scenario receipts and production controls. Shared harness/facts/composition/registration remain coordinator-owned. No cross-derivation live state or cookie transfer. Preserve correct failing assertions and link product defects; no product fix is authorized.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -59,17 +52,33 @@ Focused verification after composition: `nix build .#checks.x86_64-linux.integra
 - [ ] #2 UI user creation/role edits, classification and retry settings, and environment create/edit/delete are proven by exact database reads and reload; expected values are independently authored
 - [ ] #3 Cancel leaves rows unchanged; duplicate environment validation retains draft and creates no row; accepted empty/pending/disabled-save states are exercised in the correct order
 - [ ] #4 A real bounded write failure restores the server, persists nothing and retains the draft where accepted requirements define that state; unresolved component/state authority is recorded as blocked
-- [ ] #5 Disabling a user persists enabled=false and rejects that user's real sign-in with 401
-- [ ] #6 The coordinator executes the focused lifecycle-local-bootstrap gate containing these fragments and records exact revision, command, result and evidence
+- [x] #5 Disabling a user persists enabled=false and rejects that user's real sign-in with 401
+- [x] #6 The coordinator executes the focused lifecycle-local-bootstrap gate containing these fragments and records exact revision, command, result and evidence
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Latest owner selects next runnable product coverage progress. Implement bounded accepted Admin form success subset after existing16Access cases: production UI user creation, role edit/reload, disable/login401 and cancel no mutation; classification/retry settings saves/reload if feasible. Use design identities not already created in .2, same-scenario receipts, independent browser login and DB before/after. No new VM/owner and no production changes. Do not claim complete .3: environment CRUD and specific unresolved failed-save/presentation states remain separate outstanding cases. Coordinator owns facts/composition/registration; fragment writer owns task-490.3-admin-forms.py/.cjs only. Execute actual normal Access CI path and preserve accurate failed assertion if a product defect emerges. TASK-490.7 remains next Delivery roles/proving work after this bounded controller progress; no blanket D1 blocker.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Current readiness: TASK-490.1 is Review in draft MR !335. Tested pin 81d65be745cc9f9777d368900d01fe0f207cb052 passed focused Access and aggregate with 10 cases, 292 migrations and database.unixSocketClients=22; runtime i84kvs1lc5nqx0lmsqinwbmvy0ix8mvh. The controller packet was directly inspected for disjoint form paths, lifecycle-local-bootstrap placement, facts/receipt interfaces, coordinator ownership and focused command. FACTS["admin"], receipts()["admin.userId"], named HTTP jars/CSRF, sql_json and independent run_browser contexts are concrete. No future role dependency is required.
+## Current bounded Admin result
 
-Still Backlog, unselected and unexecuted. Exact authority gaps: draft retention/no persistence after a real failed save and any missing approved fresh-empty/pending/disabled-save component state. Coordinator must confirm state authority/order before dispatch. Existing accepted success, cancel and duplicate validation obligations are retained. No form acceptance criterion is checked by the bootstrap/session result.
+Active coordinator openai in existing TASK-490.1-integration-foundation worktree, draft MR !335. Task In Progress. Only AC#5 and #6 checked: disabled account persistence/login401 and actual scenario execution. AC#1 requires all four fragments (environment fragments absent); #2 also requires environment CRUD/nonempty membership bindings; #3 needs environment validation and selected states; #4 needs accepted failure-state coverage. They remain unchecked.
 
-### Historical
-2026-10-17 review recorded unresolved foundation/package blockers and no VM execution at that time. Separate form derivations were a former layout proposal. Bootstrap later passed at b1095c8f and after rebase at bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab; runtime riky1mm0nn185wb26abw7zzshnbml0fp recorded 292 migrations. Those observations did not verify form fragments.
+Source c254b1c54e0f40adfaa9d05b5766cfeffae9bb89. sh packages/ci/integration-owner-build.sh integration-access exited0; 23 cases passed. First16 preserved, seven new Admin phases. Each phase has independent browser result/screenshot and SQL receipts including authored name/role/enablement, unchanged cancel snapshot, retry settings and classification. Disabled login401 has no new session. UI uses real APIs, no mocks or forced clicks/DOM changes. No visual parity claim.
+
+First form run at24f82d4 passed original16 plus creation/edit/cancel/disable; retry locator exactness failed because wrapping label includes select option text. Corrected locator prefix; status/persistence/reload assertions retained. No product defect. First interrupted300s package build started no VM; metadata package verification changed an input identity and required the embedded rebuild. FinalVMdriver50.72s; two actual local VM runs while developing forms, one scenario and one VM per run. Memory4GiB configured, peak notmeasured.
+
+Retained final evidence /nix/store/nv2rpc4szk7525aa9fpb4289nz1hpbqv-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run and integration-evidence/integration-access/. Uploaded result https://gitlab.com/-/project/70402481/uploads/4edf40060b019ca9dbec691d6759ec11/result.json ; creation screenshot https://gitlab.com/-/project/70402481/uploads/eb29f2d768a7a11ce90222996bce7a10/admin-form-create-reloaded.png ; classification screenshot https://gitlab.com/-/project/70402481/uploads/f60cc53f8412e96c5550ad83a6763374/admin-form-classification-reloaded.png .
+
+Remaining environment success/cancel/validation cases are controller-runnable. Exact unspecified failed-save/pending/empty presentation states need their own D3 decision. .7 is next shared-role/Delivery proving work, not blocked by historical foundation startup failures or blanket D1. No task completion/merge/deploy claim.
+
+LOCK: openai on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation.
+
+## Historical
+Earlier records at81d65be7 proved ten bootstrap/session cases, not forms, and task was then Backlog. .25/.26 prerequisites were integrated; selected role denials later produced sixteen cases at8a857bc8. Those readiness statements are superseded by this executed bounded slice.
 <!-- SECTION:NOTES:END -->

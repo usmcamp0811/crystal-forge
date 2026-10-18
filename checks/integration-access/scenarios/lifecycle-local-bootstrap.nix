@@ -23,6 +23,10 @@
 #   Authority: the approved design's role catalogue (Admin: "Manage users &
 #   OIDC", "Edit server config") and its Server Management page ("Admin-only").
 #   Not covered here: cross-environment scope and closed registration.
+# Appended Admin forms (TASK-490.3): creation, edit, cancel, disable/login
+#   rejection, retry settings and classification save/reload. Each browser
+#   phase returns to SQL verification before the next mutation. Environment
+#   CRUD, outage draft states and visual parity remain separate obligations.
 # Authority: the owner-approved TASK-490.1 requirement is a fresh first-admin
 #   local-auth bootstrap using the normal NixOS module with
 #   services.crystal-forge.server.auth_mode = "local". The operations/auth

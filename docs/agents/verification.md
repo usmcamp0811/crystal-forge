@@ -143,7 +143,7 @@ records the failures, current receipts, and uploaded reviewer artifacts.
 TASK-490.1 foundation is in `Review`; its documentation validation passed.
 TASK-490.2 remains `In Progress`: the selected Operator/Viewer admin-denial cases
 are implemented, and only the exact environment-scope and closed-registration
-cases wait for accepted decisions. The Access scenario passed all 16 cases
+cases wait for accepted decisions. The Access scenario previously passed all 16 cases
 (ten earlier, six authorization) through the CI job script at
 `8a857bc872cf331a19036b97a93f2b7741e9728b`, with the VM executed newly; see the
 [authorization record](../knowledge/testing/integration-coverage-map.md#access-authorization-cases-task-4902).
@@ -168,7 +168,9 @@ package for design iteration, without semantic integration proof.
 ## Final inventory verification
 
 Current inventory after source retirement: one check, `integration-access`,
-versus 27 before retirement. Its 16 executed cases remain unchanged. Delivery,
+versus 27 before retirement. Its original 16 cases remain unchanged; seven
+Admin-form cases now follow them and passed at `c254b1c5` through the normal
+owner CI script, with a new VM and independent SQL/reload evidence. Delivery,
 Assurance, and Upgrade are absent; retained XML fixtures create no check.
 Final completion requires exactly four TOTAL attributes, plus complete accepted
 coverage and execution evidence. Evaluate the full set (not a filtered subset):

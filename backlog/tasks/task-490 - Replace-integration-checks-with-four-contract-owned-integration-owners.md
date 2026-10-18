@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-18 18:36'
+updated_date: '2026-10-18 21:06'
 labels:
   - testing
   - integration
@@ -26,15 +26,17 @@ ordinal: 512000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Final result: checks.x86_64-linux contains exactly FOUR TOTAL native Snowfall attributes: integration-access, integration-delivery, integration-assurance, integration-upgrade. This does not restrict verification to four commands: Rust unit and isolated PostgreSQL regressions, packaging, schema, documentation and developer utilities remain through package/app/CI mechanisms outside checks. Non-integration classification does not authorize retaining a top-level check attribute.
+Build a small, trustworthy product-testing architecture with exactly four TOTAL native Snowfall check attributes: integration-access, integration-delivery, integration-assurance, integration-upgrade. Minimize unnecessary suites, VM boots, duplicate tests/builds and CI overhead while proving accepted CF contracts. Lower-level tests may run outside these attributes, but not through one public verification wrapper per old suite.
 
-Coordinator owns contract, retirement map, shared harness, composition/registration, CI and acceptance verification. Keep the six-scenario starting topology and extend compatible cases rather than creating packet-specific VMs. Separate scenarios have fresh VMs/databases; later cases may use earlier real records through same-scenario receipts only. The accepted contract/current CF architecture defines product obligations; historical test inventory does not.
+The nine legacy suites are retired and all fifteen packages/verify-* wrappers are eliminated. Unique assertions now execute through ordinary core/metadata/OSCAL component builds, the existing consolidated isolated database workflow, direct module/runtime/schema checks and developer-tool selftests. No aggregator framework, registry or fifth check. Current counts: 1 check, 0 verify outputs, 28 public package attributes (was 43), 9 expanded CI jobs (was 14). The three future owners are absent, not placeholders.
 
-Owner-authorized source retirement in TASK-490.24 supersedes both retain-until-replacement and optional-manual coexistence. Nine legacy suite definitions and obsolete CI jobs are removed now; required assets and lower-level tests are relocated before deletion. Missing accepted owner coverage remains a gap, not obsolete or covered merely because old implementation is deleted. The current inventory is one implemented owner, Access, versus 27 previous attributes. Final acceptance is `nix eval .#checks.x86_64-linux --apply builtins.attrNames --json`, with exactly the four names above once their real scenarios exist. Do not add placeholders.
+The existing coverage map inventories current HTTP methods/auth/mutations, Dioxus interactions, production configuration, Git/evaluation, builders, agents, caches, scans/compliance/remediation, interchange/history and upgrades against accepted requirements and approved designs. It has 79 obligation rows in 12 families: 5 rows have executed subsets, 65 planned, 9 blocked by specific decisions. This is not endpoint-percentage coverage or complete row coverage. Current implementation discovers surfaces; it does not approve its own expected behavior.
 
-Access retains sixteen executed bootstrap/session/Operator-Viewer admin-denial cases; forms, preferences, notifications, OIDC, environment-scope and registration-policy work remains in the existing child tasks. Delivery/Assurance/Upgrade are unfinished. Consolidation of duplicate Rust/database selections is tracked in TASK-490.24 with exact primary-execution targets and dependencies; moving a check to a package does not by itself remove repeated work.
+At clean c254b1c54e0f40adfaa9d05b5766cfeffae9bb89 the normal Access CI path passed 23 cases with a newly executed single controller VM: original 16 unchanged, then 7 real Admin-form cases with reload and independent SQL. The consolidated DB workflow also exited 0 with 515 selected Rust cases and both populated migration rehearsals. Normal core/protocol/config, module, schema and tooling checks passed. Exact metrics/evidence and remaining duplication are in TASK-490.24; no total runtime speedup claim.
 
-This remains a test-only overhaul except the previously authorized prerequisite configuration repairs TASK-490.25 and .26 (52128b3a and 76e51464). No further product, authorization-policy, schema, migration, SQLx or design change is authorized. D1/D2 and separate TASK-492/493/494 remain scoped. Existing draft MR !335; no merge/deployment/Done authorization.
+The next shared-role milestone is .7: real services, separately authorized API-only builders and target, with an initial Git->evaluation->actual build proof in one Delivery lifecycle. .3 remains unfinished for environment CRUD/nonempty assignments and exact missing failure-state requirements; .2 environment-scope/registration decisions remain specific. OIDC, notifications, Delivery, Assurance, Upgrade and visual comparisons are not implied by the passing Access slice. Keep the six initial scenario boundaries and justify any new isolation.
+
+Final acceptance requires all four exact names and complete passing accepted coverage or an explicit scope disposition, not a green partial pipeline. No production Rust/UI/API/schema/design/module-behavior change, merge, deployment or Done claim. Prior .25/.26 configuration repairs remain the only authorized production exception.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -51,17 +53,22 @@ This remains a test-only overhaul except the previously authorized prerequisite 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-## Current source retirement (2026-10-18)
+## Current verified iteration
 
-The owner's source-removal instruction supersedes all prior legacy-retention and optional-manual coexistence rules. Implementation 0105e512 removes nine suites and their manual jobs, relocates needed browser/XCCDF assets, and moves 17 lower-level definitions to native packages. Actual checks.x86_64-linux attrNames: ["integration-access"], down from27. The final criterion remains exactly FOUR TOTAL attributes, not four owners plus retained utility checks. Native Snowfall discovery unchanged; no placeholder owners.
+Existing TASK-490.1-integration-foundation worktree and draft MR !335. TASK-490.24 owns consolidation and inventory; TASK-490.3 owns the executed bounded Admin slice. .1/.25/.26 remain Review; .2/.3/.24 remain In Progress. Final owners/coverage/minimality are incomplete.
 
-Access's unchanged16-case aggregate passed at clean0105e512 with a fresh VM execution (24.23s driver); source evidence /nix/store/n68lcq6xxab1rhhfymp7yz4pj19hff95-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run. No new cases this source-retirement pass. No product/UI/schema/design changes.
+All 15 verify outputs removed. Public package count 43 -> 28; expanded CI jobs 14 -> 9; checks remain [integration-access]. Unique protection belongs to ordinary components, direct CI/module/tool mechanisms and the isolated database runner. Six ignored overlaps, 94 repeated cf-server library selections and 2 repeated integration invocations removed. Core now runs all 94 cf-config tests instead of the old standalone CA-only 13, so gross duplicate removal is not a 102-test net whole-pipeline reduction. Broader lower-level dependency union including direct-CI tools/templates 7563 -> 7547 (net 16 recipes); no overall runtime speedup claim.
 
-TASK-490.24 records exact verification results and two600second local command timeouts (full DB regressions and builder-packaging/XCCDF dependency compilation), so full verification is incomplete. Lightweight contracts, tooling, docs, OSCAL, module validation, CI routing/lint passed. Preserved DB regression definition/derivation is identical and actual isolated PostgreSQL execution was observed. Duplicate ignored Rust/DB selections between verify-server-regressions and state-machine-tests remain to map/consolidate here before final completion.
+At clean c254b1c54e0f40adfaa9d05b5766cfeffae9bb89: normal Access CI command exited 0 with 23/23 cases, original 16 first and unchanged. Seven real Admin UI phases have reload and SQL evidence. One VM per run; final driver 50.72s, startup 10.5s reused once; 4GiB configured, peak memory unmeasured. Evidence /nix/store/nv2rpc4szk7525aa9fpb4289nz1hpbqv-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run. .3 only AC5/6 checked; remaining form requirements stay open.
 
-Child states: .1/.25/.26 Review; .2/.24 In Progress. Other coverage children remain Backlog, not silently selected. Continue accepted coverage through existing tasks, smallest same-scenario fragments and six planned scenario boundaries. Forms .3/.4, notifications .5, OIDC .6, roles .7, Delivery/Assurance/Upgrade are not implemented merely because old suites were deleted. Environment-scope/registration and Upgrade decisions remain scoped to their own cases. Final four-owner inventory/coverage not satisfied. Existing MR !335 stays draft; no merge/deploy/Done.
+Full canonical DB command also exited 0 at c254b1c5: nix run .#devScripts.state-machine-test -- -t=false up. 227 Rust summaries total 515 passed, 0 failed, 0 ignored; 284 selected ignored-library tests plus 231 integration cases in 14 targets and both populated migration rehearsals. One invocation-owned isolated PG cluster, superuser/createdb and statistics preload verified; cluster shut down/cleaned. Runtime 18m26s; /tmp/opencode/task490-db-final.log and .status=0. Earlier fixture/env and supervisor-status issues were fixed without changing product behavior or weakening tests. Core/protocol/config, metadata/OSCAL, module/runtime/XCCDF and tool tests passed too.
 
-## Historical milestones
+Coverage inventory: 79 rows, 12 families, 5 rows with covered subsets, 65 planned, 9 decision-blocked. Actor/start/action/independent expectation/observation/status recorded. Some discovered cases need assignment within existing packets. No new task family or code-defined acceptance authority.
 
-Foundation organization started at683c86e0; correct Access startup assertion exposed .25/.26. Authorized prerequisite repairs52128b3a and76e51464 enabled bootstrap; sessions passed81d65be7 and CI-path2c494ac4. Selected Operator/Viewer cases extended the same scenario to16 at8a857bc8; hosted job passed08a79037. Interim early-CI manual-coexistence policy and source-retention rules applied at those revisions only, and are now superseded. Historical records/receipts remain in the coverage map and child tasks. TASK-492/493/494 are unrelated recorded issues, not authorization for product fixes.
+Next .7 is controller-ready but unimplemented: real roles and actual build proof, then extend the same Delivery scenario. .3 environment success cases are also runnable. Exact pending decisions apply only to environment scope/registration, specified failed-save/presentation states, remaining transport/interchange policies and real supported old-release compatibility. No blanket D1/startup blocker.
+
+Remaining minimality: separate CVE/dashboard workflow/cache contexts, identical CA inputs and safe batching of exact Rust invocations after process-global isolation audit. Current partial pipeline is not full product coverage.
+
+## Historical
+Legacy suites retired at 0105e512. The one-for-one verify relocation was rejected and removed this iteration. Prior preservation/manual-coexistence and pending-DB notes are superseded. .25/.26 enabled initial bootstrap; earlier sessions/role proofs had 16 cases. TASK-492/493/494 remain separate. No merge/deploy/Done.
 <!-- SECTION:NOTES:END -->

@@ -4,13 +4,17 @@ title: 'Coordinator: services, builder, and target roles with a proving scenario
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-18 13:57'
+updated_date: '2026-10-18 20:51'
 labels:
   - testing
   - integration
   - coordinator
 dependencies:
   - TASK-490.1
+references:
+  - packages/default/crates/cf-server/src/handlers/api/builders.rs
+  - packages/default/crates/cf-builder/src/builder/api_client.rs
+  - modules/nixos/crystal-forge/default.nix
 modified_files:
   - lib/integration-test/roles.nix
   - lib/integration-test/harness.nix
@@ -29,27 +33,19 @@ ordinal: 519000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Coordinator-owned role implementation and proving packet. Goal: give Delivery, Assurance, OIDC and notifications concrete services/builder/target interfaces, each justified by real execution. Risk: high (shared VM interfaces). Non-goals: implementing the Delivery .8-.15 obligations or changing production/module semantics.
+Coordinator-owned next multi-component role/proving packet. Goal: implement concrete services, separate API-only builders and bootable target interfaces in the existing shared harness, then prove their actual use in the initial Delivery lifecycle. Risk high; no production/module semantics changes. Do not reproduce retired suites or implement all .8-.15 obligations here.
 
-Writable paths (one coordinator list):
-- lib/integration-test/roles.nix
-- lib/integration-test/harness.nix
-- docs/knowledge/testing/integration-coverage-map.md (actual role/helper interface documentation)
-- checks/integration-delivery/default.nix
-- checks/integration-delivery/scenarios/delivery-lifecycle.nix
-- checks/integration-delivery/scenarios/delivery-lifecycle.py (composition)
-- checks/integration-delivery/scenarios/fragments/task-490.7-roles-proof.py
-- checks/integration-delivery/scenarios/fragments/task-490.7-roles-proof.cjs
+Writable coordinator paths: lib/integration-test/roles.nix, harness.nix; checks/integration-delivery/default.nix and scenarios/delivery-lifecycle.nix/.py; scenarios/fragments/task-490.7-roles-proof.py/.cjs; coverage-map actual interface/result sections. Native Snowfall owner with explicit scenarios and normal linkFarm over every gate. No placeholder, independent smoke gate, custom discovery or packet VM.
 
-Composition target: checks/integration-delivery/scenarios/delivery-lifecycle.nix. Implement roles and compose the disjoint roles-proof fragments as its initial real commit→evaluation→build case. This is the existing coordinator task, not a child receiving a new VM derivation. Native owner default.nix uses { lib, inputs, pkgs, ... }, explicit scenario registration and pkgs.linkFarm over every registered gate. Shared entry is lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }. No placeholders, custom discovery, root tests/, legacyPackages.integration or mkOwner.
+Planned role interfaces, not implemented claims: services {git,oidc,tls,caches,notificationReceiver}; builder {name,strategy} for builderA/B with separate credentials and real services.crystal-forge.build API mode; targetA through real client module/key. Implement/prove concrete capabilities needed by the first workflow; do not claim speculative future fixtures ready. Provide fresh key provisioning, offline prefetched inputs and per-run nonce output whose absence is independently asserted before build.
 
-Implement services { git ? false, oidc ? false, tls ? false, caches ? [], notificationReceiver ? false }: local Git HTTP from lib/test-flake, local OIDC, test CA/trusted TLS origin, cache fixtures and notification receiver. Implement builder { name, strategy } as builderA/builderB with services.crystal-forge.build API mode and separate credentials. targetA is bootable, uses services.crystal-forge.client and its own key. Provide key provisioning, per-run nonce fresh-output fixture for assert_store_absent and offline registry using lib.crystal-forge.prefetchedPaths. Document actual signatures and prove concrete role use; do not add speculative roles. Read-only source references: lib/gitserver-test-node, lib/cache-test-node, lib/agent-test-node, lib/test-flake, checks/niks3-cache/default.nix, checks/web-ui/default.nix, NixOS build/client/cache.encryption_key_file options and docs/knowledge/builders/*. As-built documentation is evidence, not accepted authority for uncertain behavior.
+Initial proof: real authored Git input -> CF ingestion/evaluation with authoritative derivation -> API-only builderA actual build, with generated commit/job/output identities carried through receipts. Builder must have no DB access and server session/job authorization remains enforced. Target registration/heartbeat and real service use establish implemented role boundaries; publication/retrieval/deployment and extended cancel/retry/recovery remain later fragments in this SAME lifecycle, not standalone VMs.
 
-TASK-490.8-.15 contribute disjoint fragments to this single fresh Delivery VM/database. Later cases MAY consume earlier real commits, jobs, outputs and target records through receipts. Independent scenario derivations MUST NOT share live VM/database/output/receipt state. Prove the build output independently absent before the real builderA build; production packages and real service fixtures remain required.
+Current source reading: production NixOS module, cf-server handlers/builder_request.rs and handlers/api/builders.rs, queries/builders.rs/build_jobs.rs, cf-builder API/execution code, cf-agent state/deployment code, cf-protocol wire types, lib/gitserver-test-node and lib/test-flake. Retired lib/cache-test-node and old check suites are historical source at5fa1f4fa, not active templates or acceptance authority. Approved product contract and task criteria define expectations.
 
-Dependency/readiness: TASK-490.1 bootstrap prerequisite passed at bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab8a7b372e8efe0d2dd21b6f53f0625064, with .25/.26 integrated; recorded runtime riky1mm0nn185wb26abw7zzshnbml0fp has 292 migrations. That is not a Delivery proof. This packet remains unimplemented/unexecuted and awaits coordinator selection and concrete role configuration, not resolution of the historical foundation failures.
+Readiness: current controller code c254b1c54e0f40adfaa9d05b5766cfeffae9bb89 passed the normal Access aggregate with23cases and real VM. .25/.26 prerequisites remain integrated. Review status on .1, old startup failures and blanket D1 are NOT technical blockers to this packet. Services/builder/target constructors and Delivery proof remain unimplemented, so this is next coordinator implementation work, not completed coverage. Specific future policy/Upgrade decisions block only their own cases.
 
-Focused verification after implementation: `nix build .#checks.x86_64-linux.integration-delivery.scenarios.delivery-lifecycle -L`. Record exact tested dependency/source revisions, command, exit/result and evidence paths. Correct failures retain assertions and linked product defects; interface/authority conflicts go to coordinator. Normal owner registration includes the proof without requiring a separate smoke gate.
+Verify normal Delivery aggregate and its registered lifecycle gate after implementation, recording exact source, real VM/process counts, cold output proof, results and evidence. Preserve correct failures without product repair. Independent derivations never share live DB/VM/cookies/outputs; compatible .8-.15 cases reuse earlier SAME-scenario records through receipts.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -65,8 +61,9 @@ Focused verification after implementation: `nix build .#checks.x86_64-linux.inte
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Current readiness: bba718be is the tested controller foundation. Roles and Delivery proof remain unimplemented/unexecuted; coordinator owns selection and integration.
+Next controller dependency is verified at c254b1c54e0f40adfaa9d05b5766cfeffae9bb89 (normal Access CI path23/23, new VM). This does not prove Delivery. Current services/builder/target helpers and real commit->evaluation->build proof are absent. Coordinator owns their implementation/composition/registration; .7 is the next shared-role milestone and needs no blanket D1 decision. Preserve API-only builder/no-DB boundary, separate session credentials and independent absent-before actual-output proof. Later publication/deploy/recovery extend the same lifecycle.
 
-### Historical
-2026-10-17 organization review recorded unresolved foundation/package prerequisites and no VM execution at that time. A standalone smoke scenario was a former proposal. The rebased Access prerequisite and current Access aggregate later passed at bba718befbc183863781656df2df272e5f735d5a; this does not prove Delivery roles.
+Remains Backlog until next coordinator execution begins; no active .7 lock or passing assertion claimed. Existing .1 Review is not a code-readiness gate under the latest owner instruction. Retired old helper/check references now identify historical source only, not a preservation obligation.
+
+Historical: earlier packet notes pinned bba718be and reported unexecuted roles; a separate smoke derivation was rejected. The latest source-retirement/consolidation iteration retained one controller scenario and added no speculative Delivery owner.
 <!-- SECTION:NOTES:END -->

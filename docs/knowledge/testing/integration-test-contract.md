@@ -19,14 +19,15 @@ generated:
 rules below are in force. `implementation_status: partial` describes coverage,
 not the rules. The harness exists under `lib/integration-test/`; only
 `integration-access` is registered and runs automatically in GitLab. Its
-unchanged local-bootstrap scenario passed all 16 cases through the CI job script
-at `8a857bc872cf331a19036b97a93f2b7741e9728b`: five bootstrap, five session,
-and six selected Operator/Viewer admin-denial authorization cases. The VM
-executed newly. Earlier ten-case results at `81d65be7` and `2c494ac4` remain
+local-bootstrap scenario passed all 23 cases through the CI job script at
+`c254b1c54e0f40adfaa9d05b5766cfeffae9bb89`: the original five bootstrap,
+five session and six Operator/Viewer authorization cases, then seven real
+Admin-form cases with reload and independent SQL observations. The VM
+executed newly. Earlier ten- and sixteen-case results remain
 in the execution history. This proves the selected subset, not complete Access,
 Delivery, Assurance, Upgrade, or the overhaul. TASK-490.25/.26 startup repairs
 remain integrated; unrelated TASK-492 is separate. TASK-490.1 and the repairs
-are in `Review`; TASK-490.2 and TASK-490.24 remain `In Progress`. Exact
+are in `Review`; TASK-490.2, TASK-490.3 and TASK-490.24 remain `In Progress`. Exact
 environment scope and registration policy still await their own decisions.
 The owner now authorizes legacy source retirement before replacement coverage
 is complete. The former optional-manual coexistence policy is superseded.

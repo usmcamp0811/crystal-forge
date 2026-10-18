@@ -24,12 +24,21 @@ create, user PATCH and server-configuration (retry policy, classification
 banner) mutations. A Viewer browser context finds no administration entry and
 the production Access Denied state at `/admin`.
 
+Seven appended Admin-form cases now prove user creation, role edit, cancel,
+disable/sign-in rejection, retry settings and classification enable/marking.
+Each browser phase reloads and returns to independent SQL before the next
+mutation. At `c254b1c54e0f40adfaa9d05b5766cfeffae9bb89`, the normal owner CI
+path passed all **23 cases** with a newly executed VM (50.72-second driver,
+10.5-second startup reused once). Evidence:
+`/nix/store/nv2rpc4szk7525aa9fpb4289nz1hpbqv-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run`.
+These are semantic assertions, not visual-parity or complete form coverage.
+
 The historical scenario at `fc930335878279ac426510359c039dfd8961dc13`
 failed at server startup. TASK-490.25 fixed shared URI serialization while
 preserving the Unix socket; TASK-490.26 passes the selected local/OIDC mode
 from the normal module to the production unit. Targeted checks and the normal
 server package build pass. After rebase on `origin/dev` `5ae7feab`, the
-latest focused Access gate passed ten cases at
+then-current focused Access gate passed ten cases at
 `81d65be745cc9f9777d368900d01fe0f207cb052`; the normal owner aggregate
 passed by reusing that run. Evidence:
 `/nix/store/i84kvs1lc5nqx0lmsqinwbmvy0ix8mvh-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`.
@@ -81,15 +90,15 @@ Access is not complete. The selected session/CSRF/sign-out proof and the
 selected Operator/Viewer admin-denial cases are covered under the owner's
 explicit selections (16 cases; see the
 [authorization record](../../docs/knowledge/testing/integration-coverage-map.md#access-authorization-cases-task-4902)).
-The newly composed `task-490.3-admin-forms.{py,cjs}` fragments await coordinator
-execution. Their presence is not passing evidence. The recorded sixteen cases
-remain valid; no new form coverage is claimed before that run. The expanded
-coverage map preserves 79 rows: three covered subsets, 67 planned and nine
-decision-blocked rows.
+The `task-490.3-admin-forms.{py,cjs}` fragments have seven passing cases at
+`c254b1c5`; the original sixteen remain unchanged and first. The expanded map
+preserves 79 rows: five with covered subsets, 65 planned and nine decision-blocked.
+Environment CRUD/nonempty assignments and specific failed-save states remain
+unfinished in TASK-490.3.
 TASK-490.2 remains `In Progress`: the cross-environment denial rule and the
 closed-registration policy are unimplemented, and each waits for its own
 decision. An Operator browser view, other Admin routes and visual comparison
-are not covered. OIDC, forms, preferences, notifications, and shell behavior
+are not covered. OIDC, remaining forms, preferences, notifications, and shell behavior
 also remain in the
 [coverage map](../../docs/knowledge/testing/integration-coverage-map.md).
 GitLab runs this owner automatically and requires it (see below). TASK-490.24

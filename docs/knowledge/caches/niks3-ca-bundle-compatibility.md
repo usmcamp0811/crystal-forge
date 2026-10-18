@@ -19,7 +19,7 @@ The public onboarding recipe concatenates a private issuing CA and the full
 `pkgs.cacert` OpenSSL/NSS bundle. That union is intentional: the private root
 can authenticate the Niks3 API while public roots authenticate presigned HTTPS
 object-storage targets. This guide does not inspect a deployed private CA or
-its key. The [component dataset comparison](../../../packages/default/crates/cf-config/tests/ca-bundle/compatibility.nix)
+its key. The [component dataset comparison](../../../packages/default/crates/cf-config/test-support/ca-bundle/compatibility.nix)
 defines the public recipe, pinned package inputs and provenance report. The
 [component catalog](../testing/flake-checks.md#current-inventory-and-commands)
 records execution ownership and the consolidation measurements.

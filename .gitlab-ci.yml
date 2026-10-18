@@ -314,7 +314,7 @@ state-machine-tests:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - nix run .#devScripts.state-machine-test -- up --tui=false
+    - nix run .#devScripts.state-machine-test -- -t=false up
   only:
     - merge_requests
     - main

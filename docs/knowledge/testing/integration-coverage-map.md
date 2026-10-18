@@ -228,8 +228,8 @@ Authority: A-contract, TASK-490.3/.4/.5, A-design `AdminView.jsx`, `Environments
 
 | Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Packet / status |
 | --- | --- | --- | --- | --- |
-| `admin-users` | Admin with fresh list → create user, edit role/environment, cancel, disable, login as disabled user | Exact authored identity/assignments persist through reload; cancel changes nothing; disabled user cannot sign in (401). Denials beyond selected .2 proof are separate. | `users`, `user_role_assignments`, memberships and audit rows; second login. | .3; `planned`. |
-| `admin-settings` | Admin → save classification and automatic retry policy; inspect runtime/config health and audit | Authored settings survive read/reload; retry values configure future decisions rather than retroactively rewriting evidence; audit identifies real actor. Runtime diagnostics expose no secrets. | Settings/audit DB and generated runtime config; browser/server responses. | .3 save cases; diagnostics/audit **unassigned**; `planned`. |
+| `admin-users` | Admin with fresh list → create user, edit role/environment, cancel, disable, login as disabled user | Exact authored identity/assignments persist through reload; cancel changes nothing; disabled user cannot sign in (401). Denials beyond selected .2 proof are separate. | `users`, `user_role_assignments`, memberships and audit rows; second login. | .3; **integration-covered subset**: UI create, role edit, create/edit cancel, disable and failed login at `c254b1c5`. Explicit nonempty environment assignment and audit identity remain `planned`. |
+| `admin-settings` | Admin → save classification and automatic retry policy; inspect runtime/config health and audit | Authored settings survive read/reload; retry values configure future decisions rather than retroactively rewriting evidence; audit identifies real actor. Runtime diagnostics expose no secrets. | Settings/audit DB and generated runtime config; browser/server responses. | .3; **integration-covered subset**: retry-policy save, classification enable/marking save and reload at `c254b1c5`. Future retry effects, diagnostics and audit remain `planned` (some packet assignments **unassigned**). |
 | `resources` | Admin, initially empty environments → create/edit/duplicate/cancel/delete; try deleting used environment | Authored metadata survives reload; duplicate creates no extra row; cancel preserves rows; used-resource deletion preserves references. | Environments, dependent systems/bindings and reload. | .3 environment cases; used-resource guard **unassigned**; `planned`. |
 | `resource-form-bindings` | Authorized user → flake, system, builder and cache add/edit/deactivate/delete/key/environment forms | Each distinct resource binds its own identity/permission; save persists only authored fields, cancel changes none, credentials remain redacted. Provider/build/deploy effects are proved by Delivery. | Respective resource, credential and assignment tables; independent reload. | **Unassigned**: .3 explicitly excludes these forms; intended L extensions; `planned`. |
 | `preferences` | Two users → initialize/patch profile, theme/layout and notification choices; reload each | Preferences are per-user, durable and do not overwrite the other user's values. | `user_preferences`, notification-preference rows and independent browser contexts. | .4; `planned`. |
@@ -246,7 +246,7 @@ Authority: A-contract and A-design `Shell.jsx`, `DashboardView.jsx`, shared desi
 | `navigation` | Signed-in and anonymous contexts → sidebar/user menu, direct URLs, reload, back/forward, unknown route | Approved destinations/query identities survive navigation; unauthenticated protected navigation reaches login; unknown route shows designed NotFound; role-limited entries remain limited. | Browser URL/history, session identity and rendered destination; no route-count inference. | .4; `planned`. |
 | `shared-interaction` | Designed drawer/modal/menu and nested caller → keyboard open/close/Escape, focus traversal/restore, narrow viewport | Approved containment, close/cancel and focus return hold; caller retains target and return destination. Test shared mechanics once; distinct caller bindings in D/A. | Browser focus, URL and no-write DB observation for cancel. | .4; domain nesting cases **unassigned**; `planned`. |
 | `dashboard-badges` | Two scoped users, real events → dashboard/badges, acknowledge, reload | Authored event scope determines visible badges/activity; acknowledgement changes only intended user's attention state. Domain totals must agree with independently known workflows. | Attention/navigation DB; D/A event records; browser. | .4 shell; domain values .8/.11/.16/.21; extra bindings **unassigned**; `planned`. |
-| `module-runtime` | Production module server/client/API-builder selections, file secrets, explicit config → start services | Role-specific config/units and runtime credential permissions match selected options; API-only builder has no DB dependency; secrets not emitted in UI/logs. Local mode/socket subset only is already proved. | Generated TOML/env summaries, units/permissions, DB clients and startup; ordinary module/component assertions forthcoming from consolidation. | .7 role wiring; full config/secret matrix **unassigned**; `planned`. |
+| `module-runtime` | Production module server/client/API-builder selections, file secrets, explicit config → start services | Role-specific config/units and runtime credential permissions match selected options; API-only builder has no DB dependency; secrets not emitted in UI/logs. Local mode/socket subset only is already proved. | Generated TOML/env summaries, units/permissions, DB clients and startup; ordinary module/component assertions. | .7 role wiring/full config matrix `planned` (some assignments **unassigned**). Known **failing startup variant**: PostgreSQL maintenance oneshot P3/TASK-492 remains failed in the final controller evidence; it is not repaired or covered by the passing Access cases. |
 | `auth-visual` | Login/register/setup states → approved visual comparison | Exact reference required; semantic auth cases proceed independently. | Same-profile reference/actual/diff images when authority supplied. | .4/auth visuals **unassigned**; `blocked: D6-presentation`. |
 
 ### 4. `delivery.evaluation` — Git, retained evaluation and Config
@@ -439,7 +439,7 @@ Counts below count **obligation rows**, not endpoints, test cases or percentage 
 | Contract family | Rows | Integration-covered subset rows | Planned | Blocked |
 | --- | ---: | ---: | ---: | ---: |
 | `access.lifecycle` | 7 | 3 | 2 | 2 |
-| `access.configuration` | 8 | 0 | 7 | 1 |
+| `access.configuration` | 8 | 2 | 5 | 1 |
 | `access.shell` | 5 | 0 | 4 | 1 |
 | `delivery.evaluation` | 8 | 0 | 7 | 1 |
 | `delivery.build` | 7 | 0 | 7 | 0 |
@@ -450,9 +450,15 @@ Counts below count **obligation rows**, not endpoints, test cases or percentage 
 | `assurance.remediation` | 8 | 0 | 8 | 0 |
 | `assurance.interchange` | 5 | 0 | 4 | 1 |
 | `upgrade.continuity` | 3 | 0 | 0 | 3 |
-| **Total** | **79** | **3 (sixteen executed cases)** | **67** | **9** |
+| **Total** | **79** | **5 (twenty-three executed cases; some rows cover subsets only)** | **65** | **9** |
 
 No new lower-level-covered or failing obligation is asserted. Existing Rust/component/DB assertions remain evidence mechanisms with execution records below; merely discovering their code is not a pass. The explicit exclusions above are not added to the 79 required/discovered obligation rows.
+
+The known P3/TASK-492 failure is a variant within the otherwise planned module
+runtime row, not another row to add to these totals. It remains visible in
+`journals/controller/failed-units.txt` at the 23-case execution revision. A
+passing selected Access aggregate does not establish that every module unit
+started successfully or resolve this separate product defect.
 
 Discovered **packet-assignment gaps** include resource forms omitted by .3; session remainder; setup/config-health/audit; Git credential lifecycle; evaluation ordering/cancel/log/retained-attempt navigation; Config request/observation lifecycle; builder key lifecycle/metrics/order; cache discovery/probes/secret merge/read capability/queue controls; agent ingress/callback/retained rollback; approval/canary phases; scanner lease/console/archive/schedule; bundle/grouping/version/trust/deletion lifecycle; framework mapping/recovery; CVE cross-revision/environment-membership concurrency; mixed register aggregates; client exports. Rows assign a primary owner/scenario, but the coordinator must explicitly extend/select an existing packet before implementing those details. No task is created or changed by this inventory.
 
@@ -551,12 +557,13 @@ below remain records of what actually ran at their recorded revisions.
 | `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | Three automatic disposable-DB paths | Expanded state-machine invocation owns consolidated regressions on temporary PostgreSQL port 35433 with `SUPERUSER CREATEDB`, stats preload, both DB URLs in SQLx shell and one Cargo target directory. CVE exact duplicates removed; dashboard unchanged. |
 | `coverage-check`, `complexity-check`, `auto-bump-patch` | Unchanged | Release and version behavior is unchanged. |
 
-Executed automatic integration coverage is exactly the sixteen Access cases:
-five bootstrap, five session, and six authorization cases. The following
+Executed integration coverage is twenty-three Access cases: five bootstrap,
+five session, six authorization and seven Admin-form cases. GitLab schedules
+the same normal owner aggregate automatically. The following
 accepted obligations have **no integration owner coverage** until implemented;
 there is no longer a manual legacy fallback:
 
-- Access: registration policy, cross-environment scope, OIDC, forms, preferences, notifications, shell behavior, and authorization beyond the selected admin-only operations.
+- Access: registration policy, cross-environment scope, OIDC, remaining resource/environment forms and nonempty assignments, preferences, notifications, shell behavior, and authorization beyond the selected admin-only operations.
 - Accepted browser and design behavior beyond the selected Access proof. Legacy mocked steps are not automatically mandatory requirements.
 - All Delivery obligations: ingestion, builder strategies, Niks3 and Attic publication, activation, rollback.
 - All Assurance obligations.
@@ -589,24 +596,60 @@ Neither figure measures builds actually executed, cache hits, or elapsed time.
 The unchanged core/embedded feature variants still test their distinct build
 configurations; no Rust package tests were disabled.
 
+The removed 94 normal-library selections were `cf-server` tests repeated by
+the old DB wrapper. They are not the 94 `cf-config` tests now selected by core.
+Ordinary config testing expands from the former standalone 13 CA tests to all
+94 config tests (81 additional unit cases). Thus 102 redundant selections were
+removed, but this is not a claim of 102 fewer total Rust test executions across
+the entire CI pipeline, which also has feature variants and coverage measurement.
+
 The ordinary core build passed (status 0 in
 `/tmp/opencode/task490-config-core-staged.status`), including the retained Nix
 protocol fragments, config library tests and CA comparison. Pure module tests,
 installed-wrapper/config probes, actual writer XCCDF/OpenSCAP validation and
 tool selftests also passed through the exact component CI commands.
 
-The merged database workflow exposed two runner-fixture defects, not waived
+The merged database workflow exposed runner-fixture defects, not waived
 assertions: its worker config lacked required database fields, then inherited
 SQLx-shell example settings changed `flakes.watched` into an invalid map.
-Both were corrected in the test runner. The complete isolated workflow is
-running again with logs at `/tmp/opencode/task490-db-isolated.log`; require its
-actual exit status before claiming a full pass. No product code was changed.
-The newly composed TASK-490.3 Admin-form fragments await execution while the
-embedded server rebuilds after metadata-package verification changed its input
-store identity. No VM had started in the interrupted 300-second build attempt.
-The persistent aggregate run is `/tmp/opencode/task490-access-admin.log`.
-Pending those results, the 79-row inventory has three covered subsets (sixteen
-cases), 67 planned rows and nine decision-blocked rows.
+The initial cleanup silently did nothing because Nix's Bash lacks `compgen`;
+NUL-delimited environment enumeration now removes those development inputs.
+The failing worker test subsequently passed (36.79 seconds), as did the 116
+remaining exact tests and six broad groups (51 tests) in isolated follow-up
+runs. The final canonical command then completed at source
+`c254b1c54e0f40adfaa9d05b5766cfeffae9bb89`:
+`nix run .#devScripts.state-machine-test -- -t=false up` exited **0**. Its 227
+Rust result summaries total **515 passed, 0 failed, 0 ignored** across the
+284 selected ignored-library tests and 231 selected integration cases, with
+both populated migration rehearsals also passing. It ran from 20:39:03 to
+20:57:29 UTC (18 minutes 26 seconds), then shut down its disposable PostgreSQL
+cluster. Evidence is `/tmp/opencode/task490-db-final.log` and the status file
+`/tmp/opencode/task490-db-final.status`. This is a lower-level result, not
+Delivery/Assurance/Upgrade integration evidence. An invocation-owned child-status
+receipt prevents process-compose success from hiding test failure: a local
+exercise preserved child status 101 even with compose status 0, and rejected a
+missing receipt. No product code was changed.
+
+At clean `c254b1c54e0f40adfaa9d05b5766cfeffae9bb89`, the normal Access CI
+command passed all 23 cases with a newly executed controller VM. Evidence:
+`/nix/store/nv2rpc4szk7525aa9fpb4289nz1hpbqv-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run`.
+The original sixteen cases remain first and unchanged. Seven new cases prove
+UI account creation (including first/last name, role and membership reads),
+role edit, create/edit cancel, disable plus sign-in 401/no new session, retry
+settings, banner enable and marking persistence. Each phase reloads in the
+production UI and returns to independent SQL observations before the next
+mutation. Screenshots/results use distinct browser artifact directories.
+No environment-CRUD, outage-draft or visual-parity completion is claimed.
+
+This remains one registered VM scenario. The successful VM driver took 50.72
+seconds; startup/migrations took 10.5 seconds once and all later cases reused
+that setup. There were two local VM runs while developing the form slice: the
+first retained the original sixteen passes and four form passes before an
+overly exact retry-field locator failed; the corrected final run passed all
+23. A prior 300-second package build interruption started no VM. Production
+package tests stayed enabled; the metadata-package input identity required a
+one-time embedded-server rebuild. The controller is configured for 4 GiB/4
+cores; peak memory remains unmeasured. No additional VM derivation was added.
 
 ## Source-retirement verification (historical milestone)
 
