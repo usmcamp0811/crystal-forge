@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-18 00:15'
+updated_date: '2026-10-18 03:31'
 labels:
   - testing
   - integration
@@ -26,28 +26,22 @@ ordinal: 512000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The current integration layer mixes about 14 VM checks and a 26.9k-line browser suite. Many browser steps use route mocks; OIDC completion, real scanner evidence, real activation, and a binary old-version upgrade are incomplete. This parent tracks the owner-approved test-only overhaul into exactly four native Snowfall owners: integration-access, integration-delivery, integration-assurance, integration-upgrade.
+This parent tracks the owner-approved integration-check overhaul into exactly four native Snowfall owners: `integration-access`, `integration-delivery`, `integration-assurance`, and `integration-upgrade`. The coordinator owns contract, coverage/retirement map, shared harness, scenario composition, owner registration, CI integration and acceptance verification. An implementation packet does not automatically receive its own NixOS test derivation; compatible case fragments are composed into a shared scenario. Each separately built scenario has a fresh VM/database. Same-scenario cases may use real prior records/identities through receipts; no runtime state is shared across derivations.
 
-Contract source: /home/mcamp/code/crystal-forge/crystal-forge-integration-test-contract.md, adopted at docs/knowledge/testing/integration-test-contract.md. Native organization: checks/integration-{access,delivery,assurance,upgrade}/default.nix with {lib,inputs,pkgs,...}; scenarios/assets are owner-local; shared helpers at lib/integration-test through lib.crystal-forge.makeIntegrationTestHarness {pkgs,inputs}. Explicit coordinator registration and pkgs.linkFarm aggregate all registered gates. No root tests/, legacyPackages, custom discovery or placeholder owners. Existing legacy CI gates remain.
+Normal overhaul scope is test-only. The owner explicitly authorizes only the narrowly bounded production repairs in existing TASK-490.25 and TASK-490.26; keep each in its own commit. No other production functionality, auth policy, migrations, SQLx metadata, UI/assets, or design-handoff change is authorized by this exception. Correct defects remain linked and their assertions executable.
 
-Strict scope: test-only. No production functionality, Rust implementation, migrations, SQLx metadata, NixOS module behavior, UI assets, or docs/design/CrystalForge changes. Correct product defects stay executable and linked to Backlog bugs, not fixed in this overhaul.
-
-Current foundation: clean combined commit fc930335878279ac426510359c039dfd8961dc13 integrates tested TASK-491 prerequisite af39284bdf16d56402f01a64c916f17948e43b02. The exact Access VM command ran but failed before migrations/HTTP on the normal NixOS module configuration. Evidence: /nix/store/1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/. Generated PostgreSQL socket host causes an empty-host URI; generated auth_mode is absent and AUTH_MODE unset. Product blockers TASK-490.25/.26 are Backlog and not implemented. The Access assertion remains correct and failing; this is not a passing owner.
-
-Every scenario runs with a fresh VM/database. Task dependencies provide code/fixture prerequisites only; runtime rows, sessions, receipts, and successful outputs are never shared. Assurance task boundaries .20/.21/.27/.28/.29 separate triage, POA&M plan entry, finding waiver, acceptance register, and verification/closure. All child tasks remain Backlog; no Luna dispatch or readiness. Upgrade support decision remains blocked.
-
-Coordinator owns owner registrations, shared lib, flake/CI wiring, canonical contract/map and affected docs. TASK-490.7/.24 are coordinator tasks. Branch TASK-490.1-integration-foundation is based on origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd. No merge or deployment is authorized. Parent remains In Progress; cutover requires every complete owner to pass or explicit owner scope change.
+Current milestone: TASK-490.25/.26 repairs are separately integrated at `ca46cdd5` / `136348e8`; the focused local bootstrap scenario and `integration-access` owner aggregate passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. Runtime evidence and an independent Postgres Jobs first-boot ordering defect (TASK-492) are recorded in the coverage map. This is only a bootstrap slice, not full Access or four-owner coverage. Access session/forms/navigation/preferences packets and Assurance triage/waiver/register/plan/verification packets are grouped into fewer scenarios with disjoint fragments; the coordinator owns composition. TASK-490.7 owns future roles and Delivery proving work. All child packets remain Backlog until their dependencies, writable paths, placement, interface and command are concrete. Keep all legacy checks until four-owner cutover conditions pass. No merge/deploy/cutover is authorized here.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 The contract is adopted at docs/knowledge/testing/integration-test-contract.md with accurate implementation_status and directly affected AGENTS.md/verification guidance; as-built D1 is not accepted authority and uncertain cases require an owner decision
-- [ ] #2 The coverage map assigns every accepted obligation one primary owner, scenario, independent expected result, evidence and status, and records a retirement disposition for every legacy integration check and CI job
-- [ ] #3 At final cutover exactly four native Snowfall integration owners exist under checks/integration-{access,delivery,assurance,upgrade}/default.nix using { lib, inputs, pkgs, ... }; non-integration checks retain their own attributes and classification
-- [ ] #4 Each normal owner is a pkgs.linkFarm aggregate of ALL explicitly registered scenario gates and propagates every failure; meaningful WIP checks may be discoverable, and no placeholder owner is added
-- [ ] #5 Shared helpers use lib/integration-test through lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets are owner-local, coordinator registration is explicit, and there is no root tests/ tree, legacyPackages.integration, mkOwner, or custom discovery
-- [ ] #6 Legacy registrations and CI jobs are retired only after passing replacements or an explicit owner-approved scope change; correct product-defect assertions remain executable and linked to Backlog bugs
-- [ ] #7 No production code, migrations, SQLx metadata, UI assets, or design-handoff files change; child packets remain Backlog until actual dependency commits and verified commands exist
+- [ ] #2 The coverage map assigns every accepted obligation one primary owner/scenario, independent expected result, evidence and status; records legacy retirement; states task fragments do not imply VM derivations and explains every separate VM boundary
+- [ ] #3 At final cutover exactly four native Snowfall integration owners exist under checks/integration-{access,delivery,assurance,upgrade}/default.nix using { lib, inputs, pkgs, ... }; non-integration checks retain their attributes and classification
+- [ ] #4 Each normal owner is a pkgs.linkFarm aggregate of all explicitly registered scenario gates and propagates every failure; meaningful WIP may be discoverable, with no placeholder owners
+- [ ] #5 Shared helpers use lib/integration-test through lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }; coordinator owns composition/registration and packet case fragments are owner-local/disjoint
+- [ ] #6 Legacy checks and CI are retired only after passing replacements or owner-approved scope change; correct product assertions stay executable and linked
+- [ ] #7 No production code/migration/SQLx/UI/design changes except the separately committed narrow repairs explicitly authorized for TASK-490.25 and TASK-490.26; those repairs do not authorize unrelated product changes
 <!-- AC:END -->
 
 ## Implementation Notes
