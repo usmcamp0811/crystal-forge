@@ -4,7 +4,7 @@ title: NixOS server.auth_mode=local is not propagated to the server runtime
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 02:48'
+updated_date: '2026-10-18 03:27'
 labels:
   - bug
   - nixos
@@ -35,7 +35,7 @@ This repair is separately committed from TASK-490.1 test/doc work. The user expl
 <!-- AC:BEGIN -->
 - [ ] #1 The normal module's local selection produces systemd AUTH_MODE=local and the effective server reports local mode
 - [ ] #2 The normal module's OIDC selection produces systemd AUTH_MODE=oidc and preserves OIDC-only variables/selection
-- [ ] #3 Targeted evaluation verifies both module choices without a test-only override
+- [x] #3 Targeted evaluation verifies both module choices without a test-only override
 - [ ] #4 The combined Access VM proves empty-database setup-status, real local registration/sign-in, persistent admin/session and rejected wrong password with no new session
 <!-- AC:END -->
 
