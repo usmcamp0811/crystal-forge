@@ -78,7 +78,7 @@ function denseMatrix(commitId) {
   };
 }
 
-async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapshot, onHistoryPhase=()=>{}) {
+async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapshot, onHistoryPhase=()=>{}, captureEvidence) {
   const originalViewport=page.viewportSize();
   const fixture = denseMatrix(commitId);
   const originalDrawer=page.getByRole('dialog',{name:'Evaluation detail',exact:true});
@@ -336,6 +336,87 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
           expect(params.get('version')).toBe(bundle.bundle_version_id);
           expect(params.get('policy')).toBe(fixture.matrix.columns[0].policy_version_id);
           await assertDialogKeyboard(page,evidence,'compliance-evaluation-dialog');
+          if (method==='X') {
+            // The receiver steps through exactly the controls this captured system
+            // received through this captured bundle version, in snapshot order.
+            const owned=fixture.matrix.columns.filter((_,index)=>
+              fixture.matrix.rows[0].policies[index].memberships.some(m=>m.bundle_version_id===bundle.bundle_version_id));
+            expect(owned.length).toBe(bundleIndex===0 ? 96 : 32);
+            const controlNav=evidence.getByRole('navigation',{name:'Controls in this bundle'});
+            const policyParam=()=>new URL(page.url()).searchParams.get('policy');
+            await expect(evidence.getByText(`Stepping through ${owned.length} controls`)).toBeVisible();
+            const identity=evidence.getByTestId('ce-evidence-identity');
+            await expect(identity).toContainText('fixture-host-00');
+            await expect(identity).toContainText(bundle.name);
+            const navButtons=controlNav.getByRole('button');
+            await expect(navButtons).toHaveCount(owned.length);
+            await expect(controlNav.getByText('Grouping is unavailable',{exact:false})).toBeVisible();
+            await expect(navButtons.filter({hasText:owned[0].name})).toHaveAttribute('aria-current','true');
+            if (bundleIndex===0 && captureEvidence) await captureEvidence('eval-evidence-navigation');
+            // j and k step within the captured list and replace the history entry.
+            const historyLength=await page.evaluate(()=>history.length);
+            await page.keyboard.press('j');
+            await expect.poll(policyParam).toBe(owned[1].policy_version_id);
+            await expect(exact).toContainText(owned[1].name);
+            await expect(navButtons.filter({hasText:owned[1].name})).toHaveAttribute('aria-current','true');
+            await page.keyboard.press('k');
+            await expect.poll(policyParam).toBe(owned[0].policy_version_id);
+            await page.keyboard.press('k');
+            await expect.poll(policyParam).toBe(owned[0].policy_version_id);
+            expect(await page.evaluate(()=>history.length)).toBe(historyLength);
+            // A click selects directly. The sibling bundle's own controls never appear.
+            await navButtons.filter({hasText:owned[2].name}).click();
+            await expect.poll(policyParam).toBe(owned[2].policy_version_id);
+            await expect(exact).toContainText(owned[2].name);
+            await expect(navButtons.filter({hasText:owned[2].name})).toHaveAttribute('aria-current','true');
+            await expect(navButtons.filter({hasText:'Fixture policy 127'})).toHaveCount(0);
+            // Arrow keys on a focused list item use the same captured visible
+            // order as j/k. Navigation does not wrap at the list edge.
+            const selectedNavItem=navButtons.filter({hasText:owned[2].name});
+            await selectedNavItem.focus();
+            await page.keyboard.press('ArrowDown');
+            await expect.poll(policyParam).toBe(owned[3].policy_version_id);
+            await expect(navButtons.filter({hasText:owned[3].name})).toHaveAttribute('aria-current','true');
+            await page.keyboard.press('ArrowUp');
+            await expect.poll(policyParam).toBe(owned[2].policy_version_id);
+            await expect(navButtons.filter({hasText:owned[2].name})).toHaveAttribute('aria-current','true');
+            // The filter narrows the list. Keys typed or pressed there never step.
+            const filter=evidence.getByRole('searchbox',{name:'Filter controls'});
+            await filter.fill('Fixture policy 00');
+            await expect(navButtons).toHaveCount(10);
+            await filter.press('j');
+            await filter.press('k');
+            await expect(filter).toHaveValue('Fixture policy 00jk');
+            await expect.poll(policyParam).toBe(owned[2].policy_version_id);
+            await filter.fill('Fixture policy 00');
+            await filter.press('ArrowDown');
+            await filter.press('ArrowDown');
+            await expect.poll(policyParam).toBe(owned[2].policy_version_id);
+            await expect(evidence).toBeVisible();
+            await filter.fill('absent control');
+            await expect(controlNav.getByText('No controls match.',{exact:true})).toBeVisible();
+            await filter.fill('');
+            await expect(navButtons).toHaveCount(owned.length);
+            // Expand and Restore resize the receiver without leaving the evidence.
+            const widthNow=async()=>(await evidence.boundingBox()).width;
+            await evidence.getByRole('button',{name:'Expand',exact:true}).click();
+            await expect.poll(widthNow).toBe(Math.min(1360,page.viewportSize().width));
+            if (bundleIndex===0 && captureEvidence) await captureEvidence('eval-evidence-navigation-maximized');
+            await evidence.getByRole('button',{name:'Restore',exact:true}).click();
+            await expect.poll(widthNow).toBe(Math.min(960,page.viewportSize().width*0.96));
+            if (bundleIndex===0) {
+              await navButtons.filter({hasText:owned[0].name}).click();
+              await expect.poll(policyParam).toBe(owned[0].policy_version_id);
+              const viewport=page.viewportSize();
+              await page.setViewportSize({width:720,height:viewport.height});
+              const narrowBox=await evidence.boundingBox();
+              expect(narrowBox.width).toBeLessThanOrEqual(720);
+              await expect(controlNav).toBeVisible();
+              await expect(exact).toBeVisible();
+              await captureEvidence('eval-evidence-navigation-narrow');
+              await page.setViewportSize(viewport);
+            }
+          }
           response={...fixture,matrix:{...fixture.matrix,evaluation_attempt_id:id(9002),
             attempt_number:fixture.matrix.attempt_number+1,columns:[],bundles:[],rows:[],
             ...inventoryFixture([],{passed:0,failed:0,evaluation_failed:0,pending:0,excluded:0})}};
@@ -397,6 +478,16 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
     await expect(drawer.getByRole('button',{name:'Name',exact:true})).toHaveClass('active');
     await expect(drawer.getByText('[FIXTURE] services.openssh.settings.PermitRootLogin must equal no',{exact:true})).toBeVisible();
     await expect(drawer.getByRole('button',{name:'Log unavailable for retained attempt',exact:true})).toBeDisabled();
+
+    // The receiver's own Open system keeps the validated exact-context return.
+    await drawer.getByRole('button',{name:'View in compliance evidence · Fixture bundle 2 · v1',exact:true}).click();
+    const headerReceiver=page.getByRole('dialog',{name:'Evaluation check evidence',exact:true});
+    await expect(page.getByRole('region',{name:'Exact evaluation evidence'})).toContainText(fixture.matrix.commit_sha);
+    await headerReceiver.getByRole('button',{name:'Open system',exact:true}).click();
+    await expect(page).toHaveURL(new RegExp(`/systems/${fixture.matrix.rows[0].system_id}\\?.*revision=${fixture.matrix.commit_sha}`));
+    await page.getByRole('link',{name:'Back to Evaluation',exact:true}).click();
+    await expect(drawer.getByRole('button',{name:'Name',exact:true})).toHaveClass('active');
+    await expect(drawer.getByText('[FIXTURE] services.openssh.settings.PermitRootLogin must equal no',{exact:true})).toBeVisible();
 
     // Missing captured contributions fail closed without a deployed fallback.
     pinnedResponse={...fixture,matrix:{...fixture.matrix,rows:fixture.matrix.rows.map((r,index)=>index===0 ? {...r,policies:r.policies.map((p,i)=>i===0 ? {...p,memberships:[]} : p)} : r)}};
@@ -705,6 +796,16 @@ async function runEvalPolicyMatrixWorkflow(page, commitId, screenshot, onSnapsho
       await expect(retained.getByRole('tab',{name:'Dependency graph unavailable',exact:true})).toBeDisabled();
       await expect(retained.getByRole('button',{name:/^All\s+60$/})).toHaveClass('active');
       expect(freshRequests.every(url=>new URL(url).pathname===new URL(pinnedRequests[0]).pathname)).toBe(true);
+      // View bundle opens the exact captured bundle version in Compliance. It
+      // names the catalog entry only; it never claims the capture still matches.
+      await freshPage.goto(evidenceUrl.href);
+      await expect(freshPage.getByRole('region',{name:'Exact evaluation evidence'})).toContainText(fixture.matrix.evaluation_attempt_id);
+      await freshPage.getByRole('dialog',{name:'Evaluation check evidence',exact:true}).getByRole('button',{name:'View bundle',exact:true}).click();
+      await expect.poll(()=>new URL(freshPage.url()).pathname).toBe('/compliance');
+      expect(Object.fromEntries(new URL(freshPage.url()).searchParams)).toMatchObject({
+        bundle:fixture.matrix.bundles[1].bundle_id,version:fixture.matrix.bundles[1].bundle_version_id,
+      });
+      await expect(freshPage.getByRole('dialog',{name:'Evaluation check evidence',exact:true})).toBeHidden();
       for (const method of ['Escape','X','Backdrop']) {
         await freshPage.goto(evidenceUrl.href);
         const directEvidence=freshPage.getByRole('dialog',{name:'Evaluation check evidence',exact:true});

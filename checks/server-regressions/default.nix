@@ -95,6 +95,31 @@ pkgs.rustPlatform.buildRustPackage {
       return "$status"
     }
 
+    # LOGGING: Cargo replays cached rustc diagnostics across the many exact
+    # test invocations. Their combined output exhausted GitLab's 4 MiB job-log
+    # limit before the failing selection ran, so its cause was unrecoverable.
+    # Keep stdout (libtest results and panic reports) and exit statuses
+    # unchanged. Capture stderr (compiler diagnostics and "Running" lines) in
+    # a file and print its tail only when Cargo fails. Export this function so
+    # the nested `bash -c` selections below use it too.
+    cargoStderrTail=400
+    cargo() {
+      local stderrLog status
+      stderrLog="$(mktemp "$TMPDIR/cargo-stderr.XXXXXX")"
+      if command cargo "$@" 2>"$stderrLog"; then
+        status=0
+      else
+        status=$?
+        printf 'cargo %s failed with exit %s; last %s stderr lines follow\n' \
+          "$1" "$status" "$cargoStderrTail" >&2
+        tail -n "$cargoStderrTail" "$stderrLog" >&2
+      fi
+      rm -f "$stderrLog"
+      return "$status"
+    }
+    export -f cargo
+    export cargoStderrTail
+
     beginPhase migrations-and-upgrade-rehearsals
     export DATABASE_URL="postgresql://$PGUSER@127.0.0.1/$PGDATABASE"
     export CRYSTAL_FORGE_TEST_DATABASE_URL="$DATABASE_URL"

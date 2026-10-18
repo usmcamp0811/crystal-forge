@@ -886,11 +886,20 @@ its matching `END` identifies the active target and whether Cargo was compiling
 or executing. The library also has an explicit compilation boundary before its
 selected tests execute. Cargo's normal output reports executed test names.
 
-Each of the 125 ignored and 83 non-ignored selected library tests emits its qualified name,
-mode, start time, exit status, and elapsed time. Cargo stdout and stderr still
-pass through `tee` to the exact-test guard. `pipefail` preserves failures from
-Cargo or `tee`; success still requires the named `... ok` line and the existing
-one-passed/zero-failed/zero-ignored summary. Zero executed tests fail the gate.
+Cargo replays cached compiler diagnostics across the many exact test
+invocations. Their combined output exhausted GitLab's 4 MiB job-log limit
+before the failing selection ran. The runner therefore defines a `cargo` shell
+function that holds Cargo's stderr in a temporary file and prints its last 400
+lines only when Cargo fails. Stdout (test results and panic reports) and the
+exit status are unchanged. The compiler error remains visible in the failure
+tail.
+
+Each of the 145 ignored and 92 non-ignored selected library tests emits its
+qualified name, mode, start time, exit status, and elapsed time. Cargo stdout
+still passes through `tee` to the exact-test guard. `pipefail` preserves
+failures from Cargo or `tee`. Success still requires the named `... ok` line
+and the existing one-passed/zero-failed/zero-ignored summary. Zero executed
+tests fail the gate.
 
 Progress labels contain only phase names, target names, and modes. The runner
 does not print command arguments or environment values, enable `--nocapture`,

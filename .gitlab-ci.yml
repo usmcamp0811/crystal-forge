@@ -247,15 +247,32 @@ web-ui-check:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.web-ui" -L --show-trace --builders '' --max-jobs 1 --cores 2
-    - mkdir -p web-ui-screenshots
     - |
+      mkdir -p web-ui-screenshots
+      set +e
+      sh packages/ci/public-cache-build.sh ".#checks.x86_64-linux.web-ui" -L --show-trace --keep-failed --builders '' --max-jobs 1 --cores 2 \
+        > web-ui-screenshots/nix-build.log 2>&1
+      build_status=$?
+      set -e
+      if [ "$build_status" -ne 0 ]; then
+        build_dir=$(awk -F '"' '/note: keeping build directory/ { path=$2 } END { print path }' web-ui-screenshots/nix-build.log)
+        if [ -n "$build_dir" ] && [ -d "$build_dir/screenshots" ]; then
+          cp -r "$build_dir/screenshots/." web-ui-screenshots/
+          echo "Copied partial web-ui screenshots and browser diagnostics from the failed Nix build"
+        else
+          echo "The failed Nix build did not retain a screenshot directory"
+        fi
+        echo "Web UI Nix check failed with exit $build_status; full build log is an artifact"
+        tail -n 100 web-ui-screenshots/nix-build.log
+        exit "$build_status"
+      fi
+      rm -f web-ui-screenshots/nix-build.log
       STORE_PATH=$(readlink -f result)
       if [ -d "$STORE_PATH/screenshots" ]; then
-        cp -r "$STORE_PATH/screenshots/"* web-ui-screenshots/
+        cp -r "$STORE_PATH/screenshots/." web-ui-screenshots/
         echo "Copied web-ui screenshots to workspace"
       else
-        echo "No screenshots found in build result (tests may have failed)"
+        echo "No screenshots found in successful build result"
       fi
   artifacts:
     when: always

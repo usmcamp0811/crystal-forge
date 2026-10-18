@@ -51,27 +51,31 @@ const CONFIG_INSPECTION_WAIT_SECONDS = parseBoundedSeconds(
 // SQL-backed fixture steps execute against whichever PostgreSQL instance is
 // running the target Crystal Forge database. Two deployments are supported:
 //
-// - The NixOS VM check: a system-local PostgreSQL reachable only through
-//   passwordless `sudo -u postgres`, on the cluster's default port. DB_HOST is
-//   not set in that environment, so this is the fallback path and its
-//   behavior is unchanged from before host-stack support existed.
+// - The NixOS VM check: the browser process uses the guest's system-local
+//   PostgreSQL on 127.0.0.1:5432 with the VM's trust rule. The test driver uses
+//   CF_TEST_DB_* and its host-side forwarded port 5433 for SQL setup outside
+//   the guest. Neither route uses the user's local development database.
 // - The host development stack (`run-ui-dev` inside `nix develop`): a
 //   password-authenticated `crystal_forge` role on the port the devshell
 //   already exports. DB_HOST/DB_PORT/DB_USER/DB_PASSWORD/DB_NAME reuse the
 //   exact connection convention `shells/default/default.nix` establishes for
-//   every other repository tool; this file does not define a second,
-//   independent PostgreSQL configuration.
+//   other repository tools; this file does not define a second connection.
 //
 // Arguments are passed as an argv array and the SQL text is passed over
 // stdin, never interpolated into a shell command string, so fixture SQL
 // cannot be reinterpreted by a shell.
 function runFixtureSql(sql) {
-  const dbHost = process.env.DB_HOST;
+  // Browser-runner callers provide DB_* for the VM's local PostgreSQL endpoint.
+  // Use that local TCP route instead of spawning `sudo -u postgres` for every
+  // poll. This avoids per-query PAM session logs on the VM console and keeps
+  // browser-runner database reads on the isolated test database. Local callers
+  // can use DB_* overrides or the test driver's forwarded CF_TEST_DB_* values.
+  const dbHost = process.env.DB_HOST || process.env.CF_TEST_DB_HOST;
   if (dbHost) {
-    const dbPort = process.env.DB_PORT || "3042";
-    const dbUser = process.env.DB_USER || "crystal_forge";
-    const dbPassword = process.env.DB_PASSWORD || "password";
-    const dbName = process.env.DB_NAME || "crystal_forge";
+    const dbPort = process.env.DB_PORT || process.env.CF_TEST_DB_PORT || "3042";
+    const dbUser = process.env.DB_USER || process.env.CF_TEST_DB_USER || "crystal_forge";
+    const dbPassword = process.env.DB_PASSWORD ?? process.env.CF_TEST_DB_PASSWORD ?? "password";
+    const dbName = process.env.DB_NAME || process.env.CF_TEST_DB_NAME || "crystal_forge";
     return execFileSync(
       "psql",
       ["-h", dbHost, "-p", dbPort, "-U", dbUser, "-d", dbName, "-v", "ON_ERROR_STOP=1", "-A", "-t", "-F", "|"],
@@ -21634,7 +21638,23 @@ security.audit.enable = true;</fixtext>
           timestamp: now, items,
         } });
       };
-      const logRoute = route => route.fulfill({ json: [] });
+      // Browser-local log fixture. The same route answers with lines, an empty
+      // log, or a failure so one drawer can exercise every Log tab state.
+      const logFixture = { status: 200, entries: [], requests: 0, pending: false, release: null };
+      const setLogLines = count => {
+        logFixture.entries = Array.from({ length: count }, (_, index) => ({
+          timestamp: now, sequence: index + 1, level: "info", message: `fixture log line ${index + 1}`,
+        }));
+      };
+      const logRoute = async route => {
+        logFixture.requests += 1;
+        if (logFixture.pending) {
+          await new Promise(resolve => { logFixture.release = resolve; });
+        }
+        return logFixture.status === 200
+          ? route.fulfill({ json: logFixture.entries })
+          : route.fulfill({ status: logFixture.status, contentType: "application/json", body: JSON.stringify({ error: "fixture log failure" }) });
+      };
       const historyRoute = route => {
         const params = new URL(route.request().url()).searchParams;
         const query = params.get('search')?.trim().toLowerCase() || '';
@@ -21704,7 +21724,15 @@ security.audit.enable = true;</fixtext>
           .toBe(Math.min(1360, page.viewportSize().width));
         await drawer.getByRole("button", { name: "Restore", exact: true }).click();
         await runEvalPolicyMatrixWorkflow(page, commitId,
-          state => captureWorkflowState(page, stepName, state), onSnapshot, onHistoryPhase);
+          state => captureWorkflowState(page, stepName, state),
+          onSnapshot,
+          onHistoryPhase,
+          state => captureWorkflowState(page, stepName, state, async () => {
+            await expect(page.getByRole("dialog", { name: "Evaluation check evidence", exact: true })).toBeVisible();
+            await expect(page.getByRole("navigation", { name: "Controls in this bundle" })).toBeVisible();
+            await expect(page.getByRole("region", { name: "Exact evaluation evidence" })).toBeVisible();
+          }),
+        );
         await drawer.getByRole("button", { name: "Close", exact: true }).click();
         await expect(drawer).toBeHidden();
         item.evaluation_status = "cancelling";
@@ -21716,12 +21744,127 @@ security.audit.enable = true;</fixtext>
         const confirm = page.getByRole("alertdialog", { name: "Force-cancel evaluation?", exact: true });
         await expect(confirm).toBeVisible();
         expect(forceRequests).toBe(0);
-        await confirm.getByRole("button", { name: "Keep running", exact: true }).click();
+        await captureWorkflowState(page, stepName, "eval-force-cancel-confirmation", async () => {
+          await expect(confirm).toBeVisible();
+          await expect(confirm.getByRole("button", { name: "Keep running", exact: true })).toBeVisible();
+          await expect(confirm.getByRole("button", { name: "Force-cancel", exact: true })).toBeVisible();
+        });
+        // The confirmation is a sibling of the drawer, so the drawer's focus trap
+        // does not contain it. It must own initial focus, Tab wrapping, an
+        // Escape that dismisses only itself, and focus return to its opener.
+        const forceOpener = drawer.getByRole("button", { name: "Force-cancel", exact: true });
+        const keepRunning = confirm.getByRole("button", { name: "Keep running", exact: true });
+        const forceConfirm = confirm.getByRole("button", { name: "Force-cancel", exact: true });
+        await assertDialogKeyboard(page, confirm, "ed-force-cancel-dialog");
+        await keepRunning.focus();
+        await page.keyboard.press("Tab");
+        await expect(forceConfirm).toBeFocused();
+        await page.keyboard.press("Tab");
+        await expect(keepRunning).toBeFocused();
+        await page.keyboard.press("Shift+Tab");
+        await expect(forceConfirm).toBeFocused();
+        await page.keyboard.press("Escape");
         await expect(confirm).toBeHidden();
+        // Escape dismissed only the confirmation. The drawer and request count stay.
+        await expect(drawer).toBeVisible();
+        await expect(forceOpener).toBeFocused();
+        expect(forceRequests).toBe(0);
+        // Reopen with the keyboard: initial focus must land on Keep running.
+        await forceOpener.press("Enter");
+        await expect(confirm).toBeVisible();
+        await expect(keepRunning).toBeFocused();
+        await keepRunning.click();
+        await expect(confirm).toBeHidden();
+        await expect(forceOpener).toBeFocused();
         expect(forceRequests).toBe(0);
         await drawer.getByRole("button", { name: "Force-cancel", exact: true }).click();
         await confirm.getByRole("button", { name: "Force-cancel", exact: true }).click();
         await expect.poll(() => forceRequests).toBe(1);
+
+        // Live Log tab: Auto-scroll must follow the tail only while it is on.
+        // The drawer is still cancelling, so the tab polls every two seconds.
+        await drawer.getByRole("button", { name: "Log", exact: true }).click();
+        const logViewport = drawer.getByTestId("eval-log-viewport");
+        const autoscroll = drawer.getByRole("checkbox", { name: "Auto-scroll" });
+        const atLogEnd = () => logViewport.evaluate(el =>
+          el.scrollHeight > el.clientHeight && el.scrollTop + el.clientHeight >= el.scrollHeight - 2);
+        const logLines = count => expect(drawer.getByText(`${count} lines`, { exact: true })).toBeVisible({ timeout: 15000 });
+        // Print the viewport geometry when a scroll assertion fails. A bare
+        // "expected true" says nothing about whether the viewport overflowed.
+        const expectLogAtEnd = async label => {
+          try {
+            await expect.poll(atLogEnd).toBe(true);
+          } catch (error) {
+            const metrics = await logViewport.evaluate(el => ({
+              scrollTop: el.scrollTop, clientHeight: el.clientHeight, scrollHeight: el.scrollHeight,
+              overflowY: getComputedStyle(el).overflowY, children: el.children.length,
+            }));
+            console.log(`Log viewport not at end (${label}): ${JSON.stringify(metrics)}`);
+            throw error;
+          }
+        };
+        setLogLines(0);
+        await logLines(0);
+        await expect(drawer.getByText("Waiting for log output...", { exact: true })).toBeVisible();
+        setLogLines(60);
+        await logLines(60);
+        await expect(autoscroll).toBeChecked();
+        await expectLogAtEnd("60 lines, Auto-scroll on");
+        setLogLines(120);
+        await logLines(120);
+        await expectLogAtEnd("120 lines, Auto-scroll on");
+        await autoscroll.uncheck();
+        await logViewport.evaluate(el => { el.scrollTop = 0; });
+        setLogLines(180);
+        await logLines(180);
+        expect(await logViewport.evaluate(el => el.scrollTop)).toBe(0);
+        await autoscroll.check();
+        await expectLogAtEnd("Auto-scroll turned back on");
+
+        // Loading, an empty log, and a failed request are different answers.
+        // A completed drawer does not poll, so only Retry can refetch.
+        await drawer.getByRole("button", { name: "Close", exact: true }).click();
+        await expect(drawer).toBeHidden();
+        onHistoryPhase(true);
+        logFixture.status = 200;
+        setLogLines(0);
+        await page.goto(`${baseUrl}/evaluations`, { timeout: LOAD_TIMEOUT });
+        await page.getByRole("button", { name: /^Completed\b/ }).click();
+        const completedRow = page.getByRole("row").filter({ hasText: item.commit_hash.slice(0, 12) });
+        const logError = drawer.getByTestId("eval-log-error");
+        logFixture.pending = true;
+        try {
+          await completedRow.click();
+          await drawer.getByRole("button", { name: "Log", exact: true }).click();
+          await expect(drawer.getByText("Loading logs...", { exact: true })).toBeVisible();
+        } finally {
+          logFixture.pending = false;
+          logFixture.release?.();
+          logFixture.release = null;
+        }
+        await expect(drawer.getByText("No logs available", { exact: true })).toBeVisible();
+        await expect(logError).toHaveCount(0);
+        await drawer.getByRole("button", { name: "Close", exact: true }).click();
+        await expect(drawer).toBeHidden();
+        logFixture.status = 503;
+        await completedRow.click();
+        await drawer.getByRole("button", { name: "Log", exact: true }).click();
+        await expect(logError).toBeVisible();
+        await expect(logError).toContainText("503");
+        await expect(logError).not.toContainText("fixture log failure");
+        await expect(drawer.getByText("No logs available", { exact: true })).toHaveCount(0);
+        await expect(drawer.getByText("Waiting for log output...", { exact: true })).toHaveCount(0);
+        await captureWorkflowState(page, stepName, "eval-log-request-error", async () => {
+          await expect(logError).toBeVisible();
+          await expect(logError.getByRole("button", { name: "Retry", exact: true })).toBeVisible();
+        });
+        logFixture.status = 200;
+        setLogLines(3);
+        const requestsBeforeRetry = logFixture.requests;
+        await logError.getByRole("button", { name: "Retry", exact: true }).click();
+        await expect(drawer.getByText("3 lines", { exact: true })).toBeVisible();
+        await expect(logError).toHaveCount(0);
+        expect(logFixture.requests).toBeGreaterThan(requestsBeforeRetry);
       } finally {
         // Unmount the matrix/log pollers before removing only our own routes.
         try {

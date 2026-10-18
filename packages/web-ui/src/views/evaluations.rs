@@ -3,6 +3,7 @@
 mod drawer_header;
 mod drawer_snapshot;
 mod evidence_navigation;
+mod log_pane;
 mod policy_adapter;
 mod policy_captured;
 mod policy_cells;
@@ -2852,233 +2853,26 @@ fn EvalDrawer(
     }
 }
 
+/// Shows the Queue drawer's evaluation log through the shared log pane.
 #[component]
 fn EvalDrawerLogTabQueue(ev: EvalQueueItem, live: bool) -> Element {
-    let mut autoscroll = use_signal(|| true);
-    let commit_id = ev.commit_id;
-    let mut poll_tick = use_signal(|| 0_u64);
-
-    // When live, poll every 2 s to pick up new log lines
-    {
-        use_future(move || async move {
-            #[cfg(target_arch = "wasm32")]
-            loop {
-                #[cfg(target_arch = "wasm32")]
-                {
-                    gloo_timers::future::TimeoutFuture::new(2000).await;
-                    if live {
-                        poll_tick.set(poll_tick() + 1);
-                    } else {
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
-    // Re-fetch whenever poll_tick changes (driven by the loop above when live)
-    let logs_resource = use_resource(move || async move {
-        let _ = poll_tick();
-        crate::api::client::fetch_eval_logs(commit_id).await
-    });
-
-    let logs_snapshot = logs_resource.read();
-    let lines: Vec<String> = match &*logs_snapshot {
-        Some(Ok(entries)) => entries
-            .iter()
-            .map(|e| {
-                let level = e
-                    .level
-                    .as_ref()
-                    .map(|s| s.to_uppercase())
-                    .unwrap_or_else(|| "INFO".to_string());
-                format!(
-                    "{} [{}] {}",
-                    e.timestamp.format("%Y-%m-%d %H:%M:%S%.3fZ"),
-                    level,
-                    e.message
-                )
-            })
-            .collect(),
-        Some(Err(_)) | None => Vec::new(),
-    };
-    let is_loading = logs_snapshot.is_none();
-
     rsx! {
-        div { style: "display: flex; flex-direction: column; flex: 1; min-height: 0;",
-            div {
-                style: "padding: 8px 16px; border-bottom: 1px solid var(--cf-divider); display: flex; gap: 10px; align-items: center; flex-shrink: 0;",
-                span { style: "font-size: 11px; color: var(--cf-text-muted);", "{lines.len()} lines" }
-                div { style: "flex: 1;" }
-                label {
-                    style: "display: flex; gap: 6px; align-items: center; font-size: 11px;",
-                    input {
-                        r#type: "checkbox",
-                        class: "ed-checkbox",
-                        checked: autoscroll(),
-                        oninput: move |_| autoscroll.set(!autoscroll()),
-                    }
-                    "Auto-scroll"
-                }
-                button {
-                    class: "btn-icon focus-ring",
-                    title: "Download",
-                    Icon { name: IconName::Download, size: 13 }
-                }
-            }
-            pre { class: "fl-diff",
-                if is_loading {
-                    div { style: "color: var(--cf-text-muted); padding: 12px;", "Loading logs..." }
-                } else if lines.is_empty() {
-                    div { style: "color: var(--cf-text-muted); padding: 12px;",
-                        if live { "Waiting for log output..." } else { "No logs available" }
-                    }
-                } else {
-                    for (idx, line) in lines.iter().enumerate() {
-                        {
-                            let color = log_line_color(line);
-                            let line_num = format!("{:>3}", idx + 1);
-                            rsx! {
-                                div { style: "color: {color};",
-                                    span { style: "color: var(--cf-text-muted); user-select: none; display: inline-block; width: 36px;", "{line_num}" }
-                                    " {line}"
-                                }
-                            }
-                        }
-                    }
-                }
-                if live {
-                    {
-                        let next_line_num = format!("{:>3}", lines.len() + 1);
-                        rsx! {
-                            div { style: "color: #60a5fa;",
-                                span { style: "color: var(--cf-text-muted); display: inline-block; width: 36px;", "{next_line_num}" }
-                                " "
-                                span { class: "ed-pulse", style: "margin-left: 0;" }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        log_pane::EvalLogPane { commit_id: ev.commit_id, live, empty_message: None }
     }
 }
 
+/// Shows the History drawer's evaluation log through the shared log pane.
+///
+/// A failed evaluation that never streamed explains the empty log with its
+/// recorded evaluation error.
 #[component]
 fn EvalDrawerLogTabHistory(ev: EvalHistoryItem, live: bool) -> Element {
-    let mut autoscroll = use_signal(|| true);
-    let commit_id = ev.commit_id;
-    let mut poll_tick = use_signal(|| 0_u64);
-
-    // When live (cancelling state), poll every 2 s
-    {
-        use_future(move || async move {
-            #[cfg(target_arch = "wasm32")]
-            loop {
-                #[cfg(target_arch = "wasm32")]
-                {
-                    gloo_timers::future::TimeoutFuture::new(2000).await;
-                    if live {
-                        poll_tick.set(poll_tick() + 1);
-                    } else {
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
-    // Re-fetch whenever poll_tick changes
-    let logs_resource = use_resource(move || async move {
-        let _ = poll_tick();
-        crate::api::client::fetch_eval_logs(commit_id).await
-    });
-
-    let logs_snapshot = logs_resource.read();
-    let lines: Vec<String> = match &*logs_snapshot {
-        Some(Ok(entries)) => entries
-            .iter()
-            .map(|e| {
-                let level = e
-                    .level
-                    .as_ref()
-                    .map(|s| s.to_uppercase())
-                    .unwrap_or_else(|| "INFO".to_string());
-                format!(
-                    "{} [{}] {}",
-                    e.timestamp.format("%Y-%m-%d %H:%M:%S%.3fZ"),
-                    level,
-                    e.message
-                )
-            })
-            .collect(),
-        Some(Err(_)) | None => Vec::new(),
-    };
-    let is_loading = logs_snapshot.is_none();
-
+    let empty_message = ev
+        .evaluation_error_message
+        .as_deref()
+        .map(|error| format!("Evaluation failed before log streaming began: {error}"));
     rsx! {
-        div { style: "display: flex; flex-direction: column; flex: 1; min-height: 0;",
-            div {
-                style: "padding: 8px 16px; border-bottom: 1px solid var(--cf-divider); display: flex; gap: 10px; align-items: center; flex-shrink: 0;",
-                span { style: "font-size: 11px; color: var(--cf-text-muted);", "{lines.len()} lines" }
-                div { style: "flex: 1;" }
-                label {
-                    style: "display: flex; gap: 6px; align-items: center; font-size: 11px;",
-                    input {
-                        r#type: "checkbox",
-                        class: "ed-checkbox",
-                        checked: autoscroll(),
-                        oninput: move |_| autoscroll.set(!autoscroll()),
-                    }
-                    "Auto-scroll"
-                }
-                button {
-                    class: "btn-icon focus-ring",
-                    title: "Download",
-                    Icon { name: IconName::Download, size: 13 }
-                }
-            }
-            pre { class: "fl-diff",
-                if is_loading {
-                    div { style: "color: var(--cf-text-muted); padding: 12px;", "Loading logs..." }
-                } else if lines.is_empty() {
-                    div { style: "color: var(--cf-text-muted); padding: 12px;",
-                        if let Some(error) = ev.evaluation_error_message.as_deref() {
-                            "Evaluation failed before log streaming began: {error}"
-                        } else if live {
-                            "Waiting for log output..."
-                        } else {
-                            "No logs available"
-                        }
-                    }
-                } else {
-                    for (idx, line) in lines.iter().enumerate() {
-                        {
-                            let color = log_line_color(line);
-                            let line_num = format!("{:>3}", idx + 1);
-                            rsx! {
-                                div { style: "color: {color};",
-                                    span { style: "color: var(--cf-text-muted); user-select: none; display: inline-block; width: 36px;", "{line_num}" }
-                                    " {line}"
-                                }
-                            }
-                        }
-                    }
-                }
-                if live {
-                    {
-                        let next_line_num = format!("{:>3}", lines.len() + 1);
-                        rsx! {
-                            div { style: "color: #60a5fa;",
-                                span { style: "color: var(--cf-text-muted); display: inline-block; width: 36px;", "{next_line_num}" }
-                                " "
-                                span { class: "ed-pulse", style: "margin-left: 0;" }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        log_pane::EvalLogPane { commit_id: ev.commit_id, live, empty_message }
     }
 }
 

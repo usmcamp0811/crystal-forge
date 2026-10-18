@@ -670,6 +670,42 @@ open Compliance without evaluation context. Bundle name and version, framework
 and optional framework version come from the validated captured bundle. Lineage
 and version UUIDs remain secondary identity details.
 
+The evidence drawer shows a two-pane layout. The left pane lists the other
+controls that the same captured system received through the same captured bundle
+version, in snapshot column order. Selection uses only the pinned response:
+a control is listed only when exactly one snapshot column and exactly one system
+binding carry its policy version and that binding records the bundle version. The
+catalog is never read, so later edits cannot add or remove a control. The capture
+records no control family, severity, or level, so the pane states that grouping is
+unavailable and shows one flat list. A filter box narrows the list by name,
+version, or outcome label. `j` and `k` step to the next or previous visible
+control, as do Down and Up inside the list. They stop at the first and last
+control and do not wrap. They do nothing while the filter box has focus; Escape
+still dismisses the drawer from there. A step replaces the history entry and
+keeps the commit and attempt UUID, so Back still leaves the receiver and no step
+can show evidence from another attempt. The header names the captured system and
+bundle. `Open system`
+opens SystemDetail Config at the evaluated commit and keeps a validated exact
+return. `View bundle` opens the exact captured bundle version in the Compliance
+catalog and clears the evaluation return; the catalog can differ from the
+capture. Expand and Restore resize the drawer. Both actions stay disabled until
+the pinned response validates. Expand is first in tab order so initial focus does
+not move when they enable.
+
+The Log tab is one shared component for queue and history drawers. It shows
+three different states: loading, a successful empty log, and a failed request.
+A failed request shows the HTTP status or failure class, never the response body,
+and a Retry action. A live drawer also recovers on its next two-second poll.
+Auto-scroll moves the viewport to its end after the line count changes and when
+the setting is turned on. It does nothing while the setting is off. The scroll
+runs one animation frame after the change, because the DOM is not patched when
+the effect first runs.
+
+Force-cancel confirmation is a sibling of the drawer, so the drawer's focus
+trap does not contain it. The confirmation owns its focus boundary. Initial focus
+lands on `Keep running`. Tab and Shift+Tab wrap between its two buttons. Escape
+dismisses only the confirmation, and focus returns to the `Force-cancel` opener.
+
 Ordinary queue/history drawers, pinned drawers, and the evidence drawer use the
 standard `DialogInitialFocus`, `DialogFocusSentinel`, and `DialogFocusRestore`
 helpers for initial focus, focus containment, and opener restoration.

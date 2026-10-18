@@ -5,6 +5,7 @@
 //! visibility, mutation authority, and immutable version identity.
 
 mod evaluation_evidence;
+mod evidence_controls;
 
 use std::collections::HashMap;
 

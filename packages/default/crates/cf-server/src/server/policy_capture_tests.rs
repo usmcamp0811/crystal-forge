@@ -221,6 +221,22 @@ async fn real_loader_captures_overlap_empty_contexts_and_immutable_history(pool:
         crate::queries::commits::EvalStartOutcome::Started { attempt } => attempt,
         other => panic!("fixture must start: {other:?}"),
     };
+    // The matrix exposes a captured cell only for a configuration in the
+    // attempt's verified inventory selection. A read without inventory masks
+    // every cell to Unknown (`inventory_projection::mask_outside_selection`).
+    // Record the selection that production discovery persists. Then the
+    // assertions below still prove that a resolved, empty assignment reads as
+    // NotAssigned instead of being hidden by the missing inventory.
+    sqlx::query(
+        "INSERT INTO evaluation_attempt_inventory(evaluation_attempt_id, commit_id, attempt_number, configuration_names, selected_configuration_names, execution_mode)
+         SELECT id, commit_id, attempt_number, $2, $2, 'native'
+         FROM evaluation_attempts WHERE commit_id = $1 ORDER BY attempt_number DESC LIMIT 1",
+    )
+    .bind(commit)
+    .bind(vec!["alpha".to_string(), "beta".to_string()])
+    .execute(&pool)
+    .await
+    .unwrap();
     let actual = load_and_capture_policies_for_eval(&pool, flake, Some((commit, attempt)))
         .await
         .unwrap();

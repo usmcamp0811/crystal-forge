@@ -3,6 +3,9 @@
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use dioxus::prelude::*;
 
+use crate::components::dialog_focus::{
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel, DialogInitialFocus,
+};
 use crate::components::{Icon, IconName};
 
 /// Selects an authoritative completion time or a truthfully labelled queue time.
@@ -66,10 +69,22 @@ pub(super) fn Timestamp(timestamp: DateTime<Utc>) -> Element {
     }
 }
 
+/// DOM id of the confirmation. The focus components resolve the dialog by it.
+const FORCE_CANCEL_DIALOG_ID: &str = "ed-force-cancel-dialog";
+
 /// Requests confirmation for one commit without issuing an API request.
 ///
 /// The caller owns submission, duplicate-request prevention, and API errors.
 /// Dismissal invokes only `on_cancel`; Escape does not reach the drawer page.
+///
+/// The confirmation is a sibling of the drawer, so the drawer's own focus
+/// trap does not contain it. The dialog therefore owns its keyboard boundary:
+///
+/// - focus moves to **Keep running** when the dialog mounts, because the
+///   `autofocus` attribute is ignored for elements inserted after page load;
+/// - Tab and Shift+Tab wrap between the two buttons through edge sentinels;
+/// - focus returns to the opener when the dialog unmounts. If the opener is
+///   disabled or removed, focus falls back to the remaining drawer.
 #[component]
 pub(super) fn ConfirmForceCancel(
     commit_id: i32,
@@ -89,13 +104,18 @@ pub(super) fn ConfirmForceCancel(
                 }
             },
             div {
+                id: FORCE_CANCEL_DIALOG_ID,
                 class: "modal",
                 style: "max-width: 440px;",
                 role: "alertdialog",
                 aria_modal: "true",
                 aria_labelledby: "ed-force-cancel-title",
                 aria_describedby: "ed-force-cancel-description",
+                tabindex: "-1",
                 onclick: move |event| event.stop_propagation(),
+                DialogFocusRestore {}
+                DialogInitialFocus { dialog_id: FORCE_CANCEL_DIALOG_ID }
+                DialogFocusSentinel { dialog_id: FORCE_CANCEL_DIALOG_ID, boundary: DialogFocusBoundary::Last }
                 div { class: "modal-head",
                     h2 { id: "ed-force-cancel-title", style: "display: flex; gap: 8px; align-items: center;",
                         span { style: "color: #f87171;", Icon { name: IconName::Warn, size: 18 } }
@@ -129,6 +149,7 @@ pub(super) fn ConfirmForceCancel(
                         "Force-cancel"
                     }
                 }
+                DialogFocusSentinel { dialog_id: FORCE_CANCEL_DIALOG_ID, boundary: DialogFocusBoundary::First }
             }
         }
     }

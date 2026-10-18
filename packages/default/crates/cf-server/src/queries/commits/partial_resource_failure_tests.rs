@@ -675,10 +675,22 @@ async fn partial_resource_failure_retains_rejected_completion_with_preserved_bui
         );
     }
     assert_eq!(after["jobs"].as_array().unwrap().len(), 2);
+    // The fixture starts exactly three attempts: the original, the manual
+    // retry, and the policy-change attempt. Resource terminalization must not
+    // add an automatic child, so none of them may name an automatic source.
+    let attempts = after["attempts"].as_array().unwrap();
     assert_eq!(
-        after["attempts"].as_array().unwrap().len(),
-        2,
-        "no automatic child after the manual retry"
+        attempts.len(),
+        3,
+        "no automatic child after the manual and policy-change attempts: {}",
+        after["attempts"]
+    );
+    assert!(
+        attempts
+            .iter()
+            .all(|attempt| attempt["automatic_retry_source_id"].is_null()),
+        "resource failure must not schedule an automatic retry: {}",
+        after["attempts"]
     );
     assert_eq!(after["commit"]["evaluation_status"], "failed");
     assert_eq!(after["summary"]["systems_failed_policy_strict"], 2);
