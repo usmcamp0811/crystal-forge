@@ -4,13 +4,19 @@ title: 'Upgrade: real supported old-version transition and continuity scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-17 17:29'
+updated_date: '2026-10-18 03:31'
 labels:
   - testing
   - integration
   - blocked-decision
 dependencies:
   - TASK-490.7
+modified_files:
+  - >-
+    checks/integration-upgrade/scenarios/fragments/task-490.23-version-transition.py
+  - >-
+    checks/integration-upgrade/scenarios/fragments/task-490.23-version-transition.cjs
+  - checks/integration-upgrade/fixtures/*
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -20,26 +26,20 @@ ordinal: 535000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-upgrade. Contract ID: upgrade.continuity. Exclusive scenario writes: checks/integration-upgrade/scenarios/continuity.{nix,py,cjs}; scenario fixtures/assets under that owner. Pinned old-version input wiring requires coordinator approval and coordinator-owned shared/flake changes; child cannot edit those paths unilaterally.
+Owning check: integration-upgrade. Contract ID: upgrade.continuity. This packet owns only old/current version transition Python/browser case fragments and immutable test source fixtures beneath `checks/integration-upgrade/scenarios/fragments/` and `fixtures/`. The coordinator owns `version-transition.nix`, composition, browserSpecs mapping, pinned old source input wiring and owner registration. An implementation packet does not automatically receive a NixOS test derivation.
 
-BLOCKED D2: no accepted support decision names oldest supported in-place source server release, whether old agents/builders must operate with current server and for how long, or exact pinned source tag/commit. Existing v0.3.1/v0.3.0/v0.2.x tags and crate version 0.3.0 are not support promises. Owner must decide all three. Old-source flake input/fetch must not change current application dependencies. As-built D1 is evidence, not authority; other uncertain expectations also remain blocked pending owner decision.
+BLOCKED D2: no accepted support decision identifies the oldest supported in-place server release, agent/builder compatibility window, or exact pinned source. Existing tags and crate versions are not support promises. Once D2 is resolved, one fresh Upgrade VM/database runs the real old package to create identities, credentials, history and in-flight work; then the current package migrates that same database and proves continuity/recovery. The old/current phases are sequential in the same VM; separate derivations cannot share live DB state. Upgrade remains separate from current-version owners because the in-place version/schema transition mutates state that must not contaminate their proofs.
 
-Scope once unblocked: build actual old package from its own pinned source/migrations. Through old API/UI create users/credentials, evaluation/build/deployment history, queued build and pending deployment. Current package starts normally on same PostgreSQL data directory and applies migrations. Existing passwords still sign in, exact history identities persist, in-flight work reaches specified states, representative new evaluate/build completes. Old agents/builders continue within the declared compatibility window. No same-version restart substitute, synthetic old schema or current-version seeded data. Non-goals: current-version recovery (490.15), retained non-integration server-regressions migration-prefix rehearsals. TASK-490 test-only scope applies.
-
-Organization: native checks/integration-upgrade/default.nix uses { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Shared helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; child files disjoint and integration requires explicit registration. Meaningful WIP may be discoverable; only Access exists now; Upgrade default.nix only with meaningful scenario after blockers, no placeholder.
-
-Prerequisite TASK-490.7 plus D2 decision. Candidate, NOT verified: nix build .#checks.x86_64-linux.integration-upgrade.scenarios.continuity -L; append .run for evidence; aggregate nix build .#checks.x86_64-linux.integration-upgrade -L. Completion requires explicit registration, real VM execution and exact old/current revisions, commands, outcomes and evidence; keep correct failing assertions and linked Backlog product bugs.
-
-READINESS: foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s), accepted D2, implemented interfaces/fixtures/registration and verified commands required before To Do. No foundation hash is invented; no delegation or executed slice is claimed.
+Do not change application dependencies, run synthetic old schema or reuse another check's data. D1 uncertainty remains blocked. The coordinator owns package-input wiring, scenario composition and explicit registration. Requires TASK-490.7 shared role API, resolved D2, passing foundation and TASK-490.25/.26. Remain Backlog until all are concrete.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The owner decision D2 is recorded with the supported source release, compatibility window, and pinned source
-- [ ] #2 Data created by the real old release survives migration with identities, credentials, and history intact
-- [ ] #3 In-flight work recovers across the version transition and one new operation completes
-- [ ] #4 Old agents/builders within the declared window remain usable
-- [ ] #5 Executed in real VMs with recorded evidence
+- [ ] #1 The owner decision D2 names supported source release, compatibility window and pinned source
+- [ ] #2 Real old-release data survives in-place current-version migration with identities, credentials and history intact
+- [ ] #3 In-flight work recovers across version transition and one new operation completes
+- [ ] #4 Old agents/builders within the declared compatibility window remain usable
+- [ ] #5 The coordinator composes the fragments into one `version-transition` scenario; no separate derivation per implementation packet, and runtime evidence is recorded
 <!-- AC:END -->
 
 ## Implementation Notes
