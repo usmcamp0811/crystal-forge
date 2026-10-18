@@ -1,10 +1,11 @@
 ---
 id: TASK-490.3
 title: 'Access: administration and environment form persistence scenarios'
-status: Backlog
-assignee: []
+status: To Do
+assignee:
+  - '@openai'
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-18 14:41'
+updated_date: '2026-10-18 19:22'
 labels:
   - testing
   - integration
@@ -62,6 +63,12 @@ Focused verification after composition: `nix build .#checks.x86_64-linux.integra
 - [ ] #5 Disabling a user persists enabled=false and rejects that user's real sign-in with 401
 - [ ] #6 The coordinator executes the focused lifecycle-local-bootstrap gate containing these fragments and records exact revision, command, result and evidence
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Latest owner selects next runnable product coverage progress. Implement bounded accepted Admin form success subset after existing16Access cases: production UI user creation, role edit/reload, disable/login401 and cancel no mutation; classification/retry settings saves/reload if feasible. Use design identities not already created in .2, same-scenario receipts, independent browser login and DB before/after. No new VM/owner and no production changes. Do not claim complete .3: environment CRUD and specific unresolved failed-save/presentation states remain separate outstanding cases. Coordinator owns facts/composition/registration; fragment writer owns task-490.3-admin-forms.py/.cjs only. Execute actual normal Access CI path and preserve accurate failed assertion if a product defect emerges. TASK-490.7 remains next Delivery roles/proving work after this bounded controller progress; no blanket D1 blocker.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
