@@ -4,7 +4,7 @@ title: 'Access: administration and environment form persistence scenarios'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-18 13:56'
+updated_date: '2026-10-18 14:41'
 labels:
   - testing
   - integration
@@ -48,9 +48,9 @@ Environment cases: create/edit/delete through UI, verify environments rows and r
 
 Authority/source reading: approved AdminView.jsx and EnvironmentsView.jsx under docs/design/CrystalForge/components are presentation references. docs/knowledge/ui/admin-console-and-login-views.md, api/builders-queues-environments-dashboard-admin-api.md and ui/flakes-environments-builds-and-evaluations-views.md are as-built evidence, not D1 acceptance authority. Read cf-server handlers/api/admin.rs (users, classification, retry DTOs), environments.rs and routes; web-ui admin/environment tabs and CreateUserModal, EditUserModal, EnvironmentFormModal, EditEnvironmentModal, RemoveEnvironmentDialog.
 
-Dependency/readiness: TASK-490.1 controller interface is tested at bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab, including .25/.26. Use documented case/expect/receipt/http named-session/CSRF/sql_json/run_browser and fault helpers. Sign in independently in each browser invocation. This packet is not selected and has not executed; coordinator must confirm accepted form/error states and composition before dispatch. Future services/builder/target interfaces are not prerequisites for controller form proofs.
+Dependency/readiness: TASK-490.1 is Review. Current tested controller pin is 81d65be745cc9f9777d368900d01fe0f207cb052 with .25/.26 and the .2 session subset verified. Focused Access and aggregate passed 10 cases (five bootstrap then five sessions), 292 migrations and database.unixSocketClients=22; this is not execution of these form fragments. Use FACTS["admin"] and same-run receipts()["admin.userId"], documented case/expect/receipt/http named-session/CSRF/sql_json/run_browser and fault helpers. Each browser invocation signs in independently. Paths and coordinator composition target above are concrete. This packet remains Backlog/unselected/unexecuted. Exact remaining authority gaps are failed-save draft retention after real outage and any unapproved empty/pending/disabled-save component states; accepted success/cancel/validation obligations remain in scope. Confirm those states and coordinator ordering before dispatch. No future services/builder/target role or global foundation-completion dependency blocks these controller proofs.
 
-Focused verification after composition: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. Record exact revision, command, outcome and evidence; a base bootstrap pass does not prove these fragments. Keep correct failing assertions and link product defects; escalate helper/authority gaps.
+Focused verification after composition: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. Record exact revision, command, outcome and evidence; the current bootstrap/session result does not prove form fragments. Keep correct failing assertions and link product defects; escalate helper/authority gaps.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -66,8 +66,10 @@ Focused verification after composition: `nix build .#checks.x86_64-linux.integra
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Current readiness: controller bootstrap prerequisite bba718be is tested; this packet awaits user selection, approved form/error states and coordinator composition. No fragment result is claimed.
+Current readiness: TASK-490.1 is Review in draft MR !335. Tested pin 81d65be745cc9f9777d368900d01fe0f207cb052 passed focused Access and aggregate with 10 cases, 292 migrations and database.unixSocketClients=22; runtime i84kvs1lc5nqx0lmsqinwbmvy0ix8mvh. The controller packet was directly inspected for disjoint form paths, lifecycle-local-bootstrap placement, facts/receipt interfaces, coordinator ownership and focused command. FACTS["admin"], receipts()["admin.userId"], named HTTP jars/CSRF, sql_json and independent run_browser contexts are concrete. No future role dependency is required.
+
+Still Backlog, unselected and unexecuted. Exact authority gaps: draft retention/no persistence after a real failed save and any missing approved fresh-empty/pending/disabled-save component state. Coordinator must confirm state authority/order before dispatch. Existing accepted success, cancel and duplicate validation obligations are retained. No form acceptance criterion is checked by the bootstrap/session result.
 
 ### Historical
-2026-10-17 review recorded unresolved foundation/package blockers and no VM execution at that time. Separate form derivations were a former layout proposal. Bootstrap later passed at b1095c8f and after rebase at bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab; runtime riky1mm0nn185wb26abw7zzshnbml0fp records 292 migrations. Those observations do not verify form fragments.
+2026-10-17 review recorded unresolved foundation/package blockers and no VM execution at that time. Separate form derivations were a former layout proposal. Bootstrap later passed at b1095c8f and after rebase at bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab; runtime riky1mm0nn185wb26abw7zzshnbml0fp recorded 292 migrations. Those observations did not verify form fragments.
 <!-- SECTION:NOTES:END -->
