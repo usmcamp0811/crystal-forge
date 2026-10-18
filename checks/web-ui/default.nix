@@ -668,9 +668,10 @@ in pkgs.testers.runNixOSTest {
     # Main Crystal Forge server with all services enabled
     machine = {
       imports = [ inputs.self.nixosModules.crystal-forge ];
-      virtualisation.sharedDirectories.atticObserver = lib.mkIf runNativeCacheFixtures atticObserverShare;
-      virtualisation.sharedDirectories.niks3Observer = lib.mkIf runNativeCacheFixtures niks3ObserverShare;
-      environment.etc."cache-fixture-production-pki".source = lib.mkIf runNativeCacheFixtures productionPki;
+      virtualisation.sharedDirectories = lib.optionalAttrs runNativeCacheFixtures {
+        atticObserver = atticObserverShare;
+        niks3Observer = niks3ObserverShare;
+      };
 
       virtualisation.memorySize = 20480; # 20GB for everything
       virtualisation.cores = 4;
@@ -713,10 +714,14 @@ in pkgs.testers.runNixOSTest {
         TEMP = "/tmp";
       };
 
+      # Omit the optional entry itself: a conditional source leaves an etc
+      # entry with no source for focused non-cache workflows.
       environment.etc = {
         "server.key".source = "${keyPath}/agent.key";
         "server.pub".source = "${pubPath}/agent.pub";
         "cache-fixture-credentials".source = cacheCredentials;
+      } // lib.optionalAttrs runNativeCacheFixtures {
+        "cache-fixture-production-pki".source = productionPki;
       };
       security.pki.certificateFiles = ["${cacheCredentials}/ca.crt" "${productionPki}/s3-ca.crt"];
 
@@ -1219,6 +1224,11 @@ in pkgs.testers.runNixOSTest {
     test_profile = "${testProfile}"
     test_steps = ${if testSteps == null then "None" else "\"${testSteps}\""}
     test_steps_env = f" CF_UI_TEST_STEPS={test_steps}" if test_steps else ""
+    # `integration-test.js` runs inside the VM. Use its direct local PostgreSQL
+    # endpoint rather than the host-side forwarded CF_TEST_DB_PORT=5433 value.
+    # This also avoids spawning `sudo -u postgres` and emitting PAM log lines for
+    # each database poll in the long-running persisted Config workflow.
+    guest_db_env = " DB_HOST=127.0.0.1 DB_PORT=5432 DB_USER=postgres DB_PASSWORD= DB_NAME=crystal_forge"
     live_fixture_env = (
         f" CF_TEST_REAL_REPO_URL={task440_live_repo_url}"
         f" CF_TEST_REAL_COMMIT_HASH={task440_live_commit_hash}"
@@ -1246,27 +1256,42 @@ in pkgs.testers.runNixOSTest {
     # Run the integration test script
     machine.succeed("rm -f /tmp/web-ui-tests/integration.exit /tmp/screenshots/results.json /tmp/screenshots/fatal.json")
     machine.succeed(
-        f"nohup sh -c 'env CF_UI_BASELINES_DIR=/tmp/web-ui-baselines CF_UI_TEST_PROFILE={test_profile}{test_steps_env}{live_fixture_env} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
+        f"nohup sh -c 'env CF_UI_BASELINES_DIR=/tmp/web-ui-baselines CF_UI_TEST_PROFILE={test_profile}{guest_db_env}{test_steps_env}{live_fixture_env} ${pkgs.nodejs}/bin/node /tmp/web-ui-tests/integration-test.js http://127.0.0.1:${
           toString CF_TEST_SERVER_PORT
         } /tmp/screenshots; status=$?; printf \"%s\\n\" \"$status\" > /tmp/web-ui-tests/integration.exit' > /tmp/web-ui-tests/integration.log 2>&1 </dev/null &"
     )
+    def retain_browser_diagnostics():
+        # Keep partial screenshots and test output in the failed Nix build
+        # directory. CI builds with --keep-failed and publishes this archive
+        # as a job artifact, so a test failure does not erase its evidence.
+        import pathlib
+        artifact_dir = pathlib.Path("screenshots")
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+        archive = "/tmp/web-ui-tests/failed-browser-run.tar.gz"
+        machine.succeed(
+            "tar -czf " + archive + " -C /tmp screenshots web-ui-tests/integration.log "
+            "2>/dev/null || tar -czf " + archive + " -C /tmp screenshots"
+        )
+        machine.copy_from_vm(archive, str(artifact_dir))
+        print(f"WEB_UI_FAILED_ARTIFACT={artifact_dir.resolve() / 'failed-browser-run.tar.gz'}")
+
     def print_browser_diagnostics(reason):
-        # Print diagnostics while the VM is reachable. Failed derivations do
-        # not reliably retain files copied only into the test-driver workdir.
-        print(f"=== Web UI browser diagnostics: {reason} ===")
+        # Keep the live job trace bounded. The archive above retains full files;
+        # these tails expose the recent failure without flooding GitLab's log.
+        print(f"=== Web UI browser diagnostics: {reason} (last 160 lines) ===")
         try:
-            print(machine.succeed("cat /tmp/web-ui-tests/integration.log || true"))
+            print(machine.succeed("tail -n 160 /tmp/web-ui-tests/integration.log || true"))
         except Exception as e:
-            print(f"warning: could not print integration.log: {e}")
-        print("=== Crystal Forge server journal ===")
+            print(f"warning: could not read integration.log tail: {e}")
+        print("=== Crystal Forge server journal (last 80 lines) ===")
         try:
-            print(
-                machine.succeed(
-                    "journalctl -u crystal-forge-server.service --no-pager -n 300 || true"
-                )
-            )
+            print(machine.succeed("journalctl -u crystal-forge-server.service --no-pager -n 80 || true"))
         except Exception as e:
-            print(f"warning: could not print server journal: {e}")
+            print(f"warning: could not read server journal: {e}")
+        try:
+            retain_browser_diagnostics()
+        except Exception as e:
+            print(f"warning: could not retain browser artifacts: {e}")
 
     # The process can write results.json before post-processing finishes. Wait
     # for the durable exit marker so a late non-zero exit cannot be hidden by
@@ -1282,16 +1307,12 @@ in pkgs.testers.runNixOSTest {
     # Coverage-gate failures (manifest drift) abort before any results exist.
     if machine.execute("test -f /tmp/screenshots/fatal.json")[0] == 0:
         fatal_json = machine.succeed("cat /tmp/screenshots/fatal.json")
+        print_browser_diagnostics("fatal workflow coverage error")
         raise Exception(f"Web UI check aborted: {json.loads(fatal_json)['error']}")
 
     if machine.execute("test -f /tmp/screenshots/results.json")[0] != 0:
         exit_code = machine.succeed("cat /tmp/web-ui-tests/integration.exit").strip()
-        print("=== Crystal Forge server journal after integration failure ===")
-        print(
-            machine.succeed(
-                "journalctl -u crystal-forge-server.service --no-pager -n 300 || true"
-            )
-        )
+        print_browser_diagnostics("integration exited before results.json")
         raise Exception(
             "integration process exited before producing results.json "
             f"(exit code {exit_code})"
@@ -1324,12 +1345,12 @@ in pkgs.testers.runNixOSTest {
     results = json.loads(results_json)
 
     if any(not result.get("ok") for result in results):
-        print("=== Crystal Forge server journal after failed browser step ===")
-        print(
-            machine.succeed(
-                "journalctl -u crystal-forge-server.service --no-pager -n 300 || true"
-            )
-        )
+        print("=== Crystal Forge server journal after failed browser step (last 80 lines) ===")
+        print(machine.succeed("journalctl -u crystal-forge-server.service --no-pager -n 80 || true"))
+        try:
+            retain_browser_diagnostics()
+        except Exception as e:
+            print(f"warning: could not retain browser artifacts: {e}")
 
     # Copy final and intermediate screenshots for successful and failed steps.
     # Intermediate captures are review evidence even when a later assertion in
@@ -1458,8 +1479,13 @@ in pkgs.testers.runNixOSTest {
       "16-cves",
       "16b-cves-severity-filter",
       "25-caches-modal-attic",
+      # 26b owns the Completed-search regressions (configuration-name-only
+      # matches and out-of-order responses). A noncritical step failure does not
+      # fail the run, so these assertions only protect behavior when 26b is here.
+      "26b-evaluations-history",
       "26c-evaluations-latest-per-flake-populated",
       "26d-evaluations-latest-combined-filters-empty-clear",
+      "26e-evaluation-policy-bundle-controls",
       "29g-poam-failed-evidence-create",
       "29h-poam-link-compatible-findings",
       "29i-poam-detail-edits-milestones-conflicts",

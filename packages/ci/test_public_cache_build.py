@@ -183,12 +183,15 @@ cores = 4
                                 env=env, capture_output=True, text=True)
         assert result.returncode == 0, job
         impure = ["--impure"] if job.endswith("candidates") else []
+        local = LOCAL_EXECUTION if job == "web-ui-check" else []
         assert json.loads((directory / "argv").read_text()) == [
-            "build", *POLICY, *impure, ".#checks.x86_64-linux.web-ui", "-L", "--show-trace"]
+            "build", *POLICY, *impure, ".#checks.x86_64-linux.web-ui", "-L", "--show-trace", *local]
         assert result.stdout.count("InheritedInternalCache=true") == 1
-        for setting, expected in inherited_controls.items():
+        for setting, inherited in inherited_controls.items():
             effective = subprocess.check_output(
-                [real_nix, *POLICY, "config", "show", setting], env=env)
+                [real_nix, *POLICY, *local, "config", "show", setting], env=env)
+            expected = ({"builders": b"\n", "max-jobs": b"1\n", "cores": b"2\n"}
+                        .get(setting, inherited) if local else inherited)
             assert effective == expected, (job, setting)
     for job, installable in (("complexity-check", ".#code-metrics.complexity-report"),
                              ("coverage-check", ".#coverage.coverage-report")):
@@ -269,6 +272,7 @@ cores = 4
     assert "Effective fallback=true" in built.stdout
 
 print("PASS: modern/legacy Nix policy, inherited builder controls equal=true, "
-      "all matrix local execution cases equal=true, scoped argv, secret redaction, "
+      "all matrix and web-ui-check local execution cases equal=true, "
+      "manual baseline inherited controls equal=true, scoped argv, secret redaction, "
       "missing/empty/duplicate/conflicting/unsupported settings, exit status, "
       "real integration fixture source build with signatures and fallback enabled")

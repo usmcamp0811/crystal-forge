@@ -1,9 +1,14 @@
 pub mod jobs;
+mod policy_capture;
+#[cfg(test)]
+mod policy_capture_tests;
+#[cfg(test)]
+mod required_inventory_worker_tests;
 
 use crate::builder::run_cve_scan_loop;
 use crate::compliance::canonical::semantic_digest;
 use crate::compliance::resolver::{
-    AssignmentMode, ResolutionOutcome, resolve_systems_effective_policies_for_evaluation_batch,
+    AssignmentMode, ResolutionOutcome, resolve_systems_effective_policies_and_contexts_in_tx,
 };
 use crate::config::{CrystalForgeConfig, FlakeConfig};
 use crate::deployment::spawn_deployment_policy_manager;
@@ -46,8 +51,7 @@ use crate::queries::commits::{
     reset_stuck_commit_evaluations,
 };
 use crate::queries::deployment_policies::{
-    get_deployment_policies_by_versions, list_enabled_policies_for_flake,
-    list_policy_rows_by_configuration_for_flake,
+    list_enabled_policies_for_flake, list_policy_rows_by_configuration_for_flake,
 };
 use crate::queries::derivations::{
     cleanup_partial_derivations, reset_stuck_builds, set_closure_counts,
@@ -812,12 +816,11 @@ async fn load_deployment_policies_for_eval(
     }
 }
 
-/// Build a per-configuration policy map for a flake's evaluation run.
+/// Builds a per-configuration policy map for loader regression tests.
 ///
 /// For each active Crystal Forge system in the flake, the effective policy set
-/// is the union of:
-/// - Policies assigned directly through `system_policies`
-/// - Policies inherited from the system's environment through `environment_policies`
+/// comes from the authoritative specificity-aware resolver, including bundle
+/// assignments and direct environment/system assignments.
 ///
 /// If two active systems share the same NixOS configuration name but have
 /// *different* effective policy ID sets, this function returns an error with
@@ -828,22 +831,88 @@ async fn load_deployment_policies_for_eval(
 /// Use `policies_for_config(map, name)` to safely get an empty slice for those.
 /// Only native `nix-evaluation` and `multi-phase` policy versions with a parsed
 /// Nix check enter the map. Both enforce and report-only assignments enter it.
+#[cfg(test)]
 async fn load_policies_by_configuration_for_eval(
     pool: &PgPool,
     flake_id: i32,
 ) -> anyhow::Result<PoliciesByConfiguration> {
+    load_and_capture_policies_for_eval(pool, flake_id, None).await
+}
+
+// CONCURRENCY: Resolution, executable eligibility, metadata, and first-write
+// capture share one snapshot. The commit share lock serializes cancellation
+// and retry ownership changes until the plan is durable. Execution starts only
+// after this transaction commits; a duplicate capture never re-resolves a plan
+// and then executes different inputs under the same attempt identity.
+/// Resolves executable policy inputs and captures their public attempt provenance.
+///
+/// # Errors
+/// Returns ownership, duplicate-capture, resolution, or database errors. A stored
+/// public plan is never reused as an executable checkpoint after interruption.
+pub(crate) async fn load_and_capture_policies_for_eval(
+    pool: &PgPool,
+    flake_id: i32,
+    attempt: Option<(i32, i32)>,
+) -> anyhow::Result<PoliciesByConfiguration> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await?;
+    let mut capture = policy_capture::new_snapshot();
+    if let Some((commit_id, number)) = attempt {
+        let id =
+            crate::queries::eval_policy_plans::lock_attempt(&mut tx, commit_id, number).await?;
+        capture.evaluation_attempt_id = Some(id);
+        capture.attempt_number = number;
+        let (name, branch): (String, Option<String>) = sqlx::query_as(
+            "SELECT f.name,f.branch FROM flakes f JOIN commits c ON c.flake_id=f.id
+             WHERE c.id=$1 AND f.id=$2",
+        )
+        .bind(commit_id)
+        .bind(flake_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        capture.source_label =
+            Some(crate::api::eval_policy_matrix::EvalSourceLabel { name, branch });
+    }
+    let result = load_policies_for_eval_in_tx(&mut tx, flake_id, &mut capture).await;
+    if let Some((commit_id, _)) = attempt {
+        if result.is_err() {
+            // No evaluator receives this plan when executable loading fails.
+            for row in &mut capture.rows {
+                if row.resolution == crate::api::eval_policy_matrix::EvalMatrixResolution::Resolved
+                {
+                    row.resolution =
+                        crate::api::eval_policy_matrix::EvalMatrixResolution::Unavailable;
+                }
+                row.evaluation_digest = None;
+            }
+        }
+        crate::queries::eval_policy_plans::insert_plan(&mut tx, commit_id, &capture).await?;
+    }
+    tx.commit().await?;
+    result
+}
+
+async fn load_policies_for_eval_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    flake_id: i32,
+    capture: &mut crate::api::eval_policy_matrix::EvalPolicyMatrixSnapshot,
+) -> anyhow::Result<PoliciesByConfiguration> {
     use std::collections::{BTreeMap, BTreeSet};
 
-    let system_rows = sqlx::query_as::<_, (uuid::Uuid, String)>(
+    let system_rows = sqlx::query_as::<_, (uuid::Uuid, String, String, Option<bool>)>(
         r#"
-        SELECT s.id, COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+        SELECT s.id, COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname), s.hostname,
+               lifecycle.greenfield
         FROM systems s
+        LEFT JOIN system_evaluation_lifecycle lifecycle ON lifecycle.system_id = s.id
         WHERE s.flake_id = $1 AND s.is_active = TRUE
         ORDER BY 2, 1
         "#,
     )
     .bind(flake_id)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .context("Failed to load systems for effective policy evaluation")?;
 
@@ -853,17 +922,24 @@ async fn load_policies_by_configuration_for_eval(
 
     // Batch-resolve all systems in one transaction (~10 queries total),
     // replacing the previous per-system N+1 loop of full resolver invocations.
-    let system_id_vec: Vec<uuid::Uuid> = system_rows.iter().map(|(id, _)| *id).collect();
-    let batch_outcomes =
-        resolve_systems_effective_policies_for_evaluation_batch(pool, &system_id_vec)
-            .await
-            .context("Batch policy resolution for evaluation failed")?;
+    let system_id_vec: Vec<uuid::Uuid> = system_rows.iter().map(|(id, _, _, _)| *id).collect();
+    let mut bundle_contexts = std::collections::HashMap::new();
+    let batch_outcomes = resolve_systems_effective_policies_and_contexts_in_tx(
+        tx,
+        &system_id_vec,
+        None,
+        true,
+        &mut bundle_contexts,
+    )
+    .await
+    .context("Batch policy resolution for evaluation failed")?;
 
-    for (system_id, config_name) in system_rows {
+    policy_capture::initialize_rows(capture, &system_rows, &batch_outcomes);
+    for (system_id, config_name, _, _) in system_rows {
         if invalid_configurations.contains(&config_name) {
             continue;
         }
-        let outcome = match batch_outcomes.get(&system_id) {
+        let outcome = match batch_outcomes.get(&(None, system_id)) {
             Some(o) => match o {
                 ResolutionOutcome::Resolved(set) => set.policies.clone(),
                 ResolutionOutcome::Conflict(conflicts) => {
@@ -880,7 +956,8 @@ async fn load_policies_by_configuration_for_eval(
                 }
             },
             None => {
-                // System not in batch result — no active assignments (empty policy set).
+                // Preserve the old execution fallback, but capture marks the
+                // missing resolver outcome unavailable instead of known-empty.
                 vec![]
             }
         };
@@ -889,9 +966,13 @@ async fn load_policies_by_configuration_for_eval(
         resolved_systems.push((system_id, config_name, outcome));
     }
 
+    policy_capture::mark_skipped_configurations(capture, &invalid_configurations);
+
     let policy_version_ids = policy_version_ids.into_iter().collect::<Vec<_>>();
-    let policies_by_version =
-        get_deployment_policies_by_versions(pool, &policy_version_ids).await?;
+    let policies_by_version = policy_capture::load_records(tx, &policy_version_ids).await?;
+    let capture_metadata =
+        policy_capture::load_metadata(tx, &policy_version_ids, &bundle_contexts).await?;
+    policy_capture::bind_contexts(capture, &capture_metadata, &bundle_contexts)?;
     let execution_metadata = sqlx::query_as::<_, (uuid::Uuid, String, String)>(
         r#"
         SELECT id, implementation_state, execution_phase
@@ -900,7 +981,7 @@ async fn load_policies_by_configuration_for_eval(
         "#,
     )
     .bind(&policy_version_ids)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .context("Failed to load policy execution metadata for evaluation")?
     .into_iter()
@@ -919,6 +1000,7 @@ async fn load_policies_by_configuration_for_eval(
         let mut assigned = Vec::new();
         let mut skipped_report_only = Vec::new();
         for effective_policy in effective {
+            let captured_policy = effective_policy.clone();
             let Some((implementation_state, execution_phase)) =
                 execution_metadata.get(&effective_policy.policy_version_id)
             else {
@@ -961,6 +1043,13 @@ async fn load_policies_by_configuration_for_eval(
                         DeploymentPolicy::RequireCrystalForgeAgent { .. }
                     ) =>
                 {
+                    policy_capture::bind_policy(
+                        &capture_metadata,
+                        capture,
+                        _system_id,
+                        &captured_policy,
+                        true,
+                    )?;
                     assigned.push(AssignedPolicy {
                         policy_id: effective_policy.policy_version_id,
                         policy_name: record.name,
@@ -975,6 +1064,13 @@ async fn load_policies_by_configuration_for_eval(
                     placeholder,
                     reason,
                 } => {
+                    policy_capture::bind_policy(
+                        &capture_metadata,
+                        capture,
+                        _system_id,
+                        &captured_policy,
+                        false,
+                    )?;
                     warn!(
                         system_id = %_system_id,
                         configuration = %config_name,
@@ -997,6 +1093,13 @@ async fn load_policies_by_configuration_for_eval(
         // both systems.
         assigned.sort_by_key(|policy| policy.policy_id);
         let evaluation_digest = evaluation_policy_digest(&assigned, &skipped_report_only);
+        if let Some(row) = capture
+            .rows
+            .iter_mut()
+            .find(|row| row.system_id == Some(_system_id))
+        {
+            row.evaluation_digest = Some(evaluation_digest.clone());
+        }
 
         if let Some(existing_digest) = evaluation_digest_by_config.get(&config_name) {
             if existing_digest != &evaluation_digest {
@@ -1817,6 +1920,30 @@ async fn process_pending_commits(
             }
         };
 
+        // SECURITY: All lifecycle helpers and evaluator/preparation state clones
+        // carry this immutable attempt/generation capability. Never rebind a
+        // failed old worker by resolving a publication-time latest attempt.
+        let cf_state =
+            match crate::handlers::api::commits::bind_eval_producer(cf_state, commit.id, attempt)
+                .await
+            {
+                Ok(producer) => Arc::new(producer),
+                Err(error) => {
+                    // A claim can be cancelled/superseded while binding waits for
+                    // the database. Use the normal exact-attempt failure path; do
+                    // not leave a claimed commit active after a logging error.
+                    return handle_evaluation_attempt_failure(
+                        pool,
+                        cf_state,
+                        &commit,
+                        attempt,
+                        &error.to_string(),
+                        crate::models::retry_policy::RetryFailureClass::Transient,
+                    )
+                    .await;
+                }
+            };
+
         // Get flake info (post-claim; failures now go through retry/defer path)
         let flake = match commit.get_flake(&pool).await {
             Ok(flake) => flake,
@@ -1833,6 +1960,7 @@ async fn process_pending_commits(
                     crate::models::retry_policy::RetryFailureClass::Deterministic,
                 )
                 .await;
+                crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
                 return Ok(());
             }
         };
@@ -1850,6 +1978,7 @@ async fn process_pending_commits(
                     crate::models::retry_policy::RetryFailureClass::Deterministic,
                 )
                 .await;
+                crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
                 return Ok(());
             }
         };
@@ -1866,8 +1995,10 @@ async fn process_pending_commits(
         // (environment + direct assignments), returned as a BTreeMap keyed by
         // NixOS configuration name. Configurations with zero eligible Nix
         // policies produce no entry and are evaluated without assigned gates.
-        let policies_by_configuration = match load_policies_by_configuration_for_eval(
-            pool, flake.id,
+        let policies_by_configuration = match load_and_capture_policies_for_eval(
+            pool,
+            flake.id,
+            Some((commit.id, attempt)),
         )
         .await
         {
@@ -1890,6 +2021,7 @@ async fn process_pending_commits(
                     failure_class,
                 )
                 .await;
+                crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
                 return Ok(());
             }
         };
@@ -1913,10 +2045,6 @@ async fn process_pending_commits(
             )
             .await;
         }
-
-        // CRITICAL: Create broadcast channel BEFORE eval starts
-        // This ensures WebSocket clients can subscribe before messages are sent
-        crate::handlers::api::commits::ensure_eval_channel(&cf_state, commit.id).await;
 
         // Broadcast eval start status to WebSocket clients
         crate::handlers::api::commits::broadcast_eval_status(
@@ -1944,7 +2072,7 @@ async fn process_pending_commits(
         // (plus their fallback phases) may run simultaneously.  This prevents
         // a burst of incoming commits from each spawning their own full-flake
         // Nix evaluation concurrently and exhausting host memory.
-        let _eval_permit = match commit_evaluation_limiter().acquire_owned().await {
+        let eval_permit = match commit_evaluation_limiter().acquire_owned().await {
             Ok(p) => p,
             Err(_) => {
                 error!(
@@ -1975,6 +2103,7 @@ async fn process_pending_commits(
             evaluate_with_mock_eval_jobs(
                 pool,
                 &commit,
+                attempt,
                 &flake,
                 &flake.repo_url,
                 &commit.git_commit_hash,
@@ -2004,6 +2133,15 @@ async fn process_pending_commits(
             )
             .await
         };
+
+        // CONCURRENCY: This slot bounds actual evaluation, not metadata
+        // finalization, which can wait on the snapshot-writer lock. Release it
+        // only after the evaluator returns through its child-cleanup boundary.
+        // Child guards retain both heavy-Nix admission locks if cleanup needs
+        // quarantine; releasing this outer slot cannot admit a replacement Nix
+        // child before reap and process-group absence. Canonical DB ownership
+        // and the unique active-commit index still fence the next worker claim.
+        drop(eval_permit);
 
         // ── Helper: finalize cancellation side effects ──────────────────
         // Shared by both the success and failure SupersededOrCancelled branches.

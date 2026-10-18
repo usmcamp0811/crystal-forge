@@ -6,6 +6,7 @@
 
 pub mod app_state;
 pub mod auth;
+pub mod evaluation_drawer;
 pub mod navigation_focus;
 pub mod preferences;
 pub mod theme;

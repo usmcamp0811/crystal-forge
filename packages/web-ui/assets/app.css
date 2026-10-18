@@ -4531,6 +4531,36 @@ html[data-theme="light"] .coach-important b { color: #d97706; }
 }
 
 /* Evaluations drawer */
+.ed-drawer { --cf-text-muted: #6b7280; }
+.fl-tray.ed-drawer.fl-tray-max { width: min(1360px, 100vw); }
+.ed-identity-icon {
+  color: var(--cf-brand-purple);
+  display: flex;
+  flex-shrink: 0;
+}
+.ed-identity-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.ed-flake-name { font-size: 15px; font-weight: 700; }
+.ed-identity-meta {
+  font-size: 11px;
+  color: var(--cf-text-muted);
+  margin-top: 2px;
+}
+.ed-drawer .ed-stat-time { font-size: 12.5px; font-weight: 600; }
+.ed-drawer .ed-stats { grid-template-columns: repeat(5, 1fr); }
+/* The design uses native button metrics, before Tailwind's inherited reset. */
+.ed-drawer .sd-tab { font-family: Arial; line-height: normal; }
+.ed-drawer svg { stroke-width: 1.75; }
+.ed-drawer .fl-diff {
+  flex: 1;
+  font-size: 11px;
+  line-height: 1.55;
+  padding: 10px 16px;
+}
 .ed-drawer-head {
   align-items: flex-start;
 }
@@ -5037,6 +5067,209 @@ tr.kbd-focused > td {
   color: #34d399;
 }
 
+/* Captured matrix controls follow EvalDrawer's bundle-scale column strategy. */
+.pm-captured {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.pm-controls-wrap { flex-wrap: wrap; row-gap: 8px; }
+.pm-captured .seg { flex-wrap: wrap; }
+.ed-drawer .pm-controls .seg button,
+.ed-drawer .pm-controls .btn,
+.ed-drawer .pm-issue-chip { line-height: normal; }
+.ed-drawer .pm-controls .btn-ghost.active-filter {
+  color: var(--cf-text-primary);
+  background: var(--cf-hover-bg);
+  border-color: var(--cf-brand-purple);
+}
+.pm-captured .pm-scroll { min-height: 120px; }
+.pm-col-note {
+  background: none;
+  border: 0;
+  padding: 0 2px;
+  font-size: 10.5px;
+  color: var(--cf-text-muted);
+}
+button.pm-col-note { cursor: pointer; }
+button.pm-col-note:hover { color: var(--cf-text-secondary); text-decoration: underline; }
+.pm-provenance-note {
+  padding: 8px 14px;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--cf-text-secondary);
+  background: color-mix(in oklab, #f59e0b 6%, var(--cf-card-bg));
+  border-bottom: 1px solid var(--cf-divider);
+}
+/* Match the reference's native auto layout in sparse and dense modes. Minimum
+   widths remain 180px / 110px / 104px; no filler absorbs sparse-table space. */
+/* ResizeObserver supplies System's actual border-box width after auto layout,
+   including viewport, mode, font, and content changes. */
+.pm-captured-table .pm-th-health,
+.pm-captured-table .pm-td-health {
+  position: sticky;
+  left: var(--pm-host-width, 180px);
+  background: var(--cf-card-bg);
+  z-index: 1;
+}
+.pm-captured-table .pm-th-health { z-index: 3; }
+.pm-captured-table .pm-th-bundle { padding: 0; min-width: 104px; }
+.pm-bundle-heading, .pm-control-heading, .pm-bundle-button, .pm-row-toggle {
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  width: 100%;
+}
+.pm-bundle-heading {
+  display: block;
+  padding: 0;
+  text-align: center;
+}
+.pm-th-bundle-inner {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 10px 10px 8px;
+  border-right: 1px solid var(--cf-divider);
+}
+/* Names and exact versions share the reference heading treatment. Native
+   min-content layout preserves the complete identity without artificial caps. */
+.pm-th-bundle-name {
+  font-size: 11.5px;
+  font-weight: 700;
+  color: var(--cf-text-primary);
+  white-space: nowrap;
+}
+.pm-th-bundle-sub { font-size: 10px; font-weight: 600; color: var(--cf-text-muted); }
+.pm-control-heading { display: block; padding: 0; }
+.pm-captured-table .pm-th-policy-inner { height: 110px; }
+.pm-captured-table .pm-th-policy-label { overflow: hidden; text-overflow: ellipsis; max-height: 96px; }
+.pm-captured .pm-th-policy-bar > span { height: 100%; }
+.pm-control-cell-button { display: block; width: 100%; min-height: 36px; padding: 0; border: 0; background: none; color: inherit; cursor: pointer; }
+.pm-td-bundle {
+  text-align: center;
+  padding: 0;
+  border-right: 1px solid var(--cf-divider);
+  border-bottom: 1px solid var(--cf-divider);
+  white-space: nowrap;
+}
+.pm-td-bundle:hover { background: var(--cf-hover-bg); }
+.pm-bundle-button { padding: 9px 10px; }
+.pm-bundle-cell { display: inline-flex; align-items: center; gap: 6px; }
+.pm-bundle-cell strong { font: 600 11.5px var(--font-mono); font-variant-numeric: tabular-nums; }
+.pm-bundle-cell small { font-size: 10px; }
+.ed-drawer .pm-bundle-cell strong { color: var(--cf-text-primary); font-weight: 400; }
+.pm-bundle-fail, .pm-bundle-warn, .pm-bundle-unknown {
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.pm-bundle-fail { background: color-mix(in oklab, #f87171 18%, transparent); color: #f87171; }
+.pm-bundle-warn { background: color-mix(in oklab, #f59e0b 18%, transparent); color: #f59e0b; }
+.pm-bundle-unknown { background: var(--cf-subtle-bg); color: var(--cf-text-muted); }
+.pm-captured .pm-pass { color: #34d399; }
+.pm-captured .pm-warn { color: #f59e0b; }
+.pm-captured .pm-fail { color: #f87171; }
+.pm-captured .pm-not-assigned, .pm-captured .pm-legacy-unknown { color: var(--cf-text-muted); }
+.pm-row-toggle {
+  display: block;
+  max-width: 260px;
+  overflow: hidden;
+  padding: 10px 14px;
+  text-align: left;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+}
+.pm-row-toggle::before { content: "›"; display: inline-block; width: 11px; margin-right: 8px; color: var(--cf-text-muted); }
+.pm-row-toggle[aria-expanded="true"]::before { content: "⌄"; }
+.pm-row-status { font: 10px var(--font-sans); color: var(--cf-text-muted); }
+.pm-config-gate-marker { color: #f87171; font-weight: 700; }
+.pm-captured .pm-legend { flex-wrap: wrap; }
+.pm-legend-guidance { margin-left: auto; color: var(--cf-text-muted); font-size: 11px; }
+.pm-empty { padding: 24px; text-align: center; color: var(--cf-text-muted); }
+/* Preserve reference order in one wrapping group. A widened drawer can use one
+   row instead of reserving an empty secondary line. */
+.pm-captured .pm-controls { flex-direction: row; flex-wrap: wrap; gap: 8px 10px; }
+.pm-captured .pm-controls-line { display: contents; }
+.pm-sort-controls { display: flex; align-items: center; gap: 10px; }
+.pm-controls-label { font-size: 11px; color: var(--cf-text-muted); }
+.pm-issue-fail { color: #f87171; font-weight: 700; }
+.pm-issue-total { color: var(--cf-text-muted); }
+.pm-issues-clear { margin-left: auto; }
+/* Failure-first expanded row (design .pm-expand/.pm-failcard). */
+/* Expanded details stay within the visible scroll width and pinned to its
+   left edge; wide matrices must not push cards and actions off screen. */
+.pm-captured .pm-scroll { container-type: inline-size; }
+.pm-captured .pm-expand {
+  position: sticky;
+  left: 0;
+  box-sizing: border-box;
+  width: 100cqw;
+  flex-direction: column;
+  align-items: stretch;
+  flex-wrap: nowrap;
+  gap: 12px;
+}
+.pm-expand-meta { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: 11px; color: var(--cf-text-muted); }
+.pm-expand-meta code { color: var(--cf-text-secondary); }
+.pm-failcards { display: flex; flex-direction: column; gap: 10px; }
+.pm-failcard-wrap { overflow: hidden; border: 1px solid var(--cf-divider); border-radius: 8px; }
+.pm-captured .pm-failcard {
+  width: 100%;
+  border: 0;
+  border-radius: 0;
+  color: inherit;
+  font-size: inherit;
+}
+.pm-captured .pm-failcard:hover { transform: none; }
+.pm-captured .pm-failcard-pass { background: color-mix(in oklab, #34d399 6%, transparent); }
+.pm-captured .pm-failcard-not-assigned { background: transparent; }
+.pm-failcard-body { flex: 1; min-width: 0; text-align: left; }
+.pm-failcard-title { font-size: 12px; font-weight: 600; }
+.pm-failcard-sub { margin-top: 2px; font-size: 11px; color: var(--cf-text-muted); }
+.pm-failcard-chevron { flex-shrink: 0; margin-left: 8px; color: var(--cf-text-muted); }
+.pm-failcard-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--cf-divider);
+  background: var(--cf-page-bg);
+  font-size: 11.5px;
+  line-height: 1.5;
+}
+.pm-failcard-detail p { margin: 0; }
+.pm-failcard-path { font-size: 10.5px; color: var(--cf-text-muted); }
+.pm-failcard-assertion { color: #f87171; }
+.pm-failcard-unavailable { color: var(--cf-text-muted); font-style: italic; }
+.pm-failcard-evidence { white-space: pre-wrap; overflow-wrap: anywhere; }
+.pm-failcard-meta { font-size: 10.5px; color: var(--cf-text-muted); overflow-wrap: anywhere; }
+.pm-failcard-actions, .pm-expand-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.pm-all-pass { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #34d399; }
+/* Policy statistic follows the design: pass / fail with semantic colors. */
+.ed-policy-val { display: flex; align-items: baseline; gap: 6px; flex-wrap: wrap; }
+.ed-policy-pass { color: #34d399; }
+.ed-policy-sep { font-size: 12px; color: var(--cf-text-muted); }
+.ed-policy-fail { color: #f87171; }
+.ed-policy-zero, .ed-policy-unavailable { color: var(--cf-text-muted); }
+.ed-stat-unit { font-size: 10px; font-weight: 600; color: var(--cf-text-muted); }
+.ed-identity-meta .chip { padding: 0 6px; font-size: 10px; line-height: 15px; vertical-align: 1px; }
+#compliance-evaluation-dialog .pm-captured-details {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 8px;
+  font-size: 12px;
+}
+
 /* Policy matrix - Scroll container */
 .pm-scroll {
   flex: 1;
@@ -5525,6 +5758,74 @@ tr.kbd-focused > td {
 /* A nested modal must stay interactive above an open tray or drawer. */
 .modal-backdrop-above-drawer {
   z-index: 200;
+}
+
+/* Captured evaluation-evidence receiver: control navigation beside the evidence. */
+.ce-body { display: grid; grid-template-columns: 260px 1fr; flex: 1; min-height: 0; overflow: hidden; }
+.ce-nav {
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  border-right: 1px solid var(--cf-divider);
+  background: color-mix(in oklab, var(--cf-page-bg) 30%, var(--cf-card-bg));
+}
+.ce-nav-search {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  padding: 8px;
+  border-bottom: 1px solid var(--cf-divider);
+  background: color-mix(in oklab, var(--cf-page-bg) 55%, var(--cf-card-bg));
+}
+.ce-nav-search .filter-search { min-width: 0; max-width: none; margin: 0; }
+.ce-nav-search .input { font-size: 11.5px; padding: 6px 8px 6px 30px; }
+.ce-nav-group {
+  padding: 9px 14px 2px;
+  font-size: 9.5px;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  color: var(--cf-text-muted);
+}
+.ce-nav-note { padding: 0 14px 6px; font-size: 10.5px; }
+.ce-nav-empty { padding: 20px 14px; font-size: 12px; text-align: center; }
+.ce-nav-item {
+  display: block;
+  width: 100%;
+  box-sizing: border-box;
+  padding: 10px 14px;
+  border: 0;
+  border-left: 3px solid transparent;
+  border-bottom: 1px solid var(--cf-divider);
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+.ce-nav-item[aria-current="true"] {
+  border-left-color: var(--cf-brand-purple);
+  background: color-mix(in oklab, var(--cf-brand-purple) 8%, transparent);
+}
+.ce-nav-item-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 11px; }
+.ce-nav-item-name {
+  margin-top: 4px;
+  overflow: hidden;
+  font-size: 12px;
+  color: var(--cf-text-primary);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ce-nav-item-name.ce-selected { font-weight: 600; }
+.ce-dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; }
+.ce-detail { display: flex; flex-direction: column; gap: 16px; overflow: auto; padding: 20px; }
+.ce-muted { color: var(--cf-text-muted); }
+.ce-identity { display: flex; align-items: center; gap: 8px; min-width: 0; margin-top: 2px; }
+.ce-identity-system { font-size: 13px; font-weight: 700; }
+.ce-identity-hint { margin-top: 2px; font-size: 11px; }
+@media (max-width: 720px) {
+  .ce-body { grid-template-columns: 1fr; grid-template-rows: minmax(0, 34%) 1fr; }
+  .ce-nav { border-right: 0; border-bottom: 1px solid var(--cf-divider); }
 }
 
 /* Compliance view */

@@ -9,12 +9,12 @@ use crate::views::admin::AdminView;
 use crate::views::builders::BuildersView;
 use crate::views::builds::BuildsView;
 use crate::views::caches::CachesView;
-use crate::views::compliance::ComplianceView;
+use crate::views::compliance::{ComplianceEvaluationView, ComplianceView};
 use crate::views::cves::CvesView;
 use crate::views::dashboard::DashboardView;
 use crate::views::dev_login::DevLoginView;
 use crate::views::environments::EnvironmentsView;
-use crate::views::evaluations::{EvaluationsCommitView, EvaluationsView};
+use crate::views::evaluations::{EvaluationsAttemptView, EvaluationsCommitView, EvaluationsView};
 use crate::views::flakes::FlakesView;
 use crate::views::login::LoginView;
 use crate::views::not_found::NotFoundView;
@@ -71,6 +71,15 @@ pub enum Route {
     #[route("/evaluations/:commit_id")]
     EvaluationsCommitView { commit_id: i32 },
 
+    /// Opens an exact retained attempt without selecting a newer retry.
+    #[route("/evaluations/:commit_id/attempts/:attempt_id")]
+    EvaluationsAttemptView {
+        /// Database commit identity.
+        commit_id: i32,
+        /// Full retained attempt UUID.
+        attempt_id: uuid::Uuid,
+    },
+
     #[route("/builders")]
     BuildersView {},
 
@@ -88,6 +97,25 @@ pub enum Route {
 
     #[route("/poams?:..query")]
     PoamsView { query: String },
+
+    /// Opens captured evaluation evidence over the normal Compliance catalog.
+    #[route(
+        "/compliance/evaluations/:commit_id/attempts/:attempt_id?:bundle&:version&:system&:policy"
+    )]
+    ComplianceEvaluationView {
+        /// Database commit identity.
+        commit_id: i32,
+        /// Full retained attempt UUID.
+        attempt_id: uuid::Uuid,
+        /// Full captured bundle lineage UUID.
+        bundle: String,
+        /// Full captured bundle version UUID.
+        version: String,
+        /// Full captured system UUID.
+        system: String,
+        /// Full captured policy version UUID; the API supplies its lineage.
+        policy: String,
+    },
 
     #[route("/compliance?:bundle&:version&:system&:policy&:poam&:view")]
     ComplianceView {
@@ -144,6 +172,9 @@ impl Route {
             Route::EvaluationsCommitView { commit_id } => {
                 format!("Evaluations · commit {commit_id}")
             }
+            Route::EvaluationsAttemptView { commit_id, .. } => {
+                format!("Evaluations · commit {commit_id} · retained attempt")
+            }
             Route::BuildersView { .. } => "Builders".to_string(),
             Route::CachesView { .. } => "Caches".to_string(),
             Route::CvesView { .. } => "CVEs".to_string(),
@@ -151,6 +182,7 @@ impl Route {
             Route::PoliciesView { .. } => "Deployment Policies".to_string(),
             Route::PoamsView { .. } => "POA&M".to_string(),
             Route::ComplianceView { .. } => "Bundles".to_string(),
+            Route::ComplianceEvaluationView { .. } => "Bundles · evaluation evidence".to_string(),
             Route::AdminView { .. } => "Server Management".to_string(),
             Route::ProfileView { .. } => "Profile & Preferences".to_string(),
             Route::StyleGuideView { .. } => "Component Showcase".to_string(),
@@ -160,5 +192,44 @@ impl Route {
             Route::DevLoginView { .. } => "Development Login".to_string(),
             Route::NotFoundView { .. } => "Not Found".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod historical_route_tests {
+    use super::*;
+
+    #[test]
+    fn exact_attempt_routes_round_trip_full_uuid_targets() {
+        let id = |n| uuid::Uuid::from_u128(n);
+        let route = Route::ComplianceEvaluationView {
+            commit_id: 42,
+            attempt_id: id(1),
+            bundle: id(2).to_string(),
+            version: id(3).to_string(),
+            system: id(4).to_string(),
+            policy: id(5).to_string(),
+        };
+        let url = route.to_string();
+        assert!(url.starts_with(&format!("/compliance/evaluations/42/attempts/{}?", id(1))));
+        assert_eq!(url.parse::<Route>().unwrap(), route);
+        let route = Route::EvaluationsAttemptView {
+            commit_id: 42,
+            attempt_id: id(1),
+        };
+        assert_eq!(route.to_string().parse::<Route>().unwrap(), route);
+    }
+
+    #[test]
+    fn historical_routes_do_not_alias_latest_or_deployed_destinations() {
+        let attempt = uuid::Uuid::from_u128(1);
+        let exact = format!("/evaluations/42/attempts/{attempt}")
+            .parse::<Route>()
+            .unwrap();
+        assert_ne!(exact, Route::EvaluationsCommitView { commit_id: 42 });
+        let historical = format!("/compliance/evaluations/42/attempts/{attempt}")
+            .parse::<Route>()
+            .unwrap();
+        assert!(matches!(historical, Route::ComplianceEvaluationView { .. }));
     }
 }

@@ -1,0 +1,320 @@
+//! Mirrors the additive server matrix contract without resolving catalog state.
+
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+/// Contains identities and evidence from one represented evaluation attempt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalPolicyMatrixSnapshot {
+    /// Source display identity copied when this plan was captured; never filled
+    /// from today's catalog for older records.
+    #[serde(default)]
+    pub source_label: Option<EvalSourceLabel>,
+    /// Exact-attempt verified discovery; None means pending or unavailable.
+    #[serde(default)]
+    pub inventory: Option<EvalAttemptInventory>,
+    /// Distinct visible configuration gate coverage, never a control count.
+    #[serde(default)]
+    pub configuration_summary: Option<EvalConfigurationSummary>,
+    /// Saved matching-attempt global gate diagnostics, without policy IDs.
+    #[serde(default)]
+    pub configuration_failures: Vec<EvalConfigurationFailure>,
+    /// Identifies the captured attempt when available.
+    pub evaluation_attempt_id: Option<Uuid>,
+    /// Numbers the represented queue/history attempt.
+    pub attempt_number: i32,
+    /// Full server-validated commit SHA; absent on older servers.
+    #[serde(default)]
+    pub commit_sha: Option<String>,
+    /// Exact represented attempt lifecycle state.
+    #[serde(default)]
+    pub attempt_status: Option<String>,
+    /// Actual attempt start time, when retained.
+    #[serde(default)]
+    pub started_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Actual attempt completion time, when retained.
+    #[serde(default)]
+    pub completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// States whether the represented attempt has isolated mock outcomes.
+    /// This flag is independent of captured membership provenance and current
+    /// server mode. False does not prove native evaluation; older APIs omit it.
+    #[serde(default)]
+    pub mock_evidence: bool,
+    /// States whether historical memberships were captured.
+    pub provenance: EvalMatrixProvenance,
+    /// Lists exact eligible policy versions in cell order.
+    pub columns: Vec<EvalPolicyColumn>,
+    /// Lists captured bundle versions, including empty applicable contexts.
+    pub bundles: Vec<EvalBundleColumn>,
+    /// States whether all planned rows' bundle contexts were captured.
+    /// Older captures remain false; absent contexts cannot prove nonassignment.
+    pub empty_bundle_metadata_complete: bool,
+    /// Retains planned systems even when evidence is missing.
+    pub rows: Vec<EvalMatrixRow>,
+}
+
+/// Identifies the watched source as it was labeled at capture.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalSourceLabel {
+    /// Captured flake display name.
+    pub name: String,
+    /// Captured watched branch, when known.
+    pub branch: Option<String>,
+}
+
+/// Identifies the exact visible discovered and selected configuration sets.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalAttemptInventory {
+    /// Native verified discovery or synthetic mock mode.
+    pub execution_mode: String,
+    /// Sorted distinct visible names discovered by this attempt.
+    pub configurations: Vec<String>,
+    /// Visible discovered names selected for execution.
+    pub selected_configurations: Vec<String>,
+}
+
+/// Reports gate coverage once per configuration, including shared host contexts.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct EvalConfigurationSummary {
+    /// Distinct visible planned or discovered configurations.
+    pub total: usize,
+    /// Known passing configuration gates.
+    pub passed: usize,
+    /// Known failed policy/agent gates.
+    pub failed: usize,
+    /// Known Nix evaluation failures.
+    pub evaluation_failed: usize,
+    /// Selected configurations with unavailable evidence, plus planned names
+    /// absent from discovery. No missing name is counted as executed.
+    pub pending: usize,
+    /// Known unavailable coverage, distinct from work that can still complete.
+    #[serde(default)]
+    pub unavailable: usize,
+    /// Discovered configurations excluded from execution selection.
+    pub excluded: usize,
+}
+
+/// Carries an actual global gate failure for an exact configuration identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalConfigurationFailure {
+    /// Actual gate identity; this is never a fabricated versioned policy.
+    #[serde(default)]
+    pub kind: EvalConfigurationFailureKind,
+    /// Exact discovered configuration name.
+    pub configuration_name: String,
+    /// Saved diagnostic from the matching attempt, never a synthesized assertion.
+    /// Empty when the gate failed without a saved diagnostic.
+    pub detail: String,
+}
+
+/// Distinguishes actual configuration gates from versioned control results.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalConfigurationFailureKind {
+    /// The unconditional CF-agent gate failed.
+    #[default]
+    CfAgent,
+    /// The requirement gate failed without a saved per-control attribution.
+    Requirements,
+}
+
+/// Distinguishes historical capture from unavailable legacy provenance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalMatrixProvenance {
+    /// Memberships were captured before execution.
+    Captured,
+    /// Historical memberships are unavailable and must not be reconstructed.
+    LegacyUnavailable,
+}
+
+/// Names an exact captured policy version, not a framework requirement.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalPolicyColumn {
+    /// Keys outcomes and memberships by exact version.
+    pub policy_version_id: Uuid,
+    /// Identifies the policy lineage independently of its version.
+    pub policy_id: Uuid,
+    /// Contains the captured version-owned name.
+    pub name: String,
+    /// Contains the captured version label.
+    pub version: String,
+    /// Captured safe external control identifiers.
+    #[serde(default)]
+    pub identifiers: Vec<String>,
+    /// Captured description; never reconstructed from the current catalog.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Actual captured assertion text, when available.
+    #[serde(default)]
+    pub assertion: Option<String>,
+    /// Actual captured attribute path, when available.
+    #[serde(default)]
+    pub attribute_path: Option<String>,
+}
+
+/// Describes an exact captured bundle version.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalBundleColumn {
+    /// Keys the immutable version.
+    pub bundle_version_id: Uuid,
+    /// Identifies the bundle lineage.
+    pub bundle_id: Uuid,
+    /// Contains the version-owned name.
+    pub name: String,
+    /// Contains the version label.
+    pub version: String,
+    /// Names the framework without asserting requirement compliance.
+    pub framework: String,
+    /// Labels the optional framework release.
+    pub framework_version: Option<String>,
+}
+
+/// Separates per-system applicability from shared-configuration evidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalMatrixRow {
+    /// Identifies the historical system, absent on legacy rows.
+    pub system_id: Option<Uuid>,
+    /// Explicit operator classification. Unknown is never treated as greenfield.
+    #[serde(default)]
+    pub greenfield: Option<bool>,
+    /// Contains the captured system name.
+    pub system_name: String,
+    /// Keys the evaluator configuration and compatibility evidence.
+    pub configuration_name: String,
+    /// States whether applicability is authoritative.
+    pub resolution: EvalMatrixResolution,
+    /// Identifies the resolved executable and skipped report-only inputs.
+    pub evaluation_digest: Option<String>,
+    /// Contains applicable contexts, including bundles with no eligible controls.
+    /// Context presence does not establish a policy contribution or a pass.
+    #[serde(default)]
+    pub assigned_bundles: Vec<EvalBundleMembership>,
+    /// Contains per-system effective policy memberships.
+    pub policies: Vec<EvalPolicyBinding>,
+    /// Contains outcomes in snapshot column order.
+    pub cells: Vec<EvalMatrixCell>,
+    /// Contains matching-attempt result text in column/cell order.
+    /// Unknown and nonapplicable cells have no detail. Older responses can omit
+    /// the vector; absent or short vectors do not establish result evidence.
+    #[serde(default)]
+    pub details: Vec<Option<String>>,
+}
+
+/// Describes resolution independently of outcome availability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalMatrixResolution {
+    /// Applicability resolved successfully, including an empty set.
+    Resolved,
+    /// A semantic conflict prevented complete resolution.
+    Conflict,
+    /// Authoritative resolution is unavailable.
+    Unavailable,
+    /// A shared configuration conflict skipped evaluation.
+    Skipped,
+}
+
+/// Records one effective policy's per-system applicability.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalPolicyBinding {
+    /// Identifies the exact effective policy version.
+    pub policy_version_id: Uuid,
+    /// States whether failures are evidence-only.
+    pub report_only: bool,
+    /// States whether the loader could execute the implementation.
+    pub executable: bool,
+    /// Contains authoritative assignment contributions only.
+    pub memberships: Vec<EvalBundleMembership>,
+}
+
+/// Records an applicable bundle context or authoritative policy contribution.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvalBundleMembership {
+    /// Identifies the contributing bundle version.
+    pub bundle_version_id: Uuid,
+    /// Identifies the assignment lineage; absent for a genuine virtual baseline.
+    pub assignment_id: Option<Uuid>,
+    /// Identifies the assignment snapshot; absent for a genuine virtual baseline.
+    pub assignment_version_id: Option<Uuid>,
+    /// Distinguishes persisted assignments from resolver-created contexts.
+    #[serde(default)]
+    pub source: EvalBundleSource,
+}
+
+/// Describes how an authoritative bundle context entered the resolver.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalBundleSource {
+    /// A persisted assignment with exact lineage and version UUIDs.
+    #[default]
+    Assignment,
+    /// A captured published-version baseline without assignment UUIDs.
+    VirtualBaseline,
+}
+
+/// Separates explicit nonapplicability from unavailable evidence.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvalMatrixCell {
+    /// Matching-attempt evidence passed.
+    Pass,
+    /// Matching-attempt evidence produced a nonblocking failure.
+    Warn,
+    /// Matching-attempt evidence produced a blocking failure.
+    Fail,
+    /// Evidence is missing, stale, skipped, or invalid.
+    Unknown,
+    /// Successful resolution explicitly excludes this policy version.
+    NotAssigned,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn snapshot_json(provenance: &str) -> serde_json::Value {
+        json!({
+            "evaluation_attempt_id": null,
+            "attempt_number": 1,
+            "provenance": provenance,
+            "columns": [],
+            "bundles": [],
+            "empty_bundle_metadata_complete": false,
+            "rows": []
+        })
+    }
+
+    #[test]
+    fn old_json_without_mock_evidence_defaults_false() {
+        for provenance in ["captured", "legacy_unavailable"] {
+            let snapshot: EvalPolicyMatrixSnapshot =
+                serde_json::from_value(snapshot_json(provenance)).unwrap();
+            assert!(!snapshot.mock_evidence);
+        }
+    }
+
+    #[test]
+    fn explicit_mock_evidence_survives_both_provenance_paths_and_roundtrip() {
+        for provenance in ["captured", "legacy_unavailable"] {
+            let mut json = snapshot_json(provenance);
+            json["mock_evidence"] = json!(true);
+            let snapshot: EvalPolicyMatrixSnapshot = serde_json::from_value(json).unwrap();
+            assert!(snapshot.mock_evidence);
+            let roundtrip: EvalPolicyMatrixSnapshot =
+                serde_json::from_value(serde_json::to_value(&snapshot).unwrap()).unwrap();
+            assert_eq!(roundtrip, snapshot);
+        }
+    }
+
+    #[test]
+    fn explicit_false_remains_false_with_captured_or_legacy_provenance() {
+        for provenance in ["captured", "legacy_unavailable"] {
+            let mut json = snapshot_json(provenance);
+            json["mock_evidence"] = json!(false);
+            let snapshot: EvalPolicyMatrixSnapshot = serde_json::from_value(json).unwrap();
+            assert!(!snapshot.mock_evidence);
+        }
+    }
+}

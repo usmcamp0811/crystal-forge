@@ -1580,6 +1580,10 @@ pub async fn fetch_eval_logs(commit_id: i32) -> Result<Vec<EvalLogEntry>, ApiCli
     fetch_json(&url).await
 }
 
+/// Fetches latest scoped evaluation evidence.
+///
+/// # Errors
+/// Returns transport, authorization, or response decoding failures.
 pub async fn fetch_eval_policy_matrix(
     commit_id: i32,
 ) -> Result<EvalPolicyMatrixResponse, ApiClientError> {
@@ -1590,6 +1594,21 @@ pub async fn fetch_eval_policy_matrix(
         js_sys::Date::now()
     );
     fetch_json(&url).await
+}
+
+/// Fetches one exact attempt without falling back to the latest attempt.
+///
+/// # Errors
+/// Returns transport, authorization, not-found, or decoding failures.
+pub async fn fetch_eval_attempt_policy_matrix(
+    commit_id: i32,
+    attempt_id: uuid::Uuid,
+) -> Result<EvalPolicyMatrixResponse, ApiClientError> {
+    fetch_json(&format!(
+        "{}/commits/{commit_id}/eval/attempts/{attempt_id}/policy-matrix",
+        base_url()
+    ))
+    .await
 }
 
 pub async fn fetch_eval_dependency_graph(

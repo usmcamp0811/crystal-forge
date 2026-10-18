@@ -522,6 +522,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/systems/:id",
             get(systems::get_system).patch(systems::update_system_handler),
         )
+        .route(
+            "/api/v1/systems/:id/evaluation-lifecycle",
+            put(systems::evaluation_lifecycle::put_evaluation_lifecycle),
+        )
         .route("/api/v1/systems/:id/cves", get(systems::get_system_cves))
         .route(
             "/api/v1/systems/:id/cve-inventory",
@@ -1104,6 +1108,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/commits/:commit_id/eval/policy-matrix",
             get(commits::get_eval_policy_matrix),
+        )
+        .route(
+            "/api/v1/commits/:commit_id/eval/attempts/:attempt_id/policy-matrix",
+            get(commits::get_eval_policy_matrix_at_attempt),
         )
         .route(
             "/api/v1/commits/:commit_id/eval/dependency-graph",

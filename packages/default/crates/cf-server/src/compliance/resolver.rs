@@ -1128,6 +1128,12 @@ pub async fn resolve_system_effective_policies(
 /// Callers that authorize a target use this to keep policy resolution, target
 /// validation, assessment merges, and the guarded target write atomic.
 ///
+/// # Concurrency
+/// Reborrows the caller's transaction without acquiring another connection or
+/// changing isolation. Establish REPEATABLE READ before the first query when
+/// resolution must share a stable snapshot with authorization and evidence.
+/// The caller owns commit and rollback; no partial-query retry is performed.
+///
 /// # Errors
 ///
 /// Returns an error when PostgreSQL cannot load policy inputs through the
@@ -1144,6 +1150,12 @@ pub async fn resolve_system_effective_policies_in_tx(
 /// must remain in the same serializable closure as their locks and writes.
 ///
 /// Duplicate input IDs are resolved once. Missing system IDs are omitted.
+///
+/// # Concurrency
+/// Uses the caller's isolation and retained locks, without acquiring another
+/// connection. Establish REPEATABLE READ before the first query for a stable
+/// multiquery snapshot. The caller owns commit, rollback, and whole-operation
+/// retry; database failures must not be retried as isolated queries.
 ///
 /// # Errors
 ///
@@ -1296,6 +1308,80 @@ pub async fn resolve_systems_effective_policies_for_bundle_versions_batch(
     pool: &PgPool,
     requests: &[(Uuid, Vec<Uuid>)],
 ) -> Result<std::collections::HashMap<(Uuid, Uuid), ResolutionOutcome>> {
+    if requests.iter().all(|(_, system_ids)| system_ids.is_empty()) {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await?;
+    let result =
+        resolve_systems_effective_policies_for_bundle_versions_batch_in_tx(&mut tx, requests)
+            .await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Resolves one exact bundle revision in the caller's transaction.
+///
+/// # Concurrency
+/// Uses the caller's snapshot and retains its locks. Does not begin, commit,
+/// or retry a transaction. Callers requiring a stable multiquery snapshot must
+/// establish REPEATABLE READ before their first query.
+///
+/// # Errors
+/// Returns database or policy decode errors; the caller must abort on failure.
+pub async fn resolve_systems_effective_policies_for_bundle_version_batch_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_ids: &[Uuid],
+    bundle_version_id: Uuid,
+) -> Result<std::collections::HashMap<Uuid, ResolutionOutcome>> {
+    Ok(
+        resolve_systems_effective_policies_for_bundle_versions_batch_in_tx(
+            tx,
+            &[(bundle_version_id, system_ids.to_vec())],
+        )
+        .await?
+        .into_iter()
+        .filter_map(|((version_id, system_id), outcome)| {
+            (version_id == bundle_version_id).then_some((system_id, outcome))
+        })
+        .collect(),
+    )
+}
+
+/// Resolves exact bundle revisions and system sets in the caller's transaction.
+///
+/// Duplicate system IDs are resolved once; empty requests return an empty map.
+/// Results retain exact `(bundle_version_id, system_id)` identity.
+///
+/// # Concurrency
+/// Reuses the internal batch core without acquiring a pool connection. The
+/// caller owns isolation, locks, commit, and rollback. Establish REPEATABLE READ
+/// before the first query when combining resolution with other snapshot reads.
+///
+/// # Errors
+/// Returns database or policy decode errors. No partial result or query-only
+/// retry is performed; the caller must abort the transaction on failure.
+///
+/// # Examples
+/// ```no_run
+/// # async fn example(pool: &sqlx::PgPool, version: uuid::Uuid, system: uuid::Uuid) -> anyhow::Result<()> {
+/// let mut tx = pool.begin().await?;
+/// sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+///     .execute(&mut *tx).await?;
+/// let resolved = crystal_forge::compliance::resolver::resolve_systems_effective_policies_for_bundle_versions_batch_in_tx(
+///     &mut tx, &[(version, vec![system])],
+/// ).await?;
+/// let _ = resolved.get(&(version, system));
+/// tx.commit().await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn resolve_systems_effective_policies_for_bundle_versions_batch_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    requests: &[(Uuid, Vec<Uuid>)],
+) -> Result<std::collections::HashMap<(Uuid, Uuid), ResolutionOutcome>> {
     let mut requests_by_version = std::collections::HashMap::<Uuid, Vec<Uuid>>::new();
     for (bundle_version_id, system_ids) in requests {
         let entry = requests_by_version.entry(*bundle_version_id).or_default();
@@ -1317,8 +1403,8 @@ pub async fn resolve_systems_effective_policies_for_bundle_versions_batch(
         return Ok(std::collections::HashMap::new());
     }
 
-    let keyed = resolve_systems_effective_policies_batch(
-        pool,
+    let keyed = resolve_systems_effective_policies_batch_in_tx(
+        tx,
         &all_system_ids,
         Some(&requests_by_version),
         false,
@@ -1362,11 +1448,61 @@ async fn resolve_systems_effective_policies_batch(
     Ok(result)
 }
 
+/// Resolves a batch through the caller's snapshot without committing it.
+///
+/// The evaluation loader keeps this snapshot open through first-write capture.
+///
+/// # Errors
+/// Returns an error when policy inputs cannot be loaded or decoded.
 async fn resolve_systems_effective_policies_batch_in_tx(
     tx: &mut Transaction<'_, Postgres>,
     system_ids: &[Uuid],
     bundle_version_requests: Option<&std::collections::HashMap<Uuid, Vec<Uuid>>>,
     ignore_non_evaluation_conflicts: bool,
+) -> Result<std::collections::HashMap<(Option<Uuid>, Uuid), ResolutionOutcome>> {
+    resolve_systems_effective_policies_and_contexts_in_tx(
+        tx,
+        system_ids,
+        bundle_version_requests,
+        ignore_non_evaluation_conflicts,
+        &mut std::collections::HashMap::new(),
+    )
+    .await
+}
+
+/// Identifies one applicable bundle context before policy exclusions or merging.
+///
+/// Empty bundles and bundles with no executable policies still have a context.
+/// Virtual baselines have neither assignment identity; persisted assignments
+/// always have both. Context presence does not assert successful resolution or
+/// that a superseded policy version supplied effective execution semantics.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedBundleContext {
+    /// Identifies the exact bundle version selected for this system.
+    pub bundle_version_id: Uuid,
+    /// Identifies a persisted assignment lineage, absent for virtual baselines.
+    pub assignment_id: Option<Uuid>,
+    /// Identifies its immutable snapshot, absent for virtual baselines.
+    pub assignment_version_id: Option<Uuid>,
+    /// Distinguishes the resolver's virtual context from a persisted assignment.
+    pub virtual_baseline: bool,
+}
+
+/// Resolves policies and exports the exact applicable contexts from the same inputs.
+///
+/// Contexts come from the authoritative assignment query and virtual-work-item
+/// construction, not a second applicability query or surviving policy union.
+/// The caller must supply an empty context map. Results include contexts for
+/// conflicts so consumers cannot mistake skipped gates for nonassignment.
+///
+/// # Errors
+/// Returns an error when policy inputs cannot be loaded or decoded.
+pub(crate) async fn resolve_systems_effective_policies_and_contexts_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_ids: &[Uuid],
+    bundle_version_requests: Option<&std::collections::HashMap<Uuid, Vec<Uuid>>>,
+    ignore_non_evaluation_conflicts: bool,
+    contexts: &mut std::collections::HashMap<(Option<Uuid>, Uuid), Vec<ResolvedBundleContext>>,
 ) -> Result<std::collections::HashMap<(Option<Uuid>, Uuid), ResolutionOutcome>> {
     if system_ids.is_empty() {
         return Ok(std::collections::HashMap::new());
@@ -1850,6 +1986,26 @@ async fn resolve_systems_effective_policies_batch_in_tx(
                     .unwrap_or_default(),
             ));
         }
+    }
+
+    // Export contexts before exclusions, eligibility, and merge can erase every
+    // policy. This observes the work items without changing resolution inputs.
+    for (requested, system, assignments) in &work_items {
+        contexts.insert(
+            (*requested, *system),
+            assignments
+                .iter()
+                .map(|(assignment, version, _, bundle, scope, _, _, _)| {
+                    let virtual_baseline = scope == "virtual_baseline";
+                    ResolvedBundleContext {
+                        bundle_version_id: *bundle,
+                        assignment_id: (!virtual_baseline).then_some(*assignment),
+                        assignment_version_id: (!virtual_baseline).then_some(*version),
+                        virtual_baseline,
+                    }
+                })
+                .collect(),
+        );
     }
 
     let mut results = std::collections::HashMap::new();

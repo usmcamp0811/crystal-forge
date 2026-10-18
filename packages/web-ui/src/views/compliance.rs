@@ -4,6 +4,9 @@
 //! data. Route query state controls presentation only; server APIs enforce
 //! visibility, mutation authority, and immutable version identity.
 
+mod evaluation_evidence;
+mod evidence_controls;
+
 use std::collections::HashMap;
 
 use dioxus::prelude::*;
@@ -184,6 +187,52 @@ pub fn ComplianceView(
     policy: String,
     poam: String,
     view: String,
+) -> Element {
+    if view == "evaluation-evidence" {
+        // Legacy handoff URLs omit the attempt and cannot establish historical
+        // identity. Keep the catalog shell, but never resolve deployed evidence.
+        rsx! { ComplianceEvaluationView { commit_id: 0, attempt_id: uuid::Uuid::nil(), bundle, version, system, policy } }
+    } else {
+        rsx! { ComplianceCatalogView { bundle, version, system, policy, poam, view } }
+    }
+}
+
+/// Renders the normal Compliance workflow with a dedicated historical tray.
+///
+/// Path and query identity survive refresh; current catalog data never supplies
+/// missing historical membership or outcomes. The `policy` query identifies the
+/// exact policy version; the pinned response supplies the policy lineage.
+#[component]
+pub fn ComplianceEvaluationView(
+    commit_id: i32,
+    attempt_id: uuid::Uuid,
+    bundle: String,
+    version: String,
+    system: String,
+    policy: String,
+) -> Element {
+    rsx! {
+        ComplianceCatalogView {
+            bundle: String::new(), version: String::new(), system: String::new(),
+            policy: String::new(), poam: String::new(), view: String::new(),
+            historical: true,
+        }
+        evaluation_evidence::EvaluationEvidenceDrawer {
+            key: "{commit_id}-{attempt_id}-{bundle}-{version}-{system}-{policy}",
+            commit_id, attempt_id, bundle, version, system, policy,
+        }
+    }
+}
+
+#[component]
+fn ComplianceCatalogView(
+    bundle: String,
+    version: String,
+    system: String,
+    policy: String,
+    poam: String,
+    view: String,
+    #[props(default)] historical: bool,
 ) -> Element {
     // ── RBAC ─────────────────────────────────────────────────────────────────
     // Read-only compliance browsing is available to all authenticated users.
@@ -689,6 +738,11 @@ pub fn ComplianceView(
     };
 
     use_effect(move || {
+        // The historical tray owns its URL. Catalog selection must not rewrite
+        // that identity into a deployed-evidence or latest-version destination.
+        if historical {
+            return;
+        }
         if !loaded() {
             return;
         }
