@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-17 23:57'
+updated_date: '2026-10-18 00:15'
 labels:
   - testing
   - integration
@@ -36,15 +36,15 @@ Problem: children need the adopted integration contract, coverage/retirement map
 
 Native architecture: checks/integration-access/default.nix uses Snowfall { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios, and pkgs.linkFarm aggregation of every registered gate. Scenario scripts/fixtures/assets live under checks/integration-access/. Shared helpers live at lib/integration-test, exposed as lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Only the meaningful Access WIP owner is registered; no placeholder owners. Coordinator owns shared helper code, check registration, flake/CI wiring and canonical docs. Child scenario writes remain disjoint and owner-local.
 
-Implemented scenario: checks/integration-access/scenarios/lifecycle-local-bootstrap.{nix,py,cjs}. It invokes the production cf-server-drv with the normal NixOS module and records redacted generated config plus server/PostgreSQL journals on failure. Scenario actor and expected outcome: first local registrant becomes Admin; migrations apply; real browser sign-in and reload preserve the session; rejected password has no session side effect.
+Implemented scenario: checks/integration-access/scenarios/lifecycle-local-bootstrap.{nix,py,cjs}. It invokes the production cf-server-drv with the normal NixOS module and records redacted generated config plus server/PostgreSQL journals on failure. Expected: first local registrant becomes Admin; migrations apply; real browser sign-in/reload preserves session; wrong password creates no session.
 
-Current execution: TASK-491 test-only prerequisite commit af39284bdf16d56402f01a64c916f17948e43b02 was cherry-picked into this branch as a6c8922650bf7f0ff643d181422c0092cfc43242. Exact command `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L` executed the NixOS VM but FAILED the startup assertion. Evidence `/nix/store/yfc7pkz5zm8k29b82zzfhm2i8f1gn348-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. PostgreSQL starts; the generated database host is `/run/postgresql`; server exits `both host and hostaddr are missing` before migrations or HTTP. The generated [server] config has no auth_mode and `AUTH_MODE` is unset; local auth route behavior was not reached. Correct assertions remain; there is no test-only AUTH_MODE override and no production code change.
+Current execution: combined clean commit fc930335878279ac426510359c039dfd8961dc13 includes tested TASK-491 prerequisite af39284bdf16d56402f01a64c916f17948e43b02. Exact command `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L` executed a real VM and FAILED the retained startup assertion. Evidence `/nix/store/1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. PostgreSQL starts; generated database.host is `/run/postgresql`; server exits `both host and hostaddr are missing` before migrations or HTTP. Generated [server] config lacks auth_mode and systemd AUTH_MODE is unset; local-auth routes/API were not reached. Correct assertions remain. No AUTH_MODE workaround or production code change.
 
-Linked Backlog product defects: TASK-490.25 (NixOS socket host formatted as a PostgreSQL URI with an empty host) and TASK-490.26 (module local auth_mode not propagated to generated runtime config). They are not implemented here. TASK-491's package build now passes, but the Access slice does not.
+Product blockers TASK-490.25/.26 are Backlog and unresolved. Foundation does not pass. Coverage map, contract and README record the expected/generated configuration, observed result, and evidence.
 
-Packet/documentation correction: each scenario gets a fresh VM/database. Dependencies provide code/helper/fixture definitions only; no scenario may consume another run's live database, session, receipts, or successful output. Recreate required real starting evidence within the scenario. TASK-490.20 is triage only; TASK-490.21 creates/maintains plans only; TASK-490.27 finding waiver, TASK-490.28 acceptance register, and TASK-490.29 verification/closure are separate Backlog packets. No child is ready for Luna.
+Packet/documentation corrections: every scenario owns a fresh VM/database; task dependencies share immutable code/fixtures only, never runtime rows, sessions, receipts or outputs. Assurance packets .20/.21 are narrowed; .27/.28/.29 separate finding waiver, acceptance register and POA&M verification/closure. All children remain Backlog and none is ready for Luna. TASK-490.7 role proving work remains coordinator-owned.
 
-Verification: native Snowfall inventory and scenario/owner drv evaluation passed; `nix build .#checks.x86_64-linux.okf-knowledge --no-link -L` passed after the docs changes; no flake wiring or CI gate changed. The Access VM result is a recorded product-configuration failure, not a pass. Full Access coverage, valid foundation dependency status, and all remaining required scenario work remain incomplete. TASK-490.1 stays In Progress; no merge, deploy, packet readiness, Review or Done transition is authorized.
+Verification: native Snowfall inventory has 27 checks (the old 26 plus integration-access); no flake or CI wiring change. `okf-knowledge` passes (58 tests, 191 concepts, 216 Mermaid blocks). The Access VM result is a recorded product-configuration failure, not a pass. TASK-490.1 remains In Progress; no merge, deployment, Review or Done transition is authorized.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
