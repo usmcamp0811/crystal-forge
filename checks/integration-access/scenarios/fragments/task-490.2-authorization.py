@@ -119,6 +119,28 @@ def authz_verify_actor(actor):
                  actor + " persisted role assignment")
 
 
+def authz_probe(actor, operation, method, path, body):
+    """Sends one admin-only request as `actor` and proves it was rejected.
+
+    The actor's identity and role are verified first, so the rejection cannot
+    come from a missing session. The request carries the real session cookies
+    and a matching CSRF header. The protected state is read before and after.
+    Each result is recorded as a receipt so that the evidence names the status,
+    error code and state outcome of every probe.
+    """
+    fact, jar, _ = authz_actors[actor]
+    authz_verify_actor(actor)
+    before = authz_state()
+    status, response = http(controller, method, path, body, session=jar, csrf=True)
+    authz_assert_forbidden(status, response, "%s %s" % (actor, operation))
+    expect_equal(authz_state(), before,
+                 "%s %s left protected state unchanged" % (actor, operation))
+    receipt("authorization.denied.%s.%s" % (actor, operation),
+            {"method": method, "status": status, "error": response["error"],
+             "stateUnchanged": True})
+    return before
+
+
 with case("authorization-actors-created-through-admin-api-and-signed-in"):
     authz_sign_in(authz_admin_jar, admin["username"], admin["password"])
     who = authz_whoami(authz_admin_jar)
@@ -212,48 +234,52 @@ with case("authorization-admin-controls-accept-every-probe-payload"):
     authz_original = {"retry": original_retry, "banner": original_banner}
     expect_equal(authz_baseline["retry_policy"], original_retry, "baseline retry policy")
     expect_equal(authz_baseline["classification"], original_banner, "baseline banner")
+    # Evidence: the Admin controls that proved each probe payload valid, and a
+    # summary of the protected state that every denial is compared against.
+    receipt("authorization.adminControls", {
+        "retryPolicySaved": 200, "classificationSaved": 200,
+        "escalationCreate": 201, "escalationCreateRemoved": 204,
+        "escalationPatch": 200, "escalationPatchRestored": 200,
+    })
+    receipt("authorization.protectedStateBaseline", {
+        "users": len(authz_baseline["users"]),
+        "roleAssignments": len(authz_baseline["roles"]),
+        "environmentMemberships": len(authz_baseline["environments"]),
+        "userAdminAuditEvents": {a["action"]: a["n"] for a in authz_baseline["user_audit"]},
+        "retryPolicy": authz_baseline["retry_policy"],
+        "classificationBanner": authz_baseline["classification"],
+    })
 
 with case("authorization-operator-and-viewer-user-create-rejected"):
-    for actor, (fact, jar, receipt_key) in authz_actors.items():
-        authz_verify_actor(actor)
+    for actor in authz_actors:
         email = authz["createEmails"][actor]
-        before = authz_state()
-        status, body = http(controller, "POST", "/api/v1/admin/users",
-                            authz_create_payload(email), session=jar, csrf=True)
-        authz_assert_forbidden(status, body, "%s creating a user" % actor)
+        authz_probe(actor, "createUser", "POST", "/api/v1/admin/users",
+                    authz_create_payload(email))
         expect_equal(sql_json(controller, "SELECT count(*)::int AS n FROM users WHERE email = '%s'" % email),
                      [{"n": 0}], "%s's rejected account was not created" % actor)
-        expect_equal(authz_state(), before, "%s create left protected state unchanged" % actor)
 
 with case("authorization-operator-and-viewer-user-patch-rejected"):
     target_id = receipts()["authorization.target.userId"]
     for actor, (fact, jar, receipt_key) in authz_actors.items():
-        authz_verify_actor(actor)
         # Both another account and the actor's own account: self-escalation
         # is the most direct privilege-escalation attempt.
-        for what, user_id in (("another account", target_id),
-                              ("its own account", receipts()[receipt_key])):
-            before = authz_state()
-            status, body = http(controller, "PATCH", "/api/v1/admin/users/" + user_id,
-                                authz["patchProbe"], session=jar, csrf=True)
-            authz_assert_forbidden(status, body, "%s patching %s" % (actor, what))
-            expect_equal(authz_state(), before, "%s PATCH of %s left protected state unchanged" % (actor, what))
+        authz_probe(actor, "patchOtherUser", "PATCH", "/api/v1/admin/users/" + target_id,
+                    authz["patchProbe"])
+        authz_probe(actor, "patchOwnUser", "PATCH", "/api/v1/admin/users/" + receipts()[receipt_key],
+                    authz["patchProbe"])
         expect_equal(authz_user_roles(receipts()[receipt_key]), [fact["role"]],
                      "%s role after both rejected PATCH requests" % actor)
+        expect_equal(authz_user_row(receipts()[receipt_key])["is_active"], True,
+                     "%s is still enabled" % actor)
     expect_equal(authz_user_roles(target_id), [authz_target["role"]], "target role after all PATCH probes")
     expect_equal(authz_user_row(target_id)["is_active"], True, "target still enabled")
 
 with case("authorization-operator-and-viewer-admin-configuration-rejected"):
-    for actor, (fact, jar, receipt_key) in authz_actors.items():
-        authz_verify_actor(actor)
-        for what, path, payload in (
-            ("automatic retry policy", "/api/v1/admin/automatic-retry-policy", authz["retryPolicy"]),
-            ("classification banner", "/api/v1/admin/classification-config", authz["classification"]),
-        ):
-            before = authz_state()
-            status, body = http(controller, "PUT", path, payload, session=jar, csrf=True)
-            authz_assert_forbidden(status, body, "%s saving the %s" % (actor, what))
-            expect_equal(authz_state(), before, "%s save of the %s left state unchanged" % (actor, what))
+    for actor in authz_actors:
+        authz_probe(actor, "retryPolicy", "PUT", "/api/v1/admin/automatic-retry-policy",
+                    authz["retryPolicy"])
+        authz_probe(actor, "classificationBanner", "PUT", "/api/v1/admin/classification-config",
+                    authz["classification"])
     final = authz_state()
     expect_equal(final["retry_policy"], authz_original["retry"], "retry policy is still the installed one")
     expect_equal(final["classification"], authz_original["banner"], "banner is still the installed one")
