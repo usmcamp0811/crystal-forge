@@ -4,13 +4,19 @@ title: 'Delivery: Config Inspector values and provenance scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-17 20:33'
+updated_date: '2026-10-18 03:26'
 labels:
   - testing
   - integration
   - luna
 dependencies:
   - TASK-490.8
+modified_files:
+  - >-
+    checks/integration-delivery/scenarios/fragments/task-490.9-config-inspector.py
+  - >-
+    checks/integration-delivery/scenarios/fragments/task-490.9-config-inspector.cjs
+  - checks/integration-delivery/fixtures/config-inspector-*
 parent_task_id: TASK-490
 priority: medium
 type: task
@@ -20,25 +26,21 @@ ordinal: 521000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-delivery. Contract ID: delivery.evaluation.config-inspector. Exclusive writes: checks/integration-delivery/scenarios/config-inspector.{nix,py,cjs} and checks/integration-delivery/fixtures/config-inspector-*. Existing mocked steps 12l-12q/13j-13q and Nix-level config-inspector/config-observer checks do not prove worker/API/UI together; this scenario needs distinct provenance fixtures and drawer bindings.
+Owning check: integration-delivery. Contract ID: delivery.evaluation.config-inspector. This packet owns only Config Inspector Python/browser fragments and immutable option fixtures: `checks/integration-delivery/scenarios/fragments/task-490.9-config-inspector.{py,cjs}` and `fixtures/config-inspector-*`. Coordinator owns `delivery-lifecycle.nix`, Python composition, browserSpecs mapping and registration; no packet-specific NixOS derivation.
 
-Scope: author a flake with distinguishable option values and definition files. System Config tab and flake Config Inspector show exact values/provenance for the exact revision; secret-path option is redacted in API/UI; second revision with changed value is distinguishable and historical selection stays exact. Partial inventory appears only when worker reports it. Non-goal: Nix-expression unit behavior, retained in non-integration checks. TASK-490 test-only restrictions apply.
+Use a second authored revision created by TASK-490.8 earlier in the same fresh Delivery VM. The system Config tab and flake Config Inspector must show independently authored values/provenance for that exact revision; secret-path values remain redacted and historical selection remains exact. Use same-run commit receipts. No database rows, VM or evaluation output from TASK-490.8's separate historical run are reusable.
 
-Organization: native checks/integration-delivery/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator registration and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers live at lib/integration-test through lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }. Scripts/fixtures/assets owner-local; no root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix, shared lib and CI/docs; child integration requires explicit registration and disjoint files. Meaningful WIP can be discoverable; only Access exists now, add other owners only with meaningful scenarios, no placeholders.
-
-Prerequisite: TASK-490.8 integrated. Read cf-server bin/config-inspector-worker.rs, handlers/api/systems.rs config-inspections/config-observations/evaluated-options, flakes.rs revision outputs/module declarations; web-ui system Config tab/flake explorer; ConfigExplorer.jsx and FlakeExplorer.jsx; docs/knowledge/evaluation and Config Inspector concepts. Adapt read-only checks/config-inspector/fixture without modifying it. As-built D1 is evidence, not authority; uncertain cases blocked pending owner decision.
-
-Candidate, NOT verified: nix build .#checks.x86_64-linux.integration-delivery.scenarios.config-inspector -L; append .run for evidence. Aggregate nix build .#checks.x86_64-linux.integration-delivery -L. Completion requires explicit registration, real VM execution and exact revision/commands/outcomes/evidence notes; independent fixture expectations, retained correct assertions and linked Backlog product bugs; interface/authority gaps escalate to coordinator.
-
-READINESS: actual foundation commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s), implemented helpers/fixtures/registration and verified commands required before To Do. No delegation or executed slice is claimed.
+Writable paths are the named fragments and immutable owner-local fixtures. Production, shared helper, scenario composition/registration, CI and docs are read-only. Requires TASK-490.7 roles, .8 code, accepted authority, and passing foundation/.25/.26. Coordinator records the one Delivery VM result/evidence.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Inspector values and provenance match authored fixture facts for the exact revision
+- [ ] #1 Inspector values and provenance match authored fixture facts for the exact same-run revision
 - [ ] #2 Secret-path values are redacted in API and UI
 - [ ] #3 A changed second revision is distinguishable and historical selection stays exact
-- [ ] #4 Executed in real VMs with recorded evidence
+- [ ] #4 The coordinator composes this fragment into delivery-lifecycle; no packet-specific derivation is added
+- [ ] #5 No evaluation or DB output is consumed from another scenario derivation
+- [ ] #6 The coordinator records exact revision, command, outcome and evidence for the Delivery VM
 <!-- AC:END -->
 
 ## Implementation Notes
