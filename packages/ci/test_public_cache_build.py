@@ -49,20 +49,6 @@ for job in old:
         assert old[job] == new[job], job
     else:
         expected = copy.deepcopy({k: v for k, v in old[job].items() if k != "script"})
-        if job == "flake-check":
-            # TASK-470 and TASK-484 add blocking provider and discovery gates.
-            # Preserve every other matrix entry and unrelated job metadata.
-            names = expected["parallel"]["matrix"][0]["CHECK_NAME"]
-            if "nixos-discovery-reliability" not in names:
-                names.insert(names.index("server-regressions") + 1, "nixos-discovery-reliability")
-            if "attic-metrics" not in names:
-                names.insert(names.index("niks3-cache") + 1, "attic-metrics")
-            if "attic-publication" not in names:
-                names.insert(names.index("attic-metrics") + 1, "attic-publication")
-            if "niks3-write-probe" not in names:
-                names.insert(names.index("niks3-cache") + 1, "niks3-write-probe")
-            if "niks3-ui" not in names:
-                names.insert(names.index("niks3-write-probe") + 1, "niks3-ui")
         assert expected == {
             k: v for k, v in new[job].items() if k != "script"}, job
         expected_scripts = copy.deepcopy(old[job]["script"][1:])
