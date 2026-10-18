@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 02:15'
+updated_date: '2026-10-18 02:47'
 labels:
   - bug
   - nixos
@@ -27,16 +27,20 @@ ordinal: 538000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The normal NixOS module defaults local-database=true and database.host=/run/postgresql, documented as a local socket. The generated TOML contains [database] host = "/run/postgresql". cf-config DatabaseConfig::to_url formats the value as a PostgreSQL authority URI with no host, and production cf-server-drv exits before migrations with `both host and hostaddr are missing`.
+Repair the active `cf_config::config::DatabaseConfig` serializer used by the running cf-server. Preserve the documented NixOS Unix socket default `/run/postgresql`; do not switch to TCP. The server config module reexports this cf-config type. The similarly named `cf-server/src/config/database.rs` is not in the active module graph and must remain untouched unless the import graph proves otherwise.
 
-Reproduced by the native Access VM at final combined commit fc930335878279ac426510359c039dfd8961dc13. Command: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. Evidence: /nix/store/1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt and crystal-forge.journal (server failure at 7.451s). Expected: the documented local socket configuration starts the server and applies migrations. Actual: URI parser rejects empty host. The test assertion remains failing. This is a product fix outside TASK-490.1; do not change it in the test overhaul.
+The fix belongs in the shared serializer so both tokio_postgres connection validation and SQLx pool creation receive the intended configuration. Keep database clients in cf-server; cf-config may use URI encoding support but must not depend on either DB client. The regression table must call the real serializer, parse each result with both clients, and assert recovered values for socket, ordinary TCP, and space/literal-plus/reserved-character values on a nondefault port. Do not change NixOS database.host to TCP.
+
+This repair is separately committed from TASK-490.1 test/doc work. The user explicitly authorized it on 2026-10-17. Current commits: `ca46cdd5` serializer + two-client round-trip tests; combined package/Access verification remains in progress. Keep the original startup assertion; coordinator owns combined VM and owner verification.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The supported local PostgreSQL socket configuration starts the production server without an empty-host URI failure
-- [ ] #2 Fresh database migrations complete and server readiness is observable through the normal NixOS module
-- [ ] #3 A regression test proves the socket host is transported as a socket path rather than an authority URI host
+- [ ] #1 The documented /run/postgresql socket path is serialized and parsed as a Unix socket by tokio_postgres and SQLx
+- [ ] #2 An ordinary network host and nondefault port round-trip through both client parsers
+- [ ] #3 Space, literal plus, URI delimiters and percent in username/password/database/path round-trip as actual values, not a string-only comparison
+- [ ] #4 Database-client dependencies remain in cf-server; cf-config has no tokio_postgres or SQLx dependency
+- [ ] #5 The coordinator's combined Access scenario proves startup/migrations and records actual VM evidence
 <!-- AC:END -->
 
 ## Implementation Notes
