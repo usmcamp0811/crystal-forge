@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 13:47'
+updated_date: '2026-10-18 14:01'
 labels:
   - bug
   - nixos
@@ -46,17 +46,14 @@ Repair is separate commit `52128b3a63175b712f7a83860355fdeec658a230` after rebas
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Final clean combined source commit 39a6a54b651a8b77fc3416b73195e363a782fa2e reproduces the same result. Evidence output is /nix/store/vcfbia521bjad2a85yca3h3n9i4m4ikf-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt and crystal-forge.journal lines 72-79. Test remains failing, no production fix.
+Current verification: separate rebased repair commit 52128b3a63175b712f7a83860355fdeec658a230 is included in tested foundation bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab8a7b372e8efe0d2dd21b6f53f0625064. The focused Access scenario and owner aggregate passed. Runtime riky1mm0nn185wb26abw7zzshnbml0fp records /run/postgresql startup and 292 successful migrations. No pending combined verification remains from the earlier observations. Status is preserved for the coordinator.
 
-Final exact-head rerun on combined commit fc930335878279ac426510359c039dfd8961dc13 reproduces the startup failure. Evidence: /nix/store/1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt and crystal-forge.journal lines 72-79. The socket-path-to-empty-host URI defect remains unmodified.
+LOCK: claude-sonnet-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation. User authorized this narrow repair on the foundation branch as a separate commit on 2026-10-17. Active type is cf_config::config::DatabaseConfig; cf-server/src/config/database.rs is an uncompiled duplicate.
 
-LOCK: claude-sonnet-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation. The user explicitly authorized this narrow production repair on 2026-10-17 and directed that it be committed separately on the TASK-490.1 foundation branch (not a separate worktree). Active type is cf_config::config::DatabaseConfig; cf-server/src/config/database.rs is an uncompiled duplicate.
+### Historical
+At combined source 39a6a54b651a8b77fc3416b73195e363a782fa2e, startup failed before migrations/HTTP; evidence vcfbia521bjad2a85yca3h3n9i4m4ikf-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt and crystal-forge.journal lines 72-79. The exact-head fc930335878279ac426510359c039dfd8961dc13 repeat failed identically; evidence 1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/. At those revisions the serializer emitted an empty-host URI for /run/postgresql; PostgreSQL itself listened on that socket. The old test-only prohibition applied before the separate user authorization; switching to TCP would not prove the default socket path.
 
-Repair commit ca46cdd5 (full: verify with `git rev-parse ca46cdd5^{commit}` in the foundation worktree) changes the active cf-config serializer and adds the two-client regression table. `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib database_url_tests` passed (2/2). Combined Access VM proof is pending.
+Pre-rebase repair ca46cdd5 added the real serializer/two-client regression table. `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib database_url_tests` passed 2/2. The statement that combined VM proof was pending described that point in time only.
 
-Combined runtime proof passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. Exact command: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. Evidence `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`; result.json passes fresh startup/migrations, and redacted generated-config-summary.txt shows `/run/postgresql`. The NixOS test uses the production server through both connection consumers; all five cases passed.
-
-Exact final branch-head repeat at `ade5080cd84c7be057b8f0a9d9c490ed8b1fd3d5` also passed the combined Access socket startup/migration case; evidence `/nix/store/0aavcw4vk32c83gljg8y4mz7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. (First exact store path remains recorded in the description; no further rerun needed.)
-
-Rebase to origin/dev `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064` rewrote this repair commit to `52128b3a63175b712f7a83860355fdeec658a230`. The focused Access scenario and owner aggregate both passed on rebased source `bba718befbc183863781656df2df272e5f735d5a`; evidence `/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`, including 292 migrations and `/run/postgresql` configuration.
+Combined runtime proof subsequently passed at b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56 with `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`; evidence xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/ (all five cases). A pre-rebase ade5080cd84c7be057b8f0a9d9c490ed8b1fd3d5 repeat was also recorded as passing. Those observations preceded the current bba718be verification. Rebase rewrote the repair to 52128b3a63175b712f7a83860355fdeec658a230. Evidence identifiers above name outputs beneath the Nix store; the exact current runtime is recorded in Description. TASK-492 is an independent startup-order defect outside this repair.
 <!-- SECTION:NOTES:END -->
