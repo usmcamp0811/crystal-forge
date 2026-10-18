@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 03:52'
+updated_date: '2026-10-18 13:45'
 labels:
   - bug
   - nixos
@@ -57,4 +57,6 @@ Repair commit ca46cdd5 (full: verify with `git rev-parse ca46cdd5^{commit}` in t
 Combined runtime proof passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. Exact command: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. Evidence `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`; result.json passes fresh startup/migrations, and redacted generated-config-summary.txt shows `/run/postgresql`. The NixOS test uses the production server through both connection consumers; all five cases passed.
 
 Exact final branch-head repeat at `ade5080cd84c7be057b8f0a9d9c490ed8b1fd3d5` also passed the combined Access socket startup/migration case; evidence `/nix/store/0aavcw4vk32c83gljg8y4mz7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. (First exact store path remains recorded in the description; no further rerun needed.)
+
+Rebase to origin/dev `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064` rewrote this repair commit to `52128b3a63175b712f7a83860355fdeec658a230`. The focused Access scenario and owner aggregate both passed on rebased source `bba718befbc183863781656df2df272e5f735d5a`; evidence `/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`, including 292 migrations and `/run/postgresql` configuration.
 <!-- SECTION:NOTES:END -->
