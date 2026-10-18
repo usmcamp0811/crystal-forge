@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 02:48'
+updated_date: '2026-10-18 14:01'
 labels:
   - bug
   - nixos
@@ -27,20 +27,33 @@ ordinal: 538000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Current authorized repair (2026-10-18; supersedes the earlier prohibition below): active `cf_config::config::DatabaseConfig::to_url` percent-encodes URI components and preserves `/run/postgresql` as a Unix socket. Rebased separate commit `52128b3a` adds the real-serializer regression table parsed by both tokio_postgres and SQLx. The targeted tests passed before rebase; the combined Access VM passed after rebase at bba718befbc183863781656df2df272e5f735d5, including socket startup and migrations. Keep the startup assertion.
+Repair the active `cf_config::config::DatabaseConfig` serializer used by cf-server. Preserve the documented `/run/postgresql` Unix socket; do not switch to TCP. `cf-server/src/config/mod.rs` reexports and uses the cf-config type. The similarly named `cf-server/src/config/database.rs` is not in the active module graph and remains untouched.
 
-On the TASK-490.1 native Access startup slice, the controller uses the normal NixOS module defaults: local-database=true and database.host=/run/postgresql (documented as the local socket path). The generated config reports [database] host = "/run/postgresql". cf-config DatabaseConfig::to_url formats that string as `postgres://user:password@/run/postgresql:5432/database`, which has no URI host. The real production cf-server-drv exits during startup with `invalid configuration: both host and hostaddr are missing`, before migrations, bootstrap, or HTTP routes.
+One shared serializer serves tokio_postgres validation and SQLx pool creation. Keep both database clients in cf-server; cf-config has only URI encoding support. Regression table calls the real serializer, parses with both existing clients, and asserts recovered values for the default socket path, ordinary TCP, and space/literal-plus/reserved values with a nondefault port.
 
-Observed on final combined test commit fc930335878279ac426510359c039dfd8961dc13 (application baseline 33de73b013b735304dfac9c69745a074a3e76ebd): `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L` fails; scenario evidence /nix/store/1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt shows host /run/postgresql, port 5432, database crystal_forge, user crystal_forge, password redacted. Journal shows PostgreSQL listening on /run/postgresql and server startup error at 7.451s (`crystal-forge.journal`, lines 72-79). Expected: the documented local-database socket configuration starts the server and applies migrations. Actual: URI parsing rejects its empty host.
-
-Test-only overhaul must not fix production code. Keep the Access scenario's startup assertion executable and failing until a separately authorized product fix. Do not replace the configuration with an AUTH_MODE workaround. Production correction needs its own task/review; TASK-490.1 may use only a documented non-socket database host as test setup if the owner accepts that it no longer proves the module's default socket path.
+Repair is separate commit `52128b3a63175b712f7a83860355fdeec658a230` after rebase. Targeted table passed 2/2 before rebase. Combined Access scenario and owner aggregate passed on rebased source `bba718befbc183863781656df2df272e5f735d5a`; evidence `/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/` shows `/run/postgresql`, successful startup and migrations (292). Normal server package and parser checks passed before rebase; VM build on rebased source also succeeds. TASK-492 is a separate unauthorized startup-order issue.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 The supported local PostgreSQL socket configuration starts the production server without an empty-host URI failure
-- [x] #2 Fresh database migrations complete and server readiness is observable through the normal NixOS module
-- [x] #3 A regression test proves the socket host is transported as a socket path rather than an authority URI host
-- [x] #4 The real serializer round-trips socket, network and encoding-sensitive fields through both tokio_postgres and SQLx without adding database clients to cf-config
-- [x] #5 The coordinator records the combined Access VM result and evidence
+- [x] #1 The documented /run/postgresql socket path is serialized and parsed as a Unix socket by tokio_postgres and SQLx
+- [x] #2 An ordinary network host and nondefault port round-trip through both client parsers
+- [x] #3 Space, literal plus, URI delimiters and percent in username/password/database/path round-trip as actual values, not a string-only comparison
+- [x] #4 Database-client dependencies remain in cf-server; cf-config has no tokio_postgres or SQLx dependency
+- [x] #5 The coordinator's combined Access scenario proves startup/migrations and records actual VM evidence
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Current verification: separate rebased repair commit 52128b3a63175b712f7a83860355fdeec658a230 is included in tested foundation bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab8a7b372e8efe0d2dd21b6f53f0625064. The focused Access scenario and owner aggregate passed. Runtime riky1mm0nn185wb26abw7zzshnbml0fp records /run/postgresql startup and 292 successful migrations. No pending combined verification remains from the earlier observations. Status is preserved for the coordinator.
+
+LOCK: claude-sonnet-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation. User authorized this narrow repair on the foundation branch as a separate commit on 2026-10-17. Active type is cf_config::config::DatabaseConfig; cf-server/src/config/database.rs is an uncompiled duplicate.
+
+### Historical
+At combined source 39a6a54b651a8b77fc3416b73195e363a782fa2e, startup failed before migrations/HTTP; evidence vcfbia521bjad2a85yca3h3n9i4m4ikf-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt and crystal-forge.journal lines 72-79. The exact-head fc930335878279ac426510359c039dfd8961dc13 repeat failed identically; evidence 1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/. At those revisions the serializer emitted an empty-host URI for /run/postgresql; PostgreSQL itself listened on that socket. The old test-only prohibition applied before the separate user authorization; switching to TCP would not prove the default socket path.
+
+Pre-rebase repair ca46cdd5 added the real serializer/two-client regression table. `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib database_url_tests` passed 2/2. The statement that combined VM proof was pending described that point in time only.
+
+Combined runtime proof subsequently passed at b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56 with `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`; evidence xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/ (all five cases). A pre-rebase ade5080cd84c7be057b8f0a9d9c490ed8b1fd3d5 repeat was also recorded as passing. Those observations preceded the current bba718be verification. Rebase rewrote the repair to 52128b3a63175b712f7a83860355fdeec658a230. Evidence identifiers above name outputs beneath the Nix store; the exact current runtime is recorded in Description. TASK-492 is an independent startup-order defect outside this repair.
+<!-- SECTION:NOTES:END -->

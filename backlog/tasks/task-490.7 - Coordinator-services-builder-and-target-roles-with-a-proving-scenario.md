@@ -4,13 +4,22 @@ title: 'Coordinator: services, builder, and target roles with a proving scenario
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-17 17:26'
+updated_date: '2026-10-18 13:57'
 labels:
   - testing
   - integration
   - coordinator
 dependencies:
   - TASK-490.1
+modified_files:
+  - lib/integration-test/roles.nix
+  - lib/integration-test/harness.nix
+  - docs/knowledge/testing/integration-coverage-map.md
+  - checks/integration-delivery/default.nix
+  - checks/integration-delivery/scenarios/delivery-lifecycle.nix
+  - checks/integration-delivery/scenarios/delivery-lifecycle.py
+  - checks/integration-delivery/scenarios/fragments/task-490.7-roles-proof.py
+  - checks/integration-delivery/scenarios/fragments/task-490.7-roles-proof.cjs
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -20,34 +29,44 @@ ordinal: 519000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Current coordinator boundary (2026-10-18; supersedes the earlier standalone `evaluation-build-smoke` scenario wording below): implement the shared `services`, `builderA`, `builderB`, and `targetA` role interfaces and prove them as an initial case in `checks/integration-delivery/scenarios/delivery-lifecycle`. The coordinator owns that scenario's `.nix`, Python composition, browserSpecs, and `checks/integration-delivery/default.nix` registration. TASK-490.8-.15 contribute disjoint case fragments to the same fresh Delivery VM; no derivation per packet. Focused command after implementation: `nix build .#checks.x86_64-linux.integration-delivery.scenarios.delivery-lifecycle -L`; aggregate: `nix build .#checks.x86_64-linux.integration-delivery -L`.
+Coordinator-owned role implementation and proving packet. Goal: give Delivery, Assurance, OIDC and notifications concrete services/builder/target interfaces, each justified by real execution. Risk: high (shared VM interfaces). Non-goals: implementing the Delivery .8-.15 obligations or changing production/module semantics.
 
-Coordinator writer task. Exclusive shared writes: lib/integration-test/** and one proving scenario checks/integration-delivery/scenarios/evaluation-build-smoke.{nix,py,cjs}, with coordinator registration in checks/integration-delivery/default.nix and harness-interface coverage-map documentation. This is not a Luna packet.
+Writable paths (one coordinator list):
+- lib/integration-test/roles.nix
+- lib/integration-test/harness.nix
+- docs/knowledge/testing/integration-coverage-map.md (actual role/helper interface documentation)
+- checks/integration-delivery/default.nix
+- checks/integration-delivery/scenarios/delivery-lifecycle.nix
+- checks/integration-delivery/scenarios/delivery-lifecycle.py (composition)
+- checks/integration-delivery/scenarios/fragments/task-490.7-roles-proof.py
+- checks/integration-delivery/scenarios/fragments/task-490.7-roles-proof.cjs
 
-Why: Delivery, Assurance, OIDC and notification scenarios need real services, builder and target roles. Add each role only with an executed proving scenario; children cannot depend on speculative interfaces.
+Composition target: checks/integration-delivery/scenarios/delivery-lifecycle.nix. Implement roles and compose the disjoint roles-proof fragments as its initial real commit→evaluation→build case. This is the existing coordinator task, not a child receiving a new VM derivation. Native owner default.nix uses { lib, inputs, pkgs, ... }, explicit scenario registration and pkgs.linkFarm over every registered gate. Shared entry is lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }. No placeholders, custom discovery, root tests/, legacyPackages.integration or mkOwner.
 
-Scope: shared roles under lib/integration-test include services { git ? false, oidc ? false, tls ? false, caches ? [], notificationReceiver ? false } using local Git HTTP derived from lib/test-flake, local OIDC, test CA/trusted TLS origin, lib/cache-test-node fixtures and notification receiver; builder { name, strategy } instantiates builderA/builderB with services.crystal-forge.build API mode and separate credentials; targetA is bootable with services.crystal-forge.client and its own key. Provide per-run nonce fresh-output fixture for assert_store_absent, agent/builder key provisioning, and offline registry from lib.crystal-forge.prefetchedPaths. Prove real commit -> evaluation -> real fresh build on builderA and concrete role use. Document actual signatures. Non-goals: implementing Delivery obligations 490.8-.15 or changing product/module semantics.
+Implement services { git ? false, oidc ? false, tls ? false, caches ? [], notificationReceiver ? false }: local Git HTTP from lib/test-flake, local OIDC, test CA/trusted TLS origin, cache fixtures and notification receiver. Implement builder { name, strategy } as builderA/builderB with services.crystal-forge.build API mode and separate credentials. targetA is bootable, uses services.crystal-forge.client and its own key. Provide key provisioning, per-run nonce fresh-output fixture for assert_store_absent and offline registry using lib.crystal-forge.prefetchedPaths. Document actual signatures and prove concrete role use; do not add speculative roles. Read-only source references: lib/gitserver-test-node, lib/cache-test-node, lib/agent-test-node, lib/test-flake, checks/niks3-cache/default.nix, checks/web-ui/default.nix, NixOS build/client/cache.encryption_key_file options and docs/knowledge/builders/*. As-built documentation is evidence, not accepted authority for uncertain behavior.
 
-Corrected architecture: shared entry lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }. Native checks/integration-{access,delivery,assurance,upgrade}/default.nix use { lib, inputs, pkgs, ... }, explicit coordinator registrations and normal pkgs.linkFarm aggregation of ALL registered gates. Scenario scripts/fixtures/assets stay under the owning check. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Only Access exists now; add Delivery default.nix with the meaningful proving scenario, never placeholders for other owners. Meaningful WIP can be discoverable. Coordinator alone owns all owner default.nix, shared lib and CI/docs; later child integration requires explicit registration and disjoint files.
+TASK-490.8-.15 contribute disjoint fragments to this single fresh Delivery VM/database. Later cases MAY consume earlier real commits, jobs, outputs and target records through receipts. Independent scenario derivations MUST NOT share live VM/database/output/receipt state. Prove the build output independently absent before the real builderA build; production packages and real service fixtures remain required.
 
-Read-only sources: lib/gitserver-test-node, lib/cache-test-node, lib/agent-test-node, lib/test-flake, checks/niks3-cache/default.nix, checks/web-ui/default.nix, modules/nixos/crystal-forge build/client/cache.encryption_key_file and docs/knowledge/builders/*. As-built D1 is evidence, not accepted authority; uncertain cases stay blocked pending owner decision. TASK-490 test-only scope applies.
+Dependency/readiness: TASK-490.1 bootstrap prerequisite passed at bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab8a7b372e8efe0d2dd21b6f53f0625064, with .25/.26 integrated; recorded runtime riky1mm0nn185wb26abw7zzshnbml0fp has 292 migrations. That is not a Delivery proof. This packet remains unimplemented/unexecuted and awaits coordinator selection and concrete role configuration, not resolution of the historical foundation failures.
 
-Candidate, NOT verified: nix build .#checks.x86_64-linux.integration-delivery.scenarios.evaluation-build-smoke -L and same attribute with .run for evidence; nix build .#checks.x86_64-linux.integration-delivery -L aggregates all registered gates. Record actual revision, commands, VM outcomes and evidence; retain correct failing assertions with linked product bugs.
-
-READINESS: prerequisite TASK-490.1 has no resolved actual foundation dependency commit, is blocked by two existing Rust package tests, and has no VM execution. Backlog, not ready. Before To Do, coordinator packet needs actual dependency commit(s), implemented interfaces and verified commands. No delegation or executed proving slice is claimed.
+Focused verification after implementation: `nix build .#checks.x86_64-linux.integration-delivery.scenarios.delivery-lifecycle -L`. Record exact tested dependency/source revisions, command, exit/result and evidence paths. Correct failures retain assertions and linked product defects; interface/authority conflicts go to coordinator. Normal owner registration includes the proof without requiring a separate smoke gate.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 lib/integration-test provides documented services, builderA/builderB and targetA role interfaces through lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }, with concrete use proven by real VM execution
-- [ ] #2 checks/integration-delivery/scenarios/evaluation-build-smoke evaluates a real commit and builds a fresh output on builderA that was independently absent beforehand
-- [ ] #3 Coordinator adds native checks/integration-delivery/default.nix with { lib, inputs, pkgs, ... }, explicitly registers the meaningful proving scenario and uses pkgs.linkFarm for ALL registered gates; no placeholder owners or custom discovery
-- [ ] #4 Coverage map documents actual role/helper signatures and notes record actual dependency commit(s), verified commands, revision, outcomes and .run evidence
-- [ ] #5 No production code or module semantics change; this is coordinator-written work and later child registration remains coordinator-owned
+- [ ] #1 Documented services, builderA, builderB and targetA interfaces are implemented through lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }, including real fixtures, separate credentials, key provisioning and offline inputs
+- [ ] #2 The coordinator composes the disjoint task-490.7-roles-proof.py/.cjs fragments as a real commit→evaluation→build case in delivery-lifecycle; builderA output is independently absent before build
+- [ ] #3 Native Delivery owner explicitly registers delivery-lifecycle and its pkgs.linkFarm aggregate includes every registered scenario; no separate smoke gate, placeholder owner or custom discovery is required
+- [ ] #4 TASK-490.8-.15 contribute disjoint fragments to the same scenario without packet-specific VM derivations; no production/module behavior changes are made
+- [ ] #5 Later same-scenario cases consume earlier real outputs only through receipts; independent derivations never reuse live VM/database/output/receipt state
+- [ ] #6 Actual interface signatures and tested dependency/source revision, focused command, result and evidence are recorded after the real Delivery VM run
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-10-17 organization correction: shared roles move to lib/integration-test; meaningful Delivery proving scenario is owner-local and explicitly coordinator-registered. Coordinator writer, not Luna. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands required before To Do. No Luna delegation or proving-slice execution is claimed.
+Current readiness: bba718be is the tested controller foundation. Roles and Delivery proof remain unimplemented/unexecuted; coordinator owns selection and integration.
+
+### Historical
+2026-10-17 organization review recorded unresolved foundation/package prerequisites and no VM execution at that time. A standalone smoke scenario was a former proposal. The rebased Access prerequisite and current Access aggregate later passed at bba718befbc183863781656df2df272e5f735d5a; this does not prove Delivery roles.
 <!-- SECTION:NOTES:END -->

@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 20:31'
-updated_date: '2026-10-17 20:33'
+updated_date: '2026-10-18 14:00'
 labels:
   - testing
   - integration
@@ -14,6 +14,10 @@ labels:
 dependencies:
   - TASK-490.21
   - TASK-490.14
+modified_files:
+  - checks/integration-assurance/scenarios/fragments/task-490.29-verification.py
+  - >-
+    checks/integration-assurance/scenarios/fragments/task-490.29-verification.cjs
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -23,41 +27,38 @@ ordinal: 542000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Current packet boundary (2026-10-18): this task owns POA&M verification Python/browser fragments only. The coordinator owns the shared `evidence-remediation-lifecycle.nix`, composition and registration. Use the plan and actual remediation evidence created earlier in that same fresh Assurance VM; no per-packet derivation, seeded verification result, or other VM state.
+Owning check: integration-assurance. Contract ID: assurance.remediation.poam-verification. Goal: prove verification/closure/reopen after real remediation changes Current evidence. Risk: high (verification authority, evidence and stale writes). Non-goals: plan-entry assertions (.21), triage (.20), waiver/acceptance (.27/.28), exports (.22), product changes.
 
-Owning check: integration-assurance. Contract ID: assurance.remediation.poam-verification. Exclusive scenario writes: checks/integration-assurance/scenarios/remediation-poam-verification.{nix,py,cjs}.
+Writable paths (only):
+- checks/integration-assurance/scenarios/fragments/task-490.29-verification.py
+- checks/integration-assurance/scenarios/fragments/task-490.29-verification.cjs
 
-WHY: verification and closure begin with an existing POA&M and have higher authority requirements than triage or plan entry. Legacy 29g-29m and canonical POA&M lifecycle use SQL-seeded failure evidence; close/verify must instead follow real Current evidence after remediation.
+Composition target: checks/integration-assurance/scenarios/evidence-remediation-lifecycle.nix. Coordinator owns Nix/Python composition, browserSpecs and explicit registration/normal aggregation. Use actual .21 plans and .16/.18 failed evidence earlier in this fresh Assurance VM/database through receipts. Earlier same-scenario real plans/evidence/generations MAY be consumed; another derivation's live VMs, rows, outputs, generations or receipts MUST NOT be consumed. No packet-specific derivation and no seeded successful evidence/verification outcomes.
 
-OBJECTIVE: in this scenario's own fresh VM, generate real failed evidence, create/link a POA&M through the real workflow, and test only verification/closure/reopen. Do not reuse TASK-490.21/.14/.16 runtime rows, outputs, generations, or VMs. Non-goals: plan-entry assertions, finding triage, waiver/acceptance, exports, production changes.
+Premature verification before Current evidence changes is denied with no mutation. Perform real target/scanner/evaluation remediation that changes Current evidence to passing, then request authorized verification under approved role/evidence rules. Expected decision/history must match accepted owner contract and independent target/scanner observations, not CF responses. Successful verification permits closure; reopen follows its documented transition and retains original finding/evidence identity. Stale revisions have no side effect. UI distinguishes Current from historical/built evidence and returns to the exact approved finding/system/plan identity. Unclear authority, role, lifecycle or UI state remains blocked: decision/design gap.
 
-SCENARIO: after real target/scanner/evaluation state changes Current evidence to passing through remediation, authorized verifier requests verification; expected decision/history match an accepted owner contract. Verification before Current evidence changes is denied with no row mutation. Successful verification permits closure; reopen retains original finding/evidence identities and performs the documented transition; stale revisions cause no mutation. UI distinguishes Current from historical/built evidence and returns to the exact finding/system/plan. Expected evidence comes independently from actual target state and authored scanner data.
+Dependencies/readiness: TASK-490.21 plan producer and TASK-490.14 remediation/deployment code/interfaces, with .16/.18 real failures and .7 target roles, must be integrated at actual tested revisions. Reuse code/setup and earlier real Assurance cases, not Delivery live state. Foundation bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab passed with .25/.26; those old startup failures are not current blockers. Await selection, accepted verification/closure/reopen authority and coordinator ordering. No verification fragment execution is claimed.
 
-AUTHORITY: read docs/design/CrystalForge/docs/crystal-forge-systems-design/cve-poam-evidence-continuity-design-spec.md and verify status/approved sections; read docs/knowledge/poam/* as as-built only. If role authority, success criteria, transitions or UI state lack accepted authority, mark blocked: decision/design gap and escalate; do not infer from PoamStatus. Read cf-server handlers/api/poam.rs (`verify`, `close`, `reopen`, transitions/history), models/poam.rs, evidence queries and routes; web UI PoA&M/evidence views; design PoamsView.jsx/PoamViews.jsx/EvidenceDrawer.jsx for approved presentation only.
+Read-only authority/source: docs/design/CrystalForge/docs/crystal-forge-systems-design/cve-poam-evidence-continuity-design-spec.md approved sections; docs/knowledge/poam/* as as-built evidence only; cf-server handlers/api/poam.rs verify/close/reopen/transitions/history, models/poam.rs, evidence queries/routes; web-ui PoA&M/evidence views and approved PoamsView.jsx/PoamViews.jsx/EvidenceDrawer.jsx. Do not infer requirements from PoamStatus. Use documented case/assert/receipt/http/sql_json/run_browser interfaces; production, schemas, shared helpers, composition, registration, CI, docs and design are read-only.
 
-HARNESS: scenario creates its own actual POA&M and evidence in its fresh VM; no direct SQL seeding of the verification result or successful evidence. Use `lib.crystal-forge.makeIntegrationTestHarness {pkgs,inputs}` and documented driver/browser helpers. Coordinator owns registration and shared library.
-
-WRITABLE (exclusive): checks/integration-assurance/scenarios/remediation-poam-verification.{nix,py,cjs} and checks/integration-assurance/fixtures/poam-verification-* only. Production, schemas, design source, shared lib, registration and CI are read-only.
-
-DEPENDENCIES/READINESS: TASK-490.21/.14 provide code/role knowledge only; actual output must be regenerated. Requires a tested foundation and accepted verification authority. Current Access VM run fails before migrations due TASK-490.25/.26. Remain Backlog.
-
-FOCUSED COMMAND (not verified): `nix build .#checks.x86_64-linux.integration-assurance.scenarios.remediation-poam-verification -L`; `.run` for evidence only. Coordinator runs `nix build .#checks.x86_64-linux.integration-assurance -L`. One VM at a time pending measured capacity.
-
-Completion: premature and valid verification assert actual evidence and no-side-effects; closure/reopen and stale revision assertions preserve identity; explicit coordinator registration and complete owner inclusion; real VM command, revision, outcome and evidence recorded. Keep correct failures and link product defects. Remain Backlog until authority and tested prerequisite are resolved.
+Focused verification after composition: `nix build .#checks.x86_64-linux.integration-assurance.scenarios.evidence-remediation-lifecycle -L`. Coordinator records exact tested revision, command, result and evidence. Preserve correct failures and linked defects; escalate helper/authority gaps.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Premature verification before Current evidence changes is rejected with no state mutation
-- [ ] #2 Verification after a real remediation/current scan succeeds only under approved role and evidence rules
-- [ ] #3 Closure and reopen preserve exact finding/evidence identity; stale revision has no side effect
-- [ ] #4 UI shows actual Current versus historical evidence and exact return destination for approved states
-- [ ] #5 Scenario is explicitly registered and included in the complete Assurance owner run
-- [ ] #6 Real VM execution, revision, exact command, outcome, and evidence paths are recorded
+- [ ] #2 After actual target/scanner/evaluation remediation changes Current evidence to passing, verification succeeds only under approved role/evidence rules and expected decision/history
+- [ ] #3 Closure follows successful verification; closure/reopen preserve original exact finding/evidence identities and documented transitions, while stale revisions have no side effect
+- [ ] #4 UI distinguishes independently observed Current from historical/built evidence and returns to the exact approved finding/system/plan identity
+- [ ] #5 Coordinator composes named verification fragments after real .21/.16/.18 cases in evidence-remediation-lifecycle through receipts, without seeded success, packet derivation or another derivation's live state
+- [ ] #6 Coordinator executes the focused evidence-remediation-lifecycle gate and records exact tested revision, command, result and evidence; unresolved authority/role/UI states remain blocked
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Isolation clarification: dependent scenario tasks provide code/semantics only. This scenario reconstructs all required runtime data in its own fresh VM. Remain Backlog pending tested foundation, producer prerequisites and accepted verification/closure authority.
+Current readiness: foundation bba718be passed. Real plan/failed-evidence producers, target remediation interfaces and accepted verification/closure/reopen authority remain prerequisites for selection and coordinator ordering. No verification run is claimed.
+
+### Historical
+The packet split higher-authority verification/closure/reopen from plan entry. Legacy canonical/29g-29m flows used SQL-seeded failure evidence. Earlier isolation notes assumed separate runs and unresolved foundation startup. Current fragments consume earlier real same-scenario plans/evidence through receipts, perform real remediation and prohibit cross-derivation live-state reuse.
 <!-- SECTION:NOTES:END -->

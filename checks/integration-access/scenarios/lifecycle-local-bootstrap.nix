@@ -10,6 +10,11 @@
 #   Admin role; one active session exists after sign-in and survives reload.
 # Negative condition: a wrong password is rejected with 401 and creates no
 #   session or session cookie.
+# Appended session cases: two named sessions prove missing/mismatched CSRF
+#   rejection, valid revocation of only the selected row, and rejection of
+#   that session's next operation. An independent browser signs in and out;
+#   its exact persisted session is invalidated. These cases run only after
+#   the five bootstrap cases, under the owner's TASK-490.2 selection.
 # Authority: the owner-approved TASK-490.1 requirement is a fresh first-admin
 #   local-auth bootstrap using the normal NixOS module with
 #   services.crystal-forge.server.auth_mode = "local". The operations/auth
@@ -38,6 +43,7 @@ in
     nodes.controller = harness.roles.controller {browser = true;};
     facts = {
       authMode = "local";
+      database = { name = "crystal_forge"; user = "crystal_forge"; };
       inherit expectedMigrations;
       admin = harness.facts.localUserFromDesign {
         id = "u1";
@@ -49,7 +55,16 @@ in
       # Database value of the Admin role (`auth_role` enum).
       adminRoleDb = "admin";
     };
-    script = ./lifecycle-local-bootstrap.py;
-    browserSpecs.bootstrap-sign-in = ./lifecycle-local-bootstrap.cjs;
+    # Ordering is deliberate: bootstrap asserts a fresh user and one session
+    # before the selected session fragment creates additional sessions.
+    script = harness.pkgs.writeText "access-local-lifecycle.py" (
+      builtins.readFile ./lifecycle-local-bootstrap.py
+      + "\n"
+      + builtins.readFile ./fragments/task-490.2-sessions.py
+    );
+    browserSpecs = {
+      bootstrap-sign-in = ./lifecycle-local-bootstrap.cjs;
+      session-sign-out = ./fragments/task-490.2-sessions.cjs;
+    };
     timeout = 900;
   }

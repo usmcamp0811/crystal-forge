@@ -1,12 +1,10 @@
 ---
 id: TASK-490.21
-title: >-
-  Assurance: POA&M lifecycle verification, closure, and evidence continuity
-  scenario
+title: 'Assurance: create and maintain POA&M plans from real failed evidence'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-17 17:28'
+updated_date: '2026-10-18 13:59'
 labels:
   - testing
   - integration
@@ -14,6 +12,9 @@ labels:
 dependencies:
   - TASK-490.16
   - TASK-490.18
+modified_files:
+  - checks/integration-assurance/scenarios/fragments/task-490.21-poam-plan.py
+  - checks/integration-assurance/scenarios/fragments/task-490.21-poam-plan.cjs
 parent_task_id: TASK-490
 priority: medium
 type: task
@@ -23,37 +24,38 @@ ordinal: 533000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Current packet boundary (2026-10-18; supersedes older independent-scenario wording below): TASK-490.21 owns POA&M plan Python/browser fragments only. The coordinator owns the shared `evidence-remediation-lifecycle.nix`, composition and registration. Compose with earlier actual evidence and TASK-490.29 verification/closure in one fresh Assurance VM; generated identities pass through receipts. No per-packet derivation or external runtime rows.
+Owning check: integration-assurance. Contract ID: assurance.remediation.poam-plan. Goal: create and maintain POA&M plans from real failed evidence. Risk: high (evidence links and transaction integrity). Non-goals: verification/closure/reopen (.29), triage (.20), waiver/acceptance (.27/.28), product changes.
 
-Owning check: integration-assurance. Contract ID: assurance.remediation.poam-plan. Exclusive scenario writes: checks/integration-assurance/scenarios/remediation-poam-plan.{nix,py,cjs}. Legacy 29g-29m and canonical POA&M lifecycle start from SQL-seeded FAIL evidence; this scenario must generate real failed scan/policy evidence during setup.
+Writable paths (only):
+- checks/integration-assurance/scenarios/fragments/task-490.21-poam-plan.py
+- checks/integration-assurance/scenarios/fragments/task-490.21-poam-plan.cjs
 
-Scope: POA&M create/link/milestones/notes and accepted non-terminal plan edits only. Verification, closure and reopen are TASK-490.29; triage is TASK-490.20; finding waiver and acceptance register are TASK-490.27/.28. Task dependencies provide implementation knowledge only; no runtime records or outputs are shared across fresh scenario VMs.
+Composition target: checks/integration-assurance/scenarios/evidence-remediation-lifecycle.nix. Coordinator owns Nix/Python composition, browserSpecs and explicit registration/normal aggregation. Compose after .16/.18 real failed CVE/policy evidence earlier in one fresh Assurance VM/database. Earlier real findings/evaluations MAY be consumed through receipts. Another derivation's live rows, outputs, generations or receipts MUST NOT be consumed. No packet-specific derivation; never seed failed evidence, findings, plans or generated identities.
 
-READINESS: Backlog. The foundation scenario has now executed but fails before migrations on TASK-490.25/.26. No product fix is included. Accepted plan-state transitions and authority must be read from owner-approved sources; uncertain behavior stays blocked.
+Create/link plans through the production workflow. Exact finding/evidence/plan identity must survive authoritative read and browser reload. Notes, milestones, links and approved nonterminal plan edits/transitions persist. Failed create and stale revision leave no partial or persisted side effects where accepted requirements specify the state; uncertain component/state authority remains blocked. .29 consumes the actual plans through receipts in this same scenario, after real remediation/Current evidence changes, rather than expanding this packet to closure.
 
-Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator registrations and normal pkgs.linkFarm aggregate of ALL registered gates. Helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; explicit registration of disjoint child files required. Meaningful WIP may be discoverable; only Access exists now, other owners require meaningful scenarios, no placeholders.
+Dependencies/readiness: TASK-490.16 and TASK-490.18 must supply real failed evidence through integrated setup/role interfaces at recorded tested revisions. Controller foundation bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab passed with .25/.26. Await selection, approved plan-state/failure authority and coordinator composition. Historical startup failure and the already-resolved remediation split are not current blockers. No plan fragment run is claimed.
 
-Read-only source: cf-server api/poam.rs transition/verify/close/reopen/milestones/links/rollups, models/poam.rs PoamStatus/PoamRisk; owner-approved docs/design/CrystalForge cve-poam-evidence-continuity-design-spec.md, docs/knowledge/poam/*; PoamsView.jsx/PoamViews.jsx/PoamRegisterParts.jsx. As-built D1 is evidence, not accepted authority; uncertain lifecycle requirements blocked pending owner decision.
+Read-only sources/authority: cf-server api/poam.rs transitions/verify/close/reopen/milestones/links/rollups, models/poam.rs PoamStatus/PoamRisk; owner-approved docs/design/CrystalForge/docs/crystal-forge-systems-design/cve-poam-evidence-continuity-design-spec.md; docs/knowledge/poam/* as as-built evidence only; approved PoamsView.jsx/PoamViews.jsx/PoamRegisterParts.jsx. Do not infer accepted transitions from enums or current output. Production, shared helpers, scenario composition, registration, CI, docs and design are read-only; use documented case/assert/receipt/http/sql_json/run_browser interfaces.
 
-Candidate only, NOT verified or dispatch authorization: `nix build .#checks.x86_64-linux.integration-assurance.scenarios.remediation-poam-plan -L`; append `.run` for evidence; coordinator runs the full owner. This scenario must create its failed evidence in its own VM. Completion requires explicit registration, real VM execution, exact revision/commands/outcomes/evidence, independent expectations and retained correct failing assertions with linked Backlog bugs.
-
-Dependencies: TASK-490.16/.18 provide source/implementation context but not runtime outputs; generate actual evidence in this test. The combined TASK-490.1 branch has not passed its Access startup scenario. Remain Backlog until tested prerequisites and focused command are verified.
+Focused verification after composition: `nix build .#checks.x86_64-linux.integration-assurance.scenarios.evidence-remediation-lifecycle -L`. Coordinator records exact tested revision, command, result and evidence. Preserve correct failures and linked product defects; escalate helper/authority gaps.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 POA&Ms are created from real failed evidence, never seeded results
-- [ ] #2 Lifecycle transitions, milestones, and links persist with exact finding identity
-- [ ] #3 Failed plan creation and stale revision are rejected without partial or persisted side effects
-- [ ] #4 UI and stored links retain exact finding/plan identity through reload
-- [ ] #5 Scenario is explicitly registered in the complete Assurance owner
-- [ ] #6 Executed in a real VM with exact command, revision, outcome and evidence paths
+- [ ] #1 Plans start from real failed CVE/policy evidence produced earlier by .16/.18 in the same Assurance scenario; no failed evidence/finding/plan is seeded
+- [ ] #2 POA&M creation/linking preserves exact finding/evidence/plan identities in stored links and UI through reload
+- [ ] #3 Milestones, notes, links and approved nonterminal plan-state transitions persist
+- [ ] #4 Stale updates and failed plan creates have no partial or persisted effects where accepted authority defines those states; exact unresolved states remain blocked
+- [ ] #5 Coordinator composes named plan fragments with .29 verification/closure in evidence-remediation-lifecycle using same-run receipts, with no packet derivation or cross-derivation live state
+- [ ] #6 Coordinator executes the focused evidence-remediation-lifecycle gate and records exact tested revision, command, result and evidence
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-10-17 organization correction replaces old layout/commands. Additional blocker: TASK-490.20/.21 need finer splitting of triage versus policy waiver/acceptance versus verification/closure; scope preserved, no new slices or scope expansion now. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
+Current readiness: controller foundation bba718be passed. .16/.18 failed-evidence producers, approved plan transitions/failure states and coordinator composition remain prerequisites. No plan fragment execution is claimed.
 
-2026-10-17 superseding packet correction: TASK-490.21 owns POA&M plan creation/linking/milestones/notes and approved non-terminal edits only. TASK-490.29 owns verification/closure/reopen. Finding triage is TASK-490.20; finding waiver is TASK-490.27; acceptance-register renew/convert is TASK-490.28. Runtime evidence/rows from TASK-490.16/.18/other runs cannot be reused; generate real prerequisite evidence in this scenario's own fresh VM. Foundation VM has now executed and fails on product defects TASK-490.25/.26; all child tasks remain Backlog.
+### Historical
+2026-10-17 reviews recorded unresolved package/startup failures and mixed remediation scope. The decomposition assigned plan entry to .21 and verification/closure/reopen to .29; .20/.27/.28 own triage/waiver/acceptance. Legacy 29g-29m/canonical POA&M cases used SQL-seeded FAIL evidence. Current cases require real producer evidence and may share same-scenario receipts, never another derivation's live state.
 <!-- SECTION:NOTES:END -->

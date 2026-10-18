@@ -6,13 +6,16 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-17 17:27'
+updated_date: '2026-10-18 13:58'
 labels:
   - testing
   - integration
   - luna
 dependencies:
   - TASK-490.14
+modified_files:
+  - checks/integration-assurance/scenarios/fragments/task-490.18-policy.py
+  - checks/integration-assurance/scenarios/fragments/task-490.18-policy.cjs
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -22,33 +25,38 @@ ordinal: 530000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Current packet boundary (2026-10-18): this task owns only policy Python/browser fragments under `checks/integration-assurance/scenarios/fragments/`. The coordinator owns `evidence-remediation-lifecycle.nix`, composition, browserSpecs mapping and registration. Create authored policy/evaluation evidence in the same fresh Assurance VM and pass same-run identities by receipts; no per-packet derivation or external VM state.
+Owning check: integration-assurance. Contract ID: assurance.policy.enforcement. Goal: prove real versioned policy admission, not only policy persistence. Risk: high (enforcement/evidence invariants). Non-goals: every composite rule kind, STIG-import assertions (.19), product changes.
 
-Owning check: integration-assurance. Contract ID: assurance.policy.enforcement. Exclusive writes: checks/integration-assurance/scenarios/policy-enforcement.{nix,py,cjs}. Existing 19-20e/20ab2 prove policy persistence but not real Enforce versus ReportOnly admission.
+Writable paths (only):
+- checks/integration-assurance/scenarios/fragments/task-490.18-policy.py
+- checks/integration-assurance/scenarios/fragments/task-490.18-policy.cjs
 
-Scope: admin creates/publishes version with one or two authored-fixture-violable composite rule kinds (e.g. packages_absent and nixos_option), assigns versioned environment/system scope. Evaluating violating commit produces expected failed evidence. Enforce blocks real deployment and leaves target unchanged; ReportOnly records violation and permits deployment. New policy version never rewrites old-version evidence. Non-goals: every rule kind (Rust/unit tests), STIG import (490.19). TASK-490 test-only restrictions apply.
+Composition target: checks/integration-assurance/scenarios/evidence-remediation-lifecycle.nix. Coordinator owns Nix/Python composition, browserSpecs and explicit registration/normal owner aggregation. No packet-specific derivation. One fresh Assurance VM/database contains producers and remediation. Earlier real imported policies, targets, evaluations or builds MAY be used through same-scenario receipts. Another derivation's live target/DB/output/receipt state MUST NOT be consumed.
 
-Organization: native checks/integration-assurance/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned registrations and normal pkgs.linkFarm aggregate of ALL registered gates. Shared helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; child files stay disjoint, integration requires explicit registration. Meaningful WIP may be discoverable; only Access exists now; add other owners only with meaningful scenarios, no placeholders.
+Admin creates/publishes authored versions with one or two fixture-violable composite rule kinds (for example packages_absent and nixos_option), assigning versioned environment/system scope. A real violating commit evaluation produces expected failed evidence. Enforce blocks real deployment with no target change; ReportOnly records the same violation and permits real deployment. Publishing a new version does not rewrite old-version evidence. Use independently authored effective-policy/rule/scope expectations and same-run identities, never seed evaluation/deployment failures or take expected facts from CF results. .21/.29 may consume these actual failures in this same scenario.
 
-Prerequisite: TASK-490.14 integrated. Read cf-server models/deployment_policies.rs DeploymentPolicy/CompositeRuleKind/AssignedPolicyEnforcementMode, compliance/resolver.rs AssignmentMode/AssignmentTarget, api/compliance.rs assignments/policy-version publish/trust, deployment_policies.rs and deployments.rs; docs/knowledge/compliance/assignments-and-report-only-enforcement.md; PoliciesView.jsx/PolicyEditor.jsx. As-built D1 is evidence, not accepted authority; uncertain cases blocked pending owner decision.
+Dependencies/readiness: TASK-490.14 and its .12/.10/.7 role/build/publication code/interfaces must provide real evaluation/deployment setup at recorded tested revisions. Recreate runtime setup inside Assurance or consume earlier real cases within that scenario. Foundation bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab passed with .25/.26; historical startup failures are resolved. This packet awaits selection, concrete deployment/policy setup, accepted policy/enforcement authority and coordinator composition.
 
-Candidate, NOT verified: nix build .#checks.x86_64-linux.integration-assurance.scenarios.policy-enforcement -L; append .run for evidence; aggregate nix build .#checks.x86_64-linux.integration-assurance -L. Completion requires explicit registration, real VM execution and revision/commands/outcomes/evidence notes, independent fixture facts and retained correct failing assertions with linked Backlog product bugs. Escalate helper/authority gaps, no product changes.
+Read-only source/authority: cf-server models/deployment_policies.rs DeploymentPolicy/CompositeRuleKind/AssignedPolicyEnforcementMode, compliance/resolver.rs AssignmentMode/AssignmentTarget, api/compliance.rs assignments/publish/trust, deployment_policies.rs and deployments.rs; docs/knowledge/compliance/assignments-and-report-only-enforcement.md; approved PoliciesView.jsx/PolicyEditor.jsx. As-built D1 is evidence, not acceptance authority; uncertain cases remain blocked pending owner decision. Production, shared helpers, composition, registration, CI, docs and design are read-only.
 
-READINESS: actual foundation dependency commit unresolved; two existing Rust package tests block foundation; no VM execution. Backlog, not ready. Actual dependency commit(s), implemented interfaces/fixtures/registration and verified commands required before To Do. No delegation or executed slice is claimed.
+Focused verification after composition: `nix build .#checks.x86_64-linux.integration-assurance.scenarios.evidence-remediation-lifecycle -L`. Coordinator records exact tested revision, command, result and evidence. No policy fragment run is claimed. Retain correct failures and linked defects; escalate helper/authority gaps.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Published policy versions and environment/system assignments resolve to the expected effective policies
-- [ ] #2 Enforce blocks a violating deployment and the real target is unchanged
-- [ ] #3 ReportOnly records the violation without blocking
-- [ ] #4 Evidence remains bound to the policy version that produced it
-- [ ] #5 Executed in real VMs with recorded evidence
+- [ ] #1 Published authored composite-rule policy versions and versioned environment/system assignments resolve to independently expected effective policies
+- [ ] #2 Enforce blocks a real violating deployment and leaves the real target unchanged
+- [ ] #3 ReportOnly records the violation and permits the real deployment
+- [ ] #4 New policy versions do not rewrite existing evidence; evidence stays bound to its producing policy version and exact scope
+- [ ] #5 Coordinator composes named policy fragments with producers/remediation into evidence-remediation-lifecycle; same-scenario receipts may carry real prior results, with no seeded failure, packet-specific derivation or cross-derivation live state
+- [ ] #6 Coordinator executes the focused evidence-remediation-lifecycle gate and records exact tested revision, command, result and evidence
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-10-17 organization correction: native owner-local paths, shared lib/integration-test and explicit coordinator registration. Foundation commit unresolved; two existing Rust package tests block foundation; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
-Scenario isolation: create/publish/assign the policy, violating evaluation and target state inside this scenario's own fresh VM. No TASK-490.14 runtime target, evaluation, DB or output may be reused. Foundation VM fails on TASK-490.25/.26; remain Backlog.
+Current readiness: foundation bba718be passed. Real evaluation/deployment interfaces from .14/.12/.10/.7, authored rule facts, accepted authority and coordinator composition remain prerequisites. No policy packet execution is claimed.
+
+### Historical
+2026-10-17 organization/isolation review recorded package/startup blockers before .25/.26 repair verification. Former separate policy runs could not consume Delivery live state. Current policy cases may consume earlier real Assurance results through receipts; they still cannot import another derivation's runtime state.
 <!-- SECTION:NOTES:END -->

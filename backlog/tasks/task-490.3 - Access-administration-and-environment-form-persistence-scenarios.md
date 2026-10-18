@@ -4,7 +4,7 @@ title: 'Access: administration and environment form persistence scenarios'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-17 17:25'
+updated_date: '2026-10-18 13:56'
 labels:
   - testing
   - integration
@@ -16,6 +16,13 @@ references:
   - docs/knowledge/ui/admin-console-and-login-views.md
   - docs/design/CrystalForge/components/AdminView.jsx
   - docs/design/CrystalForge/components/EnvironmentsView.jsx
+modified_files:
+  - checks/integration-access/scenarios/fragments/task-490.3-admin-forms.py
+  - checks/integration-access/scenarios/fragments/task-490.3-admin-forms.cjs
+  - >-
+    checks/integration-access/scenarios/fragments/task-490.3-environment-forms.py
+  - >-
+    checks/integration-access/scenarios/fragments/task-490.3-environment-forms.cjs
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -25,41 +32,42 @@ ordinal: 515000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Current packet boundary (2026-10-18; supersedes the earlier exclusive-path and candidate-command statements below): this task owns only disjoint admin/environment Python and browser case fragments under `checks/integration-access/scenarios/fragments/task-490.3-*`. The coordinator owns `lifecycle-local-bootstrap.nix`, composition, browserSpecs mapping, and registration. Compose after the real first-admin workflow in the same local-auth VM/database as TASK-490.2/.4. No packet-specific NixOS derivation. Foundation plus TASK-490.25/.26 combined VM success remains a dispatch prerequisite.
+Owning check: integration-access. Contract IDs: access.configuration.admin, access.configuration.resources. Goal: prove real UI administration/environment persistence, reload, cancel and accepted failed-save behavior. Risk: medium. Non-goals: cache/builder/flake/system forms, cache credentials/Test (.12/.13), OIDC (.6), role enforcement (.2), unapproved visual baselines and product changes.
 
-Owning check: integration-access. Contract IDs: access.configuration.admin, access.configuration.resources. Mocked steps 14a-14c, 30c and 12e dominate existing persistence coverage; only 30b proves a real admin save. Prove browser action, authoritative effect and reload, plus failed-save draft preservation using real failures.
+Writable paths (only):
+- checks/integration-access/scenarios/fragments/task-490.3-admin-forms.py
+- checks/integration-access/scenarios/fragments/task-490.3-admin-forms.cjs
+- checks/integration-access/scenarios/fragments/task-490.3-environment-forms.py
+- checks/integration-access/scenarios/fragments/task-490.3-environment-forms.cjs
 
-Exclusive writes: checks/integration-access/scenarios/configuration-admin-forms.{nix,py,cjs} and configuration-environment-forms.{nix,py,cjs}. Other paths are read-only. Non-goals: cache/builder/flake/system forms (domain setup), cache Test/credentials (490.12/.13), OIDC execution (490.6), role enforcement (490.2), unapproved visual baselines, production changes. TASK-490 test-only scope applies.
+Composition target: checks/integration-access/scenarios/lifecycle-local-bootstrap.nix. Coordinator owns Nix/Python composition, browserSpecs mapping and explicit owner registration/normal aggregation. Compose with .2/.4 after real first-admin bootstrap in one fresh local-auth VM/database. Reuse earlier real users/environments only through same-scenario receipts; never consume another derivation's live state. No packet-specific derivation; shared helpers, production, registration, CI, docs and design sources are read-only.
 
-Corrected organization: owner default.nix at checks/integration-access/default.nix has Snowfall signature { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios, normal pkgs.linkFarm aggregate of ALL registered gates. Helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }. Scripts/fixtures/assets are owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator alone edits owner default.nix, shared lib, CI/docs and explicitly registers child scenarios. Meaningful WIP checks may be discoverable; only Access exists now, no placeholder owners.
+Admin cases: create user through UI and independently read users/user_role_assignments for exact role/environment assignments; edit role and reload; disable persists enabled=false and one sign-in attempt returns 401. Cancel leaves rows unchanged. Classification configuration and automatic retry policy saves persist and survive reload. Use authored values (design admin u1, Jordan Park u2/operator with production/staging where approved) and generated-ID receipts, not CF-derived expected values.
 
-Authority review: docs/knowledge/ui/admin-console-and-login-views.md, api/builders-queues-environments-dashboard-admin-api.md (admin/environments), ui/flakes-environments-builds-and-evaluations-views.md (Environments) are as-built evidence, not accepted D1 authority. Approved presentation references remain docs/design/CrystalForge/components/AdminView.jsx and EnvironmentsView.jsx, read-only. Uncertain behavior stays blocked pending owner decision; do not use Authority: as-built headers.
+Environment cases: create/edit/delete through UI, verify environments rows and reload for each operation. Duplicate-name validation retains the draft and creates no row. Cover fresh-install empty list before these cases create records, success, validation, write error/draft preservation and pending/disabled save where accepted design defines those states. For failed-save behavior, use a real bounded server outage via unit_stopped(controller, "crystal-forge-server.service"), restore service and prove no persistence plus retained draft where approved. Missing authority blocks only the exact component/state; do not invent expectations or remove valid success/validation checks.
 
-Read-only source: cf-server handlers/api/admin.rs (user list/create/update/delete, classification config and automatic retry policy, request DTOs), environments.rs (list/get/create/update/delete), server routes; web-ui admin.rs tabs and environments.rs, CreateUserModal, EditUserModal, EnvironmentFormModal, EditEnvironmentModal, RemoveEnvironmentDialog.
+Authority/source reading: approved AdminView.jsx and EnvironmentsView.jsx under docs/design/CrystalForge/components are presentation references. docs/knowledge/ui/admin-console-and-login-views.md, api/builders-queues-environments-dashboard-admin-api.md and ui/flakes-environments-builds-and-evaluations-views.md are as-built evidence, not D1 acceptance authority. Read cf-server handlers/api/admin.rs (users, classification, retry DTOs), environments.rs and routes; web-ui admin/environment tabs and CreateUserModal, EditUserModal, EnvironmentFormModal, EditEnvironmentModal, RemoveEnvironmentDialog.
 
-Verify actual foundation commit and harness signatures before dispatch. Pattern: checks/integration-access/scenarios/lifecycle-local-bootstrap.{nix,py,cjs}; controller browser role, API register/login setup and browser sign-in using the same credentials; helpers documented in coverage map. Authored/design facts: admin u1, u2 Jordan Park operator with production/staging, environments keyed by name (staging/lab); other values authored explicitly.
+Dependency/readiness: TASK-490.1 controller interface is tested at bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab, including .25/.26. Use documented case/expect/receipt/http named-session/CSRF/sql_json/run_browser and fault helpers. Sign in independently in each browser invocation. This packet is not selected and has not executed; coordinator must confirm accepted form/error states and composition before dispatch. Future services/builder/target interfaces are not prerequisites for controller form proofs.
 
-configuration-admin-forms: create user via Admin UI, verify users and user_role_assignments role/environments, reload; edit role persists; disable persists enabled=false and one login attempt is rejected (401); cancel leaves row unchanged; classification config and automatic retry policy save persist and survive reload. Inject a real write failure using unit_stopped(controller, crystal-forge-server.service) around save, restore service, assert draft retained and nothing persisted if accepted authority defines that failure state. Otherwise block pending owner/design decision with exact component/state.
-
-configuration-environment-forms: UI create/edit/delete, each verified in environments and after reload. Duplicate-name validation retains draft and creates no row. Cover success, fresh-install empty list, write error/draft preservation, and pending/disabled save only where approved design defines it.
-
-Candidate commands, NOT verified: nix build .#checks.x86_64-linux.integration-access.scenarios.configuration-admin-forms -L and configuration-environment-forms; append .run for evidence. Coordinator aggregate: nix build .#checks.x86_64-linux.integration-access -L. Run one VM test at a time until measured capacity supports a higher limit. Explicit registration and real VM execution required; notes record exact commands, revision, outcome and evidence paths. Independent expectations must come from authored facts/accepted requirements. Preserve correct failing assertions and linked Backlog product bugs; escalate harness/authority gaps to coordinator, never change product code or coordinator-owned files.
-
-READINESS: foundation dependency commit unresolved; foundation blocked by two existing Rust package tests, no VM execution. Backlog, not ready. Future packet requires actual dependency commit(s), verified commands and implemented interfaces/fixtures/registration before To Do. No delegation or executed slice is claimed.
+Focused verification after composition: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. Record exact revision, command, outcome and evidence; a base bootstrap pass does not prove these fragments. Keep correct failing assertions and link product defects; escalate helper/authority gaps.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Both scenarios exist only under checks/integration-access/scenarios/ and are explicitly registered by the coordinator; the normal pkgs.linkFarm aggregate includes both gates
-- [ ] #2 Each successful UI save is proven by a database read and reload read
-- [ ] #3 Cancel leaves persisted rows unchanged
-- [ ] #4 A real injected failure keeps the draft and persists nothing where accepted requirements define that state; uncertain failure behavior stays blocked pending owner decision with exact component/state
-- [ ] #5 Disabling a user persists and prevents that user's sign-in
-- [ ] #6 Both scenarios execute in real VMs with commands, revision, outcomes and .run evidence in task notes after actual dependency commits and verified commands are available
+- [ ] #1 The coordinator composes the four named form fragments into lifecycle-local-bootstrap; no packet-specific VM derivation is added
+- [ ] #2 UI user creation/role edits, classification and retry settings, and environment create/edit/delete are proven by exact database reads and reload; expected values are independently authored
+- [ ] #3 Cancel leaves rows unchanged; duplicate environment validation retains draft and creates no row; accepted empty/pending/disabled-save states are exercised in the correct order
+- [ ] #4 A real bounded write failure restores the server, persists nothing and retains the draft where accepted requirements define that state; unresolved component/state authority is recorded as blocked
+- [ ] #5 Disabling a user persists enabled=false and rejects that user's real sign-in with 401
+- [ ] #6 The coordinator executes the focused lifecycle-local-bootstrap gate containing these fragments and records exact revision, command, result and evidence
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-10-17 organization correction: native owner-local paths, shared lib/integration-test and explicit coordinator registration replace the prior layout; D1 as-built docs are not authority. Foundation commit unresolved; two existing Rust package tests block foundation, no VM execution. Backlog, not dispatch-ready. Actual dependency commit(s), implemented interfaces and verified commands are required before To Do. No Luna delegation or slice execution is claimed.
+Current readiness: controller bootstrap prerequisite bba718be is tested; this packet awaits user selection, approved form/error states and coordinator composition. No fragment result is claimed.
+
+### Historical
+2026-10-17 review recorded unresolved foundation/package blockers and no VM execution at that time. Separate form derivations were a former layout proposal. Bootstrap later passed at b1095c8f and after rebase at bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab; runtime riky1mm0nn185wb26abw7zzshnbml0fp records 292 migrations. Those observations do not verify form fragments.
 <!-- SECTION:NOTES:END -->

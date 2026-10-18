@@ -6,11 +6,12 @@
 //! result with both clients. The assertions compare the configuration each
 //! client recovers, not the URL text.
 //!
-//! Known limit: `sqlx::postgres::PgConnectOptions` has no password getter in
-//! the pinned version. The password is therefore asserted through
-//! `tokio_postgres` only.
+//! SQLx exposes the recovered password through its rebuilt connection URL.
+//! Decode that URL with the existing PostgreSQL parser rather than comparing
+//! the input string to itself.
 
 use super::DatabaseConfig;
+use sqlx::ConnectOptions;
 use sqlx::postgres::PgConnectOptions;
 use std::path::PathBuf;
 use std::str::FromStr;
@@ -152,6 +153,18 @@ fn to_url_round_trips_through_sqlx() {
             }
         }
         assert_eq!(parsed.get_port(), row.config.port, "{}: port", row.label);
+        // SQLx-specific tuning parameters are not understood by tokio_postgres.
+        // Passwords reside in the rebuilt URL's authority, not its query.
+        let mut recovered_url = parsed.to_url_lossy();
+        recovered_url.set_query(None);
+        let recovered = tokio_postgres::Config::from_str(recovered_url.as_str())
+            .unwrap_or_else(|e| panic!("{}: rebuilt SQLx URL rejected: {e}", row.label));
+        assert_eq!(
+            recovered.get_password(),
+            Some(row.config.password.as_bytes()),
+            "{}: SQLx recovered password",
+            row.label
+        );
         assert_eq!(
             parsed.get_username(),
             row.config.user,

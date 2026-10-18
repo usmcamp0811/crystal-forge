@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-17 17:25'
+updated_date: '2026-10-18 13:56'
 labels:
   - testing
   - integration
@@ -18,6 +18,12 @@ references:
   - docs/knowledge/ui/frontend-navigation-and-shared-patterns.md
   - docs/design/CrystalForge/components/Shell.jsx
   - docs/design/CrystalForge/components/ProfileView.jsx
+modified_files:
+  - checks/integration-access/scenarios/fragments/task-490.4-shell-navigation.py
+  - >-
+    checks/integration-access/scenarios/fragments/task-490.4-shell-navigation.cjs
+  - checks/integration-access/scenarios/fragments/task-490.4-preferences.py
+  - checks/integration-access/scenarios/fragments/task-490.4-preferences.cjs
 parent_task_id: TASK-490
 priority: medium
 type: task
@@ -27,41 +33,42 @@ ordinal: 516000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Current packet boundary (2026-10-18; supersedes the earlier exclusive-path and candidate-command statements below): this task owns only disjoint shell/navigation and preference Python/browser fragments under `checks/integration-access/scenarios/fragments/task-490.4-*`. The coordinator owns `lifecycle-local-bootstrap.nix`, composition, browserSpecs mapping, and registration. Compose with TASK-490.1/.2/.3 in the same local-auth VM/database; no packet-specific NixOS derivation. Foundation plus TASK-490.25/.26 combined VM success remains a dispatch prerequisite.
+Owning check: integration-access. Contract IDs: access.shell, access.configuration.preferences. Goal: prove real shell navigation and per-user profile/notification preference persistence with an approved Shell.jsx comparison. Risk: medium (presentation authority and identity isolation). Non-goals: event notification delivery (.5), Delivery/Assurance dashboard domain values, all theme/viewport combinations and product changes.
 
-Owning check: integration-access. Contract IDs: access.shell, access.configuration.preferences. Existing steps 07-11a, 09g-09i, 17 and 31 are mocked. Prove real shell/navigation and per-user persistence; first design-reference comparison belongs here because Shell.jsx is approved.
+Writable paths (only):
+- checks/integration-access/scenarios/fragments/task-490.4-shell-navigation.py
+- checks/integration-access/scenarios/fragments/task-490.4-shell-navigation.cjs
+- checks/integration-access/scenarios/fragments/task-490.4-preferences.py
+- checks/integration-access/scenarios/fragments/task-490.4-preferences.cjs
 
-Exclusive writes: checks/integration-access/scenarios/shell-navigation.{nix,py,cjs} and configuration-preferences.{nix,py,cjs}. Non-goals: event notification delivery (490.5), dashboard domain values (Delivery/Assurance), all viewport/theme combinations, production changes. All other paths remain read-only under TASK-490 test-only scope.
+Composition target: checks/integration-access/scenarios/lifecycle-local-bootstrap.nix. Coordinator owns Nix/Python composition, browserSpecs and explicit registration/normal owner aggregation. Compose after real bootstrap with .2/.3 in one fresh local-auth VM/database. Earlier real users may be consumed through same-scenario receipts; another derivation's live state, IDs or cookies may not. No packet-specific derivation. Shared helpers, production, CI, docs, registration and design references are read-only.
 
-Corrected organization: native checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicit coordinator-owned scenarios, and pkgs.linkFarm for ALL registered gates. Helpers: lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }. Owner-local scripts/fixtures/assets; no root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix, shared lib, CI/docs and explicit child registration. Meaningful WIP can be discoverable; only Access exists now and no placeholder owners are added.
+Shell: unauthenticated protected navigation redirects to /login. Signed-in navigation reaches every accepted AppShell route and heading. Unknown routes show NotFound and the accepted return path. Sidebar collapse follows accepted persistence semantics; Tab reaches primary navigation, Enter activates it; narrow viewport mobile menu and Close menu work. Compare desktop dark shell chrome against approved Shell.jsx with ctx.visual.compare(name, {view, theme, referenceSelector, actualSelector, maxDifferentRatio}); justify threshold and retain reference/actual/diff images. Do not raise a threshold to pass. The visual helper has not yet been proved in an executed scenario; report interface faults to coordinator.
 
-Authority review: docs/knowledge/ui/frontend-navigation-and-shared-patterns.md, design-system-accessibility-responsive-motion.md, alerts-and-notifications-decision.md (preferences only) are as-built evidence, not accepted D1 authority. Approved presentation references remain docs/design/CrystalForge/components/Shell.jsx and ProfileView.jsx, read-only. Uncertain expected behavior remains blocked pending owner decision; no Authority: as-built header.
+Preferences: user A changes profile and notification preferences through /profile; DB reads and reload match authored inputs while user B remains unchanged. Use design users u1/u2 where approved and same-run identity receipts, with independently authenticated browser contexts. Invalid exposed input retains draft and persists nothing where accepted requirements specify it. Missing approved responsive/visual/error states remain blocked with exact component, condition and missing fact.
 
-Read-only source: web-ui routes.rs Route/AppShell/NotFoundView, components/layout/app_shell.rs and sidebar.rs (Expand sidebar, Collapse sidebar, mobile Close menu), profile.rs; cf-server handlers/api/user_preferences.rs get/patch/initialize and user_notifications.rs notification preferences; models/user_notifications.rs InApp|Email|Both.
+Authority/source reading: approved docs/design/CrystalForge/components/Shell.jsx and ProfileView.jsx control presentation. docs/knowledge/ui/frontend-navigation-and-shared-patterns.md, design-system-accessibility-responsive-motion.md and alerts-and-notifications-decision.md (preferences) are as-built evidence, not D1 acceptance authority. Read web-ui routes.rs (Route/AppShell/NotFoundView), components/layout/app_shell.rs, sidebar.rs, profile.rs; cf-server handlers/api/user_preferences.rs, user_notifications.rs and models/user_notifications.rs (InApp/Email/Both).
 
-Verify concrete foundation interfaces before dispatch. Pattern: checks/integration-access/scenarios/lifecycle-local-bootstrap. Required browser controller, narrow run_browser viewport and ctx.visual.compare(name, {view, theme, referenceSelector, actualSelector, maxDifferentRatio}). Justify the threshold in the spec; never raise it to pass. visual.compare has not run in an executed scenario: harness faults stop this case and go to coordinator, no workaround. Facts: u1 admin and u2 second user via localUserFromDesign.
+Dependency/readiness: TASK-490.1 controller bootstrap is tested at bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab with .25/.26 integrated. Use documented driver/browser assertions, receipts, sql_json and run_browser narrow viewport; each invocation starts an independent context. This packet awaits user selection, accepted UI states and coordinator composition/visual-interface verification. It does not need future Delivery roles.
 
-shell-navigation: unauthenticated protected route -> /login; signed-in navigation reaches every AppShell route and page heading; unknown route has NotFound and return path; sidebar collapse persists according to accepted requirements. Keyboard Tab reaches primary navigation, Enter activates; narrow viewport mobile menu and Close menu work. Compare desktop dark shell chrome with Shell.jsx using justified threshold and preserve reference/actual/diff images.
-
-configuration-preferences: user A changes profile and notification preferences through /profile; DB rows and reload agree; user B unchanged. Invalid input, if exposed by UI, retains draft and persists nothing according to accepted requirements. Missing approved visual states remain blocked with component, condition and missing fact.
-
-Candidate commands, NOT verified: nix build .#checks.x86_64-linux.integration-access.scenarios.shell-navigation -L and configuration-preferences; append .run for evidence. Coordinator aggregate: nix build .#checks.x86_64-linux.integration-access -L. Run one VM test at a time until measured capacity supports a higher limit. Explicit registration and real VM execution required, with exact commands/revision/outcomes/evidence in notes. Expectations derive from authored facts/accepted requirements, never CF responses. Preserve correct failing assertions, link Backlog product bugs and escalate interface/authority gaps; no product fixes.
-
-READINESS: foundation dependency commit unresolved; two existing Rust package tests block foundation and no VM execution occurred. Backlog, not ready. Future packet requires actual dependency commit(s), implemented signatures/fixtures/registration and verified commands before To Do. No delegation or executed slice is claimed.
+Focused verification after composition: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. Record exact revision, command, outcome and evidence. Base bootstrap success does not prove these fragments. Preserve correct assertions and linked product defects; escalate authority/helper gaps without product changes.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Both scenarios exist only under checks/integration-access/scenarios/ and are explicitly registered by the coordinator in the normal pkgs.linkFarm aggregate
-- [ ] #2 Every AppShell route is reached through navigation and renders its heading; unknown routes show NotFound and protected routes redirect unauthenticated users to /login
-- [ ] #3 Keyboard, sidebar and narrow-viewport navigation satisfy accepted requirements; uncertain cases remain blocked pending owner decision
-- [ ] #4 At least one Shell.jsx visual comparison runs with a justified threshold and preserved reference/actual/diff images
-- [ ] #5 Profile and notification preferences persist per user through reload without affecting another user
-- [ ] #6 Both scenarios execute in real VMs with exact commands, revision, outcomes and .run evidence recorded after actual dependency commits and verified packet commands exist
+- [ ] #1 The coordinator composes the named shell/preferences fragments into lifecycle-local-bootstrap; no packet-specific VM derivation is added
+- [ ] #2 Every accepted AppShell route is reached through navigation and renders its heading; unknown routes show NotFound/accepted return path and protected routes redirect unauthenticated users to /login
+- [ ] #3 Keyboard Tab/Enter, sidebar persistence and narrow mobile menu/Close menu satisfy accepted requirements; unresolved states remain explicitly blocked
+- [ ] #4 At least one approved desktop-dark Shell.jsx comparison executes with a justified unchanged threshold and retained reference/actual/diff images
+- [ ] #5 Profile and notification preferences persist per user through database read/reload without changing user B; invalid-input behavior is asserted only under accepted authority
+- [ ] #6 The coordinator executes the focused lifecycle-local-bootstrap gate with these fragments and records exact revision, command, outcome and evidence
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-10-17 organization correction replaces prior layout, commands and D1 authority instructions. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s), implemented helpers and verified commands are required before To Do. No Luna delegation or executed slice is claimed. Coordinator owns owner default.nix, shared lib and CI/docs; scenario files stay disjoint.
+Current readiness: bootstrap prerequisite bba718be is tested. This packet awaits selection, approved UI states and coordinator composition/visual-interface verification. No shell/preferences fragment run is claimed.
+
+### Historical
+The 2026-10-17 review recorded unresolved foundation/package prerequisites and no VM execution at that time. Former separate shell/preferences derivations are not the current layout. Bootstrap passed at b1095c8f and then rebased bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab; runtime riky1mm0nn185wb26abw7zzshnbml0fp has 292 migrations. Those results cover bootstrap only.
 <!-- SECTION:NOTES:END -->

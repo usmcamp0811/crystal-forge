@@ -7,8 +7,9 @@
 # the server starts, applies migrations, and exposes local setup-status.
 # Historical result at fc930335: startup failed before migrations because the
 # socket URI was invalid; local auth was not reached. TASK-490.25/.26 repairs
-# are now integrated. The next combined VM run must prove the assertions below;
-# do not add a test-only AUTH_MODE override or weaken the startup assertion.
+# are integrated. Keep the startup assertions and socket observation; never
+# add a test-only AUTH_MODE override. The coordinator appends selected session
+# cases only after the final one-session bootstrap assertion below.
 
 admin = FACTS["admin"]
 
@@ -55,6 +56,22 @@ with case("fresh-startup-applies-migrations"):
     expect_equal(rows[0]["applied"], FACTS["expectedMigrations"], "applied migrations")
     expect(rows[0]["ok"], "a migration is recorded as unsuccessful")
     receipt("migrations.applied", rows[0]["applied"])
+    # Observe actual application-role client backends, not the superuser
+    # observer or PostgreSQL background processes. NULL address and port -1
+    # are PostgreSQL's Unix-socket indicators.
+    database = FACTS["database"]
+    def cf_connections():
+        return sql_json(
+            controller,
+            "SELECT client_addr::text AS address, client_port AS port "
+            "FROM pg_stat_activity WHERE datname = '%s' AND usename = '%s' "
+            "AND backend_type = 'client backend'" % (database["name"], database["user"]),
+        )
+    connections = wait_for(cf_connections, "CF database client backends", timeout=30)
+    expect(len(connections) > 0, "no CF client connection was observed")
+    expect(all(c["address"] is None and c["port"] == -1 for c in connections),
+           "a CF client backend does not use a Unix socket")
+    receipt("database.unixSocketClients", len(connections))
 
 with case("fresh-server-reports-local-setup"):
     status, body = http(controller, "GET", "/api/auth/setup-status")

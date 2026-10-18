@@ -4,13 +4,16 @@ title: 'Assurance: real finding triage and batch-triage persistence scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-17 17:28'
+updated_date: '2026-10-18 13:59'
 labels:
   - testing
   - integration
   - luna
 dependencies:
   - TASK-490.16
+modified_files:
+  - checks/integration-assurance/scenarios/fragments/task-490.20-triage.py
+  - checks/integration-assurance/scenarios/fragments/task-490.20-triage.cjs
 parent_task_id: TASK-490
 priority: medium
 type: task
@@ -20,31 +23,38 @@ ordinal: 532000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Current packet boundary (2026-10-18; supersedes older independent-scenario wording below): TASK-490.20 owns triage Python/browser fragments only. The coordinator owns the shared `evidence-remediation-lifecycle.nix`, composition and registration. Real findings created earlier in this same fresh Assurance VM are passed through receipts. TASK-490.27 waiver and .28 acceptance are separate fragments, not this packet's writable paths. No per-packet VM derivation.
+Owning check: integration-assurance. Contract ID: assurance.remediation.triage. Goal: prove single/fleet and batch triage persistence and exact selection. Risk: medium. Non-goals: waiver (.27), acceptance register (.28), POA&M plan (.21), verification/closure (.29), product changes.
 
-Owning check: integration-assurance. Contract ID: assurance.remediation.triage. Exclusive scenario writes: checks/integration-assurance/scenarios/remediation-triage.{nix,py,cjs}.
+Writable paths (only):
+- checks/integration-assurance/scenarios/fragments/task-490.20-triage.py
+- checks/integration-assurance/scenarios/fragments/task-490.20-triage.cjs
 
-Start from real scan-produced findings created as setup in this scenario's own fresh VM. Single/fleet triage and batch triage persist actor, exact scope, status and justification; the unselected findings remain unchanged. Viewer is denied with no row change. Browser navigation reaches the exact CVE/system identity. No finding waiver or acceptance-register lifecycle here; those are TASK-490.27 and .28. POA&M plan creation is TASK-490.21; verification/closure is TASK-490.29.
+Composition target: checks/integration-assurance/scenarios/evidence-remediation-lifecycle.nix. Coordinator owns Nix/Python composition, browserSpecs and explicit registration/normal aggregation. After .16 real scans earlier in this fresh Assurance VM/database, consume finding/system identities through receipts. Earlier real import/policy records may provide context. Never consume another derivation's live findings, database, outputs or receipts. No packet-specific derivation and no seeded findings/triage results.
 
-Read-only production sources: cf-server api/cves.rs triage/batch/justification, related queries/models and routes; web UI CVE views and triage dialogs. Read the owner-approved cve-poam-evidence-continuity spec only for its stated scope; D1/as-built docs are not accepted authority. Any uncertain behavior is blocked pending an owner decision.
+Single/fleet triage and batch triage persist actor, exact scope, status and justification for independently authored selected findings. Unselected findings remain unchanged. Unauthorized Viewer writes fail with no row change. Browser navigation reaches exact CVE/finding/system identity and displays persisted triage state. Expected sets derive from authored facts and producer receipts, never the list response under test.
 
-Shared helper `lib.crystal-forge.makeIntegrationTestHarness {pkgs,inputs}` and `checks/integration-assurance/default.nix` registration are coordinator-owned. Writes are restricted to this scenario's files and owner-local triage fixtures. Each run has a fresh database/VM: TASK-490.16 runtime scan rows/receipts cannot be reused. Create scan evidence as real setup in this scenario; do not seed findings.
+Dependencies/readiness: TASK-490.16 real finding producer must be integrated with actual tested role/setup prerequisites and same-scenario placement. Foundation bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab already passed with .25/.26. This packet awaits selection, accepted triage actor/scope/UI authority and coordinator composition; no triage fragment execution is claimed. The prior decomposition is resolved by .27/.28/.29, not an additional unsplit-work blocker.
 
-Candidate command, not verified: `nix build .#checks.x86_64-linux.integration-assurance.scenarios.remediation-triage -L`; `.run` for evidence; coordinator owns the full Assurance check. Remain Backlog: foundation VM run fails on TASK-490.25/.26 and exact command/authority remain unverified.
+Read-only sources/authority: cf-server api/cves.rs triage/batch/justification, related queries/models/routes; web-ui CVE views and triage dialogs. Read owner-approved cve-poam-evidence-continuity-design-spec.md only for its approved scope. D1/as-built knowledge is evidence, not acceptance authority. Uncertain cases remain blocked: decision/design gap. Production, shared lib/driver helpers, composition, registration, CI, docs and design are read-only; use documented case/expect/receipt/http/sql_json/run_browser interfaces.
+
+Focused verification after composition: `nix build .#checks.x86_64-linux.integration-assurance.scenarios.evidence-remediation-lifecycle -L`. Coordinator records exact tested revision, command, result and evidence; keep correct failures and linked defects and escalate helper/authority gaps.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Triage and batch triage persist with actor and exact scope
-- [ ] #2 Batch triage affects exactly the authored selected set; unselected findings are unchanged
-- [ ] #3 Viewer triage is rejected with no database side effect
-- [ ] #4 Browser navigation reaches and displays the exact finding/system identity
-- [ ] #5 Scenario is registered in and included by the complete Assurance owner
-- [ ] #6 Executed in a real VM with exact command, revision, outcome and evidence
+- [ ] #1 Real scan-produced findings from earlier .16 cases in the same Assurance scenario are consumed through receipts; no finding/triage result is seeded or imported from another derivation
+- [ ] #2 Single/fleet and batch triage persist actor, exact scope, status and justification for exactly the authored selected set; unselected findings remain unchanged
+- [ ] #3 Unauthorized Viewer triage is rejected without a database side effect
+- [ ] #4 Browser navigation reaches exact CVE/finding/system identity and displays persisted triage state
+- [ ] #5 Coordinator composes only the named triage fragments into evidence-remediation-lifecycle; waiver/acceptance/plan/verification remain separate fragments and no packet-specific derivation is added
+- [ ] #6 Coordinator executes the focused evidence-remediation-lifecycle gate and records exact tested revision, command, result and evidence
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-10-17 organization correction and later packet decomposition: triage only; finding waiver TASK-490.27, acceptance register TASK-490.28, POA&M plan TASK-490.21, and verification/closure TASK-490.29. Runtime findings must be generated within this scenario's fresh VM. TASK-490.25/.26 currently block foundation startup; no packet is ready.
+Current readiness: bba718be controller foundation passed; .16 producer/setup, accepted triage authority and coordinator composition remain prerequisites. No triage execution is claimed.
+
+### Historical
+2026-10-17 reviews recorded foundation blockers and a need to split mixed remediation scope. That split produced .27 waiver, .28 acceptance and .29 verification; .20 is triage only. Earlier separate-run proposals could not reuse .16 live findings. Same-scenario real producer receipts are now permitted.
 <!-- SECTION:NOTES:END -->
