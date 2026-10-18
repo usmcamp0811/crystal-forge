@@ -4,7 +4,7 @@ title: 'Access: administration and environment form persistence scenarios'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-18 03:32'
+updated_date: '2026-10-18 13:45'
 labels:
   - testing
   - integration
@@ -53,4 +53,6 @@ The base scenario passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`; TASK-490
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction: native owner-local paths, shared lib/integration-test and explicit coordinator registration replace the prior layout; D1 as-built docs are not authority. Foundation commit unresolved; two existing Rust package tests block foundation, no VM execution. Backlog, not dispatch-ready. Actual dependency commit(s), implemented interfaces and verified commands are required before To Do. No Luna delegation or slice execution is claimed.
+
+Rebase verification: the TASK-490.1 local bootstrap passed at rebased source `bba718befbc183863781656df2df272e5f735d5a`; focused and aggregate commands are specified in the current description. This fragment set remains Backlog pending TASK-490.1 review/selection and approved form/error states.
 <!-- SECTION:NOTES:END -->
