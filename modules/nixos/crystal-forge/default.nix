@@ -2926,6 +2926,7 @@ in {
         {
           # Core runtime
           RUST_LOG = cfg.log_level;
+          AUTH_MODE = cfg.server.auth_mode;
           TZDIR = "${pkgs.tzdata}/share/zoneinfo";
           LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";
 
@@ -2953,7 +2954,6 @@ in {
           NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
         }
         // lib.optionalAttrs (cfg.server.auth_mode == "oidc") ({
-            AUTH_MODE = "oidc";
             CRYSTAL_FORGE_OIDC_ISSUER_URL = cfg.server.oidc.issuerUrl;
             CRYSTAL_FORGE_OIDC_CLIENT_ID = cfg.server.oidc.clientId;
             CRYSTAL_FORGE_OIDC_REDIRECT_URI = cfg.server.oidc.redirectUri;
