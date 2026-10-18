@@ -3,8 +3,9 @@ id: TASK-490.2
 title: >-
   Access: session protection, sign-out, and role/environment authorization
   scenarios
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@openai'
 created_date: '2026-10-17 16:34'
 updated_date: '2026-10-18 14:10'
 labels:
@@ -64,6 +65,15 @@ Focused verification after coordinator composition: `nix build .#checks.x86_64-l
 - [ ] #6 The coordinator executes the focused lifecycle-local-bootstrap gate with these fragments and records exact tested revision, command, outcome and evidence; identities use FACTS/admin.userId receipts and independent authenticated contexts
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Use the bootstrap-created Admin and receipts after the five existing cases. Create two named real HTTP sessions and identify each current session via API + DB.
+2. Exercise DELETE of the second session without CSRF, with mismatched CSRF, and with valid CSRF. Compare authored invalidated=false/true expectations and exact session rows before/after; prove revoked-session request is 401 and retained session stays valid. This action itself is the protected mutation, so no unrelated config changes are needed.
+3. Add independent browser sign-in/profile Sign out proof. Emit its current session ID, assert logout and reload/protected navigation unauthenticated, then prove that exact DB row invalidated.
+4. Coordinator composes only these fragments in current scenario; run DB targeted test first then one combined VM and owner reuse. Publish artifacts on MR. Leave authorization/registration obligations open.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
@@ -73,4 +83,6 @@ Current readiness: the user selected the sessions portion against bba718be; coor
 The 2026-10-17 organization review found unresolved foundation/package prerequisites and no VM execution at that time. The former separate session/role scenario proposal was replaced by same-scenario fragments. Earlier bootstrap passed at b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56. After rebase, the actual tested prerequisite is bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab8a7b372e8efe0d2dd21b6f53f0625064. Its recorded runtime is riky1mm0nn185wb26abw7zzshnbml0fp (292 migrations). These are foundation results, not execution of this packet.
 
 User selected the session portion in the current assignment. Execute it in the existing foundation worktree as explicitly requested, not a separate worker worktree. The tested controller prerequisite is bba718befbc183863781656df2df272e5f735d5a; unresolved role/environment/registration assertions do not block this session subset.
+
+LOCK: openai on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation. User explicitly selected session subset and existing worktree. The protected mutation is selected-session revocation; 403 status and unchanged rows are the user-required security contract (no generic structured error-code requirement on this endpoint).
 <!-- SECTION:NOTES:END -->
