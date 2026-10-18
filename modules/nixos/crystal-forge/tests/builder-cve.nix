@@ -58,9 +58,7 @@
     "server_derivation"
     ["source_re_evaluate_verified"]);
 in
-  # Defer module assertions until the build command is forced. Snowfall must
-  # establish the package namespace before modules can read its packages.
-  pkgs.runCommand "crystal-forge-builder-cve-contract-check" {} (
+  # Evaluate after the flake package namespace exists; no build is needed.
   assert defaults.config.services.crystal-forge.build.cve_scanning_enabled;
   assert !optedOut.config.services.crystal-forge.build.cve_scanning_enabled;
   assert compatibleStrategies.assertion;
@@ -73,6 +71,4 @@ in
     .CRYSTAL_FORGE__BUILDER__CVE_SCANNING_ENABLED == "false";
   assert lib.elem pkgs.vulnix
     defaults.config.systemd.services.crystal-forge-builder.path;
-  ''
-    touch "$out"
-  '')
+  true

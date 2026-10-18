@@ -1,4 +1,10 @@
-"""Checks real cold/warm discovery without external inputs or shared caches."""
+"""Checks real cold/warm discovery without external inputs or shared caches.
+
+Run through discovery.sh, which owns the disposable store and working directory.
+This exercises Nix fetch/evaluation behavior, not server orchestration or static
+source contracts. The 65-second delay distinguishes the historical 60-second
+deadline from the supported 300-second discovery deadline.
+"""
 
 import base64
 import hashlib

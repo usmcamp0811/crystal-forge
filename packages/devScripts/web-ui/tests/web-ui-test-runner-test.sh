@@ -9,6 +9,10 @@
 
 set -euo pipefail
 
+# Default-selection cases must not inherit the caller's development database.
+# Custom-database cases below supply their own explicit environment.
+unset DB_HOST DB_PORT DB_USER DB_NAME
+
 runner="${1:?runner path is required}"
 source_manifest="${2:?coverage manifest path is required}"
 tmp_dir="$(mktemp -d)"

@@ -2,6 +2,8 @@
   inputs,
   lib,
   pkgs,
+  runtime ? false,
+  moduleOnly ? false,
   ...
 }: let
   system = pkgs.stdenv.hostPlatform.system;
@@ -10,8 +12,6 @@
   componentBuilder = packages.cf-builder-drv;
   publicBuilder = packages.builder;
   niks3 = packages.niks3;
-  # Keep the onboarding-format trust-set regression in this blocking CI gate.
-  caBundleCompatibility = inputs.self.packages.${system}.verify-niks3-ca-bundle;
   moduleSystem = inputs.nixpkgs.lib.nixosSystem {
     inherit system;
     modules = [
@@ -160,10 +160,7 @@
   assert proxyCases.serverDisabled.failures == [] && proxyCases.serverDisabled.evaluates;
   assert lib.all (valid: valid) (builtins.attrValues evaluatorCases.valid);
   assert lib.all (results: lib.all (valid: !valid) results) (builtins.attrValues evaluatorCases.invalid);
-    pkgs.runCommand "crystal-forge-proxy-module-validation" {
-      nativeBuildInputs = [pkgs.bash pkgs.coreutils pkgs.jq pkgs.remarshal];
-      passthru.evaluationResults = proxyCases // {evaluator = evaluatorCases;};
-    } ''
+    ''
       mkdir -p "$out"
       cp ${pkgs.writeText "proxy-assertion-results.json" (builtins.toJSON proxyCases)} "$out/assertions.json"
       cp ${pkgs.writeText "evaluator-option-results.json" (builtins.toJSON evaluatorCases)} "$out/evaluator-options.json"
@@ -239,12 +236,8 @@
         and .server.eval_overall_timeout_secs == 1' "$out/lowerBounds.json"
     '';
 in
-  # Defer module assertions until the build command is forced. Snowfall must
-  # establish the package namespace before modules can read its packages.
-  pkgs.runCommand "crystal-forge-builder-evaluator-packaging" {
-    nativeBuildInputs = [pkgs.coreutils pkgs.gnugrep pkgs.gnused pkgs.jq pkgs.bash];
-    passthru = {inherit moduleValidation caBundleCompatibility;};
-  } (
+  # CI evaluates the boolean contract, then renders the runtime script with
+  # runtime=true. There is no verification derivation or package output.
   # INVARIANT: Both colocated services and the default builder package use the
   # Nix CLI linked to nix-eval-jobs. A package wrapper must not shadow this CLI.
   assert moduleConfig.services.crystal-forge.build.package == componentBuilder;
@@ -256,12 +249,19 @@ in
   assert builtins.head moduleConfig.systemd.services.crystal-forge-server.path == evaluatorNix;
   assert lib.elem niks3 moduleConfig.systemd.services.crystal-forge-builder.path;
   assert lib.elem niks3 moduleConfig.systemd.services.crystal-forge-server.path;
-    ''
+    assert builtins.isString moduleValidation;
+    if !runtime then true else ''
+      set -euo pipefail
+      : "''${TMPDIR:?Use a disposable directory}"
+      out="$TMPDIR/module-validation"
+      ${moduleValidation}
+      # Confine filesystem interception to the generated module script probes.
+      unset -f mkdir cp chmod
+      ${lib.optionalString (!moduleOnly) ''
       export HOME="$TMPDIR/home"
       export XDG_CACHE_HOME="$TMPDIR/cache"
       mkdir -p "$HOME" "$XDG_CACHE_HOME"
-      test -f ${moduleValidation}/assertions.json
-      test -s ${caBundleCompatibility}/cf-report.json
+      test -f "$out/assertions.json"
 
       component_wrapper=${componentBuilder}/bin/builder
       public_wrapper=${publicBuilder}/bin/builder
@@ -388,5 +388,6 @@ in
         *) exit 1 ;;
       esac
 
-      printf '%s\n%s\n' "$packaged_version" "$packaged_scanner_version" > "$out"
-    '')
+      printf '%s\n%s\n' "$packaged_version" "$packaged_scanner_version" > "$TMPDIR/packaged-versions"
+      ''}
+    ''

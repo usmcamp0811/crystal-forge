@@ -202,9 +202,10 @@ integration-access:
     - merge_requests
     - main
 
-# Lower-level verification remains automatic without exporting flake checks.
-# The package derivations preserve their test selections and isolated DB hooks.
-package-verification:
+# Ordinary component builds own unit, evaluator-protocol and schema checks.
+# Pure module assertions and developer-command selftests run directly here;
+# there is no verification package per former suite.
+component-tests:
   stage: check
   tags:
     - nix
@@ -212,15 +213,6 @@ package-verification:
     max: 2
     when:
       - runner_system_failure
-  parallel:
-    matrix:
-      - PACKAGE_NAME:
-          - verify-run-ui-dev-db-check
-          - verify-server-regressions
-          - verify-nixos-discovery-reliability
-          - verify-builder-evaluator-packaging
-          - verify-web-ui-test-runner
-          - okf-knowledge
   before_script:
     # Create .netrc using CI job token (more secure)
     - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
@@ -228,16 +220,44 @@ package-verification:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
+    - sh packages/ci/public-cache-build.sh .#default.cf-server-core-drv -L --show-trace --builders '' --max-jobs 1 --cores 2
+    - nix build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge -L --show-trace --builders '' --max-jobs 1 --cores 2
     - |
-      case "$PACKAGE_NAME" in
-        verify-server-regressions|verify-nixos-discovery-reliability|verify-builder-evaluator-packaging)
-          # Bound matrix execution locally while remote Query/Fetch is unhealthy.
-          sh packages/ci/public-cache-build.sh ".#${PACKAGE_NAME}" -L --show-trace --builders '' --max-jobs 1 --cores 2
-          ;;
-        *)
-          nix build ".#${PACKAGE_NAME}" -L --show-trace --builders '' --max-jobs 1 --cores 2
-          ;;
-      esac
+      for suite in builder-cve stig packaging; do
+        nix eval --impure --json --expr "
+          let
+            f = builtins.getFlake (\"git+file://\" + toString ./.);
+            p = import f.inputs.nixpkgs {
+              system = builtins.currentSystem;
+              overlays = [ f.overlays.default ];
+            };
+          in import ./modules/nixos/crystal-forge/tests/$suite.nix {
+            inputs = f.inputs // { self = f; };
+            pkgs = p;
+            lib = p.lib // { crystal-forge = f.lib; };
+          }"
+      done
+    - |
+      nix shell --impure --expr '
+        let
+          f = builtins.getFlake ("git+file://" + toString ./.);
+          p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
+        in [ p.bash p.coreutils p.gnugrep p.gnused p.iproute2 p.procps p.util-linux
+             p.nodejs p.python3 p.nix-eval-jobs.nix p.nix-eval-jobs p.git
+             p.remarshal p.jq p.libxml2 p.openscap ]
+      ' --builders '' --max-jobs 1 --cores 2 --command bash -euo pipefail -c '
+        bash modules/nixos/crystal-forge/tests/discovery.sh
+        bash modules/nixos/crystal-forge/tests/packaging.sh
+        core=$(nix eval --raw .#default.cf-server-core-drv.outPath)
+        xccdf_schemas=$(nix eval --raw .#xccdf-1-2-schemas.outPath)
+        bash packages/default/crates/cf-server/tests/xccdf-schema.sh \
+          "$core" "$xccdf_schemas" "$PWD/schemas/cf-xccdf-1/cf-xccdf-1.xsd"
+        unset DB_HOST DB_PORT DB_USER DB_NAME
+        bash packages/devScripts/db-usability-check-test.sh packages/devScripts/db-usability-check.sh
+        bash packages/devScripts/db-only-start-test.sh packages/devScripts/db-only-start.sh
+        bash packages/devScripts/web-ui/tests/web-ui-test-runner-test.sh \
+          packages/devScripts/web-ui/tests/web-ui-test.sh packages/devScripts/web-ui/coverage-manifest.json
+      '
   only:
     - merge_requests
     - main
@@ -281,10 +301,9 @@ dashboard-visibility-tests:
     - merge_requests
     - main
 
-# Runs the evaluation state-machine regression tests (queries::commits::tests and
-# queries::derivations::tests, all #[ignore]-marked) via the repo-owned
-# `devScripts.state-machine-test` process-compose project. That target starts an
-# isolated DB, applies migrations, runs the tests with --ignored, and exits.
+# One invocation-owned PostgreSQL cluster and Cargo target directory run the
+# unique ignored library/integration regressions and populated migration
+# rehearsals. Nonignored library tests stay in ordinary component builds.
 state-machine-tests:
   stage: check
   tags:

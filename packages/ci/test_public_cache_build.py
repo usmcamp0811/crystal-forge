@@ -33,12 +33,10 @@ POLICY = [
 LOCAL_EXECUTION = ["--builders", "", "--max-jobs", "1", "--cores", "2"]
 
 new = yaml.safe_load((ROOT / ".gitlab-ci.yml").read_text())
-MATRIX_NAMES = new["package-verification"]["parallel"]["matrix"][0]["PACKAGE_NAME"]
-LOCAL_CHECKS = set(MATRIX_NAMES)
 # Source retirement removes the legacy jobs, not their accepted replacement
 # obligations. Only integration owners belong in the flake check namespace.
 assert not {"flake-check", "legacy-flake-check", "web-ui-check",
-            "web-ui-baseline-candidates"}.intersection(new)
+            "web-ui-baseline-candidates", "package-verification"}.intersection(new)
 
 with tempfile.TemporaryDirectory(prefix="cf-ci-policy-") as temporary:
     directory = Path(temporary)
@@ -121,33 +119,29 @@ cores = 4
         assert "127.0.0.1" not in result.stdout + result.stderr
         return result
 
-    route = new["package-verification"]["script"][0]
-    for name in MATRIX_NAMES:
+    component_builds = [
+        ([".#default.cf-server-core-drv"], True),
+        ([".#nixos-options-metadata", ".#oscal-fixture", ".#okf-knowledge"], False),
+    ]
+    for route, (installables, scoped) in zip(new["component-tests"]["script"], component_builds):
         result = subprocess.run(["sh", "-euc", route], cwd=ROOT,
-                                env=dict(env, PACKAGE_NAME=name), capture_output=True, text=True)
-        assert result.returncode == 0, name
+                                env=env, capture_output=True, text=True)
+        assert result.returncode == 0, installables
         recorded = json.loads((directory / "argv").read_text())
-        arguments = [f".#{name}", "-L", "--show-trace"]
-        local = name in LOCAL_CHECKS
-        if local:
-            arguments.extend(LOCAL_EXECUTION)
-        scoped = name in {"verify-server-regressions",
-                          "verify-nixos-discovery-reliability",
-                          "verify-builder-evaluator-packaging"}
-        assert recorded == ["build", *(POLICY if scoped else []), *arguments], name
-        assert result.stdout.count("InheritedInternalCache=") == int(scoped), name
+        arguments = [*installables, "-L", "--show-trace", *LOCAL_EXECUTION]
+        assert recorded == ["build", *(POLICY if scoped else []), *arguments], installables
+        assert result.stdout.count("InheritedInternalCache=") == int(scoped), installables
         # Query real Nix with the recorded build's exact configuration flags.
         # Compare private inherited values in memory; never print those values.
         controls = recorded[1:]
         controls = [arg for arg in controls if arg not in
-                    {arguments[0], "-L", "--show-trace"}]
+                    {*installables, "-L", "--show-trace"}]
         for setting in inherited_controls:
             effective = subprocess.check_output(
                 [real_nix, *controls, "config", "show", setting], env=env)
-            expected = ({"builders": b"\n", "max-jobs": b"1\n", "cores": b"2\n"}
-                        .get(setting, inherited_controls[setting]) if local
-                        else inherited_controls[setting])
-            assert effective == expected, (name, setting)
+            expected = {"builders": b"\n", "max-jobs": b"1\n", "cores": b"2\n"}.get(
+                setting, inherited_controls[setting])
+            assert effective == expected, (installables, setting)
     for job, installable in (("complexity-check", ".#code-metrics.complexity-report"),
                              ("coverage-check", ".#coverage.coverage-report")):
         script = new[job]["script"]
@@ -177,11 +171,11 @@ cores = 4
     assert run([".#checks.x86_64-linux.integration-access"], BUILD_EXIT="17").returncode == 17
     # An old CLI rejects config show but supports legacy show-config. Exercise
     # real legacy configuration parsing, including the exact same build argv.
-    result = run([".#verify-builder-evaluator-packaging", "-L"], OLD_CLI="1")
+    result = run([".#default.cf-server-core-drv", "-L"], OLD_CLI="1")
     assert result.returncode == 0
     assert result.stdout.count("InheritedInternalCache=true") == 1
     assert json.loads((directory / "argv").read_text()) == [
-        "build", *POLICY, ".#verify-builder-evaluator-packaging", "-L"]
+        "build", *POLICY, ".#default.cf-server-core-drv", "-L"]
     assert run(["--check-config"], OLD_CLI="1").returncode == 0
     for mode in ("missing", "empty", "duplicate", "conflict", "malformed", "unsupported"):
         (directory / "argv").unlink(missing_ok=True)
@@ -227,7 +221,7 @@ cores = 4
     assert "Effective fallback=true" in built.stdout
 
 print("PASS: modern/legacy Nix policy, inherited builder controls equal=true, "
-      "package matrix local execution cases equal=true, "
+      "component build local execution cases equal=true, "
       "scoped argv, secret redaction, "
       "missing/empty/duplicate/conflicting/unsupported settings, exit status, "
       "real integration fixture source build with signatures and fallback enabled")

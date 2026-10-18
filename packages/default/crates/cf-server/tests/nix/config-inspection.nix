@@ -1,15 +1,15 @@
-{ pkgs, ... }:
+{ pkgs, legacyLock }:
 
 let
-  inspectorSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_inspector.nix;
-  definitionValuesSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_definition_values.nix;
-  provenanceSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_provenance.nix;
-  provenanceLibSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_provenance_lib.nix;
-  valueEncodingSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_value_encoding.nix;
-  shallowObserverSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_shallow_observer.nix;
+  inspectorSource = builtins.readFile ../../src/models/config_inspector.nix;
+  definitionValuesSource = builtins.readFile ../../src/models/config_definition_values.nix;
+  provenanceSource = builtins.readFile ../../src/models/config_provenance.nix;
+  provenanceLibSource = builtins.readFile ../../src/models/config_provenance_lib.nix;
+  valueEncodingSource = builtins.readFile ../../src/models/config_value_encoding.nix;
+  shallowObserverSource = builtins.readFile ../../src/models/config_shallow_observer.nix;
   legacyNixpkgs = builtins.fetchTree
     (builtins.fromJSON
-      (builtins.readFile ../../lib/test-flake/test-flake/flake.lock)).nodes.nixpkgs.locked;
+      (builtins.readFile legacyLock)).nodes.nixpkgs.locked;
   fixture = pkgs.runCommand "crystal-forge-config-inspector-fixture" { } ''
     mkdir -p "$out"
     touch "$out/explicit-modules-location.nix"
@@ -450,9 +450,7 @@ let
   diagnosticStressFile = pkgs.writeText "crystal-forge-config-inspector-diagnostic-stress.nix" diagnosticStressExpression;
   diagnosticStressDefinitionValuesFile = pkgs.writeText "crystal-forge-config-definition-values-diagnostic-stress.nix" diagnosticStressDefinitionValuesExpression;
 in
-pkgs.runCommand "crystal-forge-config-inspector-check" {
-  nativeBuildInputs = [ pkgs.jq pkgs.nix-eval-jobs.nix pkgs.nix-eval-jobs ];
-} ''
+''
   export HOME="$TMPDIR"
   export XDG_CACHE_HOME="$TMPDIR/cache"
 
@@ -461,11 +459,11 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
   test "$count" -gt 30000
   unsupported=$(nix eval "''${nix_args[@]}" --json --expr "import ${unsupportedCapabilityFile}")
   test "$(printf '%s' "$unsupported" | jq -r '.supported')" = false
-  test "$(printf '%s' "$unsupported" | jq -r '.reasonCode')" = helper_capability_unavailable
-  ! grep -F 'builtins.elem option.option_key allowedOptionKeys' ${../../packages/default/crates/cf-server/src/models/config_definition_values.nix}
-  grep -F 'builtins.hasAttr option.option_key allowedOptionKeySet' ${../../packages/default/crates/cf-server/src/models/config_definition_values.nix} >/dev/null
-  ! grep -F 'lib.unique optionKeys' ${../../packages/default/crates/cf-server/src/models/config_inspector.nix}
-  ! grep -F "builtins.foldl'" ${../../packages/default/crates/cf-server/src/models/config_inspector.nix}
+   test "$(printf '%s' "$unsupported" | jq -r '.reasonCode')" = helper_capability_unavailable
+   ! grep -F 'builtins.elem option.option_key allowedOptionKeys' ${../../src/models/config_definition_values.nix}
+   grep -F 'builtins.hasAttr option.option_key allowedOptionKeySet' ${../../src/models/config_definition_values.nix} >/dev/null
+   ! grep -F 'lib.unique optionKeys' ${../../src/models/config_inspector.nix}
+   ! grep -F "builtins.foldl'" ${../../src/models/config_inspector.nix}
 
   nix eval "''${nix_args[@]}" --json --expr "import ${shallowFile}" > shallow.json
   jq -e '
@@ -763,5 +761,4 @@ pkgs.runCommand "crystal-forge-config-inspector-check" {
     ' result.jsonl >/dev/null
 
    ! grep -E 'unrelated configuration forced|namespace-change-me' result.stderr
-  touch "$out"
 ''

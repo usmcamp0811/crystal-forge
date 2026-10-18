@@ -2,7 +2,7 @@
 # Unit tests for mkStigModule.
 #
 # These are pure Nix evaluations — no VM, no build, no network.
-# They run as part of `nix flake check` and catch regressions in:
+# Explicit CI evaluation catches regressions in:
 #   - Traversal: mapAttrsRecursiveCond must not recurse into property wrappers.
 #   - Priority: STIG values use mkOverride 1 (beats mkForce, defaults, everything).
 #   - Override wrappers: mkForce/mkDefault in stigConfig is unwrapped then re-wrapped.
@@ -347,7 +347,4 @@ let
   # ── Run all tests ─────────────────────────────────────────────────────────
   allPassed = t1 && t2 && t3 && t4 && t5 && t6 && t7 && t8 && t9 && t10 && t11;
 in
-pkgs.runCommand "stig-unit-tests" {} ''
-  ${lib.optionalString allPassed "echo 'All mkStigModule unit tests passed'"}
-  touch $out
-''
+assert allPassed; true

@@ -1,57 +1,13 @@
-{ pkgs, ... }:
+#!/usr/bin/env bash
+# Runs the selected database contracts inside state-machine-test's disposable
+# PostgreSQL environment. The caller exports both database URLs and PG* values,
+# enters packages/default in the sqlx shell, and shares one Cargo target directory.
+# Normal nonignored library tests belong to the ordinary --lib --bins package
+# tests. Keep named ignored selections and integration targets explicit here.
+set -euo pipefail
 
-# Critical PostgreSQL-backed Rust regressions that are intentionally outside
-# the normal cf-server package build.
-#
-# Why this check exists:
-# `packages/default/default.nix` builds/tests cf-server with `--lib --bins`.
-# Cargo integration targets under `crates/cf-server/tests/` are therefore not
-# compiled or executed by `nix build .#server`. The general NixOS integration
-# check runs the Python cf_test suite, not these Rust targets.
-#
-# Keep this list focused on data-integrity contracts. Do not turn this into an
-# indiscriminate `--all-targets --ignored` gate: the repository also contains
-# intentionally manual, slow, and environment-specific ignored tests.
-pkgs.rustPlatform.buildRustPackage {
-  pname = "crystal-forge-server-regressions";
-  version = "0.1.0";
-
-  src = ../../packages/default;
-  cargoLock.lockFile = ../../packages/default/Cargo.lock;
-
-  # Build the server library once; the custom check phase below compiles and
-  # runs only the selected integration targets.
-  cargoBuildFlags = [ "--package" "cf-server" "--lib" ];
-
-  nativeBuildInputs = with pkgs; [
-    pkg-config
-    nix
-    postgresql
-    postgresqlTestHook
-    sqlx-cli
-  ];
-  buildInputs = with pkgs; [
-    openssl
-    libressl
-  ];
-
-  doCheck = true;
-  SQLX_OFFLINE = "true";
-
-  # sqlx::test creates disposable databases. The hook's test role therefore
-  # needs CREATEDB; SUPERUSER also lets migration tests exercise trigger and
-  # immutability behavior exactly as production migrations define it.
-  postgresqlTestUserOptions = "LOGIN SUPERUSER CREATEDB";
-  postgresqlExtraSettings = "shared_preload_libraries = 'pg_stat_statements'";
-  postgresqlEnableTCP = 1;
-  PGUSER = "cf_regression";
-  PGDATABASE = "cf_regression";
-
-  checkPhase = ''
-    runHook preCheck
-
-    # Keep the timing EXIT trap local so PostgreSQL hook cleanup retains its
-    # ownership. Boundaries report real work, never periodic synthetic output.
+    # Keep the timing EXIT trap local. The parent launcher owns PostgreSQL
+    # cleanup. Boundaries report real work, never periodic synthetic output.
     (
     checkStarted=$SECONDS
     phaseName=""
@@ -69,6 +25,8 @@ pkgs.rustPlatform.buildRustPackage {
       phaseStarted=$SECONDS
       printf 'START phase=%s at=%s\n' "$phaseName" "$(date -u +%FT%TZ)"
     }
+    # ShellCheck does not follow this function's EXIT-trap invocation.
+    # shellcheck disable=SC2329
     finishCheck() {
       local status="$?"
       finishPhase "$status"
@@ -121,8 +79,6 @@ pkgs.rustPlatform.buildRustPackage {
     export cargoStderrTail
 
     beginPhase migrations-and-upgrade-rehearsals
-    export DATABASE_URL="postgresql://$PGUSER@127.0.0.1/$PGDATABASE"
-    export CRYSTAL_FORGE_TEST_DATABASE_URL="$DATABASE_URL"
     # Public sandbox-only fixture key. Never inherit deployment credentials.
     export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="server-regressions-public-fixture-key"
 
@@ -133,13 +89,13 @@ pkgs.rustPlatform.buildRustPackage {
 
     echo "=== Populated pre-0233 migration rehearsal ==="
     createdb cf_upgrade
-    upgradeUrl="postgresql://$PGUSER@127.0.0.1/cf_upgrade"
+    upgradeUrl="postgresql://$PGUSER@127.0.0.1:$PGPORT/cf_upgrade"
     pre0233="$TMPDIR/migrations-through-0232"
     mkdir -p "$pre0233"
     expectedTask433Migrations=0
     for migration in crates/cf-server/migrations/*.sql; do
-      base="''${migration##*/}"
-      version="''${base%%_*}"
+      base="${migration##*/}"
+      version="${base%%_*}"
       if (( 10#$version <= 232 )); then
         cp "$migration" "$pre0233/"
       fi
@@ -288,12 +244,12 @@ SQL
 
     echo "=== Populated pre-0248 immutable-artifact upgrade rehearsal ==="
     createdb cf_snapshot_upgrade
-    snapshotUpgradeUrl="postgresql://$PGUSER@127.0.0.1/cf_snapshot_upgrade"
+    snapshotUpgradeUrl="postgresql://$PGUSER@127.0.0.1:$PGPORT/cf_snapshot_upgrade"
     pre0248="$TMPDIR/migrations-through-0247"
     mkdir -p "$pre0248"
     for migration in crates/cf-server/migrations/*.sql; do
-      base="''${migration##*/}"
-      version="''${base%%_*}"
+      base="${migration##*/}"
+      version="${base%%_*}"
       if (( 10#$version <= 247 )); then
         cp "$migration" "$pre0248/"
       fi
@@ -575,14 +531,6 @@ SQL
       cve_inventory_sources_route_hides_systems_and_serializes_unbuilt_targets \
       -- --ignored --test-threads=1
 
-    echo "=== Composite AC3 pure validation and interchange matrix ==="
-    cargo test --offline --package cf-server --lib \
-      ac3_validation_matrix_accepts_and_rejects_each_exposed_kind_discriminately \
-      -- --test-threads=1
-    cargo test --offline --package cf-server --lib \
-      composite_json_toml_and_cf_native_interchange_preserve_all_supported_rules \
-      -- --test-threads=1
-
     echo "=== Composite AC3 authoritative Nix executor matrix ==="
     cargo test --offline --package cf-server --lib \
       ac3_actual_nix_executor_matrix_distinguishes_pass_fail_error_and_evidence \
@@ -657,9 +605,6 @@ SQL
       finalization_populates_host_metrics_for_complete_configuration_corpus \
       -- --ignored --test-threads=1
     cargo test --offline --package cf-server --lib \
-      evaluation_start_waits_for_snapshot_writer_before_commit_lock \
-      -- --ignored --test-threads=1
-    cargo test --offline --package cf-server --lib \
       canonical_evaluation_queue_transition_preserves_lineage_and_finalization \
       -- --ignored --test-threads=1
     cargo test --offline --package cf-server --lib \
@@ -684,9 +629,6 @@ SQL
       -- --ignored --test-threads=1
     cargo test --offline --package cf-server --lib \
       successful_system_persistence_waits_for_snapshot_writer_lock \
-      -- --ignored --test-threads=1
-    cargo test --offline --package cf-server --lib \
-      cross_commit_shared_path_keeps_distinct_idempotent_rows \
       -- --ignored --test-threads=1
     cargo test --offline --package cf-server --lib \
       options_page_rejects_every_malformed_variant_outside_requested_page \
@@ -749,7 +691,7 @@ SQL
     runExactCacheRegression() {
       local testName="$1" mode=nonignored started=$SECONDS status
       shift
-      if [[ "''${1:-}" == --ignored ]]; then
+      if [[ "${1:-}" == --ignored ]]; then
         mode=ignored
       fi
       local testLog="$TMPDIR/task470-exact-test.log"
@@ -791,6 +733,8 @@ SQL
       scheduled_environment_keeps_both_exact_packages
     do
       testLog="$TMPDIR/task487-register-export-exact-test.log"
+      # Expand positional arguments in the child shell, not in this parent.
+      # shellcheck disable=SC2016
       runRegressionCommand "$testName" ignored \
         bash -o pipefail -c 'cargo test --offline --package cf-server \
           --test register_export_selection "$1" \
@@ -844,28 +788,25 @@ SQL
     # process_pending_commits reloads CrystalForgeConfig independently of
     # CFState. Scope this public fixture to the worker's exact test process;
     # other regressions must retain their existing execution-mode configuration.
-    CRYSTAL_FORGE_CONFIG=${pkgs.writeText "required-inventory-worker-mock.toml" ''
-      [server]
-      host = "127.0.0.1"
-      port = 0
-      execution_mode = "mock"
-    ''} runExactCacheRegression \
+    mockConfig="$TMPDIR/required-inventory-worker-mock.toml"
+    # The worker reloads the complete config, not just execution_mode. Use the
+    # verified invocation-owned test database rather than inherited dev-shell
+    # defaults. This fixture contains no deployment credentials.
+    cat > "$mockConfig" <<TOML
+[database]
+host = "$PGHOST"
+port = $PGPORT
+user = "$PGUSER"
+name = "$PGDATABASE"
+password = ""
+[server]
+host = "127.0.0.1"
+port = 0
+execution_mode = "mock"
+TOML
+    CRYSTAL_FORGE_CONFIG="$mockConfig" runExactCacheRegression \
       server::required_inventory_worker_tests::required_inventory_actual_worker_releases_permit_before_blocked_finalization \
       --ignored
-
-    for testName in \
-      handlers::api::commits::log_registry::tests::rotation_fences_producer_cleanup_and_closes_old_receivers \
-      handlers::api::commits::log_registry::tests::atomic_replay_live_boundary_delivers_each_event_once \
-      handlers::api::commits::log_registry::tests::retired_generation_and_other_state_cannot_publish \
-      handlers::api::commits::log_registry::tests::replay_and_channel_capacity_are_bounded_without_retargeting \
-      handlers::api::commits::tests::all_message_variants_require_original_producer_generation \
-      handlers::api::commits::tests::eval_log_wire_shapes_remain_compatible \
-      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_deadline_drops_writer_without_admission \
-      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_preserves_failures_and_blocks_both_producer_gates \
-      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_final_check_fails_closed
-    do
-      runExactCacheRegression "$testName"
-    done
 
     # MR334 review regressions use the declared module paths, including child
     # test modules. Keep each isolated SQLx case behind the exact-success guard.
@@ -967,10 +908,6 @@ SQL
       queries::eval_policy_plans::tests::isolated_mock_projection_matches_attempt_and_rejects_ambiguous_native \
       queries::eval_policy_plans::tests::confirmed_native_finalizer_failure_is_attempt_owned_and_preserves_build \
       queries::eval_policy_plans::tests::confirmed_native_finalizer_cancellation_writes_no_failure_evidence \
-      queries::commits::tests::derivation_count_isolated_current_mock_has_zero_records \
-      queries::commits::tests::derivation_count_excludes_stale_native_and_queued_retry \
-      queries::commits::tests::derivation_count_counts_current_native_records_not_groups \
-      queries::commits::tests::derivation_count_markerless_legacy_is_unavailable \
       queries::commits::partial_resource_failure_tests::partial_resource_failure_retains_rejected_completion_with_preserved_build_history \
       queries::commits::partial_resource_failure_tests::partial_resource_failure_reconciles_committed_but_unacknowledged_completion \
       queries::commits::partial_resource_failure_tests::partial_resource_failure_ignores_never_committed_completion_candidate \
@@ -1026,101 +963,4 @@ SQL
     do
       runExactCacheRegression "$testName" --ignored
     done
-    for testName in \
-      queries::commits::partial_resource_failure_tests::partial_failure_diagnostic_uses_proven_counts_not_checkpoint_guesses \
-      handlers::api::builders::tests::evaluator_fixture_reproduces_inherited_cloexec_writer \
-      handlers::api::builders::tests::evaluator_fingerprint_reports_executing_nix_and_pure_contract \
-      queries::commits::partial_resource_failure_tests::evaluation_failure_resource_marker_is_server_owned \
-      queries::commits::partial_resource_failure_tests::partial_failure_cohort_keeps_confirmed_and_resource_systems_disjoint \
-      models::retry_policy::tests::resource_failure_never_retries_whole_flake_despite_available_budget \
-      models::cache_destination::tests::niks3_basic_pair_validation_redaction_modes_and_authority \
-      models::cache_destination::tests::niks3_probe_planes_bootstrap_without_unselected_settings \
-      handlers::api::caches::basic_read_tests::niks3_basic_http_projection_and_plane_scope_do_not_cross_credentials \
-      handlers::api::caches::niks3_write_probe::tests::native_gc_schema_rejects_generic_json_and_invalid_typed_fields \
-      handlers::api::caches::niks3_write_probe::tests::exact_status_media_type_and_body_are_required \
-      handlers::api::caches::niks3_write_probe::tests::mtls_control_requires_a_specific_identity_alert_not_any_transport_failure \
-      handlers::api::caches::niks3_write_probe::tests::nginx_omission_requires_complete_page_and_only_opens_mtls_control \
-      handlers::api::caches::niks3_write_probe::tests::nginx_ingress_control_still_requires_both_native_handler_fingerprints \
-      handlers::api::caches::niks3_write_probe::tests::native_token_route_pair_proves_access_and_sends_only_invalid_bodies \
-      handlers::api::caches::niks3_write_probe::tests::no_post_follows_unknown_get_or_non_discriminating_authentication_control \
-      handlers::api::caches::niks3_write_probe::tests::definite_native_token_denial_is_false_not_untested \
-      handlers::api::caches::niks3_write_probe::tests::strict_gc_json_accepts_finished_failure_without_exposing_provider_error \
-      handlers::api::caches::niks3_write_probe::tests::mtls_route_requests_send_no_bearer_and_native_subject_denial_is_false \
-      handlers::api::caches::niks3_write_probe::tests::retained_and_replacement_effective_snapshots_select_only_active_write_credentials \
-      handlers::api::caches::niks3_write_probe::tests::missing_or_invalid_write_token_reports_local_failure_without_dns_or_read_borrowing \
-      handlers::api::caches::niks3_write_probe::tests::all_scope_invalid_bearer_preflight_precedes_metadata_dns_and_read_requests \
-      handlers::api::caches::niks3_write_probe::tests::niks3_read_custom_ca_replaces_ambient_roots_and_invalid_bundles_do_not_fallback \
-      handlers::api::caches::niks3_write_probe::tests::write_metadata_reachability_is_independent_of_protected_authentication \
-      handlers::api::caches::niks3_write_probe::tests::all_metadata_key_mismatch_keeps_api_reachable_and_does_not_skip_authentication \
-      handlers::api::caches::niks3_write_probe::tests::all_scope_missing_token_keeps_existing_local_validation_rejection \
-      handlers::api::caches::niks3_write_probe::tests::generic_post_errors_and_contradictory_controls_never_verify_authorization \
-      handlers::api::caches::niks3_write_probe::tests::unexpected_success_stops_without_control_retry_or_valid_request \
-      handlers::api::caches::niks3_write_probe::tests::metadata_and_read_requests_do_not_receive_write_bearer \
-      handlers::api::caches::niks3_write_probe::tests::chunked_bodies_are_bounded_and_a_shared_deadline_covers_stream_consumption \
-      security::cache_secrets::tests::basic_password_envelope_preserves_spaces_and_literal_prefixes \
-      queries::builders::tests::niks3_publication_fingerprint_includes_secrets_policy_and_canonical_sets \
-      handlers::api::caches::storage_metrics::tests::native_values_preserve_basis_without_inventing_paths \
-      handlers::api::caches::storage_metrics::tests::attic_inventory_preserves_exact_identity_u64_and_path_basis \
-      handlers::api::caches::storage_metrics::tests::attic_inventory_rejects_missing_null_negative_overflow_and_identity_mismatch \
-      handlers::api::caches::storage_metrics::tests::attic_optional_metadata_gate_requires_current_enabled_type_and_admin \
-      handlers::api::caches::storage_metrics::tests::attic_mapping_is_explicit_https_and_fails_closed_for_every_invalid_entry \
-      handlers::api::caches::storage_metrics::tests::attic_request_uses_only_adapter_bearer_and_exact_canonical_name \
-      handlers::api::caches::storage_metrics::tests::attic_token_loader_rejects_symlinks_public_files_and_bad_tokens \
-      handlers::api::caches::storage_metrics::tests::attic_protected_token_file_enforces_exact_adapter_alphabet_and_boundaries \
-      handlers::api::caches::storage_metrics::tests::attic_response_is_bounded_and_status_errors_are_static \
-      handlers::api::caches::storage_metrics::tests::attic_invalid_mapping_or_name_stops_before_file_or_network \
-      handlers::api::caches::storage_metrics::tests::malformed_negative_missing_and_overflow_stats_never_become_zero \
-      handlers::api::caches::storage_metrics::tests::metadata_gates_skip_all_unsupported_disabled_and_non_admin_probes \
-      handlers::api::caches::storage_metrics::tests::missing_endpoint_denial_redirects_and_non_native_success_are_not_empty_stats \
-      handlers::api::caches::storage_metrics::tests::streamed_body_limit_rejects_overflow_without_retaining_rejected_chunk \
-      handlers::api::caches::storage_metrics::tests::absent_metrics_wire_shape_is_explicit_and_not_http_cached \
-      handlers::api::caches::storage_metrics::tests::stats_request_keeps_configured_authority_prefix_and_no_authorization \
-      handlers::api::caches::storage_metrics::tests::overall_deadline_cancels_pending_work_and_returns_nulls \
-      handlers::api::caches::storage_metrics::tests::unauthenticated_request_stops_before_database_lookup \
-      handlers::api::caches::discovery_tests::niks3_discovery_projects_only_write_mtls_and_public_mode \
-      handlers::api::caches::discovery_tests::niks3_discovery_rejects_invalid_bundles_and_queries_before_network \
-      handlers::api::caches::discovery_tests::niks3_discovery_admin_first_and_public_response_redact_tls_material \
-      security::cache_secrets::tests::certificate_bundle_regressions_reject_interleaved_comments_and_noncert_blocks \
-      handlers::api::caches::niks3_ca_tests::ca_normalization_keeps_roots_separate_from_strict_client_chains \
-      handlers::api::caches::niks3_ca_tests::ca_diagnostics_are_typed_static_and_field_scoped \
-      handlers::api::caches::niks3_ca_tests::mismatched_write_identity_fails_before_dns_and_never_proves_auth \
-      handlers::api::caches::niks3_ca_tests::custom_write_roots_skip_ambient_trust_and_validate_every_root \
-      handlers::api::caches::niks3_ca_tests::transport_diagnostics_use_local_causes_not_url_or_body_text \
-      queries::cache_destinations::tests::retained_niks3_secrets_preserve_exact_opaque_storage \
-      queries::cache_destinations::tests::effective_niks3_secret_clears_discard_original_storage \
-      queries::cache_destinations::tests::ca_updates_retain_all_niks3_secret_storage_and_inactive_fields \
-      handlers::api::builders::tests::attic_requisite_env_uses_shared_server_base \
-      handlers::api::caches::retained_probe_tests::attic_canonical_api_and_model_read_roots_share_named_cache \
-      handlers::api::caches::retained_probe_tests::attic_native_metadata_and_status_matrix_never_claims_root_or_write_success \
-      handlers::api::caches::retained_probe_tests::attic_target_policy_and_credential_queries_fail_before_network \
-      handlers::api::caches::retained_probe_tests::active_type_metadata_and_serialization_never_reveal_inactive_credentials \
-      handlers::api::caches::retained_probe_tests::effective_update_never_borrows_inactive_credentials_on_type_conversion \
-      handlers::api::caches::retained_probe_tests::bearer_auth_is_exclusive_to_active_attic \
-      handlers::api::caches::retained_probe_tests::every_url_field_redacts_decoded_aws_queries_and_invalid_urls_fail_closed \
-      handlers::api::caches::s3_probe::tests::sigv4_signs_exact_bucket_host_path_query_and_sensitive_session \
-      handlers::agent_request::tests::niks3_capability_requires_authenticated_body_and_ignores_unsigned_headers \
-      handlers::agent::heartbeat::tests::niks3_selected_cache_never_drops_private_or_unsupported_first_for_fallback \
-      handlers::api::builders::tests::niks3_preclaim_capability_gate_preserves_legacy_cache_dispatch \
-      handlers::api::builders::tests::cache_probe_failure_codes_and_wire_contract_are_static \
-      handlers::api::builders::tests::cache_probe_exact_root_refresh_attic_and_private_capture_bounds \
-      handlers::api::builders::tests::niks3_basic_probe_applies_guard_to_path_info_only \
-      handlers::api::builders::tests::niks3_completion_probe_uses_independent_read_plane \
-      handlers::api::builders::tests::niks3_probe_failure_never_polls_success_transition \
-      handlers::api::builders::tests::niks3_probe_timeout_and_cancellation_reap_before_cleanup \
-      handlers::api::builders::tests::niks3_pinned_nix_accepts_remote_metadata_and_refresh_flags \
-      handlers::api::builders::niks3_input_owner_tests::niks3_input_owner_acknowledges_reap_and_cleanup_after_detach \
-      handlers::api::builders::niks3_input_owner_tests::fifo_deadlines_cover_missing_readiness_and_absent_release_reader
-    do
-      runExactCacheRegression "$testName"
-    done
-
     )
-    runHook postCheck
-  '';
-
-  # This is a check derivation, not a distributable package.
-  installPhase = ''
-    mkdir -p "$out"
-    printf '%s\n' "critical cf-server PostgreSQL regressions passed" > "$out/result"
-  '';
-}

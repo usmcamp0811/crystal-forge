@@ -55,7 +55,7 @@ let
   '';
 
   primaryExpression =
-    ../../packages/default/crates/cf-server/src/models/primary_evaluation.nix;
+    ../../src/models/primary_evaluation.nix;
   expression = ''
     (${builtins.readFile primaryExpression}) {
       flakeRef = "__LOCKED_FIXTURE_REF__";
@@ -67,9 +67,7 @@ let
     }
   '';
 in
-pkgs.runCommand "crystal-forge-primary-evaluator-isolation-check" {
-  nativeBuildInputs = [ pkgs.jq pkgs.nix-eval-jobs.nix pkgs.nix-eval-jobs ];
-} ''
+''
   export HOME="$TMPDIR"
   export XDG_CACHE_HOME="$TMPDIR/cache"
   export NIX_CONFIG='experimental-features = nix-command flakes
@@ -101,5 +99,4 @@ pkgs.runCommand "crystal-forge-primary-evaluator-isolation-check" {
       "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
   ' result.jsonl >/dev/null
 
-  touch "$out"
 ''

@@ -4,7 +4,7 @@
 # Ambient environment and filesystem state must not change pure drvPath.
 let
   primaryExpression =
-    ../../packages/default/crates/cf-server/src/models/primary_evaluation.nix;
+    ../../src/models/primary_evaluation.nix;
   authoritativeExpression = ''
     (${builtins.readFile primaryExpression}) {
       flakeRef = "__SOURCE_REF__";
@@ -15,7 +15,7 @@ let
   canonicalSource = pkgs.runCommand "crystal-forge-canonical-source" {
     nativeBuildInputs = [ pkgs.git pkgs.gnutar ];
   } ''
-    cp -R ${./fixture} repository
+    cp -R ${./fixtures/verified-source} repository
     chmod -R u+w repository
     chmod +x repository/bin/run
     ln -s bin/run repository/run
@@ -46,9 +46,7 @@ let
     test "$(cat "$out/revision.txt")" = "$commit"
   '';
 in
-pkgs.runCommand "crystal-forge-verified-source-evaluator-parity" {
-  nativeBuildInputs = [ pkgs.jq pkgs.nix-eval-jobs.nix pkgs.nix-eval-jobs ];
-} ''
+''
   export HOME="$TMPDIR/home"
   export XDG_CACHE_HOME="$TMPDIR/cache"
   export NIX_CONFIG='experimental-features = nix-command flakes
@@ -65,14 +63,10 @@ pkgs.runCommand "crystal-forge-verified-source-evaluator-parity" {
       | jq -er '.extraValue.nixVersion'
   )"
   test "$(nix --version)" = "nix (Nix) $evaluator_version"
-  source_a=${canonicalSource}
-  source_b=${canonicalSource}
-  test "$source_a" = "$source_b"
-  test "$(nix hash path --type sha256 --sri "$source_a")" = \
-    "$(nix hash path --type sha256 --sri "$source_b")"
-  source_nar_hash="$(nix hash path --type sha256 --sri "$source_a")"
+  source=${canonicalSource}
+  source_nar_hash="$(nix hash path --type sha256 --sri "$source")"
   encoded_nar_hash="$(jq -rn --arg value "$source_nar_hash" '$value | @uri')"
-  source_ref="path:$source_a?narHash=$encoded_nar_hash"
+  source_ref="path:$source?narHash=$encoded_nar_hash"
 
   export CF_VERIFIED_SOURCE_HOST_VALUE=host-specific
   touch /tmp/crystal-forge-verified-source-host-path
@@ -99,5 +93,4 @@ pkgs.runCommand "crystal-forge-verified-source-evaluator-parity" {
     --option allow-import-from-derivation true \
     "$source_ref#nixosConfigurations.host.config.system.build.toplevel.drvPath")"
   test "$impure_drv" != "$server_drv"
-  touch "$out"
 ''

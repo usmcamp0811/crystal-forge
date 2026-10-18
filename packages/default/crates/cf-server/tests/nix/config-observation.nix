@@ -1,9 +1,9 @@
 { pkgs, ... }:
 
 let
-  observerSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_observer.nix;
-  encoderSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_value_encoding.nix;
-  shallowObserverSource = builtins.readFile ../../packages/default/crates/cf-server/src/models/config_shallow_observer.nix;
+  observerSource = builtins.readFile ../../src/models/config_observer.nix;
+  encoderSource = builtins.readFile ../../src/models/config_value_encoding.nix;
+  shallowObserverSource = builtins.readFile ../../src/models/config_shallow_observer.nix;
   fixture = pkgs.runCommand "crystal-forge-config-observer-fixture" { } ''
     mkdir -p "$out"
     cat > "$out/flake.nix" <<'EOF'
@@ -223,9 +223,7 @@ let
     }
   '';
 in
-pkgs.runCommand "crystal-forge-config-observer-check" {
-  nativeBuildInputs = [ pkgs.jq pkgs.nix-eval-jobs pkgs.nix ];
-} ''
+''
   export HOME="$TMPDIR"
   export XDG_CACHE_HOME="$TMPDIR/cache"
   args=(--impure --meta --apply 'derivation: derivation.meta.crystalForgeConfigObservation' --option experimental-features 'nix-command flakes')
@@ -410,5 +408,4 @@ pkgs.runCommand "crystal-forge-config-observer-check" {
   test "$(jq -r 'select(.error == null) | .drvPath' pure-configured.jsonl | sort -u | wc -l)" -eq 1
   test ! -e "${fixture}/flake.lock"
 
-  touch "$out"
 ''

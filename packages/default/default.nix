@@ -64,11 +64,17 @@ let
               relPath == rootPath ||
               lib.hasPrefix "${rootPath}/" relPath)
             rootPaths;
+          # These files are explicit postCheck inputs, not Cargo sources. Keep
+          # them out of dependency artifacts and embedded-UI source identity.
+          isNixCheckInput = builtins.any
+            (entry: relPath == entry || lib.hasPrefix "${entry}/" relPath)
+            [ "crates/cf-server/tests/nix" "crates/cf-config/test-support" ]
+            || relPath == "crates/cf-server/tests/xccdf-schema.sh";
         in
-        isWorkspaceMeta
+        (isWorkspaceMeta
         || isWorkspaceDirectory
         || isIncludedCrateSource
-        || isIncludedRootPath;
+        || isIncludedRootPath) && !isNixCheckInput;
     };
 
   # Cargo parses every member named by a workspace manifest, even when
@@ -180,9 +186,9 @@ let
   #   cf-server-core-drv  no embedded UI, no dependency on the web-ui build
   #   cf-server-drv       embedded UI, depends on the web-ui build
   #
-  # INVARIANT: the two variants differ only by the embedded-ui Cargo feature
-  # and the CRYSTAL_FORGE_UI_DIST asset input. Every other build parameter is
-  # shared, so a backend behavior difference between the variants is a defect.
+  # INVARIANT: production compilation differs only by the embedded-ui Cargo
+  # feature and CRYSTAL_FORGE_UI_DIST. Core additionally owns cf-config library
+  # and real Nix protocol checks so those checks do not repeat for embedded UI.
   #
   # Why the split exists: CRYSTAL_FORGE_UI_DIST makes the web-ui derivation a
   # Nix input of the server. Without the split, editing a Dioxus source file
@@ -281,7 +287,34 @@ let
       cargoArtifacts = serverCargoArtifacts;
       cargoExtraArgs = "--locked --package cf-server${cargoFeatureArg}";
       cargoBuildExtraArgs = serverCargoBuildExtraArgs;
-      cargoTestExtraArgs = "--lib --bins";
+      # Cargo does not run dependency tests for --package cf-server. Core owns
+      # the foundational config tests, including all 13 CA parser tests, once.
+      cargoTestExtraArgs = "--lib --bins" + lib.optionalString (!embedUi) " --package cf-config";
+      nativeBuildInputs = serverCommonArgs.nativeBuildInputs
+        ++ lib.optionals (!embedUi) [ pkgs.jq pkgs.nix-eval-jobs.nix pkgs.nix-eval-jobs pkgs.go pkgs.openssl ];
+      # Keep fixtures inside independent subshells: their HOME, NIX_CONFIG,
+      # working files and shell functions must not leak into other checks.
+      postCheck = if embedUi then null else ''
+        export PATH="${lib.makeBinPath [ evaluatorNix pkgs.nix-eval-jobs ]}:$PATH"
+        (set -euo pipefail; work=$(mktemp -d); cd "$work"
+          ${import ./crates/cf-server/tests/nix/config-inspection.nix {
+            inherit pkgs;
+            legacyLock = ../../lib/test-flake/test-flake/flake.lock;
+          }}
+        )
+        (set -euo pipefail; work=$(mktemp -d); cd "$work"
+          ${import ./crates/cf-server/tests/nix/config-observation.nix { inherit pkgs; }}
+        )
+        (set -euo pipefail; work=$(mktemp -d); cd "$work"
+          ${import ./crates/cf-server/tests/nix/primary-isolation.nix { inherit pkgs; }}
+        )
+        (set -euo pipefail; work=$(mktemp -d); cd "$work"
+          ${import ./crates/cf-server/tests/nix/source-parity.nix { inherit pkgs; }}
+        )
+        (set -euo pipefail
+          ${import ./crates/cf-config/test-support/ca-bundle/compatibility.nix { inherit pkgs lib; }}
+        )
+      '';
       # Dependency-only Crane artifacts contain no installed server binary.
       # Wrap only the final component outputs, including the core variant.
       postFixup = ''

@@ -68,11 +68,25 @@ let
   }) (collectOptions evaluated.options));
   metadata = map (path: entriesByPath.${path})
     (lib.sort builtins.lessThan (builtins.attrNames entriesByPath));
+  paths = map (entry: entry.path) metadata;
+  get = path: entriesByPath.${path};
 in
 pkgs.writeTextFile {
   name = "crystal-forge-nixos-options-metadata";
   destination = "/share/crystal-forge/nixos-options.json";
-  text = builtins.toJSON metadata;
+  # Force representative real NixOS types when producing the ordinary artifact.
+  # Server tests consume this artifact but cannot prove Nix type classification.
+  text = assert paths == lib.sort builtins.lessThan paths;
+    assert (get "networking.firewall.enable").value_type == "boolean";
+    assert (get "networking.networkmanager.dns").value_type == "enum"
+      && (get "networking.networkmanager.dns").enum_values != [ ];
+    assert (get "boot.consoleLogLevel").value_type == "integer";
+    assert (get "networking.hostName").value_type == "string";
+    assert (get "networking.extraHosts").value_type == "lines";
+    builtins.toJSON metadata;
+  checkPhase = ''
+    test -s "$target"
+  '';
   passthru = { inherit metadata; };
   meta = {
     description = "Compact NixOS option metadata for Crystal Forge";
