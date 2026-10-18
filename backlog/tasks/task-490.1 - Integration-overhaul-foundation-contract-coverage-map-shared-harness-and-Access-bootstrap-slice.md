@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-18 03:31'
+updated_date: '2026-10-18 03:52'
 labels:
   - testing
   - integration
@@ -90,6 +90,8 @@ Final recorded scenario run at committed combined source revision 39a6a54b651a8b
 Combined Access milestone passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. Focused command `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L` passed; aggregate command `nix build .#checks.x86_64-linux.integration-access -L` passed and reused the focused gate (no extra VM). Evidence `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`: all five cases pass, 285 migrations, module socket `/run/postgresql`, unit `AUTH_MODE=local`, setup-status local/empty, first Admin browser register/sign-in/reload, one persisted session, wrong password rejected without new session/cookie. Screenshot `browser/bootstrap-sign-in/signed-in-after-reload.png`.
 
 The same journal shows independent `crystal-forge-postgres-jobs.service` failure before module role setup (`FATAL: role \"crystal_forge\" does not exist`); task TASK-492 records it. This does not fail the Access gate and is outside the .25/.26 authorization. Access bootstrap alone does not complete the Access contract or other owners.
+
+Exact final foundation branch head `ade5080cd84c7be057b8f0a9d9c490ed8b1fd3d5` was also exercised by the focused Access command and passed all five cases; the owner aggregate passed. This was an extra repeat after the documentation-only/comment follow-up; no further VM run is needed. Its evidence is `/nix/store/0aavcw4vk32c83gljg8y4mz7gi5pqrn4-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
