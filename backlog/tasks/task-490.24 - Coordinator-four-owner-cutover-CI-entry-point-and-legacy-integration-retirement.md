@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-17 20:34'
+updated_date: '2026-10-18 03:30'
 labels:
   - testing
   - integration
@@ -40,6 +40,13 @@ dependencies:
   - TASK-490.27
   - TASK-490.28
   - TASK-490.29
+modified_files:
+  - checks/integration-access/default.nix
+  - checks/integration-delivery/default.nix
+  - checks/integration-assurance/default.nix
+  - checks/integration-upgrade/default.nix
+  - .gitlab-ci.yml
+  - docs/knowledge/testing/integration-coverage-map.md
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -49,19 +56,11 @@ ordinal: 536000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Coordinator writer task, not a Luna packet. Owns checks/integration-{access,delivery,assurance,upgrade}/default.nix, shared lib/integration-test integration, .gitlab-ci.yml existing integration entry point, legacy check retirement, coverage map, contract status and directly affected testing/agent docs. Children supply disjoint scenario files and owner-local fixtures/assets; coordinator explicitly registers every integrated child.
+Coordinator-owned cutover task. Owns the four native Snowfall owner registrations, CI entry point, legacy-gate retirement, final coverage/retirement map, and cutover verification. Do not delegate owner default.nix/shared library/CI edits or create placeholder owners.
 
-Why: final inventory is exactly four native integration owners. Legacy checks/CI stay until passing replacements or explicit owner-approved scope change. This final cutover requirement does not prohibit discoverable meaningful WIP during foundation/child work.
+Current milestone: TASK-490.25 and TASK-490.26 have separate repairs integrated at `ca46cdd5` and `136348e8`. The focused local bootstrap scenario and current Access owner aggregate passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`; runtime evidence is recorded in the coverage map. This does not establish the full Access contract or any other owner. TASK-490.7 role implementation/proving remains coordinator-owned. Access .2-.4 and Assurance packets are corrected to case fragments grouped into scenarios; all remain Backlog and no packet is ready because the foundation work is still In Progress and dependent role/authority inputs remain unresolved.
 
-Corrected architecture: owner default.nix uses native Snowfall signature { lib, inputs, pkgs, ... }, explicit scenario attrsets (Access coordinator-owned), and normal pkgs.linkFarm aggregate of ALL registered gates. Shared entry: lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs } from lib/integration-test. Scripts/fixtures/assets stay within each owning checks/integration-<owner>/ directory. No root tests/, legacyPackages.integration, mkOwner or custom discovery; no complete=true export switch. Only Access exists now. Add Delivery/Assurance/Upgrade default.nix only with meaningful scenarios, never placeholders; do not defer all owner creation to final completion.
-
-Scope: integrate and explicitly register required child scenarios, ensuring every registered gate is a dependency of normal owner build and every failure propagates. Verify nix eval .#checks.x86_64-linux --apply builtins.attrNames identifies exactly the four integration names at final cutover plus classified non-integration checks. Put four-name allowlist comparison at start of existing integration CI entry point, no new validation service. Execute each complete required owner set and record normal runtime/peak resources. Retire legacy registration/job only after passing mapped replacement or explicit owner-approved scope change. Canonical scenario fixtures including STIG XML live under checks/integration-assurance/fixtures/; coordinate legacy fixture preservation/removal without cross-child writes. Update docs/knowledge/testing/flake-checks.md, web-ui-check.md, coverage map, contract implementation_status and directly affected verification/agent links. Final cutover blocked by any required failing replacement, including product defects, unless owner changes scope. No product fixes; TASK-490 test-only restrictions apply.
-
-Candidates, NOT verified: nix build .#checks.x86_64-linux.integration-access -L, integration-delivery, integration-assurance and integration-upgrade through the same checks.x86_64-linux namespace. Focused foundation target: nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L, append .run for evidence. Future packet must provide exact verified commands at actual dependency commits. Record all owner outcomes/resources/evidence; evaluation/build alone does not establish real VM execution.
-
-Authority: D1/as-built docs are implementation evidence, not accepted authority. Uncertain obligations remain blocked pending explicit owner decision. Upgrade D2 must be resolved before its replacement can pass.
-
-READINESS: all predecessor children remain Backlog, none ready. Actual foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. TASK-490.20/.21 additionally need finer splitting of triage versus policy waiver/acceptance versus closure, without scope expansion now. Actual dependency commit(s), resolved packet blockers, concrete registration and verified commands are required before To Do. No delegation or executed slice is claimed.
+Cutover is not ready: only `integration-access` exists, its bootstrap slice is a subset, and Delivery/Assurance/Upgrade remain incomplete. Keep every legacy check and CI selection until all four owner aggregates pass the accepted map, tasks, interfaces, exact commands and evidence. D1 authority and D2 Upgrade decisions remain required where applicable. TASK-492 is a separate first-boot Postgres Jobs startup-order defect; do not fix it under the TASK-490.25/.26 authorization or treat it as an Access scenario failure. No merge/deploy/cutover is authorized by this task update.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -80,4 +79,6 @@ READINESS: all predecessor children remain Backlog, none ready. Actual foundatio
 2026-10-17 organization correction replaces old registration/layout/commands and incomplete-unexported rule. Coordinator writer, not Luna. Only Access exists now; remaining native owner default.nix files require meaningful scenarios, no placeholders. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. All children Backlog, none ready. Future packets need actual dependency commit(s) and verified commands before To Do. TASK-490.20/.21 finer splitting remains a dispatch blocker without scope expansion now. D1/as-built is not authority; uncertain cases await owner decision. No delegation or executed slice is claimed.
 
 Cutover dependencies expanded 2026-10-17 to include the two product blockers discovered by the correct Access foundation slice (TASK-490.25/.26) and the decomposed Assurance work packets (.27-.29). Passing or explicit owner scope approval is still required before retiring the legacy gates. No dependent task is ready.
+
+At tested source revision b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56, focused Access VM and `nix build .#checks.x86_64-linux.integration-access -L` both passed. Current runtime evidence is `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. Only the bootstrap slice is covered. TASK-492 records the unrelated one-shot Postgres Jobs first-boot role race; no Access assertion failed.
 <!-- SECTION:NOTES:END -->
