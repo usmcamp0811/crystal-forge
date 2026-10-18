@@ -4,7 +4,7 @@ title: NixOS server.auth_mode=local is not propagated to the server runtime
 status: Backlog
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 00:15'
+updated_date: '2026-10-18 00:22'
 labels:
   - bug
   - nixos
@@ -42,4 +42,6 @@ Observed configuration in the native Access VM at final combined commit fc930335
 
 <!-- SECTION:NOTES:BEGIN -->
 Final clean combined source commit 39a6a54b651a8b77fc3416b73195e363a782fa2e reproduces the generated-config mismatch: summary shows `[server]` with no auth_mode and systemd AUTH_MODE=unset. The server failed earlier on TASK-490.25, so this VM did not observe an auth-mode response or route registration. Evidence is in /nix/store/vcfbia521bjad2a85yca3h3n9i4m4ikf-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt.
+
+Final exact-head rerun on combined commit fc930335878279ac426510359c039dfd8961dc13 confirms generated [server] omits auth_mode and systemd AUTH_MODE is unset: /nix/store/1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt. The DB URL defect prevented route registration; runtime auth response remains unobserved.
 <!-- SECTION:NOTES:END -->
