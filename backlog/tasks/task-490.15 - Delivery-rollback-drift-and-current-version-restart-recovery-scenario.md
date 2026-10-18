@@ -20,6 +20,8 @@ ordinal: 527000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18; supersedes prior separate-scenario paths below): this task owns rollback/drift/recovery Python/browser fragments under `checks/integration-delivery/scenarios/fragments/`. Coordinator owns `delivery-lifecycle.nix`, composition and registration. Use generations/jobs created earlier in that same fresh target VM; do not create a packet-specific derivation or depend on TASK-490.14's other VM state.
+
 Owning check: integration-delivery. Contract ID: delivery.activation.recovery. Exclusive writes: checks/integration-delivery/scenarios/activation-recovery.{nix,py,cjs}. Legacy rollback preselection/drift steps 12o/12i-12k are mocked; restart recovery otherwise relies on Rust state-machine tests.
 
 Scope: System detail UI rollback restores previous generation on targetA, verified through actual /run/current-system and boot entry. Out-of-band local change reports drift with actual running identity. Kill/restart server during evaluation/build and agent during deployment; bounded waits prove consistent recovery at the current version. Non-goal: version-transition recovery (Upgrade 490.23). TASK-490 test-only scope applies.

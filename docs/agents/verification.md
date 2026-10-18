@@ -108,13 +108,15 @@ records through receipts. Future Delivery, Assurance, and Upgrade scenarios,
 fixtures, and assets belong beneath `checks/integration-{delivery,assurance,upgrade}/`.
 Do not create placeholder `default.nix` files or custom discovery.
 
-The Access scenario executed at commit
-`fc930335878279ac426510359c039dfd8961dc13` and failed at the retained server
-startup assertion before migrations or HTTP. Separate WIP repairs for TASK-490.25
-and TASK-490.26 now pass their targeted checks and are integrated. The combined
-Access VM rerun remains pending; the historic failure is not a passing Access
-check. The [coverage map](../knowledge/testing/integration-coverage-map.md#foundation-execution-record)
-records the old evidence and current verification state.
+The historical Access scenario at `fc930335878279ac426510359c039dfd8961dc13`
+failed before migrations/HTTP. Separate TASK-490.25/.26 repairs are integrated.
+The combined focused Access scenario and current owner pass at
+`b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. This proves only the bootstrap
+slice; missing Access obligations and three other owners remain uncovered. The
+same VM journal records TASK-492, an independent Postgres Jobs ordering defect
+that does not fail the Access gate. The
+[coverage map](../knowledge/testing/integration-coverage-map.md#foundation-execution-record)
+records the historic failure, successful rerun, and current blocker.
 
 ## UI evidence
 

@@ -99,19 +99,21 @@ selection remain unchanged until all required owner scenarios pass.
 Run the focused Access gate with
 `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`.
 Append `.run` to the scenario attribute for evidence only. The historical
-scenario run at `fc930335878279ac426510359c039dfd8961dc13` failed on server
-startup before migrations/browser/auth. TASK-490.25/.26 repairs are integrated;
-the combined rerun is pending. See the
+scenario at `fc930335878279ac426510359c039dfd8961dc13` failed before
+migrations/browser/auth. TASK-490.25/.26 repairs are integrated; the focused
+scenario and `integration-access` aggregate both pass at
+`b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. This verifies the bootstrap slice,
+not full Access coverage. The same VM journal records unrelated TASK-492. See the
 [foundation execution record](integration-coverage-map.md#foundation-execution-record)
 for the generated configuration, exact output path, expected/actual result,
-and task links. TASK-491's package test prerequisite is resolved. The Access
-scenario remains unverified until the combined VM rerun passes.
+and task links. TASK-491's package test prerequisite is resolved. Keep all
+legacy gates until full owner cutover conditions pass.
 
 ## Summary
 
 | Check | Boots a VM | Covers | README |
 | --- | --- | --- | --- |
-| `integration-access` | Yes (controller; executed, failed) | WIP fresh local bootstrap; normal module configuration fails before migrations/browser; missing Access obligations remain recorded | [Coverage map](integration-coverage-map.md) |
+| `integration-access` | Yes (controller; bootstrap gate passed) | Fresh local bootstrap, migrations, setup-status, browser registration/sign-in/reload, persistence, wrong-password rejection; missing Access obligations remain | [Coverage map](integration-coverage-map.md) |
 | `integration` | Yes (server and git server) | Server, database, and Grafana dashboard behavior through the `cf_test` pytest markers `database`, `dashboard`, and `server` | [README](../../../checks/integration/README.md) |
 | `oidc-auth` | Yes (Keycloak and server) | OIDC login path against a real Keycloak realm | [README](../../../checks/oidc-auth/README.md) |
 | `web-ui` | Yes (server, agent, builder, git server) | Production embedded-UI server through a real browser | [README](../../../checks/web-ui/README.md) |

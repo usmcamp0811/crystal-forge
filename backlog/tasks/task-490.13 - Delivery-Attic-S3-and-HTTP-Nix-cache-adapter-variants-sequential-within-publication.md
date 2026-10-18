@@ -22,6 +22,8 @@ ordinal: 525000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18; supersedes prior separate-scenario paths below): this task owns sequential adapter Python/browser fragments and service fixtures under `checks/integration-delivery/scenarios/fragments/` and owner-local fixtures. Coordinator owns `delivery-lifecycle.nix`, composition and registration. Reuse actual same-run outputs; do not add one derivation per adapter or packet.
+
 Owning check: integration-delivery. Contract ID: delivery.publication.variants. Exclusive writes: checks/integration-delivery/scenarios/publication-variants.{nix,py,cjs}. Implement sequentially Attic, S3, then HTTP/Nix. Reuse common evaluate/build/retrieve workflow from TASK-490.12; prove only each distinct adapter boundary, no lifecycle cloning. Legacy attic-metrics, attic-publication and browser steps 21-25 partly use SQL clones/private fixture rows.
 
 Scope: Attic JWT write with scope negatives and named-cache Test; S3 access-key write/read; HTTP and Nix read-only destinations with public read and no write path. Each variant uses fresh output independently absent at destination first; wrong credentials publish nothing for write-capable adapters. Non-goal: metrics internals (non-integration). TASK-490 test-only scope applies.

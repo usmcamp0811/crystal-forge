@@ -20,6 +20,8 @@ ordinal: 519000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current coordinator boundary (2026-10-18; supersedes the earlier standalone `evaluation-build-smoke` scenario wording below): implement the shared `services`, `builderA`, `builderB`, and `targetA` role interfaces and prove them as an initial case in `checks/integration-delivery/scenarios/delivery-lifecycle`. The coordinator owns that scenario's `.nix`, Python composition, browserSpecs, and `checks/integration-delivery/default.nix` registration. TASK-490.8-.15 contribute disjoint case fragments to the same fresh Delivery VM; no derivation per packet. Focused command after implementation: `nix build .#checks.x86_64-linux.integration-delivery.scenarios.delivery-lifecycle -L`; aggregate: `nix build .#checks.x86_64-linux.integration-delivery -L`.
+
 Coordinator writer task. Exclusive shared writes: lib/integration-test/** and one proving scenario checks/integration-delivery/scenarios/evaluation-build-smoke.{nix,py,cjs}, with coordinator registration in checks/integration-delivery/default.nix and harness-interface coverage-map documentation. This is not a Luna packet.
 
 Why: Delivery, Assurance, OIDC and notification scenarios need real services, builder and target roles. Add each role only with an executed proving scenario; children cannot depend on speculative interfaces.

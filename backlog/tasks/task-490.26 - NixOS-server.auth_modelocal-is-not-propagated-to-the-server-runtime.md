@@ -37,7 +37,9 @@ This is a product fix, explicitly out of scope for TASK-490.1. Do not add a test
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The normal NixOS module option auth_mode=local results in the server runtime selecting local mode
-- [ ] #2 The fresh setup-status endpoint reports auth_mode local and requires_setup true on an empty database
-- [ ] #3 The local registration and sign-in routes are registered through the normal module configuration without a test-only environment override
+- [x] #1 The normal NixOS module option auth_mode=local results in the server runtime selecting local mode
+- [x] #2 The fresh setup-status endpoint reports auth_mode local and requires_setup true on an empty database
+- [x] #3 The local registration and sign-in routes are registered through the normal module configuration without a test-only environment override
+- [x] #4 Targeted module evaluation verifies local and OIDC AUTH_MODE and OIDC-only environment settings
+- [x] #5 The combined Access VM proves the local first-admin browser/session workflow without a test-only environment override
 <!-- AC:END -->

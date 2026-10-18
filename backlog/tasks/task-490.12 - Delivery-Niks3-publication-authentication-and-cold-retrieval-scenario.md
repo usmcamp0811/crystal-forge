@@ -20,6 +20,8 @@ ordinal: 524000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18; supersedes prior separate-scenario paths below): this task owns Niks3 Python/browser fragments under `checks/integration-delivery/scenarios/fragments/`. Coordinator owns the shared `delivery-lifecycle.nix`, composition and registration. Use same-run builder output receipts for publication and cold retrieval; TASK-490.13-.15 cases may continue from that state. No packet-specific derivation.
+
 Owning check: integration-delivery. Contract ID: delivery.publication.niks3. Exclusive writes: checks/integration-delivery/scenarios/publication-niks3.{nix,py,cjs}. Niks3 (TASK-470) legacy niks3-cache/niks3-write-probe/niks3-ui checks prove pieces with seeded queue rows; replace with real evaluation -> build -> publication -> verified cold retrieval.
 
 Scope: configure cache through Caches UI as domain setup, token write auth then mTLS. Fresh builderA output publishes to the destination bound to its ID; independent server read verifies publication. Cold targetA proves output absent first, then retrieves with signature verification. Wrong token/client certificate publishes nothing; other-environment agents receive no read credential. Non-goals: Attic/S3/HTTP/Nix (490.13), activation (490.14). Shared form behavior belongs to Access; cache credentials/Test boundaries remain Delivery. TASK-490 test-only scope applies.

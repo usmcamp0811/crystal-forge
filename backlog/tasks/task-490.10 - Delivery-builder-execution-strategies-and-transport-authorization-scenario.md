@@ -20,6 +20,8 @@ ordinal: 522000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18; supersedes prior separate-scenario paths below): this task owns only builder Python/browser fragments under `checks/integration-delivery/scenarios/fragments/`. Coordinator owns the single `delivery-lifecycle.nix`, composition and registration. Real builder outputs may feed later same-run cases through receipts; no packet-specific derivation or cross-run output reuse.
+
 Owning check: integration-delivery. Contract ID: delivery.build.strategies. Exclusive writes: checks/integration-delivery/scenarios/build-strategies.{nix,py,cjs}. Legacy niks3-cache proof seeds queue rows; this task must execute real fresh builds through authorized builder APIs.
 
 Scope: builderA uses ServerDerivation, builderB uses SourceReEvaluateVerified; source delivery is ServerBundledArchive only. Both build per-run fresh outputs independently absent beforehand (assert_store_absent). Server accepts completion only from the authorized builder session; wrong key or revoked session is rejected with no job-state change. Derivation/source archive downloads require job authorization. Builds UI shows exact job/builder/output. Non-goals: scheduling/cancel (490.11), publication (490.12). TASK-490 test-only scope applies.

@@ -22,6 +22,8 @@ ordinal: 520000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18; supersedes prior independent-scenario paths below): this task owns disjoint Python/browser Git-ingestion and evaluation-identity fragments under `checks/integration-delivery/scenarios/fragments/`. Coordinator owns `delivery-lifecycle.nix`, composition and registration. All TASK-490.8-.15 cases use one fresh Delivery VM and same-run receipts; no packet-specific NixOS derivations or other run's runtime state.
+
 Owning check: integration-delivery. Contract IDs: delivery.evaluation.ingestion, delivery.evaluation.identity. Exclusive writes: checks/integration-delivery/scenarios/evaluation-ingestion.{nix,py,cjs}, evaluation-identity.{nix,py,cjs}, and checks/integration-delivery/fixtures/evaluation-*. Legacy checks/integration seeds commits/derivations in SQL; only web-ui 13h proves real force-push, and exact commit -> drvPath -> UI identity lacks integration proof.
 
 Scope ingestion: polling and webhooks ingest two authored commits exactly once each; replay deduplicates; force-push rewrite is detected and surfaced in Flakes UI. Identity: two distinguishable commits produce drvPaths matching independent nix eval of those exact commits on services; Evaluations list, /evaluations/:commit_id and EvalDrawer show exact identity; moving head does not rewrite history. Reuse/extend the workflow proven by TASK-490.7 without duplicating it. The coordinator owns its proving scenario; this child writes only its disjoint named files and escalates shared changes. Non-goals: Config Inspector (490.9), build obligations (490.10).

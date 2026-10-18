@@ -46,8 +46,10 @@ The focused Access gate is
 `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`;
 append `.run` to the scenario attribute for evidence only. The historical Access
 VM run at `fc930335878279ac426510359c039dfd8961dc13` failed before migrations,
-browser, or auth. TASK-490.25/.26 repairs are integrated and their targeted
-checks pass; the combined VM rerun is pending. See the
+browser, or auth. After TASK-490.25/.26 repairs, the focused gate and the normal
+Access owner both passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. This
+proves the bootstrap slice only; other Access obligations remain. The same run
+records unrelated TASK-492 in the Postgres Jobs journal. See the
 [coverage map execution record](integration-coverage-map.md#foundation-execution-record).
 Do not add a test-only `AUTH_MODE` override or report the historic run as passing.
 

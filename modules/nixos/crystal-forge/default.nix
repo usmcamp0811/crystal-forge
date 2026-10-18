@@ -2926,6 +2926,8 @@ in {
         {
           # Core runtime
           RUST_LOG = cfg.log_level;
+          # Keep this in both supported modes: cf-config uses it when loading
+          # `server.auth_mode`, and several auth route gates read it directly.
           AUTH_MODE = cfg.server.auth_mode;
           TZDIR = "${pkgs.tzdata}/share/zoneinfo";
           LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";

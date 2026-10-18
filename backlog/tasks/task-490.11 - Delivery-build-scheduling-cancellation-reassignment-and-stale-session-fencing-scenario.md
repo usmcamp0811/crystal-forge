@@ -22,6 +22,8 @@ ordinal: 523000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18; supersedes prior separate-scenario paths below): this task owns scheduling Python/browser fragments and the failing-build fixture definition under `checks/integration-delivery/scenarios/fragments/` and owner-local fixtures. Coordinator owns `delivery-lifecycle.nix`, composition and registration. Its real event/output stays in the Delivery run; the Access notification scenario must recreate its own event. No packet derivation.
+
 Owning check: integration-delivery. Contract ID: delivery.build.scheduling. Exclusive writes: checks/integration-delivery/scenarios/build-scheduling.{nix,py,cjs} and checks/integration-delivery/fixtures/build-scheduling-*. This task provides the real failing-build fixture reused read-only by TASK-490.5; record its path and authored facts. Existing 15-15k mocked UI steps and Rust state-machine tests do not prove real execution results.
 
 Scope: operator cancels a running build from Builds UI; builder stops and job reaches cancelled without completion. Retry requeues and real build completes. Stop/kill builderA mid-job with unit_stopped/unit_killed; lease expiry reassigns to builderB. Returning builderA's stale session cannot complete/publish (fencing). A deliberately failing derivation produces a failed job and log. Non-goals: strategy auth (490.10), notifications (490.5). TASK-490 test-only restrictions apply.

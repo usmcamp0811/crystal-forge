@@ -20,6 +20,8 @@ ordinal: 535000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18): this task owns only old/current version Python/browser fragments and immutable source fixture definitions. The coordinator owns `version-transition.nix`, pinned input wiring and Upgrade registration. Once D2 is decided, the old and current server phases run sequentially against one fresh VM/database; the in-place version/schema transition is the concrete reason Upgrade remains isolated from current-version owners. No derivation per implementation packet.
+
 Owning check: integration-upgrade. Contract ID: upgrade.continuity. Exclusive scenario writes: checks/integration-upgrade/scenarios/continuity.{nix,py,cjs}; scenario fixtures/assets under that owner. Pinned old-version input wiring requires coordinator approval and coordinator-owned shared/flake changes; child cannot edit those paths unilaterally.
 
 BLOCKED D2: no accepted support decision names oldest supported in-place source server release, whether old agents/builders must operate with current server and for how long, or exact pinned source tag/commit. Existing v0.3.1/v0.3.0/v0.2.x tags and crate version 0.3.0 are not support promises. Owner must decide all three. Old-source flake input/fetch must not change current application dependencies. As-built D1 is evidence, not authority; other uncertain expectations also remain blocked pending owner decision.

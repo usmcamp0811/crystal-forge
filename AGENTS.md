@@ -411,8 +411,14 @@ checks may be discoverable without a completeness flag. Record missing
 obligations in the coverage map. Keep legacy checks and CI selection unchanged
 until all required owner scenarios pass.
 
-Shared helpers live in `lib/integration-test/`, exported through Snowfall as
-`lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }`.
+Shared helpers live in `lib/integration-test/`. Native Snowfall checks call:
+
+```nix
+lib.crystal-forge.makeIntegrationTestHarness {
+  inherit pkgs inputs;
+}
+```
+
 An implementation packet does not automatically receive a NixOS test
 derivation. Compatible case fragments use the existing Nix, Python, and browser
 script structure; the coordinator composes them into the owning scenario and

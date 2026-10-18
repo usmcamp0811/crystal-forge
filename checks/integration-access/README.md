@@ -13,14 +13,18 @@ the browser, signs in, reloads, and reads persisted identity and session
 state. Wrong-password rejection must not create a session.
 
 The historical scenario at `fc930335878279ac426510359c039dfd8961dc13`
-failed at server startup. It recorded the redacted generated configuration and
-server/PostgreSQL journals. TASK-490.25 now fixes shared URI serialization while
+failed at server startup. TASK-490.25 fixed shared URI serialization while
 preserving the Unix socket; TASK-490.26 now passes the selected local/OIDC mode
-from the normal module to the production unit. Targeted parser/evaluation checks
-and the normal server package build pass. The combined Access VM rerun is
-pending. Keep startup, migration, setup-status, browser, persistence, and
-rejected-login assertions. Do not add an `AUTH_MODE` test override. TASK-491
-resolves the separate Rust test race; see MR !336.
+from the normal module to the production unit. Targeted checks and the normal
+server package build pass. The combined Access VM scenario passed at
+`b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`; its evidence is
+`/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`.
+The normal `integration-access` owner aggregate also passed and reused that
+gate without another VM. Keep startup, migration, setup-status, browser,
+persistence, and rejected-login assertions. Do not add an `AUTH_MODE` test
+override. The journal also records TASK-492, a separate Postgres Jobs startup
+ordering defect; it does not fail the Access gate. TASK-491 resolves the Rust
+test race; see MR !336.
 
 Failure evidence from tested commit
 `fc930335878279ac426510359c039dfd8961dc13`:

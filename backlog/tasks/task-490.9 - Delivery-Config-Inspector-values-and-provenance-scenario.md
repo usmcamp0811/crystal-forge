@@ -20,6 +20,8 @@ ordinal: 521000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
+Current packet boundary (2026-10-18; supersedes prior separate-scenario paths below): this task owns only Config Inspector Python/browser fragments under `checks/integration-delivery/scenarios/fragments/`. Coordinator owns the shared `delivery-lifecycle.nix`, composition and registration. Use revisions created earlier in that same fresh Delivery VM via receipts; no packet-specific derivation or runtime reuse.
+
 Owning check: integration-delivery. Contract ID: delivery.evaluation.config-inspector. Exclusive writes: checks/integration-delivery/scenarios/config-inspector.{nix,py,cjs} and checks/integration-delivery/fixtures/config-inspector-*. Existing mocked steps 12l-12q/13j-13q and Nix-level config-inspector/config-observer checks do not prove worker/API/UI together; this scenario needs distinct provenance fixtures and drawer bindings.
 
 Scope: author a flake with distinguishable option values and definition files. System Config tab and flake Config Inspector show exact values/provenance for the exact revision; secret-path option is redacted in API/UI; second revision with changed value is distinguishable and historical selection stays exact. Partial inventory appears only when worker reports it. Non-goal: Nix-expression unit behavior, retained in non-integration checks. TASK-490 test-only restrictions apply.

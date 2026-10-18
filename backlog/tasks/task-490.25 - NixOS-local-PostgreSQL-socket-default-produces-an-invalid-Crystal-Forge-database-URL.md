@@ -38,7 +38,9 @@ Test-only overhaul must not fix production code. Keep the Access scenario's star
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The supported local PostgreSQL socket configuration starts the production server without an empty-host URI failure
-- [ ] #2 Fresh database migrations complete and server readiness is observable through the normal NixOS module
-- [ ] #3 A regression test proves the socket host is transported as a socket path rather than an authority URI host
+- [x] #1 The supported local PostgreSQL socket configuration starts the production server without an empty-host URI failure
+- [x] #2 Fresh database migrations complete and server readiness is observable through the normal NixOS module
+- [x] #3 A regression test proves the socket host is transported as a socket path rather than an authority URI host
+- [x] #4 The real serializer round-trips socket, network and encoding-sensitive fields through both tokio_postgres and SQLx without adding database clients to cf-config
+- [x] #5 The coordinator records the combined Access VM result and evidence
 <!-- AC:END -->
