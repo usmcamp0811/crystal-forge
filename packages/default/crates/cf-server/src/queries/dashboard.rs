@@ -2447,6 +2447,29 @@ mod tests {
                 .all(|item| item.job_id != Some(collision_job_id))
         );
 
+        // A scoped user sees terminal evaluation history only through the
+        // latest attempt's captured plan (`inventory_summary::visibility`).
+        // Current flake membership alone does not grant it. Capture the
+        // flake's registered systems for attempt 2 as the production loader
+        // does. Without this plan the commit is correctly hidden from the user.
+        sqlx::query(
+            "INSERT INTO evaluation_policy_plans(commit_id, attempt_number, evaluation_attempt_id, payload)
+             SELECT c.id, a.attempt_number, a.id, jsonb_build_object(
+                 'evaluation_attempt_id', a.id, 'attempt_number', a.attempt_number,
+                 'provenance', 'captured', 'columns', '[]'::jsonb, 'bundles', '[]'::jsonb,
+                 'empty_bundle_metadata_complete', true, 'rows',
+                 (SELECT jsonb_agg(jsonb_build_object('system_id', s.id, 'system_name', s.hostname,
+                     'configuration_name', COALESCE(NULLIF(btrim(s.system_configuration_name), ''), s.hostname),
+                     'resolution', 'resolved', 'evaluation_digest', NULL, 'policies', '[]'::jsonb,
+                     'cells', '[]'::jsonb)) FROM systems s WHERE s.flake_id = c.flake_id))
+             FROM commits c JOIN evaluation_attempts a ON a.commit_id = c.id
+             WHERE a.id = $1",
+        )
+        .bind(second_attempt_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
         let evaluation_summary = crate::queries::commits::list_eval_queue_for_user(
             &pool,
             &crate::api::models::EvalQueueParams::default(),

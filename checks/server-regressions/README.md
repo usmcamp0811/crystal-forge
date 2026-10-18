@@ -134,10 +134,254 @@ The Python fixture's timeout cleanup sends `killpg(SIGKILL)` and waits for the
 direct child. That fixture does not assert process-group absence or prove Rust
 quarantine ownership; those are separate coordinator regression contracts.
 
+## TASK-488 evaluation policy capture tests
+
+These four ignored, migration-backed tests use SQLx-created sandbox databases.
+The exact library-test runner invokes each qualified name with
+`--ignored --exact --test-threads=1`. The guard requires its named success line
+and exactly one passed test with zero failures and zero ignored tests. Missing
+or renamed tests fail the check.
+
+```text
+queries::eval_policy_plans::tests::capture_is_atomic_first_write_immutable_and_retains_partial_rows
+queries::eval_policy_plans::tests::capture_rejects_wrong_attempt_owner_and_retry_cannot_read_old_plan
+server::policy_capture_tests::real_loader_captures_overlap_empty_contexts_and_immutable_history
+server::policy_capture_tests::real_virtual_baseline_capture_preserves_bundle_without_assignment_uuids
+```
+
+The query tests cover atomic first-write capture, immutable history, partial
+rows, attempt ownership and retry isolation. The loader tests exercise resolved
+overlap, empty contexts and historical membership, including virtual baseline
+bundles without assignment UUIDs. The separate browser-local matrix fixture
+tests presentation; it does not prove persisted capture. Runner membership does
+not establish a passing result for the current worktree.
+
+### MR334 review regressions
+
+The runner adds these 16 ignored, migration-backed SQLx tests since `3bf1c002`.
+Each qualified name uses the same exact-success guard described above. The
+existing 73 ignored and 83 non-ignored library selections retain their names and
+relative execution order.
+
+```text
+queries::eval_policy_plans::scoped_read_tests::mixed_flake_projects_all_metadata_and_shared_configuration
+queries::eval_policy_plans::scoped_read_tests::foreign_missing_and_removed_membership_are_nondisclosing
+queries::eval_policy_plans::scoped_read_tests::deleted_moved_and_reconfigured_hosts_fail_closed
+queries::eval_policy_plans::scoped_read_tests::authorization_and_evidence_share_repeatable_read_snapshot
+queries::eval_policy_plans::scoped_read_tests::legacy_configuration_names_cannot_grant_historical_host_access
+queries::eval_policy_plans::scoped_read_tests::pinned_reads_preserve_scope_and_revoke_historical_access
+queries::commits::policy_counts::tests::native_ten_passes_then_queued_retry_has_zero_current_counts
+queries::commits::policy_counts::tests::current_partial_native_and_mock_counts_exclude_stale_and_pending
+queries::commits::policy_counts::tests::markerless_legacy_counts_are_unavailable_not_passing
+handlers::api::systems::evaluation_lifecycle::tests::lifecycle_mutation_scopes_authority_audits_and_cleans_up
+handlers::api::systems::evaluation_lifecycle::tests::lifecycle_handler_enforces_auth_csrf_and_nondisclosing_scope
+handlers::api::systems::evaluation_lifecycle::tests::lifecycle_audit_failure_rolls_back_classification
+server::policy_capture_tests::capture_display_metadata_and_classification_share_repeatable_read_snapshot
+queries::eval_policy_plans::pinned_read_tests::pin_belongs_to_commit_and_never_falls_back_to_new_retry
+queries::eval_policy_plans::pinned_read_tests::historical_mock_values_survive_retry_while_stale_native_is_unknown
+queries::eval_policy_plans::pinned_read_tests::pinned_native_failure_is_preserved_until_its_marker_is_overwritten
+```
+
+- **Current scope:** Mixed-environment and shared-configuration reads project
+  rows, columns, bundles, memberships, details, flat evidence, and mock presence
+  together. Foreign or missing commits and revoked membership do not disclose
+  evidence. Deleted, moved, or reconfigured hosts fail closed. Legacy configuration
+  names cannot grant historical host access. Authorization and evidence use one
+  read-only REPEATABLE READ snapshot; a fresh read observes revocation.
+- **Current counters and native-unavailable evidence:** Queue and history use the
+  represented attempt. A queued retry has zero current counts; partial current
+  native and mock outcomes exclude stale and pending rows. Dual current carriers
+  make availability false. Markerless or malformed legacy evidence cannot become
+  passing counts. The existing guarded native-finalizer and mock-projection tests
+  also retain Unknown controls and withhold stale or malformed native diagnostics.
+  Unavailable native evidence is not proof of a pass or an absent assignment.
+- **Operator Greenfield classification:** Lifecycle mutations require operator or
+  admin authority, current environment scope, and CSRF protection. Tests cover
+  explicit true, false, and null classification, actor/timestamp persistence,
+  atomic audit, denied callers, moves, revocation, admin access to unscoped hosts,
+  deletion cleanup, and rollback when audit insertion fails. Classification is
+  operator data; names and missing deployment state do not infer Greenfield.
+- **Capture metadata:** The new loader test reads classification, exact-version
+  descriptions, safe source identifiers, and trusted requirement mappings from
+  one REPEATABLE READ snapshot while concurrent operator/catalog edits occur.
+  It excludes suggested mappings and executable or secret metadata. The existing
+  loader test also preserves captured classification and display metadata after
+  current catalog/classification edits.
+- **Pinned contexts:** Pins belong to the requested commit and never fall back to
+  a newer retry. Responses project exact commit SHA, attempt UUID/number, status,
+  and start/completion timestamps without changing the stored capture. Historical
+  mock outcomes survive retry. These original native fixtures exercise mutable
+  fallback: overwritten markers leave old controls Unknown and hide retry
+  diagnostics, while exact old failure evidence remains visible only while its
+  marker survives. Immutable native retention is covered separately below.
+  The scoped pin test rechecks current
+  membership and withholds foreign metadata and commit-global errors.
+
+These declarations describe registered coverage. Parent-owned targeted runs are
+separate evidence; registration does not establish an exact-head CI pass.
+
+### TASK-488 exact inventory and visibility regressions
+
+These 24 ignored, migration-backed SQLx cases use the same exact-success guard.
+Each qualified name runs with `--ignored --exact --test-threads=1`; both the
+named success line and the one-passed/zero-failed/zero-ignored summary are required.
+
+```text
+queries::evaluation_inventory::tests::inventory_normalizes_exact_names_and_rejects_replacement
+queries::evaluation_inventory::tests::inventory_empty_and_selection_subset_are_distinct_from_missing
+queries::evaluation_inventory::tests::inventory_schema_enforces_owner_immutability_and_parent_cascade
+queries::evaluation_inventory::tests::inventory_rejects_cancelled_superseded_and_nonactive_writers
+queries::evaluation_inventory::tests::inventory_retry_never_inherits_or_accepts_older_writes
+queries::evaluation_inventory::tests::inventory_competing_first_writes_preserve_one_complete_record
+queries::commits::inventory_summary_tests::exact_inventory_replaces_cached_41_and_excludes_unselected_outcomes
+queries::commits::inventory_summary_tests::inventory_partial_unknown_ambiguous_and_queued_retry_remain_pending
+queries::commits::inventory_summary_tests::scoped_summaries_hide_shared_policy_facts_search_errors_and_revoked_membership
+handlers::api::commits::visibility::tests::mixed_environment_flake_denies_unstructured_evidence
+handlers::api::commits::visibility::tests::revocation_rechecks_each_snapshot_and_keeps_reads_atomic
+handlers::api::commits::visibility::tests::unmanaged_discovery_name_denies_even_with_all_memberships
+handlers::api::commits::visibility::tests::missing_inventory_and_queued_retry_never_inherit_authority
+handlers::api::commits::visibility::tests::all_visible_configs_allow_logs_and_mutable_latest_graph
+handlers::api::commits::visibility::tests::shared_configuration_hidden_host_denies_even_when_inactive
+handlers::api::commits::visibility::tests::missing_identity_or_registration_never_grants_vacuous_access
+handlers::api::commits::visibility::tests::mutable_graph_preserves_counts_but_denies_unmanaged_retained_rows
+handlers::api::commits::visibility::tests::stream_revalidation_observes_membership_roles_and_session_revocation
+queries::eval_policy_plans::inventory_projection_tests::inventory_discovered_41_preserves_exact_names_and_12_captured_hosts
+queries::eval_policy_plans::inventory_projection_tests::inventory_absent_and_unselected_registered_rows_keep_unknown_evidence
+queries::eval_policy_plans::inventory_projection_tests::inventory_shared_hosts_count_one_matching_global_failure_without_fake_policies
+queries::eval_policy_plans::inventory_projection_tests::inventory_history_ignores_cache_mutation_and_queued_retry_has_no_inventory
+queries::eval_policy_plans::inventory_projection_tests::inventory_scoped_reads_hide_unmanaged_hidden_columns_and_global_failure_details
+queries::eval_policy_plans::inventory_projection_tests::inventory_missing_discovery_is_unavailable_despite_passing_native_and_cache
+```
+
+- **Inventory persistence (six cases):** Migration `0306` records immutable
+  exact-attempt discovered and selected names with native/mock provenance.
+  Cases cover exact spelling, sorting/deduplication, empty versus missing
+  discovery, selection subsets, first-write conflicts, schema ownership and
+  parent cleanup, cancellation, supersession, retries, and competing writers.
+- **Queue/history summaries (three cases):** Exact discovery replaces mutable
+  cached names. Counters exclude unselected and out-of-inventory outcomes and
+  distinguish pending from unavailable coverage. Current membership scopes names,
+  search, totals, errors, and shared-configuration policy facts; revocation removes
+  access. Both summary readers use read-only REPEATABLE READ transactions.
+- **Indivisible evidence visibility (nine cases):** Logs, WebSocket authorization,
+  and mutable latest graphs require whole-flake scope. Cases cover mixed and
+  shared environments, inactive hosts, unmanaged names, missing inventory,
+  queued retries, moves, missing registration, and membership/role/session
+  revocation. An authorized snapshot can finish; the next check observes changes.
+- **Matrix inventory reconciliation (six cases):** Discovery extends captured host
+  rows without invented IDs or applicability. Absent or unselected planned rows
+  retain provenance and Unknown evidence. Shared hosts count one configuration
+  gate; scoped reads hide unmanaged names, hidden columns, and global diagnostics.
+  The primary population is the distinct union of planned and discovered names.
+  Absent planned names and ambiguous evidence are unavailable. Missing results
+  are pending only while the current attempt can still complete. A saved false
+  intrinsic CF-agent gate can prove failure under partial shared visibility;
+  hidden requirement outcomes and free-form diagnostics remain withheld.
+  Cache changes cannot rewrite retained inventory, and retries inherit none.
+
+These declarations describe registered coverage, not execution results. Native
+outcome fixtures do not prove that Nix evaluation ran. Runtime and CI verification
+remain separate evidence.
+
+### TASK-488 immutable native outcome regressions
+
+These six ignored, migration-backed SQLx cases run through the same
+`--ignored --exact --test-threads=1` guard. Each invocation must report the named
+success line and exactly one passed test with zero failures and zero ignored tests.
+
+```text
+queries::evaluation_native_outcomes::tests::native_outcome_rejects_cancelled_superseded_and_nonactive_owners
+queries::evaluation_native_outcomes::tests::native_outcome_requires_exact_selected_native_inventory
+queries::evaluation_native_outcomes::tests::native_outcome_first_write_schema_immutability_and_parent_cascade
+queries::evaluation_native_outcomes::tests::native_outcome_sidecar_has_no_artifact_build_or_observation_side_effects
+queries::evaluation_native_outcomes::tests::native_outcome_retry_retains_historical_values_under_new_ea
+queries::evaluation_native_outcomes::tests::native_producers_atomically_retain_success_and_confirmed_failure_across_retry
+```
+
+Migration `0307` retains exact-attempt native evidence independently of mutable
+derivations. The cases cover active ownership, cancellation, supersession,
+exact selected native inventory, first-write conflicts, schema immutability,
+parent cleanup, and absence of artifact, build, observation, and snapshot writes
+by the sidecar. Production persistence/finalization cases cover atomic success
+and confirmed failure, rollback, and historical values across retry.
+
+The same cases replay the data statement from migration `0308`. Retention
+requires exact discovered-and-selected native names and positive integer attempt
+markers. Mock, malformed, unselected, and unattributable carriers are excluded.
+Tests preserve existing immutable records and historical values after mutable
+carrier overwrite, and verify explicit unavailable records and native/mock
+ambiguity. The derivation uniqueness constraint prevents seeding duplicate native
+carriers; the schema case checks unavailable-state restrictions directly.
+Registration does not establish execution or a passing current-source result.
+
+### System and Compliance receiver scope
+
+Six migration-backed receiver tests cover single-system and bundle-system reads,
+scope revocation, hidden rollups, and preservation of empty/legacy responses.
+Two cases use PostgreSQL lock wait inspection to prove that membership deletion
+and environment moves wait until a receiver finishes materializing its response.
+The bundle reader restricts candidates to the exact locked system UUID set.
+
+### TASK-488 log, recovery, receiver, and inventory review regressions
+
+These 20 ignored and nine pure tests preserve all 208 previous exact selections.
+Each uses the existing named-success and exactly-one-passed guard. Registration
+describes coverage; it does not establish a runtime or CI pass.
+
+- **Attempt logs:** Historical rows remain stored; stale single and batch writes
+  fail. Unattributed legacy logs are excluded from current-attempt reads.
+  WebSocket retry replaces a hidden host UUID with a visible UUID under the same
+  configuration name without replaying old-attempt evidence. Six pure tests
+  cover generation fencing, replay/live ordering, bounded buffers, cleanup, all
+  message variants, and compatible wire shapes.
+- **Receivers:** Two additional tests materialize composite evidence with a
+  one-connection pool and preserve environment scope and admin compatibility.
+  Another test proves that evidence reads acquire the POA&M sentinel before
+  system scope locks, matching concurrent metadata writers.
+- **Restart recovery:** Seven tests retain partial durable evidence, capture a
+  fresh child plan, preserve zero and exhausted failure budgets, and retain
+  queued children and delayed backoff. Repeated/concurrent recovery targets the
+  exact source; child insertion failure rolls back source and commit changes.
+  Cancellation, terminal attempts, and missing owners never enqueue work.
+  Recovery does not consume the ordinary failure retry budget or impose a hard
+  cap on restart recovery. Ordinary failures still obey the configured budget.
+- **Required inventory:** Four database tests check cancellation, supersession,
+  timeout, connection reclamation, exact ownership, and conflicts. Three pure
+  helper tests block producer admission after persistence or final-check failure.
+  A fifth database test proves that PostgreSQL's 31-second local timeouts let
+  an abandoned writer return its connection while the external lock stays held.
+  A sixth preserves stricter database/session timeout policies.
+  The actual worker test verifies permit release before blocked finalization,
+  including finalizer failure. Database timeout cases use the actual production
+  30-second deadline, with no shorter runner timeout or deadline override.
+
+The worker requires a runner-provided public TOML fixture containing only:
+
+```toml
+[server]
+host = "127.0.0.1"
+port = 0
+execution_mode = "mock"
+```
+
+The check creates this fixture with `pkgs.writeText` and scopes
+`CRYSTAL_FORGE_CONFIG` only to the exact invocation of
+`server::required_inventory_worker_tests::required_inventory_actual_worker_releases_permit_before_blocked_finalization`.
+`process_pending_commits` reloads `CrystalForgeConfig` independently of `CFState`,
+so mock mode on `CFState` alone is insufficient. No global mock override affects
+integration targets or other tests.
+
 ## TASK-470 selected library tests
 
-The exact library-test runner selects 59 ignored tests: the 52 TASK-470 tests
-below, the six TASK-484 tests above, and this TASK-487 regression:
+The exact library-test runner selects 145 ignored tests: the 62 tests in the
+TASK-470 extra library list below (including four TASK-488 isolated mock tests
+and four derivation-count tests, plus two native-finalizer tests),
+the six TASK-484 tests, four original TASK-488 capture tests, 16 MR334 review
+tests above, the 24 inventory and visibility tests above, six immutable native
+outcome tests, six receiver scope tests, 20 additional TASK-488 review tests,
+and this TASK-487
+regression. With 92 non-ignored selections (83 existing plus nine TASK-488 pure
+tests), the exact library-test runner selects 237 tests in total:
 
 ```text
 handlers::api::deployment_policies::tests::test_list_deployment_policies_includes_fixture
@@ -167,12 +411,22 @@ acceptance-only scope, exact finding context, combined-cap rejection, linked
 system visibility, retained history, and exact scheduled package identities.
 Membership does not establish a passing result for the current source.
 
-The following 52 ignored PostgreSQL tests run with
+The following 62 ignored PostgreSQL tests run with
 `--ignored --exact --test-threads=1`. Each invocation must report exactly one
 passed test and zero ignored tests. The tests include completed CVE publication
 provenance and malformed signing-key rejection across all Niks3 auth modes.
 
 ```text
+models::evaluate_with_policies::mock_persistence::tests::mock_persistence_records_attempt_outcomes_without_production_work
+models::evaluate_with_policies::mock_persistence::tests::mock_persistence_cancelled_or_superseded_attempts_write_nothing
+models::evaluate_with_policies::mock_persistence::tests::isolated_mock_counts_match_queue_history_and_exclude_queued_retry
+queries::eval_policy_plans::tests::isolated_mock_projection_matches_attempt_and_rejects_ambiguous_native
+queries::eval_policy_plans::tests::confirmed_native_finalizer_failure_is_attempt_owned_and_preserves_build
+queries::eval_policy_plans::tests::confirmed_native_finalizer_cancellation_writes_no_failure_evidence
+queries::commits::tests::derivation_count_isolated_current_mock_has_zero_records
+queries::commits::tests::derivation_count_excludes_stale_native_and_queued_retry
+queries::commits::tests::derivation_count_counts_current_native_records_not_groups
+queries::commits::tests::derivation_count_markerless_legacy_is_unavailable
 queries::commits::partial_resource_failure_tests::partial_resource_failure_retains_rejected_completion_with_preserved_build_history
 queries::commits::partial_resource_failure_tests::partial_resource_failure_reconciles_committed_but_unacknowledged_completion
 queries::commits::partial_resource_failure_tests::partial_resource_failure_ignores_never_committed_completion_candidate
@@ -226,6 +480,55 @@ builder::cve_worker::tests::materialization_completed_provenance_identity_and_el
 handlers::api::caches::tests::niks3_api_create_rejects_malformed_keys_in_all_auth_modes
 handlers::api::caches::tests::niks3_api_update_rejects_malformed_keys_in_all_auth_modes
 ```
+
+The four TASK-488 isolated mock tests use migration-backed disposable SQLx
+databases. The original two persistence tests verify exact-attempt outcomes and
+UUID-keyed policy details in `evaluation_mock_outcomes`, not the generic
+derivation writer. Repeated writes preserve first-write evidence; updates and
+invalid attempt ownership or markers are rejected. Cancelled or superseded
+attempts write no mock outcomes. Mock persistence creates no derivations,
+buildable rows, build jobs, configuration-observation requests or observations,
+or composite assessments; both tests assert unchanged counts for these rows.
+
+The queue/history test verifies matching isolated mock counts, exclusion of old
+mock evidence from a queued retry, and native-only counting when a native retry
+starts. The projection test verifies exact-attempt mock evidence, rejects invalid
+markers, preserves Unknown for missing results, and withholds outcomes and global
+evidence when current native and mock evidence are ambiguous. A queued retry does
+not inherit old mock results. These two tests insert native derivation fixtures
+explicitly to exercise coexistence and ambiguity.
+
+The three mock persistence tests are declared in `models/mock_persistence.rs`,
+loaded by `#[path = "mock_persistence.rs"]` and `mod mock_persistence;` inside
+`models::evaluate_with_policies`. The projection test is declared in the `tests`
+module of `queries/eval_policy_plans.rs`. The qualified names above follow these
+module declarations. Membership does not establish a passing result for the
+current source.
+
+The four derivation-count tests are declared in `queries::commits::tests` with
+ignored, migration-backed SQLx test attributes. Queue and history counts report
+zero persisted derivation records for isolated current mock outcomes, exclude
+stale native records, and count current native records across statuses rather
+than result groups. A queued retry does not inherit the previous attempt's count.
+Markerless or malformed legacy markers make the count unavailable even when a
+known current record exists. These declarations describe coverage; membership
+does not establish a passing result for the current source.
+
+The two native-finalizer tests are declared in `queries::eval_policy_plans::tests`
+with ignored, migration-backed SQLx test attributes. They invoke the real
+`finalize_evaluation_attempt` with confirmed Nix failures. The failure test covers
+new derivations, resettable evaluation rows, and irreversible build state. It
+checks the exact-attempt failure marker and diagnostic, flat `eval_failed`
+projection, and structured controls that remain Unknown without policy details.
+Irreversible build status and derivation/store paths survive the failure stamp.
+Malformed failure flags or diagnostics and stale attempt markers are masked;
+a queued retry also hides the previous failure diagnostic and policy evidence.
+The cancellation test compares complete derivation rows before and after the
+finalizer for both absent and existing derivations. Cancellation writes no
+failure evidence, preserves existing rows, and creates no evaluation snapshots.
+Each fixture flake has a distinct repository URL so independent scenarios do
+not collide with the uniqueness constraint. Execute the qualified cases through
+the guarded runner; registration alone does not establish a passing result.
 
 The partial resource-failure tests use migration-backed disposable SQLx databases.
 They preserve exact completed derivation, build-job, assessment, and rule rows;
@@ -420,7 +723,8 @@ projection, protected token files and alphabet boundaries, bounded responses,
 and refusal before file or network access. Native restricted-role and module
 lifecycle acceptance remains covered by the separate `attic-metrics` VM check.
 
-These 83 non-ignored tests run with `--exact --test-threads=1`:
+The following 83 existing non-ignored tests and the nine TASK-488 pure tests
+described above run with `--exact --test-threads=1`, for 92 in total:
 
 ```text
 queries::commits::partial_resource_failure_tests::partial_failure_diagnostic_uses_proven_counts_not_checkpoint_guesses
@@ -582,11 +886,20 @@ its matching `END` identifies the active target and whether Cargo was compiling
 or executing. The library also has an explicit compilation boundary before its
 selected tests execute. Cargo's normal output reports executed test names.
 
-Each of the 59 ignored and 83 non-ignored selected library tests emits its qualified name,
-mode, start time, exit status, and elapsed time. Cargo stdout and stderr still
-pass through `tee` to the exact-test guard. `pipefail` preserves failures from
-Cargo or `tee`; success still requires the named `... ok` line and the existing
-one-passed/zero-failed/zero-ignored summary. Zero executed tests fail the gate.
+Cargo replays cached compiler diagnostics across the many exact test
+invocations. Their combined output exhausted GitLab's 4 MiB job-log limit
+before the failing selection ran. The runner therefore defines a `cargo` shell
+function that holds Cargo's stderr in a temporary file and prints its last 400
+lines only when Cargo fails. Stdout (test results and panic reports) and the
+exit status are unchanged. The compiler error remains visible in the failure
+tail.
+
+Each of the 145 ignored and 92 non-ignored selected library tests emits its
+qualified name, mode, start time, exit status, and elapsed time. Cargo stdout
+still passes through `tee` to the exact-test guard. `pipefail` preserves
+failures from Cargo or `tee`. Success still requires the named `... ok` line
+and the existing one-passed/zero-failed/zero-ignored summary. Zero executed
+tests fail the gate.
 
 Progress labels contain only phase names, target names, and modes. The runner
 does not print command arguments or environment values, enable `--nocapture`,

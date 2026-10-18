@@ -35,6 +35,7 @@ tags:
 | `checks/ui-screenshots/README.md` | retained in place; see [ui-screenshots section](../../testing/flake-checks.md#ui-screenshots) | retained | complete |
 | `checks/web-ui/README.md` | retained in place; see [web-ui section](../../testing/flake-checks.md#web-ui) | retained | complete |
 | `checks/web-ui/baselines/README.md` | retained in place; see [web-ui/baselines section](../../testing/flake-checks.md#web-uibaselines) | retained | complete |
+| `checks/web-ui/design-parity/eval-drawer.md` | retained in place at [the evaluation drawer comparison runbook](../../../../checks/web-ui/design-parity/eval-drawer.md); see [testing index](../../testing/index.md) | retained | complete |
 | `checks/web-ui-reconciliation/README.md` | retained in place; see [web-ui-reconciliation section](../../testing/flake-checks.md#web-ui-reconciliation) | retained | complete |
 | `checks/web-ui-test-runner/README.md` | retained in place; see [web-ui-test-runner section](../../testing/flake-checks.md#web-ui-test-runner) | retained | complete |
 | `checks/xccdf-schema/README.md` | retained in place; see [xccdf-schema section](../../testing/flake-checks.md#xccdf-schema) | retained | complete |
@@ -44,6 +45,18 @@ tags:
 | `CONTRIBUTING.md` | retained in place; see [pointer](../../operations/contributing-guide.md) | retained | complete |
 
 ## Source inventory
+
+### `checks/web-ui/design-parity/eval-drawer.md`
+
+- Title: Evaluation drawer comparison
+- Purpose: Defines the task-owned drawer shell comparison inputs, commands, assertions, structured matrix workflow, and visual acceptance limits.
+- Action: retained at its check-local path and cataloged in the [testing index](../../testing/index.md).
+- Sections:
+  | Source section | Destination |
+  | --- | --- |
+  | `## Inputs` | [Inputs](../../../../checks/web-ui/design-parity/eval-drawer.md#inputs) |
+  | `## Current contract` | [Current contract](../../../../checks/web-ui/design-parity/eval-drawer.md#current-contract) |
+  | `## Structured matrix workflow` | [Structured matrix workflow](../../../../checks/web-ui/design-parity/eval-drawer.md#structured-matrix-workflow) |
 
 ### `docs/test_plan.md`
 

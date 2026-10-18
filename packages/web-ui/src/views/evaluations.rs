@@ -1,4 +1,15 @@
-//! Evaluations view - rebuilt to match JSX mockup design exactly.
+//! Displays evaluation queues, history, and persisted evaluation evidence.
+
+mod drawer_header;
+mod drawer_snapshot;
+mod evidence_navigation;
+mod log_pane;
+mod policy_adapter;
+mod policy_captured;
+mod policy_cells;
+mod policy_matrix;
+#[cfg(test)]
+mod policy_sort_tests;
 
 use dioxus::prelude::*;
 #[cfg(target_arch = "wasm32")]
@@ -11,32 +22,412 @@ use crate::alerts::{
 
 use crate::api::{
     client::{
-        ApiClientError, cancel_commit_evaluation, fetch_eval_dependency_graph, fetch_eval_history,
+        cancel_commit_evaluation, fetch_eval_dependency_graph, fetch_eval_history,
         fetch_eval_policy_matrix, fetch_eval_queue, force_cancel_commit_evaluation,
         re_evaluate_commit, reorder_eval_queue,
     },
-    models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem},
+    models::{EvalHistoryItem, EvalHistoryPage, EvalQueueItem, EvalQueueSummary},
+};
+use crate::components::dialog_focus::{
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel, DialogInitialFocus,
 };
 use crate::components::{Icon, IconName};
 use crate::hooks::{InfiniteScroll, use_infinite_scroll};
 use crate::routes::Route;
+use crate::state::evaluation_drawer::EvaluationTarget as EvalDrawerTarget;
+use crate::state::evaluation_drawer::{
+    self as handoff, EVALUATION_RETURN, EvaluationIdentity, EvaluationReturn,
+};
 use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::views::latest_filter::{
-    LatestFilterState, marker_matches, replace_unique_by, request_state, reset_key, retain_visible,
+    LatestFilterState, marker_matches, replace_unique_by, reset_key, retain_visible,
 };
 
 const FETCH_LIMIT_MAX: i64 = 10_000; // must match backend LIMIT_MAX
+
+/// Shows the drawer's configuration-level policy counters in design typography.
+///
+/// The values count evaluated configurations, not bundle controls. Unavailable
+/// counters render an em dash rather than a clean zero. Empty known coverage
+/// explicitly says `No results`; zero failures alone do not prove a clean gate.
+#[component]
+fn DrawerPolicyCounts(
+    available: bool,
+    passed: i64,
+    failed: i64,
+    #[props(default)] pending: i64,
+    #[props(default)] unavailable: i64,
+    #[props(default)] evaluation_errors: i64,
+    #[props(default)] excluded: i64,
+    #[props(default)] live: bool,
+) -> Element {
+    rsx! {
+        if available {
+            div { class: "ed-stat-val ed-policy-val",
+                title: "Configurations passing / failing the CF-agent and assigned-requirement gate for this attempt. Coverage may be partial; bundle controls are counted in the Policy matrix.",
+                span { class: if passed > 0 { "ed-policy-pass" } else { "ed-policy-zero" }, "{passed}" }
+                span { class: "ed-policy-sep", "/" }
+                span { class: if failed > 0 { "ed-policy-fail" } else { "ed-policy-zero" }, "{failed}" }
+                if pending > 0 { span { class: "ed-stat-unit", if live { "{pending} pending" } else { "{pending} unavailable" } } }
+                if unavailable > 0 { span { class: "ed-stat-unit", "{unavailable} unavailable" } }
+                if evaluation_errors > 0 { span { class: "ed-stat-unit", "{evaluation_errors} eval errors" } }
+                if excluded > 0 { span { class: "ed-stat-unit", "{excluded} not selected" } }
+                if unavailable == 0 && evaluation_errors == 0 && excluded == 0 && policy_has_no_results(available, passed, failed, pending) { span { class: "ed-stat-unit", "No results" } }
+            }
+        } else {
+            div { class: "ed-stat-val ed-policy-val ed-policy-unavailable",
+                title: "Trustworthy attempt-scoped policy counts are unavailable.",
+                "—"
+                span { class: "ed-stat-unit", if live { " Pending" } else { " Unavailable" } }
+            }
+        }
+    }
+}
+
+fn policy_has_no_results(available: bool, passed: i64, failed: i64, pending: i64) -> bool {
+    available && passed == 0 && failed == 0 && pending == 0
+}
+
+fn format_inventory_count(available: bool, count: i64) -> String {
+    if available {
+        count.to_string()
+    } else {
+        "—".into()
+    }
+}
+
+fn snapshot_population(
+    snapshot: &crate::api::models::eval_policy_matrix::EvalPolicyMatrixSnapshot,
+) -> i64 {
+    let Some(inventory) = &snapshot.inventory else {
+        return 0;
+    };
+    snapshot
+        .configuration_summary
+        .as_ref()
+        .map(|summary| summary.total as i64)
+        .unwrap_or_else(|| {
+            inventory
+                .configurations
+                .iter()
+                .map(String::as_str)
+                .chain(
+                    snapshot
+                        .rows
+                        .iter()
+                        .map(|row| row.configuration_name.as_str()),
+                )
+                .collect::<std::collections::HashSet<_>>()
+                .len() as i64
+        })
+}
+
+/// Refreshes a saved header only from its validated exact-attempt response.
+///
+/// Retains original flake identity and presentation. Missing attempt data clears
+/// old counters and completion metadata; latest queue/history data is never read.
+/// Queue DTOs have no actual start/completion fields, so queue time stays queue
+/// time. Retained responses cannot establish a derivation count.
+fn refresh_retained_return(
+    mut saved: EvaluationReturn,
+    data: &crate::api::models::EvalPolicyMatrixResponse,
+) -> Option<EvaluationReturn> {
+    if !saved.identity.matches_response(data) {
+        return None;
+    }
+    let snapshot = data.matrix.as_ref()?;
+    let inventory = snapshot.inventory.as_ref();
+    let summary = inventory.and(snapshot.configuration_summary.as_ref());
+    let total = snapshot_population(snapshot);
+    let passed = summary.map_or(0, |summary| summary.passed) as i64;
+    let failed = summary.map_or(0, |summary| summary.failed) as i64;
+    let evaluation_failed = summary.map_or(0, |summary| summary.evaluation_failed) as i64;
+    let pending = summary.map_or(0, |summary| summary.pending) as i64;
+    let excluded = summary.map_or(0, |summary| summary.excluded) as i64;
+    let unavailable = summary.map_or(0, |summary| summary.unavailable) as i64;
+    let status = snapshot
+        .attempt_status
+        .clone()
+        .unwrap_or_else(|| "unavailable".into());
+    match saved.target.as_mut() {
+        Some(EvalDrawerTarget::Queue(item)) => {
+            item.inventory_available = inventory.is_some();
+            item.system_count = total;
+            item.systems = inventory.map_or_else(Vec::new, |inventory| {
+                inventory
+                    .configurations
+                    .iter()
+                    .cloned()
+                    .chain(
+                        snapshot
+                            .rows
+                            .iter()
+                            .map(|row| row.configuration_name.clone()),
+                    )
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            });
+            item.policy_counts_available = summary.is_some();
+            item.passed_count = passed;
+            item.policy_failed_count = failed;
+            item.eval_failed_count = evaluation_failed;
+            item.policy_pending_count = pending;
+            item.unselected_count = excluded;
+            item.policy_unavailable_count = unavailable;
+            item.derivation_count = None;
+            item.evaluation_status = status;
+        }
+        Some(EvalDrawerTarget::History(item)) => {
+            item.inventory_available = inventory.is_some();
+            item.system_count = total;
+            item.policy_counts_available = summary.is_some();
+            item.passed_count = passed;
+            item.policy_failed_count = failed;
+            item.eval_failed_count = evaluation_failed;
+            item.policy_pending_count = pending;
+            item.unselected_count = excluded;
+            item.policy_unavailable_count = unavailable;
+            item.derivation_count = None;
+            item.evaluation_status = status;
+            item.evaluation_completed_at = snapshot.completed_at;
+            item.evaluation_duration_ms = snapshot
+                .started_at
+                .zip(snapshot.completed_at)
+                .map(|(start, end)| (end - start).num_milliseconds())
+                .filter(|duration| *duration >= 0);
+            // The pinned response does not supply the old summary's error text.
+            item.evaluation_error_message = None;
+        }
+        None => {}
+    }
+    Some(saved)
+}
+
+#[cfg(test)]
+mod retained_header_tests {
+    use super::*;
+    use serde_json::{Value, json};
+
+    fn response() -> crate::api::models::EvalPolicyMatrixResponse {
+        serde_json::from_value(json!({
+            "commit_id": 7, "policies": [], "systems": [],
+            "matrix": {
+                "evaluation_attempt_id": uuid::Uuid::from_u128(8),
+                "attempt_number": 2, "commit_sha": "a".repeat(40),
+                "attempt_status": "failed", "started_at": "2026-10-16T00:00:00Z",
+                "completed_at": "2026-10-16T00:01:03Z",
+                "provenance": "captured", "columns": [], "bundles": [],
+                "empty_bundle_metadata_complete": true, "rows": [],
+                "inventory": { "execution_mode": "native",
+                    "configurations": ["one", "two", "three", "four", "five"],
+                    "selected_configurations": ["one", "two", "three", "four", "five"] },
+                "configuration_summary": { "total": 5, "passed": 1, "failed": 1,
+                    "evaluation_failed": 1, "pending": 0, "unavailable": 2, "excluded": 0 }
+            }
+        }))
+        .unwrap()
+    }
+
+    fn saved(history: bool) -> EvaluationReturn {
+        // Deliberately stale/latest-looking fields must all be replaced, while
+        // original flake metadata remains useful for a rich return header.
+        let item = json!({
+            "commit_id": 7, "flake_id": 3, "flake_name": "original", "branch": "main",
+            "commit_hash": "a".repeat(40), "commit_message": null, "author": null,
+            "committed_at": "2026-10-15T00:00:00Z", "enqueued_at": "2026-10-15T00:00:01Z",
+            "evaluation_status": "complete", "queue_position": 1, "systems": ["stale"],
+            "system_count": 999, "passed_count": 998, "policy_failed_count": 997,
+            "eval_failed_count": 996, "policy_pending_count": 995,
+            "policy_unavailable_count": 993, "unselected_count": 992,
+            "inventory_available": true, "policy_counts_available": true,
+            "derivation_count": 994, "attempt_number": 2,
+            "evaluation_completed_at": "2026-10-15T01:00:00Z",
+            "evaluation_duration_ms": 999999, "evaluation_error_message": "stale error",
+            "alert_occurrence_id": "original"
+        });
+        let mut saved = EvaluationReturn::direct(EvaluationIdentity {
+            commit_id: 7,
+            commit_sha: "a".repeat(40),
+            attempt_id: uuid::Uuid::from_u128(8),
+            attempt_number: 2,
+        });
+        saved.target = Some(if history {
+            EvalDrawerTarget::History(serde_json::from_value(item).unwrap())
+        } else {
+            EvalDrawerTarget::Queue(serde_json::from_value(item).unwrap())
+        });
+        saved
+    }
+
+    fn target_json(saved: EvaluationReturn) -> Value {
+        match saved.target.unwrap() {
+            EvalDrawerTarget::Queue(item) => serde_json::to_value(item).unwrap(),
+            EvalDrawerTarget::History(item) => serde_json::to_value(item).unwrap(),
+        }
+    }
+
+    #[test]
+    fn retained_headers_replace_stale_counts_with_exact_inventory_not_matrix_rows() {
+        let data = response();
+        for history in [false, true] {
+            let item = target_json(refresh_retained_return(saved(history), &data).unwrap());
+            for (key, expected) in [
+                ("system_count", 5),
+                ("passed_count", 1),
+                ("policy_failed_count", 1),
+                ("eval_failed_count", 1),
+                ("policy_pending_count", 0),
+                ("policy_unavailable_count", 2),
+                ("unselected_count", 0),
+            ] {
+                assert_eq!(item[key], json!(expected), "{key}");
+            }
+            assert_eq!(item["inventory_available"], true);
+            assert_eq!(item["policy_counts_available"], true);
+            assert_eq!(item["derivation_count"], Value::Null);
+            assert_eq!(item["evaluation_status"], "failed");
+            assert_eq!(item["flake_name"], "original");
+            if history {
+                assert_eq!(item["evaluation_completed_at"], "2026-10-16T00:01:03Z");
+                assert_eq!(item["evaluation_duration_ms"], 63000);
+                assert_eq!(item["evaluation_error_message"], Value::Null);
+            } else {
+                assert_eq!(
+                    item["systems"],
+                    json!(["five", "four", "one", "three", "two"])
+                );
+                assert_eq!(item["enqueued_at"], "2026-10-15T00:00:01Z");
+            }
+        }
+    }
+
+    #[test]
+    fn missing_retained_inventory_and_metadata_clear_old_header_fields() {
+        let mut data = response();
+        let snapshot = data.matrix.as_mut().unwrap();
+        snapshot.inventory = None;
+        snapshot.configuration_summary = None;
+        snapshot.started_at = None;
+        snapshot.completed_at = None;
+        snapshot.attempt_status = None;
+        for history in [false, true] {
+            let item = target_json(refresh_retained_return(saved(history), &data).unwrap());
+            for key in [
+                "system_count",
+                "passed_count",
+                "policy_failed_count",
+                "eval_failed_count",
+                "policy_pending_count",
+                "policy_unavailable_count",
+                "unselected_count",
+            ] {
+                assert_eq!(item[key], 0, "{key}");
+            }
+            assert_eq!(item["inventory_available"], false);
+            assert_eq!(item["policy_counts_available"], false);
+            assert_eq!(item["derivation_count"], Value::Null);
+            assert_eq!(item["evaluation_status"], "unavailable");
+            if history {
+                assert_eq!(item["evaluation_completed_at"], Value::Null);
+                assert_eq!(item["evaluation_duration_ms"], Value::Null);
+            } else {
+                assert_eq!(item["systems"], json!([]));
+            }
+        }
+    }
+
+    #[test]
+    fn retained_pending_and_empty_coverage_do_not_claim_clean_results() {
+        assert!(policy_has_no_results(true, 0, 0, 0));
+        assert!(!policy_has_no_results(false, 0, 0, 0));
+        assert!(!policy_has_no_results(true, 0, 0, 3));
+        assert!(!policy_has_no_results(true, 1, 0, 0));
+        let mut data = response();
+        let snapshot = data.matrix.as_mut().unwrap();
+        snapshot.configuration_summary = Some(Default::default());
+        let inventory = snapshot.inventory.as_mut().unwrap();
+        inventory.configurations.clear();
+        inventory.selected_configurations.clear();
+        let item = target_json(refresh_retained_return(saved(true), &data).unwrap());
+        assert_eq!(item["policy_counts_available"], true);
+        assert_eq!(item["passed_count"], 0);
+        assert_eq!(item["policy_failed_count"], 0);
+        assert_eq!(item["policy_pending_count"], 0);
+        let snapshot = data.matrix.as_mut().unwrap();
+        let summary = snapshot.configuration_summary.as_mut().unwrap();
+        summary.total = 3;
+        summary.pending = 3;
+        let inventory = snapshot.inventory.as_mut().unwrap();
+        inventory.configurations = vec!["one".into(), "three".into(), "two".into()];
+        inventory.selected_configurations = inventory.configurations.clone();
+        snapshot.completed_at = None;
+        snapshot.attempt_status = Some("in_progress".into());
+        let item = target_json(refresh_retained_return(saved(true), &data).unwrap());
+        assert_eq!(item["policy_pending_count"], 3);
+        assert_eq!(item["evaluation_status"], "in_progress");
+        assert_eq!(item["evaluation_duration_ms"], Value::Null);
+    }
+
+    #[test]
+    fn retained_refresh_rejects_another_attempt_without_a_latest_fallback() {
+        let mut data = response();
+        data.matrix.as_mut().unwrap().evaluation_attempt_id = Some(uuid::Uuid::from_u128(9));
+        assert!(refresh_retained_return(saved(true), &data).is_none());
+        assert!(refresh_retained_return(saved(false), &data).is_none());
+    }
+
+    #[test]
+    fn retained_policy_coverage_requires_verified_inventory_and_summary() {
+        let mut data = response();
+        data.matrix.as_mut().unwrap().inventory = None;
+        let item = target_json(refresh_retained_return(saved(true), &data).unwrap());
+        assert_eq!(item["inventory_available"], false);
+        assert_eq!(item["policy_counts_available"], false);
+        assert_eq!(item["policy_pending_count"], 0);
+        assert_eq!(item["policy_unavailable_count"], 0);
+
+        let mut data = response();
+        data.matrix.as_mut().unwrap().configuration_summary = None;
+        let item = target_json(refresh_retained_return(saved(false), &data).unwrap());
+        assert_eq!(item["inventory_available"], true);
+        assert_eq!(item["system_count"], 5);
+        assert_eq!(item["policy_counts_available"], false);
+        assert_eq!(item["passed_count"], 0);
+    }
+}
+
+/// Displays the reconciled planned/discovered population after verified discovery.
+/// Until discovery exists, no cache-derived number is presented as coverage.
+#[component]
+fn InventoryCount(available: bool, count: i64, live: bool) -> Element {
+    rsx! {
+        div { class: "ed-stat-val",
+            if available { "{count}" }
+            else { "—" span { class: "ed-stat-unit", if live { " Discovering" } else { " Unavailable" } } }
+        }
+    }
+}
+
+/// Shows known attempt-scoped counts without claiming full policy coverage.
+#[component]
+fn PolicyCounts(available: bool, passed: i64, failed: i64) -> Element {
+    rsx! {
+        if available {
+            span { title: "Known attempt-scoped results; coverage may be partial.",
+                span { class: "chip chip-healthy", "{passed} ✓" }
+                span { class: if failed > 0 { "chip chip-critical" } else { "chip" }, "{failed} ✗" }
+            }
+        } else {
+            span { class: "chip", title: "Trustworthy attempt-scoped policy counts are unavailable.", "Unavailable" }
+        }
+    }
+}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum EvaluationsTab {
     ActiveQueue,
     History,
-}
-
-#[derive(Clone, PartialEq)]
-enum EvalDrawerTarget {
-    Queue(EvalQueueItem),
-    History(EvalHistoryItem),
 }
 
 fn queue_item_matches_search(item: &EvalQueueItem, search: &str) -> bool {
@@ -54,29 +445,209 @@ fn queue_item_matches_search(item: &EvalQueueItem, search: &str) -> bool {
         .any(|value| value.to_lowercase().contains(search))
 }
 
-fn history_item_matches_filters(
-    item: &EvalHistoryItem,
+/// Includes every effective server criterion and refresh generation.
+/// Delimiters in user text cannot alias another request's identity.
+type ListRequestKey = (String, String, String, bool, i64, u64);
+
+/// Owns response identity and success/error together, never in separate signals.
+type AcceptedList<T> = Option<(ListRequestKey, Result<T, String>)>;
+
+/// Allows an accepted window to remain mounted during same-scope polling or
+/// limit growth. A different search/status/flake/latest scope cannot reuse it.
+/// Errors replace successes and remain visible until a newer success arrives.
+fn cached_list_result<'a, T>(
+    stored: &'a AcceptedList<T>,
+    current: &ListRequestKey,
+) -> Option<&'a Result<T, String>> {
+    stored
+        .as_ref()
+        .filter(|(key, _)| {
+            key.0 == current.0 && key.1 == current.1 && key.2 == current.2 && key.3 == current.3
+        })
+        .map(|(_, result)| result)
+}
+
+/// Publishes only the latest full request, including its limit and generation.
+/// A late A response cannot overwrite B, including an A→B→A round trip.
+fn publish_list<T>(
+    stored: &mut AcceptedList<T>,
+    current: &ListRequestKey,
+    response_key: ListRequestKey,
+    result: Result<T, String>,
+) {
+    if &response_key == current {
+        *stored = Some((response_key, result));
+    }
+}
+
+/// Grants selection pruning only to a success owned by the current full request.
+/// Cached windows and loading/error gaps must never remove explicit choices.
+fn owned_list_page<'a, T>(stored: &'a AcceptedList<T>, current: &ListRequestKey) -> Option<&'a T> {
+    stored
+        .as_ref()
+        .filter(|(key, _)| key == current)
+        .and_then(|(_, result)| result.as_ref().ok())
+}
+
+/// Uses the same deduplicated server window for history display and pruning.
+fn history_page_rows(page: &EvalHistoryPage, count: usize) -> Vec<EvalHistoryItem> {
+    replace_unique_by(page.items.clone(), |item| item.commit_id)
+        .into_iter()
+        .take(count)
+        .collect()
+}
+
+fn history_request_key(
+    search: &str,
     status: &str,
     flake: &str,
-    search: &str,
-) -> bool {
-    (status == "all" || item.evaluation_status == status)
-        && (flake == "all"
-            || item
-                .flake_name
-                .to_lowercase()
-                .contains(&flake.to_lowercase()))
-        && (search.is_empty()
-            || [
-                item.flake_name.as_str(),
-                item.branch.as_str(),
-                item.commit_hash.as_str(),
-                item.commit_message.as_deref().unwrap_or_default(),
-                item.author.as_deref().unwrap_or_default(),
-                item.evaluation_status.as_str(),
-            ]
-            .into_iter()
-            .any(|value| value.to_lowercase().contains(search)))
+    latest: bool,
+    limit: i64,
+    generation: u64,
+) -> ListRequestKey {
+    let filter = |value: &str| match value.trim() {
+        "" | "all" => String::new(),
+        value => value.to_owned(),
+    };
+    (
+        search.trim().to_owned(),
+        filter(status),
+        filter(flake),
+        latest,
+        limit,
+        generation,
+    )
+}
+
+/// Leaves list shortcuts to the focused control, including editable ancestors.
+fn list_shortcuts_blocked() -> bool {
+    #[cfg(target_arch = "wasm32")]
+    {
+        web_sys::window().and_then(|window| window.document())
+            .and_then(|document| document.active_element())
+            .is_some_and(|element| element.closest("input, select, textarea, button, a, [contenteditable]:not([contenteditable='false']), [role='button'], [role='checkbox'], [role='combobox'], [role='textbox']").ok().flatten().is_some())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        false
+    }
+}
+
+/// Keeps row identity stable across paging and ordering changes.
+fn evaluation_row_id(history: bool, commit_id: i32) -> String {
+    let list = if history { "history" } else { "queue" };
+    format!("evaluation-{list}-row-{commit_id}")
+}
+
+/// Moves keyboard focus to a rendered row, also making it a dialog opener.
+fn focus_evaluation_row(history: bool, commit_id: i32) {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen::JsCast;
+        if let Some(row) = web_sys::window()
+            .and_then(|window| window.document())
+            .and_then(|document| document.get_element_by_id(&evaluation_row_id(history, commit_id)))
+            .and_then(|row| row.dyn_into::<web_sys::HtmlElement>().ok())
+        {
+            let _ = row.focus();
+        }
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    let _ = (history, commit_id);
+}
+
+#[cfg(test)]
+mod request_key_tests {
+    use super::{
+        AcceptedList, cached_list_result, history_request_key, owned_list_page, publish_list,
+    };
+    use crate::views::latest_filter::retain_visible;
+    use std::collections::HashSet;
+
+    #[test]
+    fn same_scope_cache_survives_polling_and_limit_growth_but_not_filter_changes() {
+        let key = history_request_key("host", "all", "all", false, 50, 1);
+        let stored: AcceptedList<Vec<i32>> = Some((key.clone(), Ok(vec![7])));
+        let growing = history_request_key("host", "all", "all", false, 100, 2);
+        assert_eq!(cached_list_result(&stored, &growing), Some(&Ok(vec![7])));
+        assert!(owned_list_page(&stored, &growing).is_none());
+        for different_scope in [
+            history_request_key("other", "all", "all", false, 50, 2),
+            history_request_key("host", "failed", "all", false, 50, 2),
+            history_request_key("host", "all", "flake", false, 50, 2),
+            history_request_key("host", "all", "all", true, 50, 2),
+        ] {
+            assert!(cached_list_result(&stored, &different_scope).is_none());
+        }
+    }
+
+    #[test]
+    fn publication_rejects_reverse_responses_and_superseded_a_to_b_to_a_generations() {
+        let a = history_request_key("a", "all", "all", false, 50, 1);
+        let b = history_request_key("b", "all", "all", false, 50, 2);
+        let newer_a = history_request_key("a", "all", "all", false, 50, 3);
+        let mut stored = None;
+        publish_list(&mut stored, &b, b.clone(), Ok(vec![2]));
+        publish_list(&mut stored, &b, a.clone(), Ok(vec![1]));
+        assert_eq!(owned_list_page(&stored, &b), Some(&vec![2]));
+        publish_list(&mut stored, &newer_a, a, Ok(vec![1]));
+        assert!(cached_list_result(&stored, &newer_a).is_none());
+        publish_list(&mut stored, &newer_a, newer_a.clone(), Ok(vec![3]));
+        publish_list(&mut stored, &newer_a, b, Err("late error".into()));
+        assert_eq!(owned_list_page(&stored, &newer_a), Some(&vec![3]));
+    }
+
+    #[test]
+    fn selection_prunes_only_from_atomic_owned_success_not_loading_or_cached_page() {
+        let key = history_request_key("configuration-only-match", "all", "all", false, 50, 2);
+        let old = history_request_key("configuration-only-match", "all", "all", false, 50, 1);
+        let mut selected = HashSet::from([7, 8]);
+        let mut stored: AcceptedList<Vec<i32>> = None;
+        let prune = |stored: &AcceptedList<Vec<i32>>, selected: &mut HashSet<i32>| {
+            if let Some(ids) = owned_list_page(stored, &key) {
+                retain_visible(selected, ids.iter().copied());
+            }
+        };
+        prune(&stored, &mut selected);
+        stored = Some((old, Ok(vec![])));
+        prune(&stored, &mut selected);
+        assert_eq!(selected, HashSet::from([7, 8]));
+        publish_list(&mut stored, &key, key.clone(), Ok(vec![7]));
+        prune(&stored, &mut selected);
+        assert_eq!(selected, HashSet::from([7]));
+        selected.clear();
+        prune(&stored, &mut selected);
+        assert!(selected.is_empty());
+    }
+
+    #[test]
+    fn accepted_errors_replace_cached_success_without_pruning_selection() {
+        let key = history_request_key("host", "all", "all", false, 50, 1);
+        let next = history_request_key("host", "all", "all", false, 50, 2);
+        let mut stored: AcceptedList<Vec<i32>> = Some((key, Ok(vec![7])));
+        publish_list(&mut stored, &next, next.clone(), Err("unavailable".into()));
+        assert_eq!(
+            cached_list_result(&stored, &next),
+            Some(&Err("unavailable".into()))
+        );
+        assert!(owned_list_page(&stored, &next).is_none());
+    }
+
+    #[test]
+    fn history_key_normalizes_and_covers_all_server_criteria_and_generation() {
+        let key = history_request_key(" host ", "all", "all", false, 50, 1);
+        assert_eq!(key, history_request_key("host", "", "", false, 50, 1));
+        for other in [
+            history_request_key("other", "all", "all", false, 50, 1),
+            history_request_key("host", "failed", "all", false, 50, 1),
+            history_request_key("host", "all", "flake", false, 50, 1),
+            history_request_key("host", "all", "all", true, 50, 1),
+            history_request_key("host", "all", "all", false, 100, 1),
+            history_request_key("host", "all", "all", false, 50, 3),
+        ] {
+            assert_ne!(key, other);
+        }
+    }
 }
 
 #[component]
@@ -86,25 +657,59 @@ pub fn EvaluationsView() -> Element {
 
 #[component]
 pub fn EvaluationsCommitView(commit_id: i32) -> Element {
-    let _ = commit_id;
-    rsx! { EvaluationsPage {} }
+    rsx! { EvaluationsPage { key: "{commit_id}", requested_commit: Some(commit_id) } }
+}
+
+/// Opens a retained attempt from its shareable path, including after refresh.
+///
+/// Missing or unauthorized attempts never fall back to the latest evaluation.
+#[component]
+pub fn EvaluationsAttemptView(commit_id: i32, attempt_id: uuid::Uuid) -> Element {
+    rsx! { EvaluationsPage { key: "{commit_id}-{attempt_id}", requested_commit: Some(commit_id), requested_attempt: Some(attempt_id) } }
 }
 
 #[component]
-fn EvaluationsPage() -> Element {
+fn EvaluationsPage(
+    #[props(default)] requested_commit: Option<i32>,
+    #[props(default)] requested_attempt: Option<uuid::Uuid>,
+) -> Element {
     let nav = navigator();
     let mut navigation_focus = use_context::<Signal<Option<NavigationFocus>>>();
-    let mut queue_items = use_signal(Vec::<EvalQueueItem>::new);
+    let mut stored_queue =
+        use_signal(|| None::<(ListRequestKey, Result<EvalQueueSummary, String>)>);
     let mut active_fetch_limit = use_signal(|| 200_i64);
     let mut active_refresh = use_signal(|| 0_u64);
     let mut history_refresh = use_signal(|| 0_u64);
     let mut active_tab = use_signal(|| EvaluationsTab::ActiveQueue);
     let mut latest_filter = use_signal(LatestFilterState::default);
     let mut search_query = use_signal(String::new);
+    let queue_generation = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0_u64)));
+    let queue_key = use_memo(move || {
+        let _ = active_refresh();
+        queue_generation.set(queue_generation.get() + 1);
+        history_request_key(
+            &search_query(),
+            "",
+            "",
+            latest_filter().enabled(),
+            active_fetch_limit(),
+            queue_generation.get(),
+        )
+    });
+    let queue_resource =
+        use_memo(move || cached_list_result(&stored_queue.read(), &queue_key()).cloned());
+    let queue_items = use_memo(move || {
+        cached_list_result(&stored_queue.read(), &queue_key())
+            .and_then(|result| result.as_ref().ok())
+            .map(|summary| replace_unique_by(summary.items.clone(), |item| item.commit_id))
+            .unwrap_or_default()
+    });
     let mut drawer_target = use_signal(|| None::<EvalDrawerTarget>);
+    // Selection is explicit. Refreshes and filters may prune selected rows but
+    // must never select new rows or restore a cleared selection.
     let mut history_selected_ids = use_signal(std::collections::HashSet::<i32>::new);
     // Keyboard navigation: index into the currently visible list (queue or history).
-    // Start at 0 so the first row is auto-selected when the page loads (matching JSX).
+    // Keyboard focus is separate from bulk selection.
     let mut focused_index: Signal<Option<usize>> = use_signal(|| None);
 
     // Active queue multi-select (bulk cancel)
@@ -117,13 +722,158 @@ fn EvaluationsPage() -> Element {
     let mut history_fetch_limit = use_signal(|| 50_i64);
     let mut history_status_filter = use_signal(|| String::from("all"));
     let mut history_flake_filter = use_signal(|| String::from("all"));
-    let mut history_select_all_loaded = use_signal(|| true);
     let mut history_ack_cursor = use_signal(|| None::<String>);
     let mut evals_ack_sent = use_signal(|| false);
     // Accumulated history items across the current page-1 fetch window.
-    let mut history_items_acc: Signal<Vec<EvalHistoryItem>> = use_signal(Vec::new);
-    let mut history_total_acc = use_signal(|| 0_i64);
-    let mut history_domain_total = use_signal(|| 0_i64);
+    let mut stored_history =
+        use_signal(|| None::<(ListRequestKey, Result<EvalHistoryPage, String>)>);
+    let history_generation = use_hook(|| std::rc::Rc::new(std::cell::Cell::new(0_u64)));
+    let history_key = use_memo(move || {
+        let _ = history_refresh();
+        history_generation.set(history_generation.get() + 1);
+        history_request_key(
+            &search_query(),
+            &history_status_filter(),
+            &history_flake_filter(),
+            latest_filter().enabled(),
+            history_fetch_limit(),
+            history_generation.get(),
+        )
+    });
+    let history_resource =
+        use_memo(move || cached_list_result(&stored_history.read(), &history_key()).cloned());
+    let history_items_acc = use_memo(move || {
+        cached_list_result(&stored_history.read(), &history_key())
+            .and_then(|result| result.as_ref().ok())
+            .map(|page| history_page_rows(page, usize::MAX))
+            .unwrap_or_default()
+    });
+    let history_total_acc = use_memo(move || {
+        cached_list_result(&stored_history.read(), &history_key())
+            .and_then(|result| result.as_ref().ok())
+            .map_or(0, |page| page.total_count)
+    });
+    let history_domain_total = use_memo(move || {
+        cached_list_result(&stored_history.read(), &history_key())
+            .and_then(|result| result.as_ref().ok())
+            .map_or(0, |page| page.domain_total)
+    });
+    let initial_return = use_hook(move || {
+        EVALUATION_RETURN.peek().clone().filter(|r| {
+            requested_commit.is_some_and(|commit_id| r.matches_commit(commit_id))
+                && requested_attempt.is_none_or(|attempt_id| r.identity.attempt_id == attempt_id)
+        })
+    });
+    let mut restored = use_signal(|| false);
+    let mut direct_return = use_signal(|| None::<EvaluationReturn>);
+    let return_to_validate = initial_return.clone();
+    let return_validation = use_resource(move || {
+        let saved = return_to_validate.clone();
+        async move {
+            let exact = requested_commit.zip(requested_attempt).or_else(|| {
+                saved
+                    .as_ref()
+                    .map(|s| (s.identity.commit_id, s.identity.attempt_id))
+            });
+            let Some((commit_id, attempt_id)) = exact else {
+                return None;
+            };
+            crate::api::client::fetch_eval_attempt_policy_matrix(commit_id, attempt_id)
+                .await
+                .ok()
+                .and_then(|data| {
+                    let identity = EvaluationIdentity::from_response(&data, commit_id, attempt_id)?;
+                    if let Some(saved) = saved {
+                        // Invalid saved identity must fail closed, even if the
+                        // server returned another otherwise valid exact context.
+                        refresh_retained_return(saved, &data)
+                    } else {
+                        Some(EvaluationReturn::direct(identity))
+                    }
+                })
+        }
+    });
+    let return_for_effect = initial_return.clone();
+    use_effect(move || {
+        if restored() {
+            return;
+        }
+        if return_for_effect.is_some() || requested_attempt.is_some() {
+            // Do not apply saved page or drawer choices to an unvalidated
+            // response. Missing/unauthorized historical attempts fail closed.
+            let Some(Some(saved)) = return_validation.read().clone() else {
+                return;
+            };
+            active_tab.set(if saved.history {
+                EvaluationsTab::History
+            } else {
+                EvaluationsTab::ActiveQueue
+            });
+            search_query.set(saved.search.clone());
+            history_status_filter.set(saved.status.clone());
+            history_flake_filter.set(saved.flake.clone());
+            if latest_filter().enabled() != saved.latest {
+                latest_filter.write().toggle();
+            }
+            // Publish only validated identity before mounting a pinned Policy
+            // tab. Its initial request must never choose the latest endpoint.
+            *EVALUATION_RETURN.write() = Some(saved.clone());
+            let Some(target) = saved.target.clone() else {
+                direct_return.set(Some(saved));
+                restored.set(true);
+                return;
+            };
+            drawer_target.set(Some(target));
+            restored.set(true);
+        } else if let Some(id) = requested_commit {
+            active_fetch_limit.set(FETCH_LIMIT_MAX);
+            history_fetch_limit.set(FETCH_LIMIT_MAX);
+            if let Some(item) = queue_items
+                .read()
+                .iter()
+                .find(|item| item.commit_id == id)
+                .cloned()
+            {
+                drawer_target.set(Some(EvalDrawerTarget::Queue(item)));
+                restored.set(true);
+            } else if let Some(item) = history_items_acc
+                .read()
+                .iter()
+                .find(|item| item.commit_id == id)
+                .cloned()
+            {
+                active_tab.set(EvaluationsTab::History);
+                drawer_target.set(Some(EvalDrawerTarget::History(item)));
+                restored.set(true);
+            }
+        }
+    });
+
+    use_effect(move || {
+        let selected = drawer_target();
+        let queue = queue_items.read();
+        let history = history_items_acc.read();
+        if let Some(current) = selected.as_ref() {
+            // A return is pinned to the original attempt. Summary polling may
+            // discover a retry, but must not retarget historical presentation.
+            if EVALUATION_RETURN
+                .read()
+                .as_ref()
+                .is_some_and(|saved| match current {
+                    EvalDrawerTarget::Queue(item) => item.commit_id == saved.identity.commit_id,
+                    EvalDrawerTarget::History(item) => item.commit_id == saved.identity.commit_id,
+                })
+            {
+                return;
+            }
+            let updated = drawer_snapshot::refresh(current, &queue, &history);
+            // The effect also subscribes to selection changes. Only publish a
+            // changed snapshot so its own write cannot sustain a rerender loop.
+            if &updated != current {
+                drawer_target.set(Some(updated));
+            }
+        }
+    });
 
     use_effect(move || {
         let _ = (search_query(), latest_filter().enabled());
@@ -140,37 +890,55 @@ fn EvaluationsPage() -> Element {
         history_fetch_limit.set(50);
     });
 
-    let history_resource = use_resource(move || async move {
-        let _ = history_refresh();
-        let limit = history_fetch_limit();
-        let status = history_status_filter();
-        let flake = history_flake_filter();
-        let search = search_query();
-        let (search, latest_only) = request_state(&search, latest_filter());
-        fetch_eval_history(
-            1,
-            limit,
-            if status.is_empty() || status == "all" {
-                None
-            } else {
-                Some(status.as_str())
-            },
-            if flake.is_empty() || flake == "all" {
-                None
-            } else {
-                Some(flake.as_str())
-            },
-            search.as_deref(),
-            latest_only,
-        )
-        .await
+    let _history_request = use_resource(move || {
+        let key = history_key();
+        async move {
+            let (search, status, flake, latest_only, limit, _) = &key;
+            let result = fetch_eval_history(
+                1,
+                *limit,
+                if status.is_empty() || status == "all" {
+                    None
+                } else {
+                    Some(status.as_str())
+                },
+                if flake.is_empty() || flake == "all" {
+                    None
+                } else {
+                    Some(flake.as_str())
+                },
+                (!search.is_empty()).then_some(search.as_str()),
+                *latest_only,
+            )
+            .await;
+            let current = history_key.peek().clone();
+            if key == current {
+                publish_list(
+                    &mut stored_history.write(),
+                    &current,
+                    key,
+                    result.map_err(|error| error.to_string()),
+                );
+                history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
+            }
+        }
     });
 
-    let queue_resource = use_resource(move || async move {
-        let _ = active_refresh();
-        let search = search_query();
-        let (search, latest_only) = request_state(&search, latest_filter());
-        fetch_eval_queue(active_fetch_limit(), search.as_deref(), latest_only).await
+    let _queue_request = use_resource(move || {
+        let key = queue_key();
+        async move {
+            let result =
+                fetch_eval_queue(key.4, (!key.0.is_empty()).then_some(key.0.as_str()), key.3).await;
+            let current = queue_key.peek().clone();
+            if key == current {
+                publish_list(
+                    &mut stored_queue.write(),
+                    &current,
+                    key,
+                    result.map_err(|error| error.to_string()),
+                );
+            }
+        }
     });
 
     {
@@ -194,14 +962,6 @@ fn EvaluationsPage() -> Element {
             let _ = (active_refresh, history_refresh);
         });
     }
-
-    use_effect(move || {
-        if let Some(Ok(summary)) = &*queue_resource.read() {
-            queue_items.set(replace_unique_by(summary.items.clone(), |item| {
-                item.commit_id
-            }));
-        }
-    });
 
     use_effect(move || {
         let Some(focus) = navigation_focus() else {
@@ -273,20 +1033,6 @@ fn EvaluationsPage() -> Element {
         }
     });
 
-    // Replace the loaded history window atomically on each refresh. Fetching
-    // from page 1 with a growing limit avoids inconsistencies from mutable
-    // offset pagination (review finding #1).
-    use_effect(move || {
-        if let Some(Ok(page_data)) = &*history_resource.read() {
-            history_total_acc.set(page_data.total_count);
-            history_domain_total.set(page_data.domain_total);
-            history_items_acc.set(replace_unique_by(page_data.items.clone(), |item| {
-                item.commit_id
-            }));
-            history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
-        }
-    });
-
     // Infinite-scroll paging for history — created in the parent so the
     // parent knows the visible row count for keyboard navigation (review
     // finding #4) and can own the server-page advancement effect.
@@ -300,28 +1046,6 @@ fn EvaluationsPage() -> Element {
         latest_filter().enabled(),
     );
     let hist_paging = use_infinite_scroll(hist_reset_key, 20);
-
-    use_effect(move || {
-        if let Some(Ok(page_data)) = &*history_resource.read() {
-            history_ack_cursor.set(NAV_BADGES.read_unchecked().observed_at.clone());
-            if history_select_all_loaded() {
-                let search = search_query().trim().to_lowercase();
-                let status = history_status_filter();
-                let flake = history_flake_filter();
-                let ids = page_data
-                    .items
-                    .iter()
-                    .filter(|item| history_item_matches_filters(item, &status, &flake, &search))
-                    .filter(|item| {
-                        marker_matches(latest_filter().enabled(), item.is_latest_per_flake)
-                    })
-                    .take(hist_paging.count())
-                    .map(|item| item.commit_id)
-                    .collect::<std::collections::HashSet<_>>();
-                history_selected_ids.set(ids);
-            }
-        }
-    });
 
     // Grow the server fetch limit for history, reactive because all signal
     // reads are inside the closure (review finding #1).
@@ -434,8 +1158,11 @@ fn EvaluationsPage() -> Element {
         .unwrap_or(0);
 
     use_effect(move || {
-        let visible = queue_items
-            .read()
+        let stored = stored_queue.read();
+        let Some(summary) = owned_list_page(&stored, &queue_key()) else {
+            return;
+        };
+        let visible = replace_unique_by(summary.items.clone(), |item| item.commit_id)
             .iter()
             .filter(|item| is_active_eval_status(&item.evaluation_status))
             .filter(|item| queue_item_matches_search(item, &search_query().trim().to_lowercase()))
@@ -449,20 +1176,23 @@ fn EvaluationsPage() -> Element {
         }
     });
 
+    // The server searches authorized configuration names absent from this DTO.
+    // Its matching page is authoritative for rendering, selection, and keys.
+    let history_visible_rows = use_memo(move || {
+        cached_list_result(&stored_history.read(), &history_key())
+            .and_then(|result| result.as_ref().ok())
+            .map(|page| history_page_rows(page, hist_paging.count()))
+            .unwrap_or_default()
+    });
     use_effect(move || {
-        let visible = history_items_acc
-            .read()
+        // Read identity and rows from the same publication. A separate derived
+        // visible-row memo can still contain its loading value in this effect.
+        let stored = stored_history.read();
+        let Some(page) = owned_list_page(&stored, &history_key()) else {
+            return;
+        };
+        let visible = history_page_rows(page, hist_paging.count())
             .iter()
-            .filter(|item| {
-                history_item_matches_filters(
-                    item,
-                    &history_status_filter(),
-                    &history_flake_filter(),
-                    &search_query().trim().to_lowercase(),
-                )
-            })
-            .filter(|item| marker_matches(latest_filter().enabled(), item.is_latest_per_flake))
-            .take(hist_paging.count())
             .map(|item| item.commit_id)
             .collect::<Vec<_>>();
         let mut selected = history_selected_ids.read().clone();
@@ -508,24 +1238,10 @@ fn EvaluationsPage() -> Element {
             }
         }
     });
-    let history_visible_rows = history_items_acc
-        .read()
-        .iter()
-        .filter(|item| {
-            history_item_matches_filters(
-                item,
-                &history_status_filter(),
-                &history_flake_filter(),
-                &search_query().trim().to_lowercase(),
-            )
-        })
-        .filter(|item| marker_matches(latest_filter().enabled(), item.is_latest_per_flake))
-        .take(hist_paging.count())
-        .cloned()
-        .collect::<Vec<_>>();
     let selected_history_rows = {
         let ids = history_selected_ids.read();
         history_visible_rows
+            .read()
             .iter()
             .filter(|item| ids.contains(&item.commit_id))
             .cloned()
@@ -574,57 +1290,59 @@ fn EvaluationsPage() -> Element {
                 style: "display: flex; flex-direction: column; gap: 16px; outline: none;",
                 tabindex: 0,
                 onkeydown: move |evt| {
+                    if list_shortcuts_blocked() { return; }
                     // No keyboard nav while drawer is open
+                    if direct_return.peek().is_some() {
+                        if evt.key() == Key::Escape {
+                            direct_return.set(None);
+                            *EVALUATION_RETURN.write() = None;
+                            nav.push(Route::EvaluationsView {});
+                        }
+                        return;
+                    }
                     if drawer_target.read().is_some() {
                         if evt.key() == Key::Escape {
                             drawer_target.set(None);
+                            *EVALUATION_RETURN.write() = None;
                         }
                         return;
                     }
 
-                    // Keyboard nav is bounded to the currently *rendered* slice so
-                    // focus never lands on an invisible row (review finding #4).
-                    // `hist_paging` is created in the parent so the visible count
-                    // is directly accessible here, but it may briefly exceed the
-                    // number of actually loaded rows while a server page is in
-                    // flight — cap to the accumulated items count (finding #4).
+                    // Bounds and DOM targets both come from the rendered slice.
                     let list_len = if active_tab() == EvaluationsTab::ActiveQueue {
                         paged_active_items.len()
                     } else {
-                        hist_paging.count().min(history_items_acc.read().len())
+                        history_visible_rows.read().len()
                     };
 
+                    let direction = match evt.key() {
+                        Key::ArrowDown => Some(true),
+                        Key::ArrowUp => Some(false),
+                        Key::Character(ref c) if c == "j" => Some(true),
+                        Key::Character(ref c) if c == "k" => Some(false),
+                        _ => None,
+                    };
+                    if let Some(forward) = direction {
+                        evt.prevent_default();
+                        if list_len == 0 { return; }
+                        let next = match focused_index() {
+                            None => 0,
+                            Some(i) if forward => i.saturating_add(1).min(list_len - 1),
+                            Some(i) => i.saturating_sub(1).min(list_len - 1),
+                        };
+                        let history = active_tab() == EvaluationsTab::History;
+                        let commit_id = if history {
+                            history_visible_rows.read().get(next).map(|item| item.commit_id)
+                        } else {
+                            paged_active_items.get(next).map(|item| item.commit_id)
+                        };
+                        if let Some(commit_id) = commit_id {
+                            focused_index.set(Some(next));
+                            focus_evaluation_row(history, commit_id);
+                        }
+                        return;
+                    }
                     match evt.key() {
-                        Key::Character(ref c) if c == "j" || c == "ArrowDown" => {
-                            let next = match focused_index() {
-                                None => 0,
-                                Some(i) => (i + 1).min(list_len.saturating_sub(1)),
-                            };
-                            focused_index.set(Some(next));
-                        }
-                        Key::ArrowDown => {
-                            let next = match focused_index() {
-                                None => 0,
-                                Some(i) => (i + 1).min(list_len.saturating_sub(1)),
-                            };
-                            focused_index.set(Some(next));
-                        }
-                        Key::Character(ref c) if c == "k" => {
-                            let next = match focused_index() {
-                                None => 0,
-                                Some(0) => 0,
-                                Some(i) => i - 1,
-                            };
-                            focused_index.set(Some(next));
-                        }
-                        Key::ArrowUp => {
-                            let next = match focused_index() {
-                                None => 0,
-                                Some(0) => 0,
-                                Some(i) => i - 1,
-                            };
-                            focused_index.set(Some(next));
-                        }
                         Key::Enter => {
                             if let Some(idx) = focused_index() {
                                 if active_tab() == EvaluationsTab::ActiveQueue {
@@ -633,8 +1351,8 @@ fn EvaluationsPage() -> Element {
                                         drawer_target.set(Some(EvalDrawerTarget::Queue(ev.clone())));
                                     }
                                 } else {
-                                    // Use accumulated history items.
-                                    let item = history_items_acc.read().get(idx).cloned();
+                                    // Use the same visible slice as row rendering.
+                                    let item = history_visible_rows.read().get(idx).cloned();
                                     if let Some(ev) = item {
                                         drawer_target.set(Some(EvalDrawerTarget::History(ev)));
                                     }
@@ -689,6 +1407,13 @@ fn EvaluationsPage() -> Element {
                 }
 
                 // Stat strip
+                if requested_attempt.is_some() && return_validation.read().is_none() {
+                    p { role: "status", "Loading exact retained attempt…" }
+                }
+                if (requested_attempt.is_some() || initial_return.is_some()) && matches!(&*return_validation.read(), Some(None)) {
+                    div { role: "alert", "Exact evaluation attempt unavailable. Saved drawer state was not applied to another attempt." }
+                    button { class: "btn btn-ghost focus-ring", onclick: move |_| { *EVALUATION_RETURN.write() = None; nav.push(Route::EvaluationsView {}); }, "Open latest evaluations" }
+                }
                 div {
                     class: "stat-strip",
                     div {
@@ -886,7 +1611,6 @@ fn EvaluationsPage() -> Element {
                                         let selected_ids = selected_history_rows.iter().map(|item| item.commit_id).collect::<Vec<_>>();
                                         let mut refresh_sig = history_refresh.clone();
                                         let mut selected_sig = history_selected_ids.clone();
-                                        let mut select_all_sig = history_select_all_loaded.clone();
                                         let mut toast = toast_msg.clone();
                                         spawn(async move {
                                             let mut success = 0u32;
@@ -900,9 +1624,6 @@ fn EvaluationsPage() -> Element {
                                             if success > 0 {
                                                 toast.set(Some(format!("Re-queued {} evaluation{}", success, if success == 1 { "" } else { "s" })));
                                                 selected_sig.set(failed.into_iter().collect());
-                                                // Disable auto-select so the next poll doesn't repopulate
-                                                // the selection with successful rows (review finding #3).
-                                                select_all_sig.set(false);
                                             } else {
                                                 toast.set(Some("Re-evaluate failed — see server logs".to_string()));
                                             }
@@ -940,11 +1661,11 @@ fn EvaluationsPage() -> Element {
                         }
 
                         EvalHistory {
+                            visible_rows: history_visible_rows,
                             history_resource: history_resource,
                             history_status_filter: history_status_filter,
                             history_flake_filter: history_flake_filter,
                             history_fetch_limit: history_fetch_limit,
-                            history_select_all_loaded: history_select_all_loaded,
                             refresh: history_refresh,
                             history_selected_ids: history_selected_ids,
                             drawer_target: drawer_target,
@@ -961,12 +1682,22 @@ fn EvaluationsPage() -> Element {
                     }
                 }
 
-                if let Some(target) = drawer_target.read().clone() {
+                if let Some(saved) = direct_return() {
+                    evidence_navigation::RetainedAttemptDrawer {
+                        saved,
+                        on_close: move |_| { direct_return.set(None); *EVALUATION_RETURN.write() = None; nav.push(Route::EvaluationsView {}); },
+                    }
+                } else if let Some(target) = drawer_target.read().clone() {
                     EvalDrawer {
                         target: target,
                         refresh: active_refresh,
-                        on_close: move |_| drawer_target.set(None),
+                        on_close: move |_| { drawer_target.set(None); *EVALUATION_RETURN.write() = None; },
                         toast_msg: toast_msg,
+                        page_history: active_tab() == EvaluationsTab::History,
+                        page_search: search_query(),
+                        page_status: history_status_filter(),
+                        page_flake: history_flake_filter(),
+                        page_latest: latest_filter().enabled(),
                         on_open_policy: move |policy_name: String| {
                             navigation_focus.set(Some(NavigationFocus {
                                 target: FocusTarget::Policies,
@@ -1058,9 +1789,9 @@ fn EvaluationsPage() -> Element {
 fn EvalActiveQueue(
     evals: Vec<EvalQueueItem>,
     mut refresh: Signal<u64>,
-    queue_items: Signal<Vec<EvalQueueItem>>,
+    queue_items: Memo<Vec<EvalQueueItem>>,
     mut drawer_target: Signal<Option<EvalDrawerTarget>>,
-    focused_index: Signal<Option<usize>>,
+    mut focused_index: Signal<Option<usize>>,
     mut active_selected_ids: Signal<std::collections::HashSet<i32>>,
     mut toast_msg: Signal<Option<String>>,
     allow_reorder: bool,
@@ -1128,6 +1859,9 @@ fn EvalActiveQueue(
                         rsx! {
                             tr {
                                 key: "{commit_id}",
+                                id: evaluation_row_id(false, commit_id),
+                                tabindex: "0",
+                                onfocus: move |_| focused_index.set(Some(i)),
                                 class: "{row_classes}",
                                 draggable: if allow_reorder { "true" } else { "false" },
                                 ondragstart: move |_| {
@@ -1207,13 +1941,10 @@ fn EvalActiveQueue(
                                         "{status_meta.label}"
                                     }
                                 }
-                                td { style: "font-size: 12px; color: var(--cf-text-secondary);", "{ev_clone.system_count} hosts" }
+                                td { style: "font-size: 12px; color: var(--cf-text-secondary);", "{format_inventory_count(ev_clone.inventory_available, ev_clone.system_count)}" }
                                 td {
                                     div { style: "display: flex; gap: 6px;",
-                                        span { class: "chip chip-healthy", "{ev_clone.passed_count} ✓" }
-                                        if ev_clone.policy_failed_count > 0 {
-                                            span { class: "chip chip-critical", "{ev_clone.policy_failed_count} ✗" }
-                                        }
+                                        PolicyCounts { available: ev_clone.policy_counts_available, passed: ev_clone.passed_count, failed: ev_clone.policy_failed_count }
                                     }
                                 }
                                 td { style: "font-size: 12px; color: var(--cf-text-muted);", "{format_relative_time(ev_clone.committed_at)}" }
@@ -1315,19 +2046,19 @@ fn EvalActiveQueue(
 
 #[component]
 fn EvalHistory(
-    history_resource: Resource<Result<EvalHistoryPage, ApiClientError>>,
+    history_resource: Memo<Option<Result<EvalHistoryPage, String>>>,
+    visible_rows: Memo<Vec<EvalHistoryItem>>,
     mut history_status_filter: Signal<String>,
     mut history_flake_filter: Signal<String>,
     mut history_fetch_limit: Signal<i64>,
-    mut history_select_all_loaded: Signal<bool>,
     mut refresh: Signal<u64>,
     mut history_selected_ids: Signal<std::collections::HashSet<i32>>,
     mut drawer_target: Signal<Option<EvalDrawerTarget>>,
-    focused_index: Signal<Option<usize>>,
+    mut focused_index: Signal<Option<usize>>,
     flash_evals: bool,
-    history_items_acc: Signal<Vec<EvalHistoryItem>>,
-    history_total_acc: Signal<i64>,
-    history_domain_total: Signal<i64>,
+    history_items_acc: Memo<Vec<EvalHistoryItem>>,
+    history_total_acc: Memo<i64>,
+    history_domain_total: Memo<i64>,
     hist_paging: InfiniteScroll,
     mut toast_msg: Signal<Option<String>>,
     mut search_query: Signal<String>,
@@ -1363,7 +2094,6 @@ fn EvalHistory(
                                     onclick: move |_| {
                                         history_status_filter.set(value_str.clone());
                                         history_fetch_limit.set(50);
-                                        history_select_all_loaded.set(true);
                                         refresh.set(refresh() + 1);
                                     },
                                     "{label}"
@@ -1380,28 +2110,32 @@ fn EvalHistory(
                     onchange: move |evt| {
                         history_flake_filter.set(evt.value().clone());
                         history_fetch_limit.set(50);
-                        history_select_all_loaded.set(true);
                         refresh.set(refresh() + 1);
                     },
-                    option { value: "all", "All flakes" }
-                    if let Some(Ok(page_data)) = &*history_snapshot {
+                    option { value: "all", selected: history_flake_filter() == "all", "All flakes" }
                         {
-                            let mut flakes: Vec<String> = page_data
-                                .items
-                                .iter()
-                                .map(|item| item.flake_name.clone())
-                                .collect();
+                            let selected = history_flake_filter();
+                            let mut flakes: Vec<String> = history_snapshot
+                                .as_ref()
+                                .and_then(|result| result.as_ref().ok())
+                                .map(|page| page.items.iter().map(|item| item.flake_name.clone()).collect())
+                                .unwrap_or_default();
+                            // Keep the selected option mounted while its owned
+                            // page reloads; otherwise the browser resets to All.
+                            if selected != "all" && !selected.is_empty() {
+                                flakes.push(selected.clone());
+                            }
                             flakes.sort();
                             flakes.dedup();
-                            flakes.into_iter().map(|flake_name| rsx! {
+                            flakes.into_iter().map(move |flake_name| rsx! {
                                 option {
                                     key: "{flake_name}",
-                                    value: "{flake_name}",
+                                     value: "{flake_name}",
+                                     selected: flake_name == selected,
                                     "{flake_name}"
                                 }
                             })
                         }
-                    }
                 }
 
                 if history_total_acc() > 0 {
@@ -1419,25 +2153,8 @@ fn EvalHistory(
                         // Use accumulated items (across server pages) for the table.
                         // page_data is still used for the flake filter dropdown above
                         // and for loading/error state detection.
-                        let all_loaded = history_items_acc
-                            .read()
-                            .iter()
-                            .filter(|item| history_item_matches_filters(
-                                item,
-                                &history_status_filter(),
-                                &history_flake_filter(),
-                                &search_query().trim().to_lowercase(),
-                            ))
-                            .filter(|item| marker_matches(latest_filter().enabled(), item.is_latest_per_flake))
-                            .cloned()
-                            .collect::<Vec<_>>();
-                        let paged_items: Vec<EvalHistoryItem> = all_loaded.iter().take(hist_paging.count()).cloned().collect();
-                        let hist_has_more = hist_paging.count() < all_loaded.len() || hist_server_has_more;
-                        // Select-all operates on all loaded rows (not just the visible page)
-                        // so check/uncheck is symmetric and consistent (fixes review finding #5).
-                        let all_loaded_ids: Vec<i32> = paged_items.iter().map(|item| item.commit_id).collect();
-                        let all_checked = !all_loaded_ids.is_empty()
-                            && all_loaded_ids.iter().all(|id| history_selected_ids.read().contains(id));
+                        let paged_items = visible_rows();
+                        let hist_has_more = hist_paging.count() < history_items_acc.read().len() || hist_server_has_more;
                         rsx! {
                     table {
                         class: "sys-table",
@@ -1461,6 +2178,7 @@ fn EvalHistory(
                                     let status_meta = eval_status_meta(&ev.evaluation_status);
                                     let ev_for_row = ev.clone();
                                     let is_focused = focused_index() == Some(row_i);
+                                    let is_selected = history_selected_ids.read().contains(&commit_id);
 
                                     let is_failed = ev.evaluation_status == "failed";
                                     // Resolve the same way dismiss_attention_item
@@ -1479,7 +2197,12 @@ fn EvalHistory(
                                     let eval_key = occurrence_id_for_subject("evals", &commit_id_str)
                                         .unwrap_or(commit_id_str);
                                     let row_class = attention_row_class(
-                                        if is_focused { "kbd-focused" } else { "" },
+                                        match (is_focused, is_selected) {
+                                            (true, true) => "kbd-focused row-checked",
+                                            (true, false) => "kbd-focused",
+                                            (false, true) => "row-checked",
+                                            (false, false) => "",
+                                        },
                                         "evals",
                                         &eval_key,
                                         is_failed,
@@ -1489,7 +2212,11 @@ fn EvalHistory(
                                     rsx! {
                                         tr {
                                             key: "{commit_id}",
+                                            id: evaluation_row_id(true, commit_id),
+                                            tabindex: "0",
+                                            onfocus: move |_| focused_index.set(Some(row_i)),
                                             class: "{row_class}",
+                                            aria_selected: is_selected,
                                             style: "cursor: pointer;",
                                             onclick: move |evt| {
                                                 // Shift-click toggles selection (design: no checkboxes,
@@ -1502,7 +2229,6 @@ fn EvalHistory(
                                                         next.insert(commit_id);
                                                     }
                                                     history_selected_ids.set(next);
-                                                    history_select_all_loaded.set(false);
                                                 } else {
                                                     if is_failed {
                                                         dismiss_attention_item(
@@ -1546,23 +2272,12 @@ fn EvalHistory(
                                             }
                                             td {
                                                 style: "font-size: 12px;",
-                                                "{ev.system_count}"
+                                                "{format_inventory_count(ev.inventory_available, ev.system_count)}"
                                             }
                                             td {
                                                 div {
                                                     style: "display: flex; gap: 6px;",
-                                                    span {
-                                                        class: "chip chip-healthy",
-                                                        style: "font-size: 10px;",
-                                                        "{ev.passed_count} ✓"
-                                                    }
-                                                    if ev.policy_failed_count > 0 {
-                                                        span {
-                                                            class: "chip chip-critical",
-                                                            style: "font-size: 10px;",
-                                                            "{ev.policy_failed_count} ✗"
-                                                        }
-                                                    }
+                                                    PolicyCounts { available: ev.policy_counts_available, passed: ev.passed_count, failed: ev.policy_failed_count }
                                                 }
                                             }
                                             td {
@@ -1695,19 +2410,98 @@ fn EvalHistory(
 fn EvalDrawer(
     target: EvalDrawerTarget,
     mut refresh: Signal<u64>,
-    on_close: EventHandler<MouseEvent>,
+    on_close: EventHandler<()>,
     mut toast_msg: Signal<Option<String>>,
     on_open_policy: EventHandler<String>,
+    page_history: bool,
+    page_search: String,
+    page_status: String,
+    page_flake: String,
+    page_latest: bool,
 ) -> Element {
-    let mut drawer_tab = use_signal(|| String::from("log"));
+    let saved = use_hook(|| {
+        EVALUATION_RETURN
+            .peek()
+            .clone()
+            .filter(|saved| match &target {
+                EvalDrawerTarget::Queue(item) => {
+                    saved.matches_commit(item.commit_id)
+                        && item.attempt_number == saved.identity.attempt_number
+                }
+                EvalDrawerTarget::History(item) => {
+                    saved.matches_commit(item.commit_id)
+                        && item.attempt_number == saved.identity.attempt_number
+                }
+            })
+    });
+    let original_tab = saved
+        .as_ref()
+        .map(|s| s.tab.clone())
+        .unwrap_or_else(|| "log".into());
+    let pinned_view = saved.is_some();
+    let saved_tab = handoff::retained_tab(&original_tab, pinned_view);
+    let nav = navigator();
+    let mut drawer_tab = use_signal(|| saved_tab);
+    let maximized = use_signal(|| saved.as_ref().is_some_and(|s| s.maximized));
+    let target_for_context = target.clone();
+    // All matrix actions share this owner snapshot. The exact attempt is added
+    // only after the matrix response has validated its server context.
+    let return_seed = EvaluationReturn {
+        identity: EvaluationIdentity {
+            commit_id: match &target {
+                EvalDrawerTarget::Queue(i) => i.commit_id,
+                EvalDrawerTarget::History(i) => i.commit_id,
+            },
+            commit_sha: match &target {
+                EvalDrawerTarget::Queue(i) => i.commit_hash.clone(),
+                EvalDrawerTarget::History(i) => i.commit_hash.clone(),
+            },
+            attempt_id: saved
+                .as_ref()
+                .map(|s| s.identity.attempt_id)
+                .unwrap_or_else(uuid::Uuid::nil),
+            attempt_number: match &target {
+                EvalDrawerTarget::Queue(i) => i.attempt_number,
+                EvalDrawerTarget::History(i) => i.attempt_number,
+            },
+        },
+        target: Some(target_for_context),
+        history: page_history,
+        search: page_search,
+        status: page_status,
+        flake: page_flake,
+        latest: page_latest,
+        tab: if pinned_view {
+            original_tab
+        } else {
+            drawer_tab()
+        },
+        maximized: maximized(),
+        system: None,
+        dom: None,
+    };
+    let mut return_context = use_context_provider(|| Signal::new(return_seed.clone()));
+    use_effect(use_reactive(&return_seed, move |seed| {
+        if *return_context.peek() != seed {
+            return_context.set(seed);
+        }
+    }));
+    // Bind confirmation to the selected commit, so polling or navigation cannot
+    // transfer confirmation to a different evaluation.
+    let mut force_cancel_target = use_signal(|| None::<i32>);
+    let mut force_cancel_busy = use_signal(|| false);
 
     match target {
         EvalDrawerTarget::Queue(ev) => {
             let status_meta = eval_status_meta(&ev.evaluation_status);
-            let can_cancel = matches!(ev.evaluation_status.as_str(), "pending" | "in_progress");
-            let can_force_cancel = ev.evaluation_status == "cancelling";
-            let is_live = can_cancel || can_force_cancel;
-            let close_click = move |evt: MouseEvent| on_close.call(evt);
+            let can_cancel =
+                !pinned_view && matches!(ev.evaluation_status.as_str(), "pending" | "in_progress");
+            let can_force_cancel = !pinned_view && ev.evaluation_status == "cancelling";
+            let is_live = matches!(
+                ev.evaluation_status.as_str(),
+                "pending" | "in_progress" | "cancelling"
+            );
+            let close_click = move |_: MouseEvent| on_close.call(());
 
             rsx! {
                 div {
@@ -1715,17 +2509,26 @@ fn EvalDrawer(
                     onclick: close_click,
                 }
                 aside {
-                    class: "fl-tray",
+                    id: "queue-evaluation-dialog",
+                    aria_modal: "true",
+                    tabindex: "-1",
+                    onkeydown: move |event| if event.key() == Key::Escape { event.stop_propagation(); on_close.call(()); },
+                    class: if maximized() { "fl-tray ed-drawer fl-tray-max" } else { "fl-tray ed-drawer" },
                     role: "dialog",
                     "aria-label": "Evaluation detail",
+                    "data-commit-sha": "{ev.commit_hash}",
+                    "data-attempt-number": "{ev.attempt_number}",
+                    DialogFocusRestore {}
+                    DialogInitialFocus { dialog_id: "queue-evaluation-dialog" }
+                    DialogFocusSentinel { dialog_id: "queue-evaluation-dialog", boundary: DialogFocusBoundary::Last }
                     header {
                         class: "fl-tray-head",
                         div {
                             style: "display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;",
-                            Icon { name: IconName::Terminal, size: 18 }
+                            span { class: "ed-identity-icon", Icon { name: IconName::Evaluation, size: 18 } }
                             div { style: "min-width: 0;",
-                            h2 {
-                                "{ev.flake_name}"
+                            h2 { class: "ed-identity-title",
+                                span { class: "ed-flake-name", "{ev.flake_name}" }
                                 span { class: "chip chip-unknown", style: "font-size: 10px;", "{ev.branch}" }
                                 span {
                                     class: "chip {status_meta.cls}",
@@ -1735,7 +2538,7 @@ fn EvalDrawer(
                                 }
                             }
                             div {
-                                class: "fqdn",
+                                class: "mono ed-identity-meta",
                                 "{ev.commit_hash} · {ev.commit_id}"
                                 if ev.attempt_number > 1 {
                                     span {
@@ -1772,58 +2575,48 @@ fn EvalDrawer(
                                 button {
                                     class: "btn btn-ghost focus-ring xs",
                                     style: "color: #f87171;",
-                                    onclick: move |_| {
-                                        let mut refresh_sig = refresh.clone();
-                                        let mut toast = toast_msg.clone();
-                                        let commit_id = ev.commit_id;
-                                        spawn(async move {
-                                            if let Err(e) = force_cancel_commit_evaluation(commit_id).await {
-                                                toast.set(Some(format!("Force cancel failed: {}", e)));
-                                            } else {
-                                                refresh_sig.set(refresh_sig() + 1);
-                                            }
-                                        });
-                                    },
+                                    disabled: force_cancel_busy(),
+                                    onclick: move |_| force_cancel_target.set(Some(ev.commit_id)),
                                     "Force-cancel"
                                 }
                             }
+                            if pinned_view { button { class: "btn btn-ghost xs focus-ring", title: "This drawer is pinned to a retained attempt. Open the latest list for evaluation actions.", onclick: move |_| { *EVALUATION_RETURN.write() = None; nav.push(Route::EvaluationsView {}); }, "Open latest evaluations" } }
+                            drawer_header::ExpandButton { maximized }
                             button {
                                 class: "btn-icon focus-ring",
                                 onclick: close_click,
-                                title: "Close",
+                                 title: "Close",
+                                 aria_label: "Close",
                                 Icon { name: IconName::X, size: 16 }
                             }
                         }
                     }
                     div {
                         class: "ed-stats",
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Started" } div { class: "ed-stat-val", style: "font-size: 13px; font-weight: 600;", "{format_relative_time(ev.committed_at)}" } }
+                        // The DTO has no actual start time. Queue time must not
+                        // be presented as evaluation start or commit time.
+                        div { class: "ed-stat", div { class: "ed-stat-label", "Queued" } div { class: "ed-stat-val ed-stat-time", drawer_header::Timestamp { timestamp: ev.enqueued_at } } }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val mono", "—" } }
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
+                        div { class: "ed-stat", title: "Visible planned and discovered configurations for this exact attempt.", div { class: "ed-stat-label", "Systems" } InventoryCount { available: ev.inventory_available, count: ev.system_count, live: is_live } }
                         div {
                             class: "ed-stat",
                             div { class: "ed-stat-label", "Policy" }
-                            div {
-                                class: "ed-stat-val",
-                                style: "display: flex; gap: 6px; align-items: baseline;",
-                                span { style: "color: #34d399;", "{ev.passed_count}" }
-                                span { style: "font-size: 12px; color: var(--cf-text-muted);", "/" }
-                                span {
-                                    style: if ev.policy_failed_count > 0 { "color: #f87171;" } else { "color: var(--cf-text-muted);" },
-                                    "{ev.policy_failed_count}"
-                                }
-                            }
+                            DrawerPolicyCounts { available: ev.inventory_available, passed: ev.passed_count, failed: ev.policy_failed_count, pending: ev.policy_pending_count, unavailable: ev.policy_unavailable_count, evaluation_errors: ev.eval_failed_count, excluded: ev.unselected_count, live: is_live }
                         }
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{ev.system_count * 18}" } }
+                        div { class: "ed-stat", title: "Persisted derivation records for this attempt, not closure packages or outputs. — means unavailable.", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{format_derivation_count(ev.derivation_count)}" } }
                     }
                     div {
                         class: "sd-tabs",
                         style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border); flex-shrink: 0;",
                         button {
                             class: if drawer_tab() == "log" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
+                            disabled: pinned_view,
+                            aria_disabled: pinned_view,
+                            aria_describedby: if pinned_view { "retained-log-unavailable" } else { "" },
+                            title: if pinned_view { "Log unavailable for retained attempt: no exact-attempt log API is available." } else { "Evaluation log" },
                             onclick: move |_| drawer_tab.set("log".to_string()),
-                            Icon { name: IconName::Terminal, size: 12 }
-                            " Log"
+                            Icon { name: IconName::EvaluationLog, size: 12 }
+                            if pinned_view { " Log unavailable for retained attempt" } else { " Log" }
                             if is_live { span { class: "ed-pulse" } }
                         }
                         button {
@@ -1834,18 +2627,27 @@ fn EvalDrawer(
                         }
                         button {
                             class: if drawer_tab() == "graph" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
+                            disabled: pinned_view,
+                            aria_disabled: pinned_view,
+                            aria_describedby: if pinned_view { "retained-graph-unavailable" } else { "" },
+                            title: if pinned_view { "Dependency graph unavailable for retained attempt: no exact-attempt graph API is available." } else { "Dependency graph" },
                             onclick: move |_| drawer_tab.set("graph".to_string()),
-                            Icon { name: IconName::Git, size: 12 }
+                            Icon { name: IconName::EvaluationGraph, size: 12 }
                             " Dependency graph"
                         }
                     }
                     div {
                         class: "ed-body",
-                        if drawer_tab() == "log" {
+                        if pinned_view { evidence_navigation::RetainedTabReasons {} }
+                        if pinned_view && drawer_tab() != "policy" {
+                            p { role: "note", "Pinned attempt log and dependency evidence are unavailable from the current endpoints." }
+                        } else if drawer_tab() == "log" {
                             EvalDrawerLogTabQueue { ev: ev.clone(), live: is_live }
                         } else if drawer_tab() == "policy" {
                             EvalDrawerPolicyTab {
+                                key: "{ev.commit_id}",
                                 commit_id: ev.commit_id,
+                                live: is_live,
                                 on_open_policy: on_open_policy,
                             }
                         } else {
@@ -1854,16 +2656,43 @@ fn EvalDrawer(
                             }
                         }
                     }
+                    DialogFocusSentinel { dialog_id: "queue-evaluation-dialog", boundary: DialogFocusBoundary::First }
+                }
+                if can_force_cancel && force_cancel_target() == Some(ev.commit_id) {
+                    drawer_header::ConfirmForceCancel {
+                        commit_id: ev.commit_id,
+                        on_cancel: move |_| force_cancel_target.set(None),
+                        on_confirm: move |_| {
+                            if *force_cancel_busy.peek() || *force_cancel_target.peek() != Some(ev.commit_id) {
+                                return;
+                            }
+                            force_cancel_target.set(None);
+                            force_cancel_busy.set(true);
+                            let mut refresh_sig = refresh.clone();
+                            let mut toast = toast_msg.clone();
+                            let commit_id = ev.commit_id;
+                            spawn(async move {
+                                if let Err(e) = force_cancel_commit_evaluation(commit_id).await {
+                                    toast.set(Some(format!("Force cancel failed: {}", e)));
+                                } else {
+                                    refresh_sig.set(refresh_sig() + 1);
+                                }
+                                force_cancel_busy.set(false);
+                            });
+                        },
+                    }
                 }
             }
         }
         EvalDrawerTarget::History(ev) => {
             let status_meta = eval_status_meta(&ev.evaluation_status);
+            let (time_label, timestamp) =
+                drawer_header::history_timestamp(ev.evaluation_completed_at, ev.enqueued_at);
             let is_live = matches!(
                 ev.evaluation_status.as_str(),
                 "pending" | "in_progress" | "cancelling"
             );
-            let close_click = move |evt: MouseEvent| on_close.call(evt);
+            let close_click = move |_: MouseEvent| on_close.call(());
 
             rsx! {
                 div {
@@ -1871,17 +2700,26 @@ fn EvalDrawer(
                     onclick: close_click,
                 }
                 aside {
-                    class: "fl-tray",
+                    id: "history-evaluation-dialog",
+                    aria_modal: "true",
+                    tabindex: "-1",
+                    onkeydown: move |event| if event.key() == Key::Escape { event.stop_propagation(); on_close.call(()); },
+                    class: if maximized() { "fl-tray ed-drawer fl-tray-max" } else { "fl-tray ed-drawer" },
                     role: "dialog",
                     "aria-label": "Evaluation detail",
+                    "data-commit-sha": "{ev.commit_hash}",
+                    "data-attempt-number": "{ev.attempt_number}",
+                    DialogFocusRestore {}
+                    DialogInitialFocus { dialog_id: "history-evaluation-dialog" }
+                    DialogFocusSentinel { dialog_id: "history-evaluation-dialog", boundary: DialogFocusBoundary::Last }
                     header {
                         class: "fl-tray-head",
                         div {
                             style: "display: flex; align-items: center; gap: 12px; min-width: 0; flex: 1;",
-                            Icon { name: IconName::Terminal, size: 18 }
+                            span { class: "ed-identity-icon", Icon { name: IconName::Evaluation, size: 18 } }
                             div { style: "min-width: 0;",
-                            h2 {
-                                "{ev.flake_name}"
+                            h2 { class: "ed-identity-title",
+                                span { class: "ed-flake-name", "{ev.flake_name}" }
                                 span { class: "chip chip-unknown", style: "font-size: 10px;", "{ev.branch}" }
                                 span {
                                     class: "chip {status_meta.cls}",
@@ -1891,7 +2729,7 @@ fn EvalDrawer(
                                 }
                             }
                             div {
-                                class: "fqdn",
+                                class: "mono ed-identity-meta",
                                 "{ev.commit_hash} · {ev.commit_id}"
                                 if ev.attempt_number > 1 {
                                     span {
@@ -1904,42 +2742,49 @@ fn EvalDrawer(
                             }
                             }
                         }
+                        div { style: "display: flex; gap: 6px; align-items: center;",
+                        if pinned_view { button { class: "btn btn-ghost xs focus-ring", title: "This drawer is pinned to a retained attempt. Open the latest list for evaluation actions.", onclick: move |_| { *EVALUATION_RETURN.write() = None; nav.push(Route::EvaluationsView {}); }, "Open latest evaluations" } }
+                        drawer_header::ExpandButton { maximized }
                         button {
                             class: "btn-icon focus-ring",
                             onclick: close_click,
-                            title: "Close",
+                             title: "Close",
+                             aria_label: "Close",
                             Icon { name: IconName::X, size: 16 }
+                        }
                         }
                     }
                     div {
                         class: "ed-stats",
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Started" } div { class: "ed-stat-val", style: "font-size: 13px; font-weight: 600;", "{format_relative_time(ev.committed_at)}" } }
+                        // Completion is authoritative when present. The DTO has
+                        // no start time; older rows fall back to queued time.
+                        div { class: "ed-stat",
+                            div { class: "ed-stat-label", "{time_label}" }
+                            div { class: "ed-stat-val ed-stat-time",
+                                drawer_header::Timestamp { timestamp }
+                            }
+                        }
                         div { class: "ed-stat", div { class: "ed-stat-label", "Duration" } div { class: "ed-stat-val mono", "{format_eval_duration(&ev)}" } }
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Systems" } div { class: "ed-stat-val", "{ev.system_count}" } }
+                        div { class: "ed-stat", title: "Visible planned and discovered configurations for this exact attempt.", div { class: "ed-stat-label", "Systems" } InventoryCount { available: ev.inventory_available, count: ev.system_count, live: is_live } }
                         div {
                             class: "ed-stat",
                             div { class: "ed-stat-label", "Policy" }
-                            div {
-                                class: "ed-stat-val",
-                                style: "display: flex; gap: 6px; align-items: baseline;",
-                                span { style: "color: #34d399;", "{ev.passed_count}" }
-                                span { style: "font-size: 12px; color: var(--cf-text-muted);", "/" }
-                                span {
-                                    style: if ev.policy_failed_count > 0 { "color: #f87171;" } else { "color: var(--cf-text-muted);" },
-                                    "{ev.policy_failed_count}"
-                                }
-                            }
+                            DrawerPolicyCounts { available: ev.inventory_available, passed: ev.passed_count, failed: ev.policy_failed_count, pending: ev.policy_pending_count, unavailable: ev.policy_unavailable_count, evaluation_errors: ev.eval_failed_count, excluded: ev.unselected_count, live: is_live }
                         }
-                        div { class: "ed-stat", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{ev.system_count * 18}" } }
+                        div { class: "ed-stat", title: "Persisted derivation records for this attempt, not closure packages or outputs. — means unavailable.", div { class: "ed-stat-label", "Derivations" } div { class: "ed-stat-val", "{format_derivation_count(ev.derivation_count)}" } }
                     }
                     div {
                         class: "sd-tabs",
                         style: "padding: 0 16px; border-bottom: 1px solid var(--cf-card-border); flex-shrink: 0;",
                         button {
                             class: if drawer_tab() == "log" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
+                            disabled: pinned_view,
+                            aria_disabled: pinned_view,
+                            aria_describedby: if pinned_view { "retained-log-unavailable" } else { "" },
+                            title: if pinned_view { "Log unavailable for retained attempt: no exact-attempt log API is available." } else { "Evaluation log" },
                             onclick: move |_| drawer_tab.set("log".to_string()),
-                            Icon { name: IconName::Terminal, size: 12 }
-                            " Log"
+                            Icon { name: IconName::EvaluationLog, size: 12 }
+                            if pinned_view { " Log unavailable for retained attempt" } else { " Log" }
                             if is_live { span { class: "ed-pulse" } }
                         }
                         button {
@@ -1950,18 +2795,27 @@ fn EvalDrawer(
                         }
                         button {
                             class: if drawer_tab() == "graph" { "sd-tab focus-ring active" } else { "sd-tab focus-ring" },
+                            disabled: pinned_view,
+                            aria_disabled: pinned_view,
+                            aria_describedby: if pinned_view { "retained-graph-unavailable" } else { "" },
+                            title: if pinned_view { "Dependency graph unavailable for retained attempt: no exact-attempt graph API is available." } else { "Dependency graph" },
                             onclick: move |_| drawer_tab.set("graph".to_string()),
-                            Icon { name: IconName::Git, size: 12 }
+                            Icon { name: IconName::EvaluationGraph, size: 12 }
                             " Dependency graph"
                         }
                     }
                     div {
                         class: "ed-body",
-                        if drawer_tab() == "log" {
+                        if pinned_view { evidence_navigation::RetainedTabReasons {} }
+                        if pinned_view && drawer_tab() != "policy" {
+                            p { role: "note", "Pinned attempt log and dependency evidence are unavailable from the current endpoints." }
+                        } else if drawer_tab() == "log" {
                             EvalDrawerLogTabHistory { ev: ev.clone(), live: is_live }
                         } else if drawer_tab() == "policy" {
                             EvalDrawerPolicyTab {
+                                key: "{ev.commit_id}",
                                 commit_id: ev.commit_id,
+                                live: is_live,
                                 on_open_policy: on_open_policy,
                             }
                         } else {
@@ -1972,7 +2826,7 @@ fn EvalDrawer(
                     }
                     div {
                         class: "panel-actions",
-                        if ev.evaluation_status != "complete" {
+                        if !pinned_view && ev.evaluation_status != "complete" {
                             button {
                                 class: "btn btn-ghost focus-ring",
                                 onclick: move |_| {
@@ -1992,239 +2846,33 @@ fn EvalDrawer(
                             }
                         }
                     }
+                    DialogFocusSentinel { dialog_id: "history-evaluation-dialog", boundary: DialogFocusBoundary::First }
                 }
             }
         }
     }
 }
 
+/// Shows the Queue drawer's evaluation log through the shared log pane.
 #[component]
 fn EvalDrawerLogTabQueue(ev: EvalQueueItem, live: bool) -> Element {
-    let mut autoscroll = use_signal(|| true);
-    let commit_id = ev.commit_id;
-    let mut poll_tick = use_signal(|| 0_u64);
-
-    // When live, poll every 2 s to pick up new log lines
-    {
-        use_future(move || async move {
-            #[cfg(target_arch = "wasm32")]
-            loop {
-                #[cfg(target_arch = "wasm32")]
-                {
-                    gloo_timers::future::TimeoutFuture::new(2000).await;
-                    if live {
-                        poll_tick.set(poll_tick() + 1);
-                    } else {
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
-    // Re-fetch whenever poll_tick changes (driven by the loop above when live)
-    let logs_resource = use_resource(move || async move {
-        let _ = poll_tick();
-        crate::api::client::fetch_eval_logs(commit_id).await
-    });
-
-    let logs_snapshot = logs_resource.read();
-    let lines: Vec<String> = match &*logs_snapshot {
-        Some(Ok(entries)) => entries
-            .iter()
-            .map(|e| {
-                let level = e
-                    .level
-                    .as_ref()
-                    .map(|s| s.to_uppercase())
-                    .unwrap_or_else(|| "INFO".to_string());
-                format!(
-                    "{} [{}] {}",
-                    e.timestamp.format("%Y-%m-%d %H:%M:%S%.3fZ"),
-                    level,
-                    e.message
-                )
-            })
-            .collect(),
-        Some(Err(_)) | None => Vec::new(),
-    };
-    let is_loading = logs_snapshot.is_none();
-
     rsx! {
-        div { style: "display: flex; flex-direction: column; flex: 1; min-height: 0;",
-            div {
-                style: "padding: 8px 16px; border-bottom: 1px solid var(--cf-divider); display: flex; gap: 10px; align-items: center; flex-shrink: 0;",
-                span { style: "font-size: 11px; color: var(--cf-text-muted);", "{lines.len()} lines" }
-                div { style: "flex: 1;" }
-                label {
-                    style: "display: flex; gap: 6px; align-items: center; font-size: 11px;",
-                    input {
-                        r#type: "checkbox",
-                        class: "ed-checkbox",
-                        checked: autoscroll(),
-                        oninput: move |_| autoscroll.set(!autoscroll()),
-                    }
-                    "Auto-scroll"
-                }
-                button {
-                    class: "btn-icon focus-ring",
-                    title: "Download",
-                    Icon { name: IconName::Download, size: 13 }
-                }
-            }
-            pre { class: "fl-diff",
-                if is_loading {
-                    div { style: "color: var(--cf-text-muted); padding: 12px;", "Loading logs..." }
-                } else if lines.is_empty() {
-                    div { style: "color: var(--cf-text-muted); padding: 12px;",
-                        if live { "Waiting for log output..." } else { "No logs available" }
-                    }
-                } else {
-                    for (idx, line) in lines.iter().enumerate() {
-                        {
-                            let color = log_line_color(line);
-                            let line_num = format!("{:>3}", idx + 1);
-                            rsx! {
-                                div { style: "color: {color};",
-                                    span { style: "color: var(--cf-text-muted); user-select: none; display: inline-block; width: 36px;", "{line_num}" }
-                                    " {line}"
-                                }
-                            }
-                        }
-                    }
-                }
-                if live {
-                    {
-                        let next_line_num = format!("{:>3}", lines.len() + 1);
-                        rsx! {
-                            div { style: "color: #60a5fa;",
-                                span { style: "color: var(--cf-text-muted); display: inline-block; width: 36px;", "{next_line_num}" }
-                                " "
-                                span { class: "ed-pulse", style: "margin-left: 0;" }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        log_pane::EvalLogPane { commit_id: ev.commit_id, live, empty_message: None }
     }
 }
 
+/// Shows the History drawer's evaluation log through the shared log pane.
+///
+/// A failed evaluation that never streamed explains the empty log with its
+/// recorded evaluation error.
 #[component]
 fn EvalDrawerLogTabHistory(ev: EvalHistoryItem, live: bool) -> Element {
-    let mut autoscroll = use_signal(|| true);
-    let commit_id = ev.commit_id;
-    let mut poll_tick = use_signal(|| 0_u64);
-
-    // When live (cancelling state), poll every 2 s
-    {
-        use_future(move || async move {
-            #[cfg(target_arch = "wasm32")]
-            loop {
-                #[cfg(target_arch = "wasm32")]
-                {
-                    gloo_timers::future::TimeoutFuture::new(2000).await;
-                    if live {
-                        poll_tick.set(poll_tick() + 1);
-                    } else {
-                        break;
-                    }
-                }
-            }
-        });
-    }
-
-    // Re-fetch whenever poll_tick changes
-    let logs_resource = use_resource(move || async move {
-        let _ = poll_tick();
-        crate::api::client::fetch_eval_logs(commit_id).await
-    });
-
-    let logs_snapshot = logs_resource.read();
-    let lines: Vec<String> = match &*logs_snapshot {
-        Some(Ok(entries)) => entries
-            .iter()
-            .map(|e| {
-                let level = e
-                    .level
-                    .as_ref()
-                    .map(|s| s.to_uppercase())
-                    .unwrap_or_else(|| "INFO".to_string());
-                format!(
-                    "{} [{}] {}",
-                    e.timestamp.format("%Y-%m-%d %H:%M:%S%.3fZ"),
-                    level,
-                    e.message
-                )
-            })
-            .collect(),
-        Some(Err(_)) | None => Vec::new(),
-    };
-    let is_loading = logs_snapshot.is_none();
-
+    let empty_message = ev
+        .evaluation_error_message
+        .as_deref()
+        .map(|error| format!("Evaluation failed before log streaming began: {error}"));
     rsx! {
-        div { style: "display: flex; flex-direction: column; flex: 1; min-height: 0;",
-            div {
-                style: "padding: 8px 16px; border-bottom: 1px solid var(--cf-divider); display: flex; gap: 10px; align-items: center; flex-shrink: 0;",
-                span { style: "font-size: 11px; color: var(--cf-text-muted);", "{lines.len()} lines" }
-                div { style: "flex: 1;" }
-                label {
-                    style: "display: flex; gap: 6px; align-items: center; font-size: 11px;",
-                    input {
-                        r#type: "checkbox",
-                        class: "ed-checkbox",
-                        checked: autoscroll(),
-                        oninput: move |_| autoscroll.set(!autoscroll()),
-                    }
-                    "Auto-scroll"
-                }
-                button {
-                    class: "btn-icon focus-ring",
-                    title: "Download",
-                    Icon { name: IconName::Download, size: 13 }
-                }
-            }
-            pre { class: "fl-diff",
-                if is_loading {
-                    div { style: "color: var(--cf-text-muted); padding: 12px;", "Loading logs..." }
-                } else if lines.is_empty() {
-                    div { style: "color: var(--cf-text-muted); padding: 12px;",
-                        if let Some(error) = ev.evaluation_error_message.as_deref() {
-                            "Evaluation failed before log streaming began: {error}"
-                        } else if live {
-                            "Waiting for log output..."
-                        } else {
-                            "No logs available"
-                        }
-                    }
-                } else {
-                    for (idx, line) in lines.iter().enumerate() {
-                        {
-                            let color = log_line_color(line);
-                            let line_num = format!("{:>3}", idx + 1);
-                            rsx! {
-                                div { style: "color: {color};",
-                                    span { style: "color: var(--cf-text-muted); user-select: none; display: inline-block; width: 36px;", "{line_num}" }
-                                    " {line}"
-                                }
-                            }
-                        }
-                    }
-                }
-                if live {
-                    {
-                        let next_line_num = format!("{:>3}", lines.len() + 1);
-                        rsx! {
-                            div { style: "color: #60a5fa;",
-                                span { style: "color: var(--cf-text-muted); display: inline-block; width: 36px;", "{next_line_num}" }
-                                " "
-                                span { class: "ed-pulse", style: "margin-left: 0;" }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        log_pane::EvalLogPane { commit_id: ev.commit_id, live, empty_message }
     }
 }
 
@@ -2301,11 +2949,177 @@ fn policy_cell_class_suffix(raw: &str) -> &'static str {
     }
 }
 
+/// Renders the selected commit's matrix and refreshes live partial outcomes.
+///
+/// The keyed tab owns the request and browser timer. Reactive commit/live changes
+/// cancel the previous resource future. Setting live to false triggers one final
+/// fetch; unmount drops request futures and timers. Live failures remain visible
+/// and retry after five seconds. Historical failures expose an explicit retry.
+/// Pinned reads retain their UUID across refreshes and stop at terminal status.
 #[component]
-fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> Element {
-    let policy_resource =
-        use_resource(move || async move { fetch_eval_policy_matrix(commit_id).await });
-    let policy_snapshot = policy_resource.read();
+fn EvalDrawerPolicyTab(
+    commit_id: i32,
+    on_open_policy: EventHandler<String>,
+    #[props(default)] live: bool,
+) -> Element {
+    // Keep the displayed response outside Resource: restarting a resource can
+    // clear its value and unmount CapturedMatrix, losing presentation choices.
+    // Publish only completed requests, including errors; never mask an explicit
+    // failure with cached successful data. Key the cache as well as the tab so
+    // even a reused component cannot display a previous commit during a fetch.
+    let mut displayed = use_signal(|| None);
+    let mut request_generation = use_signal(|| 0u64);
+    let pinned = use_hook(move || {
+        EVALUATION_RETURN
+            .peek()
+            .as_ref()
+            .filter(|r| r.identity.commit_id == commit_id)
+            .map(|r| r.identity.clone())
+    });
+    let pinned_request = pinned.clone();
+    let _policy_resource = use_resource(use_reactive(
+        &(commit_id, live, request_generation()),
+        move |(commit_id, live, _generation)| {
+            let pinned = pinned_request.clone();
+            async move {
+                loop {
+                    let result = if let Some(identity) = &pinned {
+                        crate::api::client::fetch_eval_attempt_policy_matrix(
+                            commit_id,
+                            identity.attempt_id,
+                        )
+                        .await
+                    } else {
+                        fetch_eval_policy_matrix(commit_id).await
+                    };
+                    let pinned_terminal = pinned.is_some()
+                        && result.as_ref().is_ok_and(|data| {
+                            data.matrix
+                                .as_ref()
+                                .and_then(|snapshot| snapshot.attempt_status.as_deref())
+                                .is_some_and(|status| {
+                                    matches!(
+                                        status,
+                                        "complete"
+                                            | "completed"
+                                            | "succeeded"
+                                            | "failed"
+                                            | "cancelled"
+                                    )
+                                })
+                        });
+                    displayed.set(Some((commit_id, result)));
+                    if !live || pinned_terminal {
+                        break;
+                    }
+                    // Browser-only polling avoids native timers in WASM. A delay
+                    // after each response prevents overlapping requests and bounds
+                    // retries even when the endpoint fails immediately.
+                    #[cfg(target_arch = "wasm32")]
+                    TimeoutFuture::new(5_000).await;
+                    #[cfg(not(target_arch = "wasm32"))]
+                    break;
+                }
+            }
+        },
+    ));
+    let displayed = displayed.read();
+    let policy_snapshot = displayed
+        .as_ref()
+        .filter(|(id, _)| *id == commit_id)
+        .map(|(_, response)| response);
+
+    // Presentation belongs to the request owner, not its success branch. An
+    // explicit failure unmounts evidence but retains these same-attempt choices.
+    let mut matrix_state = use_signal(|| policy_matrix::ColumnState::new(0));
+    let mut matrix_expanded = use_signal(|| None::<String>);
+    let mut matrix_issue = use_signal(|| None::<String>);
+    let mut matrix_finding = use_signal(|| None::<String>);
+    let mut matrix_page = use_signal(|| 0usize);
+    let mut matrix_key = use_signal(|| None::<(i32, uuid::Uuid)>);
+    let mut matrix_initialized = use_signal(|| false);
+    let captured_snapshot = policy_snapshot
+        .and_then(|r| r.as_ref().ok())
+        .filter(|data| data.commit_id == commit_id)
+        .and_then(|r| r.matrix.clone());
+    let snapshot_for_effect = captured_snapshot.clone();
+    use_effect(use_reactive(&snapshot_for_effect, move |snapshot| {
+        let Some(snapshot) = snapshot else {
+            return;
+        };
+        let Some(id) = snapshot.evaluation_attempt_id else {
+            return;
+        };
+        let key = (commit_id, id);
+        // Only capture changes drive initialization. Subscribing to an unchanged
+        // provisional false flag would repeatedly publish sparse defaults and
+        // prevent the same attempt's first usable capture from being processed.
+        if *matrix_key.peek() != Some(key) {
+            let mut saved = handoff::MATRIX_PRESENTATIONS
+                .peek()
+                .get(&key)
+                .cloned()
+                .unwrap_or_else(|| handoff::MatrixPresentation::new(0));
+            saved.initialize(&snapshot);
+            matrix_initialized.set(saved.initialized);
+            matrix_state.set(saved.columns);
+            matrix_expanded.set(saved.expanded);
+            matrix_issue.set(saved.issue);
+            matrix_finding.set(saved.finding);
+            matrix_page.set(saved.page);
+            matrix_key.set(Some(key));
+        } else if !*matrix_initialized.peek() {
+            let mut defaults = handoff::MatrixPresentation::new(0);
+            defaults.initialize(&snapshot);
+            if defaults.initialized {
+                matrix_state.set(defaults.columns);
+                matrix_initialized.set(true);
+            }
+        }
+    }));
+    use_effect(move || {
+        let Some(key) = matrix_key() else {
+            return;
+        };
+        let state = matrix_state();
+        handoff::MATRIX_PRESENTATIONS.write().insert(
+            key,
+            handoff::MatrixPresentation {
+                initialized: matrix_initialized(),
+                columns: state,
+                expanded: matrix_expanded(),
+                issue: matrix_issue(),
+                finding: matrix_finding(),
+                page: matrix_page(),
+            },
+        );
+    });
+    let valid_return = pinned.as_ref().is_none_or(|identity| {
+        policy_snapshot.is_some_and(|response| {
+            response
+                .as_ref()
+                .is_ok_and(|data| data.commit_id == identity.commit_id)
+        }) && captured_snapshot.as_ref().is_some_and(|snapshot| {
+            snapshot.evaluation_attempt_id == Some(identity.attempt_id)
+                && snapshot.attempt_number == identity.attempt_number
+                && snapshot.commit_sha.as_ref() == Some(&identity.commit_sha)
+        })
+    });
+    let mut dom_restored = use_signal(|| false);
+    // Validation is a derived value, not a signal read. Track it explicitly so
+    // the initially pending pinned response cannot leave this effect dormant.
+    use_effect(use_reactive(&valid_return, move |valid_return| {
+        if valid_return && matrix_initialized() && matrix_key().is_some() && !dom_restored() {
+            if let Some(dom) = EVALUATION_RETURN
+                .peek()
+                .as_ref()
+                .and_then(|s| s.dom.clone())
+            {
+                dom_restored.set(true);
+                spawn(handoff::restore_dom(dom));
+            }
+        }
+    }));
 
     // Interactive state: filter, sort, expanded row, policy filter (matches JSX)
     let mut filter_state = use_signal(|| "all".to_string());
@@ -2317,12 +3131,26 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
     rsx! {
         div {
             style: "flex: 1; overflow: hidden; display: flex; flex-direction: column;",
-            match &*policy_snapshot {
+            if policy_snapshot.is_some_and(|response| response.as_ref().is_ok_and(|data| data.matrix.as_ref().is_some_and(|matrix| matrix.mock_evidence))) {
+                div { class: "pm-provenance-note", role: "note",
+                    "Mock evaluation — simulated outcomes, not compliance evidence."
+                }
+            }
+            match policy_snapshot {
                 None => rsx! {
                     div { style: "color: var(--cf-text-muted); font-size: 12px; padding: 14px;", "Loading policy matrix..." }
                 },
                 Some(Err(_)) => rsx! {
-                    div { style: "color: #f87171; font-size: 12px; padding: 14px;", "Failed to load policy matrix" }
+                    div { role: "alert", style: "color: #f87171; font-size: 12px; padding: 14px;", "Failed to load policy matrix — evidence unavailable." }
+                    button { class: "btn btn-ghost xs focus-ring", onclick: move |_| request_generation += 1, "Retry matrix request" }
+                },
+                Some(Ok(data)) if data.commit_id != commit_id || !valid_return => rsx! { div { role: "alert", "Exact evaluation attempt unavailable or context mismatch. Saved presentation was not applied to another attempt." } },
+                Some(Ok(data)) if data.matrix.is_some() => rsx! {
+                    if let Some(snapshot) = &data.matrix {
+                        // A new captured attempt intentionally resets local
+                        // choices; successful refreshes of that attempt do not.
+                        policy_captured::CapturedMatrix { key: "{snapshot.evaluation_attempt_id:?}:{snapshot.attempt_number}", snapshot: snapshot.clone(), on_open_policy, state: matrix_state, expanded: matrix_expanded, issue: matrix_issue, finding: matrix_finding, page: matrix_page }
+                    }
                 },
                 Some(Ok(data)) => {
                     let policies = &data.policies;
@@ -2346,6 +3174,16 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                         pass: usize,
                         evaluated: usize,
                         legacy_unknown: usize,
+                    }
+
+                    impl AnnotatedRow {
+                        // Missing legacy coverage and empty applicability are
+                        // never sufficient evidence for a clean system.
+                        fn is_clean(&self) -> bool {
+                            policy_matrix::legacy_row_is_clean(
+                                self.pass, self.fail, self.warn, self.legacy_unknown,
+                            )
+                        }
                     }
 
                     let annotated: Vec<AnnotatedRow> = base_rows.iter().map(|r| {
@@ -2378,7 +3216,7 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                             // there are no legacy_unknown cells requiring
                             // re-evaluation — a system with unknown history
                             // must never be reported as clean.
-                            "clean" => result.retain(|r| r.fail == 0 && r.warn == 0 && r.legacy_unknown == 0),
+                            "clean" => result.retain(|r| r.is_clean()),
                             _ => {}
                         }
                         if let Some(ref policy_name) = pf {
@@ -2434,11 +3272,14 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                     // Counts for filter badges
                     let count_fail = annotated.iter().filter(|r| r.fail > 0).count();
                     let count_warn = annotated.iter().filter(|r| r.fail == 0 && r.warn > 0).count();
-                    let count_clean = annotated.iter().filter(|r| r.fail == 0 && r.warn == 0 && r.legacy_unknown == 0).count();
+                    let count_clean = annotated.iter().filter(|r| r.is_clean()).count();
 
                     let cell_glyph = policy_cell_glyph;
 
                     rsx! {
+                        div { class: "pm-provenance-note", role: "note",
+                            "Historical bundle provenance unavailable. These are flat compatibility results; bundle memberships and complete historical applicability cannot be reconstructed from check names."
+                        }
                         // Top issues callout (matching JSX)
                         if !top_issues_sorted.is_empty() {
                             div {
@@ -2455,7 +3296,7 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                                             pf.set(Some(name.clone()));
                                         }
                                     };
-                                    let counts = format!("{}+{}+{}", iss.fail, iss.warn, iss.pass);
+                                    let counts = format!("{}/{} fail", iss.fail, iss.total);
                                     rsx! {
                                         button {
                                             key: "{iss.name}",
@@ -2600,17 +3441,21 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                                                         div { class: "pm-health",
                                                             div { class: "pm-health-bar",
                                                                 if row.fail > 0 {
-                                                                    div { style: "width: {(row.fail as f64 / policies.len() as f64) * 100.0}%; background: #f87171;" }
+                                                                    div { style: "width: {(row.fail as f64 / row.evaluated.max(1) as f64) * 100.0}%; background: #f87171;" }
                                                                 }
                                                                 if row.warn > 0 {
-                                                                    div { style: "width: {(row.warn as f64 / policies.len() as f64) * 100.0}%; background: #f59e0b;" }
+                                                                    div { style: "width: {(row.warn as f64 / row.evaluated.max(1) as f64) * 100.0}%; background: #f59e0b;" }
                                                                 }
                                                                 if row.pass > 0 {
-                                                                    div { style: "width: {(row.pass as f64 / policies.len() as f64) * 100.0}%; background: #34d399;" }
+                                                                    div { style: "width: {(row.pass as f64 / row.evaluated.max(1) as f64) * 100.0}%; background: #34d399;" }
                                                                 }
                                                             }
                                                             span { class: "mono pm-health-num", style: "color: {health_color};",
-                                                                "{row.pass}/{row.evaluated}"
+                                                                if row.evaluated == 0 {
+                                                                    if row.legacy_unknown > 0 { "Unknown" } else { "N/A" }
+                                                                } else {
+                                                                    "{row.pass}/{row.evaluated}"
+                                                                }
                                                             }
                                                         }
                                                     }
@@ -2732,12 +3577,16 @@ fn EvalDrawerPolicyTab(commit_id: i32, on_open_policy: EventHandler<String>) -> 
                                                                                }
                                                                            })}
 
-                                                                        if row.fail == 0 && row.warn == 0 && row.legacy_unknown == 0 {
+                                                                         if row.is_clean() {
                                                                             div { style: "font-size: 12px; color: #34d399; display: flex; align-items: center; gap: 8px;",
                                                                                 Icon { name: IconName::Check, size: 14 }
-                                                                                " All policies pass for this system."
-                                                                            }
-                                                                        }
+                                                                                 " All policies pass for this system."
+                                                                             }
+                                                                         } else if row.evaluated == 0 && row.legacy_unknown == 0 {
+                                                                             div { style: "font-size: 12px; color: var(--cf-text-muted);",
+                                                                                 "No applicable controls for this system."
+                                                                             }
+                                                                         }
                                                                     }
                                                                 }
                                                             }
@@ -2880,7 +3729,7 @@ fn EvalDrawerGraphTab(commit_id: i32) -> Element {
                         }
 
                         if data.packages.is_empty() {
-                            div { style: "color: var(--cf-text-muted); font-size: 12px;", "No systems recorded for this commit yet." }
+                            div { style: "color: var(--cf-text-muted); font-size: 12px;", "Dependency inventory is unavailable for this evaluation." }
                         } else {
                             div { class: "ed-graph-list",
                                 for pkg in data.packages.iter() {
@@ -3042,7 +3891,7 @@ fn is_active_eval_status(status: &str) -> bool {
     let normalized = status.trim().to_ascii_lowercase();
     matches!(
         normalized.as_str(),
-        "pending" | "in_progress" | "in-progress" | "in progress" | "cancelling"
+        "queued" | "pending" | "in_progress" | "in-progress" | "in progress" | "cancelling"
     )
 }
 
@@ -3057,6 +3906,18 @@ fn format_relative_time(dt: chrono::DateTime<chrono::Utc>) -> String {
     } else {
         format!("{}d ago", secs / 86400)
     }
+}
+
+/// Formats the server-reported record count without estimating missing data.
+fn format_derivation_count(count: Option<i64>) -> String {
+    count.map_or_else(|| "—".to_string(), |count| count.to_string())
+}
+
+#[test]
+fn derivation_count_formatter_preserves_zero_and_unknown() {
+    assert_eq!(format_derivation_count(None), "—");
+    assert_eq!(format_derivation_count(Some(0)), "0");
+    assert_eq!(format_derivation_count(Some(37)), "37");
 }
 
 fn format_eval_completed_at(item: &EvalHistoryItem) -> String {

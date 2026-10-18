@@ -1155,10 +1155,10 @@ pub fn SystemDetailView(
     cve_mode: String,
 ) -> Element {
     let _route_owned_context = (
-        config_mode,
-        revision,
-        generation,
-        deploy_generation,
+        &config_mode,
+        &revision,
+        &generation,
+        &deploy_generation,
         cve_target,
         cve_mode,
     );
@@ -1186,11 +1186,33 @@ pub fn SystemDetailView(
         initial_query = query_with_parameter("", "tab", Some(&tab));
         initial_query = query_with_parameter(&initial_query, "poam", Some(&poam));
     }
+    // Route-owned exact revision intent takes precedence over a document query
+    // that can still reflect the invoking view during an in-memory transition.
+    for (key, value) in [
+        ("tab", &tab),
+        ("config_mode", &config_mode),
+        ("revision", &revision),
+        ("generation", &generation),
+        ("deploy_generation", &deploy_generation),
+    ] {
+        if !value.is_empty() {
+            initial_query = query_with_parameter(&initial_query, key, Some(value));
+        }
+    }
     let initial_navigation = SystemDetailNavigation::from_query(&initial_query);
     let initial_cve_selection = cve_selection_from_query(&initial_query);
     let initial_cve_mode = cve_mode_from_query(&initial_query);
     let mut navigation_state = use_signal(|| initial_navigation.clone());
     let mut active_tab = use_signal(|| Tab::from_navigation(initial_navigation.tab));
+    let evaluation_return = crate::state::evaluation_drawer::EVALUATION_RETURN
+        .read()
+        .clone()
+        .filter(|saved| {
+            saved.system.is_some_and(|system| system.to_string() == id)
+                && navigation_state.read().tab == SystemDetailTab::Config
+                && navigation_state.read().config_revision
+                    == ConfigRevision::Commit(saved.identity.commit_sha.clone())
+        });
     let initial_cve_poam = (active_tab() == Tab::Cves)
         .then(|| query_value(&initial_query, "poam"))
         .flatten()
@@ -1712,6 +1734,7 @@ pub fn SystemDetailView(
                 class: "sd-root",
                 "data-testid": "system-detail-loading",
                 "data-screen-label": "SystemDetail",
+                if let Some(saved) = &evaluation_return { Link { to: Route::EvaluationsAttemptView { commit_id: saved.identity.commit_id, attempt_id: saved.identity.attempt_id }, class: "btn btn-ghost focus-ring", "Back to Evaluation" } }
                 div {
                     class: "flex items-center justify-center py-16",
                     crate::components::loading::DashboardLoadingSpinner {
@@ -1740,6 +1763,7 @@ pub fn SystemDetailView(
         return rsx! {
             div {
                 class: "space-y-4",
+                if let Some(saved) = &evaluation_return { Link { to: Route::EvaluationsAttemptView { commit_id: saved.identity.commit_id, attempt_id: saved.identity.attempt_id }, class: "btn btn-ghost focus-ring", "Back to Evaluation" } }
                 Link {
                     to: crate::routes::Route::SystemsView { query: String::new() },
                     class: "inline-flex items-center gap-1 text-sm {theme::text::SECONDARY} hover:text-white transition-colors",
@@ -2280,6 +2304,9 @@ pub fn SystemDetailView(
             }
 
             // Tab navigation
+            if let Some(saved) = &evaluation_return {
+                button { class: "btn btn-ghost focus-ring", onclick: { let commit_id = saved.identity.commit_id; let attempt_id = saved.identity.attempt_id; move |_| { nav.push(Route::EvaluationsAttemptView { commit_id, attempt_id }); } }, "Back to Evaluation" }
+            }
             div {
                 "data-testid": "system-detail-tabs",
                 "data-coach-target": "system-tabs",

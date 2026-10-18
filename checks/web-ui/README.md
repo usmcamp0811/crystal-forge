@@ -28,7 +28,9 @@ here would silently remove that guarantee.
   `default.nix`) must be present in the results and must pass. This
   includes, among many others, login/registration, system management and
   TASK-435 agent key-rotation authorization/persistence workflows, flakes,
-  builds, CVE triage, evaluations, POA&M lifecycle and bulk workflows, admin
+  builds, CVE triage, evaluation history/search (including configuration-name
+  matches and out-of-order response rejection), POA&M lifecycle and bulk
+  workflows, admin
   automatic-retry settings, evidence lifecycle, and the full policy/STIG
   authoring and mapping-round-trip family. Non-critical workflows in the
   manifest may fail without failing the check, but critical ones cannot.
@@ -783,6 +785,12 @@ into CI artifacts and posted as an MR comment by the separate
 `web-ui-screenshots-mr-comment` job. `web-ui-baseline-candidates` is a
 manual, allow-failure job that runs this same check with
 `CF_UI_UPDATE_BASELINES=1` to produce reviewable baseline candidates.
+The full browser job log is retained as an artifact if the Nix build fails.
+When the VM times out before the integration runner writes its exit marker, a
+compressed archive also retains partial screenshots and the browser log from
+the kept build directory. The live CI trace shows bounded tails instead of
+printing the full VM journal, so the failure summary is not lost to the CI log
+size cap.
 
 ## Related files
 

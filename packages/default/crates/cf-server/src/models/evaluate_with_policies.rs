@@ -17,11 +17,16 @@ mod evaluation_pressure;
 mod evaluation_recovery;
 #[path = "evaluation_watchdog.rs"]
 mod evaluation_watchdog;
+#[path = "mock_persistence.rs"]
+mod mock_persistence;
+#[path = "required_inventory_persistence.rs"]
+mod required_inventory_persistence;
 use evaluation_pressure::{PressureHysteresis, PressureSampler};
 use evaluation_recovery::{
     EvaluationProgress, PhaseStop, RecoveryController, solo_budget, solo_budget_exhausted,
 };
 use evaluation_watchdog::{EvaluationWatchdog, Expiry, OutputStream, cancellation_ticker};
+use required_inventory_persistence::persist_required_inventory;
 
 const MOCK_EVAL_TOTAL_DURATION_MS: u64 = 30_000;
 const MOCK_EVAL_MIN_PER_SYSTEM_MS: u64 = 5_000;
@@ -1164,9 +1169,7 @@ use crate::models::deployment_policies::{
     build_nix_eval_expression_for_source, build_nix_eval_expression_for_source_configurations,
     policies_for_config, policy_requirements_met, policy_results_json,
 };
-use crate::models::evaluation_snapshots::{
-    EvaluatedOption, OptionDefinitionProvenance, SafeOptionValue,
-};
+use crate::models::evaluation_snapshots::EvaluatedOption;
 use crate::models::flakes::Flake;
 use crate::models::retry_policy::RetryFailureClass;
 use crate::queries::build_jobs::{
@@ -1955,7 +1958,24 @@ fn spawn_closure_counting(pool: PgPool, finalized: FinalizedDerivation) {
     });
 }
 
-/// Helper function to broadcast eval log via WebSocket AND persist to database.
+// The sequence carries immutable ownership even when no WebSocket state exists.
+// Do not recover an owner from the current commit when flushing old stderr.
+struct EvalLogSequence {
+    owner: crate::queries::eval_logs::EvalLogOwner,
+    next: i32,
+}
+
+impl EvalLogSequence {
+    async fn for_attempt(pool: &PgPool, commit_id: i32, attempt: i32) -> Result<Self> {
+        let mut tx = pool.begin().await?;
+        let owner =
+            crate::queries::eval_logs::claimed_owner_in_tx(&mut tx, commit_id, attempt).await?;
+        tx.commit().await?;
+        Ok(Self { owner, next: 1 })
+    }
+}
+
+/// Broadcasts and persists diagnostics using the original producer ownership.
 ///
 /// This ensures logs are both:
 /// - Streamed in real-time to connected WebSocket clients
@@ -1964,7 +1984,7 @@ async fn broadcast_and_persist_eval_log(
     pool: &PgPool,
     state: Option<&crate::handlers::agent_request::CFState>,
     commit_id: i32,
-    sequence: &mut i32,
+    sequence: &mut EvalLogSequence,
     message: String,
 ) {
     // SECURITY: This is the common boundary for evaluator diagnostics. Redact
@@ -1972,13 +1992,12 @@ async fn broadcast_and_persist_eval_log(
     let message = crate::security::snapshot_redaction::redact_text(&message);
     let lower = message.to_ascii_lowercase();
 
-    // Broadcast via WebSocket (existing infrastructure)
+    // The producer-state clone retains its original owner and generation.
     if let Some(state) = state {
         crate::handlers::api::commits::broadcast_eval_log(state, commit_id, message.clone()).await;
     }
 
-    // Persist to database (new functionality)
-    // Parse log level from message format if possible
+    // Persistence separately fences the exact owner against queued successors.
     let log_level = if message.starts_with("❌") || lower.contains("error") {
         Some("error")
     } else if message.starts_with("⚠️") || lower.contains("warning") {
@@ -1991,14 +2010,19 @@ async fn broadcast_and_persist_eval_log(
         Some("info")
     };
 
-    if let Err(e) =
-        crate::queries::eval_logs::insert_eval_log(pool, commit_id, *sequence, log_level, &message)
-            .await
+    if let Err(e) = crate::queries::eval_logs::insert_eval_log(
+        pool,
+        sequence.owner,
+        sequence.next,
+        log_level,
+        &message,
+    )
+    .await
     {
         warn!("Failed to persist eval log for commit {}: {}", commit_id, e);
     }
 
-    *sequence += 1;
+    sequence.next += 1;
 }
 
 /// Outcome of a standalone fallback evaluation for a single system.
@@ -2966,10 +2990,15 @@ fn system_not_queued_reason(
 /// returns [`SystemPersistenceOutcome::NeedsBuildPreparation`]. The later
 /// activation transaction preserves that row and creates a replacement attempt.
 /// Other existing build jobs return [`SystemPersistenceOutcome::ExistingBuildJob`].
+/// Retains native terminal flags and policy results in an immutable exact-attempt
+/// sidecar in this transaction. Requires selected Native discovery inventory;
+/// mutable derivation updates on a later retry cannot erase this evidence.
 ///
 /// # Errors
 ///
-/// Returns an error when policy resolution or a database operation fails.
+/// Returns an error when policy resolution, selected Native inventory proof, or
+/// database persistence fails, or when terminal evidence differs from the first
+/// write for this attempt/configuration. Errors roll back this transaction.
 pub async fn persist_evaluated_system(
     pool: &PgPool,
     commit_id: i32,
@@ -2987,42 +3016,23 @@ pub async fn persist_evaluated_system(
     // is the global first lock for every evaluation finalization transaction.
     crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await?;
 
-    #[derive(sqlx::FromRow)]
-    struct CommitState {
-        evaluation_status: Option<String>,
-        evaluation_attempt_count: Option<i32>,
-        cancellation_requested: Option<bool>,
-    }
-
-    let state = sqlx::query_as::<_, CommitState>(
-        r#"
-        SELECT evaluation_status, evaluation_attempt_count, cancellation_requested
-        FROM commits
-        WHERE id = $1
-        FOR UPDATE
-        "#,
+    // CONCURRENCY: Retain exact latest attempt ownership before policy,
+    // derivation, and build locks. A queued retry supersedes this writer too.
+    if let Err(error) = crate::queries::evaluation_native_outcomes::lock_native_owner_tx(
+        &mut tx,
+        commit_id,
+        expected_attempt,
     )
-    .bind(commit_id)
-    .fetch_optional(&mut *tx)
-    .await?;
-
-    let Some(state) = state else {
+    .await
+    {
         tx.rollback().await?;
-        return Ok(SystemPersistenceOutcome::Superseded);
-    };
-
-    let attempt_count = state.evaluation_attempt_count.unwrap_or(0);
-    let status = state.evaluation_status.as_deref().unwrap_or("pending");
-    let cancellation = state.cancellation_requested.unwrap_or(false);
-
-    if attempt_count != expected_attempt || !matches!(status, "in_progress" | "cancelling") {
-        tx.rollback().await?;
-        return Ok(SystemPersistenceOutcome::Superseded);
-    }
-
-    if cancellation || status == "cancelling" {
-        tx.rollback().await?;
-        return Ok(SystemPersistenceOutcome::Cancelled);
+        if error.is::<EvaluationSuperseded>() {
+            return Ok(SystemPersistenceOutcome::Superseded);
+        }
+        if error.is::<EvaluationCancelled>() {
+            return Ok(SystemPersistenceOutcome::Cancelled);
+        }
+        return Err(error);
     }
 
     let system_id = sqlx::query_scalar::<_, uuid::Uuid>(
@@ -3067,6 +3077,18 @@ pub async fn persist_evaluated_system(
     // INVARIANT: Failure-only partial publication accepts only this exact
     // attempt's persisted result, never a success inherited from an older run.
     policy_results["evaluation_attempt"] = serde_json::json!(expected_attempt);
+    crate::queries::evaluation_native_outcomes::persist_native_outcome_tx(
+        &mut tx,
+        commit_id,
+        expected_attempt,
+        &result.system_name,
+        crate::queries::evaluation_native_outcomes::NativeEvalState::Evaluated,
+        result.cf_agent_enabled,
+        Some(policy_requirements_met),
+        &policy_results,
+        None,
+    )
+    .await?;
     let write = record_successful_eval_result_in_tx(
         &mut tx,
         Some(commit_id),
@@ -3548,7 +3570,7 @@ async fn handle_system_build_activation(
     commit_id: i32,
     system_name: &str,
     outcome: &SystemBuildActivationOutcome,
-    log_sequence: Option<&mut i32>,
+    log_sequence: Option<&mut EvalLogSequence>,
 ) -> Result<()> {
     use crate::handlers::api::commits::SystemEvalStatus;
     match outcome {
@@ -3932,16 +3954,24 @@ async fn prepare_persisted_evaluated_system(
 /// - If any finalization write fails the transaction is rolled back, the
 ///   commit remains `in_progress`, and the ordinary failure-CAS path retries.
 ///
+/// Confirmed failures carry the expected attempt and diagnostic in
+/// `policy_results` in the same transaction. This evidence does not replace
+/// an irreversible build status or its artifact paths.
+/// Each confirmed failure also creates immutable native sidecar evidence after
+/// exact selected Native inventory proof. Missing discovery is not a failure
+/// outcome. A newer queued attempt supersedes the finalizer before publication.
+///
 /// # Errors
-/// Returns database, snapshot, or terminal-policy persistence failures. Earlier
-/// incremental success transactions are not rolled back by this finalizer.
+/// Returns database, snapshot, terminal-policy, native inventory proof, or
+/// immutable outcome conflict errors. Earlier incremental success transactions
+/// are not rolled back by this finalizer.
 pub async fn finalize_evaluation_attempt(
     pool: &PgPool,
     commit_id: i32,
     expected_attempt: i32,
     plan: &EvaluationPlan,
 ) -> Result<EvaluationFinalizeOutcome> {
-    use crate::queries::derivations::record_synthetic_eval_failure_in_tx;
+    use crate::queries::derivations::{SyntheticFailureWrite, record_synthetic_eval_failure_in_tx};
 
     let mut tx = pool.begin().await?;
     // CONCURRENCY: All evaluation finalization paths acquire the snapshot writer
@@ -3990,10 +4020,12 @@ pub async fn finalize_evaluation_attempt(
     // lineage cannot leave a terminal commit with an active attempt row.
     let active_attempt_id: Option<uuid::Uuid> = sqlx::query_scalar(
         r#"
-        SELECT id
-        FROM evaluation_attempts
-        WHERE commit_id = $1 AND attempt_number = $2 AND status = 'in_progress'
-        FOR UPDATE
+        SELECT a.id
+        FROM evaluation_attempts a
+        WHERE a.commit_id = $1 AND a.attempt_number = $2 AND a.status = 'in_progress'
+          AND NOT EXISTS (SELECT 1 FROM evaluation_attempts newer
+              WHERE newer.commit_id = a.commit_id AND newer.attempt_number > a.attempt_number)
+        FOR UPDATE OF a
         "#,
     )
     .bind(commit_id)
@@ -4051,7 +4083,25 @@ pub async fn finalize_evaluation_attempt(
     sorted_failures.sort_by(|a, b| a.system_name.cmp(&b.system_name));
 
     for cf in &sorted_failures {
-        record_synthetic_eval_failure_in_tx(
+        // Only confirmed post-discovery failures become historical evidence.
+        // The writer proves exact selected Native inventory in this same tx.
+        crate::queries::evaluation_native_outcomes::persist_native_outcome_tx(
+            &mut tx,
+            commit_id,
+            expected_attempt,
+            &cf.system_name,
+            crate::queries::evaluation_native_outcomes::NativeEvalState::EvalFailed,
+            None,
+            None,
+            &serde_json::json!({
+                "evaluation_attempt": expected_attempt,
+                "evaluation_failure": true,
+                "evaluation_failure_error": cf.error,
+            }),
+            Some(&cf.error),
+        )
+        .await?;
+        let write = record_synthetic_eval_failure_in_tx(
             &mut tx,
             Some(commit_id),
             &cf.system_name,
@@ -4061,6 +4111,26 @@ pub async fn finalize_evaluation_attempt(
         )
         .await
         .with_context(|| format!("Failed to write synthetic failure for {}", cf.system_name))?;
+        let derivation_id = match write {
+            SyntheticFailureWrite::Inserted { derivation_id }
+            | SyntheticFailureWrite::UpdatedPendingEvaluation { derivation_id }
+            | SyntheticFailureWrite::PreservedExisting { derivation_id, .. } => derivation_id,
+        };
+        // CONCURRENCY: The helper retains the derivation lock and decides which
+        // build state and paths must survive. Stamp only evaluation evidence in
+        // this attempt-owned transaction, including for preserved build rows.
+        sqlx::query("UPDATE derivations SET policy_results = $1 WHERE id = $2")
+            .bind(serde_json::json!({
+                "evaluation_attempt": expected_attempt,
+                "evaluation_failure": true,
+                "evaluation_failure_error": cf.error,
+            }))
+            .bind(derivation_id)
+            .execute(&mut *tx)
+            .await
+            .with_context(|| {
+                format!("Failed to stamp evaluation failure for {}", cf.system_name)
+            })?;
         crate::queries::evaluation_snapshots::persist_failed_snapshot_deferred_tx(
             &mut tx,
             commit_id,
@@ -4253,7 +4323,7 @@ async fn handle_system_finalize_outcome(
     commit_id: i32,
     system_name: &str,
     outcome: SystemFinalizeOutcome,
-    log_sequence: &mut i32,
+    log_sequence: &mut EvalLogSequence,
 ) -> Result<SystemFinalizeAction> {
     match outcome {
         SystemFinalizeOutcome::Queued {
@@ -4423,6 +4493,12 @@ enum SystemFinalizeAction {
 /// during discovery is concurrent and query-bounded. Bulk cancellation polling
 /// is cooperative; a pending bulk handler can delay its next two-second poll.
 ///
+/// Logs bind to the claimed `expected_attempt` before source work. All direct
+/// statuses, fallback helpers, stderr batches, final flushes, and spawned build
+/// preparation clones retain that owner. Superseded publications cannot create
+/// or retarget a channel. Persisted logs retain prior attempts; new sequences
+/// belong to the exact attempt rather than replacing commit-wide history.
+///
 /// # Errors
 ///
 /// Returns a classified failure for invalid resource policy, source discovery,
@@ -4476,12 +4552,17 @@ async fn evaluate_with_nix_eval_jobs_inner(
     cf_state: Option<&crate::handlers::agent_request::CFState>,
     queue_notifier: Option<&QueueNotifier>,
 ) -> Result<EvaluationPlan> {
-    // Re-evaluation safety: clear previous persisted logs for this commit so
-    // (commit_id, log_sequence) uniqueness cannot collide on subsequent runs.
-    crate::queries::eval_logs::delete_eval_logs_by_commit(pool, commit.id).await?;
-
-    // Sequence counter for log persistence (1-indexed)
-    let mut log_sequence = 1i32;
+    // SECURITY: Bind once from the claimed expected attempt. Every direct
+    // status, fallback helper, and spawned preparation clone retains this token.
+    let producer_state = match cf_state {
+        Some(state) => Some(
+            crate::handlers::api::commits::bind_eval_producer(state, commit.id, expected_attempt)
+                .await?,
+        ),
+        None => None,
+    };
+    let cf_state = producer_state.as_ref();
+    let mut log_sequence = EvalLogSequence::for_attempt(pool, commit.id, expected_attempt).await?;
 
     // Bounded preparation pipeline: GC root + build activation for each
     // streaming system.  A semaphore limits concurrent nix-store subprocess
@@ -4725,8 +4806,22 @@ async fn evaluate_with_nix_eval_jobs_inner(
         ),
     )
     .await;
-    // Publish the full inventory for UI reads, including a valid empty set.
-    // Preserve changed_files; this row is never evaluation authority.
+    // INVARIANT: Every replacement expression selects only this original
+    // verified inventory/build-scope intersection. Terminal outcomes never
+    // re-enter a later child, even when their policies prohibit building.
+    let expected_systems = systems_selected_for_evaluation(&known_systems, &allowed_systems);
+    // INVARIANT: Required exact-attempt persistence precedes evaluator admission.
+    // The mutable artifact cache below remains non-authoritative and optional.
+    persist_required_inventory(
+        pool,
+        commit.id,
+        expected_attempt,
+        &known_systems,
+        &expected_systems,
+        crate::queries::evaluation_inventory::InventoryExecutionMode::Native,
+    )
+    .await?;
+    // Preserve changed_files and publish the full inventory, including empty.
     persist_discovery_inventory(
         crate::queries::commits_artifacts::upsert_commit_artifact_systems(
             pool,
@@ -4737,10 +4832,6 @@ async fn evaluate_with_nix_eval_jobs_inner(
     )
     .await?;
     let has_known_systems = !known_systems.is_empty();
-    // INVARIANT: Every replacement expression selects only this original
-    // verified inventory/build-scope intersection. Terminal outcomes never
-    // re-enter a later child, even when their policies prohibit building.
-    let expected_systems = systems_selected_for_evaluation(&known_systems, &allowed_systems);
     let mut seen_systems: HashSet<String> = HashSet::new();
     // Systems for which nix-eval-jobs emitted a JSON line with an `error`
     // field. These are confirmed evaluation failures — the error message is
@@ -6027,13 +6118,13 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                     } else {
                                         Some("debug".to_string())
                                     };
-                                    stderr_log_batch.push((log_sequence, level, line.clone()));
-                                    log_sequence += 1;
+                                    stderr_log_batch.push((log_sequence.next, level, line.clone()));
+                                    log_sequence.next += 1;
 
                                     if stderr_log_batch.len() >= STDERR_LOG_BATCH_SIZE {
                                         if let Err(e) = crate::queries::eval_logs::insert_eval_logs_batch(
                                             pool,
-                                            commit.id,
+                                            log_sequence.owner,
                                             &stderr_log_batch,
                                         )
                                         .await
@@ -6064,7 +6155,7 @@ async fn evaluate_with_nix_eval_jobs_inner(
             if !stderr_log_batch.is_empty() {
                 if let Err(e) = crate::queries::eval_logs::insert_eval_logs_batch(
                     pool,
-                    commit.id,
+                    log_sequence.owner,
                     &stderr_log_batch,
                 )
                 .await
@@ -7256,14 +7347,37 @@ async fn evaluate_with_nix_eval_jobs_inner(
     })
 }
 
-/// Dev-only deterministic mock evaluation path.
+/// Simulates evaluation and persists labelled, attempt-owned mock outcomes.
 ///
-/// This simulates nix-eval-jobs behavior while preserving queue/log/policy/derivation
-/// transitions so UI and process workflows can be validated quickly.
+/// The caller MUST enable mock execution mode and pass the claimed attempt.
+/// Configuration outcomes use the supplied captured assignments. Isolated
+/// mock evidence has no derivation, store path, or output identity. Persistence
+/// locks the commit and rejects cancellation or lost attempt ownership. Mock
+/// outcome writes do not queue config observations, prepare or enqueue builds,
+/// create GC roots, or publish composite assessments. No expected output store
+/// path is fabricated. The caller retains ordinary attempt finalization.
+/// Stream and persistent logs use the same claimed exact-attempt ownership as
+/// native evaluation. A retry retains previous logs and cannot inherit their
+/// replay buffer, producer capability, or sequence namespace.
+///
+/// # Errors
+/// Returns an [`EvaluationFailure`] for database or configuration errors, or
+/// typed cancellation/supersession through the existing lifecycle convention.
+///
+/// # Examples
+/// ```ignore
+/// let plan = evaluate_with_mock_eval_jobs(
+///     pool, &commit, attempt, &flake, &flake.repo_url,
+///     &commit.git_commit_hash, "all", &build_config, &server_config,
+///     &captured_policies, &configured_systems, Some(&cf_state),
+///     Some(&queue_notifier),
+/// ).await?;
+/// ```
 #[allow(clippy::too_many_arguments)]
 pub async fn evaluate_with_mock_eval_jobs(
     pool: &PgPool,
     commit: &Commit,
+    expected_attempt: i32,
     flake: &Flake,
     repo_url: &str,
     commit_hash: &str,
@@ -7278,6 +7392,7 @@ pub async fn evaluate_with_mock_eval_jobs(
     evaluate_with_mock_eval_jobs_inner(
         pool,
         commit,
+        expected_attempt,
         flake,
         repo_url,
         commit_hash,
@@ -7296,25 +7411,48 @@ pub async fn evaluate_with_mock_eval_jobs(
 async fn evaluate_with_mock_eval_jobs_inner(
     pool: &PgPool,
     commit: &Commit,
+    expected_attempt: i32,
     flake: &Flake,
-    repo_url: &str,
+    _repo_url: &str,
     commit_hash: &str,
     target_system: &str,
     _build_config: &BuildConfig,
     _server_config: &ServerConfig,
-    _policies_by_configuration: &Arc<PoliciesByConfiguration>,
+    policies_by_configuration: &Arc<PoliciesByConfiguration>,
     configured_systems: &[String],
     cf_state: Option<&crate::handlers::agent_request::CFState>,
     _queue_notifier: Option<&QueueNotifier>,
 ) -> Result<EvaluationPlan> {
-    // Re-evaluation safety: clear previous persisted logs for this commit so
-    // (commit_id, log_sequence) uniqueness cannot collide on subsequent runs.
-    crate::queries::eval_logs::delete_eval_logs_by_commit(pool, commit.id).await?;
+    mock_persistence::verify_active(pool, commit.id, expected_attempt).await?;
+    let producer_state = match cf_state {
+        Some(state) => Some(
+            crate::handlers::api::commits::bind_eval_producer(state, commit.id, expected_attempt)
+                .await?,
+        ),
+        None => None,
+    };
+    let cf_state = producer_state.as_ref();
+    let mut log_sequence = EvalLogSequence::for_attempt(pool, commit.id, expected_attempt).await?;
 
-    // Sequence counter for persisted/mock streamed logs (1-indexed)
-    let mut log_sequence = 1i32;
-
-    let systems = resolve_mock_systems(&flake.name, target_system, configured_systems)?;
+    // MOCK ONLY: The policy plan captured for this attempt is keyed by the
+    // configuration names of active registered systems. Mock results use
+    // the same names so captured plan rows can find their outcomes. The
+    // `configured_systems` list remains the fallback for a flake without
+    // registered systems.
+    let planned_systems = list_configuration_names_for_flake(pool, flake.id).await?;
+    let candidate_systems = select_mock_system_names(planned_systems, configured_systems);
+    let systems = resolve_mock_systems(&flake.name, target_system, &candidate_systems)?;
+    // Mock inventory is exactly the resolved synthetic list, never native
+    // discovery evidence. Persist before simulated stages or outcome publication.
+    persist_required_inventory(
+        pool,
+        commit.id,
+        expected_attempt,
+        &systems,
+        &systems,
+        crate::queries::evaluation_inventory::InventoryExecutionMode::Mock,
+    )
+    .await?;
     let stage_delay = mock_eval_stage_delay(systems.len());
 
     crate::queries::commits_artifacts::upsert_commit_artifact_cache(pool, commit.id, &systems, &[])
@@ -7338,7 +7476,6 @@ async fn evaluate_with_mock_eval_jobs_inner(
 
     let mut results = Vec::with_capacity(systems.len());
     let mut checks = Vec::with_capacity(systems.len());
-    let mut successful_systems = Vec::with_capacity(systems.len());
 
     for (idx, system_name) in systems.iter().enumerate() {
         if let Some(state) = cf_state {
@@ -7370,8 +7507,9 @@ async fn evaluate_with_mock_eval_jobs_inner(
             (30, "checking nixosConfigurations outputs"),
             (55, "expanding module graph"),
             (80, "running policy prechecks"),
-            (95, "finalizing derivation metadata"),
+            (95, "finalizing mock policy outcomes"),
         ] {
+            mock_persistence::verify_active(pool, commit.id, expected_attempt).await?;
             if let Some(state) = cf_state {
                 broadcast_and_persist_eval_log(
                     pool,
@@ -7385,59 +7523,35 @@ async fn evaluate_with_mock_eval_jobs_inner(
             tokio::time::sleep(stage_delay).await;
         }
 
-        let flake_ref = build_flake_reference(repo_url, commit_hash);
-        let drv_path = format!(
-            "/nix/store/mock-{}-{}.drv",
-            &commit_hash[..8.min(commit_hash.len())],
-            system_name
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '-' {
-                    c
-                } else {
-                    '-'
-                })
-                .collect::<String>()
-        );
-        let derivation_target = format!("{}#nixosConfigurations.{}", flake_ref, system_name);
-
         let policy_failed = should_mock_policy_fail(systems.len(), idx);
 
-        let cf_agent_enabled = Some(!policy_failed);
-        successful_systems.push(SuccessfulSystemResult {
-            system_name: system_name.clone(),
-            derivation_target,
-            drv_path: drv_path.clone(),
-            expected_store_path: None,
-            cf_agent_enabled,
-            build_eligible: true,
-        });
-
-        let check = PolicyCheckResult {
-            system_name: system_name.clone(),
-            cf_agent_enabled: Some(!policy_failed),
-            assigned_results: BTreeMap::new(),
-            has_required_packages: None,
-            custom_checks: HashMap::new(),
-            meets_requirements: !policy_failed,
-            warnings: if policy_failed {
-                vec!["Mock policy failure for UI validation".to_string()]
-            } else {
-                vec![]
-            },
-            failed_policies: if policy_failed {
-                vec![("Crystal Forge agent must be enabled".to_string(), true)]
-            } else {
-                vec![]
-            },
-            cve_checks: vec![],
-        };
+        // MOCK ONLY: Outcomes for the configuration's captured assigned
+        // policies are synthesized from a stable hash so the evaluation policy
+        // matrix shows pass and fail cells without running Nix.
+        let check = mock_policy_check(
+            system_name,
+            policies_for_config(policies_by_configuration, system_name),
+            policy_failed,
+        );
+        // CONCURRENCY: The write rechecks ownership under the commit lock after
+        // simulated work. Cancellation or supersession stops the entire mock
+        // invocation before publishing this configuration's result.
+        mock_persistence::persist_outcome(
+            pool,
+            commit.id,
+            expected_attempt,
+            &check,
+            policies_for_config(policies_by_configuration, system_name),
+        )
+        .await?;
+        let requirements_met = check.meets_requirements;
         checks.push(check);
 
         results.push(NixEvalJobResult {
             attr: system_name.clone(),
             attr_path: vec!["nixosConfigurations".to_string(), system_name.clone()],
             name: Some(system_name.clone()),
-            drv_path: Some(drv_path),
+            drv_path: None,
             error: None,
             cache_status: Some("unknown".to_string()),
             outputs: None,
@@ -7447,7 +7561,7 @@ async fn evaluate_with_mock_eval_jobs_inner(
         });
 
         if let Some(state) = cf_state {
-            if policy_failed {
+            if !requirements_met {
                 crate::handlers::api::commits::broadcast_system_status(
                     state,
                     commit.id,
@@ -7480,59 +7594,16 @@ async fn evaluate_with_mock_eval_jobs_inner(
         }
     }
 
-    // The development evaluator must exercise the same snapshot finalization
-    // boundary as production. These deterministic options are evaluator output,
-    // not browser fixtures, and are redacted and persisted by the ordinary
-    // finalizer before the commit becomes complete.
-    let evaluation_snapshots = systems
-        .iter()
-        .map(|system_name| {
-            let source = OptionDefinitionProvenance {
-                source_path: Some("/nix/store/mock-source/crystal-forge-module.nix".to_string()),
-                source_input: Some("self".to_string()),
-                source_revision: Some(commit_hash.to_string()),
-                value: None,
-                winning: true,
-                priority: Some(100),
-                status: Some("winning".to_string()),
-                winner_note: Some(
-                    "Selected by the deterministic development evaluator".to_string(),
-                ),
-                tracked_flake: None,
-            };
-            (
-                system_name.clone(),
-                vec![
-                    EvaluatedOption {
-                        path: "services.crystal-forge-agent.enable".to_string(),
-                        declared_type: Some("boolean".to_string()),
-                        metadata_error: None,
-                        value: SafeOptionValue::Scalar(serde_json::json!(true)),
-                        definitions: vec![source.clone()],
-                        overridden: Some(false),
-                    },
-                    EvaluatedOption {
-                        path: "system.stateVersion".to_string(),
-                        declared_type: Some("string".to_string()),
-                        metadata_error: None,
-                        value: SafeOptionValue::Scalar(serde_json::json!("26.05")),
-                        definitions: vec![source],
-                        overridden: Some(false),
-                    },
-                ],
-            )
-        })
-        .collect();
-
     // Mock evaluations never have system eval errors, so had_system_eval_errors is false.
     let had_system_eval_errors = false;
     Ok(EvaluationPlan {
         results,
         policy_checks: checks,
-        successful_systems,
+        // INVARIANT: Mock policy evidence never enters native artifact or option
+        // snapshot publication through the ordinary attempt finalizer.
+        successful_systems: Vec::new(),
         confirmed_failures: Vec::new(),
-        evaluation_snapshots,
-        // The development evaluator always produces a complete snapshot.
+        evaluation_snapshots: HashMap::new(),
         snapshot_capture_failures: HashMap::new(),
         flake_output_snapshot: None,
         had_system_eval_errors,
@@ -7668,6 +7739,153 @@ fn mock_eval_stage_delay(system_count: usize) -> std::time::Duration {
 
 fn should_mock_policy_fail(system_count: usize, idx: usize) -> bool {
     system_count > 1 && idx == 1
+}
+
+/// Selects the candidate configuration names for mock evaluation.
+///
+/// MOCK ONLY. `planned` holds
+/// `COALESCE(NULLIF(BTRIM(system_configuration_name), ''), hostname)` for the
+/// active registered systems of the flake. This is the key set of the
+/// evaluation policy plan. When `planned` is not empty, the function returns
+/// it sorted and deduplicated, because two active systems can share one
+/// configuration name and evaluation produces one result per configuration.
+/// When `planned` is empty, the function returns `configured` unchanged, so
+/// [`resolve_mock_systems`] keeps its configured or invented fallback.
+fn select_mock_system_names(mut planned: Vec<String>, configured: &[String]) -> Vec<String> {
+    if planned.is_empty() {
+        return configured.to_vec();
+    }
+    planned.sort();
+    planned.dedup();
+    planned
+}
+
+/// Returns whether a mock assigned-policy outcome passes.
+///
+/// MOCK ONLY. The outcome is a pure function of the configuration name and
+/// the policy version ID, so repeated mock evaluations of one plan produce
+/// the same matrix. About one outcome in
+/// [`MOCK_ASSIGNED_POLICY_FAILURE_MODULUS`] fails.
+fn mock_assigned_policy_passes(configuration_name: &str, policy_id: uuid::Uuid) -> bool {
+    mock_outcome_hash(configuration_name, policy_id) % MOCK_ASSIGNED_POLICY_FAILURE_MODULUS != 0
+}
+
+/// Sets the mock failure rate to one outcome in this many (about 10%).
+const MOCK_ASSIGNED_POLICY_FAILURE_MODULUS: u64 = 10;
+
+// INVARIANT: The hash must stay stable across processes, platforms, and Rust
+// releases. `std::hash::DefaultHasher` does not give that guarantee, so this
+// uses 64-bit FNV-1a with its published offset basis and prime. The 0xff
+// separator byte cannot occur in UTF-8 text, so different
+// (configuration, policy) pairs cannot produce the same byte sequence.
+fn mock_outcome_hash(configuration_name: &str, policy_id: uuid::Uuid) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    configuration_name
+        .as_bytes()
+        .iter()
+        .chain(std::iter::once(&0xff))
+        .chain(policy_id.as_bytes().iter())
+        .fold(FNV_OFFSET_BASIS, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+        })
+}
+
+/// Builds the mock policy check for one configuration.
+///
+/// MOCK ONLY. The result has the same structure that
+/// [`PolicyCheckResult::from_assigned`] produces for real evaluator output,
+/// so [`policy_results_json`] persists the same JSON shape:
+///
+/// - The unconditional agent gate follows `agent_failed`, the existing
+///   [`should_mock_policy_fail`] pattern. An assigned
+///   `RequireCrystalForgeAgent` policy agrees with that gate and always
+///   blocks when it fails, as in the real path.
+/// - Every other Nix-evaluated assigned policy takes its outcome from
+///   [`mock_assigned_policy_passes`]. A failure blocks only when
+///   `enforcement_mode.blocks(policy.is_strict())` is true. A report-only
+///   failure is recorded but is never blocking.
+/// - Policies that are not Nix-evaluated get no entry, as in the real path.
+/// - `meets_requirements` is true only when the agent gate passes and no
+///   failed policy is blocking.
+///
+/// Each failed assigned policy adds a warning that starts with `[MOCK]` and
+/// names the policy.
+fn mock_policy_check(
+    system_name: &str,
+    assigned: &[AssignedPolicy],
+    agent_failed: bool,
+) -> PolicyCheckResult {
+    use crate::models::deployment_policies::{AssignedPolicyCheckResult, DeploymentPolicy};
+
+    let mut assigned_results = BTreeMap::new();
+    let mut has_required_packages = None;
+    let mut warnings = Vec::new();
+    // COMPATIBILITY: Keep the pre-existing mock agent failure entry so mock
+    // queue counters and build gating are unchanged.
+    let mut failed_policies = if agent_failed {
+        warnings.push("Mock policy failure for UI validation".to_string());
+        vec![("Crystal Forge agent must be enabled".to_string(), true)]
+    } else {
+        Vec::new()
+    };
+
+    for assigned_policy in assigned.iter().filter(|ap| ap.policy.is_nix_evaluated()) {
+        let is_agent_policy = matches!(
+            assigned_policy.policy,
+            DeploymentPolicy::RequireCrystalForgeAgent { .. }
+        );
+        let (passed, blocking) = if is_agent_policy {
+            // SECURITY: The real path rejects an assigned agent result that
+            // disagrees with the unconditional gate, and the agent gate always
+            // blocks. The failure is already recorded above.
+            (!agent_failed, agent_failed)
+        } else {
+            let passed = mock_assigned_policy_passes(system_name, assigned_policy.policy_id);
+            let blocking = !passed
+                && assigned_policy
+                    .enforcement_mode
+                    .blocks(assigned_policy.policy.is_strict());
+            (passed, blocking)
+        };
+        if matches!(
+            assigned_policy.policy,
+            DeploymentPolicy::RequirePackages { .. }
+        ) {
+            has_required_packages = Some(passed);
+        }
+        if !passed {
+            warnings.push(format!(
+                "[MOCK] Policy {} failed for {} (deterministic mock outcome)",
+                assigned_policy.policy_name, system_name
+            ));
+            if !is_agent_policy {
+                failed_policies.push((assigned_policy.policy.description(), blocking));
+            }
+        }
+        assigned_results.insert(
+            assigned_policy.policy_id,
+            AssignedPolicyCheckResult {
+                passed: Some(passed),
+                blocking,
+                evaluation_error: None,
+                composite_outcomes: Vec::new(),
+            },
+        );
+    }
+
+    let meets_requirements = !agent_failed && !failed_policies.iter().any(|(_, blocks)| *blocks);
+    PolicyCheckResult {
+        system_name: system_name.to_string(),
+        cf_agent_enabled: Some(!agent_failed),
+        assigned_results,
+        has_required_packages,
+        custom_checks: HashMap::new(),
+        meets_requirements,
+        warnings,
+        failed_policies,
+        cve_checks: vec![],
+    }
 }
 
 /// Update commit metadata cache with evaluation summary statistics
@@ -8490,9 +8708,10 @@ mod tests {
         NixEvalJobResult, NixEvalProcessGuard, SuccessfulSystemResult,
         SystemBuildActivationOutcome, SystemFinalizeOutcome, SystemNotQueuedReason,
         SystemPersistenceOutcome, activate_evaluated_system_build, captured_config_root,
-        finalize_evaluated_system, finalize_evaluation_attempt, mock_eval_stage_delay,
-        normalize_policy_metadata, persist_evaluated_system, read_capped,
-        record_missing_snapshot_captures, resolve_mock_systems, run_nix_command_bounded,
+        finalize_evaluated_system, finalize_evaluation_attempt, mock_assigned_policy_passes,
+        mock_eval_stage_delay, mock_policy_check, normalize_policy_metadata,
+        persist_evaluated_system, read_capped, record_missing_snapshot_captures,
+        resolve_mock_systems, run_nix_command_bounded, select_mock_system_names,
         should_mock_policy_fail, summarize_commit_metadata,
     };
     use crate::api::models::CancelEvalOutcome;
@@ -10485,6 +10704,21 @@ mod tests {
         }
     }
 
+    // Native producer fixtures model completed discovery, not cached names.
+    async fn native_inventory(pool: &PgPool, commit_id: i32, attempt: i32, names: &[&str]) {
+        let names: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
+        crate::queries::evaluation_inventory::persist_inventory(
+            pool,
+            commit_id,
+            attempt,
+            &names,
+            &names,
+            crate::queries::evaluation_inventory::InventoryExecutionMode::Native,
+        )
+        .await
+        .expect("verified native fixture inventory should persist");
+    }
+
     fn successful_system(system_name: &str) -> SuccessfulSystemResult {
         SuccessfulSystemResult {
             system_name: system_name.to_string(),
@@ -10700,6 +10934,127 @@ mod tests {
         assert!(!should_mock_policy_fail(3, 0));
         assert!(should_mock_policy_fail(3, 1));
         assert!(!should_mock_policy_fail(3, 2));
+    }
+
+    #[test]
+    fn mock_system_names_prefer_planned_configurations() {
+        let configured = vec!["configured-only".to_string()];
+        let planned = vec![
+            "web-02".to_string(),
+            "web-01".to_string(),
+            "web-02".to_string(),
+        ];
+        let selected = select_mock_system_names(planned, &configured);
+        assert_eq!(selected, vec!["web-01".to_string(), "web-02".to_string()]);
+
+        let resolved = resolve_mock_systems("demo", "all", &selected).expect("planned systems");
+        assert_eq!(resolved, vec!["web-01".to_string(), "web-02".to_string()]);
+        let filtered = resolve_mock_systems("demo", "web-02", &selected).expect("target filter");
+        assert_eq!(filtered, vec!["web-02".to_string()]);
+
+        // Without registered systems, the configured and invented fallbacks
+        // remain in effect.
+        assert_eq!(
+            select_mock_system_names(Vec::new(), &configured),
+            configured
+        );
+        let invented = resolve_mock_systems("demo", "all", &select_mock_system_names(vec![], &[]))
+            .expect("fallback systems");
+        assert_eq!(invented[0], "demo-control-0");
+    }
+
+    fn mock_assigned(
+        id: u128,
+        mode: crate::models::deployment_policies::AssignedPolicyEnforcementMode,
+    ) -> AssignedPolicy {
+        AssignedPolicy {
+            policy_id: uuid::Uuid::from_u128(id),
+            policy_name: format!("policy-{id}"),
+            enforcement_mode: mode,
+            policy: DeploymentPolicy::RequirePackages {
+                packages: vec!["grafana".to_string()],
+                strict: true,
+            },
+        }
+    }
+
+    #[test]
+    fn mock_assigned_policy_outcome_is_stable_and_mixed() {
+        let ids: Vec<uuid::Uuid> = (1..=50u128).map(uuid::Uuid::from_u128).collect();
+        let first: Vec<bool> = ids
+            .iter()
+            .map(|id| mock_assigned_policy_passes("web-01", *id))
+            .collect();
+        let second: Vec<bool> = ids
+            .iter()
+            .map(|id| mock_assigned_policy_passes("web-01", *id))
+            .collect();
+        assert_eq!(first, second, "mock outcomes must be deterministic");
+
+        let failures = first.iter().filter(|passed| !**passed).count();
+        assert!(failures > 0, "50 ids must produce at least one failure");
+        assert!(
+            failures <= 15,
+            "failure rate must stay near 10%: {failures}"
+        );
+    }
+
+    #[test]
+    fn mock_policy_check_matches_real_blocking_semantics() {
+        use crate::models::deployment_policies::AssignedPolicyEnforcementMode;
+
+        let enforce: Vec<AssignedPolicy> = (1..=50u128)
+            .map(|id| mock_assigned(id, AssignedPolicyEnforcementMode::Enforce))
+            .collect();
+        let report_only: Vec<AssignedPolicy> = (1..=50u128)
+            .map(|id| mock_assigned(id, AssignedPolicyEnforcementMode::ReportOnly))
+            .collect();
+
+        let enforced = mock_policy_check("web-01", &enforce, false);
+        assert_eq!(enforced.assigned_results.len(), 50);
+        assert!(enforced.failed_policies.iter().all(|(_, blocks)| *blocks));
+        assert!(!enforced.failed_policies.is_empty());
+        assert!(!enforced.meets_requirements);
+        assert!(
+            enforced
+                .warnings
+                .iter()
+                .all(|warning| warning.starts_with("[MOCK] Policy policy-"))
+        );
+
+        let reported = mock_policy_check("web-01", &report_only, false);
+        assert!(!reported.failed_policies.is_empty());
+        assert!(reported.failed_policies.iter().all(|(_, blocks)| !*blocks));
+        assert!(reported.assigned_results.values().all(|r| !r.blocking));
+        assert!(
+            reported
+                .assigned_results
+                .values()
+                .any(|r| r.passed == Some(false))
+        );
+        assert!(reported.meets_requirements);
+
+        // The persisted document has the same shape as real evaluation.
+        let persisted = policy_results_json(&reported, &report_only);
+        let failed = report_only
+            .iter()
+            .find(|ap| reported.assigned_results[&ap.policy_id].passed == Some(false))
+            .expect("one report-only failure");
+        let entry = &persisted["assigned"][failed.policy_id.to_string()];
+        assert_eq!(entry["passed"], false);
+        assert_eq!(entry["blocking"], false);
+        assert_eq!(entry["enforcement_mode"], "report_only");
+        assert_eq!(entry["strict"], true);
+        assert!(entry.get("evaluation_error").is_none());
+
+        // The existing CF-agent mock failure stays unchanged and blocking.
+        let agent_failed = mock_policy_check("web-02", &[], true);
+        assert_eq!(agent_failed.cf_agent_enabled, Some(false));
+        assert!(!agent_failed.meets_requirements);
+        assert_eq!(
+            agent_failed.failed_policies,
+            vec![("Crystal Forge agent must be enabled".to_string(), true)]
+        );
     }
 
     #[test]
@@ -11067,18 +11422,15 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
-
-        finalize_evaluation_attempt(
-            &pool,
-            commit_id,
-            attempt,
-            &plan(
-                vec![successful_system("alpha")],
-                vec![failed_system("broken\0system", "module error")],
-            ),
-        )
-        .await
-        .expect_err("nul byte should make synthetic failure write fail");
+        native_inventory(&pool, commit_id, attempt, &["alpha", "broken"]).await;
+        let mut evaluation = plan(
+            vec![successful_system("alpha")],
+            vec![failed_system("broken", "module error")],
+        );
+        evaluation.force_build_job_insert_failure = true;
+        finalize_evaluation_attempt(&pool, commit_id, attempt, &evaluation)
+            .await
+            .expect_err("injected finalization failure should roll back all writes");
 
         assert_eq!(derivation_count(&pool, commit_id).await, 0);
 
@@ -11107,6 +11459,7 @@ mod tests {
 
         let system = successful_system("alpha");
         let check = passing_policy_check("alpha");
+        native_inventory(&pool, commit_id, attempt, &["alpha"]).await;
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
@@ -11158,6 +11511,7 @@ mod tests {
             .expect("policy metadata should parse");
 
         let system = successful_system("gray");
+        native_inventory(&pool, commit_id, attempt, &["gray"]).await;
 
         // Simulates the fallback path: finalize_evaluated_system called with
         // this configuration's real assigned policies, matching what the
@@ -11187,7 +11541,8 @@ mod tests {
         // What the bulk streaming path would have produced for the
         // identical check + assigned policies (this is exactly what
         // `persist_evaluated_system` computes internally).
-        let expected = policy_results_json(&check, &assigned);
+        let mut expected = policy_results_json(&check, &assigned);
+        expected["evaluation_attempt"] = serde_json::json!(attempt);
         assert_eq!(
             persisted, expected,
             "fallback path must persist the same policy_results document as the bulk path"
@@ -11224,6 +11579,7 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
+        native_inventory(&pool, commit_id, attempt, &["writer-lock-host"]).await;
 
         let mut blocker = pool.begin().await.expect("blocker should begin");
         lock_snapshot_writer_tx(&mut blocker)
@@ -11289,6 +11645,7 @@ mod tests {
 
         let system = successful_system("alpha");
         let check = failing_policy_check("alpha", true, "Require packages: git");
+        native_inventory(&pool, commit_id, attempt, &["alpha"]).await;
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
@@ -11329,6 +11686,7 @@ mod tests {
 
         let system = successful_system("alpha");
         let check = failing_policy_check("alpha", false, "Require packages: git");
+        native_inventory(&pool, commit_id, attempt, &["alpha"]).await;
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
@@ -11352,6 +11710,7 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
+        native_inventory(&pool, commit_id, attempt, &["alpha"]).await;
 
         let system = successful_system("alpha");
         let check = passing_policy_check("alpha");
@@ -11389,6 +11748,7 @@ mod tests {
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
         let system = successful_system("policy-cancel");
+        native_inventory(&pool, commit_id, attempt, &["policy-cancel"]).await;
 
         let first = finalize_evaluated_system(
             &pool,
@@ -11419,6 +11779,19 @@ mod tests {
         .await
         .expect("fixture derivation should enter the build-active state");
 
+        // Different terminal policy evidence requires a new evaluation owner.
+        finalize_evaluation_attempt(&pool, commit_id, attempt, &plan(vec![], vec![]))
+            .await
+            .expect("first evaluation should complete");
+        sqlx::query("INSERT INTO evaluation_attempts (commit_id, attempt_number, status) VALUES ($1, $2, 'queued')")
+            .bind(commit_id).bind(attempt + 1).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE commits SET evaluation_status = 'pending' WHERE id = $1")
+            .bind(commit_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let attempt = start_eval(&pool, commit_id).await;
+        native_inventory(&pool, commit_id, attempt, &["policy-cancel"]).await;
         let cancelled = finalize_evaluated_system(
             &pool,
             commit_id,
@@ -11466,15 +11839,12 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
-
-        finalize_evaluation_attempt(
-            &pool,
-            commit_id,
-            attempt,
-            &plan(vec![], vec![failed_system("bad\0system", "module error")]),
-        )
-        .await
-        .expect_err("synthetic failure write should roll back finalization");
+        native_inventory(&pool, commit_id, attempt, &["bad"]).await;
+        let mut evaluation = plan(vec![], vec![failed_system("bad", "module error")]);
+        evaluation.force_build_job_insert_failure = true;
+        finalize_evaluation_attempt(&pool, commit_id, attempt, &evaluation)
+            .await
+            .expect_err("synthetic failure write should roll back finalization");
 
         assert_eq!(derivation_count(&pool, commit_id).await, 0);
         assert_eq!(build_job_count(&pool, commit_id).await, 0);
@@ -11580,6 +11950,7 @@ mod tests {
         let attempt = start_eval(&pool, commit_id).await;
 
         let system = successful_system_no_agent("beta");
+        native_inventory(&pool, commit_id, attempt, &["beta"]).await;
         let check = agent_disabled_check("beta");
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
@@ -11616,6 +11987,7 @@ mod tests {
         let attempt = start_eval(&pool, commit_id).await;
 
         let system = successful_system_no_agent("gamma");
+        native_inventory(&pool, commit_id, attempt, &["gamma"]).await;
         let check = agent_disabled_with_strict_failure("gamma");
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
@@ -11652,6 +12024,7 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
+        native_inventory(&pool, commit_id, attempt, &["alpha", "beta"]).await;
 
         // First system finalizes successfully while eval is in_progress.
         let first_system = successful_system("alpha");
@@ -11717,6 +12090,7 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
+        native_inventory(&pool, commit_id, attempt, &["alpha", "broken"]).await;
 
         // Finalize A incrementally (simulating streaming bulk path).
         let system_a = successful_system("alpha");
@@ -11883,6 +12257,7 @@ mod tests {
         let attempt = start_eval(&pool, commit_id).await;
 
         let system = successful_system("delta");
+        native_inventory(&pool, commit_id, attempt, &["delta"]).await;
         let check = passing_policy_check("delta");
 
         // First finalize inserts derivation + build job.
@@ -11931,6 +12306,7 @@ mod tests {
         let attempt = start_eval(&pool, commit_id).await;
 
         let system = successful_system("epsilon");
+        native_inventory(&pool, commit_id, attempt, &["epsilon"]).await;
         let check = passing_policy_check("epsilon");
 
         let first = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
@@ -12002,6 +12378,7 @@ mod tests {
         //   → standalone eval runs and succeeds
         //   → finalize_evaluated_system called with the standalone result
         let system = successful_system("nix-builder-1");
+        native_inventory(&pool, commit_id, attempt, &["nix-builder-1"]).await;
         let check = passing_policy_check("nix-builder-1");
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
@@ -12127,6 +12504,7 @@ mod tests {
         let attempt = start_eval(&pool, commit_id).await;
 
         let system = successful_system("kappa");
+        native_inventory(&pool, commit_id, attempt, &["kappa"]).await;
         let check = passing_policy_check("kappa");
 
         // First finalize → Queued
@@ -12238,6 +12616,7 @@ mod tests {
 
         // ── Phase 1: persist only (no build job) ─────────────────────
         let system = successful_system("lambda");
+        native_inventory(&pool, commit_id, attempt, &["lambda"]).await;
         let check = passing_policy_check("lambda");
         let persisted = persist_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
@@ -12313,6 +12692,7 @@ mod tests {
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
         let system = successful_system("obsolete-contract-recovery");
+        native_inventory(&pool, commit_id, attempt, &["obsolete-contract-recovery"]).await;
         let check = passing_policy_check("obsolete-contract-recovery");
 
         let first = persist_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])

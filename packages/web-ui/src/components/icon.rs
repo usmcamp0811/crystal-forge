@@ -2,11 +2,18 @@
 
 use dioxus::prelude::*;
 
+/// Selects an inline SVG glyph rendered by [`Icon`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IconName {
     Sync,
     Plus,
     Terminal,
+    /// Draws the evaluation list glyph from the approved EvalDrawer design.
+    Evaluation,
+    /// Draws the windowed terminal glyph used by the Evaluation drawer Log tab.
+    EvaluationLog,
+    /// Draws the branch glyph used by the Evaluation drawer graph tab.
+    EvaluationGraph,
     X,
     Download,
     Shield,
@@ -86,6 +93,20 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
                 stroke_linecap: "round",
                 stroke_linejoin: "round"
             }
+        },
+        IconName::Evaluation => rsx! {
+            path { d: "M8 6h13M8 12h13M8 18h13", stroke_linecap: "round" }
+            path { d: "M4 6h.01M4 12h.01M4 18h.01", stroke_linecap: "round" }
+        },
+        IconName::EvaluationLog => rsx! {
+            rect { x: "3", y: "4", width: "18", height: "16", rx: "2" }
+            path { d: "m7 9 3 3-3 3M13 15h4", stroke_linecap: "round", stroke_linejoin: "round" }
+        },
+        IconName::EvaluationGraph => rsx! {
+            circle { cx: "6", cy: "6", r: "2.2" }
+            circle { cx: "6", cy: "18", r: "2.2" }
+            circle { cx: "18", cy: "12", r: "2.2" }
+            path { d: "M6 8.2v7.6M8.2 6h7.3a2.5 2.5 0 0 1 2.5 2.5v1.3", stroke_linecap: "round", stroke_linejoin: "round" }
         },
         IconName::Terminal => rsx! {
             polyline {

@@ -95,6 +95,31 @@ pkgs.rustPlatform.buildRustPackage {
       return "$status"
     }
 
+    # LOGGING: Cargo replays cached rustc diagnostics across the many exact
+    # test invocations. Their combined output exhausted GitLab's 4 MiB job-log
+    # limit before the failing selection ran, so its cause was unrecoverable.
+    # Keep stdout (libtest results and panic reports) and exit statuses
+    # unchanged. Capture stderr (compiler diagnostics and "Running" lines) in
+    # a file and print its tail only when Cargo fails. Export this function so
+    # the nested `bash -c` selections below use it too.
+    cargoStderrTail=400
+    cargo() {
+      local stderrLog status
+      stderrLog="$(mktemp "$TMPDIR/cargo-stderr.XXXXXX")"
+      if command cargo "$@" 2>"$stderrLog"; then
+        status=0
+      else
+        status=$?
+        printf 'cargo %s failed with exit %s; last %s stderr lines follow\n' \
+          "$1" "$status" "$cargoStderrTail" >&2
+        tail -n "$cargoStderrTail" "$stderrLog" >&2
+      fi
+      rm -f "$stderrLog"
+      return "$status"
+    }
+    export -f cargo
+    export cargoStderrTail
+
     beginPhase migrations-and-upgrade-rehearsals
     export DATABASE_URL="postgresql://$PGUSER@127.0.0.1/$PGDATABASE"
     export CRYSTAL_FORGE_TEST_DATABASE_URL="$DATABASE_URL"
@@ -778,6 +803,150 @@ SQL
       fi
     done
 
+    # TASK-488 captures the real resolved plan and reads exact-attempt outcomes
+    # in sqlx-created sandbox databases. Keep the missing/renamed-test guard.
+    for testName in \
+      queries::eval_policy_plans::tests::capture_is_atomic_first_write_immutable_and_retains_partial_rows \
+      queries::eval_policy_plans::tests::capture_rejects_wrong_attempt_owner_and_retry_cannot_read_old_plan \
+      server::policy_capture_tests::real_loader_captures_overlap_empty_contexts_and_immutable_history \
+      server::policy_capture_tests::real_virtual_baseline_capture_preserves_bundle_without_assignment_uuids
+    do
+      runExactCacheRegression "$testName" --ignored
+    done
+
+    # TASK-488 review fixes retain exact-attempt logs and restart evidence,
+    # avoid nested pool acquisition, and bound mandatory inventory persistence.
+    # The database timeout cases exercise the actual 30-second deadline.
+    for testName in \
+      handlers::api::commits::visibility::tests::attempt_log_regressions::websocket_retry_replaces_hidden_uuid_without_replaying_old_attempt \
+      queries::eval_logs_tests::attempt_owned_logs_retain_history_and_fence_stale_single_and_batch \
+      queries::eval_logs_tests::attempt_log_constraints_reject_partial_and_foreign_attribution \
+      queries::commits::restart_recovery_tests::restart_recovery_fresh_loader_capture_preserves_partial_durable_evidence \
+      queries::commits::restart_recovery_tests::restart_recovery_preserves_zero_and_exhausted_failure_budgets \
+      queries::commits::restart_recovery_tests::restart_recovery_repeated_concurrent_exact_source_and_later_child_interruption \
+      queries::commits::restart_recovery_tests::restart_recovery_insert_failure_rolls_back_source_and_commit \
+      queries::commits::restart_recovery_tests::restart_recovery_cancellation_terminal_and_missing_owner_never_enqueue \
+      queries::commits::restart_recovery_tests::restart_recovery_preserves_queued_children_and_delayed_backoff \
+      queries::commits::restart_recovery_tests::restart_recovery_ordinary_failure_retries_before_and_after_interruption \
+      handlers::api::compliance::tests::receiver_security::receiver_handlers_complete_with_one_connection_and_materialized_composite_evidence \
+      handlers::api::compliance::tests::receiver_security::receiver_handlers_single_connection_preserve_scope_and_admin_compatibility \
+      handlers::api::compliance::tests::receiver_security::evidence_receiver_orders_poam_sentinel_before_system_scope_locks \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_snapshot_wait_cancel_reclaims_connection \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_snapshot_wait_superseded_reclaims_connection \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_lock_wait_timeout_reclaims_connection \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_exact_owner_success_and_conflict \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_reclaims_connection_while_snapshot_blocker_stays_held \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_preserves_stricter_database_timeouts
+    do
+      runExactCacheRegression "$testName" --ignored
+    done
+
+    # process_pending_commits reloads CrystalForgeConfig independently of
+    # CFState. Scope this public fixture to the worker's exact test process;
+    # other regressions must retain their existing execution-mode configuration.
+    CRYSTAL_FORGE_CONFIG=${pkgs.writeText "required-inventory-worker-mock.toml" ''
+      [server]
+      host = "127.0.0.1"
+      port = 0
+      execution_mode = "mock"
+    ''} runExactCacheRegression \
+      server::required_inventory_worker_tests::required_inventory_actual_worker_releases_permit_before_blocked_finalization \
+      --ignored
+
+    for testName in \
+      handlers::api::commits::log_registry::tests::rotation_fences_producer_cleanup_and_closes_old_receivers \
+      handlers::api::commits::log_registry::tests::atomic_replay_live_boundary_delivers_each_event_once \
+      handlers::api::commits::log_registry::tests::retired_generation_and_other_state_cannot_publish \
+      handlers::api::commits::log_registry::tests::replay_and_channel_capacity_are_bounded_without_retargeting \
+      handlers::api::commits::tests::all_message_variants_require_original_producer_generation \
+      handlers::api::commits::tests::eval_log_wire_shapes_remain_compatible \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_deadline_drops_writer_without_admission \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_preserves_failures_and_blocks_both_producer_gates \
+      models::evaluate_with_policies::required_inventory_persistence::tests::required_inventory_final_check_fails_closed
+    do
+      runExactCacheRegression "$testName"
+    done
+
+    # MR334 review regressions use the declared module paths, including child
+    # test modules. Keep each isolated SQLx case behind the exact-success guard.
+    for testName in \
+      queries::eval_policy_plans::scoped_read_tests::mixed_flake_projects_all_metadata_and_shared_configuration \
+      queries::eval_policy_plans::scoped_read_tests::foreign_missing_and_removed_membership_are_nondisclosing \
+      queries::eval_policy_plans::scoped_read_tests::deleted_moved_and_reconfigured_hosts_fail_closed \
+      queries::eval_policy_plans::scoped_read_tests::authorization_and_evidence_share_repeatable_read_snapshot \
+      queries::eval_policy_plans::scoped_read_tests::legacy_configuration_names_cannot_grant_historical_host_access \
+      queries::eval_policy_plans::scoped_read_tests::pinned_reads_preserve_scope_and_revoke_historical_access \
+      queries::commits::policy_counts::tests::native_ten_passes_then_queued_retry_has_zero_current_counts \
+      queries::commits::policy_counts::tests::current_partial_native_and_mock_counts_exclude_stale_and_pending \
+      queries::commits::policy_counts::tests::markerless_legacy_counts_are_unavailable_not_passing \
+      handlers::api::systems::evaluation_lifecycle::tests::lifecycle_mutation_scopes_authority_audits_and_cleans_up \
+      handlers::api::systems::evaluation_lifecycle::tests::lifecycle_handler_enforces_auth_csrf_and_nondisclosing_scope \
+      handlers::api::systems::evaluation_lifecycle::tests::lifecycle_audit_failure_rolls_back_classification \
+      server::policy_capture_tests::capture_display_metadata_and_classification_share_repeatable_read_snapshot \
+      queries::eval_policy_plans::pinned_read_tests::pin_belongs_to_commit_and_never_falls_back_to_new_retry \
+      queries::eval_policy_plans::pinned_read_tests::historical_mock_values_survive_retry_while_stale_native_is_unknown \
+      queries::eval_policy_plans::pinned_read_tests::pinned_native_failure_is_preserved_until_its_marker_is_overwritten
+    do
+      runExactCacheRegression "$testName" --ignored
+    done
+
+    # TASK-488 discovery, summary, and evidence visibility use isolated SQLx
+    # databases. Require every qualified case to pass the exact-success guard.
+    for testName in \
+      queries::evaluation_inventory::tests::inventory_normalizes_exact_names_and_rejects_replacement \
+      queries::evaluation_inventory::tests::inventory_empty_and_selection_subset_are_distinct_from_missing \
+      queries::evaluation_inventory::tests::inventory_schema_enforces_owner_immutability_and_parent_cascade \
+      queries::evaluation_inventory::tests::inventory_rejects_cancelled_superseded_and_nonactive_writers \
+      queries::evaluation_inventory::tests::inventory_retry_never_inherits_or_accepts_older_writes \
+      queries::evaluation_inventory::tests::inventory_competing_first_writes_preserve_one_complete_record \
+      queries::commits::inventory_summary_tests::exact_inventory_replaces_cached_41_and_excludes_unselected_outcomes \
+      queries::commits::inventory_summary_tests::inventory_partial_unknown_ambiguous_and_queued_retry_remain_pending \
+      queries::commits::inventory_summary_tests::scoped_summaries_hide_shared_policy_facts_search_errors_and_revoked_membership \
+      handlers::api::commits::visibility::tests::mixed_environment_flake_denies_unstructured_evidence \
+      handlers::api::commits::visibility::tests::revocation_rechecks_each_snapshot_and_keeps_reads_atomic \
+      handlers::api::commits::visibility::tests::unmanaged_discovery_name_denies_even_with_all_memberships \
+      handlers::api::commits::visibility::tests::missing_inventory_and_queued_retry_never_inherit_authority \
+      handlers::api::commits::visibility::tests::all_visible_configs_allow_logs_and_mutable_latest_graph \
+      handlers::api::commits::visibility::tests::shared_configuration_hidden_host_denies_even_when_inactive \
+      handlers::api::commits::visibility::tests::missing_identity_or_registration_never_grants_vacuous_access \
+      handlers::api::commits::visibility::tests::mutable_graph_preserves_counts_but_denies_unmanaged_retained_rows \
+      handlers::api::commits::visibility::tests::stream_revalidation_observes_membership_roles_and_session_revocation \
+      queries::eval_policy_plans::inventory_projection_tests::inventory_discovered_41_preserves_exact_names_and_12_captured_hosts \
+      queries::eval_policy_plans::inventory_projection_tests::inventory_absent_and_unselected_registered_rows_keep_unknown_evidence \
+      queries::eval_policy_plans::inventory_projection_tests::inventory_shared_hosts_count_one_matching_global_failure_without_fake_policies \
+      queries::eval_policy_plans::inventory_projection_tests::inventory_history_ignores_cache_mutation_and_queued_retry_has_no_inventory \
+      queries::eval_policy_plans::inventory_projection_tests::inventory_scoped_reads_hide_unmanaged_hidden_columns_and_global_failure_details \
+      queries::eval_policy_plans::inventory_projection_tests::inventory_missing_discovery_is_unavailable_despite_passing_native_and_cache
+    do
+      runExactCacheRegression "$testName" --ignored
+    done
+
+    # TASK-488 native history uses immutable exact-attempt evidence. These SQLx
+    # cases also replay the attributable 0308 import; retain the exact guard.
+    for testName in \
+      queries::evaluation_native_outcomes::tests::native_outcome_rejects_cancelled_superseded_and_nonactive_owners \
+      queries::evaluation_native_outcomes::tests::native_outcome_requires_exact_selected_native_inventory \
+      queries::evaluation_native_outcomes::tests::native_outcome_first_write_schema_immutability_and_parent_cascade \
+      queries::evaluation_native_outcomes::tests::native_outcome_sidecar_has_no_artifact_build_or_observation_side_effects \
+      queries::evaluation_native_outcomes::tests::native_outcome_retry_retains_historical_values_under_new_ea \
+      queries::evaluation_native_outcomes::tests::native_producers_atomically_retain_success_and_confirmed_failure_across_retry
+    do
+      runExactCacheRegression "$testName" --ignored
+    done
+
+    # Receiver reads must enforce the same environment boundary as the matrix.
+    # Exact names also ensure the scope-lock concurrency checks really execute.
+    for testName in \
+      handlers::api::compliance::tests::receiver_security::system_receivers_hide_out_of_scope_hosts_with_identical_404 \
+      handlers::api::compliance::tests::receiver_security::bundle_systems_scope_host_details_and_every_total_before_rollup \
+      handlers::api::compliance::tests::receiver_security::receiver_scope_rechecks_revocations_moves_unscoped_and_deleted_hosts \
+      handlers::api::compliance::tests::receiver_security::receiver_scope_preserves_empty_revisions_and_legacy_system_rollups \
+      handlers::api::compliance::tests::receiver_security::single_receiver_guard_blocks_revocation_and_move_until_materialized \
+      handlers::api::compliance::tests::receiver_security::bundle_receiver_guard_bounds_candidates_and_blocks_scope_writes
+    do
+      runExactCacheRegression "$testName" --ignored
+    done
+
     # TASK-484 uses sqlx-created databases in this sandbox. Run each test in a
     # separate process because the heavy-Nix semaphore is process-global.
     for testName in \
@@ -792,6 +961,16 @@ SQL
     done
 
     for testName in \
+      models::evaluate_with_policies::mock_persistence::tests::mock_persistence_records_attempt_outcomes_without_production_work \
+      models::evaluate_with_policies::mock_persistence::tests::mock_persistence_cancelled_or_superseded_attempts_write_nothing \
+      models::evaluate_with_policies::mock_persistence::tests::isolated_mock_counts_match_queue_history_and_exclude_queued_retry \
+      queries::eval_policy_plans::tests::isolated_mock_projection_matches_attempt_and_rejects_ambiguous_native \
+      queries::eval_policy_plans::tests::confirmed_native_finalizer_failure_is_attempt_owned_and_preserves_build \
+      queries::eval_policy_plans::tests::confirmed_native_finalizer_cancellation_writes_no_failure_evidence \
+      queries::commits::tests::derivation_count_isolated_current_mock_has_zero_records \
+      queries::commits::tests::derivation_count_excludes_stale_native_and_queued_retry \
+      queries::commits::tests::derivation_count_counts_current_native_records_not_groups \
+      queries::commits::tests::derivation_count_markerless_legacy_is_unavailable \
       queries::commits::partial_resource_failure_tests::partial_resource_failure_retains_rejected_completion_with_preserved_build_history \
       queries::commits::partial_resource_failure_tests::partial_resource_failure_reconciles_committed_but_unacknowledged_completion \
       queries::commits::partial_resource_failure_tests::partial_resource_failure_ignores_never_committed_completion_candidate \
