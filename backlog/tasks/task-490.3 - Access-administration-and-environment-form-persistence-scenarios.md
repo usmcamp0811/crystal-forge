@@ -4,7 +4,7 @@ title: 'Access: administration and environment form persistence scenarios'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-18 02:37'
+updated_date: '2026-10-18 03:32'
 labels:
   - testing
   - integration
@@ -32,11 +32,11 @@ ordinal: 515000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-access. Contract IDs: access.configuration.admin and access.configuration.resources. This packet owns disjoint case fragments only: checks/integration-access/scenarios/fragments/task-490.3-admin-forms.py/.cjs and task-490.3-environment-forms.py/.cjs. The coordinator owns lifecycle-local-bootstrap.nix, Python composition, browserSpecs mapping, and owner registration. Do not create packet-specific NixOS test derivations.
+Owning check: integration-access. Contract IDs: access.configuration.admin and access.configuration.resources. This packet owns disjoint Python/browser fragments only: `checks/integration-access/scenarios/fragments/task-490.3-admin-forms.py/.cjs` and `task-490.3-environment-forms.py/.cjs`. The coordinator owns `lifecycle-local-bootstrap.nix`, Python composition, browserSpecs mapping, and owner registration. No packet-specific NixOS derivations.
 
-Compose after the real first-admin bootstrap in the same local-auth VM/database as TASK-490.2/.4. Create and edit users, roles, classification/retry settings, and environments through the production UI; prove authoritative DB state and reload. Cancel leaves rows unchanged. A real write failure keeps the draft and persists nothing only where approved authority defines that state; otherwise block that case as a design/decision gap. Preserve success and validation assertions.
+Compose after the real first-admin bootstrap in the same local-auth VM/database as TASK-490.2/.4. Create/edit users, roles, classification/retry settings and environments through the production UI; prove DB state and reload. Cancel leaves rows unchanged. A real write failure preserves the draft only where accepted authority defines that state; otherwise block it as a design/decision gap. Preserve success/validation assertions.
 
-Read-only sources: cf-server admin/environments handlers and routes; web-ui admin/environment forms; approved AdminView.jsx and EnvironmentsView.jsx for presentation only. As-built knowledge docs are not D1 authority. No production changes, shared helper, scenario composition, owner registration, CI, or docs writes. Foundation and TASK-490.25/.26 must pass before dispatch. The coordinator records the real composed VM result and evidence.
+The base scenario passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`; TASK-490.25/.26 are integrated. Remaining dependency is TASK-490.1 review/selection and accepted design states for failure/cancel behavior. Controller/browser interfaces and fragment paths are concrete. Focused verification after composition: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`; aggregate: `nix build .#checks.x86_64-linux.integration-access -L`. Neither includes these fragments yet; keep Backlog until selected and authority cases are resolved.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
