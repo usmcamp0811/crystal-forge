@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-18 00:15'
+updated_date: '2026-10-18 03:26'
 labels:
   - testing
   - integration
@@ -32,30 +32,26 @@ ordinal: 513000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Problem: children need the adopted integration contract, coverage/retirement map, native Snowfall scenario interface, and a real exercised Access slice. Goal: establish that shared test-only foundation and execute fresh server/database startup, supported first-admin local bootstrap, production-UI sign-in, and authoritative reload/read. Test-only scope from TASK-490 applies; docs/design/CrystalForge/ remains read-only.
+Problem: children need the adopted integration contract, coverage/retirement map, shared harness and a real Access workflow. Goal: establish those foundations and execute fresh server/database startup, migrations, local first-admin bootstrap, production-UI sign-in, reload persistence and wrong-password rejection through the normal NixOS module.
 
-Native architecture: checks/integration-access/default.nix uses Snowfall { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios, and pkgs.linkFarm aggregation of every registered gate. Scenario scripts/fixtures/assets live under checks/integration-access/. Shared helpers live at lib/integration-test, exposed as lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Only the meaningful Access WIP owner is registered; no placeholder owners. Coordinator owns shared helper code, check registration, flake/CI wiring and canonical docs. Child scenario writes remain disjoint and owner-local.
+Architecture: native Snowfall `checks/integration-access/default.nix` explicitly registers scenarios and aggregates every registered gate with `pkgs.linkFarm`. Shared helpers live under `lib/integration-test/` and are called as `lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }`. Packet files are fragments; coordinator owns Nix scenario composition and registration. No root tests/, `legacyPackages.integration`, `mkOwner`, custom discovery, or placeholder owners. Each separately built scenario has a fresh VM/database; same-scenario cases may use real earlier records/identities through receipts; no cross-derivation state.
 
-Implemented scenario: checks/integration-access/scenarios/lifecycle-local-bootstrap.{nix,py,cjs}. It invokes the production cf-server-drv with the normal NixOS module and records redacted generated config plus server/PostgreSQL journals on failure. Expected: first local registrant becomes Admin; migrations apply; real browser sign-in/reload preserves session; wrong password creates no session.
+Harness scope for this milestone: production `cf-server-drv` with embedded UI through the normal module; currently implemented role is controller with browser option. Services/builder/target role interfaces and their Delivery proving workflow remain in coordinator-owned TASK-490.7; do not add speculative roles/helpers to Access. Contract, coverage map, docs and backlog packets record accepted authority boundaries. D1/as-built material remains evidence, not authority.
 
-Current execution: combined clean commit fc930335878279ac426510359c039dfd8961dc13 includes tested TASK-491 prerequisite af39284bdf16d56402f01a64c916f17948e43b02. Exact command `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L` executed a real VM and FAILED the retained startup assertion. Evidence `/nix/store/1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. PostgreSQL starts; generated database.host is `/run/postgresql`; server exits `both host and hostaddr are missing` before migrations or HTTP. Generated [server] config lacks auth_mode and systemd AUTH_MODE is unset; local-auth routes/API were not reached. Correct assertions remain. No AUTH_MODE workaround or production code change.
+The user explicitly authorized only TASK-490.25 and TASK-490.26 production repairs, each in a separate commit: `ca46cdd5` repairs active cf-config URL serialization while preserving `/run/postgresql`; `136348e8` propagates the selected local/OIDC mode through the production server unit. Other production, module, migration, SQLx, UI, and design changes remain out of scope.
 
-Product blockers TASK-490.25/.26 are Backlog and unresolved. Foundation does not pass. Coverage map, contract and README record the expected/generated configuration, observed result, and evidence.
-
-Packet/documentation corrections: every scenario owns a fresh VM/database; task dependencies share immutable code/fixtures only, never runtime rows, sessions, receipts or outputs. Assurance packets .20/.21 are narrowed; .27/.28/.29 separate finding waiver, acceptance register and POA&M verification/closure. All children remain Backlog and none is ready for Luna. TASK-490.7 role proving work remains coordinator-owned.
-
-Verification: native Snowfall inventory has 27 checks (the old 26 plus integration-access); no flake or CI wiring change. `okf-knowledge` passes (58 tests, 191 concepts, 216 Mermaid blocks). The Access VM result is a recorded product-configuration failure, not a pass. TASK-490.1 remains In Progress; no merge, deployment, Review or Done transition is authorized.
+The combined focused Access scenario and current `integration-access` owner passed at tested revision `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. Exact commands and runtime evidence are in the coverage map and README. TASK-491 remains integrated. Current outstanding foundation scope is the remaining packet/readiness acceptance criterion; future role proof remains in TASK-490.7. No full Access contract, other owner, or overhaul pass is claimed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [x] #1 Contract is adopted at docs/knowledge/testing/integration-test-contract.md with implementation_status partial, adopted-versus-implemented distinction, and affected AGENTS.md/agent verification links; D1 is not authority
-- [x] #2 Coverage map records accepted obligation ID, owner, scenario, independent expected result, evidence and status, plus retirement disposition for every legacy check and CI job
-- [ ] #3 lib/integration-test exposes lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs } with documented concrete roles, production package selection, facts/receipts, bounded waits, fault injection, pinned rendering and failure artifacts
-- [x] #4 checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicitly registers lifecycle-local-bootstrap and aggregates ALL registered gates with pkgs.linkFarm; scripts/fixtures/assets stay owner-local
-- [x] #5 Focused checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap executes in a real VM with baseline updating disabled and failure propagation; exact command, revision, outcome and .run evidence are recorded, including linked defects where applicable
-- [x] #6 Native discovery exposes meaningful Access WIP without requiring completion; no root tests/, legacyPackages.integration, mkOwner, custom discovery or placeholder Delivery/Assurance/Upgrade owners are added; legacy checks remain until cutover
-- [ ] #7 Future bounded child packets record actual foundation/dependency commit(s), implemented interfaces, disjoint paths, fixtures, explicit coordinator registration and verified commands before To Do; until then all children remain Backlog
+- [ ] #1 Contract is adopted at docs/knowledge/testing/integration-test-contract.md with implementation_status partial, adopted-versus-implemented distinction, and affected AGENTS.md/agent verification links; D1 is not authority
+- [ ] #2 Coverage map records accepted obligation ID, owner, scenario, independent expected result, evidence and status, plus retirement disposition for every legacy check and CI job
+- [ ] #3 lib/integration-test exposes lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs } with a documented controller role, production package selection, facts/receipts, bounded waits, fault injection, pinned rendering and failure artifacts; future services/builder/target roles and proving remain in TASK-490.7
+- [ ] #4 checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicitly registers lifecycle-local-bootstrap and aggregates all registered gates with pkgs.linkFarm; scripts/fixtures/assets stay owner-local
+- [ ] #5 Focused checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap executes in a real VM with baseline updating disabled and failure propagation; exact command, revision, outcome and evidence are recorded, including linked defects where applicable
+- [ ] #6 Native discovery exposes meaningful Access WIP without requiring completion; no root tests/, legacyPackages.integration, mkOwner, custom discovery or placeholder owners are added; legacy checks remain until cutover
+- [ ] #7 Future bounded child packets record actual dependencies, disjoint fragment paths, shared scenario placement, harness interface, coordinator registration and verified commands before To Do; packets without those conditions remain Backlog
 <!-- AC:END -->
 
 ## Implementation Notes
