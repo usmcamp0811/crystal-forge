@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:34'
-updated_date: '2026-10-18 13:45'
+updated_date: '2026-10-18 13:56'
 labels:
   - testing
   - integration
@@ -33,27 +33,42 @@ ordinal: 514000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-access. Contract IDs: access.lifecycle.sessions, access.lifecycle.authorization, access.lifecycle.registration-closed. This packet owns disjoint case fragments only: `checks/integration-access/scenarios/fragments/task-490.2-sessions.py/.cjs` and `task-490.2-authorization.py/.cjs`. The coordinator owns `lifecycle-local-bootstrap.nix`, the composed Python entry point, browserSpecs mapping, and owner registration. Do not create a packet-specific NixOS derivation.
+Owning check: integration-access. Contract IDs: access.lifecycle.sessions, access.lifecycle.authorization, access.lifecycle.registration-closed. Goal: replace mocked session/role proofs with real requests, browser actions and authoritative persistence checks. Risk: medium (security assertions). This is test-only work; OIDC (.6), forms (.3), navigation (.4), TTL timing and product changes are out of scope.
 
-Compose local-auth cases after the real TASK-490.1 first-admin bootstrap in the same fresh VM/database. Reuse the created Admin and generated identity receipts; create Operator/Viewer through the real API/UI. Assert missing/mismatched CSRF is 403 without protected-row mutation, correct CSRF persists, sign-out/revocation invalidates the selected session, and denied role mutations leave rows unchanged. Check closed registration and cross-environment denial only under accepted owner authority; uncertain cases stay blocked: decision. Preserve browser navigation and exact identity assertions.
+Writable paths (only):
+- checks/integration-access/scenarios/fragments/task-490.2-sessions.py
+- checks/integration-access/scenarios/fragments/task-490.2-sessions.cjs
+- checks/integration-access/scenarios/fragments/task-490.2-authorization.py
+- checks/integration-access/scenarios/fragments/task-490.2-authorization.cjs
 
-The base scenario passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`; TASK-490.25/.26 are integrated. Remaining dependency is TASK-490.1 review/selection; no other role helper is needed. The controller/browser interface and same-scenario placement are documented. Focused verification after composition: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`; aggregate: `nix build .#checks.x86_64-linux.integration-access -L`. Neither has run with these fragments, so keep this packet Backlog until selected and accepted-authority cases are concrete.
+Composition target: checks/integration-access/scenarios/lifecycle-local-bootstrap.nix. The coordinator owns its Python composition, browserSpecs mapping and explicit owner registration/aggregation. No packet-specific NixOS derivation. Run after the real first-admin bootstrap in the same fresh VM/database. Earlier real records in this scenario MAY be consumed through receipts; another derivation's live VM, database, cookies, IDs or receipts MUST NOT be consumed.
+
+The user SELECTED the session portion. Leave status changes to the coordinator. Its concrete prerequisite is tested foundation bba718befbc183863781656df2df272e5f735d5a (bba718be), based on origin/dev 5ae7feab8a7b372e8efe0d2dd21b6f53f0625064, with TASK-490.25/.26 integrated. The controller-only session proofs do not require services/builder/target roles, completion of future dependencies, or unresolved environment/registration authority. Use FACTS["admin"] for authored credentials and receipts()["admin.userId"] for generated identity. Existing driver interfaces are case, expect, expect_equal, receipt, receipts, wait_for, sql_json(controller, query), http(controller, method, path, body=None, session=None, csrf=False, base=...), and run_browser(controller, spec, viewport="desktop", base_url=...). Named http session jars persist independently; csrf=True sends the jar's double-submit token. A mismatched-header probe must use a concrete request without changing shared helpers. Each run_browser invocation starts an independent browser context; sign in within that context and pass identities through receipts, never assume bootstrap cookies carry over. Browser helpers include page/expect/facts/receipts/emit/url/step/screenshot/whoami.
+
+Session cases: absent and mismatched x-csrf-token yield 403 csrf_validation_failed and leave protected rows unchanged (for example classification config); correct CSRF persists the mutation. Create two real sessions; DELETE /api/v1/user/sessions/:id invalidates only the selected other session, sets invalidated_at, and makes its next request unauthenticated while the retained session still works. UI sign-out invalidates its exact session; whoami is false after reload and protected navigation redirects to /login. Rejected requests create no session or protected mutation.
+
+Remaining authorization portion: create Operator/Viewer through the real admin API/UI with CSRF. Denied admin create/PATCH/config mutations return 403 without row changes; Viewer has no usable admin mutation, including direct /admin access. Cross-environment denial and closed registration after an existing user with allow_registration=false require accepted endpoint/scope/registration semantics. Only those uncertain assertions stay blocked: decision. Their authority gaps do not block the selected session portion.
+
+Authority/source reading: accepted owner requirements control expectations; knowledge pages are as-built evidence, not D1 acceptance authority. Read security/session-cookies-and-csrf.md, security/api-authentication-and-authorization.md and ui/admin-console-and-login-views.md under docs/knowledge; cf-server auth/session.rs, handlers/api/auth_session.rs, user_sessions.rs, rbac.rs, admin.rs (CreateAdminUserRequest), auth_local.rs (register/allow_registration), auth_status.rs, server routes and migration 0071_auth_identity_rbac.sql; web-ui login/register/sidebar. Author role/environment facts independently (design users by ID, environments by name); never use a response under test as its own expected value.
+
+Focused verification after coordinator composition: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. The base passed; these fragments have not run. Record tested revision, actual exit/result and evidence (result.json, browser/<spec>/, journals/controller/); retain correct failures and linked product defects. Escalate shared-interface/authority gaps to the coordinator without weakening assertions or editing production/shared/registration/CI/design files.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Session, CSRF, sign-out and revocation cases are composed into integration-access/scenarios/lifecycle-local-bootstrap by the coordinator; no packet-specific VM derivation is added
-- [ ] #2 Missing/mismatched CSRF is rejected without protected-row changes; correct tokens persist the mutation
-- [ ] #3 UI sign-out and session revocation invalidate the correct session row and the next request is unauthenticated
-- [ ] #4 Operator/Viewer admin mutations are rejected without row changes; unresolved environment scope remains blocked pending accepted authority
-- [ ] #5 Closed registration is tested only against accepted requirements; correct failures retain assertions and linked product defects
-- [ ] #6 The coordinator's real VM run executes these cases with exact tested revision, command, result and evidence recorded
+- [ ] #1 The coordinator composes only the named session/authorization fragments into lifecycle-local-bootstrap after real bootstrap; no packet-specific VM derivation is added
+- [ ] #2 Missing/mismatched CSRF yields 403 csrf_validation_failed without protected-row or session creation; correct CSRF persists the mutation
+- [ ] #3 Two real sessions prove selected-session revocation and retained-session validity; UI sign-out invalidates its exact row, next request/reload is unauthenticated and protected navigation redirects to /login
+- [ ] #4 Operator/Viewer admin mutations are rejected without row changes and Viewer has no usable direct/UI admin mutation; only uncertain environment-scoping assertions remain blocked pending accepted authority
+- [ ] #5 Closed registration/no new user is asserted against accepted owner semantics; unresolved registration authority blocks only that assertion and does not block the user-selected session portion
+- [ ] #6 The coordinator executes the focused lifecycle-local-bootstrap gate with these fragments and records exact tested revision, command, outcome and evidence; identities use FACTS/admin.userId receipts and independent authenticated contexts
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-10-17 organization correction replaces old paths, commands, discovery and D1 authority instructions. Actual foundation commit is unresolved; two existing Rust package tests block foundation and no VM execution occurred. Backlog, not ready: actual dependency commit(s) and verified commands are required before To Do. No Luna delegation or executed slice is claimed. Coordinator owns shared lib, owner default.nix registration, CI/docs; this child writes only its disjoint scenario files.
+Current readiness: the user selected the sessions portion against bba718be; coordinator owns status transition and composition. Authorization authority gaps remain limited to the affected assertions. No fragment run or completion is claimed.
 
-Rebase verification: the TASK-490.1 base scenario passed at rebased source `bba718befbc183863781656df2df272e5f735d5a`; command remains `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. This fragment set is still Backlog because TASK-490.1 remains In Progress and the role/environment/closed-registration assertions require owner authority where not already accepted.
+### Historical
+The 2026-10-17 organization review found unresolved foundation/package prerequisites and no VM execution at that time. The former separate session/role scenario proposal was replaced by same-scenario fragments. Earlier bootstrap passed at b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56. After rebase, the actual tested prerequisite is bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab8a7b372e8efe0d2dd21b6f53f0625064. Its recorded runtime is riky1mm0nn185wb26abw7zzshnbml0fp (292 migrations). These are foundation results, not execution of this packet.
 <!-- SECTION:NOTES:END -->
