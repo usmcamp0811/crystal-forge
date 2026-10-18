@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-18 03:26'
+updated_date: '2026-10-18 03:27'
 labels:
   - testing
   - integration
@@ -45,12 +45,12 @@ The combined focused Access scenario and current `integration-access` owner pass
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Contract is adopted at docs/knowledge/testing/integration-test-contract.md with implementation_status partial, adopted-versus-implemented distinction, and affected AGENTS.md/agent verification links; D1 is not authority
-- [ ] #2 Coverage map records accepted obligation ID, owner, scenario, independent expected result, evidence and status, plus retirement disposition for every legacy check and CI job
-- [ ] #3 lib/integration-test exposes lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs } with a documented controller role, production package selection, facts/receipts, bounded waits, fault injection, pinned rendering and failure artifacts; future services/builder/target roles and proving remain in TASK-490.7
-- [ ] #4 checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicitly registers lifecycle-local-bootstrap and aggregates all registered gates with pkgs.linkFarm; scripts/fixtures/assets stay owner-local
-- [ ] #5 Focused checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap executes in a real VM with baseline updating disabled and failure propagation; exact command, revision, outcome and evidence are recorded, including linked defects where applicable
-- [ ] #6 Native discovery exposes meaningful Access WIP without requiring completion; no root tests/, legacyPackages.integration, mkOwner, custom discovery or placeholder owners are added; legacy checks remain until cutover
+- [x] #1 Contract is adopted at docs/knowledge/testing/integration-test-contract.md with implementation_status partial, adopted-versus-implemented distinction, and affected AGENTS.md/agent verification links; D1 is not authority
+- [x] #2 Coverage map records accepted obligation ID, owner, scenario, independent expected result, evidence and status, plus retirement disposition for every legacy check and CI job
+- [x] #3 lib/integration-test exposes lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs } with a documented controller role, production package selection, facts/receipts, bounded waits, fault injection, pinned rendering and failure artifacts; future services/builder/target roles and proving remain in TASK-490.7
+- [x] #4 checks/integration-access/default.nix uses { lib, inputs, pkgs, ... }, explicitly registers lifecycle-local-bootstrap and aggregates all registered gates with pkgs.linkFarm; scripts/fixtures/assets stay owner-local
+- [x] #5 Focused checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap executes in a real VM with baseline updating disabled and failure propagation; exact command, revision, outcome and evidence are recorded, including linked defects where applicable
+- [x] #6 Native discovery exposes meaningful Access WIP without requiring completion; no root tests/, legacyPackages.integration, mkOwner, custom discovery or placeholder owners are added; legacy checks remain until cutover
 - [ ] #7 Future bounded child packets record actual dependencies, disjoint fragment paths, shared scenario placement, harness interface, coordinator registration and verified commands before To Do; packets without those conditions remain Backlog
 <!-- AC:END -->
 
