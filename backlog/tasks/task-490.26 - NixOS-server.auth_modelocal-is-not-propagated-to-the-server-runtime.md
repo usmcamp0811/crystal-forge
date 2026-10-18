@@ -4,7 +4,7 @@ title: NixOS server.auth_mode=local is not propagated to the server runtime
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 13:47'
+updated_date: '2026-10-18 14:01'
 labels:
   - bug
   - nixos
@@ -42,17 +42,14 @@ Repair is separate commit `76e514644505f232e4e47f085db801913d8449ab` after rebas
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Final clean combined source commit 39a6a54b651a8b77fc3416b73195e363a782fa2e reproduces the generated-config mismatch: summary shows `[server]` with no auth_mode and systemd AUTH_MODE=unset. The server failed earlier on TASK-490.25, so this VM did not observe an auth-mode response or route registration. Evidence is in /nix/store/vcfbia521bjad2a85yca3h3n9i4m4ikf-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt.
+Current verification: separate rebased repair commit 76e514644505f232e4e47f085db801913d8449ab is included in tested foundation bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab8a7b372e8efe0d2dd21b6f53f0625064. Focused Access scenario and owner aggregate passed; runtime riky1mm0nn185wb26abw7zzshnbml0fp confirms local setup-status, first-admin production-browser workflow/session assertions and 292 migrations. Earlier pending-verification statements are historical observations. Status is preserved for the coordinator.
 
-Final exact-head rerun on combined commit fc930335878279ac426510359c039dfd8961dc13 confirms generated [server] omits auth_mode and systemd AUTH_MODE is unset: /nix/store/1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt. The DB URL defect prevented route registration; runtime auth response remains unobserved.
+LOCK: claude-sonnet-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation. User authorized this narrow production repair as a separate foundation-branch commit on 2026-10-17.
 
-LOCK: claude-sonnet-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation. The user explicitly authorized this narrow production repair on 2026-10-17 and directed that it be committed separately on the TASK-490.1 foundation branch (not a separate worktree).
+### Historical
+At 39a6a54b651a8b77fc3416b73195e363a782fa2e, generated [server] omitted auth_mode and the unit reported AUTH_MODE=unset. Evidence vcfbia521bjad2a85yca3h3n9i4m4ikf-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt. Exact-head fc930335878279ac426510359c039dfd8961dc13 repeated that observation; evidence 1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/. The config default would select oidc, but .25 prevented migrations/route registration, so no OIDC HTTP response was observed. The old product-fix prohibition preceded separate user authorization; no test-only AUTH_MODE override was used.
 
-Repair commit 136348e8 integrates the module-derived AUTH_MODE in the production server unit for both auth choices. Targeted NixOS evaluation returned `{"local":"local","oidc":"oidc"}`. Combined Access VM proof remains pending.
+Pre-rebase repair 136348e8 propagated module-derived AUTH_MODE for local/OIDC while retaining conditional OIDC variables and EnvironmentFile precedence. Targeted module evaluation returned {"local":"local","oidc":"oidc"}. Combined runtime proof was pending at that point only.
 
-Combined runtime proof passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. Setup-status returned local mode with `requires_setup=true` on the empty database; the embedded-UI browser registered the first Admin, signed in, reloaded with the persistent session, and the wrong password was rejected without creating another session. Evidence: `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/` (`result.json`, `browser/bootstrap-sign-in/result.json`, `browser/bootstrap-sign-in/signed-in-after-reload.png`, generated-config-summary.txt). No test-only environment override was used.
-
-Exact final branch-head repeat at `ade5080cd84c7be057b8f0a9d9c490ed8b1fd3d5` passed the local-mode setup-status and browser/session assertions; evidence is `/nix/store/0aavcw4vk32c83gljg8y4mz7gi5pqrn4-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. No further rerun needed.
-
-Rebase to origin/dev `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064` rewrote this repair commit to `76e514644505f232e4e47f085db801913d8449ab`. The focused Access scenario and owner aggregate passed on rebased source `bba718befbc183863781656df2df272e5f735d5a`; runtime setup-status and browser assertions confirm effective local mode, with evidence `/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`.
+The combined proof later passed at b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56: empty-DB setup-status local/requires_setup, embedded-UI first Admin registration/sign-in/reload, persistent session and rejected wrong password without a new session. Evidence xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/ includes result.json, browser/bootstrap-sign-in/result.json, signed-in-after-reload.png and redacted generated config. ade5080cd84c7be057b8f0a9d9c490ed8b1fd3d5 also passed; evidence 0aavcw4vk32c83gljg8y4mz7gi5pqrn4-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/. Rebase rewrote the repair to 76e514644505f232e4e47f085db801913d8449ab and produced the current bba718be result. Evidence identifiers above name outputs beneath the Nix store; Description records the exact current runtime. TASK-492 is independent and outside this repair.
 <!-- SECTION:NOTES:END -->
