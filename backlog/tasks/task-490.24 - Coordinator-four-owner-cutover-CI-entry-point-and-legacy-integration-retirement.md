@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-18 18:00'
+updated_date: '2026-10-18 18:01'
 labels:
   - testing
   - integration
@@ -116,6 +116,8 @@ Source-retirement pass selected by the owner. Resume existing TASK-490.1-integra
 3. Update TASK-490, this task, contract and retirement map: final checks.x86_64-linux attrNames must equal the four approved names exactly. Retirement is authorized now without completed replacement coverage; missing accepted obligations remain gaps.
 4. Validate moved imports, retained browser tooling, documentation/schema/Nix package commands, database-regression path and unchanged Access aggregate. Capture actual inventory and any complex deduplication left for this task.
 5. Commit and push bounded changes to draft MR !335. Leave final task requirements open; do not merge or deploy.
+
+Delegated browser-asset relocation: move the minimal host web-ui-test and design generator dependency closure from checks/web-ui into packages/devScripts/web-ui; adjust only developer runner and design output references. Preserve imported workflow modules and referenced standalone eval-drawer capture tooling. Remove the static dependency on retired VM default.nix. Run host runner selftest through nix develop plus generator selftests and syntax checks; stage owned files only. Coordinator owns legacy deletion, XML fixture relocation, CI/docs/shared harness and task state.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
