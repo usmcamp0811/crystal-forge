@@ -119,6 +119,9 @@ Remaining automatic coverage gaps (deliberate and temporary): authorization, reg
 
 This early milestone does not complete TASK-490.24. Status stays In Progress. The final cutover criteria (#7 to #12) are unmet and untouched. No merge, deployment, or Done transition is authorized.
 
+Hosted-pipeline status when recorded: the draft MR !335 pipeline for the documentation commit created exactly the intended jobs. `integration-access` and the other automatic jobs were queued (pending, no runner assigned yet), the seven `legacy-flake-check` entries and `web-ui-check` were manual with `allow_failure: true`, and no screenshot reporter existed. The GitLab-hosted `integration-access` result is NOT yet verified; the VM-executed pass recorded above came from running the same job script locally. Early-milestone criteria #1 to #6 are checked on that basis. Final-cutover criteria #7 to #12 remain unchecked and this task stays In Progress.
+
+
 ## Historical (superseded readiness statements)
 
 Before the early transition, the recorded policy was to keep all legacy CI scheduling unchanged until all four owners passed. The owner superseded that for the early milestone. Older records follow.
@@ -126,6 +129,4 @@ Before the early transition, the recorded policy was to keep all legacy CI sched
 2026-10-17 organization correction replaced old registration/layout/commands and the incomplete-unexported rule. At that time only Access existed, the foundation was blocked by two Rust package tests, no VM had executed, and all children were Backlog. D1/as-built is not authority; uncertain cases await owner decision. Cutover dependencies were expanded to include TASK-490.25/.26 and the Assurance packets .27 to .29.
 
 Access execution history: bootstrap passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56` (evidence `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-…`), at `ade5080cd84c7be057b8f0a9d9c490ed8b1fd3d5` (`/nix/store/0aavcw4vk32c83gljg8y4mz7gi5pqrn4-…`), and after rebase on `origin/dev` `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064` at `bba718befbc183863781656df2df272e5f735d5a` (`/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-…`). The ten-case result is at `81d65be745cc9f9777d368900d01fe0f207cb052` (`/nix/store/i84kvs1lc5nqx0lmsqinwbmvy0ix8mvh-…`). TASK-492 records the unrelated Postgres Jobs first-boot role race; no Access assertion failed.
-
-Hosted-pipeline status when recorded: the draft MR !335 pipeline for the documentation commit created exactly the intended jobs. `integration-access` and the other automatic jobs were queued (pending, no runner assigned yet), the seven `legacy-flake-check` entries and `web-ui-check` were manual with `allow_failure: true`, and no screenshot reporter existed. The GitLab-hosted `integration-access` result is NOT yet verified; the VM-executed pass recorded above came from running the same job script locally. Early-milestone criteria #1 to #6 are checked on that basis. Final-cutover criteria #7 to #12 remain unchecked and this task stays In Progress.
 <!-- SECTION:NOTES:END -->
