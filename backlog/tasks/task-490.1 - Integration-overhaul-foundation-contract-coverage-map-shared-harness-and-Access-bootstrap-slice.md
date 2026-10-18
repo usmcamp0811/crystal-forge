@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-18 03:52'
+updated_date: '2026-10-18 13:45'
 labels:
   - testing
   - integration
@@ -92,6 +92,8 @@ Combined Access milestone passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. 
 The same journal shows independent `crystal-forge-postgres-jobs.service` failure before module role setup (`FATAL: role \"crystal_forge\" does not exist`); task TASK-492 records it. This does not fail the Access gate and is outside the .25/.26 authorization. Access bootstrap alone does not complete the Access contract or other owners.
 
 Exact final foundation branch head `ade5080cd84c7be057b8f0a9d9c490ed8b1fd3d5` was also exercised by the focused Access command and passed all five cases; the owner aggregate passed. This was an extra repeat after the documentation-only/comment follow-up; no further VM run is needed. Its evidence is `/nix/store/0aavcw4vk32c83gljg8y4mz7gi5pqrn4-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`.
+
+Rebase update: branch is now based on origin/dev `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064`. The focused Access VM and `integration-access` aggregate both passed on the rebased exact source `bba718befbc183863781656df2df272e5f735d5a`; migration receipt is 292. Evidence `/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. TASK-490.25/.26 repair commits were rewritten by rebase to `52128b3a63175b712f7a83860355fdeec658a230` and `76e514644505f232e4e47f085db801913d8449ab`.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
