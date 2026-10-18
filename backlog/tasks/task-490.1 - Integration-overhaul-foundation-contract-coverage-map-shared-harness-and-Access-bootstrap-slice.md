@@ -41,7 +41,7 @@ Authority: adopt accepted owner requirements; D1 as-built docs are evidence only
 
 Verification candidates (not verified): nix eval .#checks.x86_64-linux.integration-access.scenarios --apply builtins.attrNames; nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L; nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap.run -L for evidence; nix build .#checks.x86_64-linux.integration-access -L for all registered gates. Verify native check discovery and no placeholder owners. Real VM execution, not evaluation/build alone, must be evidenced with actual outcome and command. Preserve correct failing assertions and link product bugs.
 
-READINESS: In Progress, blocked pending package build by two existing Rust package tests; no VM execution. The actual foundation dependency commit is unresolved. Historical base origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd is not that commit. Future child packets need actual dependency commit(s), verified commands, implemented helper signatures, exact paths, fixtures and registration before To Do. No delegation or executed slice is claimed. Risk: medium, shared interface and VM cost. Live preview not applicable: no browser-visible behavior change.
+READINESS: In Progress. The Access VM scenario executed at combined foundation revision fc930335878279ac426510359c039dfd8961dc13 and fails the startup assertion on product configuration defects TASK-490.25/.26 before migration, auth or browser behavior. The TASK-491 package prerequisite is integrated. This WIP is not a passing foundation. Keep all dependent packets Backlog until product blockers are addressed through separate authorized work and a successful foundation slice is verified. No Luna delegation, merge or deploy. Risk: medium. Live preview not applicable: test-only changes.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -58,7 +58,7 @@ READINESS: In Progress, blocked pending package build by two existing Rust packa
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-10-17 organization correction: native owner directories and lib/integration-test replace the previous layout and completion-only export proposal. Backlog grooming only. Foundation is blocked by two existing Rust package tests; no VM execution or Luna delegation occurred. Actual foundation dependency commit remains unresolved; do not substitute the historical base hash. All children remain Backlog and none is ready. Future packets require actual dependency commit(s) and verified commands before To Do. Uncertain D1/as-built cases require owner decision.
+Historical pre-execution note: the first foundation attempt was blocked by two existing Rust package tests, before TASK-491 was repaired. The native Snowfall layout now replaces the previous root tests/ proposal. See the later execution record below for the real VM result and current blockers.
 
 Historical preflight (not a current lock): branch/worktree TASK-490.1-integration-foundation at /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation was recorded from origin/dev 33de73b013b735304dfac9c69745a074a3e76ebd. Prior notes reported preserved pre-existing dev files, no main worktree, /dev/kvm present, and no live-preview requirement for this test-only task. This correction does not verify those historical environment observations.
 
@@ -66,7 +66,7 @@ Task status correction: foundation remains In Progress under the existing lock a
 
 LOCK: claude-opus-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation
 
-Run one VM test at a time until measured capacity supports a higher limit. Foundation remains In Progress, blocked pending package build; dependent children remain Backlog. No foundation readiness or verification is claimed.
+Run one VM test at a time until measured capacity supports a higher limit. Foundation remains In Progress; the server package passes after TASK-491, while the Access VM correctly fails on the linked product configuration defects. Dependent children remain Backlog. No owner or overhaul pass is claimed.
 
 Native Snowfall correction verification: `nix eval --json .#checks.x86_64-linux --apply builtins.attrNames` succeeded with the prior 26 checks plus integration-access. Normal-owner and focused-scenario drvPath evaluation succeeded. `nix build .#checks.x86_64-linux.integration-access --dry-run --no-link` resolves the unchanged production server derivation; it does not execute a VM. flake.nix matches base. JavaScript syntax and Python ast.parse checks passed through nix develop. Documentation validation passed (58 tests, 191 concepts, 216 Mermaid blocks). git diff --check passed.
 
