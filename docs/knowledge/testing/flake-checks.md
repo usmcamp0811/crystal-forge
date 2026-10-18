@@ -86,7 +86,7 @@ gives each legacy check below its retirement disposition. For the web UI check i
 [Crystal Forge testing plan](test-plan.md).
 
 Shared helpers live in `lib/integration-test/`; Snowfall exports
-`lib.crystal-forge.makeIntegrationTestHarness {pkgs}`. Future Delivery,
+`lib.crystal-forge.makeIntegrationTestHarness {pkgs, inputs}`. Future Delivery,
 Assurance, and Upgrade scenarios, fixtures, and assets belong beneath
 `checks/integration-{delivery,assurance,upgrade}/`. Do not create placeholder
 `default.nix` files or custom discovery. Legacy checks and CI selection remain
@@ -94,15 +94,19 @@ unchanged until all required owner scenarios pass.
 
 Run the focused Access gate with
 `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`.
-Append `.run` to the scenario attribute for evidence only. Bootstrap execution
-is unverified: two package-build attempts failed in different existing Rust
-tests before any scenario VM executed. No product defect was reproduced.
+Append `.run` to the scenario attribute for evidence only. The scenario ran at
+`fc930335878279ac426510359c039dfd8961dc13` and failed on server startup before
+migrations/browser/auth. See the
+[foundation execution record](integration-coverage-map.md#foundation-execution-record)
+for the generated configuration, exact output path, expected/actual result,
+and Backlog defect links. TASK-491's package test prerequisite is resolved;
+the NixOS module product defects still block Access.
 
 ## Summary
 
 | Check | Boots a VM | Covers | README |
 | --- | --- | --- | --- |
-| `integration-access` | Yes (controller; execution unverified) | WIP fresh local bootstrap scenario; missing Access obligations remain recorded | [Coverage map](integration-coverage-map.md) |
+| `integration-access` | Yes (controller; executed, failed) | WIP fresh local bootstrap; normal module configuration fails before migrations/browser; missing Access obligations remain recorded | [Coverage map](integration-coverage-map.md) |
 | `integration` | Yes (server and git server) | Server, database, and Grafana dashboard behavior through the `cf_test` pytest markers `database`, `dashboard`, and `server` | [README](../../../checks/integration/README.md) |
 | `oidc-auth` | Yes (Keycloak and server) | OIDC login path against a real Keycloak realm | [README](../../../checks/oidc-auth/README.md) |
 | `web-ui` | Yes (server, agent, builder, git server) | Production embedded-UI server through a real browser | [README](../../../checks/web-ui/README.md) |

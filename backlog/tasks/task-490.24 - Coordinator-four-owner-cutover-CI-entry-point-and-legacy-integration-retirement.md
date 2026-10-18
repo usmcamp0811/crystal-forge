@@ -61,7 +61,7 @@ Candidates, NOT verified: nix build .#checks.x86_64-linux.integration-access -L,
 
 Authority: D1/as-built docs are implementation evidence, not accepted authority. Uncertain obligations remain blocked pending explicit owner decision. Upgrade D2 must be resolved before its replacement can pass.
 
-READINESS: all child packets remain Backlog, none ready. Product blockers TASK-490.25/.26 were exposed by the first Access VM execution. The combined test-source branch contains TASK-491 commit a6c8922650bf7f0ff643d181422c0092cfc43242; the Access startup assertion still fails before migrations. Assurance packets .20/.21 were narrowed and .27/.28/.29 separate triage, waiver, acceptance-register and verification/closure starting states. Child scenario runs cannot reuse live data or outputs from other scenarios. Product defects, accepted authority, complete owner scenario registrations and passing full owner runs are required before cutover. No Luna delegation or executed owner is claimed.
+READINESS: all child packets remain Backlog, none ready. Product blockers TASK-490.25/.26 were reproduced by Access VM at combined commit `fc930335878279ac426510359c039dfd8961dc13`; the startup assertion fails before migrations. Assurance packets .20/.21 were narrowed and .27/.28/.29 separate triage, waiver, acceptance-register and verification/closure. Child scenario runs cannot reuse live data or outputs from other scenarios. Product defects, accepted authority, complete owner registrations and passing full owner runs are required before cutover. No Luna delegation or executed owner is claimed.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria

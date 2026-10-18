@@ -104,9 +104,13 @@ Assurance, and Upgrade scenarios, fixtures, and assets belong beneath
 `checks/integration-{delivery,assurance,upgrade}/`. Do not create placeholder
 `default.nix` files or custom discovery.
 
-Bootstrap execution remains unverified: two package-build attempts failed in
-different existing Rust tests before any scenario VM executed. These failures
-do not establish a reproduced product defect.
+The Access scenario executed at commit
+`fc930335878279ac426510359c039dfd8961dc13` and failed at the retained server
+startup assertion before migrations or HTTP. The generated database socket
+host produced `both host and hostaddr are missing`; the generated auth mode
+was absent and `AUTH_MODE` was unset. The [coverage map](../knowledge/testing/integration-coverage-map.md#foundation-execution-record)
+records the expected/actual configuration, evidence path, and linked defects.
+This result is a product-configuration failure, not a passing Access check.
 
 ## UI evidence
 
