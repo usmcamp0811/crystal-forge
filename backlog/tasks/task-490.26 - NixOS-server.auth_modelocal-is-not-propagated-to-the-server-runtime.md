@@ -4,7 +4,7 @@ title: NixOS server.auth_mode=local is not propagated to the server runtime
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 03:52'
+updated_date: '2026-10-18 13:45'
 labels:
   - bug
   - nixos
@@ -53,4 +53,6 @@ Repair commit 136348e8 integrates the module-derived AUTH_MODE in the production
 Combined runtime proof passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. Setup-status returned local mode with `requires_setup=true` on the empty database; the embedded-UI browser registered the first Admin, signed in, reloaded with the persistent session, and the wrong password was rejected without creating another session. Evidence: `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/` (`result.json`, `browser/bootstrap-sign-in/result.json`, `browser/bootstrap-sign-in/signed-in-after-reload.png`, generated-config-summary.txt). No test-only environment override was used.
 
 Exact final branch-head repeat at `ade5080cd84c7be057b8f0a9d9c490ed8b1fd3d5` passed the local-mode setup-status and browser/session assertions; evidence is `/nix/store/0aavcw4vk32c83gljg8y4mz7gi5pqrn4-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. No further rerun needed.
+
+Rebase to origin/dev `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064` rewrote this repair commit to `76e514644505f232e4e47f085db801913d8449ab`. The focused Access scenario and owner aggregate passed on rebased source `bba718befbc183863781656df2df272e5f735d5a`; runtime setup-status and browser assertions confirm effective local mode, with evidence `/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`.
 <!-- SECTION:NOTES:END -->
