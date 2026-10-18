@@ -151,11 +151,14 @@ def http(node, method, path, body=None, session=None, csrf=False, base="http://l
         jar = f"/tmp/cf-it/jar-{session}.txt"
         args += ["-b", jar, "-c", jar]
         if csrf:
-            token = node.succeed(
-                f"awk '$6 == \"__Host-cf-csrf\" {{ print $7 }}' {jar} 2>/dev/null | tail -n1"
-            ).strip()
-            expect(token, f"session {session!r} has no __Host-cf-csrf cookie for a CSRF request")
-            args += ["-H", f"x-csrf-token: {token}"]
+            # Keep the token in the VM. The test driver logs commands, so an
+            # interpolated header would expose a runtime security token.
+            node.succeed(
+                f"awk '$6 == \"__Host-cf-csrf\" {{ print \"x-csrf-token: \" $7; found=1 }} "
+                f"END {{ if (!found) exit 1 }}' {shlex.quote(jar)} "
+                "> /tmp/cf-it/csrf-header"
+            )
+            args += ["-H", "@/tmp/cf-it/csrf-header"]
     if body is not None:
         _vm_write(node, "/tmp/cf-it/http-request.json", json.dumps(body))
         args += ["-H", "content-type: application/json", "--data-binary", "@/tmp/cf-it/http-request.json"]

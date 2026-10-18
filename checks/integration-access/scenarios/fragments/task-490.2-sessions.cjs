@@ -22,10 +22,18 @@ exports.run = async (ctx) => {
 
   await ctx.step("UI sign-out ends this session", async () => {
     await page.goto(ctx.url("/profile"));
-    const logout = page.waitForResponse((r) =>
-      new URL(r.url()).pathname === "/api/auth/logout" && r.request().method() === "POST");
-    await page.getByRole("button", { name: "Sign out", exact: true }).click();
-    expect((await logout).status()).toBe(204);
+    const signOut = page.getByRole("button", { name: "Sign out", exact: true });
+    await expect(signOut).toBeVisible();
+    // The fresh-install coach can cover the profile action. Dismiss it through
+    // its real UI control, never by removing DOM or changing app preferences.
+    const closeCoach = page.getByRole("button", { name: "Close Crystal Forge Coach", exact: true });
+    if (await closeCoach.isVisible()) await closeCoach.click();
+    const [logout] = await Promise.all([
+      page.waitForResponse((r) =>
+        new URL(r.url()).pathname === "/api/auth/logout" && r.request().method() === "POST"),
+      signOut.click(),
+    ]);
+    expect(logout.status()).toBe(204);
     await expect(page).toHaveURL(/\/login$/);
     const who = await ctx.whoami();
     expect(who.body.is_authenticated).toBe(false);
