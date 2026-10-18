@@ -4,7 +4,7 @@ title: NixOS server.auth_mode=local is not propagated to the server runtime
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 03:30'
+updated_date: '2026-10-18 03:33'
 labels:
   - bug
   - nixos
@@ -26,9 +26,9 @@ ordinal: 539000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Propagate `services.crystal-forge.server.auth_mode` to the effective production server setting using the normal NixOS systemd unit. Set `AUTH_MODE` from the module option for both local and OIDC selections; preserve OIDC-specific environment variables only in OIDC mode and preserve existing EnvironmentFile precedence. Do not add a test-only override or change auth policy.
+Propagate `services.crystal-forge.server.auth_mode` through the normal NixOS production server unit. Set `AUTH_MODE` from the module option for both local and OIDC; keep OIDC-specific variables conditional and preserve existing EnvironmentFile precedence. No test-only override or authentication-policy change.
 
-This repair is separately committed from TASK-490.1 test/doc work. The user explicitly authorized it on 2026-10-17. The local/oidc module evaluation yielded the corresponding unit values; commit `136348e8` integrates the unit setting. TASK-490.1's current Access bootstrap case proves local setup-status, first administrator registration/sign-in, reload persistence, and rejected login through the production UI once the combined VM run passes. Keep the test assertion; coordinator owns combined VM and owner verification.
+Separately committed as `136348e8f1772372dc96630112902265853e3656`. Targeted NixOS evaluation verified local/OIDC AUTH_MODE and OIDC-only variable presence. The combined Access scenario passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`: empty-DB setup-status reports local mode, the production embedded UI registers/signs in the first administrator, reload preserves the active session, and wrong password is rejected without another session. Evidence: `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. No test-only environment override was used. The separate TASK-492 Postgres Jobs startup-order defect is not included in this authorization.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
