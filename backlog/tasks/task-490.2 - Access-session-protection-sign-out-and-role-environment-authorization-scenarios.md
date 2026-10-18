@@ -93,6 +93,8 @@ Tested source `8a857bc872cf331a19036b97a93f2b7741e9728b` on a clean tree. Comman
 
 Receipts in `result.json`: authorization.operator.userId f6abcf83-8467-47ca-9f6a-ca0f85eff663, authorization.viewer.userId 2f1bf363-f52b-47e5-9a5d-c72aa8ad829c (equal to authorization.viewer.browserUserId), authorization.target.userId a4166a9b-62f1-42b7-b4d4-335a4a89be5d, ten `authorization.denied.<actor>.<operation>` entries (each status 403, error forbidden, stateUnchanged true), `authorization.adminControls` (200, 200, 201, 204, 200, 200) and `authorization.protectedStateBaseline` (4 users, 4 role assignments, 0 environment memberships; audit counts match the Admin control sequence, which shows the comparison sees real changes).
 
+Hosted: the GitLab `integration-access` job passed all 16 cases in MR pipeline 2960613754 at `08a79037f872ec7743293a9d973a21f9aa4acebb` (58 derivations built; 74 s; 1.0 MB artifact).
+
 Viewer browser result passed at /admin; the screenshot shows the Viewer, a navigation without a Server entry, and the Access Denied section. No real runtime token appears in the build log or evidence. No product defect was found and no production, UI, API, module, migration or schema file changed.
 
 Reviewer artifacts: scenario result https://gitlab.com/-/project/70402481/uploads/678acd9a2c79d87d72d81c70cad2abd4/result.json ; Viewer browser result https://gitlab.com/-/project/70402481/uploads/dc58018286300818fd347b58b862aea5/viewer-admin-denied-result.json ; screenshot https://gitlab.com/-/project/70402481/uploads/e840b7c9cd5b2bfa1222deea8e788826/viewer-admin-access-denied.png . Review: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335
