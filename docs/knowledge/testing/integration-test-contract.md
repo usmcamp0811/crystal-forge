@@ -59,7 +59,10 @@ not fixed. New supported behavior can require more assertions.
 TASK-490.24 source-retirement decision (2026-10-18) supersedes the earlier
 retain-until-four-pass policy and the optional-manual coexistence policy.
 The nine legacy suites are retired with owner approval before replacement
-coverage is complete. All 17 non-integration definitions move to packages.
+coverage is complete. The initial seventeen-definition package relocation is
+superseded: all fifteen public `verify-*` wrappers are removed. Unique assertions
+run in ordinary component tests, direct CI commands and existing isolated-DB
+workflows. Documentation and screenshot tools remain ordinary packages.
 The current inventory is only `integration-access` (one versus 27), with its
 unchanged 16 executed cases. Delivery, Assurance, and Upgrade are absent.
 This is not final four-owner completion. No placeholder owner is permitted.
@@ -415,8 +418,12 @@ assign primary execution ownership, and consolidate or justify duplicate
 execution. Developer tools remain package or app outputs. Final completion
 requires complete accepted coverage, no task-specific VM proliferation hidden
 beneath four aggregate names, and measured execution and resource costs.
-`verify-server-regressions` and `state-machine-tests` still overlap; resolution
-remains complex outstanding TASK-490.24 work. Relocation does not resolve it.
+The existing state-machine workflow owns consolidated server/database selections.
+Six repeated ignored selections, 94 normal-library selections and two CVE-job
+`composite_policy` executions are removed. This source audit does not establish
+a full current-head run. The [component catalog](flake-checks.md#current-inventory-and-commands)
+records exact homes and measured derivation counts; task notes retain execution
+status. No replacement verification registry or aggregation framework is added.
 The [retirement map](integration-coverage-map.md#legacy-retirement-map) records
 source dispositions separately from coverage and CI selection.
 

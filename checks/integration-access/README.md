@@ -81,6 +81,11 @@ Access is not complete. The selected session/CSRF/sign-out proof and the
 selected Operator/Viewer admin-denial cases are covered under the owner's
 explicit selections (16 cases; see the
 [authorization record](../../docs/knowledge/testing/integration-coverage-map.md#access-authorization-cases-task-4902)).
+The newly composed `task-490.3-admin-forms.{py,cjs}` fragments await coordinator
+execution. Their presence is not passing evidence. The recorded sixteen cases
+remain valid; no new form coverage is claimed before that run. The expanded
+coverage map preserves 79 rows: three covered subsets, 67 planned and nine
+decision-blocked rows.
 TASK-490.2 remains `In Progress`: the cross-environment denial rule and the
 closed-registration policy are unimplemented, and each waits for its own
 decision. An Operator browser view, other Admin routes and visual comparison
@@ -94,6 +99,9 @@ mark obligations covered. The current inventory is one total check, down from
 27; the final target is exactly four total `checks.x86_64-linux` attributes.
 Delivery, Assurance, and Upgrade owners are absent. Retained Assurance XML
 fixtures do not register an owner. No placeholder checks are permitted.
+Lower-level assertions run through ordinary component builds, direct
+`component-tests` CI commands and existing isolated database workflows. All
+fifteen public `verify-*` packages are removed; see the [component catalog](../../docs/knowledge/testing/flake-checks.md#current-inventory-and-commands).
 
 The coordinator composes `scenarios/fragments/task-490.2-sessions.py` after
 the five bootstrap cases using `pkgs.writeText` and `builtins.readFile` in

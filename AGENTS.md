@@ -413,8 +413,14 @@ obligations in the coverage map. Implemented integration owners run
 automatically in GitLab (`integration-access` today). TASK-490.24 explicitly
 authorizes legacy source retirement before replacement coverage is complete.
 The nine legacy suites and their manual jobs are retired; missing accepted
-obligations remain gaps. Lower-level verification and developer tools live in
-package outputs. The current inventory is one total check (formerly 27), not
+obligations remain gaps. Unique lower-level assertions run in ordinary component
+builds, explicit `component-tests` CI commands, and the existing isolated
+`devScripts.state-machine-test` workflow. All fifteen public `verify-*` wrappers
+are removed; do not recreate them or add a registry or aggregation framework.
+Core-only evaluator and CA checks must not repeat in the embedded build.
+Developer tools remain package/app outputs. Use the source/command mapping in
+`docs/knowledge/testing/flake-checks.md` and `docs/agents/verification.md`.
+The current inventory is one total check (formerly 27), not
 completed four-owner coverage. Final `checks.x86_64-linux` MUST contain exactly
 `integration-access`, `integration-assurance`, `integration-delivery`, and
 `integration-upgrade`, with no additional checks or placeholders. Verify the

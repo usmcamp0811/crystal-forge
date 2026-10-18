@@ -188,7 +188,7 @@ error code. The repository still packages v2.34.3. Confirm the deployed binary
 and source before attributing v2.35.4 behavior to a deployment. The automatic
 plan supplies a derived threshold in either case; it does not turn an upstream
 threshold into hard containment. See
-[runtime packaging](../../../packages/verify-builder-evaluator-packaging/README.md)
+[runtime packaging probes](../../../modules/nixos/crystal-forge/tests/packaging.sh)
 for exact evaluator/Nix selection. This resource policy does not change the
 flake pin or the guarded netrc patch.
 
@@ -297,7 +297,7 @@ input fetches make cold-input latency a supported suspicion. The local user,
 checkout, and cache state were not identical to the deployed server runtime.
 Those observations do not establish the exact cause of that deployed failure.
 
-The [deterministic cold/warm check](../../../packages/verify-nixos-discovery-reliability/README.md)
+The [deterministic cold/warm runtime test](../../../modules/nixos/crystal-forge/tests/discovery.sh)
 provides controlled proof of the deadline failure mechanism. A sandbox-local
 Basic-auth archive endpoint delays its locked input response by 65 seconds.
 Pure discovery of an exact NAR-qualified root times out under 60 seconds and

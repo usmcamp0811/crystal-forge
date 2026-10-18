@@ -15,7 +15,7 @@ generated:
 
 # Crystal Forge integration coverage and retirement map
 
-This map is maintained under the [integration test maintenance contract](integration-test-contract.md). It is the compact catalog that contract Section 3 requires. It records **status**, not intent: a row is `covered` only when its scenario executes and passes at a recorded revision.
+This map is maintained under the [integration test maintenance contract](integration-test-contract.md). Its product inventory starts from supported application boundaries and accepted requirements, not the retired tests. A source route, component, test function, or planned scenario is a discovery fact, not coverage. Only the sixteen recorded Access cases have executed integration proof. The inventory below adds no covered behavior.
 
 Current application baseline after rebase: `origin/dev` at `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064`. Overhaul branch: `TASK-490.1-integration-foundation`. Parent task: TASK-490. The earlier `b1095c8f`/`ade5080c` passing runs used the prior `33de73b0` base; the current rebased base was verified separately below.
 
@@ -23,21 +23,32 @@ Status values:
 
 | Status | Meaning |
 | --- | --- |
-| `covered` | Scenario executed and passed at the recorded revision. |
-| `failing: defect` | Scenario executes; a correct assertion fails because of a recorded product defect. Not covered. |
-| `planned` | A child task owns the scenario; it is not implemented. |
-| `unverified` | Scenario exists, but has not executed to establish its outcome. |
-| `blocked: design gap` | Accepted domain behavior has no approved UI state. The dependent UI case waits. |
-| `blocked: decision` | An owner decision is needed before an expectation can be authored. |
-| `gap: unimplemented` | Accepted requirement that the application does not implement. Recorded, never shown as coverage. |
+| `Integration-covered` | The named subset executed and passed at the recorded revision; no implied coverage of adjacent operations. |
+| `lower-level-covered` | A named Rust, component, schema, or isolated-DB assertion has recorded passing evidence. Never integration proof. No new row receives this status in this research pass. |
+| `planned` | Required or discovered obligation with an intended owner/scenario; not integration-proven. A packet marked **unassigned** still needs explicit coordinator assignment. Existing but unexecuted assertions also remain planned here. |
+| `failing` | An executed correct assertion fails at a recorded revision; link its defect and evidence. Historical failures remain in the execution record. |
+| `blocked: <decision ID>` | Only the stated case cannot receive an independent expectation until that exact decision or design state is supplied. Other cases in the family proceed. |
+| `out of scope` | A named unsupported, developer-only, or retired behavior has no product integration obligation under the accepted contract. |
 
-## Authority decision D1 (pending owner confirmation)
+## Authority and case-local decisions
 
 Most current behavior is described by `docs/knowledge/` concepts with `implementation_status: implemented`. Those documents describe as-built behavior; the contract says as-built behavior does not approve itself. Approved design authority exists for Systems/SC1 (`systems-view-design-v0.1.md` Section 22 owner decisions) and the owner-approved CVE/POA&M continuity specification. The compliance, CVEs, cross-view, and XCCDF design documents are review drafts.
 
-No provisional authority is granted by D1. Implemented knowledge concepts are as-built evidence, not accepted requirements. Review-draft design documents also do not approve domain behavior. A scenario must cite an accepted requirement or explicit owner decision for its expectations. Uncertain cases remain `blocked: decision` pending the owner's decision; a `planned` row below identifies intended work, not approval of its expected result. Where an approved source exists, that source controls the expectation even if current code differs.
+There is no global D1 approval gate on the product inventory. Implemented knowledge concepts locate mechanisms; their status does not approve every implementation choice. Review drafts also do not approve themselves. The adopted maintenance contract assigns the supported boundaries to owners. The active child-task selections, approved design states, Systems owner decisions, and normative CVE continuity specification supply independent expectations within their scopes. Detailed new expectations must name the applicable accepted clause before execution. A conflict blocks its specific case, not its entire family. A `planned` discovery row is an explicit unproved obligation, not ratification of as-built behavior. An accepted expectation wins when code differs.
 
-The owner's explicit TASK-490.2 selections authorize the five session cases and the Operator/Viewer admin-denial cases below. The admin-denial cases (create, PATCH, and configuration requests rejected with 403 and no protected change; no usable Viewer admin mutation in the UI) are implemented and executed. They rest on the approved design's role catalogue ("Manage users & OIDC", "Edit server config" belong to Admin) and its "Admin-only" Server Management page; they do not define Operator as generally read-only. Two decisions remain unresolved, and each blocks only its own case: the exact cross-environment endpoint and scope rule, and the closed-registration policy for an existing user with `allow_registration = false`. Neither case is implemented.
+The owner's explicit TASK-490.2 selections authorize the five session cases and the Operator/Viewer admin-denial cases below. The admin-denial cases (create, PATCH, and configuration requests rejected with 403 and no protected change; no usable Viewer admin mutation in the UI) are implemented and executed. They rest on the approved design's role catalogue ("Manage users & OIDC", "Edit server config" belong to Admin) and its "Admin-only" Server Management page; they do not define Operator as generally read-only. For the remaining TASK-490.2 cases, two decisions remain unresolved: the exact cross-environment endpoint and scope rule, and the closed-registration policy for an existing user with `allow_registration = false`. Each blocks only its own case. Neither case is implemented.
+
+| Decision | Exact missing fact and affected cases | Work that can proceed |
+| --- | --- | --- |
+| D1-scope | Select the cross-environment endpoint/method and accepted visibility/mutation rule, including hidden-versus-absent response. The environment handler currently filters membership and returns non-enumerating 404 for a hidden detail; that is evidence, not the owner's selection for TASK-490.2. | Selected admin denials, forms, and already-approved system/CVE non-disclosure checks. |
+| D1-registration | With an existing user and `allow_registration = false`, specify registration denial/status and whether first-admin bootstrap is the sole exception. | Fresh bootstrap and ordinary login/session cases. |
+| D2-upgrade | Name oldest supported in-place server release, pinned source, and agent/builder mixed-version support window. Tags and crate version strings do not establish support. | Current-version restart recovery and migration/component verification. |
+| D3-form-state | Identify approved `AdminView.jsx` / `EnvironmentsView.jsx` state for real failed-save draft retention and any missing fresh-empty, pending, or disabled-save state. | TASK-490.3 accepted success, cancel, duplicate validation, reload and disabled-account login cases. |
+| D4-auth-transport | For `POST /webhook`, specify whether unsigned public ingress is accepted or requires authenticated origin, and the rejection/no-enqueue outcome. Separately, specify missing/mismatched-CSRF outcomes for cookie-authenticated `POST /api/v1/admin/users`, `PATCH/DELETE /api/v1/admin/users/:id`, `PUT /api/v1/admin/{classification-config,automatic-retry-policy}`, and `POST /api/v1/environments`, `PATCH/DELETE /api/v1/environments/:id`; these handlers do not call the shared CSRF guard. Do not infer universal 401/403/CSRF policy from routing. | Valid-CSRF role denials already proved; authenticated form success; selected session CSRF cases; builder signatures/job authorization. |
+| D5-interchange | Approve the exact draft CF-XCCDF portable identity/digest/trust reconciliation rules and policy-interchange conflict outcomes before making those draft-only details release gates. | Accepted STIG preview/import atomicity, authored rule identities, schema validation, download content/scope. |
+| D6-presentation | Supply approved login/register/setup visual references and any missing specific domain UI state. G1 names the auth pages. A missing visual reference does not block semantic API/browser workflows. | Designed interactions and independently specified domain outcomes. |
+
+No unresolved decision is asserted for CVE stable identity, Current versus historical evidence, prospective environment decisions, verification freshness, recurrence, or acceptance renewal/conversion. The normative continuity specification already decides these, including Section 32.
 
 ## Harness interface
 
@@ -100,11 +111,11 @@ Host resources (`sledge`, inspected 2026-10-17): 32 cores, 123 GiB RAM with abou
 
 ## Obligation map
 
-Scenario paths are relative to `checks/`. "Evidence" names the observation required in addition to `result.json`. Expected results still require the accepted authority review described in D1. Each separately built scenario runs in a fresh VM/database; a prerequisite scenario's runtime output is never reused. A task dependency supplies code/immutable fixture preparation only, not another check's live data. Within one scenario, later cases may use identities and records created by earlier real workflows; carry generated identities in the existing receipt mechanism. Every scenario must create its own real starting evidence through setup operations and must not seed the result under test. The coordinator owns composition and registration; packet boundaries alone do not define VM boundaries.
+Scenario paths are relative to `checks/`. Authoritative observations supplement `result.json`; the case-local authority rules above apply. Each separately built scenario runs in a fresh VM/database; a prerequisite scenario's runtime output is never reused. A task dependency supplies code/immutable fixture preparation only, not another check's live data. Within one scenario, later cases may use identities and records created by earlier real workflows; carry generated identities in the existing receipt mechanism. Every scenario must create its own real starting evidence through setup operations and must not seed the result under test. The coordinator owns composition and registration; packet boundaries alone do not define VM boundaries.
 
 ### Planned packet-to-scenario composition and VM boundaries
 
-The current table records intended case composition; only bootstrap and the selected session fragment are implemented and verified. The coordinator owns each scenario's `.nix` composition and explicit owner registration. Packet-owned case fragments have disjoint paths under the owner's `scenarios/fragments/` directory; they do not each define or register a NixOS test derivation.
+The current table records intended case composition; only bootstrap, selected sessions and selected admin-denial authorization fragments are implemented and verified. The coordinator owns each scenario's `.nix` composition and explicit owner registration. Packet-owned case fragments have disjoint paths under the owner's `scenarios/fragments/` directory; they do not each define or register a NixOS test derivation.
 
 | Scenario | Packet cases to compose | Why this VM boundary is retained |
 | --- | --- | --- |
@@ -117,7 +128,7 @@ The current table records intended case composition; only bootstrap and the sele
 
 The planned scenario derivations are the local Access lifecycle, notification delivery, OIDC lifecycle, Delivery lifecycle, Assurance evidence/remediation lifecycle, and Upgrade version transition. Their boundaries reflect incompatible auth/service configuration, separate owner contracts, or deliberate in-place version/database transition—not one VM per implementation packet. No independent scenario may use another scenario's rows, sessions, receipts, generations, or output.
 
-Focused verification attributes are concrete even before their scenario files are implemented. Only the local-bootstrap attribute currently exists; the remaining targets below are planned and MUST be registered by the coordinator before execution. Each focused gate has the normal owner aggregate shown after the semicolon.
+The focused commands below name intended targets. Only the local-bootstrap attribute currently exists; the remaining targets are planned and MUST be registered by the coordinator before execution. Each focused gate has the normal owner aggregate shown after the semicolon.
 
 | Scenario | Focused command; owner aggregate |
 | --- | --- |
@@ -128,88 +139,328 @@ Focused verification attributes are concrete even before their scenario files ar
 | `integration-assurance/scenarios/evidence-remediation-lifecycle` | `nix build .#checks.x86_64-linux.integration-assurance.scenarios.evidence-remediation-lifecycle -L`; `nix build .#checks.x86_64-linux.integration-assurance -L` |
 | `integration-upgrade/scenarios/version-transition` | `nix build .#checks.x86_64-linux.integration-upgrade.scenarios.version-transition -L`; `nix build .#checks.x86_64-linux.integration-upgrade -L` |
 
-### Access (`integration-access`)
+### Inventory reading key and inspected sources
 
-| Contract ID | Scenario | Independent expected result | Evidence | Status |
-| --- | --- | --- | --- | --- |
-| `access.lifecycle.local-bootstrap` | `integration-access/scenarios/lifecycle-local-bootstrap` | Module `auth_mode = "local"` yields local mode; migrations applied = forward migration files in source; application-role client backends use Unix sockets; first registrant persists with only `admin`; one session after sign-in survives reload; wrong password returns 401 with no session row or cookie. | DB rows, browser result, reload screenshot, generated-config summary, filtered `pg_stat_activity` | `covered` at `81d65be745cc9f9777d368900d01fe0f207cb052`; original five cases unchanged, 292 migrations, 22 socket clients |
-| `access.lifecycle.sessions` | `integration-access/scenarios/lifecycle-local-bootstrap`; `scenarios/fragments/task-490.2-sessions.{py,cjs}` | Owner-selected proof: missing/mismatched CSRF on DELETE returns 403 with session lifecycle rows unchanged; valid CSRF returns 204 and invalidates only the selected row; its next GET returns 401 while the retained session returns 200. Independent browser profile Sign out returns logout 204, persists exact-row invalidation, survives reload at `/login`, rejects protected GET with 401, and redirects protected navigation to `/login`. | Exact `user_sessions` before/after, retained/revoked/browser receipts, browser result and screenshot | `covered` at `81d65be745cc9f9777d368900d01fe0f207cb052`; five appended cases passed under the owner's session selection |
-| `access.lifecycle.authorization` | `integration-access/scenarios/lifecycle-local-bootstrap`; `scenarios/fragments/task-490.2-authorization.{py,cjs}` | Operator and Viewer admin-only user create, user PATCH (another account and the actor's own), and server-configuration PUT (automatic retry policy, classification banner) are rejected with HTTP 403 `forbidden` and no protected change; a Viewer finds no administration entry and the production Access Denied state at `/admin`. Cross-environment denials need the exact endpoint and scope rule (pending D1). | Admin controls prove each payload valid; actor identity and role verified first; DB before/after of users, role assignments, environment memberships, user-admin audit counts, retry policy and banner; Viewer browser result and screenshot | **Covered for the selected admin-only operations** (see [Access authorization cases](#access-authorization-cases-task-4902)). Operator browser view, other admin routes and DELETE-as-actor are not covered. `blocked: decision`: only the exact environment-scope cases |
-| `access.lifecycle.registration-closed` | `integration-access/scenarios/lifecycle-local-bootstrap` (remaining TASK-490.2 cases) | Pending D1: with `allow_registration = false` and an existing user, a second registration does not create a user. | DB `users` count | `blocked: decision`; case unimplemented (code reading suggests a defect; not executed) |
-| `access.lifecycle.oidc` | `integration-access/scenarios/lifecycle-oidc` (TASK-490.6 fragment) | Authorization-code sign-in through a local OIDC provider creates a CF session; group mapping yields the mapped role and environment scope. | Provider and CF DB rows, browser trace | `planned` (needs `services` role) |
-| `access.configuration.admin` | `integration-access/scenarios/lifecycle-local-bootstrap` (TASK-490.3 fragment) | Admin users, classification, and retry-policy forms persist and survive reload; cancel discards; a failed save keeps the draft. | DB rows, reload read | `planned` |
-| `access.configuration.resources` | `integration-access/scenarios/lifecycle-local-bootstrap` (TASK-490.3 fragment) | Environment create/edit/delete persists through reload; validation errors keep the draft. | DB rows, reload read | `planned` |
-| `access.shell` | `integration-access/scenarios/lifecycle-local-bootstrap` (TASK-490.4 fragment) | Navigation reaches every accepted route; unknown routes show NotFound; keyboard focus and sidebar collapse follow the approved Shell reference; unauthenticated routes redirect to `/login`. | Screenshots, visual comparison where an approved state exists | `planned` |
-| `access.configuration.preferences` | `integration-access/scenarios/lifecycle-local-bootstrap` (TASK-490.4 fragment) | Profile and notification preferences persist per user and survive reload; one user's change does not affect another. | DB `user_preferences`, reload read | `planned` |
-| `access.configuration.notifications` | `integration-access/scenarios/configuration-notifications` (TASK-490.5 fragment) | A real domain event produces an in-app notification; read/dismiss persist; email delivery reaches the local receiver only when enabled. | Receiver log, DB rows | `planned` (needs event source and `services` role) |
+Research baseline: `2c34186ed597aa064506384907a06e943b0d227d`, inspected
+2026-10-18 in the existing TASK-490.1 worktree under active TASK-490.24.
+Concurrent lower-level consolidation is in progress. Its final file/command
+references and execution results are not assumed here. The source index names
+inspected boundaries and relevant mechanism locations; it is not a claim that
+every implementation line or every guard has been independently executed.
 
-### Delivery (`integration-delivery`)
+The twelve contract-family tables below replace the old suite-shaped obligation list. Route families are discovery scope, not route-count coverage. Brace lists enumerate suffixes; `:id` denotes the registered parameter. Methods apply only as listed. All `/api/v1` prefixes are omitted in the route inventory unless another prefix is shown. Every registered product family in `bin/server.rs` is assigned below, including aliases, conditional authentication, streams, and UI fallback. No generated registry or additional database is required.
 
-| Contract ID | Scenario | Independent expected result | Evidence | Status |
-| --- | --- | --- | --- | --- |
-| `delivery.evaluation.ingestion` | TASK-490.8 | Push and webhook events for authored commits create exactly one commit row each; duplicate events are deduplicated; force-push rewrite is detected. | Git log on services, DB rows | `planned` |
-| `delivery.evaluation.identity` | TASK-490.8 | Evaluation of two distinguishable commits records the exact commit and the `drvPath` that `nix eval` independently computes; Evaluations view navigation reaches the exact record. | Independent `nix eval` output, browser trace | `planned` |
-| `delivery.evaluation.config-inspector` | TASK-490.9 | Config Inspector lists the authored option values and definition provenance for the exact revision; a secret-path value is redacted. | Independent option facts, browser state | `planned` |
-| `delivery.build.strategies` | TASK-490.10 | `ServerDerivation` and `SourceReEvaluateVerified` each build a fresh output on a real builder; an unauthorized builder session is rejected with no job state change. | Builder store, DB job rows | `planned` |
-| `delivery.build.scheduling` | TASK-490.11 | Cancel, retry, reassignment, and stale-session fencing produce the specified job states; a fenced builder cannot complete a job. | DB job history, builder logs | `planned` |
-| `delivery.publication.niks3` | TASK-490.12 | A fresh output is published to Niks3 with token and mTLS write auth; a cold agent store retrieves it with signature verification. | `assert_store_absent`, cache object, agent store | `planned` |
-| `delivery.publication.variants` | TASK-490.13 | Attic, S3, and HTTP/Nix each prove their distinct publication or read authentication boundary once; the common workflow is not repeated. | Per-adapter observer logs | `planned` |
-| `delivery.activation.modes` | TASK-490.14 | `manual`, `auto_latest`, and `pinned` deploy exactly as specified. For BootOnly, before reboot the selected next-boot entry changes, while the running identity and `/run/booted-system` each remain equal to their own separately recorded pre-action values. After reboot, the target boots and runs the selected deployment. A second agent is not affected. | Independently observed boot selection, `/run/current-system`, `/run/booted-system`, DB | `planned` |
-| `delivery.activation.recovery` | TASK-490.15 | Rollback restores the previous generation on the target; drift is reported; server, builder, and agent restarts recover in-flight state at the current version. | Target state, DB, journals | `planned` |
+Source shorthand is relative to the repository root:
 
-### Assurance (`integration-assurance`)
+| Reference | Inspected source and purpose |
+| --- | --- |
+| S-router | `packages/default/crates/cf-server/src/bin/server.rs`, route construction and conditional auth/UI fallback; startup/migration/recovery ordering. |
+| S-api | `packages/default/crates/cf-server/src/handlers/api/`; the named `.rs` file in a row is its handler. `rbac.rs`, `auth_session.rs`, and `auth/extractors.rs` identify session/role/CSRF mechanisms. There is no global router auth/CSRF layer that proves every handler's boundary. |
+| S-worker | `packages/default/crates/cf-server/src/{services,queries}/`; named modules locate server-owned policy, transaction, identity and evidence mechanisms. These are observation locations, not independent expected values. |
+| S-wire | `packages/default/crates/cf-protocol/src/{agent,builder,cache,source_artifact}.rs`; supported payload/strategy/capability variants. |
+| S-agent | `packages/default/crates/cf-agent/src/{bin/agent,system_state,network,deployment/agent}.rs`; state gathering, heartbeat, cache copy and activation. Agent authentication is in server `handlers/agent_request.rs` and `handlers/agent/*.rs`. |
+| S-builder | `packages/default/crates/cf-builder/src/{builder/api_client,builder/mod,builder/cve_scanner,build,cache}.rs`; server `handlers/builder_request.rs`, `handlers/api/builders.rs`, `queries/{builders,build_jobs,build_reservations,cve_scan_leases}.rs`. |
+| S-config | `modules/nixos/crystal-forge/default.nix`, `packages/default/crates/cf-config/src/config/*.rs`, `cf-config/src/{cache_credentials,ca_bundle}.rs`; generated configuration, service roles, runtime secrets and TLS trust. |
+| S-ui | `packages/web-ui/src/routes.rs`, `views/*.rs`, and `components/`; actual route/query state, forms, drawers and navigation. Specific consumers are named below. |
+| A-contract | [Adopted maintenance contract](integration-test-contract.md), Sections 1–4: supported boundary ownership, real-component proof and independently authored facts. Active TASK-490 child acceptance criteria refine the named cases; a new discovery does not silently extend a child task. |
+| A-systems | `docs/design/CrystalForge/docs/crystal-forge-systems-design/{systems-view-design-v0.1,system-cves-chunk-1}.md`: owner decisions, target intent, non-disclosure, read-only reads and UI authority. Only accepted clauses control; AS-BUILT/PROPOSED sections do not. |
+| A-continuity | `docs/design/CrystalForge/cve-poam-evidence-continuity-design-spec.md`, normative product contract, Sections 2, 6–24, 27–29 and 32. It supersedes SC1's older Current-action retention gate where stated. |
+| A-design | `docs/design/CrystalForge/components/`: approved component states referenced below. Mock names and counts may supply authored fixture values, never backend policy or evidence authority. Missing states use D3/D6. |
+| E-domain | `docs/knowledge/builders/verified-source-evaluator-contract.md`, `deployment/manual-deployment-queue-contract.md`, `evaluation/evaluation-snapshot-retention-and-rollback.md`, and `ui/system-cves-sc1-contract.md`: inspected mechanism/precedence pointers. Their `implemented` metadata does not approve new requirements. |
 
-| Contract ID | Scenario | Independent expected result | Evidence | Status |
-| --- | --- | --- | --- | --- |
-| `assurance.scanning.cve` | `integration-assurance/scenarios/evidence-remediation-lifecycle` (TASK-490.16 fragment) | A real scanner run against the intended closure with deterministic vulnerability data yields the authored CVE set; Current, built, historical, missing, failed, and clean evidence stay distinct in API and UI. | Scanner input data, DB rows, browser state | `planned` |
-| `assurance.scanning.hardening` | `integration-assurance/scenarios/evidence-remediation-lifecycle` (TASK-490.17 fragment) | Hardening scan of a real target reports the authored service findings; justification persists. | Target unit facts, DB | `planned` |
-| `assurance.policy.enforcement` | `integration-assurance/scenarios/evidence-remediation-lifecycle` (TASK-490.18 fragment) | Policy versions and assignments resolve to the expected effective policies; `Enforce` blocks and `ReportOnly` records without blocking an admission decision. | DB decisions, deployment outcome | `planned` |
-| `assurance.policy.stig-import` | `integration-assurance/scenarios/evidence-remediation-lifecycle` (TASK-490.19 fragment) | Importing the DISA Anduril NixOS STIG XCCDF yields the authored rule count and identities; preview does not persist; malformed input is rejected atomically. | DB rows before/after, browser state | `planned` |
-| `assurance.remediation.triage` | `integration-assurance/scenarios/evidence-remediation-lifecycle` (TASK-490.20 fragment) | Single and batch triage persist actor, scope, status, and justification for exactly the authored findings; unauthorized triage changes nothing. | DB before/after, browser identity/navigation | `planned`; generate real finding evidence earlier in this scenario |
-| `assurance.remediation.finding-waiver` | `integration-assurance/scenarios/evidence-remediation-lifecycle` (TASK-490.27 fragment) | Approved finding-waiver decisions remain distinct from remediation and Current evidence. | DB decision/evidence rows, browser | `planned`; authority may block exact states |
-| `assurance.remediation.acceptance-register` | `integration-assurance/scenarios/evidence-remediation-lifecycle` (TASK-490.28 fragment) | The register selects exact source-owned acceptance records; renew/convert affects only the selected record and preserves source identity. | DB before/after, download/list and navigation | `planned`; create source record earlier in this scenario |
-| `assurance.remediation.poam-plan` | `integration-assurance/scenarios/evidence-remediation-lifecycle` (TASK-490.21 fragment) | A POA&M created from real failed evidence retains exact finding identity; notes, milestones, and accepted plan transitions persist. | DB rows, browser reload | `planned`; generate failed evidence earlier in this scenario |
-| `assurance.remediation.poam-verification` | `integration-assurance/scenarios/evidence-remediation-lifecycle` (TASK-490.29 fragment) | Verification is denied before Current evidence changes; after real remediation, authorized verification/closure/reopen preserves evidence identity and rejects stale writes. | DB state/history, actual target/scanner state, browser | `planned`; construct plan and both evidence states earlier in this scenario |
-| `assurance.interchange` | `integration-assurance/scenarios/evidence-remediation-lifecycle` (TASK-490.22 fragment) | Downloaded register (CSV, XLSX, OSCAL JSON/XML), POA&M, acceptance, CVE CSV, XCCDF, and policy-interchange exports parse independently and contain the expected records and scope. | Downloaded files, schema validation | `planned`; export records produced earlier in this scenario |
+Scenario abbreviations use the six existing composition targets: **L** = Access `lifecycle-local-bootstrap`; **N** = Access `configuration-notifications`; **O** = Access `lifecycle-oidc`; **D** = Delivery `delivery-lifecycle`; **A** = Assurance `evidence-remediation-lifecycle`; **U** = Upgrade `version-transition`. Only L is registered. A table's owner is the primary execution owner. `unassigned` means no existing packet explicitly covers that discovered obligation; coordinator TASK-490.24 must assign it before implementation. No packet or table row creates a new VM.
 
-### Upgrade (`integration-upgrade`)
+For every mutation case, use a valid authorized positive control and a separately authenticated disallowed actor, then independently compare protected records and external effects. Test exact ownership, hidden/absent identity, invalid/stale input, retry, cancellation and reload where those conditions apply. Do not conflate session last-seen updates with protected domain changes. A read's HTTP success or a UI toast is not authoritative persistence evidence. Expected commits, option values, findings, policy inputs, target paths and export records come from authored fixtures or independent tools, never CF's response under test.
 
-| Contract ID | Scenario | Independent expected result | Evidence | Status |
-| --- | --- | --- | --- | --- |
-| `upgrade.continuity` | TASK-490.23 | A supported older package creates users, sessions, history, and in-flight work through its own schema; the current package migrates and keeps identities and credentials, recovers in-flight state, and completes one new operation. | Old/new DB rows, browser sign-in | `blocked: decision` |
+### Registered HTTP surface families
 
-Decision D2 (Upgrade): no document defines the supported upgrade source or the agent/builder compatibility window. Tags exist (`v0.3.1` 2026-05-30, `v0.3.0`, `v0.2.x`), and all crates report `0.3.0`; a tag alone is not a support promise. The owner must name (a) the oldest supported server release for in-place upgrade, (b) whether agents and builders from that release must keep working against the current server, and (c) the pinned source for that release. A same-version restart, a synthetic old schema, or current-version seeded data is not a substitute. The migration-prefix rehearsals in `server-regressions` remain non-integration schema tests.
+This table is a complete family-level discovery index for S-router, not a per-endpoint pass matrix. Contract rows below define the proof. Method groups on one row remain distinct operations for implementation; proving one does not cover the others.
 
-### UI inventory and owning workflow
-
-Routes from `packages/web-ui/src/routes.rs`. "Approved reference" names the design component; `none` means a visual case is `blocked: design gap` and only semantic assertions apply.
-
-| Route / surface | Owning workflow | Approved reference |
+| Family / methods and registered patterns | Handler / gate observed in source | Contract family |
 | --- | --- | --- |
-| `/login`, `/register`, `/setup` | `access.lifecycle` | none |
-| Shell, sidebar, user menu, `/:..route` NotFound, `/style-guide` | `access.shell` | `Shell.jsx` |
-| `/profile` | `access.configuration.preferences` | `ProfileView.jsx` |
-| `/admin` (users, roles, oidc, jobs, audit, server tabs) | `access.configuration.admin` | `AdminView.jsx` |
-| `/environments` and its modals | `access.configuration.resources` | `EnvironmentsView.jsx` |
-| `/` dashboard | Mechanics `access.shell`; counts by domain owner | `DashboardView.jsx`, `DashboardWidgetsOps.jsx` |
-| `/flakes`, history-rewrite dialog | `delivery.evaluation.ingestion` | `FlakesView.jsx`, `FlakeExplorer.jsx` |
-| `/evaluations`, `/evaluations/:commit_id`, EvalDrawer | `delivery.evaluation.identity` | `EvalsView.jsx`, `EvalDrawer.jsx` |
-| System Config tab, flake Config Inspector | `delivery.evaluation.config-inspector` | `ConfigExplorer.jsx` |
-| `/builders`, `/builds` | `delivery.build.*` | `BuildersView.jsx`, `BuildsView.jsx` |
-| `/caches` and credential modals | `delivery.publication.*` (form persistence: Access) | `CachesView.jsx`, `Niks3Cache.jsx` |
-| `/systems`, `/systems/:id` Overview, Deploy, History, Logs | `delivery.activation.*` | `Systems.jsx`, `SystemDetail.jsx`, `DeployGate.jsx` |
-| System CVEs tab, `/cves`, `/scanning` | `assurance.scanning.cve` | `CvesView.jsx`, `ScanningView.jsx`, SC1 design |
-| System Hardening tab | `assurance.scanning.hardening` | `HardeningTab.jsx` |
-| `/deployment-policies`, policy editor | `assurance.policy.*` | `PoliciesView.jsx`, `PolicyEditor.jsx` |
-| `/compliance` bundles, evidence drawer, Import STIG | `assurance.policy.*` | `ComplianceView.jsx`, `BundleEditor.jsx`, `ImportStigModal.jsx` |
-| `/poams` and triage dialogs | `assurance.remediation.*` | `PoamsView.jsx`, `PoamViews.jsx`, `CveBatchTriage.jsx` |
-| Export modal and register downloads | `assurance.interchange` | `AtoPackage.jsx` |
+| `GET /status`; `POST /system_state`, `/agent/{heartbeat,state,deployment-started,deployment-failed}` | `status.rs`, `handlers/agent/*.rs`; agent body signature and registered hostname/key. `/system_state` aliases state ingestion. | `delivery.activation`, installation portion of `access.lifecycle` |
+| `POST /webhook` | `handlers/webhook.rs`; payload parsing and asynchronous commit insertion, no signature guard in handler (D4). | `delivery.evaluation` |
+| `GET /api/auth/{whoami,setup-status}`; `POST /api/auth/logout`; local `POST /api/auth/local/{login,register}`; OIDC `GET /api/auth/oidc/{login,callback}`; dev `POST /api/auth/dev/login` | `auth_*.rs`; public context/bootstrap, cookie sessions, logout CSRF; mode-conditional routes. Dev mode is release-rejected. | `access.lifecycle` |
+| `GET /admin/{users,oidc-mappings,audit-events,server-info,classification-config,automatic-retry-policy,setup-progress,config-health}`; `POST /admin/{users,oidc-mappings,setup-wizard/dismiss,setup-wizard/agent-acknowledge}`; `PATCH,DELETE /admin/users/:id`; `DELETE /admin/oidc-mappings/:id`; `PUT /admin/{classification-config,automatic-retry-policy}` | `admin.rs`, `setup_wizard.rs`, `config_health.rs`; Admin gates except intentionally public classification read. Do not infer uniform CSRF. | `access.configuration` |
+| `GET,PATCH /user/{preferences,notification-preferences}`; `POST /user/preferences/initialize`; `GET /user/notifications`; `POST /user/notifications/{read-all,dismiss-all,:notification_id/read}`; `DELETE /user/notifications/:notification_id`; `GET /user/sessions`; `POST /user/sessions/revoke-all`; `DELETE /user/sessions/:session_id` | `user_*.rs`; per-session user identity, user-owned records; session mutations explicitly validate CSRF. | `access.lifecycle`, `access.configuration` |
+| `GET /navigation/badges`; `POST /navigation/acknowledge`; `GET /dashboard/{summary,activity}` and `/nixos/options` | `navigation.rs`, `dashboard.rs`, `nixos_options.rs`; inspect each read's scope, metadata availability and actor. | `access.shell`; domain values by Delivery/Assurance |
+| `GET,POST /environments`; `GET,PATCH,DELETE /environments/:id`; `GET /environments/policies-map`, `/policies`; `GET,PATCH /environments/:id/policies`; `GET /environments/:id/{caches,compliance-assignments}` | `environments.rs`, `caches.rs`, `compliance.rs`; authenticated membership-filtered reads, Admin resource mutations; policy/cache bindings retain their domain owners. | `access.configuration`, `assurance.policy`, `delivery.publication` |
+| `GET,POST /systems`; `GET,PATCH /systems/:id`; `PUT /systems/:id/{evaluation-lifecycle,public-key}`; `POST /systems/:id/{sync,deactivate,deploy,rollback,rollback-generation,verify-generation-closure}` | `systems.rs`, `systems/evaluation_lifecycle.rs`; role and environment checks per action, explicit CSRF on selected mutation handlers. | `access.configuration`, `delivery.activation` |
+| `GET /systems/:id/{commits,generations,deployment-status,history,agent-events,evaluated-options,evaluation-summary,evaluation-module-sources}`; `POST /systems/:id/{evaluations,config-inspections,config-observations}/:revision`; `GET /systems/:id/config-observation-requests/:request_id`, `/systems/:id/config-observations/by-id/:observation_id` | `systems.rs`; scoped retained identity and read paths; whole-commit evaluation queue action Admin-only plus CSRF; Config actions have separate authorization. | `delivery.evaluation`, `delivery.activation` |
+| `GET,POST /flakes`; `POST /flakes/sync`; `PATCH,DELETE /flakes/:id`; `POST /flakes/:id/{sync,refresh,accept-rewrite}`; `GET /flakes/timelines`, `/flakes/:id/revisions/:revision/outputs`, `/flakes/:id/revisions/:revision/modules/:module/declarations`, `/flakes/:id/commits/:hash/diff`; `GET,PUT,PATCH,DELETE /flakes/:id/credentials`; `POST /flakes/:id/credentials/test` | `flakes.rs`; RequireAuth/Operator/Admin and scoped reads, encrypted credential management. | `access.configuration`, `delivery.evaluation` |
+| `GET /commits/{eval-queue,eval-history}`; `POST /commits/eval-queue/reorder`; `GET /commits/:commit_id/eval/{stream,logs,policy-matrix,dependency-graph}`, `/commits/:commit_id/eval/attempts/:attempt_id/policy-matrix`; `POST /commits/:commit_id/{re-evaluate,cancel-evaluation,force-cancel-evaluation}` | `commits.rs`, `commits/visibility.rs`, `commits/log_registry.rs`; scoped read visibility, role gates on queue actions; re-evaluate has Admin and CSRF checks. | `delivery.evaluation` |
+| `GET,POST /builders`; `POST /builders/resolve-id`; `GET,PATCH,DELETE /builders/:id`; `DELETE /builders/:id/permanent`; `PUT /builders/:id/public-key`; `POST /builders/:id/regenerate-keypair`; `PATCH /builders/:id/environments`; `GET /builders/:id/metrics` | `builders.rs`; Admin management versus separately signed resolve/session bootstrap. | `access.configuration`, `delivery.build` |
+| `POST /builders/:id/{session,heartbeat}`; `GET,POST /builders/:id/next-job`; `POST /builders/:id/jobs/:job_id/{start,progress,publish-derivation-closure,complete,fail,logs,finalize-cancelled}`; `GET /builders/:id/jobs/:job_id/{derivation-archive,derivation-manifest,source-archive,status}`; also `POST .../derivation-archive` for delta | `builders.rs`, `handlers/builder_request.rs`; signed method/path/timestamp/body, builder identity/session/job ownership and manifest authorization. | `delivery.build`, publication binding in `delivery.publication` |
+| `GET /build-jobs`, `/build-jobs/{recent,:id}`, `/build-jobs/:job_id/logs/stream`; `POST /build-jobs/:id/{cancel,requeue,force-cancel,prioritize,move-up,move-down}` and `/build-queue/reorder` | `builders.rs`; Admin cancel/force-cancel, Operator/Admin ordering, scoped retry and authenticated log access. | `delivery.build` |
+| `GET,POST /caches`; `GET,PUT,DELETE /caches/:id`; `GET,PUT /caches/:id/environments`; `GET /caches/:id/metrics`; `POST /caches/test-credentials`, `/caches/:id/test-credentials`, `/caches/niks3/discover`, `/caches/:id/niks3/discover`, alias `/api/caches/niks3/discover` | `caches.rs` and `caches/*.rs`; Admin mutation/probe gates, sanitized reads and in-memory secret merge. Probe's supplied CSRF state must match; no assumption of generic mutation semantics. | `access.configuration`, `delivery.publication` |
+| `GET /cache-push-jobs`, `/cache-push-jobs/:id`; `POST /cache-push-jobs/:id/{retry,cancel}`, `/cache-push-jobs/{bulk-retry,bulk-cancel}` | `caches.rs`; queue controls and authorization, per-destination publication state. | `delivery.publication` |
+| `GET /cves`, `/cves/{grouped,inventory/groups,inventory/members,inventory/pairs,stats,packages,export,summary,vulnerabilities,top-systems,scan-freshness}`; `GET /cves/:cve_id{,/systems,/fleet,/justifications}`; `POST /cves/{rescan-fleet,rescan/:derivation_id,batch-detail,batch-triage}`, `/cves/:cve_id/triage`; `POST,DELETE /cves/:cve_id/justification` | `cves.rs`, `dashboard.rs`, `poam.rs`; fleet authorization is separate from system-target authorization; triage actor scope and CSRF. | `assurance.scanning`, `assurance.remediation`, `assurance.interchange` |
+| `GET /systems/:id/{cves,cve-inventory,cve-inventory-page,cve-inventory-sources,cve-scan-eligibility}`; `PUT /systems/:id/cves/:cve_id/justification`; `GET,POST /systems/:id/cves/:cve_id/triage`; `POST /systems/:id/cve-scan`, `/flakes/:id/configs/:config_name/cve-scan`; `GET /cve-scans/:id` | `systems.rs`, `flakes.rs`, `poam.rs`; authorize system/target before source disclosure, scoped mutation and Current evidence authority. | `assurance.scanning`, `assurance.remediation` |
+| `GET /scanning/{stats,queue,scans,scans/:scan_id,systems,systems/:system_id/scans,activity,schedule,deployed}`; `PATCH /scanning/scans`; `PUT /scanning/schedule`; `POST /builders/:id/cve-scans/{claim,heartbeat,complete,fail}` | `scanning.rs` Admin console; `builders.rs` signed lease-bound scanner operations with payload limits. | `assurance.scanning` |
+| `GET /hardening/{summary,top-services,systems}`; `GET /systems/:id/{hardening,hardening-inventory,hardening/justifications,hardening-scan-eligibility}`; `PUT /systems/:id/hardening/:service_name/justification`; `POST /systems/:id/hardening-scan`; `GET /hardening-scans/:id` | `hardening.rs`; Admin fleet summaries, scoped system/target reads and justified writes. | `assurance.scanning` |
+| `GET,POST /deployment-policies`; `GET,PUT,DELETE /deployment-policies/:id`; `GET /deployment-policies/:id/deletion-eligibility`; `POST /deployment-policies/bulk-delete`; `POST /deployments/commit/:commit_id/approve`; `GET /deployments/commit/:commit_id/{approvals,rollout}/:policy_id` | `deployment_policies.rs`, `deployments.rs`; Auth read, Operator edit/create, Admin deletion, configured approval role. | `assurance.policy`; rollout execution `delivery.activation` |
+| `GET,POST /compliance/grouping-schemes`; `PUT,DELETE /compliance/grouping-schemes/:id`; `GET,POST /compliance/bundles`; `GET,PUT,DELETE /compliance/bundles/:id`; `GET /compliance/bundles/:id/{deletion-eligibility,systems}`, `/compliance/bundles/:id/systems/:system_id/evidence`, `/systems/:system_id/compliance` | `compliance.rs`; authenticated catalog, Admin management, scoped system evidence reads. | `assurance.policy` |
+| `POST /policy-versions/:version_id/{trust,publish}`, `/policies/:policy_id/drafts`, `/compliance/bundle-versions/:version_id/{trust,publish}`, `/compliance/bundles/:bundle_id/drafts`; `GET /policy-versions/:version_id/usage`, `/compliance/bundle-versions/:version_id/{policies,requirements}` | `compliance.rs`; distinct trust/publication/version operations; Admin mutation gates and explicit CSRF on these workflows. | `assurance.policy` |
+| `POST /compliance/assignments`, `/compliance/assignments/preview`; `GET,PUT,DELETE /compliance/assignments/:id`; `GET /compliance/assignments/:id/effective-policies`, `/systems/:id/{compliance-assignments,effective-policies}` | `compliance.rs`; Admin assignment mutation and scoped effective-policy/evidence reads. | `assurance.policy` |
+| `GET /compliance/frameworks`, `/compliance/frameworks/:id/{versions,mapped-policy-versions}`, `/compliance/framework-versions/:fv_id/requirements`, `/compliance/requirement-versions/:rv_id/children`, `/compliance/bundle-versions/:bv_id/requirement-coverage`; `POST /compliance/framework-versions/:fv_id/recover`; `GET,POST /policy-versions/:pv_id/requirement-mappings`; `PUT,DELETE /policy-versions/:pv_id/requirement-mappings/:m_id` | `framework_requirements.rs`; authenticated catalog, Operator/Admin mapping edits with CSRF, Admin recovery. | `assurance.policy` |
+| `POST /compliance/xccdf/{preview,import}`; `GET /compliance/bundle-versions/:version_id/xccdf`, `/compliance/assignments/:assignment_id/xccdf`, `/policy-versions/:version_id/export`; `POST /policies/interchange/{export,preview,import}` | `compliance.rs`; role gates, body limits, receiver validation and transactional reconciliation. | `assurance.interchange` |
+| `GET,POST /poams`; `POST /poams/cves`; `GET /poams/{dashboard,dashboard/watchlist,rollups/systems,rollups/bundles,relationships/findings,relationships/assignments,relationships/cves,compatible,assignees}`; `GET,PATCH /poams/:id`; `GET /poams/:id/compatible`; `POST /poams/:id/{transition,notes,milestones,findings,cve-findings,assignments,verify,close,reopen}`; `PATCH,DELETE /poams/:id/milestones/:milestone_id`; `DELETE /poams/:id/{findings/:finding_id,cve-findings/:finding_id,assignments/:assignment_version_id}` | `poam.rs`, `services/poam.rs`; RequireAuth, actor role/environment scope, CSRF, domain locking/version/precondition checks. | `assurance.remediation` |
+| `GET,POST /finding-waivers`; `GET /finding-waivers/:id`; `POST /finding-waivers/:id/status`; `GET /acceptances`; `POST /acceptances/:source/:id/{renew,convert}`; `GET /{poams,acceptances,register}/export` | `poam.rs`, `acceptance_register.rs`, `register_export.rs`; source-owned scope/version and transactional actions; independently scoped exports. | `assurance.remediation`, `assurance.interchange` |
+| Embedded UI `GET` fallback/static assets; core-server unmatched 404; browser route catch-all | `handlers/ui.rs`, S-router feature guard, S-ui routes/shell. | `access.shell`; core packaging lower-level mechanism |
 
-Shared mechanics (drawer focus/close, confirm dialogs) are tested once in the first owning workflow; each distinct caller's identity, permission, and return destination is asserted in its own workflow.
+### 1. `access.lifecycle` — installation, identity and authentication
 
-### Supported variants at the baseline
+Authority: A-contract, selected TASK-490.2 cases, A-design Admin role catalogue. Sources: S-router, S-api `auth_*.rs`, `user_sessions.rs`, `rbac.rs`, `auth/extractors.rs`, S-config. Owner/scenario: **Access/L**, except OIDC **Access/O**.
 
-Verified in code at the baseline: cache types `S3`, `Attic`, `Niks3`, `Http`, `Nix` (`cf-protocol/src/cache.rs`); builder strategies `ServerDerivation`, `SourceReEvaluateVerified`, with source delivery `ServerBundledArchive` only (`cf-protocol/src/builder.rs`); system deployment policies `manual`, `auto_latest`, `pinned` and activation `ImmediatePersist`, `BootOnly`; enforcement `Enforce`, `ReportOnly`; auth modes `local`, `oidc` (module); roles `Admin`, `Operator`, `Viewer`; notification channels `InApp`, `Email`, `Both`; imports XCCDF 1.2 XML/ZIP and policy interchange; server exports register `csv`/`xlsx`/`oscal-json`/`oscal-xml`, POA&M and acceptances `csv`/`xlsx`, CVEs `csv`, XCCDF, policy interchange; client-only CF-JSON, CSV, SARIF, OSCAL, print HTML. No CKL importer exists. A feature named only in a design draft is not in scope.
+| Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Packet / status |
+| --- | --- | --- | --- | --- |
+| `local-bootstrap` | Fresh local-auth module/database → start, register first Admin, sign in/reload, wrong-password attempt | Config selects local; source migration set applied; app-role clients use Unix socket; only Admin role; durable session; wrong password 401 without session/cookie. | Generated config, migrations table, filtered `pg_stat_activity`, users/roles/sessions, browser reload. | .1; **Integration-covered**, five cases, latest recorded sixteen-case rerun `0105e512`. |
+| `sessions` | User with retained, selected and separate browser sessions → missing/mismatched CSRF DELETE, valid revoke, sign out | Invalid CSRF 403 changes no lifecycle rows; valid revoke 204 invalidates selected session only; revoked GET 401, retained GET 200; browser logout 204, reload/protected navigation at `/login`. | Exact `user_sessions`, HTTP responses, browser result/receipts. | .2; **Integration-covered**, five cases, `0105e512`; not revoke-all/expiry coverage. |
+| `authorization` | Real Operator/Viewer plus Admin positive controls → user POST/PATCH, retry/banner PUT, Viewer `/admin` | Selected ten denied requests return 403 `forbidden`, no protected mutation; Viewer has no usable Admin UI mutation. | Users/roles/memberships/admin-audit/settings before/after; independent Viewer browser. | .2; **Integration-covered**, six cases, `0105e512`; details in execution record. |
+| `session-remainder` | Authenticated user plus foreign/expired/revoked sessions → list, revoke-all, attempt foreign revoke and protected reads | Own-session isolation and accepted expiry/disabled-account rules; no foreign invalidation; logout cannot leave a usable revoked credential. Exact cases beyond selected proof need authored expectations. | Sessions/users and independent cookie jars, reload and protected API. | .2 extension **unassigned**; `planned`. |
+| `environment-scope` | Nonmember Operator/Viewer and Admin control → selected cross-environment request | Membership/hidden-resource expectation must be selected independently. | Scoped HTTP plus protected rows and side-effect observers. | .2; `blocked: D1-scope`. |
+| `registration-closed` | Existing local user, registration disabled → second registration | Approved exception/status and no unauthorized new user/session. | Users/roles/sessions before/after. | .2; `blocked: D1-registration`. |
+| `oidc` | Local provider with authored groups and roles → authorization-code redirect/callback, denied callback, logout | Genuine provider exchange issues only intended CF identity, roles and memberships; failed state/nonce/code validation creates no authenticated session; logout invalidates CF session. | Provider exchange plus CF users/mappings/sessions, browser redirect chain. | .6, O; `planned`, needs .7 services. |
+
+### 2. `access.configuration` — forms, settings and notification lifecycle
+
+Authority: A-contract, TASK-490.3/.4/.5, A-design `AdminView.jsx`, `EnvironmentsView.jsx`, `ProfileView.jsx`, resource form references. Sources: S-api `admin.rs`, `environments.rs`, `setup_wizard.rs`, `config_health.rs`, `user_*.rs`; S-ui views and form components. Owner/scenario: **Access/L** unless N is stated.
+
+| Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Packet / status |
+| --- | --- | --- | --- | --- |
+| `admin-users` | Admin with fresh list → create user, edit role/environment, cancel, disable, login as disabled user | Exact authored identity/assignments persist through reload; cancel changes nothing; disabled user cannot sign in (401). Denials beyond selected .2 proof are separate. | `users`, `user_role_assignments`, memberships and audit rows; second login. | .3; `planned`. |
+| `admin-settings` | Admin → save classification and automatic retry policy; inspect runtime/config health and audit | Authored settings survive read/reload; retry values configure future decisions rather than retroactively rewriting evidence; audit identifies real actor. Runtime diagnostics expose no secrets. | Settings/audit DB and generated runtime config; browser/server responses. | .3 save cases; diagnostics/audit **unassigned**; `planned`. |
+| `resources` | Admin, initially empty environments → create/edit/duplicate/cancel/delete; try deleting used environment | Authored metadata survives reload; duplicate creates no extra row; cancel preserves rows; used-resource deletion preserves references. | Environments, dependent systems/bindings and reload. | .3 environment cases; used-resource guard **unassigned**; `planned`. |
+| `resource-form-bindings` | Authorized user → flake, system, builder and cache add/edit/deactivate/delete/key/environment forms | Each distinct resource binds its own identity/permission; save persists only authored fields, cancel changes none, credentials remain redacted. Provider/build/deploy effects are proved by Delivery. | Respective resource, credential and assignment tables; independent reload. | **Unassigned**: .3 explicitly excludes these forms; intended L extensions; `planned`. |
+| `preferences` | Two users → initialize/patch profile, theme/layout and notification choices; reload each | Preferences are per-user, durable and do not overwrite the other user's values. | `user_preferences`, notification-preference rows and independent browser contexts. | .4; `planned`. |
+| `notifications` | Real event plus two users/channels → receive, read one/all, dismiss one/all; email enabled/disabled/retry | Only eligible recipients receive event; lifecycle mutations affect own records; disabled email sends none; enabled email reaches receiver without changing domain event identity. | Notification/outbox/preference DB, receiver requests and browser reload. | .5, N; retry/recipient variants need explicit packet detail; `planned`, .7/event prerequisite. |
+| `setup-and-oidc-admin` | Admin after bootstrap → setup progress/dismiss/agent acknowledgement and mapping CRUD | Progress reflects actual configured prerequisites; dismissal/acknowledgement persist per accepted scope; mappings alter only intended future identity assignments. | Setup/mapping/audit records, subsequent OIDC login in O. | .6 mapping execution; setup UI/API **unassigned**; `planned`. |
+| `failed-save-states` | Admin with unsaved draft → bounded real server outage or pending request | Exact designed draft/empty/pending/disabled-save expectation required; DB remains unchanged for a failed write. | DB before/after, browser draft, restored service and reload. | .3; `blocked: D3-form-state` only for unspecified presentation/retention states. |
+
+### 3. `access.shell` — routing, shared mechanics and module boundary
+
+Authority: A-contract and A-design `Shell.jsx`, `DashboardView.jsx`, shared design states. Sources: S-ui `routes.rs`, `components/layout/{app_shell,sidebar,topbar}.rs`, `components/dialog_focus.rs`, onboarding, S-config/S-router. Owner/scenario: **Access/L**; domain values retain their domain owner.
+
+| Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Packet / status |
+| --- | --- | --- | --- | --- |
+| `navigation` | Signed-in and anonymous contexts → sidebar/user menu, direct URLs, reload, back/forward, unknown route | Approved destinations/query identities survive navigation; unauthenticated protected navigation reaches login; unknown route shows designed NotFound; role-limited entries remain limited. | Browser URL/history, session identity and rendered destination; no route-count inference. | .4; `planned`. |
+| `shared-interaction` | Designed drawer/modal/menu and nested caller → keyboard open/close/Escape, focus traversal/restore, narrow viewport | Approved containment, close/cancel and focus return hold; caller retains target and return destination. Test shared mechanics once; distinct caller bindings in D/A. | Browser focus, URL and no-write DB observation for cancel. | .4; domain nesting cases **unassigned**; `planned`. |
+| `dashboard-badges` | Two scoped users, real events → dashboard/badges, acknowledge, reload | Authored event scope determines visible badges/activity; acknowledgement changes only intended user's attention state. Domain totals must agree with independently known workflows. | Attention/navigation DB; D/A event records; browser. | .4 shell; domain values .8/.11/.16/.21; extra bindings **unassigned**; `planned`. |
+| `module-runtime` | Production module server/client/API-builder selections, file secrets, explicit config → start services | Role-specific config/units and runtime credential permissions match selected options; API-only builder has no DB dependency; secrets not emitted in UI/logs. Local mode/socket subset only is already proved. | Generated TOML/env summaries, units/permissions, DB clients and startup; ordinary module/component assertions forthcoming from consolidation. | .7 role wiring; full config/secret matrix **unassigned**; `planned`. |
+| `auth-visual` | Login/register/setup states → approved visual comparison | Exact reference required; semantic auth cases proceed independently. | Same-profile reference/actual/diff images when authority supplied. | .4/auth visuals **unassigned**; `blocked: D6-presentation`. |
+
+### 4. `delivery.evaluation` — Git, retained evaluation and Config
+
+Authority: A-contract, TASK-490.8/.9, accepted Systems identity/read boundaries; E-domain locates detailed evaluator/snapshot mechanisms. Sources: S-api `flakes.rs`, `commits.rs` and submodules, `systems.rs`; S-worker evaluation/config modules. Owner/scenario: **Delivery/D**.
+
+| Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Packet / status |
+| --- | --- | --- | --- | --- |
+| `ingestion` | Authored repository with distinguishable commits → poll, manual sync, valid/duplicate webhook, force push and accept rewrite | Each authored event maps to correct repo/branch/full SHA; deduplication does not multiply work; rewrite acknowledgement never reinterprets retained old identity. | Independent Git log/tree, commit/branch/evaluation rows and rewrite UI. | .8; `planned`. |
+| `git-credentials` | Admin/Operator and credentialed fixture → create/test/rotate/delete SSH or HTTP credentials, sync private root/locked input | Right credentials reach intended origin; failures create no successful evaluation; readback/logs redact secrets; test does not become saved credentials. | Fixture requests, protected credential rows, job identity, sanitized browser/logs. | **Unassigned** within .8 boundary; Access owns form persistence; `planned`. |
+| `identity` | Two exact source revisions/configurations → evaluate each and open Evaluation drawer | Full source/lock/target identity selects independently computed `.drvPath`; failed discovery/evaluation is not an empty successful inventory. | Independent evaluator invocation against authored source, evaluation/derivation/artifact DB, browser. | .8, first proof .7; `planned`. |
+| `queue-attempts-logs` | Real pending/running/failed evaluations → reorder, cancel/force-cancel, retry; open retained attempt/log stream | Queue action changes only selected work; stale producers cannot append to successor attempt; old attempt and its matrix/logs stay old after retry; visibility applies to history and streams. | Queue/attempt/log DB, worker process lifecycle, independent browser/SSE capture. | .8 extension **unassigned**; `planned`. |
+| `config-inspector` | Real evaluated revision with authored option definitions and secret paths → inspect values, provenance, diff, module declarations/options search | Correct values/definition winners and revision; secrets redacted before storage/exposure; unavailable content is not fabricated by GET; bounded pages preserve one snapshot identity. | Authored Nix option facts, stored snapshot/provenance, browser and no new queue work on reads. | .9; `planned`. |
+| `config-observation` | Authorized system with exact revision → explicit evaluation prerequisite, inspection/observation POST, request polling and by-ID read | Explicit action queues/reuses only intended work; Admin whole-commit boundary retained; stale/foreign request/snapshot cannot disclose or overwrite current selection. | Config request/observation/snapshot tables, worker records, browser query state. | **Unassigned** .9-adjacent; `planned`. |
+| `historical-navigation` | Retained attempt and captured evidence; later retry/head movement → exact evaluation/compliance links and return | Full attempt UUID and captured system/bundle/policy version remain selected; navigation never substitutes latest/deployed evidence. | Attempt/snapshot rows, browser direct URL/reload/back/return and captured policy matrix. | **Unassigned** .8/.9 and Assurance caller coordination; `planned`. |
+| `webhook-and-csrf-policy` | Untrusted ingress/cookie mutation outside an explicitly approved protection case → request | Public webhook authentication and remaining cookie-CSRF expectations need exact authority; do not accept unsigned implementation as policy. | HTTP, before/after commit/queue rows and external fetch observer. | .8 / Access authorization; `blocked: D4-auth-transport` for these exact security-policy cases. |
+
+### 5. `delivery.build` — builder trust, scheduling and execution
+
+Authority: A-contract, TASK-490.7/.10/.11. Sources: S-builder, S-wire builder/source artifact, S-api `builders.rs`; E-domain evaluator-contract pointer. Owner/scenario: **Delivery/D**.
+
+| Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Packet / status |
+| --- | --- | --- | --- | --- |
+| `registration-session` | Two separately provisioned builders → resolve ID, signed session, heartbeat, deactivate/rotate key/reconnect | Correct identity/capability and session only; invalid key, wrong path/method/body, stale timestamp or foreign ID gains no job authority. Key rotation invalidates obsolete authority as specified. | Builder/session/key DB, signed request outcomes, independent process identity. | .7/.10; rotation/admin lifecycle extension **unassigned**; `planned`. |
+| `claim-scheduling` | Real queued jobs with architecture/environment/capacity constraints → competing next-job GET/POST | Exactly one authorized claimant; unsupported evaluator/strategy/capacity cannot claim; server owns queue and API builder has no SQL connection. | Build jobs/reservations/sessions, independent builder stores and DB client list. | .10/.11; `planned`. |
+| `server-derivation` | Fresh absent output → authorized manifest/full or delta derivation archive, start/build/progress/complete | Only job-authorized store paths transfer; foreign/extra path rejected; real builder realizes server-selected derivation and reports exact output. | Manifest, absent-before proof, real Nix store/build logs, job attempt and completion records. | .10; `planned`. |
+| `verified-source` | Canonical server-bundled tracked source → capability check, source archive verification, re-evaluate/compare/build | Exact source/lock and evaluator yield authored derivation before realization; corrupt archive or derivation mismatch fails before build; sanitized repository URL is not fetch authority. | Independent source digest/NAR/lock/eval and builder process/store observations. | .10; `planned`. |
+| `ordering-retry` | Real waiting/failed jobs → prioritize, move up/down, reorder, manual requeue and automatic retry | Authored ordering and eligible retry policy control new attempts; retry preserves original attempt/evidence and does not duplicate live claims. | Queue order, job history/attempts, Admin retry settings, builder claims. | .11; ordering variants **unassigned**; `planned`. |
+| `cancel-fencing` | Running job then graceful/force cancel, dead worker, reassignment/session replacement → late progress/log/complete/fail/finalize | Canceled work stops; only current authorized lease/session may mutate job; fenced worker cannot complete successor; terminal state is not resurrected. | Actual process cessation, build-job/session/attempt records and rejected late request outcomes. | .11; `planned`. |
+| `history-logs-metrics` | Real successful/failed/canceled attempts → Builds detail, logs/stream, builder metrics | Attempt identity and result/logs agree; viewer gets only authorized read; secrets are redacted; UI does not merge retries. Metrics describe actual worker workload. | Persistent attempt/log records, process observations, browser/SSE and sanitized logs. | .10/.11; read/metrics bindings **unassigned**; `planned`. |
+
+### 6. `delivery.publication` — cache authority and cold retrieval
+
+Authority: A-contract, TASK-490.12/.13; S-config/S-wire/S-api locate distinct supported boundaries. Owner/scenario: **Delivery/D**. Every positive copy/publication uses per-run output, proves destination absence first, and independently checks stored bytes/NAR/signature. A metadata Test result cannot prove upload or retrieval.
+
+| Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Packet / status |
+| --- | --- | --- | --- | --- |
+| `cache-configuration` | Admin with destination/environment bindings → save/rotate/remove secrets and assign destination | Exact destination/type/environment persists; masked readback does not erase retained secret; credential removal is explicit; encrypted storage contains no plaintext secret. | Cache destination/assignment rows and raw encrypted field inspection without logging values; independent access probe. | Access form **unassigned**; Delivery .12/.13 execution; `planned`. |
+| `probe-discovery` | Admin and disallowed actor → unsaved/stored Test and Niks3 discovery including alias, scoped write/read/all | Discovery/Test obey intended target/TLS policy, merge secrets only in memory and persist no destination/assignment/job. Read success never attests write permission. | Fixture origin/DNS/redirect observations, DB before/after, sanitized diagnostic/browser result. | .12/.13 extension **unassigned**; `planned`. |
+| `niks3-write` | Real builder output, separate write-plane endpoint → token then mTLS publication | Only valid write credential authorizes upload to intended cache; wrong token/CA/client identity fails without successful publication; read secret is not a write credential. | Cache service/object/NAR observations, build/publication rows, independent bytes/signatures. | .12; `planned`. |
+| `niks3-read` | Cold capable agent with assigned published cache → public, mTLS and Basic retrieval; wrong credential/redirect/origin/legacy capability | Valid read plane retrieves exact signed output; invalid trust/auth fails closed; no write token/key leaks into heartbeat/read process; signed capability governs runtime settings. | Agent store absence/presence, native cache requests, heartbeat payload inspection with secrets suppressed, publication binding. | .12; Basic/capability/security variants need explicit packet detail; `planned`. |
+| `adapter-variants` | Fresh outputs and supported credentials → Attic native push/read, S3 copy/object access, Http/Nix configured copy/read | Each adapter's distinct publication/read authorization and signature boundary works; do not invent HTTP upload support for read-only service or repeat common lifecycle per adapter. | Adapter-native service/object logs, cold reader store and independently verified closure. | .13; `planned`. |
+| `publication-jobs` | Real failed/queued publication → list/detail, retry/cancel and bulk operations | Only eligible intended jobs change; bounded retry does not fabricate success; cancel prevents later successful publication accounting; partial adapter failures remain visible. | Cache push jobs/history plus actual object existence and worker lifecycle. | **Unassigned** .12/.13 extension; `planned`. |
+| `publication-authority` | Builder reports destination/output or derivation-closure publication → server verifies, issues agent runtime cache settings | Claimed success is insufficient; destination/output binding and verified cache identity authorize delivery; cross-environment/unverified destination cannot supply deploy credentials. | `cache_publication_reads`/publication DB mechanisms, independent cache retrieval, selected target heartbeat. | .12/.14; cross-boundary detail **unassigned**; `planned`. |
+
+### 7. `delivery.activation` — agent, deployment, rollback and recovery
+
+Authority: A-contract, TASK-490.14/.15 and accepted Systems decisions. Sources: S-agent/S-wire, S-api `systems.rs`, `deployments.rs`, S-worker deployment/system state/approval/canary mechanisms. Owner/scenario: **Delivery/D**.
+
+| Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Packet / status |
+| --- | --- | --- | --- | --- |
+| `agent-register-heartbeat` | Admin/module registers target and key, two real agents → startup/state/heartbeat, tampered/unknown-key reports | Agent belongs only to registered system; signed state records actual host/running path/generation; invalid report cannot alter state or obtain desired target/cache secrets. There is no separate public agent-registration route. | Independently gathered target facts, systems/state/heartbeat rows and signed responses; second-target isolation. | .7/.14; key lifecycle and negative ingress detail **unassigned**; `planned`. |
+| `deployment-policy` | Manual/auto_latest/pinned systems with known revisions → choose deploy action, retry same intent, conflict intent | Exact eligible target selected; explicit auto-latest continuation/conversion intent respected; retries do not enqueue duplicate deployment or affect another target. Partial policy conversion versus queue failure must be independently specified before detailed case authorship. | Policy/request/deployment rows, heartbeat desired target, browser Deploy flow and actual target. | .14; request/partial-success extension **unassigned**; `planned`. |
+| `approval-rollout` | Real approval/time-window/canary policy and multiple targets → authorized/unauthorized approval, phase advance/halt | Policy-selected approval authority and rollout gates govern real deployment; unmet/expired approval or halted phase cannot activate later target. Approval history identifies actor and selected commit/policy. | Approval/rollout/admission records and actual target paths over time. | **Unassigned** .14/.18 coordination; `planned`. |
+| `activation-modes` | Built/published target absent from destination → ImmediatePersist then BootOnly, reboot | Immediate mode runs intended system; BootOnly changes next-boot selection while running and booted identities each retain their separately recorded pre-action values; reboot runs/boots selected target; other agent unchanged. | `/run/current-system`, `/run/booted-system`, independent boot-loader selection, boot ID and deployment/state rows. | .14; `planned`. |
+| `failure-progress` | Real copy/activation failure or lost server → deployment-started/failed callbacks, status/history/events | Failure/progress reports match attempted target; failed copy/activation is never reported as successful running state; retry respects actual running state and does not double-activate. | Actual cache/activation process outcome, target path, deployment/event records, browser logs/history. | .14/.15; callback/status bindings **unassigned**; `planned`. |
+| `rollback-retention` | Retained previous generation plus foreign/missing identity → rollback/default or exact generation, closure verification | Only exact authorized retained lineage can roll back; path alone or foreign generation is insufficient; target actually restores intended generation; history/snapshot lineage persists after source rewrite/GC. | Target generation/path, retained generation/deployment/snapshot rows, browser History/Config. | .15; retention/rewrite variants **unassigned**; `planned`. |
+| `drift-recovery` | Local out-of-band activation and in-flight work → agent/server/builder restart, network interruption/rejoin | Report actual drift/local origin without inventing deployment proof; bounded current-version recovery reconciles real state, reclaims stale work and preserves completed history. | Target processes/store/boot IDs, DB histories/leases and journals; no same-version restart claim as Upgrade. | .15; `planned`. |
+
+### 8. `assurance.scanning` — CVE/hardening execution and evidence
+
+Authority: A-contract, TASK-490.16/.17, A-systems and A-continuity Sections 6–7, 22, 27–29. Sources: S-api `cves.rs`, `systems.rs`, `hardening.rs`, `scanning.rs`, `builders.rs`; S-worker scan/lease/inventory modules. Owner/scenario: **Assurance/A**.
+
+| Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Packet / status |
+| --- | --- | --- | --- | --- |
+| `cve-execution` | Real intended closure plus deterministic vulnerability data → system/flake/derivation/fleet scan | Scanner actually consumes exact closure; authored CVE/package set and clean control produce corresponding immutable observations, not fake success. | Independent package closure/data, real scanner process/output, scan/observation DB. | .16; all trigger entry-point bindings need packet detail; `planned`. |
+| `scanner-lease` | Two API builders with real queued CVE scan → claim/heartbeat/complete/fail and stale/oversize submissions | Only active owner lease accepts bounded results; stale/foreign completion cannot replace evidence; failure/retry retains distinction from clean. | Scan lease/attempt/observation rows, actual scanner and rejected request records. | **Unassigned** .16/.10 coordination; `planned`. |
+| `current-historical` | Running A, built/head B, historical C; mapped/unmapped/ambiguous/absent observations → browse and refresh | Current follows actual reported mapped derivation, never head fallback; explicit history remains selected/read-only where specified; missing/failed evidence is not clean; newest failed attempt does not erase valid same-target completed evidence. | Real target identity plus exact scan/derivation/source rows; browser target/query and API. | .16; `planned`; continuity specification governs Current actions, not superseded SC1 gate. |
+| `counts-inventory` | Authored CVE/package/system set and scoped users → summaries/grouped inventory/pages/detail/top systems/freshness | Counts use accepted units and scope; grouping/page totals do not count duplicate observations as distinct findings; failed/missing sources remain distinguishable. | Independent authored set arithmetic, exact scans/observations and browser fleet/system dashboards. | .16; advanced dashboard/inventory bindings **unassigned**; `planned`. |
+| `scan-console` | Admin with real scheduled/failed/completed scans → queue/activity/detail, schedule PUT and archive PATCH | Selected schedule persists and yields eligible work; archive does not alter evidence truth; deployed/scan history distinguishes unscanned from clean. Non-Admin cannot mutate Admin console. | Schedule/archive/scan DB, worker scheduling and browser reload. | **Unassigned** .16 extension; `planned`. |
+| `hardening` | Real target with authored hardened/weak units → eligibility, scan, inventory/current/history, justification | Findings reflect target unit facts; scan attempt and completed evidence remain distinct; exact target is not substituted by older/head evidence; scoped justification persists without rewriting technical scan result. | Target unit configuration and real scanner output; hardening scan/result/justification records, browser. | .17; `planned`. |
+| `read-safety` | Hidden/foreign/stale target and unsaved triage draft → read inventory/candidates, refresh/paginate, delayed response | Authorize before source disclosure; GET enqueues no scan/build/deploy/plan/decision; late target response cannot retarget mounted draft; current evidence changes require explicit concurrency handling. | Protected row/queue counts, response identity, real browser draft/query state. | .16/.20/.29; read-race binding detail **unassigned**; `planned`. |
+
+### 9. `assurance.policy` — executable policies, bundles, assignments and frameworks
+
+Authority: A-contract, TASK-490.18/.19 and approved A-design states. Draft Compliance/cross-view documents are not blanket domain approval. Sources: S-api `deployment_policies.rs`, `compliance.rs`, `framework_requirements.rs`, `environments.rs`; S-worker enforcement/approval/time-window/CVE mechanisms. Owner/scenario: **Assurance/A**; actual rollout belongs to Delivery.
+
+| Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Packet / status |
+| --- | --- | --- | --- | --- |
+| `policy-lifecycle` | Authorized editor/Admin plus Viewer → create/edit/draft/trust/publish/use/delete and bulk delete | Intended lineage/version/semantic content persists; trust and publication remain separate; immutable used version stays historical; deletion eligibility protects references; denied operation changes none. | Policy/version/usage/audit and dependent evidence records, editor reload. | .18; trust/draft/delete/bulk details **unassigned**; `planned`. |
+| `bundle-grouping` | Admin → bundle CRUD/version membership, grouping scheme CRUD, filter/open evidence drawer | Exact authored policies/requirements grouped without changing technical evidence; deletion protects assignments/history; drawer binds exact selected system/bundle/version. | Bundle/version/membership/grouping tables and actual evidence, browser identity. | **Unassigned** .18-adjacent; `planned`. |
+| `assignment-resolution` | Environment/system assignments with include/exclude/override inputs → preview, commit/update/remove, effective-policy read | Preview writes none; stored scope/version and approved precedence produce independently authored effective policy set; environment and host do not silently exchange identity. | Assignment/version/membership DB, independent expected set, enforcement result. | .18; `planned`; draft-only precedence conflicts require case-specific clause review. |
+| `enforce-report-only` | Real passing/failing input and Enforce/ReportOnly assignments → evaluate and request deploy | Enforce failure blocks admission; ReportOnly records same technical outcome without blocking; missing/failed evidence follows accepted policy, not success default. | Evaluation decision/results, deployment admission records and actual target non/activation. | .18; `planned`. |
+| `policy-kinds` | Authored native/expression/package/CVE/agent/approval/time-window/canary conditions → evaluate supported policy configuration | Each supported execution boundary gets real positive/negative input; technical result and gate meaning remain separate; no parser-only proof of execution. | Independent Nix/target facts, policy evidence/result DB, gate/rollout observer. | .18 broad boundary; per-kind execution matrix **unassigned**; `planned`. |
+| `framework-catalog` | Imported STIG/framework release → list versions, search requirements/children/mapped policies, bundle coverage | Authored external rule/requirement identities and hierarchy survive; mappings distinguish policy evidence from framework coverage; search/filter scope does not drop version identity. | Independently parsed source catalog, framework/requirement/mapping DB, browser. | .19 catalog; extra framework/coverage bindings **unassigned**; `planned`. |
+| `mapping-recovery` | Operator/Admin with exact requirement version and unresolved historic release → mapping CRUD, Admin recovery | Only intended mapping/version changes; failed/mismatched source recovery leaves unresolved version honest; startup can continue without inventing missing source digest/evidence. | Requirement mappings/version/digest rows, source file digest and recovery result. | **Unassigned** .19-adjacent; `planned`. |
+
+### 10. `assurance.remediation` — triage, risk and POA&M continuity
+
+Authority: A-continuity (including Section 32), A-contract, TASK-490.20/.21/.27/.28/.29 and corresponding approved design states. Sources: S-api `poam.rs`, `acceptance_register.rs`, `cves.rs`; S-worker `services/poam.rs`, `queries/{poam,acceptance_register,cves}.rs`. Owner/scenario: **Assurance/A**. Start from real evidence created earlier in A, not seeded outcomes.
+
+| Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Packet / status |
+| --- | --- | --- | --- | --- |
+| `triage` | Authorized Operator, Viewer/nonmember and real finding → system/fleet single/batch triage and justification/revoke | Exact canonical CVE/package/system or environment scope, actor and justification persist; denied/stale mutation changes none; batch applies only intended compatible findings. | Stable finding/disposition/history/audit and immutable observation rows; browser selection. | .20; `planned`. |
+| `finding-waiver` | Real policy failure plus authorized requester/approver → request/list/detail/decide waiver | Source-owned waiver lifecycle/authority retained; acceptance does not make technical evidence pass or remediate target; scope and observation/policy version stay exact. | Waiver/finding/version/audit records and unchanged target/scanner evidence. | .27; `planned`; no global authority blocker. |
+| `acceptance-register` | Policy waiver and CVE accepted risk visible in register → filter/open/review/renew | Typed source ID and source revision retained; renewal is audited new review with server-clock 90-day deadline and preserves required origin/scope; forbidden source state cannot renew. | Source waiver/disposition records, successor/audit links and browser reload. | .28; `planned`, A-continuity Section 32 is authority. |
+| `acceptance-conversion` | Selected acceptance plus current real finding → convert, duplicate retry, concurrent conflict | Atomic source-authorized plan creation/compatible reuse and selected acceptance replacement; rollback on failure; one replacement event; other host/environment decisions unchanged. Never browser revoke-then-create. | Transactional source/plan/link/audit before/after, concurrent request results. | .28; `planned`. |
+| `poam-plan` | Real failed policy/CVE evidence → create compatible plan, edit owner/details, note/milestone/link/unlink/transition | Exact finding family and opened-against evidence preserved; accepted fields/transitions persist; wrong-family/foreign link or invalid transition changes none; cancel/read never writes. | Plans, immutable baseline/link/assignment/notes/milestones/history and browser reload. | .21; `planned`. |
+| `continuity` | Same CVE/package across revisions/versions, environment members entering/leaving/moving, host override → advance real deployments/scans | Stable finding/plan identity survives evidence changes; prospective environment default and host override resolve independently; clean/unknown/affected remain distinct; technical remediation is not a disposition. | Independently authored membership/revision sequence, findings/evidence/dispositions/links and target scans. | .20/.21/.29; cross-revision/membership matrix detail **unassigned**; `planned`. |
+| `verification-closure-recurrence` | Open plan, old/failing/unknown then newer Current clean evidence; later recurrence → verify/close/reopen | Fresh Current evidence required; unknown/failure cannot verify; closure follows accepted evidence and authority; return before closure resumes same episode, recurrence after closure preserves closed episode/history and follows normative recurrence behavior. | Actual target/scans, baseline/current evidence IDs, verification/history/plan state; denied stale results. | .29; `planned`. |
+| `register-navigation-concurrency` | Real scoped records → dashboard/watchlist/rollups/relationships/compatible/assignees, drawer and cross-view return; stale concurrent write | List/filter totals match authored scope; hidden/foreign records non-disclosing; exact evidence/plan stays selected through return; stale writes conflict without losing retained draft or duplicating decisions. | Scoped DB selections, source versions/locks, URL/reload/back and no-write reads. | .21/.28/.29; aggregate/caller details **unassigned**; `planned`. |
+
+### 11. `assurance.interchange` — import, export and independent consumers
+
+Authority: A-contract and TASK-490.19/.22; A-continuity for source identity/scope. Draft `docs/design/CrystalForge/uploads/crystal-forge-xccdf-interchange-profile-v0.1.md` supplies questions, not approval. Sources: S-api `compliance.rs`, `register_export.rs`, `acceptance_register.rs`, `poam.rs`, `cves.rs`, server compliance/interchange/schema and register export services; S-ui `io_menu.rs` and domain export consumers. Owner/scenario: **Assurance/A**.
+
+| Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Packet / status |
+| --- | --- | --- | --- | --- |
+| `stig-import` | Authorized user with DISA Anduril XCCDF XML/ZIP → preview/import; malformed/oversize/invalid payload | Preview writes nothing; authored rule identities/count from independent parser persist only after valid import; rejected import is atomic; role/body limits apply before protected writes. | External source parser/schema plus framework/bundle/policy DB before/after and browser import state. | .19; `planned`. |
+| `policy-interchange` | Real authored policy/version set → export/download, preview/import into isolated receiver state | Download parses independently; selected semantic records/scope round-trip; validation error leaves receiver unchanged; imported trust cannot be inferred from file presence. | Parsed payload/schema, source/receiver DB and actual browser download. | .22; `planned` for accepted round-trip subset. |
+| `native-reconciliation-details` | CF-native identities/digests with exact match, lineage/version conflict or unverified signature → preview/import | Exact draft-only reconciliation/trust conflict outcomes require approval; existing implementation/tests cannot select expectation. | Independent source digest/identity comparison, receiver DB transaction results. | .22; `blocked: D5-interchange` only for these details. |
+| `server-exports` | Real scoped plans/acceptances/CVEs/bundles/assignments/policies → register CSV/XLSX/OSCAL JSON/XML, POA&M/acceptance CSV/XLSX, CVE CSV, XCCDF and policy exports | Independent parsers/schema validate actual files; exact authored records/IDs/scope and source versions included; hidden/unselected data omitted; export does not mutate domain records. | Downloaded bytes parsed externally, source-selection DB and no-write observation. | .22; `planned`. |
+| `client-exports` | Real view/filter selection → client CF-JSON/CSV/SARIF/OSCAL/print HTML where exposed | Actual client output preserves selected identity/scope and honest unavailable evidence; no fabricated pass or server-export parity assumed. | Browser-produced file/print document, independent parser and selected real source records. | **Unassigned** .22-adjacent; `planned`. |
+
+### 12. `upgrade.continuity` — version transition and compatibility
+
+Authority: A-contract/TASK-490.23, with release matrix pending D2. Sources: S-router startup/migrations, `packages/default/crates/cf-server/migrations/`, S-wire, S-agent/S-builder, retained generation/snapshot/evidence DB mechanisms. Owner/scenario: **Upgrade/U**.
+
+| Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Packet / status |
+| --- | --- | --- | --- | --- |
+| `persisted-transition` | Real supported older server creates users/sessions/resources/credentials/history → install current package and start normally | Original IDs, usable credentials, history and evidence relationships survive forward migrations; one new real operation succeeds; no synthetic old-schema/current-seed substitute. | Old/new independent DB reads, migration set, real sign-in/new operation and preserved evidence. | .23; `blocked: D2-upgrade`. |
+| `mixed-version` | Supported old agent/builder against upgraded server → signed heartbeat/session/claim/build/delivery | Declared compatibility window works; unsupported capability receives explicit safe refusal without corrupting claims or leaking runtime credentials. | Real old binaries, wire responses, job/target/store and DB state. | .23; `blocked: D2-upgrade`. |
+| `transition-recovery` | Old-version in-flight work and completed history → migrate/restart/recover | Recovery uses migrated state without duplicate successful work or false terminal success; migration failure cannot be reported as successful upgrade. | Old/current process outcomes, leases/attempts/history and target identity. | .23; `blocked: D2-upgrade`; same-version recovery remains .15. |
+
+### Browser routes, forms, drawers and navigation bindings
+
+All route variants in S-ui `routes.rs` are accounted for collectively below. Query parameters carry identity, filters and return state; testing a page mount does not prove its forms or domain values. Design component names locate approved states, not proof that all states in a draft are accepted.
+
+| Routes / surfaces | Actual consumers and interactions to bind | Owner / scenario / status |
+| --- | --- | --- |
+| `/login`, `/register`, `/setup` | `views/{login,register,setup}.rs`; local forms/OIDC redirect, validation, first-admin and setup transitions | Access L/O; selected bootstrap only Integration-covered; remainder planned; visuals D6. |
+| `/dev/login` | `views/dev_login.rs`; conditional developer identity selector | Developer-only flow out of product integration scope; release-mode rejection belongs to existing Rust/module boundary verification. |
+| `/`, `/style-guide`, `/:..route`, shell/profile menu | `views/{dashboard,style_guide,not_found}.rs`, `components/layout/`, onboarding coach/tours/setup; sidebar collapse, breadcrumbs, keyboard/focus, notification tray | Access L planned; domain dashboard values D/A planned. Style guide is a component showcase, not domain evidence. |
+| `/profile` | `views/profile.rs`; profile/preferences/notification choices and session list/revoke/revoke-all/sign-out | Access L/N planned except selected sign-out/session cases. |
+| `/admin` | `views/admin.rs`; users/roles/OIDC/jobs/audit/server sections; create/edit/disable user, mappings, retry/classification and runtime diagnostics | Access L/O planned; selected Viewer denial only Integration-covered. |
+| `/environments?:..query` | `views/environments*.rs`, `components/environments/`; create/edit/remove/policy dialogs, validation, list/query filters | Access L .3 planned; assignments Assurance A. |
+| `/flakes?:..query` | `views/flakes*.rs`, `components/flake/`; add/edit/delete, credentials/Test, refresh/sync/accept rewrite, explorer/source/module/diff and scan actions | Access form unassigned; Delivery D .8/.9 planned; scan Assurance A .16. |
+| `/evaluations`, `/evaluations/:commit_id`, `/evaluations/:commit_id/attempts/:attempt_id` | `views/evaluations.rs`, `views/evaluations/{drawer_snapshot,policy_matrix,policy_captured,evidence_navigation,log_pane}.rs`; queue actions, logs, exact attempt matrix and evidence-return links | Delivery D .8/.9 planned; exact retained-attempt/stream bindings unassigned. |
+| `/builders`, `/builds?:..query` | `views/{builders,builds}.rs`, `components/{builders,builds}/`; resource/key/environment dialogs, worker/detail/queue panes, retry/cancel/reorder/log stream | Access resource forms unassigned; Delivery D .10/.11 planned. |
+| `/caches` | `views/caches.rs`, `views/caches/{niks3,metrics}.rs`; add/edit/remove/credential/Test/discovery/assignment modals, publication queue and metrics | Access persistence unassigned; Delivery D .12/.13 planned. |
+| `/systems?:..query`, `/systems/:id?:tab&:poam&:config_mode&:revision&:generation&:deploy_generation&:cve_target&:cve_mode` | `views/systems*.rs`, `views/system_detail.rs`, `components/system/`, modals; Overview/Config/Deploy/Compliance/CVEs/Hardening/History/Logs, preview, edit/key/remove/SSH helper, sync/rollback/generation rollback/auto-latest prompt | Access resource forms unassigned; Delivery D and Assurance A planned; explicit tab/target/history binding required, not one global revision. |
+| `/cves?:..query`, `/scanning` | `views/{cves,scanning}.rs`, `components/cve/`; package-first inventory/details, batch selection/triage, source/freshness, scan dialogs/schedule/archive and exports | Assurance A .16/.20/.22 planned; console/advanced binding gaps unassigned. |
+| `/deployment-policies` | `views/policies.rs`, `components/policy/`; editor/refine, bulk remove, grouping, interchange, trust/publication/usage where exposed | Assurance A .18/.22 planned; lifecycle variants unassigned. |
+| `/compliance?:bundle&:version&:system&:policy&:poam&:view` | `views/compliance.rs`, `components/compliance/`; catalog/version/filter, bundle editor, assignment/preview, requirement/mapping, import, evidence drawer and finding/POA&M links | Assurance A .18/.19/.21/.22 planned; framework recovery/bundle lifecycle variants unassigned. |
+| `/compliance/evaluations/:commit_id/attempts/:attempt_id?:bundle&:version&:system&:policy` | `views/compliance/evaluation_evidence.rs`, `evidence_controls.rs`; captured attempt view, exact versions, return to Evaluation, unavailable historic state | Delivery D originating navigation; Assurance A evidence semantics; planned, caller packet unassigned. |
+| `/poams?:..query` | `views/poams.rs`, `views/{poam_api,register_api}.rs`, `components/poam/`; scoped remediation/acceptance registers, details, owner/notes/milestones/link/verify/close/reopen, renew/convert, export tray | Assurance A .21/.27/.28/.29/.22 planned; distinct policy/CVE source versions and return destinations required. |
+
+Common drawer focus/close behavior belongs to Access; each Evaluation/System/Compliance/POA&M caller still proves its exact identity, permission, nesting and return target in D/A. Loading, empty, validation, error, stale and unavailable states are case-specific; no blanket design blocker replaces accepted semantic checks.
+
+### Module/configuration discovery bindings
+
+These bindings expand the `module-runtime` obligation and the relevant domain
+rows; they are not extra covered rows. Source: S-config's module options,
+serialization, scripts, units and assertions. Pure option evaluation uses the
+existing lower-level module/component mechanism; the [component catalog](flake-checks.md#current-inventory-and-commands)
+and [verification guide](../../agents/verification.md#consolidated-component-verification)
+record its consolidated sources and commands. Only real runtime behavior earns
+integration proof.
+
+| Declared configuration surface | Required boundary / primary owner and planned observation |
+| --- | --- |
+| `enable`, `server.enable`, `build.enable`, `client.enable`, `local-database`, `database`, `env-file`, `configPath`, `log_level` | Access installation/config: generated effective settings, secret-file ownership and service role separation; local socket/migrations subset executed only. Remote DB/file-password and disabled/combined role variants remain unassigned/planned. |
+| `server.auth_mode`, OIDC client/secret-file/group mapping, bootstrap, session throttle/retention | Access L/O: correct conditional auth routes and runtime session lifecycle; invalid/conflicting OIDC secrets rejected in module configuration. Public runtime health must not disclose secrets. |
+| `flakes`, `auth` SSH/netrc/known-hosts, evaluator workers/memory/discovery/idle/overall timeouts | Delivery D: credentialed exact root/input source; resource/deadline limits cannot change successful source identity or leave work falsely successful after cancel/timeout. Source/evaluator resource fault variants are unassigned/planned. |
+| `build` API mode/server/key, strategies/source delivery, IFD, concurrency, sandbox/offline/substitutes and systemd resource limits | Delivery D: ordinary module rejects removed direct-DB mode and unsupported verified-source settings; runtime API builder has independent key/store and obeys realization/cancellation limits. No synthetic build success. |
+| `cache`, encryption key file, signing, compression/filter, retries, S3/Attic/Niks3 auth; deployment signature trust | Delivery D: effective secrets and trust survive config loading without store/log leaks; build/push/read use separate intended credential plane and exact output/destination. Test/probe private-target exceptions remain explicit fixture settings. |
+| `deployment`, `systems`, `environments`, `client` server/key and startup delay/polling | Delivery D and Access resource forms: configured identity/defaults agree with persisted resources; runtime target/policy/activation/retry behavior observed on actual target. Serialization text alone is insufficient. |
+| `vulnix`, `hardening`, server automatic hardening scans and worker units | Assurance A: enabled real worker consumes intended input, times out/fails/retries honestly and records actual evidence; scanner settings do not authorize fake completed evidence. |
+| `server.notificationEmail.*` | Access N: endpoint/sender/token-file/delivery permission/digest/retry settings govern actual receiver delivery; disabled external delivery sends none. |
+| `server.trust_forwarded_builder_https`, `trustedProxyCidrs` | Delivery D builder transport: explicit direct-peer trust and HTTPS gate; forwarded headers from an untrusted peer grant no secure-session authority. Module rejects enabled trust with empty CIDRs. Detailed proxy transport case is unassigned/planned. |
+| `dashboards` datasource/provisioning and service setup | Supported optional module configuration: retain ordinary configuration assertions and credential-safe datasource wiring; runtime dashboard provisioning obligations need explicit packet assignment. Incidental historical Grafana/SQL-view assertions do not automatically become integration requirements. |
+
+### Supported variants and explicit exclusions
+
+| Surface | Discovered supported variants / disposition |
+| --- | --- |
+| Authentication | `local`, `oidc`; Admin/Operator/Viewer. Debug-only dev login is `out of scope` for production integration; release rejection remains a lower-level obligation. |
+| Build/source | `ServerDerivation`, `SourceReEvaluateVerified`; `ServerBundledArchive` is the only accepted delivery for verified-source contract v1. `None` means not applicable; reserved `LocalGitWorktree` / `BuilderFetchPublicInputs` modes are rejected, not supported alternatives. Derivation equality does not promise output reproducibility. |
+| Caches | `S3`, `Attic`, `Niks3`, `Http`, `Nix`; Niks3 write token/mTLS and separate public/mTLS/Basic read auth/capabilities. Test/discovery, upload, cold read, signature trust and environment binding are distinct obligations. |
+| Deployment | `manual`, `auto_latest`, `pinned`; `ImmediatePersist`, `BootOnly`; actual running, booted, selected boot and retained generation identities are separate. |
+| Policy/evidence | `Enforce`, `ReportOnly`; policy/bundle trust/publication/version and assignment are separate; CVE/hardening attempt versus completed evidence, Current versus explicit historical, stable finding versus observation versus risk decision versus plan are separate. |
+| Notifications | `InApp`, `Email`, `Both`; per-user preference/delivery lifecycle and receiver proof, not a mocked send success. |
+| Interchange | XCCDF 1.2 XML/ZIP and policy interchange; server/client export variants listed above. CKL import is `out of scope` (no importer); draft-only proposed features do not become supported surfaces. |
+| Historical test artifacts | Mocked responses, seeded successful scans/builds/publications, incidental Grafana checks and baseline-approval tooling are `out of scope` as integration proof. Retired code is not a requirement source. |
+
+### Inventory totals, missing assignments and next runnable milestone
+
+Counts below count **obligation rows**, not endpoints, test cases or percentage coverage. Route and browser indexes overlap these obligations and must not be added to them. A row can contain several variants, so even an Integration-covered row is limited to its named executed subset.
+
+| Contract family | Rows | Integration-covered subset rows | Planned | Blocked |
+| --- | ---: | ---: | ---: | ---: |
+| `access.lifecycle` | 7 | 3 | 2 | 2 |
+| `access.configuration` | 8 | 0 | 7 | 1 |
+| `access.shell` | 5 | 0 | 4 | 1 |
+| `delivery.evaluation` | 8 | 0 | 7 | 1 |
+| `delivery.build` | 7 | 0 | 7 | 0 |
+| `delivery.publication` | 7 | 0 | 7 | 0 |
+| `delivery.activation` | 7 | 0 | 7 | 0 |
+| `assurance.scanning` | 7 | 0 | 7 | 0 |
+| `assurance.policy` | 7 | 0 | 7 | 0 |
+| `assurance.remediation` | 8 | 0 | 8 | 0 |
+| `assurance.interchange` | 5 | 0 | 4 | 1 |
+| `upgrade.continuity` | 3 | 0 | 0 | 3 |
+| **Total** | **79** | **3 (sixteen executed cases)** | **67** | **9** |
+
+No new lower-level-covered or failing obligation is asserted. Existing Rust/component/DB assertions remain evidence mechanisms with execution records below; merely discovering their code is not a pass. The explicit exclusions above are not added to the 79 required/discovered obligation rows.
+
+Discovered **packet-assignment gaps** include resource forms omitted by .3; session remainder; setup/config-health/audit; Git credential lifecycle; evaluation ordering/cancel/log/retained-attempt navigation; Config request/observation lifecycle; builder key lifecycle/metrics/order; cache discovery/probes/secret merge/read capability/queue controls; agent ingress/callback/retained rollback; approval/canary phases; scanner lease/console/archive/schedule; bundle/grouping/version/trust/deletion lifecycle; framework mapping/recovery; CVE cross-revision/environment-membership concurrency; mixed register aggregates; client exports. Rows assign a primary owner/scenario, but the coordinator must explicitly extend/select an existing packet before implementing those details. No task is created or changed by this inventory.
+
+**Next controller-only milestone:** TASK-490.3 accepted Admin/environment success, cancel, duplicate validation, reload and disabled-login subset, composed into L after real first-admin bootstrap. Its task is Backlog and requires coordinator selection; it has no .7 dependency. D3 blocks only missing failed-save/empty/pending presentation states. The existing controller/helper/receipt interface is adequate by source inspection, not newly executed proof.
+
+**Next Delivery-enabling milestone:** TASK-490.7 real services/builderA/builderB/target roles and commit→evaluation→fresh build proof in D. `lib/integration-test/roles.nix` currently implements only `common` and `controller { browser ? false; }`; .7's role signatures are proposed task interfaces, not available functions. .7 remains Backlog/unexecuted, and its .1 prerequisite is Review. Do not dispatch .8/.10 as though live roles exist, add a placeholder owner, or consume Access runtime state. A successful .7 opens the real Delivery path and later Assurance inputs; it does not by itself prove all Delivery obligations.
+
+Research verification: route registration, handlers/gates, UI routes/consumer references, module/config/protocol sources, accepted authority and .7/.3 task dependencies were inspected. No VM, server, browser, scanner, migration, build or test was started in this documentation-only pass. Formatting/count validation is reported at handoff; the prior sixteen-case execution remains the only integration proof.
 
 ## Product defects and design gaps
 
@@ -235,7 +486,7 @@ and `integration-upgrade`. Every separate verification package or CI test job
 must have a distinct necessary purpose. Preserve useful assertions, assign
 primary execution ownership, and consolidate or justify duplicate execution.
 
-Current inventory after retirement: one attribute, `integration-access`, versus
+Recorded inventory after the source-retirement milestone: one attribute, `integration-access`, versus
 27 before retirement. Its 16 cases are unchanged. Delivery, Assurance, and Upgrade
 are absent. XML fixtures alone do not constitute an Assurance owner. This is
 not final completion. Final acceptance also needs complete accepted coverage,
@@ -264,34 +515,40 @@ with `false` is not completion. No placeholders may fill missing names.
 | `checks/niks3-write-probe` | Integration | retired by owner decision | Accepted connection Test boundary remains planned Delivery work. |
 | `checks/attic-metrics` | Integration | retired by owner decision | Accepted adapter observations belong to planned Delivery variants. Production adapter package remains. |
 | `checks/attic-publication` | Component fixture | retired by owner decision | Accepted native publication belongs to planned Delivery variants. |
-| `checks/nixos-discovery-reliability` | Nix contract | relocated | `packages/verify-nixos-discovery-reliability`; evaluator contract assertions preserved. |
-| `checks/server-regressions` | DB-backed Rust | relocated; deduplication unresolved | `packages/verify-server-regressions`; PostgreSQL hook and exact Cargo selections preserved. Migration-prefix rehearsals do not satisfy Upgrade. Overlap with `state-machine-tests` remains complex TASK-490.24 work, not solved by relocation. |
-| `checks/builder-evaluator-packaging` | Packaging | relocated | `packages/verify-builder-evaluator-packaging`; wrapper/module contracts preserved. |
-| `checks/web-ui-test-runner` | Dev tooling | relocated | `packages/verify-web-ui-test-runner`; tests the retained host runner without services. |
-| `checks/run-ui-dev-db-check` | Dev tooling | relocated | `packages/verify-run-ui-dev-db-check`; database readiness/worktree script assertions preserved. |
+| `checks/nixos-discovery-reliability` | Nix contract | consolidated | `modules/nixos/crystal-forge/tests/discovery.{sh,py}`, direct runtime CI with independent temporary Nix stores. |
+| `checks/server-regressions` | DB-backed Rust | consolidated | Existing `devScripts.state-machine-test` owns unique ignored/integration selections and both populated migration rehearsals; migration-prefix checks never satisfy Upgrade. |
+| `checks/builder-evaluator-packaging` | Packaging | consolidated | `modules/nixos/crystal-forge/tests/packaging.nix` pure module evaluation plus `packaging.sh` direct installed-wrapper/service probes; no nested validation derivation. |
+| `checks/web-ui-test-runner` | Dev tooling | consolidated | `packages/devScripts/web-ui/tests/web-ui-test-runner-test.sh`, direct CI selftest under `nix develop`. No backend integration claim. |
+| `checks/run-ui-dev-db-check` | Dev tooling | consolidated | Existing `packages/devScripts/{db-usability-check-test,db-only-start-test}.sh`, direct `component-tests` CI under `nix develop`. |
 | `checks/okf-knowledge` | Documentation | relocated | `packages/okf-knowledge`; validation, provenance and diagram audits preserved. |
 | `checks/ui-screenshots` | Mocked screenshots | relocated | `packages/ui-screenshots`; design iteration aid without semantic assertions. |
-| `checks/config-inspector`, `config-observer`, `evaluator-snapshot-isolation`, `verified-source-evaluator-parity`, `nixos-options-metadata`, `niks3-ca-bundle` | Nix/Rust contracts | relocated | Each becomes `packages/verify-<name>`; lower-level assertions preserved outside `checks`. |
-| `checks/builder-cve-contract`, `oscal-export`, `xccdf-schema`, `stig` | Contracts/unit | relocated | Each becomes `packages/verify-<name>`; lower-level assertions preserved outside `checks`. |
+| `checks/config-inspector`, `config-observer`, `evaluator-snapshot-isolation`, `verified-source-evaluator-parity`, `nixos-options-metadata`, `niks3-ca-bundle` | Nix/Rust contracts | consolidated | Core-only evaluator `postCheck` fragments, explicit normal `cf-config` library selection and Go/Rust CA comparison; ordinary metadata package assertions. [Exact homes](flake-checks.md#current-inventory-and-commands); no D integration proof. |
+| `checks/builder-cve-contract`, `oscal-export`, `xccdf-schema`, `stig` | Contracts/unit | consolidated | Direct module boolean evaluations, ordinary OSCAL fixture check phase and actual installed XCCDF writer/schema command. [Exact homes](flake-checks.md#current-inventory-and-commands); no A integration proof. |
 | `checks/test-keys` | Unused placeholders | removed | No executable consumers; not a coverage obligation. |
 | Legacy browser XCCDF XML V1R1 and V1R2 | Immutable fixtures | relocated | `checks/integration-assurance/fixtures/xccdf/`; no `default.nix` and no placeholder check. |
-| CI `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | DB-backed Rust | retained; execution justification provisional | Three process-compose database jobs remain. Fake scanning does not prove real Assurance scanning. Repeated ignored commit tests with `verify-server-regressions` still need consolidation or justification. |
+| CI `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | DB-backed Rust | existing DB mechanisms; consolidated selections | State-machine workflow owns 284 unique ignored library tests, fourteen integration targets/231 cases and both migration rehearsals in fresh invocation-owned PostgreSQL. Six ignored duplicates and 94 normal-library selections removed; two duplicate `composite_policy` executions removed from CVE job. Dashboard unchanged. Full current run still needs successful evidence. |
 | CI `legacy-flake-check`, `web-ui-check`, `web-ui-baseline-candidates` | Legacy/manual jobs | removed | Sources and candidate-baseline workflow retired; no replacement pass claimed. |
 | CI `web-ui-screenshots-mr-comment` | Reporter | already removed in early transition | No replacement comment bot. Access exports its own evidence. |
 
 ### Current GitLab selection
 
-The early transition retained optional manual legacy jobs. The subsequent
-owner-authorized TASK-490.24 source-retirement pass removes them and relocates
-lower-level verification to packages. Neither milestone marks missing coverage
-complete.
+The source-retirement milestone removed optional manual legacy jobs and first
+relocated lower-level definitions into packages. The latest owner instruction
+supersedes that one-for-one relocation: all fifteen public `verify-*` definitions
+are removed. Unique assertions now use ordinary Rust/component/package tests,
+direct CI commands and the existing isolated state-machine workflow. The
+[component catalog](flake-checks.md#current-inventory-and-commands) maps all fifteen
+successors and the [verification guide](../../agents/verification.md#consolidated-component-verification)
+gives direct commands. No registry, new aggregate framework or fifth check is
+introduced. Historical commands
+below remain records of what actually ran at their recorded revisions.
 
 | GitLab job | Selection now | Notes |
 | --- | --- | --- |
 | `integration-access` | Automatic and required on merge requests and `main` | Builds the normal owner aggregate `checks.x86_64-linux.integration-access`. Exports `integration-evidence/integration-access/` even when the build fails. |
 | `legacy-flake-check`, `web-ui-check`, `web-ui-baseline-candidates` | Removed | No optional legacy execution remains. |
-| `package-verification`: `verify-run-ui-dev-db-check`, `verify-server-regressions`, `verify-nixos-discovery-reliability`, `verify-builder-evaluator-packaging`, `verify-web-ui-test-runner`, `okf-knowledge` | Automatic | Native `packages.x86_64-linux.<name>` targets; preserved lower-level verification outside `checks`. |
-| `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | Automatic | Disposable-database and `--ignored` Rust tests; a package build does not replace them. Temporary retention (`keep (provisional)`): any repeated test execution between these jobs and `server-regressions` needs one primary owner or a recorded reason. |
+| `component-tests` | One explicit job replaces the six-entry package matrix | Builds core, metadata, OSCAL and docs; runs pure module evaluations, independent-store discovery, installed wrappers/schema and tool selftests directly. Fifteen verification wrappers removed. |
+| `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | Three automatic disposable-DB paths | Expanded state-machine invocation owns consolidated regressions on temporary PostgreSQL port 35433 with `SUPERUSER CREATEDB`, stats preload, both DB URLs in SQLx shell and one Cargo target directory. CVE exact duplicates removed; dashboard unchanged. |
 | `coverage-check`, `complexity-check`, `auto-bump-patch` | Unchanged | Release and version behavior is unchanged. |
 
 Executed automatic integration coverage is exactly the sixteen Access cases:
@@ -314,7 +571,23 @@ accepted coverage, four passing normal aggregates, the exact four-name
 inventory/CI allowlist, execution-cost evidence, and duplicate-execution
 resolution. Source removal and fixture relocation alone do not satisfy it.
 
-## Source-retirement verification
+Consolidation removes eighteen verification derivations: fifteen public roots,
+one nested module-validation derivation and the CA fixture/runner. Twenty-two
+expression helpers and six fixture generators remain unique component inputs,
+not gates. The measured recursive derivation union for core plus the five-package
+slice decreases 5,428 → 4,432 (996 fewer). No runtime speedup is claimed without
+measurement. Go dataset invocations decrease 9 → 3 and OpenSSL parses
+1,758 → 879; all thirteen unchanged CA library tests run in normal core tests.
+
+The full database/core runs were launched with logs at
+`/tmp/opencode/task490-db-full.log` and
+`/tmp/opencode/task490-config-core-staged.log`; their corresponding `.status`
+files must show success before recording a pass. The newly composed TASK-490.3
+Admin-form fragments await coordinator execution. They do not change the 79-row
+inventory: three covered subsets (sixteen cases), 67 planned rows and nine
+decision-blocked rows. No new covered or lower-level-covered row is asserted.
+
+## Source-retirement verification (historical milestone)
 
 At clean source `0105e512baa80ace5f181918bbb72951bf506a50`, the exact
 inventory evaluation returned `["integration-access"]` (27 attributes before
@@ -327,7 +600,7 @@ its driver script completed in 24.23 seconds. Evidence is retained at
 and exported beneath `integration-evidence/integration-access/`. Scenario and
 browser assertions are unchanged. No new scenario was registered.
 
-All 17 relocated package `drvPath`s evaluated. Lightweight contract/tool
+At that milestone, all 17 relocated package `drvPath`s evaluated. Lightweight contract/tool
 packages, CA compatibility (13 selected Rust tests), OSCAL validation, and
 builder module validation passed. The host browser runner selftest, design
 generator tests, browser harness static contracts, and CI cache-policy/routing
@@ -342,10 +615,11 @@ derivation are identical to the former check, including all selected tests
 and database hooks. The combined `verify-builder-evaluator-packaging` and
 `verify-xccdf-schema` build also exceeded 600 seconds while compiling the
 server dependency. Their full results remain unverified. No test was skipped
-or changed to obtain a pass. Run those package commands with a longer build
-window or use exact-head CI evidence before review completion.
+or changed to obtain a pass. These removed package commands are historical;
+verify their consolidated successors with a longer build window or exact-head
+CI evidence before review completion.
 
-Documentation validation now runs as `nix build .#okf-knowledge -L`; it passed
+Documentation validation at that milestone ran as `nix build .#okf-knowledge -L`; it passed
 after updating relocated links and the fixture README manifest entry. The
 documentation-only follow-up does not require another Access VM run.
 

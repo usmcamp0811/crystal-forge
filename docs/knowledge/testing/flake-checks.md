@@ -1,7 +1,7 @@
 ---
 type: Testing Guide
 title: Crystal Forge flake checks catalog
-description: "Catalogs the integration owner, relocated verification packages, and historical retired suites, preserving migration provenance and distinguishing coverage gaps from source retirement."
+description: "Catalogs integration owners, consolidated component verification, and historical retired suites, preserving provenance and distinguishing execution evidence from coverage gaps."
 tags:
   - crystal-forge
   - testing
@@ -78,34 +78,70 @@ Final acceptance requires `true`, complete accepted coverage, and passing real
 aggregates. See the [contract](integration-test-contract.md) and
 [retirement map](integration-coverage-map.md#legacy-retirement-map).
 
-All 17 lower-level definitions are preserved outside `checks`:
+The initial one-for-one package relocation is superseded. All fifteen public
+`verify-*` definitions are removed. Unique assertions use the following existing
+component homes. This table documents ownership; it is not an execution registry.
 
-| Former name | Current package target | Purpose |
-| --- | --- | --- |
-| `builder-cve-contract` | `.#verify-builder-cve-contract` | Builder CVE contract |
-| `builder-evaluator-packaging` | `.#verify-builder-evaluator-packaging` | Wrapper and module packaging |
-| `config-inspector` | `.#verify-config-inspector` | Option inspection contracts |
-| `config-observer` | `.#verify-config-observer` | Observer contracts |
-| `evaluator-snapshot-isolation` | `.#verify-evaluator-snapshot-isolation` | Evaluator failure isolation |
-| `niks3-ca-bundle` | `.#verify-niks3-ca-bundle` | CA compatibility |
-| `nixos-discovery-reliability` | `.#verify-nixos-discovery-reliability` | Evaluator discovery |
-| `nixos-options-metadata` | `.#verify-nixos-options-metadata` | Option metadata |
-| `oscal-export` | `.#verify-oscal-export` | Fixture schema validation |
-| `run-ui-dev-db-check` | `.#verify-run-ui-dev-db-check` | Development database scripts |
-| `server-regressions` | `.#verify-server-regressions` | Preserved PostgreSQL hook and exact Cargo selections |
-| `stig` | `.#verify-stig` | STIG module semantics |
-| `verified-source-evaluator-parity` | `.#verify-verified-source-evaluator-parity` | Source verification parity |
-| `web-ui-test-runner` | `.#verify-web-ui-test-runner` | Retained host runner contract |
-| `xccdf-schema` | `.#verify-xccdf-schema` | Schema and writer fixtures |
-| `ui-screenshots` | `.#ui-screenshots` | Mocked design iteration; no semantic proof |
-| `okf-knowledge` | `.#okf-knowledge` | Documentation, provenance and diagram validation |
+| Former verification name | Current source and primary execution |
+| --- | --- |
+| `config-inspector` | [config-inspection.nix](../../../packages/default/crates/cf-server/tests/nix/config-inspection.nix), normal core server `postCheck` |
+| `config-observer` | [config-observation.nix](../../../packages/default/crates/cf-server/tests/nix/config-observation.nix), normal core server `postCheck` |
+| `evaluator-snapshot-isolation` | [primary-isolation.nix](../../../packages/default/crates/cf-server/tests/nix/primary-isolation.nix), normal core server `postCheck` |
+| `verified-source-evaluator-parity` | [source-parity.nix](../../../packages/default/crates/cf-server/tests/nix/source-parity.nix), normal core server `postCheck`, with its locked verified-source fixture |
+| `niks3-ca-bundle` | All thirteen unchanged `cf-config` library tests in the normal core build; [compatibility.nix](../../../packages/default/crates/cf-config/tests/ca-bundle/compatibility.nix) compares Go/Rust full-DER identities on three datasets in core `postCheck` |
+| `server-regressions` | Existing `devScripts.state-machine-test`; [database-regressions.sh](../../../packages/devScripts/tests/database-regressions.sh) and [state-machine-tests.sh](../../../packages/devScripts/tests/state-machine-tests.sh) |
+| `builder-cve-contract` | [builder-cve.nix](../../../modules/nixos/crystal-forge/tests/builder-cve.nix), explicit boolean Nix evaluation |
+| `stig` | [stig.nix](../../../modules/nixos/crystal-forge/tests/stig.nix), explicit boolean Nix evaluation |
+| `builder-evaluator-packaging` | [packaging.nix](../../../modules/nixos/crystal-forge/tests/packaging.nix), pure module evaluation; [packaging.sh](../../../modules/nixos/crystal-forge/tests/packaging.sh), installed-wrapper and generated-service probes |
+| `nixos-discovery-reliability` | [discovery.sh](../../../modules/nixos/crystal-forge/tests/discovery.sh) and [discovery.py](../../../modules/nixos/crystal-forge/tests/discovery.py), direct runtime test with independent temporary Nix stores |
+| `nixos-options-metadata` | Ordinary [nixos-options-metadata](../../../packages/nixos-options-metadata/default.nix) assertions and `postCheck` |
+| `oscal-export` | Ordinary [oscal-fixture](../../../packages/oscal-fixture/default.nix) check phase, validating the NIST AR/AP/SSP chain with [validate.py](../../../packages/oscal-fixture/validate.py) |
+| `run-ui-dev-db-check` | Existing [DB usability selftest](../../../packages/devScripts/db-usability-check-test.sh) and [DB start selftest](../../../packages/devScripts/db-only-start-test.sh), direct CI commands under `nix develop` |
+| `web-ui-test-runner` | Existing [host runner selftest](../../../packages/devScripts/web-ui/tests/web-ui-test-runner-test.sh), direct CI command under `nix develop` |
+| `xccdf-schema` | [xccdf-schema.sh](../../../packages/default/crates/cf-server/tests/xccdf-schema.sh), installed real exporter fixture XML, CF extensions, and OpenSCAP validation in direct component CI |
 
-Run `nix build <target> -L`. Sources are `packages/verify-<former-name>/`,
-except `packages/ui-screenshots/` and `packages/okf-knowledge/`.
-The six retained automatic matrix entries now run as `package-verification`
-using native package targets. The three process-compose database Rust jobs
-remain. Overlap between `verify-server-regressions` and `state-machine-tests`
-is unresolved complex TASK-490.24 work; relocation does not deduplicate them.
+The four evaluator fragments run once in the normal core server build, not in
+the embedded build. Existing Rust test definitions remain. Core explicitly
+selects `--package cf-config` as well as `--package cf-server --lib --bins`;
+selecting only `cf-server` did not run dependency-library CA tests. The separate
+CA runner and fixture derivations are removed. Dataset comparison reduces Go
+invocations from nine to three and OpenSSL parses from 1,758 to 879 without
+removing the cross-language identity assertions.
+
+One explicit `component-tests` CI job replaces the six-entry
+`package-verification` matrix. It builds core, metadata, OSCAL and documentation,
+then runs module evaluations, discovery, installed-wrapper/schema tests and
+developer-tool selftests directly. See [.gitlab-ci.yml](../../../.gitlab-ci.yml)
+and the [verification guide](../../agents/verification.md#consolidated-component-verification)
+for commands. `.#okf-knowledge` and `.#ui-screenshots` remain ordinary packages;
+mocked screenshots provide design feedback, not semantic proof.
+
+The three database jobs remain. `state-machine-tests` owns one fresh invocation
+of PostgreSQL on port 35433 with temporary data, `LOGIN SUPERUSER CREATEDB`, and
+`pg_stat_statements` preload. Its SQLx shell exports both `DATABASE_URL` and
+`TEST_DATABASE_URL`; all selections share `target/database-tests`. The source
+and compiled-test audit retains 284 unique ignored library tests and fourteen
+integration targets containing 231 cases. Six repeated ignored selections and
+94 nonignored library selections are removed; normal package `--lib --bins`
+owns the latter. The whole `composite_policy` target owns two tests removed from
+the CVE job. Both populated migration rehearsals and exact missing-test guards
+remain. Dashboard execution is unchanged. Selection totals are not distinct-test
+counts.
+
+Removed verification derivations total eighteen: fifteen public roots, the
+nested module-validation derivation, and the CA fixture and runner. Twenty-two
+expression helpers and six fixture generators remain unique component inputs,
+not gates. The measured recursive derivation union for core plus the former
+five-package slice fell from 5,428 to 4,432 (996 fewer). This is a dependency-DAG
+measurement, not a measured runtime improvement.
+
+Handwritten XCCDF examples are retired static examples, not production test
+evidence. The direct schema command validates actual writer output and all five
+CF extension node types with non-vacuous extraction. Rust tests retain custom
+check and structural semantics; this does not prove XSD validity of every
+custom-check variant. Full current core/database verification and newly composed
+Admin-form execution require their own successful results; the recorded sixteen
+Access cases remain the only executed integration proof.
 
 The nine legacy integration suite directories are retired. CI jobs
 `legacy-flake-check`, `web-ui-check`, and `web-ui-baseline-candidates` are
@@ -120,14 +156,13 @@ mandatory requirements.
 The remainder preserves the migration-base catalog and subsequent historical
 scope notes. Old `checks` commands, CI memberships, paths and baseline procedures
 below describe retired or relocated implementations and are not current run
-instructions. Use the package table above for retained verification. Historical
+instructions. Use the component table above for retained verification. Historical
 README links for retired suites resolve to the last retained source revision;
-current package README links identify relocated sources.
+successor source links identify the consolidated implementation.
 
 This concept was a catalog and pointer record. Each check kept its own
-`README.md` next to its `default.nix`. Those README files are the
-authoritative text and stay in place, because each check and package uses its
-README as its ecosystem entry point. This catalog records, for each README, what
+`README.md` next to its `default.nix`. The removed READMEs remain historical
+provenance; current execution ownership is defined above. This catalog records what
 the check verifies, how to run it, and where the README lives. The summaries
 come from reading each README together with the matching `default.nix` at the
 migration base commit. The TASK-470 packaging and Niks3 sections and cache
@@ -204,17 +239,17 @@ Keep the legacy gate definitions until full owner cutover conditions pass.
 | `oidc-auth` | Yes (Keycloak and server) | OIDC login path against a real Keycloak realm | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/oidc-auth/README.md) |
 | `web-ui` | Yes (server, agent, builder, git server) | Production embedded-UI server through a real browser | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/web-ui/README.md) |
 | `web-ui-reconciliation` | Yes (nginx only) | One STIG import reconciliation workflow with mocked API routes | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/web-ui-reconciliation/README.md) |
-| `web-ui-test-runner` | No | The `web-ui-test` wrapper script logic | [README](../../../packages/verify-web-ui-test-runner/README.md) |
+| `web-ui-test-runner` | No | The `web-ui-test` wrapper script logic | [Successor selftest](../../../packages/devScripts/web-ui/tests/web-ui-test-runner-test.sh) |
 | `ui-screenshots` | No | Fixture-driven screenshots of every view in two themes | [README](../../../packages/ui-screenshots/README.md) |
-| `server-regressions` | No | PostgreSQL-backed Rust regression tests and a migration upgrade rehearsal | [README](../../../packages/verify-server-regressions/README.md) |
-| `builder-evaluator-packaging` | No | Evaluator-bound Nix/Niks3 wrappers, service PATH, proxy assertions, and generated configuration | [README](../../../packages/verify-builder-evaluator-packaging/README.md) |
+| `server-regressions` | No | PostgreSQL-backed Rust regression tests and a migration upgrade rehearsal | [Successor runner](../../../packages/devScripts/tests/database-regressions.sh) |
+| `builder-evaluator-packaging` | No | Evaluator-bound Nix/Niks3 wrappers, service PATH, proxy assertions, and generated configuration | [Successor runtime probes](../../../modules/nixos/crystal-forge/tests/packaging.sh) |
 | `niks3-cache` | Yes (cache, server, builder, agent) | Real cache publication, proxy claims, capability gates, agent pulls, and local CVE materialization | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/niks3-cache/README.md) |
 | `okf-knowledge` | No | OKF structural validation, checker unit tests, exact diagram audit, and a pinned Mermaid syntax parse of every diagram (no browser render; `nix run .#okf-mermaid-renderer` renders SVG manually) | — |
-| `oscal-export` | No | OSCAL 1.1.2 schema validation of fixture output | [README](../../../packages/verify-oscal-export/README.md) |
-| `xccdf-schema` | No | XCCDF 1.2 and `cf-xccdf-1` schema validation | [README](../../../packages/verify-xccdf-schema/README.md) |
-| `stig` | No | `mkStigModule` override and merge semantics | [README](../../../packages/verify-stig/README.md) |
-| `nixos-options-metadata` | No | Extracted NixOS option type metadata | [README](../../../packages/verify-nixos-options-metadata/README.md) |
-| `run-ui-dev-db-check` | No | `run-ui-dev` database probe and start scripts | [README](../../../packages/verify-run-ui-dev-db-check/README.md) |
+| `oscal-export` | No | OSCAL 1.1.2 schema validation of fixture output | [Successor validator](../../../packages/oscal-fixture/validate.py) |
+| `xccdf-schema` | No | XCCDF 1.2 and `cf-xccdf-1` schema validation | [Successor script](../../../packages/default/crates/cf-server/tests/xccdf-schema.sh) |
+| `stig` | No | `mkStigModule` override and merge semantics | [Successor assertions](../../../modules/nixos/crystal-forge/tests/stig.nix) |
+| `nixos-options-metadata` | No | Extracted NixOS option type metadata | [Successor package tests](../../../packages/nixos-options-metadata/default.nix) |
+| `run-ui-dev-db-check` | No | `run-ui-dev` database probe and start scripts | [Successor selftest](../../../packages/devScripts/db-usability-check-test.sh) |
 
 ## Server and database checks
 
@@ -263,7 +298,7 @@ Historical README: [checks/oidc-auth/README.md](https://gitlab.com/crystal-forge
 
 ### `server-regressions`
 
-README: [packages/verify-server-regressions/README.md](../../../packages/verify-server-regressions/README.md).
+Current successor: [consolidated database runner](../../../packages/devScripts/tests/database-regressions.sh). The description below records the historical package/check, not the current launcher or test counts.
 
 - **What it verifies.** The check builds `cf-server` test targets with
   `buildRustPackage` and runs them against a disposable PostgreSQL instance from
@@ -388,7 +423,7 @@ baseline action is implied by this catalog entry.
 
 ### `builder-evaluator-packaging`
 
-README: [packages/verify-builder-evaluator-packaging/README.md](../../../packages/verify-builder-evaluator-packaging/README.md).
+Current successors: [module assertions](../../../modules/nixos/crystal-forge/tests/packaging.nix) and [installed runtime probes](../../../modules/nixos/crystal-forge/tests/packaging.sh). The root and nested module-validation derivations described below are removed.
 
 - **What it verifies.** Sandbox probes check component/public wrappers and service
   PATH for the exact evaluator Nix and evaluator-bound Niks3 1.6.0. The dependent
@@ -515,7 +550,7 @@ Historical README: [checks/web-ui-reconciliation/README.md](https://gitlab.com/c
 
 ### `web-ui-test-runner`
 
-README: [packages/verify-web-ui-test-runner/README.md](../../../packages/verify-web-ui-test-runner/README.md).
+Current successor: [direct host runner selftest](../../../packages/devScripts/web-ui/tests/web-ui-test-runner-test.sh).
 
 - **What it verifies.** The check tests the host-side `web-ui-test` wrapper
   (`checks/web-ui/tests/web-ui-test.sh`) with
@@ -553,7 +588,7 @@ data this check reads.
 
 ### `oscal-export`
 
-README: [packages/verify-oscal-export/README.md](../../../packages/verify-oscal-export/README.md).
+Current successor: [ordinary OSCAL fixture package](../../../packages/oscal-fixture/default.nix) with its [schema-chain validator](../../../packages/oscal-fixture/validate.py).
 
 - **What it verifies.** `crystal-forge-oscal-fixture` produces a deterministic
   OSCAL Assessment Results document. `validate.py` validates that document and
@@ -567,7 +602,7 @@ README: [packages/verify-oscal-export/README.md](../../../packages/verify-oscal-
 
 ### `xccdf-schema`
 
-README: [packages/verify-xccdf-schema/README.md](../../../packages/verify-xccdf-schema/README.md).
+Current successor: [installed writer schema validation](../../../packages/default/crates/cf-server/tests/xccdf-schema.sh). Hand-authored XML below is historical static-example validation, not current production-test evidence or proof of all export variants.
 
 - **What it verifies.** The check validates the vendored XCCDF 1.2 schema and
   the repository's `cf-xccdf-1` extension schema (`schemas/cf-xccdf-1/`). It uses
@@ -584,7 +619,7 @@ README: [packages/verify-xccdf-schema/README.md](../../../packages/verify-xccdf-
 
 ### `stig`
 
-README: [packages/verify-stig/README.md](../../../packages/verify-stig/README.md).
+Current successor: [eleven pure module assertion groups](../../../modules/nixos/crystal-forge/tests/stig.nix), evaluated directly without a derivation.
 
 - **What it verifies.** A pure Nix evaluation tests
   `lib.crystal-forge.mkStigModule`, the helper that sets NixOS option values at a
@@ -607,7 +642,7 @@ README: [packages/verify-stig/README.md](../../../packages/verify-stig/README.md
 
 ### `nixos-options-metadata`
 
-README: [packages/verify-nixos-options-metadata/README.md](../../../packages/verify-nixos-options-metadata/README.md).
+Current successor: [ordinary metadata package assertions and postCheck](../../../packages/nixos-options-metadata/default.nix).
 
 - **What it verifies.** A pure Nix evaluation over the `nixos-options-metadata`
   package asserts that the metadata list is sorted by option path, that five
@@ -626,7 +661,7 @@ README: [packages/verify-nixos-options-metadata/README.md](../../../packages/ver
 
 ### `run-ui-dev-db-check`
 
-README: [packages/verify-run-ui-dev-db-check/README.md](../../../packages/verify-run-ui-dev-db-check/README.md).
+Current successors: [DB usability selftest](../../../packages/devScripts/db-usability-check-test.sh) and [DB start selftest](../../../packages/devScripts/db-only-start-test.sh), invoked directly under `nix develop`.
 
 - **What it verifies.** The check runs two bash tests against the real scripts
   in `packages/devScripts/`. `db-usability-check.sh` must tell apart a

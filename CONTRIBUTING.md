@@ -50,7 +50,8 @@ Crystal Forge has comprehensive testing across multiple levels. When contributin
 
 **For component integration**:
 
-- Server regression tests: `nix build .#verify-server-regressions`
+- Core component tests: `nix build .#default.cf-server-core-drv -L`
+- Isolated server/database regressions: `nix run .#devScripts.state-machine-test -- up --tui=false`
 - Registered integration owner: `nix build .#checks.x86_64-linux.integration-access`
 - Python server, builder, cache, and database tests:
   `nix run .#cf-test-suite.runTests -- -vvv`
@@ -60,8 +61,12 @@ TASK-490.24 retires the legacy suites before replacement coverage is complete.
 Only Access exists today, with 16 executed cases; missing Access, Delivery,
 Assurance, and Upgrade obligations remain in the coverage map. The current
 inventory is one total check, formerly 27. The final target is exactly four
-total check attributes, without placeholders. Lower-level verification now
-uses package targets (`verify-<name>`, except `okf-knowledge` and `ui-screenshots`).
+total check attributes, without placeholders. Lower-level verification uses
+ordinary component builds, direct `component-tests` CI commands, and existing
+isolated database workflows. All fifteen `verify-*` wrappers are removed.
+Documentation and mocked design captures remain `.#okf-knowledge` and
+`.#ui-screenshots` package targets. The [verification guide](docs/agents/verification.md#consolidated-component-verification)
+lists the consolidated commands and their execution boundaries.
 The host `web-ui-test` developer command remains available; the legacy `web-ui`
 VM gate and baseline-candidate CI job are retired.
 

@@ -41,18 +41,18 @@ tags:
 | `checks/web-ui-reconciliation/README.md` | historical scope in [web-ui-reconciliation section](../../testing/flake-checks.md#web-ui-reconciliation); source retired by TASK-490.24 | merged | complete |
 | `checks/web-ui-test-runner/README.md` | relocated source cataloged in [web-ui-test-runner section](../../testing/flake-checks.md#web-ui-test-runner) | merged | complete |
 | `checks/xccdf-schema/README.md` | relocated source cataloged in [xccdf-schema section](../../testing/flake-checks.md#xccdf-schema) | merged | complete |
-| `packages/verify-builder-evaluator-packaging/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#builder-evaluator-packaging) | retained | complete |
-| `packages/verify-niks3-ca-bundle/README.md` | retained at relocated package source; [operator contract](../../caches/niks3-ca-bundle-compatibility.md) | retained | complete |
-| `packages/verify-nixos-options-metadata/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#nixos-options-metadata) | retained | complete |
-| `packages/verify-nixos-discovery-reliability/README.md` | retained at relocated package source; [cold-input evidence](../../evaluation/bulk-evaluator-resource-planning.md#cold-input-evidence-and-limits) | retained | complete |
-| `packages/verify-oscal-export/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#oscal-export) | retained | complete |
-| `packages/verify-run-ui-dev-db-check/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#run-ui-dev-db-check) | retained | complete |
-| `packages/verify-server-regressions/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#server-regressions) | retained | complete |
-| `packages/verify-stig/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#stig) | retained | complete |
+| `packages/verify-builder-evaluator-packaging/README.md` | consolidated module and installed-wrapper contract in [catalog](../../testing/flake-checks.md#current-inventory-and-commands); former package removed | merged | complete |
+| `packages/verify-niks3-ca-bundle/README.md` | [operator contract](../../caches/niks3-ca-bundle-compatibility.md) and [core CA ownership](../../testing/flake-checks.md#current-inventory-and-commands); former package removed | merged | complete |
+| `packages/verify-nixos-options-metadata/README.md` | ordinary metadata package assertions in [catalog](../../testing/flake-checks.md#current-inventory-and-commands) | merged | complete |
+| `packages/verify-nixos-discovery-reliability/README.md` | direct runtime test in [catalog](../../testing/flake-checks.md#current-inventory-and-commands) and [cold-input evidence](../../evaluation/bulk-evaluator-resource-planning.md#cold-input-evidence-and-limits) | merged | complete |
+| `packages/verify-oscal-export/README.md` | ordinary OSCAL fixture validation in [catalog](../../testing/flake-checks.md#current-inventory-and-commands) | merged | complete |
+| `packages/verify-run-ui-dev-db-check/README.md` | direct tool selftests in [component catalog](../../testing/flake-checks.md#current-inventory-and-commands) | merged | complete |
+| `packages/verify-server-regressions/README.md` | consolidated isolated state-machine workflow and selection audit in [catalog](../../testing/flake-checks.md#current-inventory-and-commands) | merged | complete |
+| `packages/verify-stig/README.md` | eleven pure module assertion groups in [catalog](../../testing/flake-checks.md#current-inventory-and-commands) | merged | complete |
 | `packages/ui-screenshots/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#ui-screenshots) | retained | complete |
 | `packages/devScripts/web-ui/design-parity/eval-drawer.md` | retained at relocated developer-tool source; [testing index](../../testing/index.md) | retained | complete |
-| `packages/verify-web-ui-test-runner/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#web-ui-test-runner) | retained | complete |
-| `packages/verify-xccdf-schema/README.md` | retained at relocated package source; [catalog](../../testing/flake-checks.md#xccdf-schema) | retained | complete |
+| `packages/verify-web-ui-test-runner/README.md` | direct host runner selftest in [component catalog](../../testing/flake-checks.md#current-inventory-and-commands) | merged | complete |
+| `packages/verify-xccdf-schema/README.md` | actual installed writer/schema validation and static-example disposition in [catalog](../../testing/flake-checks.md#current-inventory-and-commands) | merged | complete |
 | `packages/cf-test-suite/README.md` | retained in place; see [scenario runner section](../../testing/flake-checks.md#scenario-runner-packagescf-test-suite) | retained | complete |
 | `docs/design/CrystalForge/fixtures/README.md` | retained in place; see [pointer](../../testing/design-golden-fixtures.md) | retained | complete |
 | `backlog/docs/doc-1 - Task-Template.md` | retained in place; see [pointer](../../operations/backlog-process-documents.md) | retained | complete |
@@ -64,7 +64,9 @@ tags:
 
 The table preserves original source identities and migration-base provenance.
 `merged` records the current catalog or retirement disposition after the original
-path is removed; new `retained` rows identify the relocated live Markdown sources.
+path is removed; `retained` rows identify live Markdown sources. The interim
+verification-package README rows are now `merged`: those files are removed,
+and the component catalog and verification guide own their current contracts.
 The historical source inventory below describes the earlier migration, not the
 current filesystem. Its original titles, purposes and source paths remain as
 provenance. Source retirement is explicitly authorized before replacement

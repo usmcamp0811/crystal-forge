@@ -183,7 +183,7 @@ readiness reporting, artifact creation, exit-status propagation) is covered by
 a separate lightweight check that starts no services:
 
 ```bash
-nix build .#verify-web-ui-test-runner --no-link -L
+nix develop -c env -u DB_HOST -u DB_PORT -u DB_USER -u DB_NAME bash packages/devScripts/web-ui/tests/web-ui-test-runner-test.sh packages/devScripts/web-ui/tests/web-ui-test.sh packages/devScripts/web-ui/coverage-manifest.json
 ```
 
 ### Authoritative verification (historical)

@@ -19,9 +19,10 @@ The public onboarding recipe concatenates a private issuing CA and the full
 `pkgs.cacert` OpenSSL/NSS bundle. That union is intentional: the private root
 can authenticate the Niks3 API while public roots authenticate presigned HTTPS
 object-storage targets. This guide does not inspect a deployed private CA or
-its key. See the [reproduction check](../../../packages/verify-niks3-ca-bundle/README.md)
-for the public recipe, package origins, measured structure, and verification
-history.
+its key. The [component dataset comparison](../../../packages/default/crates/cf-config/tests/ca-bundle/compatibility.nix)
+defines the public recipe, pinned package inputs and provenance report. The
+[component catalog](../testing/flake-checks.md#current-inventory-and-commands)
+records execution ownership and the consolidation measurements.
 
 Niks3's Go client uses one custom root pool for both API and presigned S3
 connections. A selected custom CA replaces system roots; it does not augment
@@ -156,7 +157,13 @@ for guarded confirmed/pending completion and bounded callback retries.
 
 The focused Go/Rust reproduction uses one synthetic private issuer plus the
 full public NSS bundle. It compares complete DER-identity sets selected by Go,
-not subject names. The three package origins are recorded in its README.
+not subject names. The component comparison records the three package origins
+in its generated provenance report. Normal core tests explicitly select all
+thirteen unchanged `cf-config` library tests; `--package cf-server` alone did
+not select dependency-library tests. Core `postCheck` owns the separate real
+Go/Rust dataset comparison, with no public verification package, CA runner or
+fixture derivation. Go invocations decrease from nine to three and OpenSSL
+parses from 1,758 to 879; complete identity equality remains required.
 The public bundle contains 121 ordinary and 172 trusted certificates, plus
 605 annotation lines. The annotations are 172 labels, 51 omission notes,
 170 trust headings, and 212 OID lines. They are supported generator structure,

@@ -856,7 +856,8 @@ nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/default
 nix build --no-link -L path:.#packages.x86_64-linux.server path:.#packages.x86_64-linux.builder
 
 # Preserved lower-level packaging contract, outside checks.
-nix build --no-link -L path:.#verify-builder-evaluator-packaging
+nix build --no-link -L .#default.cf-server-core-drv
+nix shell --impure --expr 'let f = builtins.getFlake ("git+file://" + toString ./.); p = import f.inputs.nixpkgs { system = builtins.currentSystem; }; in [ p.remarshal p.jq ]' --command bash modules/nixos/crystal-forge/tests/packaging.sh
 ```
 
 Ignored SQLx integration tests are not run by the Rust commands above. Run those
@@ -867,7 +868,7 @@ requirements remain unimplemented coverage gaps. Packaging retains pinned
 child Nix, the server, and the builder to evaluator **Nix 2.34.8** through
 `pkgs.nix-eval-jobs.nix`; do not replace this with an unrelated Nix on `PATH`.
 
-The [packaging gate](../../../packages/verify-builder-evaluator-packaging/README.md) probes
+The [direct packaging probes](../../../modules/nixos/crystal-forge/tests/packaging.sh) test
 wrappers and service PATH. The [historical Niks3 VM gate](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/niks3-cache/README.md)
 exercised token/public, mTLS/public, token/private, mTLS/private, and token/public
 read-proxy variants with real remote builds, signed completion, server verification,

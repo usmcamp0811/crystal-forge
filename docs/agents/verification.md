@@ -105,10 +105,10 @@ normal owner aggregate (never a `.run` output) and exports evidence files to
 `integration-evidence/integration-access/`, including after a failed build.
 TASK-490.24 authorizes retirement of the nine legacy suite directories before
 replacement coverage is complete. `legacy-flake-check`, `web-ui-check`, and
-`web-ui-baseline-candidates` are removed. The six retained matrix entries now
-run as `package-verification` using native package targets; the three
-process-compose database Rust jobs remain. The `verify-server-regressions`
-and `state-machine-tests` overlap remains unresolved in TASK-490.24. The
+`web-ui-baseline-candidates` are removed. One explicit `component-tests` job
+replaces the six-entry package matrix. All fifteen public `verify-*` wrappers
+are removed. Three process-compose database Rust jobs remain; the existing
+state-machine workflow now owns the consolidated server regressions. The
 [coverage map](../knowledge/testing/integration-coverage-map.md#current-gitlab-selection)
 lists the obligations that have no automatic integration coverage.
 
@@ -179,9 +179,83 @@ nix eval --json .#checks.x86_64-linux --apply 'c: builtins.attrNames c == [ "int
 ```
 
 The final predicate must return `true`; a successful evaluation returning
-`false` does not pass final acceptance. Lower-level verification uses
-`nix build .#verify-<name> -L`, with `.#okf-knowledge` and `.#ui-screenshots`
-as the two naming exceptions. These packages are outside `checks`.
+`false` does not pass final acceptance. Consolidated lower-level verification
+runs outside `checks`, as described below. Do not add a fifth check or replace
+the removed wrappers with another registry or aggregation framework.
+
+## Consolidated component verification
+
+The explicit `component-tests` job in `.gitlab-ci.yml` runs these commands on
+merge requests and `main`. Ordinary core tests own nonignored server library/bin
+tests and all thirteen unchanged `cf-config` CA library tests. Core `postCheck`
+owns real Nix inspection, observation, snapshot isolation, source parity and
+Go/Rust CA dataset comparison. These checks do not repeat in the embedded build.
+
+```bash
+sh packages/ci/public-cache-build.sh .#default.cf-server-core-drv -L --show-trace --builders '' --max-jobs 1 --cores 2
+nix build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge -L --show-trace --builders '' --max-jobs 1 --cores 2
+
+for suite in builder-cve stig packaging; do
+  nix eval --impure --json --expr "
+    let
+      f = builtins.getFlake (\"git+file://\" + toString ./.);
+      p = import f.inputs.nixpkgs {
+        system = builtins.currentSystem;
+        overlays = [ f.overlays.default ];
+      };
+    in import ./modules/nixos/crystal-forge/tests/$suite.nix {
+      inputs = f.inputs // { self = f; };
+      pkgs = p;
+      lib = p.lib // { crystal-forge = f.lib; };
+    }"
+done
+
+nix develop -c bash modules/nixos/crystal-forge/tests/discovery.sh
+nix shell --impure --expr '
+  let
+    f = builtins.getFlake ("git+file://" + toString ./.);
+    p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
+  in [ p.remarshal p.jq p.libxml2 p.openscap ]
+' --command bash -euo pipefail -c '
+  bash modules/nixos/crystal-forge/tests/packaging.sh
+  core=$(nix eval --raw .#default.cf-server-core-drv.outPath)
+  xccdf_schemas=$(nix eval --raw .#xccdf-1-2-schemas.outPath)
+  bash packages/default/crates/cf-server/tests/xccdf-schema.sh \
+    "$core" "$xccdf_schemas" "$PWD/schemas/cf-xccdf-1/cf-xccdf-1.xsd"
+'
+
+nix develop -c env -u DB_HOST -u DB_PORT -u DB_USER -u DB_NAME bash -euo pipefail -c '
+  bash packages/devScripts/db-usability-check-test.sh packages/devScripts/db-usability-check.sh
+  bash packages/devScripts/db-only-start-test.sh packages/devScripts/db-only-start.sh
+  bash packages/devScripts/web-ui/tests/web-ui-test-runner-test.sh \
+    packages/devScripts/web-ui/tests/web-ui-test.sh packages/devScripts/web-ui/coverage-manifest.json
+'
+```
+
+Each pure module evaluation must return `true`; none creates a verification
+derivation. Discovery uses independent temporary Nix stores. Packaging probes
+the installed wrappers and generated service contract. Schema validation uses
+actual installed exporter output, five CF extension types and OpenSCAP; it does
+not claim XSD coverage for every custom-check variant. Build core before running
+the installed-fixture command. Evaluation alone does not realize its inputs.
+
+Run the consolidated database workflow once:
+
+```bash
+nix run .#devScripts.state-machine-test -- up --tui=false
+```
+
+The launcher owns a fresh temporary cluster on port 35433, verifies its data
+directory, role privileges (`LOGIN SUPERUSER CREATEDB`) and `pg_stat_statements`
+preload, and exports both database URLs inside the SQLx shell. All selections
+share `target/database-tests`. It preserves both populated migration rehearsals,
+284 unique ignored library tests and fourteen integration targets (231 cases).
+Six repeated ignored selections and 94 nonignored library selections were
+removed; normal package tests own the latter. Two repeated `composite_policy`
+executions were removed from the CVE job because the full target owns them.
+The CVE and dashboard jobs remain separate. Do not interpret selection counts
+as distinct-test counts. See the [component ownership table](../knowledge/testing/flake-checks.md#current-inventory-and-commands)
+for the exact source homes and the task notes for the assertion audit.
 
 ## Output handling
 
