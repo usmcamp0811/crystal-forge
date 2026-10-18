@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 13:45'
+updated_date: '2026-10-18 13:47'
 labels:
   - bug
   - nixos
@@ -27,11 +27,11 @@ ordinal: 538000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Repair the active `cf_config::config::DatabaseConfig` serializer used by the running cf-server. Preserve the documented NixOS Unix socket default `/run/postgresql`; do not switch to TCP. The server config module reexports this cf-config type. The similarly named `cf-server/src/config/database.rs` is not in the active module graph and remains untouched.
+Repair the active `cf_config::config::DatabaseConfig` serializer used by cf-server. Preserve the documented `/run/postgresql` Unix socket; do not switch to TCP. `cf-server/src/config/mod.rs` reexports and uses the cf-config type. The similarly named `cf-server/src/config/database.rs` is not in the active module graph and remains untouched.
 
-The shared serializer serves both tokio_postgres connection validation and the SQLx pool. Database-client dependencies remain in cf-server; cf-config uses only URI encoding support. The regression table calls the real serializer, parses each output through both clients, and asserts recovered socket, ordinary TCP, and encoding-sensitive values including space/literal-plus/reserved characters with nondefault port.
+One shared serializer serves tokio_postgres validation and SQLx pool creation. Keep both database clients in cf-server; cf-config has only URI encoding support. Regression table calls the real serializer, parses with both existing clients, and asserts recovered values for the default socket path, ordinary TCP, and space/literal-plus/reserved values with a nondefault port.
 
-Separately committed as `ca46cdd584c7cef6071d1ee3662453faa51912b6`. Targeted two-client tests passed. The combined Access scenario passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`; evidence `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/` shows the production module's `/run/postgresql` host, successful startup and migrations. The normal Access aggregate also passed. The coordinator recorded unrelated first-boot Postgres Jobs defect TASK-492; it is not authorized under this repair.
+Repair is separate commit `52128b3a63175b712f7a83860355fdeec658a230` after rebase. Targeted table passed 2/2 before rebase. Combined Access scenario and owner aggregate passed on rebased source `bba718befbc183863781656df2df272e5f735d5a`; evidence `/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/` shows `/run/postgresql`, successful startup and migrations (292). Normal server package and parser checks passed before rebase; VM build on rebased source also succeeds. TASK-492 is a separate unauthorized startup-order issue.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
