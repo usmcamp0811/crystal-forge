@@ -6,7 +6,7 @@ title: >-
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 03:33'
+updated_date: '2026-10-18 03:52'
 labels:
   - bug
   - nixos
@@ -55,4 +55,6 @@ LOCK: claude-sonnet-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-i
 Repair commit ca46cdd5 (full: verify with `git rev-parse ca46cdd5^{commit}` in the foundation worktree) changes the active cf-config serializer and adds the two-client regression table. `SQLX_OFFLINE=true nix develop -c cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib database_url_tests` passed (2/2). Combined Access VM proof is pending.
 
 Combined runtime proof passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. Exact command: `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. Evidence `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`; result.json passes fresh startup/migrations, and redacted generated-config-summary.txt shows `/run/postgresql`. The NixOS test uses the production server through both connection consumers; all five cases passed.
+
+Exact final branch-head repeat at `ade5080cd84c7be057b8f0a9d9c490ed8b1fd3d5` also passed the combined Access socket startup/migration case; evidence `/nix/store/0aavcw4vk32c83gljg8y4mz7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. (First exact store path remains recorded in the description; no further rerun needed.)
 <!-- SECTION:NOTES:END -->
