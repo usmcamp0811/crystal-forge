@@ -4,7 +4,7 @@ title: NixOS server.auth_mode=local is not propagated to the server runtime
 status: In Progress
 assignee: []
 created_date: '2026-10-17 20:28'
-updated_date: '2026-10-18 02:15'
+updated_date: '2026-10-18 02:47'
 labels:
   - bug
   - nixos
@@ -26,16 +26,17 @@ ordinal: 539000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The TASK-490.1 Access scenario uses the normal module option services.crystal-forge.server.auth_mode = "local". Generated config contains [server] without auth_mode; `systemctl show crystal-forge-server.service -p Environment --value` reports AUTH_MODE=unset. cf-config default_auth_mode() reads AUTH_MODE and defaults to oidc, so the module's local choice is not represented in generated runtime configuration.
+Propagate `services.crystal-forge.server.auth_mode` to the effective production server setting using the normal NixOS systemd unit. Set `AUTH_MODE` from the module option for both local and OIDC selections; preserve OIDC-specific environment variables only in OIDC mode and preserve existing EnvironmentFile precedence. Do not add a test-only override or change auth policy.
 
-Observed configuration in the native Access VM at final combined commit fc930335878279ac426510359c039dfd8961dc13: /nix/store/1d5178gxpdv7j4d20dddddr7ik0pq0p3-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/generated-config-summary.txt. The same run failed first on TASK-490.25's malformed database URL; no route registration, setup-status response, or OIDC HTTP behavior was observed. Expected: normal module auth_mode=local selects local auth. Actual: generated TOML omits the key and systemd env omits AUTH_MODE. Keep the local-mode assertion executable. No test-only override or production fix belongs in TASK-490.1.
+This repair is separately committed from TASK-490.1 test/doc work. The user explicitly authorized it on 2026-10-17. The local/oidc module evaluation yielded the corresponding unit values; commit `136348e8` integrates the unit setting. TASK-490.1's current Access bootstrap case proves local setup-status, first administrator registration/sign-in, reload persistence, and rejected login through the production UI once the combined VM run passes. Keep the test assertion; coordinator owns combined VM and owner verification.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The normal NixOS module option auth_mode=local results in the server runtime selecting local mode
-- [ ] #2 The fresh setup-status endpoint reports auth_mode local and requires_setup true on an empty database
-- [ ] #3 The local registration and sign-in routes are registered through the normal module configuration without a test-only environment override
+- [ ] #1 The normal module's local selection produces systemd AUTH_MODE=local and the effective server reports local mode
+- [ ] #2 The normal module's OIDC selection produces systemd AUTH_MODE=oidc and preserves OIDC-only variables/selection
+- [ ] #3 Targeted evaluation verifies both module choices without a test-only override
+- [ ] #4 The combined Access VM proves empty-database setup-status, real local registration/sign-in, persistent admin/session and rejected wrong password with no new session
 <!-- AC:END -->
 
 ## Implementation Notes
