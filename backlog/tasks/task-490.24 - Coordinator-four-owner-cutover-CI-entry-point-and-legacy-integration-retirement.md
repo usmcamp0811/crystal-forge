@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-18 03:30'
+updated_date: '2026-10-18 03:52'
 labels:
   - testing
   - integration
@@ -81,4 +81,6 @@ Cutover is not ready: only `integration-access` exists, its bootstrap slice is a
 Cutover dependencies expanded 2026-10-17 to include the two product blockers discovered by the correct Access foundation slice (TASK-490.25/.26) and the decomposed Assurance work packets (.27-.29). Passing or explicit owner scope approval is still required before retiring the legacy gates. No dependent task is ready.
 
 At tested source revision b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56, focused Access VM and `nix build .#checks.x86_64-linux.integration-access -L` both passed. Current runtime evidence is `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. Only the bootstrap slice is covered. TASK-492 records the unrelated one-shot Postgres Jobs first-boot role race; no Access assertion failed.
+
+The Access focused scenario and owner aggregate were repeated at final documentation/comment revision `ade5080cd84c7be057b8f0a9d9c490ed8b1fd3d5`; both pass. The evidence output is `/nix/store/0aavcw4vk32c83gljg8y4mz7gi5pqrn4-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. This repeat verifies the final exact head; it is not evidence for any missing Access contract or other owner.
 <!-- SECTION:NOTES:END -->
