@@ -141,11 +141,13 @@ Postgres Jobs ordering defect that does not fail the Access gate. The
 [coverage map](../knowledge/testing/integration-coverage-map.md#foundation-execution-record)
 records the failures, current receipts, and uploaded reviewer artifacts.
 TASK-490.1 foundation is in `Review`; its documentation validation passed.
-TASK-490.2 remains `In Progress`: the Operator/Viewer cases are unimplemented,
-and only the exact environment-scope and closed-registration cases wait for
-accepted decisions. The same Access scenario passed ten cases through the CI job
-script at `2c494ac4bf8cc7155899723ee69fcf879ac49248`, with the VM executed
-newly. Validate this
+TASK-490.2 remains `In Progress`: the selected Operator/Viewer admin-denial cases
+are implemented, and only the exact environment-scope and closed-registration
+cases wait for accepted decisions. The Access scenario passed all 16 cases
+(ten earlier, six authorization) through the CI job script at
+`8a857bc872cf331a19036b97a93f2b7741e9728b`, with the VM executed newly; see the
+[authorization record](../knowledge/testing/integration-coverage-map.md#access-authorization-cases-task-4902).
+Validate this
 documentation follow-up with `nix build .#checks.x86_64-linux.okf-knowledge -L`;
 do not rerun a VM merely because documentation follows the tested source.
 

@@ -58,7 +58,7 @@ followed by five owner-selected session/CSRF/revocation and browser sign-out
 cases. Sign-out proves logout 204, exact persisted session invalidation,
 login after reload, protected GET 401, and protected navigation to `/login`.
 This is semantic coverage, not a visual-parity verdict or full Access coverage.
-Role/environment/closed-registration cases remain unimplemented under D1.
+Operator/Viewer admin-denial cases (create, PATCH, configuration, Viewer UI) were later added and passed; cross-environment and closed-registration cases remain unimplemented under D1.
 The same run records unrelated TASK-492
 in the Postgres Jobs journal. See the
 [coverage map execution record](integration-coverage-map.md#foundation-execution-record).

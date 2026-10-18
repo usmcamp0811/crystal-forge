@@ -16,7 +16,13 @@ session lifecycle writes, valid 204 revocation of only the selected session,
 its next GET returning 401 while the retained session returns 200, and an
 independent browser signing out through the profile. Browser sign-out requires
 logout 204, exact-row invalidation, `/login` after reload, protected GET 401,
-and protected navigation returning to `/login`.
+and protected navigation returning to `/login`. Six further owner-selected
+authorization cases create an Operator and a Viewer through the Admin API,
+prove with Admin that each probe payload is valid, and then show that both
+roles receive 403 `forbidden` and no protected change for the admin-only user
+create, user PATCH and server-configuration (retry policy, classification
+banner) mutations. A Viewer browser context finds no administration entry and
+the production Access Denied state at `/admin`.
 
 The historical scenario at `fc930335878279ac426510359c039dfd8961dc13`
 failed at server startup. TASK-490.25 fixed shared URI serialization while
@@ -71,15 +77,16 @@ replacement CI gate. Normal verification does not update visual baselines.
 
 ## Missing obligations
 
-Access is not complete. The selected session/CSRF/sign-out proof is covered
-under the owner's explicit selection. TASK-490.2 remains `In Progress`:
-Operator/Viewer admin denials and unavailable UI states, environment-scope
-restrictions, and closed-registration cases are unimplemented, with exact
-expectations blocked under D1. OIDC, forms, preferences, notifications,
-and shell behavior also remain in the
+Access is not complete. The selected session/CSRF/sign-out proof and the
+selected Operator/Viewer admin-denial cases are covered under the owner's
+explicit selections (16 cases; see the
+[authorization record](../../docs/knowledge/testing/integration-coverage-map.md#access-authorization-cases-task-4902)).
+TASK-490.2 remains `In Progress`: the cross-environment denial rule and the
+closed-registration policy are unimplemented, and each waits for its own
+decision. An Operator browser view, other Admin routes and visual comparison
+are not covered. OIDC, forms, preferences, notifications, and shell behavior
+also remain in the
 [coverage map](../../docs/knowledge/testing/integration-coverage-map.md).
-In Operator/Viewer terms, the denial cases are unimplemented; only the exact
-environment-scope and closed-registration expectations wait for decisions.
 GitLab runs this owner automatically and requires it (see below). The legacy
 integration checks are optional manual jobs, and that does not mark their
 obligations covered.
@@ -88,7 +95,13 @@ The coordinator composes `scenarios/fragments/task-490.2-sessions.py` after
 the five bootstrap cases using `pkgs.writeText` and `builtins.readFile` in
 `scenarios/lifecycle-local-bootstrap.nix`; the matching `.cjs` is registered as
 `session-sign-out`. This uses the same VM/database and real admin receipt,
-with an independent browser context; it adds no DSL, gate, or role.
+with an independent browser context; it adds no DSL, gate, or role. The
+authorization fragment `task-490.2-authorization.py` is appended after the
+session fragment in the same way, and its `.cjs` is registered as
+`viewer-admin-denied`. The Operator, Viewer and target users, and the probe
+payloads, are authored facts in the scenario `.nix`; identities come from the
+approved design fixture by stable ID. No additional VM derivation, owner or
+flake check exists for these cases.
 
 The first session attempt at `537186835956d7af48a0868289e16364625dd85c`
 failed the last UI case due to the coach overlay and unhandled-promise test
@@ -124,9 +137,13 @@ After a successful build, the script copies `result/<scenario>/evidence/`. If
 the build succeeded but evidence is missing, the job fails. After a failed
 build, the `result` link does not exist. The script then resolves each
 registered scenario's `.run.outPath` through evaluation and copies only outputs
-that already exist. It never builds a `.run` derivation, because a crash or
-timeout could run the VM again and replace the original attempt's evidence. It
-always exits with the original build status. The scenario names come from the
+that already exist, including the last listed scenario (the listing has no final
+newline). A copy failure is reported and counted; it does not replace the build
+status, and the remaining scenarios are still collected. The script never builds
+a `.run` derivation, because a crash or timeout could run the VM again and
+replace the original attempt's evidence. After a failed build it always exits
+with the original build status. After a successful build, a missing or
+uncopyable evidence directory fails the job. The scenario names come from the
 owner's own `scenarios` attribute set; the script keeps no second list.
 
 Run the same script locally from the repository root. It removes a stale

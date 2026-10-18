@@ -124,15 +124,17 @@ for the generated configuration, exact output path, expected/actual result,
 and task links. TASK-491's package test prerequisite is resolved. The CI job
 script `sh packages/ci/integration-owner-build.sh integration-access` also
 executed the VM and passed the same ten cases at
-`2c494ac4bf8cc7155899723ee69fcf879ac49248`; it exports real evidence files
-to `integration-evidence/integration-access/`, including after a failed build.
+`2c494ac4bf8cc7155899723ee69fcf879ac49248`, and all 16 cases (adding six
+Operator/Viewer authorization cases) at `8a857bc872cf331a19036b97a93f2b7741e9728b`;
+it exports real evidence files to `integration-evidence/integration-access/`,
+including after a failed build, and keeps the build status if collection fails.
 Keep the legacy gate definitions until full owner cutover conditions pass.
 
 ## Summary
 
 | Check | Boots a VM | Covers | README |
 | --- | --- | --- | --- |
-| `integration-access` | Yes (controller; ten-case gate passed; automatic and required in GitLab) | Local bootstrap, 292 migrations, 22 observed socket clients, registration/sign-in/reload, wrong-password rejection, selected-session CSRF/revocation and independent browser sign-out; role/environment/registration cases remain unimplemented | [Coverage map](integration-coverage-map.md) |
+| `integration-access` | Yes (controller; 16-case gate passed; automatic and required in GitLab) | Local bootstrap, 292 migrations, observed Unix-socket clients, registration/sign-in/reload, wrong-password rejection, selected-session CSRF/revocation and independent browser sign-out, and Operator/Viewer denial (403, no protected change) of admin-only user create, user PATCH and server configuration plus the Viewer `/admin` Access Denied UI; cross-environment scope and closed-registration cases remain unimplemented | [Coverage map](integration-coverage-map.md) |
 | `integration` | Yes (server and git server) | Server, database, and Grafana dashboard behavior through the `cf_test` pytest markers `database`, `dashboard`, and `server` | [README](../../../checks/integration/README.md) |
 | `oidc-auth` | Yes (Keycloak and server) | OIDC login path against a real Keycloak realm | [README](../../../checks/oidc-auth/README.md) |
 | `web-ui` | Yes (server, agent, builder, git server) | Production embedded-UI server through a real browser | [README](../../../checks/web-ui/README.md) |
