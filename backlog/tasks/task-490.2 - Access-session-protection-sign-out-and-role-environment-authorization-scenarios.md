@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:34'
-updated_date: '2026-10-18 03:32'
+updated_date: '2026-10-18 13:45'
 labels:
   - testing
   - integration
@@ -54,4 +54,6 @@ The base scenario passed at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`; TASK-490
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction replaces old paths, commands, discovery and D1 authority instructions. Actual foundation commit is unresolved; two existing Rust package tests block foundation and no VM execution occurred. Backlog, not ready: actual dependency commit(s) and verified commands are required before To Do. No Luna delegation or executed slice is claimed. Coordinator owns shared lib, owner default.nix registration, CI/docs; this child writes only its disjoint scenario files.
+
+Rebase verification: the TASK-490.1 base scenario passed at rebased source `bba718befbc183863781656df2df272e5f735d5a`; command remains `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. This fragment set is still Backlog because TASK-490.1 remains In Progress and the role/environment/closed-registration assertions require owner authority where not already accepted.
 <!-- SECTION:NOTES:END -->
