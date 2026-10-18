@@ -85,6 +85,32 @@ in
         password = "cf-it-access-target-1";
       } // { roleWire = "Viewer"; };
 
+      # A new design identity: the earlier role-denial cases already created
+      # u2/u4/u7. Form cases must observe the creation of this account themselves.
+      adminFormUser = harness.facts.localUserFromDesign {
+        id = "u3";
+        username = "dchen";
+        password = "cf-it-admin-form-1";
+      };
+      adminForms = {
+        initialRoleWire = "Operator";
+        initialRoleDb = "operator";
+        editedRoleWire = "Viewer";
+        editedRoleDb = "viewer";
+        cancelEmail = "cancelled-admin-form@acme.io";
+        retryPolicy = {
+          max_build_retries = 4;
+          max_evaluation_retries = 2;
+          backoff_seconds = 60;
+          transient_only = false;
+        };
+        classification = {
+          enabled = true;
+          level = "CUI";
+          custom_text = "CF-IT ADMIN FORM";
+        };
+      };
+
       # Authored request payloads for the admin-only operations. Each denied
       # request uses a payload that the Admin control case first proves is
       # accepted, so a 403 can only be caused by the actor's role.
@@ -128,11 +154,22 @@ in
       + builtins.readFile ./fragments/task-490.2-sessions.py
       + "\n"
       + builtins.readFile ./fragments/task-490.2-authorization.py
+      + "\n"
+      + builtins.readFile ./fragments/task-490.3-admin-forms.py
     );
     browserSpecs = {
       bootstrap-sign-in = ./lifecycle-local-bootstrap.cjs;
       session-sign-out = ./fragments/task-490.2-sessions.cjs;
       viewer-admin-denied = ./fragments/task-490.2-authorization.cjs;
+      # Distinct artifacts and contexts, not additional VM scenarios. Each
+      # phase returns to Python for authoritative SQL before the next mutation.
+      admin-form-create = ./fragments/task-490.3-admin-forms.cjs;
+      admin-form-edit = ./fragments/task-490.3-admin-forms.cjs;
+      admin-form-cancel = ./fragments/task-490.3-admin-forms.cjs;
+      admin-form-disable = ./fragments/task-490.3-admin-forms.cjs;
+      admin-form-retry = ./fragments/task-490.3-admin-forms.cjs;
+      admin-form-classification-enable = ./fragments/task-490.3-admin-forms.cjs;
+      admin-form-classification = ./fragments/task-490.3-admin-forms.cjs;
     };
     timeout = 900;
   }
