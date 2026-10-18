@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-18 18:22'
+updated_date: '2026-10-18 18:36'
 labels:
   - testing
   - integration
@@ -51,25 +51,17 @@ This remains a test-only overhaul except the previously authorized prerequisite 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-## Current (2026-10-18)
+## Current source retirement (2026-10-18)
 
-Child states: TASK-490.1, .25 and .26 are Review in draft MR !335. TASK-490.2 and TASK-490.24 are In Progress (.2: session and selected Operator/Viewer admin-denial cases verified; cross-environment and closed-registration cases open; .24: early CI transition implemented, final cutover outstanding). The remaining children are Backlog and none is dispatch-ready: they need actual dependency commits and verified commands before To Do, and TASK-490.20/.21 need finer splitting without scope expansion. TASK-490.7/.24 are coordinator writer tasks. D1 (as-built behavior is not authority) and Upgrade D2 remain applicable.
+The owner's source-removal instruction supersedes all prior legacy-retention and optional-manual coexistence rules. Implementation 0105e512 removes nine suites and their manual jobs, relocates needed browser/XCCDF assets, and moves 17 lower-level definitions to native packages. Actual checks.x86_64-linux attrNames: ["integration-access"], down from27. The final criterion remains exactly FOUR TOTAL attributes, not four owners plus retained utility checks. Native Snowfall discovery unchanged; no placeholder owners.
 
-Early CI transition (TASK-490.24, owner-authorized): `integration-access` is an automatic required GitLab job; `integration`, `oidc-auth`, `niks3-cache`, `niks3-write-probe`, `niks3-ui`, `attic-metrics`, `attic-publication` and `web-ui-check` are optional manual jobs. The job script passed all 16 Access cases (five bootstrap, five session, six Operator/Viewer authorization) with the VM executed newly at `8a857bc872cf331a19036b97a93f2b7741e9728b`. Cross-environment scope, registration-policy, OIDC, broad UI/design, Delivery, Assurance and Upgrade now have no automatic integration coverage; TASK-490.2 and the other owners remain incomplete. Final four-owner cutover and legacy source retirement are outstanding. The earlier note that all legacy checks are kept until all four owners pass applies to source retirement only.
+Access's unchanged16-case aggregate passed at clean0105e512 with a fresh VM execution (24.23s driver); source evidence /nix/store/n68lcq6xxab1rhhfymp7yz4pj19hff95-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run. No new cases this source-retirement pass. No product/UI/schema/design changes.
 
-2026-10-18 final minimization rule (recorded in TASK-490.24, the contract and the coverage map): every remaining independent flake check or CI test job must have a distinct necessary purpose. Preserve useful assertions, assign their primary execution ownership, consolidate duplicate execution, and keep developer tools available through package or app outputs. Classification as non-integration alone does not justify a separate check. Checks kept during migration are provisional, not final. Cutover must also show no task-specific VM proliferation under the four aggregates, a reason for repeated Rust/database execution, and the final flake inventory with measured runtime and resource cost. Nothing is deleted arbitrarily before then.
+TASK-490.24 records exact verification results and two600second local command timeouts (full DB regressions and builder-packaging/XCCDF dependency compilation), so full verification is incomplete. Lightweight contracts, tooling, docs, OSCAL, module validation, CI routing/lint passed. Preserved DB regression definition/derivation is identical and actual isolated PostgreSQL execution was observed. Duplicate ignored Rust/DB selections between verify-server-regressions and state-machine-tests remain to map/consolidate here before final completion.
 
-Run one VM test at a time until measured capacity supports a higher limit. LOCK: claude-opus-5-5 on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation.
+Child states: .1/.25/.26 Review; .2/.24 In Progress. Other coverage children remain Backlog, not silently selected. Continue accepted coverage through existing tasks, smallest same-scenario fragments and six planned scenario boundaries. Forms .3/.4, notifications .5, OIDC .6, roles .7, Delivery/Assurance/Upgrade are not implemented merely because old suites were deleted. Environment-scope/registration and Upgrade decisions remain scoped to their own cases. Final four-owner inventory/coverage not satisfied. Existing MR !335 stays draft; no merge/deploy/Done.
 
-## Historical (dated records; superseded readiness statements)
+## Historical milestones
 
-2026-10-17 organization correction replaced prior layout and incomplete-unexported rules. Backlog grooming only. At that time the foundation dependency commit was unresolved, the foundation was blocked by two existing Rust package tests, no VM had executed, and all 24 children were Backlog. The prior owner claude-opus-5-5 recorded the foundation worktree /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation; that is not evidence of completed foundation.
-
-Corrected native-layout WIP was preserved and pushed at `683c86e03ef14b37e69c00030d6d17660398324d`; draft MR !335 (not merge-ready). Only integration-access was discoverable (27 total checks, previous 26 unchanged). No root tests tree, custom discovery or flake-output assembly remains. TASK-491 then blocked VM execution.
-
-The foundation resumed on 2026-10-17 in the existing dedicated worktree. It integrated the tested TASK-491 dependency by cherry-pick `af39284bdf16d56402f01a64c916f17948e43b02` as `a6c8922650bf7f0ff643d181422c0092cfc43242`. The exact Access scenario executed in a VM and failed at startup, preserving its assertion. Generated config evidence revealed product blockers TASK-490.25 (local PostgreSQL socket host becomes empty-authority URI) and TASK-490.26 (local auth_mode omitted; AUTH_MODE unset). Assurance packets .20/.21 were narrowed; .27/.28/.29 split waiver, acceptance register, and verify/closure. The per-scenario fresh DB/VM rule says task dependencies never share runtime outputs.
-
-Final combined foundation commit then was `39a6a54b651a8b77fc3416b73195e363a782fa2e`; its focused Access check failed on fresh startup with evidence in `/nix/store/vcfbia521bjad2a85yca3h3n9i4m4ikf-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/`. The milestone then advanced at `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`: the focused Access bootstrap and the owner aggregate passed. TASK-492 records the independent Postgres Jobs first-boot role race found in the journal, outside the .25/.26 exception.
-
-2026-10-18 source retirement: previous manual-coexistence/source-retention statements are historical and superseded by the current owner instruction. Actual flake inventory drops 27 -> 1 (Access only) with 17 package verification paths retained and nine legacy suites deleted. Three future owners and their accepted coverage still need construction; source cleanup is not final suite completion.
+Foundation organization started at683c86e0; correct Access startup assertion exposed .25/.26. Authorized prerequisite repairs52128b3a and76e51464 enabled bootstrap; sessions passed81d65be7 and CI-path2c494ac4. Selected Operator/Viewer cases extended the same scenario to16 at8a857bc8; hosted job passed08a79037. Interim early-CI manual-coexistence policy and source-retention rules applied at those revisions only, and are now superseded. Historical records/receipts remain in the coverage map and child tasks. TASK-492/493/494 are unrelated recorded issues, not authorization for product fixes.
 <!-- SECTION:NOTES:END -->
