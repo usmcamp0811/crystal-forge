@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-18 13:45'
+updated_date: '2026-10-18 13:47'
 labels:
   - testing
   - integration
@@ -32,15 +32,13 @@ ordinal: 513000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Problem: children need the adopted integration contract, coverage/retirement map, shared harness and a real Access workflow. Goal: establish those foundations and execute fresh server/database startup, migrations, local first-admin bootstrap, production-UI sign-in, reload persistence and wrong-password rejection through the normal NixOS module.
+Problem: children need the adopted integration contract, coverage/retirement map, shared harness, and a real Access workflow. Goal: execute fresh production server/database startup, migrations, first-admin local bootstrap, embedded-UI sign-in, reload persistence, and rejected-login behavior through the normal NixOS module.
 
-Architecture: native Snowfall `checks/integration-access/default.nix` explicitly registers scenarios and aggregates every registered gate with `pkgs.linkFarm`. Shared helpers live under `lib/integration-test/` and are called as `lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }`. Packet files are fragments; coordinator owns Nix scenario composition and registration. No root tests/, `legacyPackages.integration`, `mkOwner`, custom discovery, or placeholder owners. Each separately built scenario has a fresh VM/database; same-scenario cases may use real earlier records/identities through receipts; no cross-derivation state.
+Architecture: native Snowfall `checks/integration-access/default.nix` explicitly registers scenarios and aggregates every registered gate with `pkgs.linkFarm`. Shared helpers live under `lib/integration-test/` and native checks call `lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }`. Packets contribute disjoint fragments; coordinator owns Nix composition/registration. Each separate scenario gets a fresh VM/database; same-scenario cases may reuse real prior records via receipts. No root tests/, `legacyPackages.integration`, `mkOwner`, custom discovery, or placeholders.
 
-Harness scope for this milestone: production `cf-server-drv` with embedded UI through the normal module; currently implemented role is controller with browser option. Services/builder/target role interfaces and their Delivery proving workflow remain in coordinator-owned TASK-490.7; do not add speculative roles/helpers to Access. Contract, coverage map, docs and backlog packets record accepted authority boundaries. D1/as-built material remains evidence, not authority.
+For this milestone only the controller role is implemented. Future services/builder/target roles and their Delivery proving workflow remain in TASK-490.7. Do not add them speculatively to Access. The user authorized only separate TASK-490.25/.26 production repairs; their current rebased commits are `52128b3a63175b712f7a83860355fdeec658a230` and `76e514644505f232e4e47f085db801913d8449ab`. No other production, module, migration, SQLx, UI, or design changes are authorized.
 
-The user explicitly authorized only TASK-490.25 and TASK-490.26 production repairs, each in a separate commit: `ca46cdd5` repairs active cf-config URL serialization while preserving `/run/postgresql`; `136348e8` propagates the selected local/OIDC mode through the production server unit. Other production, module, migration, SQLx, UI, and design changes remain out of scope.
-
-The combined focused Access scenario and current `integration-access` owner passed at tested revision `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`. Exact commands and runtime evidence are in the coverage map and README. TASK-491 remains integrated. Current outstanding foundation scope is the remaining packet/readiness acceptance criterion; future role proof remains in TASK-490.7. No full Access contract, other owner, or overhaul pass is claimed.
+The focused Access scenario and current `integration-access` owner passed at rebased source `bba718befbc183863781656df2df272e5f735d5a` on `origin/dev` `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064`. Evidence and historical failures are recorded in the coverage map and README. This is only the bootstrap slice, not the full Access contract, other owners, or overhaul. TASK-492 records a separate first-boot Postgres Jobs role-ordering issue outside the production exception. Keep child packets Backlog pending actual dependencies, authority, paths, scenario composition, harness interfaces, and verification commands.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
