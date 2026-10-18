@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-18 15:45'
+updated_date: '2026-10-18 17:25'
 labels:
   - testing
   - integration
@@ -87,7 +87,7 @@ Current coverage, stated accurately: the Access scenario `lifecycle-local-bootst
 - [x] #1 [Early CI] The existing CI selection runs `integration-access` automatically and required on merge requests and `main` by building the normal owner aggregate `.#checks.x86_64-linux.integration-access` through packages/ci/public-cache-build.sh with `-L --show-trace --builders '' --max-jobs 1 --cores 2`; a focused scenario or `.run` output is never the gate; no placeholder owner or four-name assertion is added
 - [x] #2 [Early CI] `integration`, `oidc-auth`, `niks3-cache`, `niks3-write-probe`, `niks3-ui`, `attic-metrics`, `attic-publication` and `web-ui-check` are optional manual jobs with `when: manual` and `allow_failure: true`; their check attributes, commands, assertions and fixtures are preserved
 - [x] #3 [Early CI] The six retained matrix entries, the three database-backed Rust jobs, coverage-check, complexity-check and the release/version jobs remain automatic; the automatic web-ui-screenshots-mr-comment reporter and its dependency wiring are removed; web-ui-baseline-candidates stays manual
-- [x] #4 [Early CI] Owner evidence is exported as real files (Nix store symlinks dereferenced) with `artifacts: when: always`; after a failed owner build the script keeps the original exit status, resolves registered scenarios' `.run.outPath` through evaluation, copies only outputs that already exist, keeps the build log, and never launches a `.run` build; a successful build whose evidence is missing fails the job
+- [ ] #4 [Early CI] Owner evidence is exported as real files (Nix store symlinks dereferenced) with `artifacts: when: always`; after a failed owner build the script keeps the original exit status, resolves registered scenarios' `.run.outPath` through evaluation, copies only outputs that already exist, keeps the build log, and never launches a `.run` build; a successful build whose evidence is missing fails the job
 - [x] #5 [Early CI] The contract, coverage map (retirement map distinguishing automatic selection from source retirement, with the automatic coverage gaps), flake-check catalog, web-ui-check runbook, verification guide, Access README, TASK-490 and this task state the early-transition policy accurately; no legacy obligation is marked covered
 - [x] #6 [Early CI] GitLab lint accepts the file, the effective selection matches the intent for merge-request and main pipelines, script syntax is checked, and the actual Access CI execution path ran once with its evidence inspected and VM-executed versus reused recorded
 - [ ] #7 [Final cutover] At final cutover exactly four native checks/integration-{access,delivery,assurance,upgrade}/default.nix owners use { lib, inputs, pkgs, ... }; each normal pkgs.linkFarm aggregate executes ALL registered gates and its complete required set, propagating every failure
