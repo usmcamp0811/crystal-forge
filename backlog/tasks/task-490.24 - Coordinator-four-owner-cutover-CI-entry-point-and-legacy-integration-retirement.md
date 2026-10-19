@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-19 01:49'
+updated_date: '2026-10-19 03:14'
 labels:
   - testing
   - integration
@@ -143,4 +143,6 @@ LOCK: openai on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-
 
 ## Historical
 Nine legacy suites were removed0105e512. One-for-one17lower-level relocation was rejected, not final retention; all15verify outputs removed now. .25/.26 prior configuration repairs enabled bootstrap; sessions/role denials earlier proved16cases. TASK-492/493/494 remain separate. Previous manual-coexistence, source-preservation and pending-DB notes are superseded by this full verified result.
+
+Corrective implementation pushed separately:184642f2 behavior-oriented Access modules and functional coverage ownership/tracking;590ee94c explicit offline CI/preparation, absolute Bash and realized XCCDF schema;c2b77aad root-runner PostgreSQL privilege separation;e07b4bd2 bounded short socket paths, CI routing expectation and documented commands. Six task-numbered files renamed sessions/authorization/admin-forms .py/.cjs; static preservation compared composed AST and23case IDs/order/receipts unchanged. Existing child records updated throughMCP to semantic paths; no task renamed/deleted. Normal Access aggregate exited0 at590ee94c with freshVM23/23, driver50.46s; evidence /nix/store/b21y37v9ffhlk74jr6ijslzvkfr33b2l-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run. Full canonical offlineDB590ee94c:515pass227summaries, migrationspass,18m29s, loopback-only namespace outboundENETUNREACH; explicit empty substituters/builders and nofallback outer/nested; Cargo/SQLxoffline. HostNixdaemon outside namespace, notfirewallisolatedclaim. Hosted2961337066 passedAccess/component/CVE/dashboard; state-machine failed rootinitdb; coverage/complexity skipped. Rootfix drops onlyPGchildren to resolvednobody UID/GID, leavesCargo/cachepermissions intact. Rootpath confirmed by hosted2961382083 logsPGowner nobody and actualRustexecution; fulljob stillrunning at lastinspection. Followupshortsocket fix prevents107byte Unixsocketlimit underlongTMPDIR; localfullrun515pass/0fail/0ignored,227summaries,18m14s, canonicalreceipt0 andcleanup in /tmp/opencode/task490-offline-root-launcher.log, sourceworkingtree basedc2b77aad committedase07b4bd2 (not clean-c2 testclaim). Priorlongsocketattempt failedbeforetests/logretained. Schema/OpenSCAP andactualcomponenthostjobpassed; newertip hostedresultpending. No Deliveryimplementationyet: ownerrequires correctivehostedjobs success beforecontinuation; .7 remainsselectednext, no startup/D1blocker orplaceholder. Currentflakeinventory onlyintegration-access.
 <!-- SECTION:NOTES:END -->
