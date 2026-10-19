@@ -6,12 +6,25 @@
   inherit (harness) pkgs lib inputs;
   modulePath = inputs.self + "/modules/nixos/crystal-forge";
   configuration = ../fixtures/configuration.nix;
+  # PERFORMANCE: Recipes are data in the generated flake. Their default deep
+  # string context forces every build-time output, including unused outputs.
+  # Keep each recipe reference, but depend on its actual production output
+  # separately below instead of rebuilding the entire compiler/tool closure.
+  agentRecipe = builtins.unsafeDiscardOutputDependency harness.packages.agent.drvPath;
+  evaluatorRecipe = builtins.unsafeDiscardOutputDependency pkgs.crystal-forge.default.evaluatorNix.drvPath;
+  evalJobsRecipe = builtins.unsafeDiscardOutputDependency pkgs.nix-eval-jobs.drvPath;
   baseline = inputs.nixpkgs.lib.nixosSystem {
     system = pkgs.stdenv.hostPlatform.system;
     inherit pkgs;
     specialArgs.sourceNonce = "baseline-preparation-only";
     modules = [modulePath configuration];
   };
+  # Retain the baseline's selected direct build inputs, including copied
+  # scripts and build-only checks that its runtime closure does not reference.
+  # A metadata root preserves their output contexts without the transitive
+  # all-outputs expansion of a deep .drvPath context.
+  buildInputs = pkgs.writeText "delivery-build-inputs.json"
+    (builtins.toJSON baseline.config.system.build.toplevel.drvAttrs);
   # Pin the same immutable input identity as the product flake and preload its
   # exact store source on the evaluator/builders. No registry rewrite is used.
   source = pkgs.runCommand "delivery-source-fixture" {} ''
@@ -36,20 +49,33 @@
               cf-agent-drv = {
                 type = "derivation";
                 name = "${harness.packages.agent.name}";
-                drvPath = "${harness.packages.agent.drvPath}";
+                drvPath = "${agentRecipe}";
                 outPath = builtins.appendContext "${harness.packages.agent}" {
-                  "${harness.packages.agent.drvPath}" = {outputs = ["out"];};
+                  "${agentRecipe}" = {outputs = ["out"];};
                 };
               };
               evaluatorNix = {
                 type = "derivation";
                 name = "${pkgs.crystal-forge.default.evaluatorNix.name}";
-                drvPath = "${pkgs.crystal-forge.default.evaluatorNix.drvPath}";
+                drvPath = "${evaluatorRecipe}";
                 outPath = builtins.appendContext "${pkgs.crystal-forge.default.evaluatorNix}" {
-                  "${pkgs.crystal-forge.default.evaluatorNix.drvPath}" = {outputs = ["out"];};
+                  "${evaluatorRecipe}" = {outputs = ["out"];};
                 };
               };
-            }; })];
+            };
+              # Match the production overlay, not bare nixpkgs' evaluator.
+              # This also makes nix-fast-build identical to the prepared one;
+              # otherwise realization rebuilds a second Nix library/toolchain.
+              nix-eval-jobs = {
+                type = "derivation";
+                name = "${pkgs.nix-eval-jobs.name}";
+                drvPath = "${evalJobsRecipe}";
+                outPath = builtins.appendContext "${pkgs.nix-eval-jobs}" {
+                  "${evalJobsRecipe}" = {outputs = ["out"];};
+                };
+                nix = final.crystal-forge.default.evaluatorNix;
+              };
+            })];
           };
           specialArgs.sourceNonce = builtins.readFile ./nonce;
           modules = [./crystal-forge ./configuration.nix];
@@ -93,9 +119,12 @@
   };
   prepared = {...}: {
     imports = [offlineNetwork];
+    # Carry selected build-only inputs alongside the runtime system.
     virtualisation.additionalPaths = [
       pkgs.path inputs.self baseline.config.system.build.toplevel
-      baseline.config.system.build.toplevel.drvPath
+      buildInputs
+      # Retain recipe metadata without realizing unused dependency outputs.
+      (builtins.unsafeDiscardOutputDependency baseline.config.system.build.toplevel.drvPath)
     ];
     nix.settings = {
       experimental-features = ["nix-command" "flakes"];

@@ -165,6 +165,21 @@ state-machine, CVE, dashboard, complexity and coverage. They do not establish
 hosted results for the later Delivery/product-fix source. Final-head hosted
 verification is recorded separately at handoff.
 
+Hosted cold preparation exposed deep Nix recipe contexts in the generated
+source fixture. Its direct derivation dependencies measured 2,525. Retaining
+recipe paths without their transitive all-output contexts reduces that fixture
+to five actual production-output dependencies. A separate immutable metadata
+root retains the baseline's selected direct build inputs, including copied boot
+scripts and build-only checks. This is build-input preparation, not a coverage
+registry. The source also uses the same patched evaluator/Nix package pair as
+the baseline; it no longer rebuilds a different evaluator during realization.
+The unchanged eight-case normal aggregate passed after this correction in a
+working tree based on `ee6e0ddb`, driver 62.67 seconds; evidence:
+`/nix/store/fi1dd1iqfx1fm2k3lj26jcia2rkc1p62-vm-test-run-cf-it-delivery-delivery-lifecycle-run`.
+The 2,525-to-five figure is scoped to this fixture, not a whole-pipeline recipe
+or runtime comparison. No network fallback, output seeding or assertion
+relaxation supplied missing inputs during verification.
+
 ### Semantic source cleanup execution
 
 At `590ee94c635154e027317414298ebe05e9b48bbd`, the normal
