@@ -4,7 +4,7 @@ title: 'Assurance: export downloads and policy/XCCDF interchange round-trip scen
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-18 13:59'
+updated_date: '2026-10-19 02:14'
 labels:
   - testing
   - integration
@@ -15,8 +15,8 @@ dependencies:
   - TASK-490.27
   - TASK-490.28
 modified_files:
-  - checks/integration-assurance/scenarios/fragments/task-490.22-exports.py
-  - checks/integration-assurance/scenarios/fragments/task-490.22-exports.cjs
+  - checks/integration-assurance/scenarios/fragments/exports.py
+  - checks/integration-assurance/scenarios/fragments/exports.cjs
   - checks/integration-assurance/fixtures/interchange-*
 parent_task_id: TASK-490
 priority: medium
@@ -30,8 +30,8 @@ ordinal: 534000
 Owning check: integration-assurance. Contract ID: assurance.interchange. Goal: validate real-record UI downloads with independent parsers/schema validators and prove atomic policy interchange. Risk: medium. Non-goals: retained schema-unit coverage in oscal-export/xccdf-schema, production changes.
 
 Writable paths (only):
-- checks/integration-assurance/scenarios/fragments/task-490.22-exports.py
-- checks/integration-assurance/scenarios/fragments/task-490.22-exports.cjs
+- checks/integration-assurance/scenarios/fragments/exports.py
+- checks/integration-assurance/scenarios/fragments/exports.cjs
 - checks/integration-assurance/fixtures/interchange-*
 
 Composition target: checks/integration-assurance/scenarios/evidence-remediation-lifecycle.nix. Coordinator owns Nix/Python composition, browserSpecs and explicit registration/normal owner aggregation. Compose after real import/scan/plan/waiver/acceptance producers in one fresh Assurance VM/database. Earlier real records from .19/.16/.21/.27/.28 MAY be consumed through receipts; another derivation's live records, downloads, outputs or receipts MUST NOT be consumed. No packet-specific derivation; never seed source records or export outcomes.
