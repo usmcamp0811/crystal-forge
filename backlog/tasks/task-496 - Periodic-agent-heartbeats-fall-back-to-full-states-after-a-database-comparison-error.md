@@ -3,11 +3,11 @@ id: TASK-496
 title: >-
   Periodic agent heartbeats fall back to full states after a database comparison
   error
-status: To Do
+status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-19 05:37'
-updated_date: '2026-10-19 21:39'
+updated_date: '2026-10-19 21:40'
 labels: []
 dependencies: []
 references:
@@ -33,6 +33,16 @@ The real target agent registers and sends signed periodic heartbeat requests, bu
 - [ ] #3 A genuine state change still creates the required full-state evidence rather than being misclassified as an unchanged heartbeat.
 - [ ] #4 An integration or isolated-database regression and affected source documentation describe and verify the intended classification and failure behavior.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Owner-authorized narrow product repair, based on f6439851 in the dedicated TASK-496-heartbeat-classification worktree. Coordinator openai owns integration and real-agent scenario edits; bounded worker owns only active heartbeat/query Rust code and its regressions.
+1. Reproduce the actual latest-state decoder failure with the migrated schema. SystemState expects boot_id while SELECT * from system_states has no such column; verify this before choosing a projection fix. Preserve systems.boot_id as reboot baseline, historical state semantics and conservative real-error behavior.
+2. Apply the smallest justified query/result-shape correction, without schema/protocol redesign or unrelated generation policy changes. Add an ignored migrated query regression and signed-handler sequence proving initial state, repeated unchanged heartbeats, a genuine compared state change and later heartbeat correlation; include exact registered IDs and a foreign-host control.
+3. Run the affected Rust/DB tests against an invocation-owned isolated database only, with offline Cargo/SQLx and explicit preparation. Worker must not start competing VM stacks or use the user's development database. Coordinator adds exact selections to the existing consolidated runner.
+4. Commit the product fix separately after review and integrate it into the coordinator branch. Replace Delivery's permissive heartbeat/full-state fallback proof with exact real-agent assertions, then exercise changed running generations in the same activation/rollback lifecycle. Record real artifacts and hosted results; no merge/deploy/Done.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
