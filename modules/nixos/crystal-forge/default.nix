@@ -831,12 +831,15 @@ in {
         type = lib.types.bool;
         default = false;
         description = lib.mdDoc ''
-          Build in offline mode (no network access).
+          Disable substitutes, remote builders and substitution fallback during
+          Nix realization. Overrides use_substitutes and inherited acquisition
+          settings. Uses options supported by nix-store and the modern Nix CLI.
 
-          When true, Nix will not attempt to download anything. Useful
-          for air-gapped environments or testing.
-
-          **Note**: Requires all sources to be pre-fetched or in store.
+          Required sources must already be available locally. Missing inputs
+          cannot be obtained from substitutes or remote builders. This option
+          is not an OS network firewall: isolate fixed-output derivations at
+          the host boundary when a complete network prohibition is required.
+          Builder API communication and cache publication are not disabled.
         '';
       };
 
