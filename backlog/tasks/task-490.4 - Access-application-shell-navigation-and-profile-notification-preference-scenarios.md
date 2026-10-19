@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-18 14:41'
+updated_date: '2026-10-19 02:13'
 labels:
   - testing
   - integration
@@ -19,11 +19,10 @@ references:
   - docs/design/CrystalForge/components/Shell.jsx
   - docs/design/CrystalForge/components/ProfileView.jsx
 modified_files:
-  - checks/integration-access/scenarios/fragments/task-490.4-shell-navigation.py
-  - >-
-    checks/integration-access/scenarios/fragments/task-490.4-shell-navigation.cjs
-  - checks/integration-access/scenarios/fragments/task-490.4-preferences.py
-  - checks/integration-access/scenarios/fragments/task-490.4-preferences.cjs
+  - checks/integration-access/scenarios/fragments/shell-navigation.py
+  - checks/integration-access/scenarios/fragments/shell-navigation.cjs
+  - checks/integration-access/scenarios/fragments/preferences.py
+  - checks/integration-access/scenarios/fragments/preferences.cjs
 parent_task_id: TASK-490
 priority: medium
 type: task
@@ -36,10 +35,10 @@ ordinal: 516000
 Owning check: integration-access. Contract IDs: access.shell, access.configuration.preferences. Goal: prove real shell navigation and per-user profile/notification preference persistence with an approved Shell.jsx comparison. Risk: medium (presentation authority and identity isolation). Non-goals: event notification delivery (.5), Delivery/Assurance dashboard domain values, all theme/viewport combinations and product changes.
 
 Writable paths (only):
-- checks/integration-access/scenarios/fragments/task-490.4-shell-navigation.py
-- checks/integration-access/scenarios/fragments/task-490.4-shell-navigation.cjs
-- checks/integration-access/scenarios/fragments/task-490.4-preferences.py
-- checks/integration-access/scenarios/fragments/task-490.4-preferences.cjs
+- checks/integration-access/scenarios/fragments/shell-navigation.py
+- checks/integration-access/scenarios/fragments/shell-navigation.cjs
+- checks/integration-access/scenarios/fragments/preferences.py
+- checks/integration-access/scenarios/fragments/preferences.cjs
 
 Composition target: checks/integration-access/scenarios/lifecycle-local-bootstrap.nix. Coordinator owns Nix/Python composition, browserSpecs and explicit registration/normal owner aggregation. Compose after real bootstrap with .2/.3 in one fresh local-auth VM/database. Earlier real users may be consumed through same-scenario receipts; another derivation's live state, IDs or cookies may not. No packet-specific derivation. Shared helpers, production, CI, docs, registration and design references are read-only.
 
