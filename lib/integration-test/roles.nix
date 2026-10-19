@@ -9,10 +9,8 @@
 #   builderB   - second real builder; MAY also run a second real agent.
 #   targetA    - real bootable NixOS target and agent.
 #
-# Only `controller` is implemented in the foundation. The other role
-# functions are added here by the coordinator when the first scenario that
-# needs them is implemented, so that each role is proven by an executed
-# scenario before other packets depend on it.
+# Roles expose only capabilities required by implemented scenario bodies.
+# Defining a constructor does not establish passing runtime evidence.
 #
 # INVARIANT: Role modules use only documented `services.crystal-forge`
 # options and the production packages from lib/default.nix. A role MUST NOT
@@ -73,5 +71,118 @@
     };
 
     environment.systemPackages = [pkgs.postgresql];
+  };
+
+  # Local Git and authenticated Nix-store publication. Each builder generates
+  # its own SSH key at runtime; the driver installs only public keys here.
+  services = {}: {...}: {
+    virtualisation.memorySize = 1024;
+    virtualisation.diskSize = 8192;
+    services.nginx = {
+      enable = true;
+      virtualHosts.git = {
+        default = true;
+        root = "/srv/git";
+      };
+    };
+    # CF uses shallow clones; a static/dumb HTTP Git server cannot serve them.
+    # Reuse the NixOS cgit smart-HTTP backend used by the repository Git helper.
+    services.cgit.delivery = {
+      enable = true;
+      scanPath = "/srv/git";
+      gitHttpBackend.checkExportOkFiles = false;
+      nginx.virtualHost = "git";
+      user = "git";
+      group = "git";
+    };
+    users.groups.git = {};
+    users.users.git = {
+      isSystemUser = true;
+      group = "git";
+      home = "/srv/git";
+    };
+    services.openssh = {
+      enable = true;
+      settings.PasswordAuthentication = false;
+      settings.AuthorizedKeysFile = ".ssh/authorized_keys";
+    };
+    networking.firewall.allowedTCPPorts = [22 80];
+    users.groups.cache = {};
+    users.users.cache = {
+      isNormalUser = true;
+      group = "cache";
+      home = "/var/lib/cache";
+      createHome = true;
+    };
+    nix.settings = {
+      trusted-users = ["root" "cache"];
+      substituters = lib.mkForce [];
+      builders = lib.mkForce [];
+      fallback = false;
+    };
+    environment.systemPackages = [pkgs.git pkgs.openssh];
+    systemd.tmpfiles.rules = ["d /srv/git 0755 root root -"];
+  };
+
+  # A production API-only builder. The driver registers its fresh public key
+  # and checks output absence before explicitly starting the normal unit.
+  builder = {name, strategy ? "server_derivation"}: {...}: {
+    imports = [inputs.self.nixosModules.crystal-forge];
+    networking.hostName = name;
+    virtualisation.memorySize = 2048;
+    virtualisation.cores = 2;
+    virtualisation.diskSize = 12288;
+    services.crystal-forge = {
+      enable = true;
+      local-database = false;
+      server.enable = false;
+      build = {
+        enable = true;
+        package = packages.builder;
+        api_mode = true;
+        server_url = "http://controller:3000";
+        supported_execution_strategies = [strategy];
+        use_substitutes = false;
+        offline = true;
+        sandbox = true;
+        max_concurrent_derivations = 1;
+        max_jobs = 1;
+        cores_per_job = 1;
+        cve_scanning_enabled = false;
+      };
+    };
+    systemd.services.crystal-forge-builder = {
+      wantedBy = lib.mkForce [];
+      path = [pkgs.openssh];
+      environment.NIX_SSHOPTS = "-i /var/lib/crystal-forge/cache-ssh -o UserKnownHostsFile=/var/lib/crystal-forge/cache-known-hosts -o StrictHostKeyChecking=yes";
+    };
+    nix.settings = {
+      substituters = lib.mkForce [];
+      builders = lib.mkForce [];
+      fallback = false;
+    };
+    environment.systemPackages = [pkgs.crystal-forge.default.cf-keygen-drv pkgs.openssh];
+  };
+
+  # Registration precedes the first real agent report. Keys exist only inside
+  # this run, never in immutable fixtures or evidence receipts.
+  target = {}: {...}: {
+    imports = [inputs.self.nixosModules.crystal-forge];
+    virtualisation.memorySize = 1024;
+    services.crystal-forge = {
+      enable = true;
+      local-database = false;
+      server.enable = false;
+      build.enable = false;
+      client = {
+        enable = true;
+        package = packages.agent;
+        server_host = "controller";
+        server_port = 3000;
+        private_key = "/run/cf-it-agent.key";
+      };
+    };
+    systemd.services.crystal-forge-agent.wantedBy = lib.mkForce [];
+    environment.systemPackages = [pkgs.crystal-forge.default.cf-keygen-drv];
   };
 }
