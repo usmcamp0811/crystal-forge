@@ -4,7 +4,7 @@ title: 'Access: in-app and email notification delivery scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-18 02:37'
+updated_date: '2026-10-19 02:12'
 labels:
   - testing
   - integration
@@ -13,8 +13,8 @@ dependencies:
   - TASK-490.7
   - TASK-490.11
 modified_files:
-  - checks/integration-access/scenarios/fragments/task-490.5-notifications.py
-  - checks/integration-access/scenarios/fragments/task-490.5-notifications.cjs
+  - checks/integration-access/scenarios/fragments/notifications.py
+  - checks/integration-access/scenarios/fragments/notifications.cjs
 parent_task_id: TASK-490
 priority: medium
 type: task
@@ -24,7 +24,7 @@ ordinal: 517000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-access. Contract ID: access.configuration.notifications. This packet owns checks/integration-access/scenarios/fragments/task-490.5-notifications.py and task-490.5-notifications.cjs, plus owner-local receiver fixture assets. The coordinator owns configuration-notifications.nix, Python composition, browserSpecs mapping, and owner registration. This is one scenario fragment packet, not a separate test derivation per packet.
+Owning check: integration-access. Contract ID: access.configuration.notifications. This packet owns checks/integration-access/scenarios/fragments/notifications.py and notifications.cjs, plus owner-local receiver fixture assets. The coordinator owns configuration-notifications.nix, Python composition, browserSpecs mapping, and owner registration. This is one scenario fragment packet, not a separate test derivation per packet.
 
 Use a real BuildFailures or DeployFailures event and an email-enabled NixOS module configuration with the local receiver service. Verify in-app recipient filtering, read/read-all/dismiss/delete persistence, and email to subscribed recipients only; email-disabled produces none. Recreate the real event in this scenario. TASK-490.11 code/fixture dependencies do not supply another VM's database, session, or build output. Digest timing and external providers are out of scope.
 
@@ -48,3 +48,12 @@ Needs TASK-490.7 services/receiver/builder roles and TASK-490.11 event implement
 
 Isolation correction: TASK-490.11's failing-build runtime output cannot be reused. This scenario must run its own real failing build/event as setup in its own fresh VM/database, or consume only immutable fixture definitions/helpers from the integrated dependency. A task dependency never supplies another scenario's database, VM, session or output. Foundation dependency remains untested for successful server startup; remain Backlog.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-10-19 02:12
+---
+Source-path maintenance only: stable behavior-oriented filenames identify intended source ownership; the names do not prove implementation or execution. Existing requirements, status and recorded results remain unchanged.
+---
+<!-- COMMENTS:END -->
