@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-19 05:37'
-updated_date: '2026-10-19 13:08'
+updated_date: '2026-10-19 15:39'
 labels: []
 dependencies: []
 references:
@@ -13,6 +13,9 @@ references:
   - modules/nixos/crystal-forge/default.nix
   - checks/integration-delivery/scenarios/fragments/source-build.py
   - /tmp/opencode/delivery-local-run12.log
+modified_files:
+  - packages/default/crates/cf-config/src/config/build.rs
+  - modules/nixos/crystal-forge/default.nix
 priority: high
 type: bug
 ordinal: 546000
@@ -21,7 +24,11 @@ ordinal: 546000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-A real API-only builder received and materialized an authorized NixOS derivation, then failed before realization because its configured offline mode passed --offline to nix-store 2.34.8. The selected CLI rejects that flag. Observed during the Delivery lifecycle on the TASK-490.1 branch based on e07b4bd2, with services.crystal-forge.build.offline=true. The captured build log states: error: unknown flag '--offline'. Production changes are prohibited in the testing overhaul, so this record tracks the product defect separately. This is not the already-resolved state-machine CI networking or Bash issue.
+A real API-only builder received and materialized an authorized NixOS derivation, then failed before realization because offline=true passed --offline to nix-store 2.34.8, which rejects that flag. The owner explicitly authorized a separate product fix after this defect blocked the unchanged Delivery proof. This is not the already-resolved state-machine CI networking/Bash issue.
+
+The correction lives in shared BuildConfig argument generation. It replaces the modern-only flag with compatible acquisition settings for both legacy nix-store and modern Nix, while preserving resource/sandbox and ordinary online behavior. Offline mode disables substitution, substituters, remote builders and fallback; it is not an OS firewall for fixed-output builders or a prohibition on required API/publication traffic. Full network isolation remains a host responsibility.
+
+The implementation was developed in its dedicated TASK-495 worktree and committed separately. It is applied to the coordinator branch with offline=true and all actual realization/output assertions retained. No schema or protocol transition is involved.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -46,4 +53,14 @@ Owner-authorized separate product correction. Worktree /home/mcamp/code/crystal-
 
 <!-- SECTION:NOTES:BEGIN -->
 The owner explicitly authorized a separate product fix in response to the Delivery blocker question. The test must keep offline=true and retain all build, output and network assertions. Use a dedicated task worktree; do not treat the failure as expected success.
+
+## Implementation and local verification
+
+- Dedicated worktree: `/home/mcamp/code/crystal-forge/TASK-495-builder-offline`; product commit `6844d185`, applied to the coordinator branch as `fc0c5836`.
+- Focused command: `nix develop .#sqlx -c env SQLX_OFFLINE=true cargo test --offline --manifest-path packages/default/Cargo.toml --package cf-config --lib config::build::tests`: 5 passed, including new legacy/modern/scoped argument and online-policy regressions.
+- `cargo test --offline --manifest-path packages/default/Cargo.toml --package cf-config --doc` through the SQLx shell: 1 doctest passed. `cargo doc --offline ... --package cf-config --no-deps` succeeded with three pre-existing bare-URL warnings in builder.rs/oidc.rs; no documentation suppression added.
+- Targeted rustfmt and whitespace checks passed. The final emitted options were accepted by nix-store 2.34.5 without the unsupported flag or unknown-setting warning.
+- Normal production builder package in the coordinator build passed 99 library, 34 binary and 2 integration tests. Agent package passed 15 library, 11 binary and 1 integration tests. These completed before the later embedded-UI preparation timeout; that timeout launched no VM.
+- The unchanged offline=true Delivery path subsequently performed a real NixOS realization from an independently absent nonce output. The latest full normal aggregate passed all 8 cases, including signed publication, exact job/session/output completion and independent second builder session. Evidence: `/nix/store/bys8qx6hix4kvf1yqycjbiqq2pmr1sc4-vm-test-run-cf-it-delivery-delivery-lifecycle-run`, working tree based on fc0c5836; not a clean-revision claim.
+- Final clean-revision/hosted verification remains pending recording. Keep In Progress; no merge, deployment or Done.
 <!-- SECTION:NOTES:END -->
