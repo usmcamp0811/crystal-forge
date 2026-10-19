@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-18 13:58'
+updated_date: '2026-10-19 02:14'
 labels:
   - testing
   - integration
@@ -14,8 +14,8 @@ labels:
 dependencies:
   - TASK-490.14
 modified_files:
-  - checks/integration-assurance/scenarios/fragments/task-490.18-policy.py
-  - checks/integration-assurance/scenarios/fragments/task-490.18-policy.cjs
+  - checks/integration-assurance/scenarios/fragments/policy.py
+  - checks/integration-assurance/scenarios/fragments/policy.cjs
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -28,8 +28,8 @@ ordinal: 530000
 Owning check: integration-assurance. Contract ID: assurance.policy.enforcement. Goal: prove real versioned policy admission, not only policy persistence. Risk: high (enforcement/evidence invariants). Non-goals: every composite rule kind, STIG-import assertions (.19), product changes.
 
 Writable paths (only):
-- checks/integration-assurance/scenarios/fragments/task-490.18-policy.py
-- checks/integration-assurance/scenarios/fragments/task-490.18-policy.cjs
+- checks/integration-assurance/scenarios/fragments/policy.py
+- checks/integration-assurance/scenarios/fragments/policy.cjs
 
 Composition target: checks/integration-assurance/scenarios/evidence-remediation-lifecycle.nix. Coordinator owns Nix/Python composition, browserSpecs and explicit registration/normal owner aggregation. No packet-specific derivation. One fresh Assurance VM/database contains producers and remediation. Earlier real imported policies, targets, evaluations or builds MAY be used through same-scenario receipts. Another derivation's live target/DB/output/receipt state MUST NOT be consumed.
 
