@@ -316,8 +316,8 @@ state-machine-tests:
   script:
     # Preparation may acquire missing closures and Cargo sources. Execution below
     # must fail on missing prerequisites instead of fetching them during tests.
-    - nix build .#devScripts.state-machine-test --no-link --builders '' --max-jobs 1 --cores 2
-    - nix develop .#sqlx --builders '' --max-jobs 1 --cores 2 -c cargo fetch --locked --manifest-path packages/default/Cargo.toml
+    - nix build .#devScripts.state-machine-test --no-link --builders '' --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --max-jobs 1 --cores 2
+    - nix develop .#sqlx --builders '' --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --max-jobs 1 --cores 2 -c cargo fetch --locked --manifest-path packages/default/Cargo.toml
     - |
       export CARGO_NET_OFFLINE=true SQLX_OFFLINE=true
       nix run --offline --option substituters '' --option substitute false \

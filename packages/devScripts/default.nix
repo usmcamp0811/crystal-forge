@@ -1370,19 +1370,55 @@ let
     };
   };
 
-  state-machine-test-module = {
+  # CI can launch process-compose as root, but PostgreSQL must never run as
+  # root. Drop only its initialization/server children; Cargo and evidence
+  # retain the invoking user's permissions and compilation cache.
+  stateMachinePostgresCommand = process: let
+    # services-flake exposes each original process as a module (including its
+    # namespace defaults), not as the merged process-compose configuration.
+    command = (lib.evalModules {
+      modules = [
+        { _module.freeformType = lib.types.attrsOf lib.types.anything; }
+        process
+      ];
+    }).config.command;
+  in pkgs.writeShellApplication {
+    name = "state-machine-postgres";
+    runtimeInputs = [ pkgs.util-linux ];
+    text = ''
+      if (( EUID == 0 )); then
+        : "''${CF_STATE_MACHINE_POSTGRES_UID:?Missing isolated PostgreSQL owner}"
+        : "''${CF_STATE_MACHINE_POSTGRES_GID:?Missing isolated PostgreSQL group}"
+        exec setpriv --reuid="$CF_STATE_MACHINE_POSTGRES_UID" \
+          --regid="$CF_STATE_MACHINE_POSTGRES_GID" --clear-groups \
+          --no-new-privs ${lib.getExe command} "$@"
+      fi
+      exec ${lib.getExe command} "$@"
+    '';
+  };
+
+  state-machine-test-module = { config, ... }: {
     # The launcher enters a fresh temporary directory before process-compose.
     # Never reuse the development database path or port for these regressions.
     services.postgres."db" = {
       port = mkForce state_machine_test_db_port;
       listen_addresses = mkForce "127.0.0.1";
       dataDir = mkForce "./data/state-machine-db";
+      # services-flake expands this at runtime. Keep initialization sockets
+      # beneath the launcher's disposable path, including on root CI runners.
+      socketDir = "$CF_STATE_MACHINE_SOCKET_DIR";
+      superuser = "postgres";
+      createDatabase = false;
       settings.shared_preload_libraries = "pg_stat_statements";
       initialScript.before = mkForce ''
         CREATE USER crystal_forge LOGIN SUPERUSER CREATEDB;
         CREATE DATABASE crystal_forge OWNER crystal_forge;
       '';
     };
+    settings.processes.db-init.command = mkForce (stateMachinePostgresCommand
+      config.services.postgres.db.outputs.settings.processes.db-init);
+    settings.processes.db.command = mkForce (stateMachinePostgresCommand
+      config.services.postgres.db.outputs.settings.processes.db);
     settings.processes.state-machine-tests = {
       inherit namespace;
       command = runStateMachineTests;
