@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-19 15:45'
+updated_date: '2026-10-19 19:24'
 labels:
   - testing
   - integration
@@ -90,7 +90,7 @@ The existing product inventory has79rows:11with passed subsets,59planned and9dec
 - [x] #9 FINAL: all replaced legacy definitions and obsolete manual jobs are removed; preserve necessary assets at their owner/package locations; historical test inventory does not create mandatory product requirements
 - [ ] #10 FINAL: useful assertions have primary execution ownership; repeated Rust/database work is consolidated or justified by distinct execution evidence; developer tools use packages/apps and no non-integration flake check attribute remains
 - [ ] #11 FINAL: retain the six-scenario starting topology with each extra machine/lifecycle/isolation boundary justified; report measured runtime/resources and the actual final inventory, not merely CI job names or four wrapper aggregates
-- [ ] #12 Coordinator owns shared harness, composition, registration and CI; owner-local case fragments reuse same-scenario receipts only; no root tests/, custom discovery, registry or new test framework
+- [x] #12 Coordinator owns shared harness, composition, registration and CI; owner-local case fragments reuse same-scenario receipts only; no root tests/, custom discovery, registry or new test framework
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -146,4 +146,14 @@ All15verify outputs and9legacy suites were retired. Unique assertions moved to o
 The database audit removed6ignored overlaps,94repeated normal cf-server selections and2duplicate composite-policy calls. It retained284unique ignored-library and231integration cases,14targets and populated migration rehearsals. Core expanded cf-config selection from13CA-only tests to94units; TASK-495 adds2more ordinary config regressions. Prior c254b1c5 execution passed515DB and23Access cases. Detailed assertion ownership and legacy dispositions remain in the existing coverage map/catalog.
 
 LOCK: openai on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation.
+
+## Verified corrective and initial Delivery code
+
+Clean code revision `bea0c29936c2220a8c1ba8dbfeb5750dacc18cde` passed hosted pipeline2964502717. All eight required jobs succeeded: integration-access, integration-delivery, component-tests, state-machine-tests, cve-processing-test, dashboard-visibility-tests, complexity-check and coverage-check. Downloaded owner artifacts confirm Access23/23 and Delivery8/8 with that exact source revision. Hosted state-machine trace totals515passed/0failed/0ignored across227summaries.
+
+Both normal owner commands also exited0 locally at that clean revision. Latest local Access driver54.18s and Delivery driver79.32s; peak memory remains unmeasured. Source inventory still has two native owners,28public packages andzeroverify outputs. No active checks/**/task-* files, fragments/task-* references or root tests/ directory remain.
+
+Cold pipeline2964350322 failed before Delivery VM startup because an opaque recipe closure omitted a bootstrap object. Pipeline2964012282 was superseded/canceled, not passed. The native baseline now retains its complete build closure once for compatible roles; actual cold hosted Delivery then passed. The source-generator2525->5dependency figure is scoped, not a whole-owner reduction. Cold preparation remains a minimization constraint.
+
+TASK-495 is Review in draft MR!335; no merge/deploy/Done. The parent and this task remain In Progress because final four-owner coverage/minimization are unmet. Criterion12 is now verified for the implemented architecture; final criteria7/8/10/11 remain open. Reporting-only follow-ups record this tested code point and do not change executable assertions.
 <!-- SECTION:NOTES:END -->
