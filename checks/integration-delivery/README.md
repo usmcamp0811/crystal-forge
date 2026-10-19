@@ -26,12 +26,13 @@ sh packages/ci/integration-owner-build.sh integration-delivery
 ```
 
 The normal aggregate requires every case. Its `.run` output is evidence only.
-During initial development, source/target registration, periodic target
-reporting, native evaluation and output coldness executed successfully. The
-real builder then failed on the unsupported `nix-store --offline` flag, tracked
-as TASK-495. The owner authorized a separate product fix; the scenario retains
-`offline = true` and its success/output assertions. The gate remains failed
-until the real workflow passes. TASK-496 separately records heartbeat
+During development, the real builder exposed the unsupported
+`nix-store --offline` flag (TASK-495). The owner authorized a separate product
+fix, developed in its own worktree and committed independently. The normal
+Delivery aggregate then passed all eight cases locally with `offline = true`,
+real signed publication and all success/output assertions retained. The coverage
+map records exact source and evidence; this is not complete Delivery coverage.
+TASK-496 separately records heartbeat
 classification falling back to full-state persistence after a database error;
 periodic reporting does not establish correctness of that optimization.
 

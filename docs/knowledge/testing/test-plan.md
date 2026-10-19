@@ -222,7 +222,9 @@ The three process-compose database Rust jobs remain. The existing state-machine
 workflow owns consolidated regressions with one fresh temporary PostgreSQL
 cluster; exact duplicate selections are removed. Full run status remains
 separate from the source audit.
-Only Access exists (16 executed cases; one total check versus 27 previously).
+Access and Delivery exist with behavior-oriented shared lifecycles (two total
+checks versus 27 previously). The coverage map records exact executed subsets;
+neither owner is complete, and Assurance and Upgrade remain absent.
 The final target is exactly four total check names and complete accepted
 coverage, without placeholders. See [Crystal Forge flake checks](flake-checks.md) and
 [Web UI check runbook](web-ui-check.md) for the current matrix and browser test

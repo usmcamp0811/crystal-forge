@@ -64,17 +64,20 @@ with case("api-builder-performs-real-authorized-nix-build"):
         # This authored fixture has no source/cache secrets. Preserve the real
         # Nix/process stderr as failure evidence, not just the exit code.
         receipt("delivery.failedBuildLog", completed["logs"])
-    expect_equal(completed["status"], "success", "real builder job terminal result (see retained journals)")
     expect_equal(completed["builder_id"], receipts()["delivery.builderA.id"], "authorized builder identity")
     expect(bool(completed["session_id"]), "job has no owning process session")
     expect_equal(completed["session_id"], completed["current_session_id"], "current session owns completed job")
-    expect_equal(completed["store_path"], receipts()["delivery.outputPath"], "completed authoritative output")
+    receipt("delivery.builderA.sessionId", completed["session_id"])
     output = shlex.quote(receipts()["delivery.outputPath"])
     builderA.succeed("nix-store --check-validity " + output + " && test -d " + output)
     expect_equal(builderA.succeed("cat " + output + "/cf-it-source-nonce").strip(),
                  receipts()["delivery.sourceNonce"], "built output contains authored nonce")
+    receipt("delivery.outputRealized", True)
+    # Realization and publication are distinct evidence. A successful local
+    # build must not hide a failed mandatory publication/completion boundary.
+    expect_equal(completed["status"], "success", "real builder job terminal result (see retained journals)")
+    expect_equal(completed["store_path"], receipts()["delivery.outputPath"], "completed authoritative output")
     services.succeed("nix-store --check-validity " + output + " && test -d " + output)
-    receipt("delivery.builderA.sessionId", completed["session_id"])
     receipt("delivery.buildCompleted", True)
     builderA.succeed("test -r /var/lib/crystal-forge/config.toml && "
                      "! grep -q '^\\[database\\]' /var/lib/crystal-forge/config.toml")
@@ -89,6 +92,8 @@ with case("second-api-builder-establishes-independent-session"):
     second = wait_for(second_session, "second authenticated API builder session/heartbeat", timeout=90)[0]
     expect(second["id"] != receipts()["delivery.builderA.sessionId"], "builder processes share a session")
     receipt("delivery.builderB.sessionId", second["id"])
+    builderB.succeed("test -r /var/lib/crystal-forge/config.toml && "
+                     "! grep -q '^\\[database\\]' /var/lib/crystal-forge/config.toml")
     expect_equal(sql_json(controller, "SELECT count(*)::int AS n FROM pg_stat_activity "
         "WHERE datname='crystal_forge' AND client_addr IS NOT NULL"), [{"n": 0}],
         "no remote database clients on the controller")

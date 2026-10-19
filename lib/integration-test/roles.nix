@@ -73,8 +73,8 @@
     environment.systemPackages = [pkgs.postgresql];
   };
 
-  # Local Git and authenticated Nix-store publication. Each builder generates
-  # its own SSH key at runtime; the driver installs only public keys here.
+  # Local Git and authenticated Nix-store publication. Publication clients
+  # generate runtime keys; the driver installs only public trust material here.
   services = {}: {...}: {
     virtualisation.memorySize = 1024;
     virtualisation.diskSize = 8192;
@@ -154,7 +154,6 @@
     systemd.services.crystal-forge-builder = {
       wantedBy = lib.mkForce [];
       path = [pkgs.openssh];
-      environment.NIX_SSHOPTS = "-i /var/lib/crystal-forge/cache-ssh -o UserKnownHostsFile=/var/lib/crystal-forge/cache-known-hosts -o StrictHostKeyChecking=yes";
     };
     nix.settings = {
       substituters = lib.mkForce [];

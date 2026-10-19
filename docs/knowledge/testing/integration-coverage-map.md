@@ -58,7 +58,7 @@ Shared helpers and registration points:
 | --- | --- | --- |
 | `lib/integration-test/default.nix` | Snowfall export: call `lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }` from native check arguments. | Foundation |
 | `lib/integration-test/harness.nix` | Harness implementation: production `packages`, `roleNames`, and `mkScenario`. | Foundation |
-| `lib/integration-test/roles.nix` | Role modules. `common role`; `controller { browser ? false }`. Delivery service/builder/target roles are authorized next but not implemented. | TASK-490.7 |
+| `lib/integration-test/roles.nix` | Role modules: `common role`, `controller { browser ? false }`, `services {}`, `builder { name, strategy ? "server_derivation" }`, `target {}`. Services supplies local smart-HTTP Git and an authenticated Nix store; OIDC/email/other cache fixtures remain unimplemented. | TASK-490.7 |
 | `lib/integration-test/browser.nix` | Render profile `cf-it-render-v1`, `cf-browser` wrapper, browser NixOS module. | Foundation |
 | `lib/integration-test/browser/cf-browser.cjs` | Browser spec runner and `ctx` API. | Foundation |
 | `lib/integration-test/facts.nix` | `byId`, `localUserFromDesign`, `designReference`, `designSite`. | Foundation |
@@ -69,7 +69,14 @@ Shared helpers and registration points:
 | `checks/integration-access/scenarios/fragments/authorization.{py,cjs}` | Selected Admin-only role denials; exports `authz_state()` for protected-state checks shared with forms. Browser registration: `viewer-admin-denied`. | TASK-490.2 |
 | `checks/integration-access/scenarios/fragments/admin-forms.{py,cjs}` | Admin account and settings workflows appended after authorization; browser phases return to Python for independent SQL verification. | TASK-490.3 |
 
-Registration is explicit and coordinator-owned; there is no custom discovery or completeness flag. The normal `checks.x86_64-linux.integration-access` check builds every gate in its `scenarios` attribute set. Meaningful WIP checks may be discoverable; only Access currently is. A tracking task does not automatically get a NixOS test derivation. Compatible behavior cases are fragments composed by the coordinator into a shared scenario using the existing Nix, Python, and browser-script structure. Missing obligations remain in this map. Future Delivery, Assurance, and Upgrade scenarios, fixtures, and assets all belong beneath `checks/integration-{delivery,assurance,upgrade}/`. Do not create placeholder `default.nix` files. GitLab runs each implemented owner automatically (today only `integration-access`). TASK-490.24 authorizes source retirement now; see [Current GitLab selection](#current-gitlab-selection). Retirement does not establish passing replacement coverage.
+Registration is explicit and coordinator-owned; there is no custom discovery or
+completeness flag. Access and Delivery each build every gate in their own
+`scenarios` attribute set and run automatically in GitLab. Tracking tasks do not
+define source files, VM boundaries or derivations. Compatible behavior modules
+compose through the existing Nix, Python and browser scripts. Keep all scenario
+assets beneath their functional owner. Assurance and Upgrade have no placeholder
+`default.nix`. Missing obligations remain gaps; the authorized legacy source
+retirement does not establish replacement coverage.
 
 Scenario file contract (`<name>.nix`):
 
@@ -113,6 +120,51 @@ Host resources (`sledge`, inspected 2026-10-17): 32 cores, 123 GiB RAM with abou
 
 ## Obligation map
 
+### Delivery source and authorized-build execution
+
+The normal `sh packages/ci/integration-owner-build.sh integration-delivery`
+aggregate passed eight mandatory cases in one five-role lifecycle. Initial
+local evidence is from a working tree based on
+`fc0c58361d00466fe50e3c46d6b37e01d4db7bf8`, not a clean-revision claim:
+`/nix/store/bys8qx6hix4kvf1yqycjbiqq2pmr1sc4-vm-test-run-cf-it-delivery-delivery-lifecycle-run`.
+Driver time was 100.17 seconds; configured memory totals 10 GiB across five
+VMs (peak usage unmeasured). One controller/database and the same stores,
+credentials and receipts serve the whole lifecycle. BuilderB starts after
+BuilderA's completed job so this is not a competing-claim proof.
+
+The proof authors a nonce-bearing Git commit, ingests that exact SHA, records
+its native evaluation attempt and authoritative derivation, queries Nix output
+metadata independently, and proves output absence on all five nodes before
+releasing BuilderA. The real authenticated API builder materializes the
+authorized derivation and realizes the output with `offline=true`. Its valid
+output contains the independently authored nonce. Signed publication to the
+test-owned SSH Nix store and exact job/session/output completion are mandatory.
+BuilderB establishes a distinct session; the real target registers and reports
+its actual running generation, including a subsequent periodic report.
+
+NAT/public egress is blocked while local role traffic remains available.
+Immutable inputs and baseline dependencies are prepared; the nonce output is
+never built on the host. Runtime keys stay in the VMs. The destination trusts
+generated public signing material in addition to its normal trust roots;
+signature checking is not disabled. No response is mocked or result seeded.
+The controller can publish input closures with its own runtime credentials.
+Sharing immutable baseline preparation with the services store avoids copying
+the full toolchain into its writable disk; the nonce output remains cold.
+
+TASK-495 exposed and separately corrected an unsupported legacy Nix CLI flag.
+Product commit `6844d185` was developed in its own task worktree and applied as
+`fc0c5836` with owner authorization. TASK-496 remains an observed failing
+heartbeat-classification variant: periodic reports are accepted but become full
+state rows after a database comparison error. Positive reporting does not prove
+the lightweight optimization. The prior package-build timeout launched no VM;
+earlier failing test attempts remain immutable evidence, not passing runs.
+
+Corrective hosted pipelines `2961382083` (`c2b77aad`) and `2961428492`
+(`e07b4bd2`) passed all seven pre-Delivery required jobs: Access, component,
+state-machine, CVE, dashboard, complexity and coverage. They do not establish
+hosted results for the later Delivery/product-fix source. Final-head hosted
+verification is recorded separately at handoff.
+
 ### Semantic source cleanup execution
 
 At `590ee94c635154e027317414298ebe05e9b48bbd`, the normal
@@ -151,7 +203,7 @@ Stable contract IDs and scenario names define functional ownership. Backlog task
 | `integration-access/scenarios/lifecycle-local-bootstrap` | `access.lifecycle`, `access.configuration`, `access.shell`: bootstrap, local-mode session/CSRF/sign-out, authorization, closed registration, admin/environment forms, shell/navigation and per-user preferences. Each case uses identities and records produced earlier in this same real workflow; generated identities go through receipts. | One local-auth controller configuration and one evolving database support these cases. Preserve the dependency order below. | TASK-490.1/.2/.3/.4 |
 | `integration-access/scenarios/configuration-notifications` | `access.configuration`: real event, in-app preference/delivery and email delivery cases. | Separate from local bootstrap because proving email requires a different machine configuration: notification email enabled with a local receiver, plus a real delivery/build event. Recreate that event here; another scenario's VM or output is not reusable. | TASK-490.5; services prerequisite .7; event preparation .11 |
 | `integration-access/scenarios/lifecycle-oidc` | `access.lifecycle`: authorization-code, callback, role mapping and sign-out cases. | Separate because `auth_mode = "oidc"` and the local OIDC provider/redirect setup are incompatible with the local-mode bootstrap proof. | TASK-490.6; services prerequisite .7 |
-| `integration-delivery/scenarios/delivery-lifecycle` | `delivery.evaluation`, `delivery.build`, `delivery.publication`, `delivery.activation`: real ingestion/evaluation, build scheduling/transports, publication variants, activation, rollback and recovery. Use generated commit/build/cache/target identities through receipts. | One controller, service fixture, builder, second agent and target topology supports the ordered workflows. Keep all produced outputs and target state inside this run. No tracking-specific Delivery VM is justified by the current module/role requirements. | TASK-490.7 foundation; .8/.9/.10/.11/.12/.13/.14/.15 |
+| `integration-delivery/scenarios/delivery-lifecycle` | `delivery.evaluation`, `delivery.build`, `delivery.publication`, `delivery.activation`: real ingestion/evaluation, build scheduling/transports, publication variants, activation, rollback and recovery. Use generated commit/build/cache/target identities through receipts. | One controller/database, service fixture, two independent API-only builders and a target agent support the ordered workflows. Keep outputs and state inside this run. Separate builders provide distinct store/session authority; no tracking-specific VM is justified. | TASK-490.7 foundation; .8/.9/.10/.11/.12/.13/.14/.15 |
 | `integration-assurance/scenarios/evidence-remediation-lifecycle` | `assurance.scanning`, `assurance.policy`, `assurance.remediation`, `assurance.interchange`: scanning, target, policy and import cases; then triage, waiver, acceptance, POA&M and verification/closure/reopen; then exports of records created earlier in the same scenario. | One controller/target/service configuration and a single actual finding/evidence chain can support these ordered cases. Keep one fresh VM/database for the whole scenario; use receipts for finding, acceptance, plan and target identities. Do not create tracking-specific derivations or depend on another scenario's outputs. Reconsider only if a proven incompatible machine configuration or isolation invariant appears, and record that concrete reason here before splitting. | TASK-490.16/.17/.18/.19/.20/.21/.27/.28/.29/.22 |
 | `integration-upgrade/scenarios/version-transition` | `upgrade.continuity`: real old-version setup workflow, current-version migration, continuity and recovery. | Separate because it intentionally changes the running server version and migrates an in-place database; that compatibility/migration state must not contaminate current-version Delivery or Assurance evidence. Old and current phases remain sequential inside its own fresh VM/database. | TASK-490.23 |
 
@@ -159,7 +211,9 @@ The implemented local Access lifecycle directly concatenates bootstrap → `sess
 
 The scenario derivations are the local Access lifecycle, notification delivery, OIDC lifecycle, Delivery lifecycle, Assurance evidence/remediation lifecycle, and Upgrade version transition. Only the local Access lifecycle is registered. Their boundaries reflect incompatible auth/service configuration, separate owner contracts, or deliberate in-place version/database transition—not one VM per tracking task. No independent scenario may use another scenario's rows, sessions, receipts, generations, or output.
 
-The focused commands below name intended targets. Only the local-bootstrap attribute currently exists; the remaining targets are planned and MUST be registered by the coordinator before execution. Each focused gate has the normal owner aggregate shown after the semicolon.
+The local-bootstrap and Delivery lifecycle attributes exist. Other targets
+below remain planned and must be explicitly registered before execution. Each
+focused gate has its normal owner aggregate after the semicolon.
 
 | Scenario | Focused command; owner aggregate |
 | --- | --- |
@@ -199,7 +253,14 @@ Source shorthand is relative to the repository root:
 | A-design | `docs/design/CrystalForge/components/`: approved component states referenced below. Mock names and counts may supply authored fixture values, never backend policy or evidence authority. Missing states use D3/D6. |
 | E-domain | `docs/knowledge/builders/verified-source-evaluator-contract.md`, `deployment/manual-deployment-queue-contract.md`, `evaluation/evaluation-snapshot-retention-and-rollback.md`, and `ui/system-cves-sc1-contract.md`: inspected mechanism/precedence pointers. Their `implemented` metadata does not approve new requirements. |
 
-Scenario abbreviations use the six composition targets: **L** = Access `lifecycle-local-bootstrap`; **N** = Access `configuration-notifications`; **O** = Access `lifecycle-oidc`; **D** = Delivery `delivery-lifecycle`; **A** = Assurance `evidence-remediation-lifecycle`; **U** = Upgrade `version-transition`. Only L is registered. A table's owner/scenario and behavior IDs define primary execution ownership. The **Tracking / status** field preserves task selections, unassigned details and evidence status separately from ownership; `.n` abbreviates `TASK-490.n`. `unassigned` means no existing tracking task explicitly selects that discovered detail; the coordinator must select it before implementation (tracking: TASK-490.24). No task or table row creates a new VM.
+Scenario abbreviations use the six composition targets: **L** = Access
+`lifecycle-local-bootstrap`; **N** = Access `configuration-notifications`;
+**O** = Access `lifecycle-oidc`; **D** = Delivery `delivery-lifecycle`;
+**A** = Assurance `evidence-remediation-lifecycle`; **U** = Upgrade
+`version-transition`. L and D are registered. Behavior IDs and owner/scenario
+names define primary execution ownership. **Tracking / status** keeps task
+selection separate; `.n` abbreviates `TASK-490.n`. `unassigned` details require
+coordinator selection before implementation. No task or row creates a VM.
 
 For every mutation case, use a valid authorized positive control and a separately authenticated disallowed actor, then independently compare protected records and external effects. Test exact ownership, hidden/absent identity, invalid/stale input, retry, cancellation and reload where those conditions apply. Do not conflate session last-seen updates with protected domain changes. A read's HTTP success or a UI toast is not authoritative persistence evidence. Expected commits, option values, findings, policy inputs, target paths and export records come from authored fixtures or independent tools, never CF's response under test.
 
@@ -277,7 +338,7 @@ Authority: A-contract and A-design `Shell.jsx`, `DashboardView.jsx`, shared desi
 | `navigation` | Signed-in and anonymous contexts → sidebar/user menu, direct URLs, reload, back/forward, unknown route | Approved destinations/query identities survive navigation; unauthenticated protected navigation reaches login; unknown route shows designed NotFound; role-limited entries remain limited. | Browser URL/history, session identity and rendered destination; no route-count inference. | .4; `planned`. |
 | `shared-interaction` | Designed drawer/modal/menu and nested caller → keyboard open/close/Escape, focus traversal/restore, narrow viewport | Approved containment, close/cancel and focus return hold; caller retains target and return destination. Test shared mechanics once; distinct caller bindings in D/A. | Browser focus, URL and no-write DB observation for cancel. | .4; domain nesting cases **unassigned**; `planned`. |
 | `dashboard-badges` | Two scoped users, real events → dashboard/badges, acknowledge, reload | Authored event scope determines visible badges/activity; acknowledgement changes only intended user's attention state. Domain totals must agree with independently known workflows. | Attention/navigation DB; D/A event records; browser. | .4 shell; domain values .8/.11/.16/.21; extra bindings **unassigned**; `planned`. |
-| `module-runtime` | Production module server/client/API-builder selections, file secrets, explicit config → start services | Role-specific config/units and runtime credential permissions match selected options; API-only builder has no DB dependency; secrets not emitted in UI/logs. Local mode/socket subset only is already proved. | Generated TOML/env summaries, units/permissions, DB clients and startup; ordinary module/component assertions. | .7 role wiring/full config matrix `planned` (some assignments **unassigned**). Known **failing startup variant**: PostgreSQL maintenance oneshot P3/TASK-492 remains failed in the final controller evidence; it is not repaired or covered by the passing Access cases. |
+| `module-runtime` | Production module server/client/API-builder selections, file secrets, explicit config → start services | Role-specific config/units and runtime credential permissions match selected options; API-only builder has no DB dependency; secrets not emitted in UI/logs. | Generated TOML/env summaries, units/permissions, DB clients and startup; ordinary module/component assertions. | .7; **integration-covered subset**: real server/client/API-builder startup, no builder DB section and no remote controller DB clients in D. Full configuration/security matrix remains `planned`. P3/TASK-492 maintenance startup and TASK-496 heartbeat-classification variants remain **failing**, not repaired by positive role proof. |
 | `auth-visual` | Login/register/setup states → approved visual comparison | Exact reference required; semantic auth cases proceed independently. | Same-profile reference/actual/diff images when authority supplied. | .4/auth visuals **unassigned**; `blocked: D6-presentation`. |
 
 ### 4. `delivery.evaluation` — Git, retained evaluation and Config
@@ -286,9 +347,9 @@ Authority: A-contract, TASK-490.8/.9, accepted Systems identity/read boundaries;
 
 | Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Tracking / status |
 | --- | --- | --- | --- | --- |
-| `ingestion` | Authored repository with distinguishable commits → poll, manual sync, valid/duplicate webhook, force push and accept rewrite | Each authored event maps to correct repo/branch/full SHA; deduplication does not multiply work; rewrite acknowledgement never reinterprets retained old identity. | Independent Git log/tree, commit/branch/evaluation rows and rewrite UI. | .8; `planned`. |
+| `ingestion` | Authored repository with distinguishable commits → poll, manual sync, valid/duplicate webhook, force push and accept rewrite | Each authored event maps to correct repo/branch/full SHA; deduplication does not multiply work; rewrite acknowledgement never reinterprets retained old identity. | Independent Git log/tree, commit/branch/evaluation rows and rewrite UI. | .7/.8; **integration-covered subset**: authored commit, smart-HTTP Git and manual sync preserve exact SHA in D. Poll, webhook, deduplication and rewrite variants remain `planned`. |
 | `git-credentials` | Admin/Operator and credentialed fixture → create/test/rotate/delete SSH or HTTP credentials, sync private root/locked input | Right credentials reach intended origin; failures create no successful evaluation; readback/logs redact secrets; test does not become saved credentials. | Fixture requests, protected credential rows, job identity, sanitized browser/logs. | **Unassigned** within .8 boundary; Access owns form persistence; `planned`. |
-| `identity` | Two exact source revisions/configurations → evaluate each and open Evaluation drawer | Full source/lock/target identity selects independently computed `.drvPath`; failed discovery/evaluation is not an empty successful inventory. | Independent evaluator invocation against authored source, evaluation/derivation/artifact DB, browser. | .8, first proof .7; `planned`. |
+| `identity` | Two exact source revisions/configurations → evaluate each and open Evaluation drawer | Full source/lock/target identity selects independently computed `.drvPath`; failed discovery/evaluation is not an empty successful inventory. | Independent evaluator invocation against authored source, evaluation/derivation/artifact DB, browser. | .7/.8; **integration-covered subset**: one exact commit/native attempt/derivation/output chain and independently authored nonce in D. Two-revision contrast, failure variants and browser bindings remain `planned`. |
 | `queue-attempts-logs` | Real pending/running/failed evaluations → reorder, cancel/force-cancel, retry; open retained attempt/log stream | Queue action changes only selected work; stale producers cannot append to successor attempt; old attempt and its matrix/logs stay old after retry; visibility applies to history and streams. | Queue/attempt/log DB, worker process lifecycle, independent browser/SSE capture. | .8 extension **unassigned**; `planned`. |
 | `config-inspector` | Real evaluated revision with authored option definitions and secret paths → inspect values, provenance, diff, module declarations/options search | Correct values/definition winners and revision; secrets redacted before storage/exposure; unavailable content is not fabricated by GET; bounded pages preserve one snapshot identity. | Authored Nix option facts, stored snapshot/provenance, browser and no new queue work on reads. | .9; `planned`. |
 | `config-observation` | Authorized system with exact revision → explicit evaluation prerequisite, inspection/observation POST, request polling and by-ID read | Explicit action queues/reuses only intended work; Admin whole-commit boundary retained; stale/foreign request/snapshot cannot disclose or overwrite current selection. | Config request/observation/snapshot tables, worker records, browser query state. | **Unassigned** .9-adjacent; `planned`. |
@@ -301,9 +362,9 @@ Authority: A-contract, TASK-490.7/.10/.11. Sources: S-builder, S-wire builder/so
 
 | Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Tracking / status |
 | --- | --- | --- | --- | --- |
-| `registration-session` | Two separately provisioned builders → resolve ID, signed session, heartbeat, deactivate/rotate key/reconnect | Correct identity/capability and session only; invalid key, wrong path/method/body, stale timestamp or foreign ID gains no job authority. Key rotation invalidates obsolete authority as specified. | Builder/session/key DB, signed request outcomes, independent process identity. | .7/.10; rotation/admin lifecycle extension **unassigned**; `planned`. |
+| `registration-session` | Two separately provisioned builders → resolve ID, signed session, heartbeat, deactivate/rotate key/reconnect | Correct identity/capability and session only; invalid key, wrong path/method/body, stale timestamp or foreign ID gains no job authority. Key rotation invalidates obsolete authority as specified. | Builder/session/key DB, signed request outcomes, independent process identity. | .7/.10; **integration-covered subset**: two independent runtime keys, registered IDs and real API sessions/heartbeat; BuilderA job-session correlation in D. Negative authentication, rotation/deactivation and reconnect variants remain `planned`. |
 | `claim-scheduling` | Real queued jobs with architecture/environment/capacity constraints → competing next-job GET/POST | Exactly one authorized claimant; unsupported evaluator/strategy/capacity cannot claim; server owns queue and API builder has no SQL connection. | Build jobs/reservations/sessions, independent builder stores and DB client list. | .10/.11; `planned`. |
-| `server-derivation` | Fresh absent output → authorized manifest/full or delta derivation archive, start/build/progress/complete | Only job-authorized store paths transfer; foreign/extra path rejected; real builder realizes server-selected derivation and reports exact output. | Manifest, absent-before proof, real Nix store/build logs, job attempt and completion records. | .10; `planned`. |
+| `server-derivation` | Fresh absent output → authorized manifest/full or delta derivation archive, start/build/progress/complete | Only job-authorized store paths transfer; foreign/extra path rejected; real builder realizes server-selected derivation and reports exact output. | Manifest, absent-before proof, real Nix store/build logs, job attempt and completion records. | .7/.10; **integration-covered subset**: authorized materialization, real offline realization, absent-before/present-after nonce output and successful exact job/session completion in D. Foreign/extra-path denial and other transport variants remain `planned`. |
 | `verified-source` | Canonical server-bundled tracked source → capability check, source archive verification, re-evaluate/compare/build | Exact source/lock and evaluator yield authored derivation before realization; corrupt archive or derivation mismatch fails before build; sanitized repository URL is not fetch authority. | Independent source digest/NAR/lock/eval and builder process/store observations. | .10; `planned`. |
 | `ordering-retry` | Real waiting/failed jobs → prioritize, move up/down, reorder, manual requeue and automatic retry | Authored ordering and eligible retry policy control new attempts; retry preserves original attempt/evidence and does not duplicate live claims. | Queue order, job history/attempts, Admin retry settings, builder claims. | .11; ordering variants **unassigned**; `planned`. |
 | `cancel-fencing` | Running job then graceful/force cancel, dead worker, reassignment/session replacement → late progress/log/complete/fail/finalize | Canceled work stops; only current authorized lease/session may mutate job; fenced worker cannot complete successor; terminal state is not resurrected. | Actual process cessation, build-job/session/attempt records and rejected late request outcomes. | .11; `planned`. |
@@ -319,7 +380,7 @@ Authority: A-contract, TASK-490.12/.13; S-config/S-wire/S-api locate distinct su
 | `probe-discovery` | Admin and disallowed actor → unsaved/stored Test and Niks3 discovery including alias, scoped write/read/all | Discovery/Test obey intended target/TLS policy, merge secrets only in memory and persist no destination/assignment/job. Read success never attests write permission. | Fixture origin/DNS/redirect observations, DB before/after, sanitized diagnostic/browser result. | .12/.13 extension **unassigned**; `planned`. |
 | `niks3-write` | Real builder output, separate write-plane endpoint → token then mTLS publication | Only valid write credential authorizes upload to intended cache; wrong token/CA/client identity fails without successful publication; read secret is not a write credential. | Cache service/object/NAR observations, build/publication rows, independent bytes/signatures. | .12; `planned`. |
 | `niks3-read` | Cold capable agent with assigned published cache → public, mTLS and Basic retrieval; wrong credential/redirect/origin/legacy capability | Valid read plane retrieves exact signed output; invalid trust/auth fails closed; no write token/key leaks into heartbeat/read process; signed capability governs runtime settings. | Agent store absence/presence, native cache requests, heartbeat payload inspection with secrets suppressed, publication binding. | .12; Basic/capability/security variants need explicit tracking detail; `planned`. |
-| `adapter-variants` | Fresh outputs and supported credentials → Attic native push/read, S3 copy/object access, Http/Nix configured copy/read | Each adapter's distinct publication/read authorization and signature boundary works; do not invent HTTP upload support for read-only service or repeat common lifecycle per adapter. | Adapter-native service/object logs, cold reader store and independently verified closure. | .13; `planned`. |
+| `adapter-variants` | Fresh outputs and supported credentials → Attic native push/read, S3 copy/object access, Http/Nix configured copy/read | Each adapter's distinct publication/read authorization and signature boundary works; do not invent HTTP upload support for read-only service or repeat common lifecycle per adapter. | Adapter-native service/object logs, cold reader store and independently verified closure. | .7/.13; **integration-covered subset**: signed Nix-store publication over authenticated SSH to a previously cold destination in D. Attic/S3/HTTP, cold-agent retrieval and negative trust/auth variants remain `planned`. |
 | `publication-jobs` | Real failed/queued publication → list/detail, retry/cancel and bulk operations | Only eligible intended jobs change; bounded retry does not fabricate success; cancel prevents later successful publication accounting; partial adapter failures remain visible. | Cache push jobs/history plus actual object existence and worker lifecycle. | **Unassigned** .12/.13 extension; `planned`. |
 | `publication-authority` | Builder reports destination/output or derivation-closure publication → server verifies, issues agent runtime cache settings | Claimed success is insufficient; destination/output binding and verified cache identity authorize delivery; cross-environment/unverified destination cannot supply deploy credentials. | `cache_publication_reads`/publication DB mechanisms, independent cache retrieval, selected target heartbeat. | .12/.14; cross-boundary detail **unassigned**; `planned`. |
 
@@ -471,21 +532,25 @@ Counts below count **obligation rows**, not endpoints, test cases or percentage 
 | --- | ---: | ---: | ---: | ---: |
 | `access.lifecycle` | 7 | 3 | 2 | 2 |
 | `access.configuration` | 8 | 2 | 5 | 1 |
-| `access.shell` | 5 | 0 | 4 | 1 |
-| `delivery.evaluation` | 8 | 0 | 7 | 1 |
-| `delivery.build` | 7 | 0 | 7 | 0 |
-| `delivery.publication` | 7 | 0 | 7 | 0 |
+| `access.shell` | 5 | 1 | 3 | 1 |
+| `delivery.evaluation` | 8 | 2 | 5 | 1 |
+| `delivery.build` | 7 | 2 | 5 | 0 |
+| `delivery.publication` | 7 | 1 | 6 | 0 |
 | `delivery.activation` | 7 | 0 | 7 | 0 |
 | `assurance.scanning` | 7 | 0 | 7 | 0 |
 | `assurance.policy` | 7 | 0 | 7 | 0 |
 | `assurance.remediation` | 8 | 0 | 8 | 0 |
 | `assurance.interchange` | 5 | 0 | 4 | 1 |
 | `upgrade.continuity` | 3 | 0 | 0 | 3 |
-| **Total** | **79** | **5 (twenty-three executed cases; some rows cover subsets only)** | **65** | **9** |
+| **Total** | **79** | **11 (Access and Delivery executed subsets; not complete rows)** | **59** | **9** |
 
-No new lower-level-covered or failing obligation is asserted. Existing Rust/component/DB assertions remain evidence mechanisms with execution records below; merely discovering their code is not a pass. The explicit exclusions above are not added to the 79 required/discovered obligation rows.
+Existing Rust/component/DB assertions remain lower-level evidence, not product
+integration coverage. The 11 rows contain passed subsets only. Failing runtime
+variants (P3/TASK-492 and TASK-496) remain explicit within their row; they are
+not extra rows or silently covered by a positive subset. Exclusions are not
+added to the 79 required/discovered obligations.
 
-The known P3/TASK-492 failure is a variant within the otherwise planned module
+The known P3/TASK-492 failure is a variant within the partially covered module
 runtime row, not another row to add to these totals. It remains visible in
 `journals/controller/failed-units.txt` at the 23-case execution revision. A
 passing selected Access aggregate does not establish that every module unit
@@ -493,11 +558,25 @@ started successfully or resolve this separate product defect.
 
 Discovered **tracking-selection gaps** include resource forms omitted by .3; session remainder; setup/config-health/audit; Git credential lifecycle; evaluation ordering/cancel/log/retained-attempt navigation; Config request/observation lifecycle; builder key lifecycle/metrics/order; cache discovery/probes/secret merge/read capability/queue controls; agent ingress/callback/retained rollback; approval/canary phases; scanner lease/console/archive/schedule; bundle/grouping/version/trust/deletion lifecycle; framework mapping/recovery; CVE cross-revision/environment-membership concurrency; mixed register aggregates; client exports. Rows assign a primary owner/scenario, but the coordinator must explicitly extend/select tracking scope before implementing those details. No task is created or changed by this inventory.
 
-**Next controller-only milestone:** rerun the normal Access aggregate after the fragment naming/composition cleanup. Seven Admin-form cases already executed at `c254b1c5` after the original sixteen cases in L; they prove account creation, role edit, create/edit cancel, disable/login rejection, retry settings and classification enable/marking persistence with reload and SQL observations. The new run is pending; no post-cleanup pass is claimed. Environment success, duplicate validation and other unexecuted form details remain planned, not part of those seven cases. Tracking: TASK-490.3; composition cleanup TASK-490.24. These controller-only workflows have no Delivery-role dependency. D3 blocks only missing failed-save/empty/pending presentation states.
+**Next controller-only milestone:** environment success, duplicate validation and
+remaining form details in L. The semantic cleanup preserved all 23 existing
+Access cases and the normal aggregate passed again at `590ee94c`; this is no
+longer a pending rerun. Tracking: TASK-490.3. These workflows have no Delivery-role
+dependency. D3 blocks only the unspecified failed-save/presentation states.
 
-**Next Delivery-enabling milestone:** real services/builderA/builderB/target roles and commit→evaluation→fresh build proof in D. Tracking: TASK-490.7, authorized next but not yet implemented or executed. `lib/integration-test/roles.nix` currently implements only `common` and `controller { browser ? false; }`; the proposed role signatures are not available functions. Do not treat later ingestion/build selections (tracking: .8/.10) as having live roles, add a placeholder owner, or consume Access runtime state. This milestone opens the real Delivery path and later Assurance inputs; it does not by itself prove all Delivery obligations. Neither the former global D1 gate nor the repaired bootstrap startup failures block this authorized work. Case-local D1 decisions and the separate P3/TASK-492 maintenance-unit defect remain recorded.
+**Delivery foundation:** the concrete roles and D's source/evaluation/real-build
+proof now exist and executed locally. Tracking: TASK-490.7. Later ingestion,
+source-verification, scheduling, publication variants, activation and recovery
+extend compatible sections of D using its receipts, not a new packet VM or Access
+runtime state. TASK-495 is the separately authorized offline-realization product
+fix; TASK-496 records heartbeat classification falling back to full state after
+a database error. Neither positive reporting nor the build proof repairs that
+classification defect. Case-local decisions and P3/TASK-492 remain separate.
 
-Research verification: route registration, handlers/gates, UI routes/consumer references, module/config/protocol sources, accepted authority and tracking dependencies were inspected. The documentation-only inventory adds no execution proof. Recorded integration evidence covers twenty-three Access cases at `c254b1c5`; the post-cleanup Access rerun remains pending. Documentation validation is reported at handoff separately from integration execution.
+Research located supported surfaces; it did not establish coverage. Execution
+records distinguish the post-cleanup Access pass, successful corrective hosted
+pipelines, and the new Delivery proof. Documentation validation is not
+integration evidence.
 
 ## Product defects and design gaps
 
@@ -585,20 +664,21 @@ below remain records of what actually ran at their recorded revisions.
 | GitLab job | Selection now | Notes |
 | --- | --- | --- |
 | `integration-access` | Automatic and required on merge requests and `main` | Builds the normal owner aggregate `checks.x86_64-linux.integration-access`. Exports `integration-evidence/integration-access/` even when the build fails. |
+| `integration-delivery` | Automatic and required on merge requests and `main` | Builds the normal native Delivery aggregate and exports `integration-evidence/integration-delivery/`, including failed-run evidence. Inherits the existing owner job's resource/cache/exit-status rules. |
 | `legacy-flake-check`, `web-ui-check`, `web-ui-baseline-candidates` | Removed | No optional legacy execution remains. |
 | `component-tests` | One explicit job replaces the six-entry package matrix | Builds core, metadata, OSCAL and docs; runs pure module evaluations, independent-store discovery, installed wrappers/schema and tool selftests directly. Fifteen verification wrappers removed. |
 | `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | Three automatic disposable-DB paths | Expanded state-machine invocation owns consolidated regressions on temporary PostgreSQL port 35433 with `SUPERUSER CREATEDB`, stats preload, both DB URLs in SQLx shell and one Cargo target directory. CVE exact duplicates removed; dashboard unchanged. |
 | `coverage-check`, `complexity-check`, `auto-bump-patch` | Unchanged | Release and version behavior is unchanged. |
 
-Executed integration coverage is twenty-three Access cases: five bootstrap,
-five session, six authorization and seven Admin-form cases. GitLab schedules
-the same normal owner aggregate automatically. The following
+Executed integration subsets are twenty-three Access cases and eight initial
+Delivery cases. GitLab schedules both normal owner aggregates automatically.
+Exact results and revisions are recorded separately. The following
 accepted obligations have **no integration owner coverage** until implemented;
 there is no longer a manual legacy fallback:
 
 - Access: registration policy, cross-environment scope, OIDC, remaining resource/environment forms and nonempty assignments, preferences, notifications, shell behavior, and authorization beyond the selected admin-only operations.
 - Accepted browser and design behavior beyond the selected Access proof. Legacy mocked steps are not automatically mandatory requirements.
-- All Delivery obligations: ingestion, builder strategies, Niks3 and Attic publication, activation, rollback.
+- Remaining Delivery obligations: ingestion variants, verified-source execution, scheduling/cancellation/fencing/retry, Niks3/Attic/S3/HTTP adapters, cold agent retrieval, activation, rollback and recovery. The positive source/native-build/local signed-publication foundation is not complete Delivery coverage.
 - All Assurance obligations.
 - All Upgrade obligations.
 
@@ -606,7 +686,7 @@ This is an explicit owner-authorized coverage gap during construction. Source
 retirement removes implementations; it does not remove accepted obligations or
 claim their replacement passed.
 
-Final TASK-490.24 completion still requires the three absent owners, complete
+Final TASK-490.24 completion still requires the two absent owners, complete
 accepted coverage, four passing normal aggregates, the exact four-name
 inventory/CI allowlist, execution-cost evidence, and duplicate-execution
 resolution. Source removal and fixture relocation alone do not satisfy it.

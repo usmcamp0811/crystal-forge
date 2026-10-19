@@ -402,7 +402,8 @@ local checks during implementation, then obtain results for affected
 owners at the review revision. Report failed, blocked, skipped,
 and unverified cases explicitly. A preview is not proof that a check passed.
 
-Only `integration-access` is currently discoverable. Its coordinator-owned
+`integration-access` and `integration-delivery` are currently discoverable. Their
+behavior-oriented scenarios use explicit owner-local registration. The
 `checks/integration-access/default.nix` explicitly registers scenarios; the
 normal check uses `pkgs.linkFarm` to build every registered scenario gate.
 Run a focused gate with
@@ -410,7 +411,7 @@ Run a focused gate with
 append `.run` to the scenario attribute for evidence only. Meaningful WIP
 checks may be discoverable without a completeness flag. Record missing
 obligations in the coverage map. Implemented integration owners run
-automatically in GitLab (`integration-access` today). TASK-490.24 explicitly
+automatically in GitLab (Access and Delivery today). TASK-490.24 explicitly
 authorizes legacy source retirement before replacement coverage is complete.
 The nine legacy suites and their manual jobs are retired; missing accepted
 obligations remain gaps. Unique lower-level assertions run in ordinary component
@@ -420,7 +421,7 @@ are removed; do not recreate them or add a registry or aggregation framework.
 Core-only evaluator and CA checks must not repeat in the embedded build.
 Developer tools remain package/app outputs. Use the source/command mapping in
 `docs/knowledge/testing/flake-checks.md` and `docs/agents/verification.md`.
-The current inventory is one total check (formerly 27), not
+The current inventory is two total checks (formerly 27), not
 completed four-owner coverage. Final `checks.x86_64-linux` MUST contain exactly
 `integration-access`, `integration-assurance`, `integration-delivery`, and
 `integration-upgrade`, with no additional checks or placeholders. Verify the

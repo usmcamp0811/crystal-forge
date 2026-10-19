@@ -17,8 +17,8 @@ generated:
 
 **Status:** Adopted by the owner on 2026-10-17 through TASK-490. The maintenance
 rules below are in force. `implementation_status: partial` describes coverage,
-not the rules. The harness exists under `lib/integration-test/`; only
-`integration-access` is registered and runs automatically in GitLab. Its
+not the rules. The harness exists under `lib/integration-test/`; Access and
+Delivery are registered and run automatically in GitLab. Access's
 local-bootstrap scenario passed all 23 cases through the CI job script at
 `c254b1c54e0f40adfaa9d05b5766cfeffae9bb89`: the original five bootstrap,
 five session and six Operator/Viewer authorization cases, then seven real
@@ -64,10 +64,12 @@ coverage is complete. The initial seventeen-definition package relocation is
 superseded: all fifteen public `verify-*` wrappers are removed. Unique assertions
 run in ordinary component tests, direct CI commands and existing isolated-DB
 workflows. Documentation and screenshot tools remain ordinary packages.
-The current inventory is only `integration-access` (one versus 27), with selected
+The current inventory is Access and Delivery (two versus 27), with selected
 bootstrap, session, role-authorization and Admin-form persistence coverage.
 The earlier 16-case subset remains first and unchanged; seven Admin-form cases
-extend the recorded run to 23 cases. Delivery, Assurance, and Upgrade are absent.
+extend the recorded Access run to 23 cases. Delivery contains the source,
+native evaluation, API-builder and target-agent lifecycle. Its exact execution
+record is in the coverage map. Assurance and Upgrade are absent.
 This is not final four-owner completion. No placeholder owner is permitted.
 The earlier optional-manual CI transition remains in the execution history;
 it does not describe the current source-retirement policy.
@@ -94,7 +96,19 @@ A new page, component, API route, cache adapter, policy kind, task, or regressio
 
 Each check MUST run independently. Checks MAY share immutable Nix inputs, fixture definitions, and test helpers. They MUST NOT depend on another check's database, VM, session, or previously produced runtime output.
 
-**Harness location and registration.** Shared helpers live in `lib/integration-test/`. A native Snowfall check calls `lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }`. The coordinator explicitly registers a `scenarios` attribute set in `checks/integration-access/default.nix`; the normal check uses `pkgs.linkFarm` to build every registered scenario gate. An implementation packet does not automatically receive its own NixOS test derivation. Compatible packet work MUST be composed as case fragments in a shared scenario using the existing Nix, Python, and browser-script structure. The coordinator owns scenario composition and registration. Focused execution uses `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`; append `.run` to the scenario attribute to obtain evidence only. Meaningful WIP checks may be discoverable, without a completeness flag. Only Access is currently discoverable. Future Delivery, Assurance, and Upgrade scenarios, fixtures, and assets belong beneath `checks/integration-{delivery,assurance,upgrade}/`; do not create placeholder `default.nix` files or custom discovery. The [coverage map](integration-coverage-map.md#harness-interface) documents the interface, planned packet groupings, and missing obligations.
+**Harness location and registration.** Shared helpers live in
+`lib/integration-test/`. Native owner checks call
+`lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }` and
+explicitly register `scenarios` in their own `default.nix`. The normal
+`pkgs.linkFarm` aggregate builds every registered scenario gate. Access and
+Delivery are currently discoverable. Compatible behavior modules use the
+existing Nix, Python and browser-script composition inside a shared lifecycle;
+tracking tasks do not define files or derivations. Focused execution selects
+`checks.x86_64-linux.<owner>.scenarios.<scenario>`; `.run` is evidence only.
+Meaningful WIP owners may be discoverable without a completeness flag. Keep
+scenario files and assets under their owner; do not add placeholders or custom
+discovery. The [coverage map](integration-coverage-map.md#harness-interface)
+records actual interfaces, behavior-oriented composition and remaining gaps.
 
 Each scenario produced by `mkScenario` runs in its own fresh NixOS VM test and database. The normal owner check aggregates those independent scenario gates. Scenario files and immutable fixture definitions MAY be reused. Live databases, VMs, sessions, runtime identities, and successful outputs MUST NOT be reused between scenarios or owner checks. A Backlog task dependency names code/fixture prerequisites only; it does not make a producer scenario's runtime data available to a dependent scenario. Within one scenario, later cases MAY use identities and records created by earlier real workflows; the existing receipt mechanism carries generated identities. A scenario MUST create the real starting state it needs in its own run, without seeding the result under test.
 

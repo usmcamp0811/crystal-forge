@@ -62,9 +62,11 @@ sources:
 ## Current inventory and commands
 
 TASK-490.24 authorizes source retirement before four-owner completion. The
-current `checks.x86_64-linux` inventory contains only `integration-access`
-(one total attribute, previously 27). Its unchanged 16 executed cases do not
-complete Access. Delivery, Assurance, and Upgrade are absent. No placeholders
+current `checks.x86_64-linux` inventory contains `integration-access` and
+`integration-delivery` (two total attributes, previously 27). Access's bootstrap,
+session, authorization and Admin-form subset does not complete Access. Delivery
+has a real source/evaluation/build/agent lifecycle, not complete Delivery coverage.
+Assurance and Upgrade are absent. No placeholders
 are registered, including beneath the retained Assurance fixture directory.
 
 The final inventory must contain exactly four TOTAL names. Verify the full set:
@@ -228,13 +230,19 @@ executed the VM and passed the same ten cases at
 Operator/Viewer authorization cases) at `8a857bc872cf331a19036b97a93f2b7741e9728b`;
 it exports real evidence files to `integration-evidence/integration-access/`,
 including after a failed build, and keeps the build status if collection fails.
-Keep the legacy gate definitions until full owner cutover conditions pass.
+The former retain-until-cutover instruction is superseded by the authorized
+source retirement. This historical result does not restore a legacy gate.
 
 ## Summary
 
+Only Access and Delivery are current integration checks. The other rows retain
+historical suite inventories or identify current lower-level/tool successors;
+they are not additional flake check attributes.
+
 | Check | Boots a VM | Covers | README |
 | --- | --- | --- | --- |
-| `integration-access` | Yes (controller; 16-case gate passed; automatic and required in GitLab) | Local bootstrap, 292 migrations, observed Unix-socket clients, registration/sign-in/reload, wrong-password rejection, selected-session CSRF/revocation and independent browser sign-out, and Operator/Viewer denial (403, no protected change) of admin-only user create, user PATCH and server configuration plus the Viewer `/admin` Access Denied UI; cross-environment scope and closed-registration cases remain unimplemented | [Coverage map](integration-coverage-map.md) |
+| `integration-access` | Yes (one shared controller; automatic and required) | Bootstrap/migrations, local sign-in/reload, sessions/CSRF/sign-out, selected Admin-only role denials and Admin form persistence. Remaining environment, registration and other Access obligations stay gaps. | [Coverage map](integration-coverage-map.md) |
+| `integration-delivery` | Yes (one five-role lifecycle; automatic and required) | Authored source/native evaluation, exact derivation/attempt, two API-only builder sessions, cold real Nix output, signed local publication and target-agent reporting. Remaining Delivery obligations stay gaps. | [README](../../../checks/integration-delivery/README.md) |
 | `integration` | Yes (server and git server) | Server, database, and Grafana dashboard behavior through the `cf_test` pytest markers `database`, `dashboard`, and `server` | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/integration/README.md) |
 | `oidc-auth` | Yes (Keycloak and server) | OIDC login path against a real Keycloak realm | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/oidc-auth/README.md) |
 | `web-ui` | Yes (server, agent, builder, git server) | Production embedded-UI server through a real browser | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/web-ui/README.md) |

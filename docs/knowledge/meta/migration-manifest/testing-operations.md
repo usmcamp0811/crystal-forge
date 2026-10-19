@@ -19,6 +19,7 @@ tags:
 | `docs/mock-execution-mode.md` | [operations/mock-execution-mode.md](../../operations/mock-execution-mode.md) | moved | complete |
 | `checks/integration/README.md` | historical scope in [integration section](../../testing/flake-checks.md#integration); source retired by TASK-490.24 | merged | complete |
 | `checks/integration-access/README.md` | new TASK-490.1 runbook retained beside the native check; see [coverage map](../../testing/integration-coverage-map.md) | retained | complete |
+| `checks/integration-delivery/README.md` | behavior-oriented source/build lifecycle runbook retained beside its native owner; see [coverage map](../../testing/integration-coverage-map.md) | retained | complete |
 | `checks/integration-assurance/fixtures/xccdf/README.md` | retained fixture provenance for planned Assurance import coverage; [retirement map](../../testing/integration-coverage-map.md#legacy-retirement-map) | retained | complete |
 | `checks/builder-evaluator-packaging/README.md` | relocated source cataloged in [builder-evaluator-packaging section](../../testing/flake-checks.md#builder-evaluator-packaging) | merged | complete |
 | `checks/niks3-cache/README.md` | historical scope in [niks3-cache section](../../testing/flake-checks.md#niks3-cache); source retired by TASK-490.24 | merged | complete |

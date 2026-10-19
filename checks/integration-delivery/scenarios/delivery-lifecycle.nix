@@ -79,12 +79,15 @@
     EOF
   '';
   offlineNetwork = {...}: {
+    environment.systemPackages = [pkgs.iptables];
     # eth0 is QEMU's public/NAT interface; role traffic uses the test VLAN.
     # Permit boot DHCP/IPv6 link control, but no external fixture acquisition.
     networking.firewall.extraCommands = ''
-      iptables -A OUTPUT -o eth0 -p udp --dport 67 -j ACCEPT
+      iptables -A OUTPUT -o eth0 -p udp --dport 67 -d 255.255.255.255/32 -j ACCEPT
+      iptables -A OUTPUT -o eth0 -p udp --dport 67 -d 10.0.2.2/32 -j ACCEPT
       iptables -A OUTPUT -o eth0 -j REJECT
-      ip6tables -A OUTPUT -o eth0 -p ipv6-icmp -j ACCEPT
+      ip6tables -A OUTPUT -o eth0 -p ipv6-icmp -d fe80::/10 -j ACCEPT
+      ip6tables -A OUTPUT -o eth0 -p ipv6-icmp -d ff02::/16 -j ACCEPT
       ip6tables -A OUTPUT -o eth0 -j REJECT
     '';
   };
@@ -103,7 +106,7 @@
   };
 in harness.mkScenario {
   inherit owner name;
-  contracts = ["delivery.evaluation" "delivery.build"];
+  contracts = ["delivery.evaluation" "delivery.build" "delivery.publication"];
   nodes = {
     controller = { ... }: {
       imports = [(harness.roles.controller {}) prepared];
@@ -119,10 +122,18 @@ in harness.mkScenario {
       };
     };
     services = {...}: {
-      imports = [(harness.roles.services {}) offlineNetwork];
+      # Share only immutable preparation, including input-closure metadata.
+      # Otherwise first publication needlessly copies the entire toolchain
+      # into this writable cache. The runtime nonce output is still absent.
+      imports = [(harness.roles.services {}) prepared];
       environment.etc."cf-it/source".source = source;
     };
-    builderA = {...}: {imports = [(harness.roles.builder {name = "builderA";}) prepared];};
+    builderA = {...}: {
+      imports = [(harness.roles.builder {name = "builderA";}) prepared];
+      # Retain native copy diagnostics for this controlled local SSH store.
+      # Private keys remain files; no external cache credentials are supplied.
+      systemd.services.crystal-forge-builder.environment.RUST_LOG = lib.mkForce "info,cf_builder::derivations::cache=debug";
+    };
     builderB = {...}: {imports = [(harness.roles.builder {name = "builderB";}) prepared];};
     targetA = {...}: {imports = [(harness.roles.target {}) offlineNetwork];};
   };

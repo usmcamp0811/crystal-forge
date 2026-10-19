@@ -33,9 +33,9 @@ generator/manifest/tests/drawer capture tools now live beneath
 `checks/integration-assurance/fixtures/xccdf/`, without an owner registration.
 The approved design reference is unchanged.
 
-The current check inventory is one total attribute, `integration-access`,
-versus 27 previously. Its unchanged 16 executed cases are a partial Access
-proof. Delivery, Assurance, and Upgrade owners are absent. Final completion
+The current check inventory contains `integration-access` and
+`integration-delivery`, versus 27 previously. Their executed behavior subsets
+do not complete either owner. Assurance and Upgrade remain absent. Final completion
 requires exactly four total check names and complete accepted coverage. See
 the [contract's final inventory command](integration-test-contract.md#1-fixed-check-inventory).
 
@@ -61,7 +61,7 @@ approved baselines.
 > [current GitLab selection](integration-coverage-map.md#current-gitlab-selection).
 > Do not add new workflows here; add them to the owning scenario instead.
 
-Only `integration-access` is currently discoverable. Its coordinator-owned
+Access and Delivery are currently discoverable. The coordinator-owned
 `checks/integration-access/default.nix` explicitly registers scenarios; the
 normal `pkgs.linkFarm` check builds all registered gates. Meaningful WIP checks
 may be discoverable without a completeness flag. Native checks call

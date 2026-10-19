@@ -167,11 +167,15 @@ package for design iteration, without semantic integration proof.
 
 ## Final inventory verification
 
-Current inventory after source retirement: one check, `integration-access`,
-versus 27 before retirement. Its original 16 cases remain unchanged; seven
+Current inventory: `integration-access` and `integration-delivery`,
+versus 27 before retirement. Access's original 16 cases remain unchanged; seven
 Admin-form cases now follow them and passed at `c254b1c5` through the normal
-owner CI script, with a new VM and independent SQL/reload evidence. Delivery,
-Assurance, and Upgrade are absent; retained XML fixtures create no check.
+owner CI script, with a new VM and independent SQL/reload evidence.
+Assurance and Upgrade are absent; retained XML fixtures create no check.
+Delivery's `delivery-lifecycle` registers real Git/native evaluation, API-only
+builders and target-agent proof. Run its normal aggregate with
+`sh packages/ci/integration-owner-build.sh integration-delivery`; exact tested
+revisions and remaining obligations are in the coverage map.
 Final completion requires exactly four TOTAL attributes, plus complete accepted
 coverage and execution evidence. Evaluate the full set (not a filtered subset):
 

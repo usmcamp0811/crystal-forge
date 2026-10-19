@@ -21,6 +21,11 @@ with case("delivery-services-and-administrator-ready"):
     controller.wait_for_open_port(3000)
     services.wait_for_unit("nginx.service")
     services.wait_for_unit("sshd.service")
+    for node in (controller, services, builderA, builderB, targetA):
+        node.wait_for_unit("firewall.service")
+        node.succeed("iptables -C OUTPUT -o eth0 -j REJECT && "
+                     "ip6tables -C OUTPUT -o eth0 -j REJECT")
+    receipt("delivery.publicEgressDenied", True)
     status, registered = http(controller, "POST", "/api/auth/local/register", {
         "username": admin["username"], "email": admin["email"],
         "password": admin["password"], "first_name": admin["firstName"],
@@ -65,19 +70,16 @@ with case("source-authored-commit-served-by-local-git"):
 
 with case("api-builders-register-distinct-runtime-credentials"):
     ssh_public_keys = []
+    signing_public_keys = []
     host_key = services.succeed("cat /etc/ssh/ssh_host_ed25519_key.pub").strip()
     for node, name in ((builderA, "builderA"), (builderB, "builderB")):
         node.succeed(
             "install -d -m 0750 -o crystal-forge -g crystal-forge /var/lib/crystal-forge && "
             "cf-keygen -y -f /var/lib/crystal-forge/builder-api.key && "
-            "ssh-keygen -q -t ed25519 -N '' -f /var/lib/crystal-forge/cache-ssh && "
             "chown crystal-forge:crystal-forge /var/lib/crystal-forge/builder-api.* "
-            "/var/lib/crystal-forge/cache-ssh*"
+            "&& chmod 600 /var/lib/crystal-forge/builder-api.key"
         )
         public_key = node.succeed("cat /var/lib/crystal-forge/builder-api.pub").strip()
-        ssh_public_keys.append(node.succeed("cat /var/lib/crystal-forge/cache-ssh.pub").strip())
-        _vm_write(node, "/var/lib/crystal-forge/cache-known-hosts", "services " + host_key + "\n")
-        node.succeed("chmod 644 /var/lib/crystal-forge/cache-known-hosts")
         created = delivery_api("POST", "/api/v1/builders", {
             "name": name, "host": name, "arch": "x86_64-linux", "public_key": public_key,
             "max_cpu_cores": 2, "max_memory_mb": 2048, "max_concurrent_jobs": 1,
@@ -92,12 +94,47 @@ with case("api-builders-register-distinct-runtime-credentials"):
            "builders share a registered identity")
     expect(receipts()["delivery.builderA.publicKey"] != receipts()["delivery.builderB.publicKey"],
            "builders share a credential")
+    # Both builder publication and the controller's normal background closure
+    # publication need real credentials. They share only public trust material.
+    for node, name in ((controller, "controller"), (builderA, "builderA"), (builderB, "builderB")):
+        node.succeed("umask 077; ssh-keygen -q -t ed25519 -N '' -f /var/lib/crystal-forge/cache-ssh && "
+                     "nix-store --generate-binary-cache-key " + shlex.quote("delivery-" + name) +
+                     " /var/lib/crystal-forge/cache-sign.key /var/lib/crystal-forge/cache-sign.pub && "
+                     "chown crystal-forge:crystal-forge /var/lib/crystal-forge/cache-ssh* "
+                     "/var/lib/crystal-forge/cache-sign.* && "
+                     "chmod 600 /var/lib/crystal-forge/cache-ssh /var/lib/crystal-forge/cache-sign.key")
+        ssh_public_keys.append(node.succeed("cat /var/lib/crystal-forge/cache-ssh.pub").strip())
+        signing_public_keys.append(node.succeed("cat /var/lib/crystal-forge/cache-sign.pub").strip())
+        _vm_write(node, "/var/lib/crystal-forge/cache-known-hosts", "services " + host_key + "\n")
+        node.succeed("chmod 644 /var/lib/crystal-forge/cache-known-hosts")
+        # Scope environment allowlists need not carry NIX_SSHOPTS: the real
+        # user's normal OpenSSH configuration pins identity and host trust.
+        _vm_write(node, "/var/lib/crystal-forge/.ssh/config", "Host services\n"
+                  "  User cache\n  IdentityFile /var/lib/crystal-forge/cache-ssh\n"
+                  "  IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking yes\n"
+                  "  UserKnownHostsFile /var/lib/crystal-forge/cache-known-hosts\n")
+        node.succeed("chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.ssh && "
+                     "chmod 700 /var/lib/crystal-forge/.ssh && chmod 600 /var/lib/crystal-forge/.ssh/config")
     _vm_write(services, "/var/lib/cache/.ssh/authorized_keys", "\n".join(ssh_public_keys) + "\n")
     services.succeed("chown -R cache:cache /var/lib/cache/.ssh && "
                      "chmod 700 /var/lib/cache/.ssh && chmod 600 /var/lib/cache/.ssh/authorized_keys")
+    # Trust only public signing material from this run. Keep signature checks
+    # enabled; an authenticated SSH connection alone does not authorize NARs.
+    _vm_write(services, "/run/cf-it-cache-keys.conf",
+              "\nextra-trusted-public-keys = " + " ".join(signing_public_keys) + "\n")
+    services.succeed("cp /etc/nix/nix.conf /run/cf-it-nix.conf && "
+                     "cat /run/cf-it-cache-keys.conf >> /run/cf-it-nix.conf && "
+                     "rm /etc/nix/nix.conf && install -m 0644 /run/cf-it-nix.conf /etc/nix/nix.conf && "
+                     "systemctl restart nix-daemon.service")
+    for node in (controller, builderA, builderB):
+        # Verify fixture credentials before attributing a publication failure
+        # to the CF workflow. No private key leaves its originating VM.
+        node.succeed("runuser -u crystal-forge -- ssh -o ConnectTimeout=5 cache@services true")
     cache = delivery_api("POST", "/api/v1/caches", {
         "name": "delivery-local-store", "cache_type": "Nix", "push_to": FACTS["cacheUrl"],
         "enabled": True, "require_sigs": True,
+        "max_retries": 0,
+        "signing_key_path": "/var/lib/crystal-forge/cache-sign.key",
         "environment_ids": [receipts()["delivery.environmentId"]],
     }, expected=201)
     receipt("delivery.cacheId", cache["id"])
