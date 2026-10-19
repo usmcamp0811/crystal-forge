@@ -670,16 +670,23 @@ let
     '';
   };
 
+  # --offline alone does not disable configured remote builders. Pass these
+  # settings at both Nix entry points; preparation is a separate online step.
+  # Disable ordinary local closure builds here too. Do not export max-jobs=0:
+  # the Rust contracts must still build their local Nix fixture derivations.
+  stateMachineOfflineArgs = "--offline --option substituters '' --option substitute false --option builders '' --option fallback false --option accept-flake-config false --max-jobs 0 --no-update-lock-file";
+
   runStateMachineTests = pkgs.writeShellApplication {
     name = "run-state-machine-tests";
-    runtimeInputs = with pkgs; [ nix coreutils ];
+    runtimeInputs = with pkgs; [ bash nix coreutils ];
     text = ''
       set -euo pipefail
 
       export PROJECT_ROOT="''${PROJECT_ROOT:-$PWD}"
       : "''${CF_STATE_MACHINE_STATUS_FILE:?Use the isolated state-machine-test launcher}"
       status=0
-      nix develop "$PROJECT_ROOT#sqlx" -c bash ${./tests/state-machine-tests.sh} || status=$?
+      nix develop ${stateMachineOfflineArgs} "$PROJECT_ROOT#sqlx" \
+        -c ${pkgs.bash}/bin/bash ${./tests/state-machine-tests.sh} || status=$?
       printf '%s\n' "$status" > "$CF_STATE_MACHINE_STATUS_FILE"
       exit "$status"
     '';
@@ -687,14 +694,14 @@ let
 
   runDashboardVisibilityTests = pkgs.writeShellApplication {
     name = "run-dashboard-visibility-tests";
-    runtimeInputs = with pkgs; [ nix coreutils ];
+    runtimeInputs = with pkgs; [ bash nix coreutils ];
     text = ''
       set -euo pipefail
 
       REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
       DB_URL="postgresql://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge"
 
-      nix develop "$REPO_ROOT#sqlx" -c bash -euo pipefail -c "
+      nix develop "$REPO_ROOT#sqlx" -c ${pkgs.bash}/bin/bash -euo pipefail -c "
         cd \"$REPO_ROOT/packages/default\"
         DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source crates/cf-server/migrations
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
@@ -711,14 +718,14 @@ let
 
   runCveProcessingTest = pkgs.writeShellApplication {
     name = "run-cve-processing-test";
-    runtimeInputs = with pkgs; [ nix coreutils ];
+    runtimeInputs = with pkgs; [ bash nix coreutils ];
     text = ''
       set -euo pipefail
 
       REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
       DB_URL="''${CRYSTAL_FORGE_CVE_TEST_DATABASE_URL:?Set CRYSTAL_FORGE_CVE_TEST_DATABASE_URL to a dedicated CVE test database}"
 
-      nix develop "$REPO_ROOT#sqlx" -c bash -euo pipefail -c "
+      nix develop "$REPO_ROOT#sqlx" -c ${pkgs.bash}/bin/bash -euo pipefail -c "
         cd \"$REPO_ROOT/packages/default\"
         export DATABASE_URL=\"$DB_URL\"
         DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source crates/cf-server/migrations
@@ -1469,10 +1476,28 @@ in full-stack.config.outputs.package // {
     name = "process-compose";
     meta.description =
       "Runs selected database contracts in a fresh disposable PostgreSQL cluster";
-    runtimeInputs = with pkgs; [ coreutils postgresql ];
+    runtimeInputs = with pkgs; [ bash nix coreutils postgresql ];
     text = ''
+      export PROJECT_ROOT="''${PROJECT_ROOT:-$PWD}"
+      export CARGO_NET_OFFLINE=true SQLX_OFFLINE=true
+      # Descendant Nix commands inherit the same policy. Explicit CLI settings
+      # also prevent a caller's NIX_CONFIG from enabling remote acquisition.
+      export NIX_CONFIG="''${NIX_CONFIG:-}
+      substituters =
+      substitute = false
+      builders =
+      fallback = false
+      accept-flake-config = false
+      "
+      if ! nix develop ${stateMachineOfflineArgs} "$PROJECT_ROOT#sqlx" \
+        -c cargo metadata --locked --offline --format-version 1 \
+        --manifest-path "$PROJECT_ROOT/packages/default/Cargo.toml" >/dev/null; then
+        echo "State-machine offline prerequisite failure: SQLx shell closure or locked Cargo dependencies unavailable (see Nix/Cargo error above)." >&2
+        echo "Prepare separately: nix build .#devScripts.state-machine-test; nix develop .#sqlx -c cargo fetch --locked --manifest-path packages/default/Cargo.toml" >&2
+        exit 1
+      fi
       export CF_STATE_MACHINE_PORT=${toString state_machine_test_db_port}
-      exec bash ${./tests/state-machine-environment.sh} \
+      exec ${pkgs.bash}/bin/bash ${./tests/state-machine-environment.sh} \
         ${stateMachineTest.config.outputs.package}/bin/process-compose "$@"
     '';
   };

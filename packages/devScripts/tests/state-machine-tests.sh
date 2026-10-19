@@ -3,7 +3,7 @@
 # in one sqlx shell and compilation directory. Only the launcher owns the cluster.
 set -euo pipefail
 source "$PROJECT_ROOT/packages/devScripts/tests/database-environment.sh"
-bash "$PROJECT_ROOT/packages/devScripts/tests/database-regressions.sh"
+"$BASH" "$PROJECT_ROOT/packages/devScripts/tests/database-regressions.sh"
 
 # These broad groups remain the primary owner of their six overlaps with the
 # extracted regressions. Do not narrow the groups to the historical overlap.

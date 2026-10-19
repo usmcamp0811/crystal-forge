@@ -736,7 +736,7 @@ SQL
       # Expand positional arguments in the child shell, not in this parent.
       # shellcheck disable=SC2016
       runRegressionCommand "$testName" ignored \
-        bash -o pipefail -c 'cargo test --offline --package cf-server \
+        "$BASH" -o pipefail -c 'cargo test --offline --package cf-server \
           --test register_export_selection "$1" \
           -- --ignored --exact --test-threads=1 --color=never 2>&1 | tee "$2"' \
           _ "$testName" "$testLog"

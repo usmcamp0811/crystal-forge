@@ -221,7 +221,7 @@ component-tests:
     - chmod 600 ~/.netrc
   script:
     - sh packages/ci/public-cache-build.sh .#default.cf-server-core-drv -L --show-trace --builders '' --max-jobs 1 --cores 2
-    - nix build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge -L --show-trace --builders '' --max-jobs 1 --cores 2
+    - nix build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge .#xccdf-1-2-schemas -L --show-trace --builders '' --max-jobs 1 --cores 2
     - |
       for suite in builder-cve stig packaging; do
         nix eval --impure --json --expr "
@@ -314,7 +314,16 @@ state-machine-tests:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - nix run .#devScripts.state-machine-test -- -t=false up
+    # Preparation may acquire missing closures and Cargo sources. Execution below
+    # must fail on missing prerequisites instead of fetching them during tests.
+    - nix build .#devScripts.state-machine-test --no-link --builders '' --max-jobs 1 --cores 2
+    - nix develop .#sqlx --builders '' --max-jobs 1 --cores 2 -c cargo fetch --locked --manifest-path packages/default/Cargo.toml
+    - |
+      export CARGO_NET_OFFLINE=true SQLX_OFFLINE=true
+      nix run --offline --option substituters '' --option substitute false \
+        --option builders '' --option fallback false \
+        --option accept-flake-config false --max-jobs 0 --no-update-lock-file \
+        .#devScripts.state-machine-test -- -t=false up
   only:
     - merge_requests
     - main

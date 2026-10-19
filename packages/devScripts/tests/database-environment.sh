@@ -34,7 +34,7 @@ if [[ "$(psql -XAt -v ON_ERROR_STOP=1 -c 'SHOW shared_preload_libraries')" != pg
   echo "State-machine PostgreSQL requires pg_stat_statements preload" >&2
   exit 1
 fi
-export SQLX_OFFLINE=true
+export SQLX_OFFLINE=true CARGO_NET_OFFLINE=true
 # All targets and exact selections share this compilation cache. It is separate
 # from ordinary package builds, whose feature/profile settings can differ.
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PROJECT_ROOT/packages/default/target/database-tests}"
