@@ -1,8 +1,9 @@
 ---
 id: TASK-490.7
 title: 'Coordinator: services, builder, and target roles with a proving scenario'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@openai'
 created_date: '2026-10-17 16:36'
 updated_date: '2026-10-19 03:37'
 labels:
@@ -56,6 +57,17 @@ Verify normal Delivery aggregate and its registered lifecycle gate after impleme
 - [ ] #5 Later same-scenario cases consume earlier real outputs only through receipts; independent derivations never reuse live VM/database/output/receipt state
 - [ ] #6 Actual interface signatures and tested dependency/source revision, focused command, result and evidence are recorded after the real Delivery VM run
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Resume in the existing coordinator worktree /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation, branch of the same name, base dev. User explicitly selected continuation in draft MR !335. The prerequisite corrective pipeline 2961382083 passed all seven required hosted jobs at c2b77aad. Coordinator lock is recorded for this worktree.
+1. Implement concrete services (local Git and required real publication destination), API-only builder {name,strategy}, and target constructors in existing roles.nix. Instantiate controller/services/builderA/builderB/targetA only once in delivery-lifecycle. No production changes or speculative future fixture interfaces.
+2. Author an offline locked source fixture and a runtime nonce-bearing Git commit. Preload only immutable inputs and baseline build dependencies, never the nonce-specific result. Require actual source ingestion/native evaluation and independently verify the authorized drv/output and exact attempt identity before allowing builderA to poll.
+3. Use separately generated builder/target keys and real authenticated protocols. Require builderA actual Nix realization with absent-before/present-after nonce output, successful job/identity correlation, builderB distinct session, and target registration plus real heartbeat. Native builder requires publication after build: configure a real test-owned destination as a prerequisite, without claiming complete publication coverage.
+4. Explicitly register the meaningful Delivery lifecycle in a native owner aggregate. Compose semantic source-build.py sections using existing receipt/driver helpers; no browser fragment unless necessary. Later compatible delivery cases extend this lifecycle.
+5. Evaluate and build the normal owner, inspect all receipts/logs and correct only test plumbing. Record truthful failures without production fixes, then run hosted owner and update existing coverage map with exact evidence, topology and remaining obligations. Keep MR draft; no merge/deploy/Done.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
