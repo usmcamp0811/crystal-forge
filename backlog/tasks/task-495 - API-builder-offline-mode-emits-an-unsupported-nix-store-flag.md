@@ -1,11 +1,11 @@
 ---
 id: TASK-495
 title: API builder offline mode emits an unsupported nix-store flag
-status: In Progress
+status: Review
 assignee:
   - '@openai'
 created_date: '2026-10-19 05:37'
-updated_date: '2026-10-19 15:39'
+updated_date: '2026-10-19 19:20'
 labels: []
 dependencies: []
 references:
@@ -13,6 +13,8 @@ references:
   - modules/nixos/crystal-forge/default.nix
   - checks/integration-delivery/scenarios/fragments/source-build.py
   - /tmp/opencode/delivery-local-run12.log
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2964502717'
 modified_files:
   - packages/default/crates/cf-config/src/config/build.rs
   - modules/nixos/crystal-forge/default.nix
@@ -33,10 +35,10 @@ The implementation was developed in its dedicated TASK-495 worktree and committe
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A configured offline API-only builder can realize an authorized derivation using the supported Nix CLI without an unsupported-flag error.
-- [ ] #2 Offline realization cannot acquire external substitutes or use remote builders or network fallback.
-- [ ] #3 Tests cover the effective invocation and a real successful local realization with its output absent before execution.
-- [ ] #4 Affected configuration and maintainer documentation describe the actual offline guarantee and missing-prerequisite failure.
+- [x] #1 A configured offline API-only builder can realize an authorized derivation using the supported Nix CLI without an unsupported-flag error.
+- [x] #2 Offline realization cannot acquire external substitutes or use remote builders or network fallback.
+- [x] #3 Tests cover the effective invocation and a real successful local realization with its output absent before execution.
+- [x] #4 Affected configuration and maintainer documentation describe the actual offline guarantee and missing-prerequisite failure.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -63,4 +65,12 @@ The owner explicitly authorized a separate product fix in response to the Delive
 - Normal production builder package in the coordinator build passed 99 library, 34 binary and 2 integration tests. Agent package passed 15 library, 11 binary and 1 integration tests. These completed before the later embedded-UI preparation timeout; that timeout launched no VM.
 - The unchanged offline=true Delivery path subsequently performed a real NixOS realization from an independently absent nonce output. The latest full normal aggregate passed all 8 cases, including signed publication, exact job/session/output completion and independent second builder session. Evidence: `/nix/store/bys8qx6hix4kvf1yqycjbiqq2pmr1sc4-vm-test-run-cf-it-delivery-delivery-lifecycle-run`, working tree based on fc0c5836; not a clean-revision claim.
 - Final clean-revision/hosted verification remains pending recording. Keep In Progress; no merge, deployment or Done.
+
+## Verified code and review handoff
+
+Code revision `bea0c29936c2220a8c1ba8dbfeb5750dacc18cde` passed hosted pipeline 2964502717. All eight required jobs succeeded: Access, Delivery, component, state-machine, CVE, dashboard, complexity and coverage. The archived Delivery result records all 8 cases passed with offline=true, outputAbsentBeforeBuild=true, outputRealized=true, buildCompleted=true and publicEgressDenied=true. It preserves exact source, native attempt, drv, job, builder-session and target identities.
+
+The same clean revision passed both normal aggregates locally (Access 23/23, Delivery 8/8), all 96 cf-config tests and the documented package/schema/tool checks. The hosted state-machine trace totals 515 passed, 0 failed, 0 ignored across 227 summaries. Earlier preparation/cold-store failures remain recorded; they are not counted as successful tests.
+
+Open review vehicle: draft MR !335. Product code remains the separate commit 6844d185, applied as fc0c5836; no offline=false workaround, expected failure or production test bypass was added. All four task criteria are verified. Move to Review, not Done; the MR is not merged and the task worktree remains available.
 <!-- SECTION:NOTES:END -->
