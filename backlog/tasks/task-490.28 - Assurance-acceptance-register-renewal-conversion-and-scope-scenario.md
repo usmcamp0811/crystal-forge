@@ -4,7 +4,7 @@ title: 'Assurance: acceptance-register renewal, conversion, and scope scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 20:31'
-updated_date: '2026-10-18 14:00'
+updated_date: '2026-10-19 02:15'
 labels:
   - testing
   - integration
@@ -13,8 +13,8 @@ dependencies:
   - TASK-490.27
   - TASK-490.21
 modified_files:
-  - checks/integration-assurance/scenarios/fragments/task-490.28-acceptance.py
-  - checks/integration-assurance/scenarios/fragments/task-490.28-acceptance.cjs
+  - checks/integration-assurance/scenarios/fragments/acceptance.py
+  - checks/integration-assurance/scenarios/fragments/acceptance.cjs
 parent_task_id: TASK-490
 priority: medium
 type: task
@@ -27,8 +27,8 @@ ordinal: 541000
 Owning check: integration-assurance. Contract ID: assurance.remediation.acceptance-register. Goal: prove source-owned acceptance projection, scope and selected-record renew/convert behavior. Risk: high (cross-record identity and transactions). Non-goals: triage/waiver lifecycle assertions (.20/.27), POA&M verification (.29), product changes.
 
 Writable paths (only):
-- checks/integration-assurance/scenarios/fragments/task-490.28-acceptance.py
-- checks/integration-assurance/scenarios/fragments/task-490.28-acceptance.cjs
+- checks/integration-assurance/scenarios/fragments/acceptance.py
+- checks/integration-assurance/scenarios/fragments/acceptance.cjs
 
 Composition target: checks/integration-assurance/scenarios/evidence-remediation-lifecycle.nix. Coordinator owns Nix/Python composition, browserSpecs and explicit registration/normal aggregation. After approved .27/.21 source flows produce real source-owned acceptances earlier in this fresh Assurance VM/database, consume exact source/acceptance IDs through receipts. Earlier same-scenario real records MAY be reused; another derivation's live rows, outputs or receipts MUST NOT be consumed. No packet-specific derivation; never seed acceptance/waiver/plan records or renew/convert results.
 
