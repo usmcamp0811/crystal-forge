@@ -4,7 +4,7 @@ title: 'Assurance: create and maintain POA&M plans from real failed evidence'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-18 13:59'
+updated_date: '2026-10-19 02:14'
 labels:
   - testing
   - integration
@@ -13,8 +13,8 @@ dependencies:
   - TASK-490.16
   - TASK-490.18
 modified_files:
-  - checks/integration-assurance/scenarios/fragments/task-490.21-poam-plan.py
-  - checks/integration-assurance/scenarios/fragments/task-490.21-poam-plan.cjs
+  - checks/integration-assurance/scenarios/fragments/poam-plan.py
+  - checks/integration-assurance/scenarios/fragments/poam-plan.cjs
 parent_task_id: TASK-490
 priority: medium
 type: task
@@ -27,8 +27,8 @@ ordinal: 533000
 Owning check: integration-assurance. Contract ID: assurance.remediation.poam-plan. Goal: create and maintain POA&M plans from real failed evidence. Risk: high (evidence links and transaction integrity). Non-goals: verification/closure/reopen (.29), triage (.20), waiver/acceptance (.27/.28), product changes.
 
 Writable paths (only):
-- checks/integration-assurance/scenarios/fragments/task-490.21-poam-plan.py
-- checks/integration-assurance/scenarios/fragments/task-490.21-poam-plan.cjs
+- checks/integration-assurance/scenarios/fragments/poam-plan.py
+- checks/integration-assurance/scenarios/fragments/poam-plan.cjs
 
 Composition target: checks/integration-assurance/scenarios/evidence-remediation-lifecycle.nix. Coordinator owns Nix/Python composition, browserSpecs and explicit registration/normal aggregation. Compose after .16/.18 real failed CVE/policy evidence earlier in one fresh Assurance VM/database. Earlier real findings/evaluations MAY be consumed through receipts. Another derivation's live rows, outputs, generations or receipts MUST NOT be consumed. No packet-specific derivation; never seed failed evidence, findings, plans or generated identities.
 
