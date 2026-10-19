@@ -168,10 +168,8 @@ verification is recorded separately at handoff.
 Hosted cold preparation exposed deep Nix recipe contexts in the generated
 source fixture. Its direct derivation dependencies measured 2,525. Retaining
 recipe paths without their transitive all-output contexts reduces that fixture
-to five actual production-output dependencies. A separate immutable metadata
-root retains the baseline's selected direct build inputs, including copied boot
-scripts and build-only checks. This is build-input preparation, not a coverage
-registry. The source also uses the same patched evaluator/Nix package pair as
+to five actual production-output dependencies. The source also uses the same
+patched evaluator/Nix package pair as
 the baseline; it no longer rebuilds a different evaluator during realization.
 The unchanged eight-case normal aggregate passed after this correction in a
 working tree based on `ee6e0ddb`, driver 62.67 seconds; evidence:
@@ -179,6 +177,16 @@ working tree based on `ee6e0ddb`, driver 62.67 seconds; evidence:
 The 2,525-to-five figure is scoped to this fixture, not a whole-pipeline recipe
 or runtime comparison. No network fallback, output seeding or assertion
 relaxation supplied missing inputs during verification.
+
+Cold hosted preparation at `f369aacd` then exposed an invalid bootstrap object
+(`strncpy`) while exporting the raw recipe closure, before any VM ran. Narrow
+opaque recipe preparation had worked on the warm local store but was not a
+complete cold-store prerequisite. The current native baseline retains the full
+build closure once for all compatible roles, including those bootstrap source
+objects. This is a deliberate cold-preparation cost, not a claim of globally
+minimal recipes or 2,520 fewer whole-owner builds. The generated source remains
+small; the separate selected-input metadata experiment is not retained. No
+mandatory assertion or offline execution boundary was relaxed.
 
 ### Semantic source cleanup execution
 

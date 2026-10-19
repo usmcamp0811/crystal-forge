@@ -16,10 +16,12 @@ through write-once receipts; private keys remain inside the VMs.
 
 The source contains a real NixOS configuration and an unchanged copy of the
 production module. Locked nixpkgs and baseline dependencies are prepared, but
-the runtime nonce-specific output is never built on the host. Selected direct
-build inputs are retained through immutable Nix
-metadata, not deep recipe contexts that force every transitive output. The
-authored source and baseline use the same production evaluator/Nix pair. Public/NAT egress
+the runtime nonce-specific output is never built on the host. Raw archive
+transport requires a valid complete recipe closure, including bootstrap source
+objects. One native baseline preparation supplies that closure to compatible
+roles; its cold preparation cost remains a minimization constraint. The source
+generator itself does not expand recipe contexts. The authored source and
+baseline use the same production evaluator/Nix pair. Public/NAT egress
 is blocked; local role traffic remains available. Native builder completion
 requires publication, so the scenario supplies a real authenticated SSH Nix
 store. This does not claim complete cache-adapter or deployment coverage.

@@ -6,10 +6,9 @@
   inherit (harness) pkgs lib inputs;
   modulePath = inputs.self + "/modules/nixos/crystal-forge";
   configuration = ../fixtures/configuration.nix;
-  # PERFORMANCE: Recipes are data in the generated flake. Their default deep
-  # string context forces every build-time output, including unused outputs.
-  # Keep each recipe reference, but depend on its actual production output
-  # separately below instead of rebuilding the entire compiler/tool closure.
+  # Recipes are data in the source generator. Avoid expanding their deep
+  # contexts here; complete cold-store preparation belongs to the baseline
+  # below, rather than to the generated Git source.
   agentRecipe = builtins.unsafeDiscardOutputDependency harness.packages.agent.drvPath;
   evaluatorRecipe = builtins.unsafeDiscardOutputDependency pkgs.crystal-forge.default.evaluatorNix.drvPath;
   evalJobsRecipe = builtins.unsafeDiscardOutputDependency pkgs.nix-eval-jobs.drvPath;
@@ -19,12 +18,6 @@
     specialArgs.sourceNonce = "baseline-preparation-only";
     modules = [modulePath configuration];
   };
-  # Retain the baseline's selected direct build inputs, including copied
-  # scripts and build-only checks that its runtime closure does not reference.
-  # A metadata root preserves their output contexts without the transitive
-  # all-outputs expansion of a deep .drvPath context.
-  buildInputs = pkgs.writeText "delivery-build-inputs.json"
-    (builtins.toJSON baseline.config.system.build.toplevel.drvAttrs);
   # Pin the same immutable input identity as the product flake and preload its
   # exact store source on the evaluator/builders. No registry rewrite is used.
   source = pkgs.runCommand "delivery-source-fixture" {} ''
@@ -119,12 +112,13 @@
   };
   prepared = {...}: {
     imports = [offlineNetwork];
-    # Carry selected build-only inputs alongside the runtime system.
+    # Raw derivation-archive transport needs a valid full recipe closure. The
+    # deep baseline context materializes bootstrap source objects too; an
+    # opaque recipe worked only on a warm host and failed cold-store export.
+    # All roles share this one immutable preparation, never the nonce output.
     virtualisation.additionalPaths = [
       pkgs.path inputs.self baseline.config.system.build.toplevel
-      buildInputs
-      # Retain recipe metadata without realizing unused dependency outputs.
-      (builtins.unsafeDiscardOutputDependency baseline.config.system.build.toplevel.drvPath)
+      baseline.config.system.build.toplevel.drvPath
     ];
     nix.settings = {
       experimental-features = ["nix-command" "flakes"];
