@@ -121,7 +121,8 @@ cores = 4
 
     component_builds = [
         ([".#default.cf-server-core-drv"], True),
-        ([".#nixos-options-metadata", ".#oscal-fixture", ".#okf-knowledge"], False),
+        ([".#nixos-options-metadata", ".#oscal-fixture", ".#okf-knowledge",
+          ".#xccdf-1-2-schemas"], False),
     ]
     for route, (installables, scoped) in zip(new["component-tests"]["script"], component_builds):
         result = subprocess.run(["sh", "-euc", route], cwd=ROOT,

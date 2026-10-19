@@ -195,7 +195,7 @@ Go/Rust CA dataset comparison. These checks do not repeat in the embedded build.
 
 ```bash
 sh packages/ci/public-cache-build.sh .#default.cf-server-core-drv -L --show-trace --builders '' --max-jobs 1 --cores 2
-nix build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge -L --show-trace --builders '' --max-jobs 1 --cores 2
+nix build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge .#xccdf-1-2-schemas -L --show-trace --builders '' --max-jobs 1 --cores 2
 
 for suite in builder-cve stig packaging; do
   nix eval --impure --json --expr "
@@ -241,11 +241,37 @@ actual installed exporter output, five CF extension types and OpenSCAP; it does
 not claim XSD coverage for every custom-check variant. Build core before running
 the installed-fixture command. Evaluation alone does not realize its inputs.
 
-Run the consolidated database workflow once:
+Prepare the launcher, SQLx environment and locked Cargo sources separately.
+Only this preparation phase permits network acquisition:
 
 ```bash
-nix run .#devScripts.state-machine-test -- up --tui=false
+nix build .#devScripts.state-machine-test --no-link --builders '' \
+  --option substituters https://cache.nixos.org --option extra-substituters '' \
+  --option accept-flake-config false --max-jobs 1 --cores 2
+nix develop .#sqlx --builders '' \
+  --option substituters https://cache.nixos.org --option extra-substituters '' \
+  --option accept-flake-config false --max-jobs 1 --cores 2 \
+  -c cargo fetch --locked --manifest-path packages/default/Cargo.toml
 ```
+
+Run the consolidated database workflow offline:
+
+```bash
+CARGO_NET_OFFLINE=true SQLX_OFFLINE=true \
+nix run --offline --option substituters '' --option substitute false \
+  --option builders '' --option fallback false \
+  --option accept-flake-config false --max-jobs 0 --no-update-lock-file \
+  .#devScripts.state-machine-test -- -t=false up
+```
+
+The nested SQLx shell uses the same Nix settings. Missing shell or Cargo inputs
+fail before cluster creation with preparation instructions. `SQLX_OFFLINE`
+does not control Nix networking. Descendant Nix fixture builds can execute
+locally, but must not substitute, use remote builders or fall back to fetching.
+The launch chain declares Bash and uses absolute Nix executables. On root CI
+runners, only PostgreSQL children drop to the resolved `nobody` UID/GID; Cargo
+and evidence retain the invoking user's permissions. Cluster and short socket
+directories are invocation-owned and removed on exit.
 
 The launcher owns a fresh temporary cluster on port 35433, verifies its data
 directory, role privileges (`LOGIN SUPERUSER CREATEDB`) and `pg_stat_statements`

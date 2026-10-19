@@ -1405,7 +1405,7 @@ let
       listen_addresses = mkForce "127.0.0.1";
       dataDir = mkForce "./data/state-machine-db";
       # services-flake expands this at runtime. Keep initialization sockets
-      # beneath the launcher's disposable path, including on root CI runners.
+      # in the launcher's short disposable socket path, including root CI.
       socketDir = "$CF_STATE_MACHINE_SOCKET_DIR";
       superuser = "postgres";
       createDatabase = false;

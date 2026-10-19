@@ -15,7 +15,7 @@ generated:
 
 # Crystal Forge integration coverage and retirement map
 
-This map is maintained under the [integration test maintenance contract](integration-test-contract.md). Its product inventory starts from supported application boundaries and accepted requirements, not the retired tests. A source route, component, test function, or planned scenario is a discovery fact, not coverage. Twenty-three Access cases have recorded integration proof at `c254b1c5`: five bootstrap, five session, six authorization and seven Admin-form cases. The post-cleanup rerun is pending. The inventory below adds no covered behavior.
+This map is maintained under the [integration test maintenance contract](integration-test-contract.md). Its product inventory starts from supported application boundaries and accepted requirements, not the retired tests. A source route, component, test function, or planned scenario is a discovery fact, not coverage. Twenty-three Access cases passed again after semantic source cleanup at `590ee94c635154e027317414298ebe05e9b48bbd`: five bootstrap, five session, six authorization and seven Admin-form cases. The inventory below adds no covered behavior.
 
 Current application baseline after rebase: `origin/dev` at `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064`. Overhaul branch: `TASK-490.1-integration-foundation`. Parent task: TASK-490. The earlier `b1095c8f`/`ade5080c` passing runs used the prior `33de73b0` base; the current rebased base was verified separately below.
 
@@ -112,6 +112,33 @@ Isolation and shared store: each separately built scenario is its own NixOS test
 Host resources (`sledge`, inspected 2026-10-17): 32 cores, 123 GiB RAM with about 45 GiB available. The controller is configured for 4 GiB and 4 cores. One VM run failed during server startup; peak usage and safe parallel capacity remain unmeasured. Run one VM test at a time until measurements establish capacity.
 
 ## Obligation map
+
+### Semantic source cleanup execution
+
+At `590ee94c635154e027317414298ebe05e9b48bbd`, the normal
+`sh packages/ci/integration-owner-build.sh integration-access` command exited
+successfully after executing a fresh VM. All 23 existing case IDs, ordering,
+receipt names and assertions passed. Driver time was 50.46 seconds; startup
+remained 10.5 seconds once. Evidence:
+`/nix/store/b21y37v9ffhlk74jr6ijslzvkfr33b2l-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run`.
+Hosted pipeline `2961337066` also passed Access, component, CVE and dashboard
+jobs at that revision. Its state-machine job failed because root `initdb` is
+forbidden; coverage/complexity were skipped, not passed. Follow-up pipeline
+`2961382083` at `c2b77aad1e7f9d400ad1bb96fac2e5bbab6bf782` is pending final
+verification. Root PostgreSQL privilege handling is not established by the
+earlier non-root local result.
+
+The canonical database path at `590ee94c` passed 515 tests and both populated
+migration rehearsals with outbound connections denied in a loopback-only
+network namespace. Outer and nested Nix settings disabled substitution,
+remote builders and fallback; Cargo and SQLx ran offline. The host Nix daemon
+was outside the namespace: this is not proof of a firewall-isolated daemon.
+See [verification commands](../../agents/verification.md#consolidated-component-verification).
+The current launcher additionally passed all 515 selected tests after the root
+privilege and short-socket changes (working tree based on `c2b77aad`, not a
+clean-revision claim), exit receipt 0, 18m14s; log
+`/tmp/opencode/task490-offline-root-launcher.log`. An earlier long-TMPDIR
+attempt failed at socket initialization before tests; its evidence is retained.
 
 Scenario paths are relative to `checks/`. Authoritative observations supplement `result.json`; the case-local authority rules above apply. Each separately built scenario runs in a fresh VM/database; a prerequisite scenario's runtime output is never reused. A task dependency supplies code/immutable fixture preparation only, not another check's live data. Within one scenario, later cases may use identities and records created by earlier real workflows; carry generated identities in the existing receipt mechanism. Every scenario must create its own real starting evidence through setup operations and must not seed the result under test. The coordinator owns composition and registration; tracking boundaries alone do not define VM boundaries.
 

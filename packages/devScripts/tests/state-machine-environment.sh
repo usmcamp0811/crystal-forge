@@ -11,12 +11,18 @@ if pg_isready -h 127.0.0.1 -p "$CF_STATE_MACHINE_PORT" >/dev/null 2>&1; then
   exit 1
 fi
 testRoot="$(mktemp -d "${TMPDIR:-/tmp}/cf-state-machine.XXXXXX")"
+socketRoot=""
 cleanup() {
   rm -rf -- "$testRoot"
+  if [[ -n "$socketRoot" ]]; then rm -rf -- "$socketRoot"; fi
 }
 trap cleanup EXIT
 export CF_STATE_MACHINE_DATA_DIR="$testRoot/data/state-machine-db"
-export CF_STATE_MACHINE_SOCKET_DIR="$testRoot/data/sockets"
+# PostgreSQL appends an initialization suffix and socket filename. Linux limits
+# the complete Unix socket path to 107 bytes; TMPDIR can already exceed that.
+# Keep sockets in a separate short, invocation-owned directory and clean both.
+socketRoot="$(mktemp -d /tmp/cf-sm-sockets.XXXXXX)"
+export CF_STATE_MACHINE_SOCKET_DIR="$socketRoot"
 export CF_STATE_MACHINE_STATUS_FILE="$testRoot/test-exit-status"
 # Migration-prefix copies and exact-test logs are invocation-owned too.
 export TMPDIR="$testRoot/tmp"
@@ -33,6 +39,7 @@ if (( EUID == 0 )); then
   fi
   mkdir -p "$testRoot/data"
   chown "$CF_STATE_MACHINE_POSTGRES_UID:$CF_STATE_MACHINE_POSTGRES_GID" "$testRoot/data"
+  chown "$CF_STATE_MACHINE_POSTGRES_UID:$CF_STATE_MACHINE_POSTGRES_GID" "$socketRoot"
   chmod 711 "$testRoot"
 fi
 stop() {
