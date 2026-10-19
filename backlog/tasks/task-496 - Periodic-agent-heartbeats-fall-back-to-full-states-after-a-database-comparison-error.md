@@ -3,9 +3,11 @@ id: TASK-496
 title: >-
   Periodic agent heartbeats fall back to full states after a database comparison
   error
-status: Backlog
-assignee: []
+status: To Do
+assignee:
+  - '@openai'
 created_date: '2026-10-19 05:37'
+updated_date: '2026-10-19 21:39'
 labels: []
 dependencies: []
 references:
@@ -31,3 +33,9 @@ The real target agent registers and sends signed periodic heartbeat requests, bu
 - [ ] #3 A genuine state change still creates the required full-state evidence rather than being misclassified as an unchanged heartbeat.
 - [ ] #4 An integration or isolated-database regression and affected source documentation describe and verify the intended classification and failure behavior.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+The owner explicitly authorized this smallest production repair and regressions in the current assignment. Dedicated worktree/branch TASK-496-heartbeat-classification is based on the refreshed coordinator reporting head f6439851. No schema redesign, deployment-policy/protocol change or unrelated agent repair is authorized.
+<!-- SECTION:NOTES:END -->
