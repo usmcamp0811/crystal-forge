@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-19 15:46'
+updated_date: '2026-10-19 19:27'
 labels:
   - testing
   - integration
@@ -28,19 +28,19 @@ ordinal: 512000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Build a small, trustworthy product-testing architecture with exactly four final native Snowfall owners: integration-access, integration-delivery, integration-assurance and integration-upgrade. Organize permanent files and scenarios by stable product behavior, never by tracking task or implementing agent. Minimize unnecessary VM lifecycles, duplicate assertions/builds and CI overhead while proving accepted CF contracts.
+Build a small, trustworthy product-testing architecture with exactly four final native Snowfall owners: integration-access, integration-delivery, integration-assurance and integration-upgrade. Permanent files and scenario boundaries follow stable product behavior, not tracking tasks or implementing agents. Minimize duplicate work and justify configuration/isolation boundaries.
 
-The nine legacy suites and fifteen verify-* wrappers remain retired. Unique protection runs in ordinary components, direct module/runtime/schema/tool CI and the existing isolated PostgreSQL workflow. There is no replacement aggregator, registry or fifth check. Current native checks are Access and Delivery; Assurance and Upgrade are absent, not placeholders.
+The nine superseded suites and fifteen verify-* wrappers remain retired. Unique assertions run in ordinary components, direct module/runtime/schema/tool CI and the existing isolated PostgreSQL workflow. No replacement registry, aggregator, DSL or fifth check is permitted. Access and Delivery now have meaningful native owners; Assurance and Upgrade are absent, not placeholders.
 
-Access retains its original23cases in one local-auth controller/database lifecycle. The six task-numbered fragments were renamed to sessions/authorization/admin-forms without changing case IDs, receipts, assertions or deliberate ordering. Delivery now has a real five-role lifecycle proving an authored Git commit, native evaluation and authoritative drv, an authenticated API-only builder's real offline build, independently cold nonce output, signed local publication, separate builder sessions and real target registration/periodic reporting. Eight Delivery cases passed locally. These subsets do not complete either owner.
+Verified code bea0c299 passed hosted pipeline 2964502717 with all eight required jobs successful. Access preserves all 23 existing cases in one controller/database lifecycle and uses sessions/authorization/admin-forms modules. Delivery passed eight cases in one five-role lifecycle: authored Git commit, exact native evaluation/attempt/derivation, authenticated API-only builder realization, independently cold nonce output, signed local publication, distinct builder sessions and real target periodic reporting. This is not complete coverage of either owner.
 
-The existing coverage map inventories79obligations across12families:11rows with passed subsets,59planned and9decision-blocked. Failed runtime variants remain explicit. Current implementation locates surfaces; accepted requirements and designs define expectations. No percentage or complete-row claim follows from a passing subset.
+The existing 79-row catalog has 11 rows with passed subsets, 59 planned and nine decision-blocked. Known failing runtime variants remain explicit; passing subsets are not percentages or complete rows. Accepted requirements and designs define expectations. Current code locates mechanisms only.
 
-The corrective iteration repaired outer/nested truly offline Nix execution, declared absolute Bash launchers, root PostgreSQL privilege separation, short invocation-owned socket paths and XCCDF realization. Corrective hosted pipelines2961382083 and2961428492 passed all seven pre-Delivery required jobs. Full local isolated database execution passed515selected Rust cases and both populated migration rehearsals under outbound-denied client networking. Final clean-head Access/Delivery and hosted eight-job evidence still require recording.
+The corrective iteration verified true offline outer/nested Nix acquisition settings, separate controlled preparation, declared absolute Bash, root PostgreSQL privilege separation, short invocation-owned sockets and explicit XCCDF realization. Hosted database execution passed 515 cases and both populated migration rehearsals. Local outbound-denied verification and its host-daemon limitation are recorded in the coverage map.
 
-The owner explicitly authorized the separate TASK-495 product fix after offline=true exposed an unsupported nix-store flag. It was developed in its own worktree and applied as a separate commit, with offline=true and all Delivery assertions retained. Prior .25/.26 repairs remain integrated. No other production/UI/API/schema/design repair, merge, deployment or Done is authorized. TASK-496 heartbeat classification remains Backlog.
+The owner separately authorized TASK-495 after offline=true exposed an unsupported legacy Nix flag. It was developed in its own worktree, committed independently and is now Review in draft MR !335. offline=true and all Delivery assertions remain. Prior .25/.26 repairs remain integrated. No other production/UI/API/schema/design repair is authorized; TASK-496 remains Backlog.
 
-Remaining scope includes Access environment/forms, authorization decisions, shell/preferences/notifications/OIDC; extended Delivery ingestion/strategies/scheduling/publication/activation/recovery; all Assurance; and the supported Upgrade transition. Keep behavior-oriented scenario boundaries and justify incompatible configurations or isolation, not tracking packets. Final acceptance requires all four owners and complete accepted coverage or explicit scope disposition, not merely a green partial pipeline.
+Extended Access and Delivery, all Assurance, the supported Upgrade transition and final minimization remain open. Cold raw-recipe preparation retains one complete native baseline closure and remains a cost constraint; source-generator fan-out reduction is not a whole-pipeline speed/recipe claim. Keep this parent In Progress and MR !335 draft. No merge, deployment or Done.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -57,19 +57,23 @@ Remaining scope includes Access environment/forms, authorization decisions, shel
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-## Current milestone
+## Verified code
 
-Coordinator openai resumed the existing TASK-490.1 worktree and draft MR !335. Access source organization is behavior-oriented and its23case IDs/receipts/order are preserved. The post-cleanup normal Access aggregate passed at590ee94c. Corrective hosted pipelines2961382083 and2961428492 passed all seven pre-Delivery required jobs, including full database execution and component/schema checks.
+Revision `bea0c29936c2220a8c1ba8dbfeb5750dacc18cde` passed pipeline https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2964502717. All eight required jobs succeeded: Access, Delivery, component, state-machine, CVE, dashboard, complexity and coverage. Archived results confirm Access 23/23 and Delivery 8/8 with that exact revision. Hosted database trace: 515 passed, 0 failed, 0 ignored; 227 Rust summaries and populated migration rehearsals.
 
-Initial Delivery is implemented, not merely planned: one native owner, one five-role lifecycle, eight mandatory cases. Latest local run passed all8 at a working tree based on fc0c5836; evidence `/nix/store/bys8qx6hix4kvf1yqycjbiqq2pmr1sc4-vm-test-run-cf-it-delivery-delivery-lifecycle-run`, driver100.17s, configured10GiB, peak unmeasured. It preserves exact Git/attempt/drv/job/session/target identities and proves the nonce output absent before real build and valid afterward. Immutable baseline dependencies are shared; live state never crosses scenarios.
+Both normal owner commands also exited 0 locally at that clean source. Latest driver times: Access 54.18 s and Delivery 79.32 s. Delivery configures 10 GiB over five roles; peak memory unmeasured. One controller/database serves each independent lifecycle. Immutable preparation may be shared; live state never crosses scenarios.
 
-TASK-495 was separately authorized, developed in its own worktree and committed6844d185; coordinator applicationfc0c5836. No offline=false workaround or xfail was used. TASK-496 remains a separate observed product defect. Existing P3/TASK-492 startup maintenance failure remains visible.
+TASK-495 product commit 6844d185 came from a separate worktree and was applied as fc0c5836. It is Review, not merged. No offline=false workaround or expected failure was used. TASK-496 heartbeat classification and P3/TASK-492 startup maintenance remain explicit unresolved variants. The initial .7 proof is verified; its later functional contribution criterion remains open.
 
-Final clean-revision and hosted Delivery/product-fix verification are pending recording. The parent, .2, .3, .7 and .24 remain In Progress; final four-owner acceptance is unmet. No merge/deploy/Done.
+## Organization and remaining scope
 
-## Historical consolidation evidence
+All six task-numbered Access fragments were renamed to semantic paths with IDs, receipts, assertions and ordering preserved. Delivery uses source-build.py inside one lifecycle and the same harness. No task-specific VM, root tests/ directory, generated coverage registry or new testing framework exists.
 
-All15verify outputs were removed, packages43->28 and pre-Delivery expanded CIjobs14->9. Broad lower-level dependency union7563->7547 was measured before Delivery/TASK-495; no final-head recipe or overall speedup claim. Six ignored overlaps,94repeated normal cf-server selections and2duplicate integration invocations were removed. Core cf-config selection expanded13CA-only->94units; TASK-495 adds2ordinary regressions, so gross duplicate removal is not a net whole-pipeline test reduction.
+Current native checks are Access and Delivery only. The catalog records 79 rows: 11 with passed subsets, 59 planned and nine decision-blocked. Extended workflows and final four-owner/minimization acceptance remain unmet. Parent and coordinator tasks remain In Progress; MR !335 remains draft. Reporting-only notes record the verified code point and do not change executable assertions. No merge/deploy/Done.
 
-At clean c254b1c5, Access23cases and the canonical isolated database path515tests/both populated migration rehearsals passed. Later offline/root-runner evidence is in TASK-490.24. Exact assertion ownership, all79obligations, historical source dispositions and remaining11partial/59planned/9blocked coverage are maintained in the existing coverage map and catalog. Old notes that Delivery roles were absent are superseded by this implementation.
+## Historical metrics and limits
+
+The pre-Delivery consolidation removed 15 verify outputs, reduced public packages 43 to 28, expanded jobs 14 to 9, and measured lower-level recipes 7,563 to 7,547. Those are not final-head whole-pipeline runtime/recipe claims. Source-generator direct dependencies later measured 2,525 to five, but raw archive transport still needs one complete native baseline recipe closure for cold-store validity. Cold preparation remains a minimization constraint. The superseded/canceled and failed cold-preparation pipelines remain historical evidence, not passes.
+
+Detailed assertion ownership, the entire product inventory, source dispositions, exact commands and immutable evidence paths remain in the existing coverage map/catalog and TASK-490.24.
 <!-- SECTION:NOTES:END -->
