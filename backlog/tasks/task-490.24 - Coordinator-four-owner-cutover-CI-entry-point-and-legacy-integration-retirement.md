@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-18 21:05'
+updated_date: '2026-10-19 01:49'
 labels:
   - testing
   - integration
@@ -114,6 +114,8 @@ Remaining-eight delegated scope: remove owned verify outputs; preserve pure buil
 Delegated five-package slice in existing locked TASK-490.1 worktree: inspect actual Rust assertions; remove verify-config-inspector/config-observer/evaluator-snapshot-isolation/verified-source-evaluator-parity/niks3-ca-bundle public definitions. Preserve unique real Nix protocol tests as cf-server core-only postCheck fragments under existing component tests, retain locked source inputs, and move Go/Rust CA dataset compatibility into core check execution. Select cf-config normal library tests once in core (current cf-server-only selection does not run dependency tests), removing separate CA Rust runner. Evaluate component drvPaths and real dependency inventory; validate through Nix with persistent logs for expensive builds. Stage only this slice; no commit, CI/docs/devScripts or production changes.
 
 Additional assigned XCCDF slice: exclusively delete verify-xccdf-schema definition/README and orphan verify-server-regressions README; add cf-server/tests/xccdf-schema.sh taking installed core, XCCDF schema directory and CF schema file. Retain actual writer-generated XCCDF/OpenSCAP validation and all five CF extension node types with non-vacuous extraction. Remove handwritten example documents and structural duplicates after writer/parser Rust audit. Verify actual installed fixture binary if available; no default.nix edits, stage only assigned paths.
+
+Owner-directed corrective iteration at reviewed head45f2b57e in existing locked TASK-490.1 worktree/branch (openai coordinator). Preserve existing topology, IDs, receipt names and production behavior. Rename task-numbered Access fragments to stable sessions/authorization/admin-forms modules; document explicit shared-state prerequisites and bootstrap-first ordering, update active references and behavior ownership/tracking columns. Repair CI execution: separate controlled prerequisite realization from offline state-machine phase; outer/nested Nix disable substituters/builders/fallback and Cargo/SQLx offline; generated launcher uses declared absolute Bash; explicitly realize existing XCCDF schema output. Verify effective settings, network-denied execution if supported, existing 23 Access cases, full isolated database suite and component commands. Commit semantic cleanup and CI repairs separately, push draft!335 and inspect actual required hosted jobs before proceeding with substantive Delivery coverage. No new investigation task, wrapper, registry, production repair, merge or deploy. Delivery continuation uses existing .7 with behavior-named files and shared harness only after corrective verification.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
