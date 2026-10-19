@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-19 19:23'
+updated_date: '2026-10-19 21:57'
 labels:
   - testing
   - integration
@@ -53,9 +53,11 @@ The owner separately authorized TASK-495 after offline=true exposed an unsupport
 - [x] #1 Documented services, builderA, builderB and targetA interfaces are implemented through lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }, including real fixtures, separate credentials, key provisioning and offline inputs
 - [x] #2 The coordinator composes the disjoint behavior-named source-build.py module as a real commit→evaluation→build case in delivery-lifecycle; builderA output is independently absent before build
 - [x] #3 Native Delivery owner explicitly registers delivery-lifecycle and its pkgs.linkFarm aggregate includes every registered scenario; no separate smoke gate, placeholder owner or custom discovery is required
-- [ ] #4 TASK-490.8-.15 contribute disjoint fragments to the same scenario without packet-specific VM derivations; no production/module behavior changes are made
-- [x] #5 Later same-scenario cases consume earlier real outputs only through receipts; independent derivations never reuse live VM/database/output/receipt state
-- [x] #6 Actual interface signatures and tested dependency/source revision, focused command, result and evidence are recorded after the real Delivery VM run
+- [x] #4 Later same-scenario cases consume earlier real outputs only through receipts; independent derivations never reuse live VM/database/output/receipt state
+- [x] #5 Actual interface signatures and tested dependency/source revision, focused command, result and evidence are recorded after the real Delivery VM run
+- [ ] #6 A cold input-addressed output is rejected specifically at an enforced signature boundary when unsigned or signed by an untrusted key; it remains absent/invalid, then the correctly signed equivalent succeeds with exact contents and signature evidence. Transport, access and dependencies are independently proven; no trusted-user/import/content-addressed bypass.
+- [ ] #7 Controlled test-owned IPv4/IPv6 endpoints prove actual outside-boundary connection rejection with route/interface and boundary-hit evidence, while required local Git/API/SSH-store/agent traffic works. No deployed cache probe or isolation removal is permitted.
+- [ ] #8 The real agent establishes exact registered state, unchanged heartbeats correlate without duplicate full states or comparison errors, a genuine observed change creates new full-state evidence, and later heartbeats correlate to that new state after the authorized TASK-496 repair.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -67,6 +69,8 @@ Resume in the existing coordinator worktree /home/mcamp/code/crystal-forge/TASK-
 3. Use separately generated builder/target keys and real authenticated protocols. Require builderA actual Nix realization with absent-before/present-after nonce output, successful job/identity correlation, builderB distinct session, and target registration plus real heartbeat. Native builder requires publication after build: configure a real test-owned destination as a prerequisite, without claiming complete publication coverage.
 4. Explicitly register the meaningful Delivery lifecycle in a native owner aggregate. Compose semantic source-build.py sections using existing receipt/driver helpers; no browser fragment unless necessary. Later compatible delivery cases extend this lifecycle.
 5. Evaluate and build the normal owner, inspect all receipts/logs and correct only test plumbing. Record truthful failures without production fixes, then run hosted owner and update existing coverage map with exact evidence, topology and remaining obligations. Keep MR draft; no merge/deploy/Done.
+
+Owner-selected continuation at refreshed clean f6439851. User explicitly corrects this task's lifecycle: its initial role/build proof and review findings may enter Review independently of future dependent task completion. The old criterion requiring .8-.15 contributions is removed from this foundation task only; those accepted obligations remain on the children/parent gate. Coordinator owns shared roles, composition, registration and integration. First batch closes enforced signatures (inspect pinned Nix trust semantics; use untrusted receiver path in an existing VM), controlled outside-VLAN IPv4/IPv6 connectivity with positive controls and actual boundary hits, and exact heartbeat/state-lineage assertions after separate TASK-496 integration. Preserve existing cases and all offline/cold-store constraints. Then execute selected .14/.15 activation/rollback and independent Assurance work; no further product fix without authority.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -93,6 +97,8 @@ TASK-495 was separately authorized, developed in its own worktree as6844d185 and
 ## Remaining task scope
 
 Criteria1,2,3,5,6 are verified for the initial role/build milestone. Criterion4 concerns later functional contributions; those obligations remain unimplemented and are not marked complete. Keep this task In Progress and MR!335 draft. Further source/evaluation, scheduling, cache, activation and recovery behavior must extend appropriate semantic modules in this lifecycle, never a task-specific VM or file boundary. No merge/deploy/Done.
+
+Preflight: existing coordinator branch/worktree is clean at f6439851, synced to origin; target origin/dev remains5ae7feab. Existing openai coordinator locks refer to this worktree. Dev has no tracked modifications; unrelated locks/session file remain untouched. The owner authorizes dependency-ready child selection for this assignment and TASK-496 only as the new product repair. No architecture reset or inventory repeat.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
