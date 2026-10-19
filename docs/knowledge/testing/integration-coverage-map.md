@@ -120,6 +120,35 @@ Host resources (`sledge`, inspected 2026-10-17): 32 cores, 123 GiB RAM with abou
 
 ## Obligation map
 
+### Verified corrective and initial Delivery code
+
+Verified code revision: `bea0c29936c2220a8c1ba8dbfeb5750dacc18cde`.
+[Hosted pipeline 2964502717](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2964502717)
+completed successfully. These are actual job results, not lint or intended
+selection:
+
+| Job | Result | Evidence |
+| --- | --- | --- |
+| `integration-access` | Passed, 23/23 cases | [Job 17294404506](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17294404506); archived result has the exact verified revision and unchanged case IDs. |
+| `integration-delivery` | Passed, 8/8 cases | [Job 17294404507](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17294404507); exact source/attempt/drv/job/session/target receipts and cold/realized/completed/egress-denied markers. |
+| `component-tests` | Passed | [Job 17294404508](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17294404508); ordinary components, module/runtime/tool and realized XCCDF/OpenSCAP checks. |
+| `cve-processing-test` | Passed | [Job 17294404509](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17294404509). |
+| `dashboard-visibility-tests` | Passed | [Job 17294404510](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17294404510). |
+| `state-machine-tests` | Passed | [Job 17294404511](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17294404511); downloaded trace totals 515 passed, 0 failed, 0 ignored, 227 summaries, plus populated migration rehearsals. |
+| `complexity-check` | Passed | [Job 17294404512](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17294404512). |
+| `coverage-check` | Passed | [Job 17294404513](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17294404513). |
+
+Both normal owner commands also exited 0 locally at that clean revision:
+Access 23/23, driver 54.18 seconds, and Delivery 8/8, driver 79.32 seconds.
+Local immutable evidence:
+
+- Access: `/nix/store/798g3ypl22k5m3g7z2x65blwvndw37lc-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run`.
+- Delivery: `/nix/store/61x9c3ii0zw0b6c4pzln0af1vcm8zhfd-vm-test-run-cf-it-delivery-delivery-lifecycle-run`.
+
+Reporting-only follow-ups do not change the executable cases. This successful
+partial pipeline does not complete the four owners or resolve P3/TASK-492 and
+TASK-496. TASK-495's separately authorized repair is in Review, not merged.
+
 ### Delivery source and authorized-build execution
 
 The normal `sh packages/ci/integration-owner-build.sh integration-delivery`
@@ -199,9 +228,9 @@ remained 10.5 seconds once. Evidence:
 Hosted pipeline `2961337066` also passed Access, component, CVE and dashboard
 jobs at that revision. Its state-machine job failed because root `initdb` is
 forbidden; coverage/complexity were skipped, not passed. Follow-up pipeline
-`2961382083` at `c2b77aad1e7f9d400ad1bb96fac2e5bbab6bf782` is pending final
-verification. Root PostgreSQL privilege handling is not established by the
-earlier non-root local result.
+`2961382083` at `c2b77aad1e7f9d400ad1bb96fac2e5bbab6bf782` passed all seven
+pre-Delivery required jobs, including root-runner PostgreSQL execution. The
+earlier non-root local result alone did not establish that privilege boundary.
 
 The canonical database path at `590ee94c` passed 515 tests and both populated
 migration rehearsals with outbound connections denied in a loopback-only
@@ -496,7 +525,7 @@ All route variants in S-ui `routes.rs` are accounted for collectively below. Que
 | `/dev/login` | `views/dev_login.rs`; conditional developer identity selector | Existing Rust/module boundary verification | Developer-only flow out of product integration scope; release-mode rejection remains lower-level. | Not a product integration selection |
 | `/`, `/style-guide`, `/:..route`, shell/profile menu | `views/{dashboard,style_guide,not_found}.rs`, `components/layout/`, onboarding coach/tours/setup; sidebar collapse, breadcrumbs, keyboard/focus, notification tray | Access L; domain dashboard values D/A | Planned. Style guide is a component showcase, not domain evidence. | .4; domain selections in obligation tables |
 | `/profile` | `views/profile.rs`; profile/preferences/notification choices and session list/revoke/revoke-all/sign-out | Access L/N | Planned except selected sign-out/session cases. | .2/.4/.5 |
-| `/admin` | `views/admin.rs`; users/roles/OIDC/jobs/audit/server sections; create/edit/disable user, mappings, retry/classification and runtime diagnostics | Access L/O | Selected Viewer denial and seven Admin-form cases Integration-covered at `c254b1c5`; remainder planned. Post-cleanup rerun pending. | .2/.3/.6; diagnostics/audit details unassigned |
+| `/admin` | `views/admin.rs`; users/roles/OIDC/jobs/audit/server sections; create/edit/disable user, mappings, retry/classification and runtime diagnostics | Access L/O | Selected Viewer denial and seven Admin-form cases passed again at verified `bea0c299`; remaining bindings planned. | .2/.3/.6; diagnostics/audit details unassigned |
 | `/environments?:..query` | `views/environments*.rs`, `components/environments/`; create/edit/remove/policy dialogs, validation, list/query filters | Access L; assignments Assurance A | Planned. | .3; assignment selections in obligation tables |
 | `/flakes?:..query` | `views/flakes*.rs`, `components/flake/`; add/edit/delete, credentials/Test, refresh/sync/accept rewrite, explorer/source/module/diff and scan actions | Access L forms; Delivery D; scanning Assurance A | Planned. | Access forms unassigned; .8/.9; scans .16 |
 | `/evaluations`, `/evaluations/:commit_id`, `/evaluations/:commit_id/attempts/:attempt_id` | `views/evaluations.rs`, `views/evaluations/{drawer_snapshot,policy_matrix,policy_captured,evidence_navigation,log_pane}.rs`; queue actions, logs, exact attempt matrix and evidence-return links | Delivery D | Planned. | .8/.9; exact retained-attempt/stream bindings unassigned |
