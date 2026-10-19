@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-19 19:24'
+updated_date: '2026-10-19 19:26'
 labels:
   - testing
   - integration
@@ -119,41 +119,33 @@ Subsequent explicit owner authorization permits the separate TASK-495 product co
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-## Current implementation
+## Verified code and hosted results
 
-The six Access fragments use stable sessions/authorization/admin-forms paths. Their executable bodies, 23 case IDs, receipt names and deliberate ordering were preserved. The normal post-cleanup Access aggregate passed at 590ee94c with a new controller VM; evidence is `/nix/store/b21y37v9ffhlk74jr6ijslzvkfr33b2l-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run`.
+Verified code revision: `bea0c29936c2220a8c1ba8dbfeb5750dacc18cde`.
+Hosted pipeline: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2964502717.
+All eight jobs passed: Access, Delivery, component, state-machine, CVE, dashboard, complexity and coverage. Downloaded artifacts confirm Access 23/23 and Delivery 8/8 at that exact source. The hosted database trace totals 515 passed, 0 failed, 0 ignored across 227 summaries, plus both populated migration rehearsals.
 
-The native Delivery owner now explicitly registers one five-role lifecycle with source-build.py. Eight mandatory cases passed locally after a real nonce-bearing Git commit, native evaluation, authorized API-only build, signed local publication, independent second builder session and target periodic reporting. Latest evidence is `/nix/store/bys8qx6hix4kvf1yqycjbiqq2pmr1sc4-vm-test-run-cf-it-delivery-delivery-lifecycle-run`, working tree based on fc0c5836, not a clean-revision claim. Driver time: 100.17 s. Configured memory: 10 GiB; peak unmeasured. Immutable baseline preparation is shared; runtime outputs never are.
+Both normal owner commands exited 0 locally at the same clean revision. Access driver: 54.18 s; Delivery driver: 79.32 s. Delivery uses five roles, one controller/database and 10 GiB configured memory; peak memory is unmeasured. Local immutable evidence:
+- Access: `/nix/store/798g3ypl22k5m3g7z2x65blwvndw37lc-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run`.
+- Delivery: `/nix/store/61x9c3ii0zw0b6c4pzln0af1vcm8zhfd-vm-test-run-cf-it-delivery-delivery-lifecycle-run`.
 
-TASK-495 was separately authorized. Product commit6844d185 came from its dedicated worktree and was applied as fc0c5836. The same offline=true proof then realized and published its actual output. TASK-496 remains Backlog: periodic reports are accepted but classification falls back to full states after a database error. This is not marked resolved by the positive reporting case.
+## Architecture and correction
 
-## Corrective CI and offline evidence
+All six Access fragment paths are behavior-oriented. Case IDs, receipts, assertions and bootstrap/session/authorization/form ordering remain intact. Delivery explicitly registers one source/evaluation/authorized-build lifecycle, not a packet VM or smoke gate. Native aggregates require every registered gate; no .run bypass, registry, DSL or root tests/ directory exists.
 
-- Source commits:184642f2 semantic organization;590ee94c explicit offline preparation/execution, declared Bash and XCCDF realization;c2b77aad root-runner PostgreSQL privilege separation;e07b4bd2 short socket paths and documented commands.
-- Corrective pipelines2961382083 (c2b77aad) and2961428492 (e07b4bd2) passed all seven pre-Delivery required jobs: Access, component, state-machine, CVE, dashboard, complexity and coverage.
-- Full canonical offline PostgreSQL command passed515tests,227Rust summaries and both populated migration rehearsals. Outbound-denied client namespace had only loopback; effective outer/nested Nix settings disabled substitution, remote builders and fallback. Cargo/SQLx were offline. The host Nix daemon was outside the namespace; do not claim a firewall-isolated daemon.
-- Latest local database evidence: `/tmp/opencode/task490-offline-root-launcher.log`, canonical exit receipt0,515passed/0failed/0ignored,18m14s, cluster cleanup verified. Source was a working tree based on c2b77aad, committed as e07b4bd2. The earlier long-TMPDIR socket attempt failed before tests and remains retained.
-- Root CI drops only PostgreSQL children to the resolved nobody UID/GID. Cargo/cache ownership, exact selections, privileges, child-status receipt and cleanup remain intact.
+CI repairs provide separate controlled preparation, explicit offline outer/nested Nix settings, declared absolute Bash, root PostgreSQL privilege separation, invocation-owned short sockets and explicit existing XCCDF realization. Full local PostgreSQL execution also passed under outbound-denied client networking. The host daemon was outside that namespace; this is not proof of a firewall-isolated daemon.
 
-## Current gaps and handoff
+TASK-495 was separately authorized and implemented in its own worktree as 6844d185, applied as fc0c5836. It is Review in draft MR !335. offline=true and every Delivery assertion remain. TASK-496 and P3/TASK-492 remain explicit failing runtime variants, not fixed by positive reporting/startup subsets.
 
-The flake inventory is Access and Delivery only. The79-row inventory has11rows with passed subsets,59planned and9decision-blocked; these are not full-row coverage or percentages. Remaining Access forms/shell/preferences/notifications/OIDC, extended Delivery, all Assurance and Upgrade remain open. P3/TASK-492 remains a failing startup variant. Final clean-revision owner and hosted eight-job results still need recording. Keep this task In Progress and MR!335 draft; no merge/deploy/Done.
+## Cold preparation limits and history
 
-## Consolidation history
+Source-generator fan-out measured 2,525 to 5 direct dependencies, not a whole-owner reduction. An opaque raw recipe closure worked warm but failed cold export before VM startup at f369aacd. The native baseline now prepares its complete recipe/build closure once for compatible roles; cold hosted Delivery passed. Cold preparation remains a minimization constraint. Pipeline 2964012282 was superseded/canceled, not passed; 2964350322 failed cold preparation. Their evidence is retained.
 
-All15verify outputs and9legacy suites were retired. Unique assertions moved to ordinary component builds, direct module/runtime/schema/tool CI and the existing isolated state-machine runner. Normal Rust tests were not disabled. The pre-Delivery consolidation measured packages43->28, CIjobs14->9 and a broad lower-level recipe union7563->7547 (net16). The narrow996reduction was not a whole-pipeline measure. These are historical counts before Delivery and TASK-495, not final-head runtime/recipe claims.
+Earlier consolidation removed all 15 verify outputs and nine legacy suites without disabling normal Rust tests. Historical pre-Delivery measures were packages 43 to 28, expanded jobs 14 to 9 and lower-level recipes 7,563 to 7,547; these are not current whole-pipeline speed/recipe claims. Six ignored overlaps, 94 repeated normal cf-server selections and two duplicate integration calls were removed. The canonical database selection retains 284 unique ignored-library plus 231 integration cases in 14 targets. Core's config selection expanded from 13 CA-only to 94 units; TASK-495 adds two ordinary regressions, and all 96 passed on coordinator source.
 
-The database audit removed6ignored overlaps,94repeated normal cf-server selections and2duplicate composite-policy calls. It retained284unique ignored-library and231integration cases,14targets and populated migration rehearsals. Core expanded cf-config selection from13CA-only tests to94units; TASK-495 adds2more ordinary config regressions. Prior c254b1c5 execution passed515DB and23Access cases. Detailed assertion ownership and legacy dispositions remain in the existing coverage map/catalog.
+## Remaining scope
+
+Current inventory: Access and Delivery; 28 public packages; zero verify outputs. The single 79-row catalog has 11 rows with passed subsets, 59 planned and nine decision-blocked, not percentage/full-row coverage. Assurance/Upgrade are absent. Extended Access/Delivery and final minimization remain open. Final criteria 7/8/10/11 are unchecked; architecture criterion 12 is verified. Keep parent/this task In Progress and MR !335 draft. No merge, deployment or Done.
 
 LOCK: openai on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation.
-
-## Verified corrective and initial Delivery code
-
-Clean code revision `bea0c29936c2220a8c1ba8dbfeb5750dacc18cde` passed hosted pipeline2964502717. All eight required jobs succeeded: integration-access, integration-delivery, component-tests, state-machine-tests, cve-processing-test, dashboard-visibility-tests, complexity-check and coverage-check. Downloaded owner artifacts confirm Access23/23 and Delivery8/8 with that exact source revision. Hosted state-machine trace totals515passed/0failed/0ignored across227summaries.
-
-Both normal owner commands also exited0 locally at that clean revision. Latest local Access driver54.18s and Delivery driver79.32s; peak memory remains unmeasured. Source inventory still has two native owners,28public packages andzeroverify outputs. No active checks/**/task-* files, fragments/task-* references or root tests/ directory remain.
-
-Cold pipeline2964350322 failed before Delivery VM startup because an opaque recipe closure omitted a bootstrap object. Pipeline2964012282 was superseded/canceled, not passed. The native baseline now retains its complete build closure once for compatible roles; actual cold hosted Delivery then passed. The source-generator2525->5dependency figure is scoped, not a whole-owner reduction. Cold preparation remains a minimization constraint.
-
-TASK-495 is Review in draft MR!335; no merge/deploy/Done. The parent and this task remain In Progress because final four-owner coverage/minimization are unmet. Criterion12 is now verified for the implemented architecture; final criteria7/8/10/11 remain open. Reporting-only follow-ups record this tested code point and do not change executable assertions.
 <!-- SECTION:NOTES:END -->
