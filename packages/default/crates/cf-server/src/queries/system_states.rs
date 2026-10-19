@@ -182,13 +182,23 @@ where
     }
     Ok(())
 }
+/// Returns the latest persisted full state for the exact hostname, if present.
+///
+/// Historical rows do not store boot IDs. The projection supplies `None` for
+/// [`SystemState::boot_id`]; `systems.boot_id` remains the mutable reboot
+/// baseline and must not be presented as historical state evidence.
+///
+/// # Errors
+///
+/// Returns database or row-decoding errors. Heartbeat classification must keep
+/// treating these errors conservatively as requiring a full state report.
 pub async fn get_last_system_state_by_hostname(
     pool: &PgPool,
     hostname: &str,
 ) -> Result<Option<SystemState>> {
     let row = sqlx::query_as::<_, SystemState>(
         r#"
-        SELECT *
+        SELECT system_states.*, NULL::text AS boot_id
         FROM system_states
         WHERE hostname = $1
         ORDER BY timestamp DESC
@@ -308,6 +318,34 @@ mod tests {
     use ed25519_dalek::SigningKey;
     use sqlx::PgPool;
     use uuid::Uuid;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified isolated database and database creation privileges"]
+    async fn latest_state_decodes_migrated_history_without_boot_id(pool: PgPool) {
+        let mut state = SystemStateBuilder::new().build();
+        state.hostname = "latest-state-decoder".into();
+        state.boot_id = Some("payload-boot-not-historical".into());
+        insert_system_state(&pool, &state, true, None, None)
+            .await
+            .unwrap();
+
+        let latest = super::get_last_system_state_by_hostname(&pool, &state.hostname)
+            .await
+            .expect("migrated historical row must decode as SystemState")
+            .unwrap();
+        assert!(latest.id.is_some());
+        assert_eq!(latest.hostname, state.hostname);
+        assert_eq!(latest.store_path, state.store_path);
+        assert_eq!(latest.generation, state.generation);
+        assert_eq!(latest.kernel, state.kernel);
+        assert!(latest.boot_id.is_none(), "history has no boot_id column");
+        assert!(
+            super::get_last_system_state_by_hostname(&pool, "absent-host")
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
 
     async fn test_pool_from_env() -> PgPool {
         let db_url = std::env::var("DATABASE_URL")
