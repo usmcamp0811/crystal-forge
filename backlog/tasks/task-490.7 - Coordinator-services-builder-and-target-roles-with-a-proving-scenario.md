@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-19 22:17'
+updated_date: '2026-10-19 23:00'
 labels:
   - testing
   - integration
@@ -56,7 +56,7 @@ The owner separately authorized TASK-495 after offline=true exposed an unsupport
 - [x] #4 Later same-scenario cases consume earlier real outputs only through receipts; independent derivations never reuse live VM/database/output/receipt state
 - [x] #5 Actual interface signatures and tested dependency/source revision, focused command, result and evidence are recorded after the real Delivery VM run
 - [ ] #6 A cold input-addressed output is rejected specifically at an enforced signature boundary when unsigned or signed by an untrusted key; it remains absent/invalid, then the correctly signed equivalent succeeds with exact contents and signature evidence. Transport, access and dependencies are independently proven; no trusted-user/import/content-addressed bypass.
-- [ ] #7 Controlled test-owned IPv4/IPv6 endpoints prove actual outside-boundary connection rejection with route/interface and boundary-hit evidence, while required local Git/API/SSH-store/agent traffic works. No deployed cache probe or isolation removal is permitted.
+- [x] #7 Controlled test-owned IPv4/IPv6 endpoints prove actual outside-boundary connection rejection with route/interface and boundary-hit evidence, while required local Git/API/SSH-store/agent traffic works. No deployed cache probe or isolation removal is permitted.
 - [ ] #8 The real agent establishes exact registered state, unchanged heartbeats correlate without duplicate full states or comparison errors, a genuine observed change creates new full-state evidence, and later heartbeats correlate to that new state after the authorized TASK-496 repair.
 <!-- AC:END -->
 
@@ -101,6 +101,12 @@ TASK-495 was separately authorized, developed in its own worktree as6844d185 and
 Criteria1,2,3,5,6 are verified for the initial role/build milestone. Criterion4 concerns later functional contributions; those obligations remain unimplemented and are not marked complete. Keep this task In Progress and MR!335 draft. Further source/evaluation, scheduling, cache, activation and recovery behavior must extend appropriate semantic modules in this lifecycle, never a task-specific VM or file boundary. No merge/deploy/Done.
 
 Preflight: existing coordinator branch/worktree is clean at f6439851, synced to origin; target origin/dev remains5ae7feab. Existing openai coordinator locks refer to this worktree. Dev has no tracked modifications; unrelated locks/session file remain untouched. The owner authorizes dependency-ready child selection for this assignment and TASK-496 only as the new product repair. No architecture reset or inventory repeat.
+
+Network continuation verified locally on 2026-10-19 in coordinator worktree based on d11de05967b2ade5c7e1f833317039de134c307a (dirty source, not a clean-head or hosted claim). Added fixtures/network-isolation.nix, fixtures/network-probe.py and fragments/network-boundary.py; composed the new case after the existing eight cases in delivery-lifecycle.nix. Same five VMs, second VLAN only. Each controller/builder/target IPv4 and IPv6 probe proves eth2 routing, live same-route control UID response, failed product-actor connection and increment of the exact rejection-rule counter. Local Git/API/authenticated SSH still works; NAT isolation retained; no deployed cache probe. Criterion 7 is locally proven.
+
+Exact gate command: nix build .#checks.x86_64-linux.integration-delivery --no-link -L --builders '' --max-jobs 1 --cores 2. Final exit 0, 9/9 cases, driver 77.08s. Evidence /nix/store/lra2iw4nmplfr1lycslrc2dh4nfgg0l9-vm-test-run-cf-it-delivery-delivery-lifecycle-run/result.json records all eight network receipts and localRoleTrafficPreserved=true. First executed attempt failed IPv6 positive control because the fixture blocked neighbor-discovery replies to global VLAN addresses; corrected only neighbor-discovery permissions and narrowed control exception to exact probe addresses/port. Failed run preserved at /nix/store/pmwnqnhijsa3yn0c1zi5p0camxv45jpy-vm-test-run-cf-it-delivery-delivery-lifecycle-run. Earlier build attempts hit 120s and 1200s tool timeouts before VM execution; neither is a pass.
+
+Python AST parsing and Nix owner derivation evaluation passed. git diff --check and git diff --cached --check passed. nix build .#okf-knowledge --no-link -L --builders '' --max-jobs 1 --cores 2 exited 0: 58 tests, 215 Mermaid blocks parsed with 0 errors, 192 concepts validated. README and coverage map document the tested boundary, failure, evidence and remaining limits. Full flake check and new hosted pipeline were not run in this bounded batch. No new commit/push/MR change. Existing database-runner selections remain untouched. TASK-496 repair is applied; final run observed heartbeat representation, but permissive fallback assertion remains and criterion 8 is not closed. Signature rejection and exact real-agent state transition are next; activation/rollback/Assurance/Upgrade remain incomplete. Keep In Progress and existing lock.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
