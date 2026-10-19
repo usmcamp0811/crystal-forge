@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:37'
-updated_date: '2026-10-18 13:57'
+updated_date: '2026-10-19 02:13'
 labels:
   - testing
   - integration
@@ -14,8 +14,8 @@ labels:
 dependencies:
   - TASK-490.12
 modified_files:
-  - checks/integration-delivery/scenarios/fragments/task-490.14-activation.py
-  - checks/integration-delivery/scenarios/fragments/task-490.14-activation.cjs
+  - checks/integration-delivery/scenarios/fragments/activation.py
+  - checks/integration-delivery/scenarios/fragments/activation.cjs
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -28,8 +28,8 @@ ordinal: 526000
 Owning check: integration-delivery. Contract ID: delivery.activation.modes. Goal: prove real activation policies, BootOnly semantics and target isolation; mocked UI or seeded deployment rows are insufficient. Risk: high (boot and identity assertions). Non-goals: rollback/drift (.15), product changes, shared helper/composition/registration/CI/docs edits.
 
 Writable paths (only):
-- checks/integration-delivery/scenarios/fragments/task-490.14-activation.py
-- checks/integration-delivery/scenarios/fragments/task-490.14-activation.cjs
+- checks/integration-delivery/scenarios/fragments/activation.py
+- checks/integration-delivery/scenarios/fragments/activation.cjs
 
 Composition target: checks/integration-delivery/scenarios/delivery-lifecycle.nix. Coordinator owns Nix/Python composition, browserSpecs mapping and explicit owner registration/aggregation. No packet-specific VM derivation. Earlier real builds/publications/deployments in this same fresh Delivery VM/database MAY be consumed through receipts. Another derivation's live targets, rows, outputs or receipts MUST NOT be consumed.
 
