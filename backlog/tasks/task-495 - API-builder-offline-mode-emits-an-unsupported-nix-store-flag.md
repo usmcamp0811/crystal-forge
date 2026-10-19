@@ -5,7 +5,7 @@ status: Review
 assignee:
   - '@openai'
 created_date: '2026-10-19 05:37'
-updated_date: '2026-10-19 19:20'
+updated_date: '2026-10-19 19:23'
 labels: []
 dependencies: []
 references:
@@ -49,28 +49,34 @@ Owner-authorized separate product correction. Worktree /home/mcamp/code/crystal-
 2. Add focused ordinary cf-config argument tests for direct nix-store, systemd-scoped nix-store and modern Nix callers, including offline overriding use_substitutes=true and online behavior unchanged. No new gate or testing framework.
 3. Update adjacent public Rust contracts and the existing NixOS build.offline option documentation. Distinguish Nix input-acquisition policy from an OS network firewall and from API/publication traffic.
 4. Run targeted cf-config tests, formatting and rustdoc through Nix, then build the real builder package. Commit the bounded product fix separately. Apply that reviewed product commit to the coordinator branch without modifying its Delivery assertions/configuration. Run the same offline=true Delivery proof to establish actual absent-before/present-after Nix realization; retain precise failures and no xfail. Do not merge/deploy or mark Done.
+
+The planned implementation and verification are complete at code revision bea0c299. Hosted pipeline2964502717 passed all eight required jobs. The task is awaiting review in draft MR!335; release its implementation lock and retain its worktree until merge.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-The owner explicitly authorized a separate product fix in response to the Delivery blocker question. The test must keep offline=true and retain all build, output and network assertions. Use a dedicated task worktree; do not treat the failure as expected success.
+## Verified repair and review vehicle
 
-## Implementation and local verification
+- Status: Review, not Done. Draft MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335.
+- Dedicated implementation worktree: `/home/mcamp/code/crystal-forge/TASK-495-builder-offline`.
+- Independent product commit: `6844d185`; coordinator application: `fc0c5836`.
+- Verified code revision: `bea0c29936c2220a8c1ba8dbfeb5750dacc18cde`.
+- Hosted pipeline2964502717 succeeded. All eight required jobs passed, including real Access/Delivery, component, database, CVE, dashboard, complexity and coverage execution.
 
-- Dedicated worktree: `/home/mcamp/code/crystal-forge/TASK-495-builder-offline`; product commit `6844d185`, applied to the coordinator branch as `fc0c5836`.
-- Focused command: `nix develop .#sqlx -c env SQLX_OFFLINE=true cargo test --offline --manifest-path packages/default/Cargo.toml --package cf-config --lib config::build::tests`: 5 passed, including new legacy/modern/scoped argument and online-policy regressions.
-- `cargo test --offline --manifest-path packages/default/Cargo.toml --package cf-config --doc` through the SQLx shell: 1 doctest passed. `cargo doc --offline ... --package cf-config --no-deps` succeeded with three pre-existing bare-URL warnings in builder.rs/oidc.rs; no documentation suppression added.
-- Targeted rustfmt and whitespace checks passed. The final emitted options were accepted by nix-store 2.34.5 without the unsupported flag or unknown-setting warning.
-- Normal production builder package in the coordinator build passed 99 library, 34 binary and 2 integration tests. Agent package passed 15 library, 11 binary and 1 integration tests. These completed before the later embedded-UI preparation timeout; that timeout launched no VM.
-- The unchanged offline=true Delivery path subsequently performed a real NixOS realization from an independently absent nonce output. The latest full normal aggregate passed all 8 cases, including signed publication, exact job/session/output completion and independent second builder session. Evidence: `/nix/store/bys8qx6hix4kvf1yqycjbiqq2pmr1sc4-vm-test-run-cf-it-delivery-delivery-lifecycle-run`, working tree based on fc0c5836; not a clean-revision claim.
-- Final clean-revision/hosted verification remains pending recording. Keep In Progress; no merge, deployment or Done.
+The archived Delivery result records all eight mandatory cases passed with offline=true, independently absent-before/realized-after nonce output, signed local publication and exact successful job/session/output identities. Public egress rejection remained active. No offline=false workaround, expected failure or assertion bypass was used. Job17294404507 retains the artifact under `integration-evidence/integration-delivery/delivery-lifecycle/`.
 
-## Verified code and review handoff
+## Focused and component checks
 
-Code revision `bea0c29936c2220a8c1ba8dbfeb5750dacc18cde` passed hosted pipeline 2964502717. All eight required jobs succeeded: Access, Delivery, component, state-machine, CVE, dashboard, complexity and coverage. The archived Delivery result records all 8 cases passed with offline=true, outputAbsentBeforeBuild=true, outputRealized=true, buildCompleted=true and publicEgressDenied=true. It preserves exact source, native attempt, drv, job, builder-session and target identities.
+- `nix develop .#sqlx -c env SQLX_OFFLINE=true cargo test --offline --manifest-path packages/default/Cargo.toml --package cf-config --lib config::build::tests`: 5 passed.
+- New ordinary regressions cover legacy, modern and scoped command arguments, offline overriding substitution, and unchanged online policy.
+- The cf-config doctest passed. `cargo doc --offline --manifest-path packages/default/Cargo.toml --package cf-config --no-deps` succeeded through the SQLx shell with three existing bare-URL warnings in builder.rs/oidc.rs; no suppression was added.
+- The coordinator cf-config suite passed all96tests. Normal builder package checks passed99library/34binary/2integration cases; agent checks passed15/11/1. Identical package results may be reused by Nix; no forced-rebuild claim.
+- Targeted rustfmt, whitespace checks and legacy nix-store option parsing passed. Actual Nix2.34.8 realization then succeeded through the same offline=true builder path.
 
-The same clean revision passed both normal aggregates locally (Access 23/23, Delivery 8/8), all 96 cf-config tests and the documented package/schema/tool checks. The hosted state-machine trace totals 515 passed, 0 failed, 0 ignored across 227 summaries. Earlier preparation/cold-store failures remain recorded; they are not counted as successful tests.
+## Contract and limits
 
-Open review vehicle: draft MR !335. Product code remains the separate commit 6844d185, applied as fc0c5836; no offline=false workaround, expected failure or production test bypass was added. All four task criteria are verified. Move to Review, not Done; the MR is not merged and the task worktree remains available.
+Shared Nix options disable substitution, substituters, remote builders and fallback without using modern-only --offline. Ordinary online/resource/sandbox behavior remains unchanged. Rustdoc and the NixOS option description distinguish acquisition policy from an OS firewall and required API/publication traffic. Required source inputs must be locally available; no external fallback supplied the successful test result.
+
+All four acceptance criteria are verified. The MR is not merged, no deployment occurred, and the worktree is retained. TASK-496 heartbeat classification and the broader test-overhaul gaps are separate work.
 <!-- SECTION:NOTES:END -->
