@@ -1,10 +1,10 @@
 ---
 id: TASK-490.7
 title: 'Coordinator: services, builder, and target roles with a proving scenario'
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-19 02:12'
+updated_date: '2026-10-19 03:37'
 labels:
   - testing
   - integration
@@ -65,6 +65,8 @@ Next controller dependency is verified at c254b1c54e0f40adfaa9d05b5766cfeffae9bb
 Remains Backlog until next coordinator execution begins; no active .7 lock or passing assertion claimed. Existing .1 Review is not a code-readiness gate under the latest owner instruction. Retired old helper/check references now identify historical source only, not a preservation obligation.
 
 Historical: earlier packet notes pinned bba718be and reported unexecuted roles; a separate smoke derivation was rejected. The latest source-retirement/consolidation iteration retained one controller scenario and added no speculative Delivery owner.
+
+The owner explicitly selected this task for execution after corrective CI passes. Pipeline 2961382083 at c2b77aad passed all seven required hosted jobs on 2026-10-19. Source organization uses behavior-oriented files; source-build.py is a proposed module, not existing proof.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
