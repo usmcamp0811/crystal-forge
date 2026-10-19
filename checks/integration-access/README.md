@@ -90,7 +90,7 @@ Access is not complete. The selected session/CSRF/sign-out proof and the
 selected Operator/Viewer admin-denial cases are covered under the owner's
 explicit selections (16 cases; see the
 [authorization record](../../docs/knowledge/testing/integration-coverage-map.md#access-authorization-cases-task-4902)).
-The `task-490.3-admin-forms.{py,cjs}` fragments have seven passing cases at
+The `admin-forms.{py,cjs}` fragments have seven passing cases at
 `c254b1c5`; the original sixteen remain unchanged and first. The expanded map
 preserves 79 rows: five with covered subsets, 65 planned and nine decision-blocked.
 Environment CRUD/nonempty assignments and specific failed-save states remain
@@ -112,17 +112,31 @@ Lower-level assertions run through ordinary component builds, direct
 `component-tests` CI commands and existing isolated database workflows. All
 fifteen public `verify-*` packages are removed; see the [component catalog](../../docs/knowledge/testing/flake-checks.md#current-inventory-and-commands).
 
-The coordinator composes `scenarios/fragments/task-490.2-sessions.py` after
-the five bootstrap cases using `pkgs.writeText` and `builtins.readFile` in
-`scenarios/lifecycle-local-bootstrap.nix`; the matching `.cjs` is registered as
-`session-sign-out`. This uses the same VM/database and real admin receipt,
-with an independent browser context; it adds no DSL, gate, or role. The
-authorization fragment `task-490.2-authorization.py` is appended after the
-session fragment in the same way, and its `.cjs` is registered as
-`viewer-admin-denied`. The Operator, Viewer and target users, and the probe
-payloads, are authored facts in the scenario `.nix`; identities come from the
-approved design fixture by stable ID. No additional VM derivation, owner or
-flake check exists for these cases.
+## Composition and runtime prerequisites
+
+`scenarios/lifecycle-local-bootstrap.nix` uses direct `pkgs.writeText` and
+`builtins.readFile` concatenation in this order, in one Python namespace and
+one controller VM/database:
+
+1. `lifecycle-local-bootstrap.py` completes the five fresh-install assertions
+   and establishes `controller`, `admin`, shared helpers and `admin.userId`.
+2. `fragments/sessions.py` uses those helpers and that receipt before creating
+   additional sessions. `sessions.cjs` is registered as `session-sign-out`.
+3. `fragments/authorization.py` creates Operator, Viewer and target users only
+   after the fresh-install assertions and session checks. Its controls restore
+   the target and installed retry/banner configuration. `authorization.cjs`
+   uses its Viewer receipt under `viewer-admin-denied`.
+4. `fragments/admin-forms.py` requires authorization's `authz_state()` protected
+   snapshot for cancel checks, the still-absent design identity `u3`, and restored
+   installed configuration, including the disabled banner. `admin-forms.cjs`
+   serves the seven registered phases; request/completion receipts select one
+   phase at a time, with SQL checks between phases.
+
+Every browser run signs in independently using authored facts and verifies its
+identity against same-run receipts. Operator, Viewer and target identities and
+probe payloads remain authored in the scenario `.nix`, using stable design IDs.
+Module headers document dependencies. Behavior-based filenames express ownership;
+no additional registry, VM derivation, owner or flake check is needed.
 
 The first session attempt at `537186835956d7af48a0868289e16364625dd85c`
 failed the last UI case due to the coach overlay and unhandled-promise test

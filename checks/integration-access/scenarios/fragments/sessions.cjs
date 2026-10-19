@@ -1,5 +1,6 @@
-// TASK-490.2: independent browser context signs in as the existing real Admin
-// and signs out through the production profile. Never import bootstrap cookies.
+// Signs in as the bootstrapped Admin and signs out through the profile.
+// Requires facts.admin and the same-run admin.userId receipt from bootstrap.
+// sessions.py invokes this in a fresh context; never import bootstrap cookies.
 "use strict";
 
 exports.run = async (ctx) => {

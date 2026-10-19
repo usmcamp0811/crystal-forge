@@ -118,7 +118,7 @@ implementation packet does not automatically receive a NixOS derivation.
 Compatible case fragments use the existing Nix/Python/browser-script structure;
 the coordinator composes and registers the scenario. The local scenario uses
 `pkgs.writeText` plus `builtins.readFile` to append
-`scenarios/fragments/task-490.2-sessions.py` after bootstrap and registers the
+`scenarios/fragments/sessions.py` after bootstrap and registers the
 matching `.cjs` as `session-sign-out`; no new DSL, gate, or role is needed.
 Each separately built
 scenario gets a fresh VM/database; cases within one scenario may use real earlier

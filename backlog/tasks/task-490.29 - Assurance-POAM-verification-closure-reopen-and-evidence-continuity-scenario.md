@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 20:31'
-updated_date: '2026-10-18 14:00'
+updated_date: '2026-10-19 02:15'
 labels:
   - testing
   - integration
@@ -15,9 +15,8 @@ dependencies:
   - TASK-490.21
   - TASK-490.14
 modified_files:
-  - checks/integration-assurance/scenarios/fragments/task-490.29-verification.py
-  - >-
-    checks/integration-assurance/scenarios/fragments/task-490.29-verification.cjs
+  - checks/integration-assurance/scenarios/fragments/verification.py
+  - checks/integration-assurance/scenarios/fragments/verification.cjs
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -30,8 +29,8 @@ ordinal: 542000
 Owning check: integration-assurance. Contract ID: assurance.remediation.poam-verification. Goal: prove verification/closure/reopen after real remediation changes Current evidence. Risk: high (verification authority, evidence and stale writes). Non-goals: plan-entry assertions (.21), triage (.20), waiver/acceptance (.27/.28), exports (.22), product changes.
 
 Writable paths (only):
-- checks/integration-assurance/scenarios/fragments/task-490.29-verification.py
-- checks/integration-assurance/scenarios/fragments/task-490.29-verification.cjs
+- checks/integration-assurance/scenarios/fragments/verification.py
+- checks/integration-assurance/scenarios/fragments/verification.cjs
 
 Composition target: checks/integration-assurance/scenarios/evidence-remediation-lifecycle.nix. Coordinator owns Nix/Python composition, browserSpecs and explicit registration/normal aggregation. Use actual .21 plans and .16/.18 failed evidence earlier in this fresh Assurance VM/database through receipts. Earlier same-scenario real plans/evidence/generations MAY be consumed; another derivation's live VMs, rows, outputs, generations or receipts MUST NOT be consumed. No packet-specific derivation and no seeded successful evidence/verification outcomes.
 

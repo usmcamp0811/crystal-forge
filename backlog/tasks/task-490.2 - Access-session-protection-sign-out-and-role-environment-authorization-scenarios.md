@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:34'
-updated_date: '2026-10-18 17:42'
+updated_date: '2026-10-19 02:13'
 labels:
   - testing
   - integration
@@ -23,10 +23,10 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335'
 modified_files:
   - checks/integration-access/scenarios/lifecycle-local-bootstrap.nix
-  - checks/integration-access/scenarios/fragments/task-490.2-sessions.py
-  - checks/integration-access/scenarios/fragments/task-490.2-sessions.cjs
-  - checks/integration-access/scenarios/fragments/task-490.2-authorization.py
-  - checks/integration-access/scenarios/fragments/task-490.2-authorization.cjs
+  - checks/integration-access/scenarios/fragments/sessions.py
+  - checks/integration-access/scenarios/fragments/sessions.cjs
+  - checks/integration-access/scenarios/fragments/authorization.py
+  - checks/integration-access/scenarios/fragments/authorization.cjs
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -39,10 +39,10 @@ ordinal: 514000
 Owning check: integration-access. Contract IDs: access.lifecycle.sessions, access.lifecycle.authorization, access.lifecycle.registration-closed. Goal: replace mocked session/role proofs with real requests, browser actions and authoritative persistence checks. Risk: medium (security assertions). The user-selected session subset and the selected Operator/Viewer admin-denial cases are implemented, executed and verified. The whole task remains In Progress because the cross-environment scope rule and the closed-registration policy remain open. Non-goals: OIDC (.6), forms (.3), navigation (.4), TTL timing and product changes.
 
 Writable paths (only):
-- checks/integration-access/scenarios/fragments/task-490.2-sessions.py
-- checks/integration-access/scenarios/fragments/task-490.2-sessions.cjs
-- checks/integration-access/scenarios/fragments/task-490.2-authorization.py
-- checks/integration-access/scenarios/fragments/task-490.2-authorization.cjs
+- checks/integration-access/scenarios/fragments/sessions.py
+- checks/integration-access/scenarios/fragments/sessions.cjs
+- checks/integration-access/scenarios/fragments/authorization.py
+- checks/integration-access/scenarios/fragments/authorization.cjs
 
 Composition target: checks/integration-access/scenarios/lifecycle-local-bootstrap.nix. Coordinator owns Python composition, browserSpecs mapping and explicit owner registration/aggregation. The session fragment and then the authorization fragment execute after the five real first-admin bootstrap cases in the same fresh VM/database. No packet-specific derivation, owner or flake check exists. Earlier same-scenario real records MAY be consumed through receipts; another derivation's live VM, database, cookies, IDs or receipts MUST NOT be consumed.
 

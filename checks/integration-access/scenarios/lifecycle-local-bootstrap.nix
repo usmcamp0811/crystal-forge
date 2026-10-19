@@ -14,8 +14,8 @@
 #   rejection, valid revocation of only the selected row, and rejection of
 #   that session's next operation. An independent browser signs in and out;
 #   its exact persisted session is invalidated. These cases run only after
-#   the five bootstrap cases, under the owner's TASK-490.2 selection.
-# Appended authorization cases (TASK-490.2, selected by the owner): Operator
+#   the five bootstrap cases.
+# Appended authorization cases: Operator
 #   and Viewer actors, created through the Admin API, are denied the
 #   admin-only user create, user PATCH and server-configuration mutations with
 #   403 and no protected state change. A Viewer browser context finds no
@@ -23,7 +23,7 @@
 #   Authority: the approved design's role catalogue (Admin: "Manage users &
 #   OIDC", "Edit server config") and its Server Management page ("Admin-only").
 #   Not covered here: cross-environment scope and closed registration.
-# Appended Admin forms (TASK-490.3): creation, edit, cancel, disable/login
+# Appended Admin forms: creation, edit, cancel, disable/login
 #   rejection, retry settings and classification save/reload. Each browser
 #   phase returns to SQL verification before the next mutation. Environment
 #   CRUD, outage draft states and visual parity remain separate obligations.
@@ -67,7 +67,7 @@ in
       # Database value of the Admin role (`auth_role` enum).
       adminRoleDb = "admin";
 
-      # TASK-490.2 authorization actors. Identity, display name, email and
+      # Authorization actors. Identity, display name, email and
       # role come from the approved design fixture by stable ID (u2 is an
       # Operator, u4 a Viewer, u7 a Viewer that serves as the protected
       # target). The server derives a local username from the email's local
@@ -149,31 +149,34 @@ in
         };
       };
     };
-    # Ordering is deliberate: bootstrap asserts a fresh user and one session
-    # before the selected session fragment creates additional sessions, and
-    # the authorization fragment creates further users only after both.
+    # One controller/database and one Python namespace, in dependency order:
+    # bootstrap establishes controller/admin/helpers and admin.userId before
+    # sessions creates more sessions. Authorization creates actors only after
+    # fresh-install assertions and exports authz_state() for form cancel checks.
+    # Forms require u3 still absent and authorization's retry/banner controls
+    # restored to installed values (banner disabled). Keep direct concatenation.
     script = harness.pkgs.writeText "access-local-lifecycle.py" (
       builtins.readFile ./lifecycle-local-bootstrap.py
       + "\n"
-      + builtins.readFile ./fragments/task-490.2-sessions.py
+      + builtins.readFile ./fragments/sessions.py
       + "\n"
-      + builtins.readFile ./fragments/task-490.2-authorization.py
+      + builtins.readFile ./fragments/authorization.py
       + "\n"
-      + builtins.readFile ./fragments/task-490.3-admin-forms.py
+      + builtins.readFile ./fragments/admin-forms.py
     );
     browserSpecs = {
       bootstrap-sign-in = ./lifecycle-local-bootstrap.cjs;
-      session-sign-out = ./fragments/task-490.2-sessions.cjs;
-      viewer-admin-denied = ./fragments/task-490.2-authorization.cjs;
+      session-sign-out = ./fragments/sessions.cjs;
+      viewer-admin-denied = ./fragments/authorization.cjs;
       # Distinct artifacts and contexts, not additional VM scenarios. Each
       # phase returns to Python for authoritative SQL before the next mutation.
-      admin-form-create = ./fragments/task-490.3-admin-forms.cjs;
-      admin-form-edit = ./fragments/task-490.3-admin-forms.cjs;
-      admin-form-cancel = ./fragments/task-490.3-admin-forms.cjs;
-      admin-form-disable = ./fragments/task-490.3-admin-forms.cjs;
-      admin-form-retry = ./fragments/task-490.3-admin-forms.cjs;
-      admin-form-classification-enable = ./fragments/task-490.3-admin-forms.cjs;
-      admin-form-classification = ./fragments/task-490.3-admin-forms.cjs;
+      admin-form-create = ./fragments/admin-forms.cjs;
+      admin-form-edit = ./fragments/admin-forms.cjs;
+      admin-form-cancel = ./fragments/admin-forms.cjs;
+      admin-form-disable = ./fragments/admin-forms.cjs;
+      admin-form-retry = ./fragments/admin-forms.cjs;
+      admin-form-classification-enable = ./fragments/admin-forms.cjs;
+      admin-form-classification = ./fragments/admin-forms.cjs;
     };
     timeout = 900;
   }

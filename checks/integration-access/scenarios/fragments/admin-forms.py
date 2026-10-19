@@ -1,4 +1,9 @@
-# TASK-490.3 bounded Admin subset, appended after the existing 16 Access cases.
+# Admin form persistence cases; concatenate after authorization completes.
+# Requires bootstrap's controller, FACTS, case/HTTP/SQL/browser/assertion helpers,
+# receipt/receipts helpers and admin.userId receipt, plus authorization.py's
+# authz_state() protected snapshot for cancel checks (excluding sign-in activity).
+# The u3 account must still be absent. Authorization controls must have restored
+# installed retry/banner config, including the initially disabled banner.
 # Authority: approved AdminView.jsx user creation, role, all-environment scope,
 # cancel, disable, retry controls and classification controls. These checks
 # assert semantics and persistence, not visual parity or outage draft behavior.

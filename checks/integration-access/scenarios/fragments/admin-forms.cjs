@@ -1,4 +1,8 @@
-// TASK-490.3: production Admin forms; semantic evidence, not visual parity.
+// Production Admin forms; semantic evidence, not visual parity.
+// Requires facts.admin/adminRoleWire/adminFormUser/adminForms, admin.userId,
+// and exactly one pending adminForms.request.<phase> receipt from admin-forms.py.
+// Phases run in order: create establishes adminForms.userId for edit/cancel/
+// disable; retry and classification start from restored installed configuration.
 // Each registered name maps to this file but gets its own artifact directory
 // and fresh browser context. Python requests one phase and checks SQL before
 // requesting the next phase. No authentication state crosses browser runs.

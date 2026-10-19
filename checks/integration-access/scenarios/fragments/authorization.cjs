@@ -1,5 +1,6 @@
-// TASK-490.2: an independent browser context signs in as the Viewer that the
-// Admin API created, then looks for administrative surfaces through the
+// Requires facts.viewer and authorization.viewer.userId from authorization.py's
+// same-run Admin API creation. A fresh context signs in as that Viewer and
+// looks for administrative surfaces through the
 // production UI. It never imports cookies from another context and it changes
 // no application code, DOM element, selector, or response.
 //

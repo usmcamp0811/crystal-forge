@@ -1,6 +1,8 @@
-# Selected TASK-490.2 session cases. The coordinator appends this fragment
-# after all five bootstrap cases, so their fresh-user/one-session assertions
-# remain meaningful. Authority: the owner's explicit session-proof request.
+# Session protection and sign-out cases; concatenate after bootstrap completes.
+# Requires bootstrap's controller, admin, case/HTTP/SQL/browser/assertion helpers,
+# receipt/receipts helpers, and persisted admin.userId receipt in this same run.
+# Bootstrap's fresh-user/one-session assertions must precede these new sessions.
+# Authority: the owner's explicit session-proof request.
 # Cookie jars belong to this run; only generated IDs leave through receipts.
 
 session_user_id = receipts()["admin.userId"]

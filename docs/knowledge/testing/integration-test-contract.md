@@ -64,8 +64,10 @@ coverage is complete. The initial seventeen-definition package relocation is
 superseded: all fifteen public `verify-*` wrappers are removed. Unique assertions
 run in ordinary component tests, direct CI commands and existing isolated-DB
 workflows. Documentation and screenshot tools remain ordinary packages.
-The current inventory is only `integration-access` (one versus 27), with its
-unchanged 16 executed cases. Delivery, Assurance, and Upgrade are absent.
+The current inventory is only `integration-access` (one versus 27), with selected
+bootstrap, session, role-authorization and Admin-form persistence coverage.
+The earlier 16-case subset remains first and unchanged; seven Admin-form cases
+extend the recorded run to 23 cases. Delivery, Assurance, and Upgrade are absent.
 This is not final four-owner completion. No placeholder owner is permitted.
 The earlier optional-manual CI transition remains in the execution history;
 it does not describe the current source-retirement policy.
@@ -141,6 +143,18 @@ The table below is the stable ownership map. The per-scenario catalog, authority
 When implemented, add an **Authority** link and a **Scenario** file/name reference to each applicable row. Do not mark a row covered until that reference points to an executable case that proves it. Record accepted but unimplemented requirements as coverage gaps. A passing subset does not establish complete coverage of the accepted scope.
 
 Use stable identifiers based on behavior, such as `delivery.evaluation.matrix`, rather than task numbers or temporary filenames. Do not add an identifier for every CSS property, button, or screenshot.
+
+Active scenario and fragment filenames and ownership descriptions MUST name
+stable behaviors, not implementation tasks. Task IDs MAY identify historical
+authority or execution records. A file split MUST retain the smallest existing
+composition mechanism and document runtime prerequisites in the composition and
+module headers: required helpers, facts, receipts, prior assertions and restored
+state. Within Access's local-bootstrap scenario, bootstrap establishes the
+controller, Admin and `admin.userId` before session checks; authorization actors
+are created after fresh-install assertions. Admin forms reuse authorization's
+`authz_state()` protected snapshot for cancel checks and require untouched design
+identity `u3` and restored installed retry/banner configuration. These fragments
+share one controller/database and Python namespace; they are not independent gates.
 
 Update a catalog row when its requirement, ownership, or scenario reference changes. A copy or spacing change usually needs only an update to the existing scenario and the MR impact record.
 

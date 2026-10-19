@@ -1,11 +1,12 @@
 # Native Snowfall entry point. Coordinator-owned registration point.
-# WIP: only fresh local bootstrap is registered. Missing Access obligations
+# WIP: local bootstrap, sessions, role authorization and Admin form persistence
+# share one registered scenario. Missing Access obligations
 # are listed in docs/knowledge/testing/integration-coverage-map.md.
 #
 # CI: GitLab builds this normal aggregate automatically and requires it (job
-# `integration-access`). TASK-490.24 retires legacy suite sources with explicit
-# owner approval before replacement coverage is complete. This partial owner
-# still proves only its 16 cases; the coverage map records missing obligations.
+# `integration-access`). Legacy suite retirement has explicit owner approval
+# before replacement coverage is complete (TASK-490.24). This partial owner
+# proves selected behaviors; the coverage map records missing obligations.
 {lib, inputs, pkgs, ...}: let
   harness = lib.crystal-forge.makeIntegrationTestHarness {inherit pkgs inputs;};
   scenarios = {

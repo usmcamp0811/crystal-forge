@@ -4,7 +4,7 @@ title: 'Assurance: finding-waiver lifecycle and evidence separation scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 20:31'
-updated_date: '2026-10-18 14:00'
+updated_date: '2026-10-19 02:15'
 labels:
   - testing
   - integration
@@ -12,8 +12,8 @@ labels:
 dependencies:
   - TASK-490.16
 modified_files:
-  - checks/integration-assurance/scenarios/fragments/task-490.27-waiver.py
-  - checks/integration-assurance/scenarios/fragments/task-490.27-waiver.cjs
+  - checks/integration-assurance/scenarios/fragments/waiver.py
+  - checks/integration-assurance/scenarios/fragments/waiver.cjs
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -26,8 +26,8 @@ ordinal: 540000
 Owning check: integration-assurance. Contract ID: assurance.remediation.finding-waiver. Goal: prove the approved waiver lifecycle separately from remediation. Risk: high (decision authority/evidence separation). Non-goals: triage (.20), acceptance-register renewal/conversion (.28), POA&M (.21/.29), product changes.
 
 Writable paths (only):
-- checks/integration-assurance/scenarios/fragments/task-490.27-waiver.py
-- checks/integration-assurance/scenarios/fragments/task-490.27-waiver.cjs
+- checks/integration-assurance/scenarios/fragments/waiver.py
+- checks/integration-assurance/scenarios/fragments/waiver.cjs
 
 Composition target: checks/integration-assurance/scenarios/evidence-remediation-lifecycle.nix. Coordinator owns Nix/Python composition, browserSpecs and explicit registration/normal aggregation. Use real .16 scan-produced findings earlier in this fresh Assurance VM/database through receipts. Earlier real same-scenario findings MAY be consumed; another derivation's live findings, outputs, rows or receipts MUST NOT be consumed. No packet-specific derivation; never seed findings or waiver states. No additional fixture path is granted; author needed waiver facts in these fragments.
 

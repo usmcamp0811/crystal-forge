@@ -4,7 +4,7 @@ title: 'Assurance: real finding triage and batch-triage persistence scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-18 13:59'
+updated_date: '2026-10-19 02:14'
 labels:
   - testing
   - integration
@@ -12,8 +12,8 @@ labels:
 dependencies:
   - TASK-490.16
 modified_files:
-  - checks/integration-assurance/scenarios/fragments/task-490.20-triage.py
-  - checks/integration-assurance/scenarios/fragments/task-490.20-triage.cjs
+  - checks/integration-assurance/scenarios/fragments/triage.py
+  - checks/integration-assurance/scenarios/fragments/triage.cjs
 parent_task_id: TASK-490
 priority: medium
 type: task
@@ -26,8 +26,8 @@ ordinal: 532000
 Owning check: integration-assurance. Contract ID: assurance.remediation.triage. Goal: prove single/fleet and batch triage persistence and exact selection. Risk: medium. Non-goals: waiver (.27), acceptance register (.28), POA&M plan (.21), verification/closure (.29), product changes.
 
 Writable paths (only):
-- checks/integration-assurance/scenarios/fragments/task-490.20-triage.py
-- checks/integration-assurance/scenarios/fragments/task-490.20-triage.cjs
+- checks/integration-assurance/scenarios/fragments/triage.py
+- checks/integration-assurance/scenarios/fragments/triage.cjs
 
 Composition target: checks/integration-assurance/scenarios/evidence-remediation-lifecycle.nix. Coordinator owns Nix/Python composition, browserSpecs and explicit registration/normal aggregation. After .16 real scans earlier in this fresh Assurance VM/database, consume finding/system identities through receipts. Earlier real import/policy records may provide context. Never consume another derivation's live findings, database, outputs or receipts. No packet-specific derivation and no seeded findings/triage results.
 

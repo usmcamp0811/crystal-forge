@@ -4,7 +4,7 @@ title: 'Coordinator: services, builder, and target roles with a proving scenario
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-18 20:51'
+updated_date: '2026-10-19 02:12'
 labels:
   - testing
   - integration
@@ -22,8 +22,7 @@ modified_files:
   - checks/integration-delivery/default.nix
   - checks/integration-delivery/scenarios/delivery-lifecycle.nix
   - checks/integration-delivery/scenarios/delivery-lifecycle.py
-  - checks/integration-delivery/scenarios/fragments/task-490.7-roles-proof.py
-  - checks/integration-delivery/scenarios/fragments/task-490.7-roles-proof.cjs
+  - checks/integration-delivery/scenarios/fragments/source-build.py
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -35,7 +34,7 @@ ordinal: 519000
 <!-- SECTION:DESCRIPTION:BEGIN -->
 Coordinator-owned next multi-component role/proving packet. Goal: implement concrete services, separate API-only builders and bootable target interfaces in the existing shared harness, then prove their actual use in the initial Delivery lifecycle. Risk high; no production/module semantics changes. Do not reproduce retired suites or implement all .8-.15 obligations here.
 
-Writable coordinator paths: lib/integration-test/roles.nix, harness.nix; checks/integration-delivery/default.nix and scenarios/delivery-lifecycle.nix/.py; scenarios/fragments/task-490.7-roles-proof.py/.cjs; coverage-map actual interface/result sections. Native Snowfall owner with explicit scenarios and normal linkFarm over every gate. No placeholder, independent smoke gate, custom discovery or packet VM.
+Writable coordinator paths: lib/integration-test/roles.nix, harness.nix; checks/integration-delivery/default.nix and scenarios/delivery-lifecycle.nix/.py; scenarios/fragments/source-build.py; coverage-map actual interface/result sections. Native Snowfall owner with explicit scenarios and normal linkFarm over every gate. No placeholder, independent smoke gate, custom discovery or packet VM.
 
 Planned role interfaces, not implemented claims: services {git,oidc,tls,caches,notificationReceiver}; builder {name,strategy} for builderA/B with separate credentials and real services.crystal-forge.build API mode; targetA through real client module/key. Implement/prove concrete capabilities needed by the first workflow; do not claim speculative future fixtures ready. Provide fresh key provisioning, offline prefetched inputs and per-run nonce output whose absence is independently asserted before build.
 
@@ -51,7 +50,7 @@ Verify normal Delivery aggregate and its registered lifecycle gate after impleme
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Documented services, builderA, builderB and targetA interfaces are implemented through lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }, including real fixtures, separate credentials, key provisioning and offline inputs
-- [ ] #2 The coordinator composes the disjoint task-490.7-roles-proof.py/.cjs fragments as a real commit→evaluation→build case in delivery-lifecycle; builderA output is independently absent before build
+- [ ] #2 The coordinator composes the disjoint behavior-named source-build.py module as a real commit→evaluation→build case in delivery-lifecycle; builderA output is independently absent before build
 - [ ] #3 Native Delivery owner explicitly registers delivery-lifecycle and its pkgs.linkFarm aggregate includes every registered scenario; no separate smoke gate, placeholder owner or custom discovery is required
 - [ ] #4 TASK-490.8-.15 contribute disjoint fragments to the same scenario without packet-specific VM derivations; no production/module behavior changes are made
 - [ ] #5 Later same-scenario cases consume earlier real outputs only through receipts; independent derivations never reuse live VM/database/output/receipt state
@@ -67,3 +66,12 @@ Remains Backlog until next coordinator execution begins; no active .7 lock or pa
 
 Historical: earlier packet notes pinned bba718be and reported unexecuted roles; a separate smoke derivation was rejected. The latest source-retirement/consolidation iteration retained one controller scenario and added no speculative Delivery owner.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+created: 2026-10-19 02:12
+---
+Backlog maintenance only: source-build.py is the proposed stable behavior-oriented source path, not proof of an implemented module or passing Delivery case. AC #2 retains the real commit→evaluation→build and independently absent-before-build obligations. No .cjs fragment is required for this non-browser proof. Coordinator retains the broader services/builder/target implementation context above for later work. No status change or startDelivery is authorized by this maintenance update.
+---
+<!-- COMMENTS:END -->

@@ -1,7 +1,10 @@
-# Selected TASK-490.2 authorization cases. The coordinator appends this
-# fragment after the five bootstrap cases and the five session cases, so the
-# fresh-install and session assumptions of those cases stay valid. Cookie jars
-# belong to this run; only generated identities leave through receipts.
+# Role authorization cases; concatenate after bootstrap and session checks.
+# Requires bootstrap's controller, admin, FACTS, case/HTTP/SQL/browser/assertion
+# helpers, receipt/receipts helpers, and persisted admin.userId receipt.
+# Create Operator/Viewer/target actors only after fresh-install assertions.
+# Exports authz_state() for admin-forms.py cancel checks. Controls restore the
+# target, retry policy and classification config; design identity u3 stays absent.
+# Cookie jars belong to this run; only generated identities leave via receipts.
 #
 # Requirement (approved design, role catalogue and Server Management page):
 # Admin may "Manage users & OIDC" and "Edit server config"; the page is
