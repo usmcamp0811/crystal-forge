@@ -1,9 +1,10 @@
 ---
 id: TASK-495
 title: API builder offline mode emits an unsupported nix-store flag
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-10-19 05:37'
+updated_date: '2026-10-19 13:06'
 labels: []
 dependencies: []
 references:
@@ -29,3 +30,9 @@ A real API-only builder received and materialized an authorized NixOS derivation
 - [ ] #3 Tests cover the effective invocation and a real successful local realization with its output absent before execution.
 - [ ] #4 Affected configuration and maintainer documentation describe the actual offline guarantee and missing-prerequisite failure.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+The owner explicitly authorized a separate product fix in response to the Delivery blocker question. The test must keep offline=true and retain all build, output and network assertions. Use a dedicated task worktree; do not treat the failure as expected success.
+<!-- SECTION:NOTES:END -->
