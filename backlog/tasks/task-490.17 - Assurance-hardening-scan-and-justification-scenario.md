@@ -4,7 +4,7 @@ title: 'Assurance: hardening scan and justification scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-18 13:58'
+updated_date: '2026-10-19 02:13'
 labels:
   - testing
   - integration
@@ -12,8 +12,8 @@ labels:
 dependencies:
   - TASK-490.14
 modified_files:
-  - checks/integration-assurance/scenarios/fragments/task-490.17-hardening.py
-  - checks/integration-assurance/scenarios/fragments/task-490.17-hardening.cjs
+  - checks/integration-assurance/scenarios/fragments/hardening.py
+  - checks/integration-assurance/scenarios/fragments/hardening.cjs
 parent_task_id: TASK-490
 priority: medium
 type: task
@@ -26,8 +26,8 @@ ordinal: 529000
 Owning check: integration-assurance. Contract ID: assurance.scanning.hardening. Goal: prove real hardening worker results from independently authored target unit facts. Risk: medium. Non-goals: CVE assertions, STIG controls (.19), product changes.
 
 Writable paths (only):
-- checks/integration-assurance/scenarios/fragments/task-490.17-hardening.py
-- checks/integration-assurance/scenarios/fragments/task-490.17-hardening.cjs
+- checks/integration-assurance/scenarios/fragments/hardening.py
+- checks/integration-assurance/scenarios/fragments/hardening.cjs
 
 Composition target: checks/integration-assurance/scenarios/evidence-remediation-lifecycle.nix. Coordinator owns Nix/Python composition, browserSpecs and explicit owner registration/normal aggregation. Compose alongside CVE/policy/import/remediation/export fragments in one fresh Assurance VM/database. Earlier real target/deployment results in this scenario MAY be consumed through receipts; another derivation's live target, generation, database, output or receipts MUST NOT be consumed. No packet-specific derivation; keep authored unit facts in these fragments and coordinate target configuration through the coordinator.
 
