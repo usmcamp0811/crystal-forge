@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-19 15:39'
+updated_date: '2026-10-19 19:23'
 labels:
   - testing
   - integration
@@ -16,6 +16,8 @@ references:
   - packages/default/crates/cf-server/src/handlers/api/builders.rs
   - packages/default/crates/cf-builder/src/builder/api_client.rs
   - modules/nixos/crystal-forge/default.nix
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2964502717'
 modified_files:
   - lib/integration-test/roles.nix
   - checks/integration-delivery/default.nix
@@ -48,12 +50,12 @@ The owner separately authorized TASK-495 after offline=true exposed an unsupport
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Documented services, builderA, builderB and targetA interfaces are implemented through lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }, including real fixtures, separate credentials, key provisioning and offline inputs
-- [ ] #2 The coordinator composes the disjoint behavior-named source-build.py module as a real commit→evaluation→build case in delivery-lifecycle; builderA output is independently absent before build
-- [ ] #3 Native Delivery owner explicitly registers delivery-lifecycle and its pkgs.linkFarm aggregate includes every registered scenario; no separate smoke gate, placeholder owner or custom discovery is required
+- [x] #1 Documented services, builderA, builderB and targetA interfaces are implemented through lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }, including real fixtures, separate credentials, key provisioning and offline inputs
+- [x] #2 The coordinator composes the disjoint behavior-named source-build.py module as a real commit→evaluation→build case in delivery-lifecycle; builderA output is independently absent before build
+- [x] #3 Native Delivery owner explicitly registers delivery-lifecycle and its pkgs.linkFarm aggregate includes every registered scenario; no separate smoke gate, placeholder owner or custom discovery is required
 - [ ] #4 TASK-490.8-.15 contribute disjoint fragments to the same scenario without packet-specific VM derivations; no production/module behavior changes are made
-- [ ] #5 Later same-scenario cases consume earlier real outputs only through receipts; independent derivations never reuse live VM/database/output/receipt state
-- [ ] #6 Actual interface signatures and tested dependency/source revision, focused command, result and evidence are recorded after the real Delivery VM run
+- [x] #5 Later same-scenario cases consume earlier real outputs only through receipts; independent derivations never reuse live VM/database/output/receipt state
+- [x] #6 Actual interface signatures and tested dependency/source revision, focused command, result and evidence are recorded after the real Delivery VM run
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -70,27 +72,27 @@ Resume in the existing coordinator worktree /home/mcamp/code/crystal-forge/TASK-
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-## Local execution
+## Verified initial Delivery milestone
 
-- Worktree/branch: TASK-490.1-integration-foundation; coordinator openai; active task lock.
-- Normal command: `sh packages/ci/integration-owner-build.sh integration-delivery`.
-- Latest working-tree run: 8 passed; no failed/skipped cases; source based on `fc0c58361d00466fe50e3c46d6b37e01d4db7bf8`, not a clean-revision claim.
-- Evidence: `/nix/store/bys8qx6hix4kvf1yqycjbiqq2pmr1sc4-vm-test-run-cf-it-delivery-delivery-lifecycle-run`.
-- Driver: 100.17 seconds. Five VMs, one controller/database; configured memory 10 GiB. Peak memory unmeasured.
-- Receipts preserve exact authored SHA, native attempt UUID/number, drv, output, job, BuilderA/B IDs/sessions, target UUID/state/periodic-report IDs, output absence/realization and active public-egress rejection rules.
-- Initial Git, pure-lock/package-reference, resource-budget and cache-signing setup failures were corrected in fixtures only. No assertion was weakened. A cache capacity failure was corrected by sharing immutable baseline dependencies, not increasing disk or seeding the nonce result.
+- Verified code: `bea0c29936c2220a8c1ba8dbfeb5750dacc18cde`.
+- Hosted pipeline 2964502717 succeeded. All eight jobs passed: Access, Delivery, component, state-machine, CVE, dashboard, complexity and coverage.
+- The hosted Delivery artifact records 8/8 mandatory cases passed, exact source/attempt/drv/job/builder-session/target identities, `outputAbsentBeforeBuild=true`, `outputRealized=true`, `buildCompleted=true` and `publicEgressDenied=true`.
+- Hosted evidence: job17294404507 artifacts under `integration-evidence/integration-delivery/delivery-lifecycle/`. Target periodic reporting used full-state persistence; TASK-496 classification remains unresolved.
+- Both normal aggregates passed locally at the same clean source: Access23/23 and Delivery8/8, exit0. Latest Delivery evidence: `/nix/store/61x9c3ii0zw0b6c4pzln0af1vcm8zhfd-vm-test-run-cf-it-delivery-delivery-lifecycle-run`; driver79.32s. Configured memory10GiB across five VMs; peak unmeasured.
 
-## Separate product correction
+## Actual interfaces and lifecycle
 
-TASK-495 was explicitly authorized after the real builder rejected `nix-store --offline`. Product commit `6844d185` was developed in `/home/mcamp/code/crystal-forge/TASK-495-builder-offline` and applied as `fc0c5836`. The same offline=true proof then performed a real successful realization and signed publication. TASK-496 remains Backlog; periodic target reports currently fall back to full states after a database-comparison error.
+`services {}` supplies smart-HTTP Git and a signed/authenticated SSH Nix store. `builder {name,strategy?"server_derivation"}` supplies separate production API-only builders; `target {}` supplies the real client. Runtime keys remain in VMs; all later generated identities pass through receipts. BuilderB starts after BuilderA completes, so no competing-claim or fencing coverage is claimed. One controller/database and the same five roles serve the entire lifecycle. Independent scenarios never share live state.
 
-## Hosted prerequisite and remaining verification
+## Cold preparation and history
 
-Corrective pipelines 2961382083 (c2b77aad) and 2961428492 (e07b4bd2) passed all seven pre-Delivery required jobs. These do not prove the later Delivery source. Final clean-revision owner runs and hosted Delivery/product-fix pipeline remain to be recorded. Keep task In Progress and MR !335 draft. No merge/deploy/Done.
+The source generator's direct dependency fan-out measured2525->5. This is not a whole-owner recipe reduction. An opaque raw recipe closure worked warm but failed cold export on a bootstrap object before VM startup. The native baseline now prepares its complete build closure once for compatible roles. Cold preparation remains a minimization constraint, not an excuse to seed the nonce output or acquire dependencies during offline execution. Early Git, lock, signing and capacity setup failures remain historical evidence; no assertion was weakened.
 
-## History
+TASK-495 was separately authorized, developed in its own worktree as6844d185 and applied asfc0c5836. offline=true remained unchanged. TASK-496 remains Backlog; P3/TASK-492 is also separate.
 
-The former planned task-numbered roles-proof fragment and proposed standalone smoke gate were superseded. The controller prerequisite was already verified; old startup failures and blanket D1 were not blockers to this implementation.
+## Remaining task scope
+
+Criteria1,2,3,5,6 are verified for the initial role/build milestone. Criterion4 concerns later functional contributions; those obligations remain unimplemented and are not marked complete. Keep this task In Progress and MR!335 draft. Further source/evaluation, scheduling, cache, activation and recovery behavior must extend appropriate semantic modules in this lifecycle, never a task-specific VM or file boundary. No merge/deploy/Done.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
