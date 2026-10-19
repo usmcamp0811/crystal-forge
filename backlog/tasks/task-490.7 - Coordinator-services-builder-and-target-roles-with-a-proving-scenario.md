@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-19 21:57'
+updated_date: '2026-10-19 22:17'
 labels:
   - testing
   - integration
@@ -71,6 +71,8 @@ Resume in the existing coordinator worktree /home/mcamp/code/crystal-forge/TASK-
 5. Evaluate and build the normal owner, inspect all receipts/logs and correct only test plumbing. Record truthful failures without production fixes, then run hosted owner and update existing coverage map with exact evidence, topology and remaining obligations. Keep MR draft; no merge/deploy/Done.
 
 Owner-selected continuation at refreshed clean f6439851. User explicitly corrects this task's lifecycle: its initial role/build proof and review findings may enter Review independently of future dependent task completion. The old criterion requiring .8-.15 contributions is removed from this foundation task only; those accepted obligations remain on the children/parent gate. Coordinator owns shared roles, composition, registration and integration. First batch closes enforced signatures (inspect pinned Nix trust semantics; use untrusted receiver path in an existing VM), controlled outside-VLAN IPv4/IPv6 connectivity with positive controls and actual boundary hits, and exact heartbeat/state-lineage assertions after separate TASK-496 integration. Preserve existing cases and all offline/cold-store constraints. Then execute selected .14/.15 activation/rollback and independent Assurance work; no further product fix without authority.
+
+Resume network finding in the existing coordinator worktree at d11de059. Add a second controlled VLAN to the same five VMs, a dual-stack HTTP probe on services, and a narrowly scoped control UID permitted only to that probe. Assert real IPv4/IPv6 route selection, same-route positive control, product-actor rejection and exact firewall counter increments. Preserve NAT isolation and verify local Git/API/SSH traffic. Compose the behavior-named fragment after the existing source/build lifecycle; run the normal Delivery aggregate and inspect its raw result. No production/UI change or signature/activation completion claim in this bounded batch.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
