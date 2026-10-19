@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-18 13:58'
+updated_date: '2026-10-19 02:14'
 labels:
   - testing
   - integration
@@ -22,8 +22,8 @@ references:
   - >-
     checks/integration-assurance/fixtures/stig-import-U_Anduril_NixOS_STIG_V1R2_Manual-xccdf.xml
 modified_files:
-  - checks/integration-assurance/scenarios/fragments/task-490.19-stig-import.py
-  - checks/integration-assurance/scenarios/fragments/task-490.19-stig-import.cjs
+  - checks/integration-assurance/scenarios/fragments/stig-import.py
+  - checks/integration-assurance/scenarios/fragments/stig-import.cjs
   - checks/integration-assurance/fixtures/stig-import-*
 parent_task_id: TASK-490
 priority: high
@@ -37,8 +37,8 @@ ordinal: 531000
 Owning check: integration-assurance. Contract ID: assurance.policy.stig-import. Goal: prove input-derived import identities, preview atomicity, version provenance and framework mapping persistence. Risk: medium. Non-goals: enforcement (.18), export/round-trip assertions (.22), evaluation evidence, product changes and visual baselines without approved ImportStigModal state.
 
 Writable paths (only):
-- checks/integration-assurance/scenarios/fragments/task-490.19-stig-import.py
-- checks/integration-assurance/scenarios/fragments/task-490.19-stig-import.cjs
+- checks/integration-assurance/scenarios/fragments/stig-import.py
+- checks/integration-assurance/scenarios/fragments/stig-import.cjs
 - checks/integration-assurance/fixtures/stig-import-*
 
 Composition target: checks/integration-assurance/scenarios/evidence-remediation-lifecycle.nix. Coordinator owns Nix/Python composition, browserSpecs mapping and explicit registration/normal owner aggregation. Import cases need only the controller/browser interface but compose inside the shared Assurance VM/database. No standalone import gate or packet-specific NixOS derivation. Later same-scenario policy/remediation/export cases MAY consume real imported identities through receipts. Another derivation's live rows, outputs or receipts MUST NOT be consumed.
