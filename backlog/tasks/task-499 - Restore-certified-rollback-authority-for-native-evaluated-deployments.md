@@ -4,6 +4,7 @@ title: Restore certified rollback authority for native-evaluated deployments
 status: Backlog
 assignee: []
 created_date: '2026-10-20 04:21'
+updated_date: '2026-10-20 05:56'
 labels: []
 dependencies: []
 references:
@@ -13,6 +14,7 @@ references:
   - packages/default/crates/cf-server/src/queries/systems.rs
   - docs/knowledge/evaluation/evaluation-snapshot-retention-and-rollback.md
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17305508230'
 priority: high
 type: bug
 ordinal: 550000
@@ -31,3 +33,9 @@ The connected Delivery workflow performed real Git/native evaluation/build/publi
 - [ ] #3 Artifact schema versions and selector/retention boundaries remain explicit and are covered by regressions and updated source documentation.
 - [ ] #4 Missing or mismatched certified lineage remains ineligible and cannot be bypassed by a supplied store path.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Cleanhostedreproductionatdf11c8005de5ab7088015757dafc7fa7602da188, pipeline2966113736, Deliveryjob17305508230. BothactualCFmanageddeploymentscompleted, states1->2->3andeachnewstatehas2laterheartbeats. Freshgeneration1aftergeneration2: notcurrent, retainedidentitynull, rollbackeligiblefalse. Actualcasehistory-ui-rollback-restores-retained-output-and-correlates-current-state failsmandatoryprerequisite, notskip/expectedfailure. Fullresultdownloadedto/tmp/opencode/hosted-delivery-df11c800.json. Nativeproducer/V1retentionauthoritymismatchconfirmedbysourceinspection; normalV2ConfiginspectioncannotproviderequiredV1authority. Productrepairnotauthorized/started; keepBackloguntilownerdecision.
+<!-- SECTION:NOTES:END -->
