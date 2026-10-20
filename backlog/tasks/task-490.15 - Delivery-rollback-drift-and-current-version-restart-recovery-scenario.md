@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai
 created_date: '2026-10-17 16:37'
-updated_date: '2026-10-20 05:26'
+updated_date: '2026-10-20 05:55'
 labels:
   - testing
   - integration
@@ -13,6 +13,8 @@ labels:
 dependencies:
   - TASK-490.14
   - TASK-499
+references:
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17305508230'
 modified_files:
   - checks/integration-delivery/scenarios/fragments/recovery.py
   - checks/integration-delivery/scenarios/fragments/recovery.cjs
@@ -63,4 +65,6 @@ Owner explicitly selected retained-generation rollback after two actual CF-manag
 Mandatory rollback case executed after two completed manual CF-managed deployments and failed at fresh eligibility: firstgeneration1 is_current=false, generation_snapshot_id=null, rollback_eligible=false. No seeded snapshot/authority, alternatecommitrollback, skip/expectedfailure or allow_failure used. Actual restoration/UIrollbackrequest notexecuted. TASK499 is the newly observed blocking product dependency; its repair requires separate authorization and accepted artifact-authority strategy.
 
 Latest normal owner command sh packages/ci/integration-owner-build.sh integration-delivery exit1 on x86_64-linux at3db47c89-dirty,13passingcases and1mandatoryfailure,driver303.80s. Evidence /nix/store/mrs8rm4yvf5lk9vklqs01qvmzp1zl9n7-vm-test-run-cf-it-delivery-delivery-lifecycle-run and integration-evidence/integration-delivery. Semantic recovery.py/recovery.cjs composed into existing lifecycle only. Fresh before/after request identity checks and exact retained binding checks are implemented below the failing prerequisite but remain unexecuted. Broader drift/restart recovery notimplemented. KeepInProgress/draftMR335; neverreportrollbackpassed.
+
+Exactcleancommittedhosteddf11c800reproducesTASK499afterbothrealmanualdeploymentspass. Deliveryjob17305508230FAILED13passed1failed; downloadedfreshresultandbuildlogmatchsourceRevisiondf11c800. Freshgeneration1inventoryafterB: is_current=false, generation_snapshot_id=null, rollback_eligible=false. GatefailsbeforeUIrollbackoperation; nooperation/restoration/rollbackheartbeatsclaimed. Code/evidencepushedtodraftMR335. NeedownerauthorizationforTASK499productauthorityrepairbeforeconnectedincrementcancomplete.
 <!-- SECTION:NOTES:END -->
