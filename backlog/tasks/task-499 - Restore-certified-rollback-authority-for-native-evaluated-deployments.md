@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai
 created_date: '2026-10-20 04:21'
-updated_date: '2026-10-20 22:16'
+updated_date: '2026-10-20 22:21'
 labels: []
 dependencies: []
 references:
@@ -64,6 +64,8 @@ Producer/binding/retention choice: create a separately typed bounded native depl
 3. Update each deployment binding, reciprocal/ordinary retention, generation eligibility and rollback resolver with explicit version-aware identity validation, not accepting another integrity number generically. Preserve V2 exclusion and legacy supported V1. Fix only any demonstrated newest-request fallback defect needed to preserve existing accepted negative guarantee.
 4. Focused Rust/isolated DB regressions: real producer -> binding -> observation retention -> eligible rollback; wrong system; same output/different commit/derivation; stale/failed/uncertified/mismatched evidence; immutable retained identity after selector advance; Config reads unavailable/no mutation; migration old semantics and bounded reclamation. Update affected contracts/specs and SQLx metadata only when shapes require it.
 5. Commit independently and integrate into existing Delivery owner. Keep mandatory recovery assertion unchanged; run A -> B -> History rollback -> actual restoration -> state/twoH/reload. No new owner/scenario/package for this repair.
+
+Owner review follow-up on d68 (integrated by Sol as 62e86efa): reproduce old-unbound native recertification and newest pending/succeeded incomplete-lineage fallback. Preserve applied0310. Use conservative native publication-before-request/observation ordering, with actual publication clock after writer lock; preserve V1 late-publication semantics. Rank newest same-path request before complete immutable tuple validation in repair/external fallback and reciprocal observations. Bound reciprocal publication work newest-first to existing 100-row maintenance convention. Strengthen populated certified V1/V2 upgrade and native terminal24h release tests. Focused isolated PostgreSQL tests only, no VM/preview DB changes; separate follow-up commit, no amend. Assess forward migration only if existing schema cannot enforce the chosen contract.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
