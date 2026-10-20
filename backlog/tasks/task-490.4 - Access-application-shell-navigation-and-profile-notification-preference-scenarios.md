@@ -3,10 +3,10 @@ id: TASK-490.4
 title: >-
   Access: application shell navigation and profile/notification preference
   scenarios
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-19 02:13'
+updated_date: '2026-10-20 20:30'
 labels:
   - testing
   - integration
@@ -66,10 +66,5 @@ Focused verification after composition: `nix build .#checks.x86_64-linux.integra
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Current readiness: TASK-490.1 is Review in draft MR !335. Tested controller pin 81d65be745cc9f9777d368900d01fe0f207cb052 passed focused Access and aggregate with 10 cases, 292 migrations and database.unixSocketClients=22; runtime i84kvs1lc5nqx0lmsqinwbmvy0ix8mvh. The controller packet was directly inspected for disjoint paths, lifecycle-local-bootstrap placement, FACTS["admin"]/admin.userId receipts, independent run_browser contexts and coordinator composition/registration ownership. No future role dependency is required.
-
-Still Backlog, unselected and unexecuted. Exact authority gaps: accepted sidebar persistence and keyboard/narrow responsive states, invalid-input draft behavior where exposed, missing approved visual reference/threshold facts. The visual.compare interface has not been proved by an executed comparison; the session screenshot is not that proof. These gaps remain limited to their affected cases; no shell/preferences criterion is checked from bootstrap/session results.
-
-### Historical
-The 2026-10-17 review recorded unresolved foundation/package prerequisites and no VM execution at that time. Former separate shell/preferences derivations are not the current layout. Bootstrap passed at b1095c8f and then rebased bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab; runtime riky1mm0nn185wb26abw7zzshnbml0fp had 292 migrations. Those results covered bootstrap only.
+Owner now explicitly selects the independent shell/profile/notification-preference contribution. Existing Access23 cases and controller setup are implemented at df11c800. No obsolete bootstrap/Rust startup blocker applies. Worker owns only the four named semantic Python/browser fragments; Sol owns facts, composition, registration and VM execution. Approved Shell/Profile references control expectations; missing decisions block only their dependent assertions. No product UI change is authorized by this test-only child.
 <!-- SECTION:NOTES:END -->
