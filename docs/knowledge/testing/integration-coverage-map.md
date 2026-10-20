@@ -149,6 +149,89 @@ Reporting-only follow-ups do not change the executable cases. This successful
 partial pipeline does not complete the four owners or resolve P3/TASK-492 and
 TASK-496. TASK-495's separately authorized repair is in Review, not merged.
 
+### Delivery signature and unchanged-heartbeat continuation
+
+The normal command `nix build .#checks.x86_64-linux.integration-delivery
+--no-link -L --builders '' --max-jobs 1 --cores 2` exited 0 locally on
+2026-10-20. All ten cases passed; driver time was 178.07 seconds. Source was
+the working tree based on `d11de05967b2ade5c7e1f833317039de134c307a`, recorded
+as dirty. This is not a clean-head or hosted result. Evidence:
+`/nix/store/i6h35avw0z6kkyci7zxv5f2rlz9i8c2d-vm-test-run-cf-it-delivery-delivery-lifecycle-run`.
+
+The publication fragment uses the exact CF-built input-addressed output and a
+separate rooted receiving store inside services. The Unix-daemon client reports
+`trusted=false`. All 727 dependencies were signed and imported through that
+untrusted connection before the target test. The target remained absent and
+invalid, then failed specifically because it lacked a signature by a trusted
+key. Only source signature metadata changed before the same copy succeeded.
+Receiver metadata and the authored nonce matched; NAR hash, size and references
+were unchanged. No privileged import, disabled signature check, CA exemption,
+receiver reconfiguration or publication race supplied success. This proves a
+signature boundary independently of the existing trusted SSH publication
+account; it does not prove that account enforces signatures.
+
+The target assertion no longer accepts full-state fallback. Two real heartbeat
+rows referenced the exact registered initial state S1; there was exactly one
+full state and no comparison database-error log. A genuine observed state
+transition S2 and subsequent heartbeat correlation remain open, so TASK-490.7
+criterion 8 is not complete. The controlled IPv4/IPv6 network case also passed
+again. Activation, rollback, Assurance and Upgrade remain incomplete.
+
+The subsequent `nix flake check --keep-going --no-update-lock-file -L
+--builders '' --max-jobs 1 --cores 2` exited 0 for `x86_64-linux`. Both registered
+owners executed: Access 23/23 (50.90 seconds) and Delivery 10/10 (160.52 seconds).
+Evidence:
+
+- Access: `/nix/store/q9qhgv1qh35lj3s71wcg8s84q0985kwr-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run`.
+- Delivery: `/nix/store/y88mk7bplyb6hjxyqacsnsx8zhyf2dyn-vm-test-run-cf-it-delivery-delivery-lifecycle-run`.
+
+The command omitted incompatible `aarch64-darwin`, `aarch64-linux` and
+`x86_64-darwin` systems. It does not complete absent Assurance/Upgrade owners or
+missing contract obligations. No new hosted result is claimed.
+
+After explicit launcher/Cargo preparation, the documented offline isolated
+state-machine workflow exited 0: 517 passed, 0 failed, 0 ignored across 229 Rust
+summaries, including both TASK-496 regressions and populated migration cases.
+The two new ignored-library selections raise that selection count from 284 to
+286; fourteen integration targets retain 231 cases. The launcher created and
+removed its temporary PostgreSQL cluster; no shared database was used. Offline
+settings disable acquisition but do not prove host-daemon firewall isolation.
+
+### Delivery controlled network continuation
+
+The normal command `nix build .#checks.x86_64-linux.integration-delivery
+--no-link -L --builders '' --max-jobs 1 --cores 2` exited 0 locally on
+2026-10-19. The tested source was the working tree based on
+`d11de05967b2ade5c7e1f833317039de134c307a`, recorded as dirty, not a clean
+revision or hosted result. All nine cases passed; the driver took 77.08 seconds.
+Evidence:
+`/nix/store/lra2iw4nmplfr1lycslrc2dh4nfgg0l9-vm-test-run-cf-it-delivery-delivery-lifecycle-run`.
+
+The new behavior-named network fragment uses the same five VMs and a second
+test VLAN. The services VM hosts a controlled dual-stack HTTP endpoint. Each
+controller, builder and target proves an `eth2` route, same-route reachability
+from the narrowly permitted control UID, and product-actor rejection with an
+increase in the exact IPv4/IPv6 firewall rejection counter. All eight network
+receipts report a reachable control and boundary rejection. Required local
+Git/API/SSH traffic remains usable; no external cache is probed. NAT isolation
+remains enabled. This is a controlled VM boundary proof, not evidence that the
+host Nix daemon has no network access.
+
+The first executed continuation failed its IPv6 positive control because the
+fixture blocked neighbor-discovery replies to global VLAN addresses. Narrow
+neighbor-discovery permissions corrected the fixture; TCP rejection remained
+enabled. Failed evidence remains at
+`/nix/store/pmwnqnhijsa3yn0c1zi5p0camxv45jpy-vm-test-run-cf-it-delivery-delivery-lifecycle-run`.
+Earlier two-minute and twenty-minute build invocations timed out before VM
+execution and are not test passes.
+
+The source includes the separately authorized TASK-496 product repair. The
+observed periodic report is now a lightweight heartbeat. The existing assertion
+still permits full-state fallback; exact real-agent unchanged/changed lineage
+is not yet proved. Signature rejection, activation, rollback, Assurance and
+Upgrade coverage remain open. No new hosted pipeline or full flake-check result
+is claimed.
+
 ### Delivery source and authorized-build execution
 
 The normal `sh packages/ci/integration-owner-build.sh integration-delivery`
@@ -696,7 +779,7 @@ with `false` is not completion. No placeholders may fill missing names.
 | `checks/builder-cve-contract`, `oscal-export`, `xccdf-schema`, `stig` | Contracts/unit | consolidated | Direct module boolean evaluations, ordinary OSCAL fixture check phase and actual installed XCCDF writer/schema command. [Exact homes](flake-checks.md#current-inventory-and-commands); no A integration proof. |
 | `checks/test-keys` | Unused placeholders | removed | No executable consumers; not a coverage obligation. |
 | Legacy browser XCCDF XML V1R1 and V1R2 | Immutable fixtures | relocated | `checks/integration-assurance/fixtures/xccdf/`; no `default.nix` and no placeholder check. |
-| CI `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | DB-backed Rust | existing DB mechanisms; consolidated selections | State-machine workflow owns 284 unique ignored library tests, fourteen integration targets/231 cases and both migration rehearsals in fresh invocation-owned PostgreSQL. Six ignored duplicates and 94 normal-library selections removed; two duplicate `composite_policy` executions removed from CVE job. Dashboard unchanged. Full current run still needs successful evidence. |
+| CI `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | DB-backed Rust | existing DB mechanisms; consolidated selections | State-machine workflow owns 286 unique ignored library tests, fourteen integration targets/231 cases and both migration rehearsals in fresh invocation-owned PostgreSQL. Includes the two TASK-496 regressions. Six ignored duplicates and 94 normal-library selections removed; two duplicate `composite_policy` executions removed from CVE job. Dashboard unchanged. Local offline continuation passed 517 cases; current hosted evidence remains pending. |
 | CI `legacy-flake-check`, `web-ui-check`, `web-ui-baseline-candidates` | Legacy/manual jobs | removed | Sources and candidate-baseline workflow retired; no replacement pass claimed. |
 | CI `web-ui-screenshots-mr-comment` | Reporter | already removed in early transition | No replacement comment bot. Access exports its own evidence. |
 

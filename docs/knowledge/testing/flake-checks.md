@@ -122,8 +122,9 @@ The three database jobs remain. `state-machine-tests` owns one fresh invocation
 of PostgreSQL on port 35433 with temporary data, `LOGIN SUPERUSER CREATEDB`, and
 `pg_stat_statements` preload. Its SQLx shell exports both `DATABASE_URL` and
 `TEST_DATABASE_URL`; all selections share `target/database-tests`. The source
-and compiled-test audit retains 284 unique ignored library tests and fourteen
-integration targets containing 231 cases. Six repeated ignored selections and
+and compiled-test audit retains 286 unique ignored library tests and fourteen
+integration targets containing 231 cases. Two library selections cover TASK-496
+heartbeat/state decoding. Six repeated ignored selections and
 94 nonignored library selections are removed; normal package `--lib --bins`
 owns the latter. The whole `composite_policy` target owns two tests removed from
 the CVE job. Both populated migration rehearsals and exact missing-test guards

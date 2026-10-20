@@ -176,20 +176,27 @@ with case("target-registers-and-reports-real-agent-state"):
     expect(bool(report["agent_version"]), "agent reported no software identity")
     receipt("delivery.targetStateId", report["state_id"])
     receipt("delivery.targetRunningPath", actual_running)
-    # The role contract requires a real periodic report, not a particular
-    # storage optimization. The server can persist a full state instead of a
-    # lightweight heartbeat. Record which representation was observed; the
-    # known state-comparison database-error fallback is NOT proven correct.
+    # Unchanged real-agent reports must reference S1 without inserting another
+    # full state. A successful POST or a conservative DB-error fallback cannot
+    # satisfy this assertion after the TASK-496 repair.
     def periodic_report():
-        if targetA.execute("journalctl -u crystal-forge-agent --no-pager | "
-                           "grep -F 'Posting heartbeat (heartbeat)'")[0] != 0:
-            return None
-        return sql_json(controller,
-            "SELECT id::text AS id, 'heartbeat' AS kind FROM agent_heartbeats "
+        rows = sql_json(controller,
+            "SELECT h.id::text AS id, h.system_state_id::text AS state_id, s.id::text AS system_id "
+            "FROM agent_heartbeats h JOIN system_states ss ON ss.id=h.system_state_id "
+            "JOIN systems s ON s.hostname=ss.hostname "
             "WHERE system_state_id=" + str(int(report["state_id"])) +
-            " UNION ALL SELECT id::text AS id, 'full-state-report' AS kind FROM system_states "
-            "WHERE hostname=" + literal(FACTS["target"]) + " AND id>" + str(int(report["state_id"])) +
-            " AND store_path=" + literal(actual_running) + " ORDER BY id LIMIT 1")
-    heartbeat = wait_for(periodic_report, "real periodic target heartbeat and persisted result", timeout=90)[0]
-    receipt("delivery.targetHeartbeatId", heartbeat["id"])
-    receipt("delivery.targetHeartbeatRepresentation", heartbeat["kind"])
+            " ORDER BY h.id")
+        return rows if len(rows) >= 2 else None
+    heartbeats = wait_for(periodic_report, "two real target heartbeats referencing S1", timeout=150)
+    for heartbeat in heartbeats:
+        expect_equal(heartbeat["system_id"], target["id"], "heartbeat registered system identity")
+        expect_equal(heartbeat["state_id"], report["state_id"], "unchanged heartbeat state lineage")
+    states = sql_json(controller, "SELECT id::text AS id, store_path FROM system_states WHERE hostname=" +
+                      literal(FACTS["target"]) + " ORDER BY id")
+    expect_equal(states, [{"id": report["state_id"], "store_path": actual_running}],
+                 "unchanged target has exactly one full state")
+    controller.fail("journalctl -u crystal-forge-server --no-pager | "
+                    "grep -F 'Database error occurred while checking state'")
+    receipt("delivery.targetHeartbeatId", heartbeats[0]["id"])
+    receipt("delivery.targetHeartbeatIds", [h["id"] for h in heartbeats])
+    receipt("delivery.targetHeartbeatRepresentation", "heartbeat")

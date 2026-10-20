@@ -936,6 +936,8 @@ TOML
       queries::cache_destinations::tests::niks3_selection_assigned_first_disabled_fallback_and_stable_order \
       queries::cache_destinations::tests::niks3_assignment_writers_wait_for_publication_snapshot \
       handlers::agent::heartbeat::tests::niks3_signed_handler_preserves_pending_deployment_and_delivers_only_selected_reads \
+      handlers::agent::heartbeat::tests::signed_heartbeat_classification_preserves_exact_state_lineage \
+      queries::system_states::tests::latest_state_decodes_migrated_history_without_boot_id \
       handlers::api::builders::tests::niks3_builder_and_agent_selection_share_assigned_first_policy \
       queries::builders::tests::niks3_canonical_environment_dispatch_rejects_ambiguity_before_credentials \
       queries::builders::tests::niks3_canonical_environment_completion_rejects_post_dispatch_ambiguity \

@@ -281,7 +281,8 @@ The launcher owns a fresh temporary cluster on port 35433, verifies its data
 directory, role privileges (`LOGIN SUPERUSER CREATEDB`) and `pg_stat_statements`
 preload, and exports both database URLs inside the SQLx shell. All selections
 share `target/database-tests`. It preserves both populated migration rehearsals,
-284 unique ignored library tests and fourteen integration targets (231 cases).
+286 unique ignored library tests and fourteen integration targets (231 cases).
+The library selections include two TASK-496 heartbeat/state-decoding regressions.
 Six repeated ignored selections and 94 nonignored library selections were
 removed; normal package tests own the latter. Two repeated `composite_policy`
 executions were removed from the CVE job because the full target owns them.

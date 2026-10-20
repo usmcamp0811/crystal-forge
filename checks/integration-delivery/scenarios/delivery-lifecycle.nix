@@ -97,19 +97,7 @@
     }}
     EOF
   '';
-  offlineNetwork = {...}: {
-    environment.systemPackages = [pkgs.iptables];
-    # eth0 is QEMU's public/NAT interface; role traffic uses the test VLAN.
-    # Permit boot DHCP/IPv6 link control, but no external fixture acquisition.
-    networking.firewall.extraCommands = ''
-      iptables -A OUTPUT -o eth0 -p udp --dport 67 -d 255.255.255.255/32 -j ACCEPT
-      iptables -A OUTPUT -o eth0 -p udp --dport 67 -d 10.0.2.2/32 -j ACCEPT
-      iptables -A OUTPUT -o eth0 -j REJECT
-      ip6tables -A OUTPUT -o eth0 -p ipv6-icmp -d fe80::/10 -j ACCEPT
-      ip6tables -A OUTPUT -o eth0 -p ipv6-icmp -d ff02::/16 -j ACCEPT
-      ip6tables -A OUTPUT -o eth0 -j REJECT
-    '';
-  };
+  offlineNetwork = ../fixtures/network-isolation.nix;
   prepared = {...}: {
     imports = [offlineNetwork];
     # Raw derivation-archive transport needs a valid full recipe closure. The
@@ -148,8 +136,19 @@ in harness.mkScenario {
       # Share only immutable preparation, including input-closure metadata.
       # Otherwise first publication needlessly copies the entire toolchain
       # into this writable cache. The runtime nonce output is still absent.
-      imports = [(harness.roles.services {}) prepared];
+      imports = [(harness.roles.services {}) prepared ../fixtures/signature-receiver.nix];
       environment.etc."cf-it/source".source = source;
+      networking.firewall.allowedTCPPorts = [9080];
+      systemd.services.network-probe = {
+        description = "Controlled outside-boundary connectivity probe";
+        wantedBy = ["multi-user.target"];
+        after = ["network.target"];
+        serviceConfig = {
+          DynamicUser = true;
+          ExecStart = "${pkgs.python3}/bin/python3 ${../fixtures/network-probe.py}";
+          Restart = "on-failure";
+        };
+      };
     };
     builderA = {...}: {
       imports = [(harness.roles.builder {name = "builderA";}) prepared];
@@ -167,10 +166,13 @@ in harness.mkScenario {
     flake = {name = "delivery-source"; url = "http://services/delivery.git"; branch = "main";};
     target = "targetA";
     cacheUrl = "ssh-ng://cache@services";
+    receiverNix = "${pkgs.crystal-forge.default.evaluatorNix}";
   };
   script = pkgs.writeText "delivery-lifecycle.py" (
-    builtins.readFile ./delivery-lifecycle.py + "\n"
-    + builtins.readFile ./fragments/source-build.py
+     builtins.readFile ./delivery-lifecycle.py + "\n"
+     + builtins.readFile ./fragments/source-build.py + "\n"
+     + builtins.readFile ./fragments/publication.py + "\n"
+     + builtins.readFile ./fragments/network-boundary.py
   );
   timeout = 1800;
 }
