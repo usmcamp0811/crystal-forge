@@ -1,8 +1,9 @@
 ---
 id: TASK-490.15
 title: 'Delivery: rollback, drift, and current-version restart recovery scenario'
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - openai
 created_date: '2026-10-17 16:37'
 updated_date: '2026-10-20 03:13'
 labels:
@@ -38,6 +39,16 @@ Requires TASK-490.7/.14 role and code prerequisites, accepted authority, and pas
 - [ ] #4 The coordinator composes this fragment after .14 in delivery-lifecycle; no packet derivation is added
 - [ ] #5 The coordinator records actual Delivery VM revision, command, outcome and evidence
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Owner-selected retained-generation rollback contribution in existing coordinator worktree/branch TASK-490.1-integration-foundation and draft MR335. Use same five VMs/database/receipts after .14 manual A then B deployments. No new task-specific VM/worktree per explicit user continuation.
+1. Require first CF-managed deployment A has server-owned retained generation snapshot and rollback_eligible=true; do not assume initial harness generation is eligible or seed retention.
+2. After actual B activation, navigate existing production History rollback action to preselected Deploy plan; assert selected retained A identity and send normal UI rollback-generation operation. No duplicate API/UI full lifecycle.
+3. Independently observe actual running A marker/path/profile and actual rollback generation (not assumed equal original number), real agent new state/history/succeeded request and two later heartbeats on correct current state. Inspect reload/system/history and screenshot.
+4. Compose semantic recovery.py/recovery.cjs only after activation in same existing lifecycle. Run required normal owner command, Access regression where required, docs/appropriate lower-level checks and exact committed hosted pipeline. Keep broader drift/restart recovery acceptance open; no unrelated repair or parent completion.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
