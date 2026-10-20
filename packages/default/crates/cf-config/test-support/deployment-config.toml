@@ -1,0 +1,21 @@
+[client]
+private_key = "/unused-deployment-regression-key"
+server_host = "127.0.0.1"
+server_port = 3000
+
+[deployment]
+deployment_poll_interval = "15m"
+deployment_timeout_minutes = 60
+dry_run_first = true
+fallback_to_local_build = false
+max_deployment_age_minutes = 30
+post_agent_start_deployment_delay = 0
+require_sigs = true
+strategy = "immediate_persist"
+
+[vulnix]
+enable_whitelist = false
+extra_args = []
+max_retries = 5
+poll_interval = "1m"
+timeout = "5m"

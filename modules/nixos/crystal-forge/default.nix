@@ -1441,7 +1441,13 @@ in {
       deployment_poll_interval = lib.mkOption {
         type = lib.types.str;
         default = "15m";
-        description = "Interval between deployment polling checks";
+        description = lib.mdDoc ''
+          Interval between deployment polling checks, as a human duration such
+          as "15m" or "1h 30m". The duration must resolve to nonnegative whole
+          seconds. The agent also accepts integer seconds in TOML for deployed
+          configuration compatibility and serializes this interval as integer
+          seconds. Invalid, overflowing, and fractional-second values are rejected.
+        '';
       };
       post_agent_start_deployment_delay = lib.mkOption {
         type = lib.types.ints.unsigned;

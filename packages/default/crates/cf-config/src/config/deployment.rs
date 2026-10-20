@@ -265,8 +265,19 @@ pub struct DeploymentConfig {
     pub deployment_timeout_minutes: u64,
     pub cache_url: Option<String>,
     pub cache_public_key: Option<String>,
-    #[serde(with = "duration_serde")]
+    /// Interval between deployment polls, in nonnegative whole seconds.
+    ///
+    /// Accepts integer seconds from deployed configurations and human durations
+    /// such as `"15m"` from the NixOS module. Rejects invalid, overflowing, or
+    /// fractional-second durations. Serialization retains integer seconds.
+    #[serde(
+        serialize_with = "duration_serde::serialize",
+        deserialize_with = "deserialize_poll_interval"
+    )]
     pub deployment_poll_interval: Duration,
+    /// Minimum agent uptime before deployment, expressed as integer seconds.
+    ///
+    /// Defaults to 60 seconds when omitted; zero permits immediate deployment.
     #[serde(
         default = "default_post_agent_start_deployment_delay",
         with = "duration_serde"
@@ -287,6 +298,32 @@ pub struct DeploymentConfig {
     /// Deployment strategy (immediate_persist or boot_only)
     #[serde(default)]
     pub strategy: DeploymentStrategy,
+}
+
+// COMPATIBILITY: The module emits human durations, but deployed files use
+// integer seconds. Keep this adapter local: other duration fields retain their
+// existing formats. Reject fractions so integer serialization cannot lose time.
+fn deserialize_poll_interval<'de, D>(deserializer: D) -> Result<Duration, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum Interval {
+        Seconds(u64),
+        Human(#[serde(with = "humantime_serde")] Duration),
+    }
+
+    let duration = match Interval::deserialize(deserializer)? {
+        Interval::Seconds(seconds) => Duration::from_secs(seconds),
+        Interval::Human(duration) => duration,
+    };
+    if duration.subsec_nanos() != 0 {
+        return Err(serde::de::Error::custom(
+            "deployment polling interval must be a whole number of seconds",
+        ));
+    }
+    Ok(duration)
 }
 
 fn default_post_agent_start_deployment_delay() -> Duration {
@@ -317,6 +354,124 @@ impl Default for DeploymentConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn polling_interval_accepts_compatible_whole_seconds() {
+        for (value, seconds) in [
+            (serde_json::json!(0), 0),
+            (serde_json::json!(900), 900),
+            (serde_json::json!(u64::MAX), u64::MAX),
+            (serde_json::json!("0s"), 0),
+            (serde_json::json!("15m"), 900),
+            (serde_json::json!("1h 30m"), 5400),
+            (serde_json::json!("1000ms"), 1),
+        ] {
+            let mut input = serde_json::to_value(DeploymentConfig::default()).unwrap();
+            input["deployment_poll_interval"] = value;
+            let config: DeploymentConfig = serde_json::from_value(input).unwrap();
+            assert_eq!(
+                config.deployment_poll_interval,
+                Duration::from_secs(seconds)
+            );
+            let encoded = serde_json::to_value(config).unwrap();
+            assert_eq!(encoded["deployment_poll_interval"], seconds);
+        }
+    }
+
+    #[test]
+    fn deployment_durations_reject_invalid_or_lossy_values() {
+        for value in [
+            serde_json::json!(-1),
+            serde_json::json!(1.5),
+            serde_json::json!(true),
+            serde_json::json!(null),
+            serde_json::json!([]),
+            serde_json::json!({"secs": 900, "nanos": 0}),
+            serde_json::json!(""),
+            serde_json::json!("900"),
+            serde_json::json!("-1s"),
+            serde_json::json!("later"),
+            serde_json::json!("18446744073709551616s"),
+            serde_json::json!("18446744073709551615h"),
+            serde_json::json!("1.5s"),
+            serde_json::json!("1ms"),
+            serde_json::json!("0.0000000001s"),
+        ] {
+            for field in [
+                "deployment_poll_interval",
+                "post_agent_start_deployment_delay",
+            ] {
+                let mut input = serde_json::to_value(DeploymentConfig::default()).unwrap();
+                input[field] = value.clone();
+                assert!(
+                    serde_json::from_value::<DeploymentConfig>(input).is_err(),
+                    "{field}: {value}"
+                );
+            }
+        }
+        // Numeric overflow must also fail before it can be coerced into seconds.
+        let text = include_str!("../../test-support/deployment-config.toml")
+            .replace("\"15m\"", "18446744073709551616");
+        assert!(
+            ::config::Config::builder()
+                .add_source(::config::File::from_str(&text, ::config::FileFormat::Toml))
+                .build()
+                .and_then(|config| config.try_deserialize::<super::super::CrystalForgeConfig>())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn deployment_defaults_and_integer_start_delay_remain_compatible() {
+        let root: super::super::CrystalForgeConfig = ::config::Config::builder()
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        assert_eq!(
+            root.deployment.deployment_poll_interval,
+            Duration::from_secs(60)
+        );
+        assert_eq!(
+            root.deployment.post_agent_start_deployment_delay,
+            Duration::from_secs(60)
+        );
+        let mut input = serde_json::to_value(DeploymentConfig::default()).unwrap();
+        input["post_agent_start_deployment_delay"] = serde_json::json!(0);
+        let config: DeploymentConfig = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(config.post_agent_start_deployment_delay, Duration::ZERO);
+        input["post_agent_start_deployment_delay"] = serde_json::json!("1m");
+        assert!(serde_json::from_value::<DeploymentConfig>(input).is_err());
+    }
+
+    #[test]
+    fn generated_nixos_deployment_config_roundtrips() {
+        let text = match std::env::var("CF_TEST_GENERATED_DEPLOYMENT_CONFIG") {
+            Ok(path) => std::fs::read_to_string(path).unwrap(),
+            Err(_) => include_str!("../../test-support/deployment-config.toml").to_owned(),
+        };
+        // Use the same TOML source and root deserializer as the agent loader.
+        let config: super::super::CrystalForgeConfig = ::config::Config::builder()
+            .add_source(::config::File::from_str(&text, ::config::FileFormat::Toml))
+            .build()
+            .unwrap()
+            .try_deserialize()
+            .unwrap();
+        assert_eq!(
+            config.deployment.deployment_poll_interval,
+            Duration::from_secs(900)
+        );
+        assert_eq!(
+            config.deployment.post_agent_start_deployment_delay,
+            Duration::ZERO
+        );
+        let encoded = serde_json::to_value(&config.deployment).unwrap();
+        assert_eq!(encoded["deployment_poll_interval"], 900);
+        assert_eq!(encoded["post_agent_start_deployment_delay"], 0);
+        let decoded: DeploymentConfig = serde_json::from_value(encoded).unwrap();
+        assert_eq!(decoded.deployment_poll_interval, Duration::from_secs(900));
+        assert_eq!(decoded.post_agent_start_deployment_delay, Duration::ZERO);
+    }
 
     #[test]
     fn test_deployment_strategy_default() {
