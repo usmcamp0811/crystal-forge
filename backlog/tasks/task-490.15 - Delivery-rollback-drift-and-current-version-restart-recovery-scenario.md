@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai
 created_date: '2026-10-17 16:37'
-updated_date: '2026-10-20 05:24'
+updated_date: '2026-10-20 05:26'
 labels:
   - testing
   - integration
@@ -14,8 +14,8 @@ dependencies:
   - TASK-490.14
   - TASK-499
 modified_files:
-  - checks/integration-delivery/scenarios/fragments/task-490.15-recovery.py
-  - checks/integration-delivery/scenarios/fragments/task-490.15-recovery.cjs
+  - checks/integration-delivery/scenarios/fragments/recovery.py
+  - checks/integration-delivery/scenarios/fragments/recovery.cjs
 parent_task_id: TASK-490
 priority: medium
 type: task
@@ -25,7 +25,7 @@ ordinal: 527000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-delivery. Contract ID: delivery.activation.recovery. This packet owns only recovery Python/browser fragments under `checks/integration-delivery/scenarios/fragments/task-490.15-*`. Coordinator owns `delivery-lifecycle.nix`, composition and registration; no packet-specific derivation.
+Owning check: integration-delivery. Contract ID: delivery.activation.recovery. This packet owns only recovery Python/browser fragments at `checks/integration-delivery/scenarios/fragments/recovery.py` and `recovery.cjs`. Coordinator owns `delivery-lifecycle.nix`, composition and registration; no packet-specific derivation.
 
 Compose after actual deployment generations and pending work created by TASK-490.14 cases in the same fresh Delivery VM/target. Prove rollback to prior target generation, independent drift detection, and bounded recovery after server/builder/agent restart during work. Reuse same-run target/job receipts; do not depend on TASK-490.14's separate run state. Version transition remains TASK-490.23 under the Upgrade owner.
 
