@@ -1,10 +1,11 @@
 ---
 id: TASK-500
 title: Distinguish deployment-start observations from completed history entries
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - openai
 created_date: '2026-10-20 05:20'
-updated_date: '2026-10-20 20:30'
+updated_date: '2026-10-20 20:31'
 labels: []
 dependencies: []
 references:
@@ -29,6 +30,16 @@ Correct the verified SystemDetail History and rollback-plan presentation defects
 - [ ] #2 The rollback plan's strategy label follows the approved presentation or an explicitly recorded product decision.
 - [ ] #3 Behavioral browser coverage verifies Started versus completed presentation and durable reload behavior without synthetic completion evidence.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Dedicated worktree/branch TASK-500-history-presentation, clean base df11c800; Sol owns persistent preview and task lock. UI writes are blocked until that preview is verified/published. No competing default-port stack or shared user database.
+1. Read approved SystemDetail and authoritative history mappings. State the existing metric's accepted meaning; count distinct deployment attempts rather than Started and terminal observations twice, retaining failures where the approved contract includes them. A Started observation cannot be labelled completed Deployed/success.
+2. Make only the bounded History mapping/count and rollback Strategy presentation repair, matching switch_to_generation. Do not change icons, layout, unrelated sections or design references. Extend pure UI model regressions for Started/terminal/failed/same-deployment counts and reload identity.
+3. Coordinator extends existing Delivery browser assertions to inspect all contradictory cards/counts, exact event/deployment identity and approved rollback plan. No duplicate lifecycle/new VM. Verify preview current, then normal affected UI/component/Delivery checks and screenshots.
+4. Commit separately; Sol integrates and records missing/extra/reordered/merged/metadata/interaction/hierarchy comparison disposition explicitly. No Done or merge.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
