@@ -1,10 +1,10 @@
 ---
 id: TASK-490.15
 title: 'Delivery: rollback, drift, and current-version restart recovery scenario'
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-10-17 16:37'
-updated_date: '2026-10-18 03:26'
+updated_date: '2026-10-20 03:13'
 labels:
   - testing
   - integration
@@ -45,4 +45,6 @@ Requires TASK-490.7/.14 role and code prerequisites, accepted authority, and pas
 2026-10-17 organization correction: native owner-local layout and explicit coordinator registration. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
 
 Scenario isolation correction: TASK-490.14's generation/output/VM cannot be reused. Set up and perform the prior real deployment(s) in this scenario's own fresh targetA VM before exercising rollback and drift; reuse only immutable fixture definitions or role/helper code. Current foundation VM execution fails on TASK-490.25/.26, so remain Backlog.
+
+Owner explicitly selected retained-generation rollback after two actual CF-managed manual deployments in the same Delivery lifecycle. No drift/restart-recovery completion is implied. Use semantic recovery.py/.cjs filenames, not historical task-numbered paths. Coordinator owns shared fixture/composition.
 <!-- SECTION:NOTES:END -->
