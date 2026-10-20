@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai
 created_date: '2026-10-20 04:21'
-updated_date: '2026-10-20 20:31'
+updated_date: '2026-10-20 21:23'
 labels: []
 dependencies: []
 references:
@@ -51,4 +51,6 @@ Producer/binding/retention choice: create a separately typed bounded native depl
 
 <!-- SECTION:NOTES:BEGIN -->
 Verified baseline: df11c8005de5ab7088015757dafc7fa7602da188; hosted pipeline2966113736 Deliveryjob17305508230 failed mandatory rollback eligibility after13passingcases. Access23 and database517/0/0 passed; component/CVE/dashboard passed; complexity/coverage skipped. Downloaded /tmp/opencode/hosted-delivery-df11c800.json confirms fresh generation1 is not current after B, retained UUID null, eligibility false. The current owner assignment authorizes implementation. Prior nonauthorization wording is obsolete and removed. Research identifies a missing bounded native deployment-authority producer; do not solve by accepting V2 as V1 or restoring an eager full Config crawl.
+
+Repair implementation in TASK-499-retained-authority at df11c800: added forward 0310 for bounded schema3/integrity3 Native deployment identity, active producer certification and shared exact-live-lineage predicate; PRIMARY supports legacy V1 and certified3, Config remains V2-only. Existing binding/retention/rollback/read consumers are being updated; no historical recertification or artifact->derivation FK. Test database launcher /tmp/opencode/task499-db.sh uses fresh invocation-owned PostgreSQL 35437 and repository database-environment.sh ownership/preload checks. Baseline focused legacy deployment/finalization test passed (exit0), logs /tmp/opencode/task499-negative-before2.log. Stronger wrapper-negative and producer-chain tests in progress. Preview http://127.0.0.1:8082/systems verified HTTP200; still baseline backend, owner will refresh after build. Preview/user databases untouched. SQLx stored-query inventory inspection found no checked metadata referencing affected artifact tables or changed authority views; new SQL uses runtime queries.
 <!-- SECTION:NOTES:END -->
