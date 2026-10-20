@@ -486,7 +486,16 @@ async fn run_signature_commands(
             command
         };
         command.args(operation.args);
-        require_signature_command(command).await?;
+        let result = require_signature_command(command).await;
+        if cache
+            .push_to
+            .as_deref()
+            .is_some_and(|uri| uri.starts_with("ssh://"))
+        {
+            result.context("Legacy SSH publication could not verify configured-key closure trust; this protocol cannot repair signature metadata")?;
+        } else {
+            result?;
+        }
     }
     Ok(())
 }

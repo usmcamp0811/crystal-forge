@@ -117,15 +117,17 @@ impl CacheConfig {
 
     /// Returns the ordered metadata synchronization and destination trust checks.
     ///
-    /// Signed `Nix` publication completes only after transfer and both commands
+    /// Signed `Nix` publication completes only after transfer and these commands
     /// succeed. `source_store` must identify the store used for source signing
     /// and transfer (normally `NIX_REMOTE`, or `auto` when unset). The destination
-    /// must support `addSignatures`, as `ssh-ng://` does in Nix 2.34.8. Legacy
-    /// `ssh://` cannot update warm-path signatures and fails when an update is
-    /// required. Other cache adapters retain their native publication contract.
+    /// uses `addSignatures` for synchronization, as supported by `ssh-ng://` in
+    /// Nix 2.34.8. Legacy `ssh://` instead runs verification only: complete CF
+    /// trust succeeds without attempting unsupported writes of unrelated source
+    /// signatures. Missing CF trust fails verification and cannot be repaired
+    /// through that protocol. Other adapters keep their native contract.
     ///
     /// `copy-sigs` checks NAR hash, size and references before adding signatures,
-    /// but silently skips mismatches. The second command verifies destination
+    /// but silently skips mismatches. The verification command checks destination
     /// metadata recursively with only the configured key's public half. It does
     /// not fetch source signatures during verification or accept `ultimate` as
     /// a substitute for trust. Nix also accepts verifiable content-addressed paths.
@@ -153,7 +155,7 @@ impl CacheConfig {
         else {
             return Vec::new();
         };
-        vec![
+        let mut commands = vec![
             CacheCommand {
                 command: "nix".into(),
                 args: [
@@ -196,7 +198,11 @@ impl CacheConfig {
                 .map(String::from)
                 .collect(),
             },
-        ]
+        ];
+        if destination.starts_with("ssh://") {
+            commands.remove(0);
+        }
+        commands
     }
 
     /// Legacy: still returns args only.
@@ -325,6 +331,12 @@ mod tests {
                 "/nix/store/output"
             ]
         );
+        cache.push_to = Some("ssh://cache@host".into());
+        let legacy = cache.signature_commands("/nix/store/output", "daemon");
+        assert_eq!(legacy.len(), 1);
+        assert_eq!(legacy[0].args[1], "verify");
+        assert!(!legacy[0].args.iter().any(|arg| arg == "--substituter"));
+        cache.push_to = Some("ssh-ng://cache@host".into());
         for adapter in [
             CacheType::S3,
             CacheType::Http,
@@ -366,7 +378,10 @@ mod tests {
         let source_root = fixture.path().join("source");
         let destination_root = fixture.path().join("destination");
         let consumer_root = fixture.path().join("consumer");
-        let store = |root: &std::path::Path| format!("local?root={}", root.display());
+        // Nix builds can inherit NIX_STORE_DIR=/dummy. Root relocates physical
+        // files; explicitly keep virtual paths at /nix/store for this fixture.
+        let store =
+            |root: &std::path::Path| format!("local?root={}&store=/nix/store", root.display());
         let source = store(&source_root);
         let destination = store(&destination_root);
         let consumer = store(&consumer_root);
@@ -374,6 +389,9 @@ mod tests {
             Command::new(&nix)
                 .env("NIX_CONFIG", "experimental-features = nix-command\nsubstituters =\nbuilders =\nrequire-sigs = true\n")
                 .env_remove("NIX_REMOTE")
+                .env("NIX_USER_CONF_FILES", "/dev/null")
+                .env("HOME", fixture.path())
+                .env("XDG_CACHE_HOME", fixture.path().join("cache"))
                 .args(args).output().unwrap()
         };
         let success = |output: Output| -> String {
@@ -479,6 +497,18 @@ mod tests {
             other_key.to_str().unwrap(),
             dependency,
         ]));
+        // Reproduce a prior build signed only with a different static key.
+        // The selected publication key must cover the entire resolved root.
+        success(run(&[
+            "store",
+            "sign",
+            "--recursive",
+            "--store",
+            &source,
+            "--key-file",
+            other_key.to_str().unwrap(),
+            output,
+        ]));
         let mut sign = cache.sign_command(output).unwrap();
         sign.args.extend(["--store".into(), source.clone()]);
         success(execute(sign));
@@ -556,6 +586,21 @@ mod tests {
                 .success()
         );
         let commands = cache.signature_commands(output, &source);
+        let legacy = CacheConfig {
+            push_to: Some("ssh://fixture".into()),
+            ..cache.clone()
+        };
+        let legacy_verify = || {
+            let mut commands = legacy.signature_commands(output, &source);
+            assert_eq!(commands.len(), 1);
+            assert_eq!(commands[0].args[1], "verify");
+            // Exercise the legacy command policy with real local metadata;
+            // SSH topology belongs to the owning Delivery integration scenario.
+            commands[0].args[3] = destination.clone();
+            commands.remove(0)
+        };
+        let legacy_untrusted = execute(legacy_verify());
+        assert!(!legacy_untrusted.status.success());
         // Verification alone must fail despite successful source signing/copy.
         let untrusted = execute(commands[1].clone());
         assert!(!untrusted.status.success());
@@ -584,6 +629,43 @@ mod tests {
             success(execute(operation));
         }
         assert_eq!(after, metadata(&destination));
+        // Add a source signature after transfer. Legacy publication must not
+        // attempt unsupported addSignatures merely to copy this unrelated key.
+        let late_key = fixture.path().join("late.key");
+        std::fs::write(
+            &late_key,
+            success(run(&["key", "generate-secret", "--key-name", "late"])),
+        )
+        .unwrap();
+        success(run(&[
+            "store",
+            "sign",
+            "--recursive",
+            "--store",
+            &source,
+            "--key-file",
+            late_key.to_str().unwrap(),
+            output,
+        ]));
+        assert!(
+            metadata(&source)[dependency]["signatures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s.as_str().unwrap().starts_with("late:"))
+        );
+        assert!(
+            !metadata(&destination)[dependency]["signatures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s.as_str().unwrap().starts_with("late:"))
+        );
+        success(execute(legacy_verify()));
+        eprintln!(
+            "legacy policy: verify-only; missing CF trust={}; complete CF trust with unrelated source-only signature=0",
+            legacy_untrusted.status
+        );
         success(acquire());
         let acquired = metadata(&consumer);
         assert!(acquired.get(dependency).is_some());

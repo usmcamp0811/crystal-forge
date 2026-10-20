@@ -224,14 +224,18 @@ impl Derivation {
     /// Signed Nix publication also synchronizes and verifies destination closure
     /// metadata after transfer. See [`CacheConfig::signature_commands`] for the
     /// supported protocol, trust requirements, and partial-failure contract.
+    /// Before transfer, Nix publication recursively signs the resolved root with
+    /// this attempt's selected key. Earlier static-config signing does not prove
+    /// trust under a database-selected key. Signing failure stops the attempt.
     ///
     /// Database Attic uses only the selected endpoint, native cache and stored
     /// token in a private per-attempt XDG config. Static publication retains
     /// legacy login behavior. Disabled/filtered publication still skips work.
     ///
     /// # Errors
-    /// Returns static errors for selected Attic preparation, process failure,
-    /// timeout or cancellation. Other backends retain their existing errors.
+    /// Returns errors for selected Nix source signing or destination trust
+    /// verification, and static errors for selected Attic preparation, process
+    /// failure, timeout or cancellation. Other backends retain existing errors.
     ///
     /// See [`Self::push_to_cache_with_source_and_retry`] for a database-selected
     /// publication example. Queue workers use this single-attempt entry point
@@ -283,6 +287,11 @@ impl Derivation {
 
         let effective_command = cache_cmd.command.clone();
         let mut effective_args = cache_cmd.args.clone();
+
+        // SECURITY: Queue attempts can select a different key from the static
+        // build configuration. Sign the resolved publication root, not self's
+        // possibly stale store_path, before transferring any of this attempt.
+        sign_publication_root(cache_config, &store_path, build_config, "nix").await?;
 
         // --- Special handling for Attic -------------------------------------------------------
         if effective_command == "attic"
@@ -485,6 +494,24 @@ impl Derivation {
 
 // INVARIANT: Keep server-owned publication consistent with API builders. Transfer
 // skips warm paths; success requires destination metadata trust after transfer.
+async fn sign_publication_root(
+    cache: &CacheConfig,
+    resolved_root: &str,
+    build: &BuildConfig,
+    nix_program: &str,
+) -> Result<()> {
+    if cache.cache_type == CacheType::Nix {
+        if let Some(mut operation) = cache.sign_command(resolved_root) {
+            // Inject the executable in component tests without mutating PATH.
+            operation.command = nix_program.into();
+            run_publication_command(operation, cache, build, "source signing").await?;
+        }
+    }
+    Ok(())
+}
+
+// Verify only destination metadata after transfer. Source signing above cannot
+// repair metadata on warm destination paths that Nix copy skips.
 async fn run_signature_commands(
     cache: &CacheConfig,
     store_path: &str,
@@ -492,40 +519,142 @@ async fn run_signature_commands(
 ) -> Result<()> {
     let source = std::env::var("NIX_REMOTE").unwrap_or_else(|_| "auto".into());
     for operation in cache.signature_commands(store_path, &source) {
-        let mut command = if build.should_use_systemd() {
-            let mut command = tokio::process::Command::new("systemd-run");
-            command.args(["--scope", "--collect", "--quiet"]);
-            apply_systemd_props_for_scope(build, &mut command);
-            apply_cache_env(&mut command);
-            apply_cache_config_env_for_scope(&mut command, cache);
-            command.arg("--").arg(operation.command);
-            command
+        let result = run_publication_command(
+            operation,
+            cache,
+            build,
+            "signature propagation/verification",
+        )
+        .await;
+        if cache
+            .push_to
+            .as_deref()
+            .is_some_and(|uri| uri.starts_with("ssh://"))
+        {
+            result.context("Legacy SSH publication could not verify configured-key closure trust; this protocol cannot repair signature metadata")?;
         } else {
-            let mut command = tokio::process::Command::new(operation.command);
-            build.apply_to_command(&mut command);
-            apply_cache_env_to_command(&mut command);
-            apply_cache_config_env_to_command(&mut command, cache);
-            command
-        };
-        command.args(operation.args);
-        // SECURITY: Native errors and argv can expose credential-bearing URLs.
-        let status = command
-            .kill_on_drop(true)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .status()
-            .await
-            .map_err(|_| {
-                anyhow::anyhow!("Nix publication signature propagation/verification spawn failed")
-            })?;
-        if !status.success() {
-            bail!(
-                "Nix publication signature propagation/verification failed with {status}; output suppressed"
-            );
+            result?;
         }
     }
     Ok(())
+}
+
+// The same environment and scope policy applies to signing and post-transfer
+// trust operations. Stage labels are static; never include native output or URLs.
+async fn run_publication_command(
+    operation: cf_config::config::CacheCommand,
+    cache: &CacheConfig,
+    build: &BuildConfig,
+    stage: &str,
+) -> Result<()> {
+    let mut command = if build.should_use_systemd() {
+        let mut command = tokio::process::Command::new("systemd-run");
+        command.args(["--scope", "--collect", "--quiet"]);
+        apply_systemd_props_for_scope(build, &mut command);
+        apply_cache_env(&mut command);
+        apply_cache_config_env_for_scope(&mut command, cache);
+        command.arg("--").arg(operation.command);
+        command
+    } else {
+        let mut command = tokio::process::Command::new(operation.command);
+        build.apply_to_command(&mut command);
+        apply_cache_env_to_command(&mut command);
+        apply_cache_config_env_to_command(&mut command, cache);
+        command
+    };
+    command.args(operation.args);
+    // SECURITY: Native errors and argv can expose credential-bearing URLs.
+    let status = command
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map_err(|_| anyhow::anyhow!("Nix publication {stage} spawn failed"))?;
+    if !status.success() {
+        bail!("Nix publication {stage} failed with {status}; output suppressed");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod publication_signing_tests {
+    use super::*;
+    use std::os::unix::fs::PermissionsExt;
+
+    #[tokio::test]
+    async fn publication_signing_preserves_unsigned_and_other_adapters() {
+        let build = BuildConfig {
+            use_systemd_scope: false,
+            ..Default::default()
+        };
+        let mut cache = CacheConfig::default();
+        sign_publication_root(&cache, "/nix/store/resolved", &build, "/must-not-spawn")
+            .await
+            .unwrap();
+        cache.signing_key = Some("/selected/key".into());
+        for adapter in [
+            CacheType::Attic,
+            CacheType::Niks3,
+            CacheType::Http,
+            CacheType::S3,
+        ] {
+            cache.cache_type = adapter;
+            sign_publication_root(&cache, "/nix/store/resolved", &build, "/must-not-spawn")
+                .await
+                .unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn selected_publication_key_signs_resolved_root_and_propagates_failure() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = directory.path().join("nix");
+        let arguments = directory.path().join("arguments");
+        let build = BuildConfig {
+            use_systemd_scope: false,
+            ..Default::default()
+        };
+        let resolved = "/nix/store/11111111111111111111111111111111-selected-output";
+        for previous_key in [None, Some("/static/different.key")] {
+            let static_cache = CacheConfig {
+                signing_key: previous_key.map(String::from),
+                ..Default::default()
+            };
+            let selected = CacheConfig {
+                signing_key: Some("/selected/database.key".into()),
+                ..Default::default()
+            };
+            for exit in [0, 23] {
+                std::fs::write(&script, format!(
+                    "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf 'synthetic-private-key https://private.invalid/?token=secret' >&2\nexit {exit}\n",
+                    arguments.display(),
+                )).unwrap();
+                std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+                let result =
+                    sign_publication_root(&selected, resolved, &build, script.to_str().unwrap())
+                        .await;
+                let args = std::fs::read_to_string(&arguments).unwrap();
+                assert!(args.contains("store\nsign\n--recursive\n"));
+                assert!(args.contains("--key-file\n/selected/database.key\n"));
+                assert!(args.contains(resolved));
+                if let Some(key) = &static_cache.signing_key {
+                    assert!(!args.contains(key));
+                }
+                if exit == 0 {
+                    result.unwrap();
+                } else {
+                    let message = format!("{:#}", result.unwrap_err());
+                    assert!(message.contains("source signing failed"));
+                    assert!(message.contains("23"));
+                    assert!(!message.contains("synthetic"));
+                    assert!(!message.contains("https://"));
+                    assert!(!message.contains("database.key"));
+                }
+            }
+        }
+    }
 }
 
 /// Runs one Niks3 upload without exposing credentials or presigned URLs.
