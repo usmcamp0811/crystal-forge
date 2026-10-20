@@ -3,10 +3,11 @@ id: TASK-490.4
 title: >-
   Access: application shell navigation and profile/notification preference
   scenarios
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - openai
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-20 20:30'
+updated_date: '2026-10-20 20:31'
 labels:
   - testing
   - integration
@@ -62,6 +63,16 @@ Focused verification after composition: `nix build .#checks.x86_64-linux.integra
 - [ ] #5 Profile and notification preferences persist per user through database read/reload without changing user B; invalid-input behavior is asserted only under accepted authority
 - [ ] #6 The coordinator executes the focused lifecycle-local-bootstrap gate with these fragments and records exact revision, command, outcome and evidence
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Dedicated worktree/branch TASK-490.4-access-preferences, clean base df11c800. Sol owns shared helpers/facts/composition/registration and VM execution. Worker owns only shell-navigation.py/.cjs and preferences.py/.cjs.
+1. Use actual approved Shell/Profile references and existing real same-run users/receipts to implement compatible local-auth route, return-navigation, protected/unknown-route, profile and notification-preference persistence/identity-isolation cases. Preserve Access23 and no product changes.
+2. Add cancellation and relevant failed-read/save, empty/loading/denied assertions only where existing API/design authority is explicit. Report exact decision/helper gaps without weakening other cases. Use browser semantic locators and actual requests/persistence; no mocked producers/results.
+3. Define required authored fact/receipt interfaces for coordinator. Keep independent browser contexts and one existing local lifecycle; no task-specific derivation. Include approved desktop shell comparison with a justified fixed threshold if supported; otherwise record exact missing authority rather than guessing.
+4. Run cheap syntax/static tests only in worker. Sol composes cases and runs complete Access once coherent; commit separately after execution evidence. Worker starts no server/VM.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
