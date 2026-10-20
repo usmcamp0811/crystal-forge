@@ -1,10 +1,11 @@
 ---
 id: TASK-497
 title: Generated deployment configuration must deserialize in the production agent
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - openai
 created_date: '2026-10-20 03:33'
-updated_date: '2026-10-20 20:30'
+updated_date: '2026-10-20 20:31'
 labels: []
 dependencies: []
 references:
@@ -28,6 +29,16 @@ The NixOS module's generated deployment configuration must be consumable by the 
 - [ ] #2 Polling interval units and supported configuration representations are documented consistently across module and agent.
 - [ ] #3 Regression coverage exercises generated configuration through the production deserializer and retains rejection of invalid values.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Dedicated worktree/branch TASK-497-deployment-config, clean base df11c800. Sol owns integration and task lock. Worker owns cf-config deployment serde, a compact normal component regression, module deployment-option documentation and directly affected source docs only.
+1. Reproduce actual generated TOML for documented nondefault post_agent_start_deployment_delay through the production deserializer, not a handwritten approximation.
+2. Use the existing duration-conversion conventions to reconcile documented human duration strings and deployed integer-second representation without changing defaults or broadening unrelated configuration. Preserve rejection of invalid/negative/overflow input.
+3. Add valid/invalid/default compatibility tests and a normal generated-config regression; no standalone verification package/VM. Record exact Nix/cargo commands and statuses.
+4. Commit narrow product change independently after inspection; Sol integrates and executes affected Delivery/normal component checks.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
