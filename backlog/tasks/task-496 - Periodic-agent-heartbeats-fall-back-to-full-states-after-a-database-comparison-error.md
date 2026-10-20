@@ -7,7 +7,7 @@ status: Review
 assignee:
   - '@openai'
 created_date: '2026-10-19 05:37'
-updated_date: '2026-10-20 05:55'
+updated_date: '2026-10-20 06:04'
 labels: []
 dependencies: []
 references:
@@ -59,4 +59,6 @@ Changed-state acceptance now has real-agent evidence, not only a fabricated sign
 Evidence /nix/store/mrs8rm4yvf5lk9vklqs01qvmzp1zl9n7-vm-test-run-cf-it-delivery-delivery-lifecycle-run/result.json and browser/journals. OverallDelivery remainsFAILED13passed/1failed at mandatory retained rollback eligibility (TASK499); this is independent of the now-executed changed-state classification. Keep task In Progress pending integrated publication/hosted handoff; do not mark Done. Rollback acceptance and parent overhaul are not satisfied by this task.
 
 Changed-state acceptance is now also executed on clean hosted committed inputdf11c800, not merely dirtylocal assertions. DownloadedDeliveryjob17305508230 result/buildlog: initialstate1/H1,2; actualCFgeneration1/state2/H10,11; actualsecondCFgeneration2/state3/H13,14; exactlyonefullstatepertransition, same registeredtarget, no comparisonerror. UIoperations, coldcandidateacquisition, realagentactivationandhistoryreloadpassed. AllfourTASK496criteria satisfied; move narrowproducttasktoReview underdraftMR335, notDone. Productrepairremainsd11de059(original5c8f5ee8); nootherrepairimplemented. DB517/0/0andnormalcomponentchecks passed exactclean3db47c89 withidenticalRustinputs; currentdf11componentjobalsopassed. OverallconnectedDeliverystillfailsmandatoryrollbackTASK499, unrelatedtoheartbeatfix; no rollback or parentcompletionclaim.
+
+Final clean-head df11c800 hosted state-machinejob17305508234 nowPASSED:517tests,0failed,0ignored,229summaries; rawtrace downloadedandinspected. Currentcomponentjobalsopassed. Pipeline2966113736 FAILED solelyrequiredDeliveryrollbackauthoritycaseTASK499; complexity/coverage skipped. NarrowTASK496Review statusisbackedbycurrentclean-hosted changedstateandDB evidence, notoldgreenpipelineorunchangedsubset.
 <!-- SECTION:NOTES:END -->
