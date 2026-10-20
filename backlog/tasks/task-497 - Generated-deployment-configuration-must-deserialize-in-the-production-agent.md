@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai
 created_date: '2026-10-20 03:33'
-updated_date: '2026-10-20 20:33'
+updated_date: '2026-10-20 20:39'
 labels: []
 dependencies: []
 references:
@@ -46,4 +46,12 @@ Narrow research confirmed duration_serde is integer-only and shared with unrelat
 
 <!-- SECTION:NOTES:BEGIN -->
 Owner authorization: current TASK-490 assignment explicitly selects TASK-497 for the smallest configuration/deserializer compatibility repair. Historical failed reproduction: /nix/store/bw95j4zs3j8wfi4dnxsnw8xrfnlw2hw6-vm-test-run-cf-it-delivery-delivery-lifecycle-run. Use a dedicated product worktree based on df11c800; no new verification package or VM solely for this boundary.
+
+Worker implementation committed locally as c438ee35754592f1ce8f1d45b7bfdbb165747f74 on TASK-497-deployment-config, base df11c8005de5ab7088015757dafc7fa7602da188. Dedicated worktree is clean. Changed only deployment.rs, test-support/deployment-config.{nix,sh,toml}, and the module polling-option documentation hunk. Polling-only serde compatibility accepts deployed integer seconds and existing humantime-serde whole-second human durations; serialization remains integer seconds. Start delay remains integer-only. Preserved root 60s and emitted module 15m defaults.
+
+Real module reproduction: NixOS agent with post_agent_start_deployment_delay=0 generated deployment_poll_interval="15m". Production root deserializer failed before the fix with 'invalid type: string "15m", expected an integer for key deployment.deployment_poll_interval'. The executable generated-config regression also failed with explicitly captured status 101 when the original integer-only annotation was temporarily restored; same regression passed with the adapter restored (status 0). Logs: /tmp/opencode/task497-reproduction.log, /tmp/opencode/task497-reproduction-status.log, /tmp/opencode/task497-generated-regression.log.
+
+Final offline verification status 0: rustfmt --edition 2024 --check packages/default/crates/cf-config/src/config/deployment.rs; bash -n packages/default/crates/cf-config/test-support/deployment-config.sh; cargo test --offline --locked --manifest-path packages/default/Cargo.toml -p cf-config (100 unit tests + 15 doctests passed); bash packages/default/crates/cf-config/test-support/deployment-config.sh (actual NixOS module TOML regenerated offline, fixture compared byte-for-byte, production root deserialization and integer-seconds round-trip passed). Executed through repo nix develop .#sqlx with CARGO_NET_OFFLINE=true SQLX_OFFLINE=true, --offline --option substituters '' --option substitute false --option builders '' --option fallback false --option accept-flake-config false --max-jobs 0 --no-update-lock-file. Script permits only local data realization for Nix IFD. Final raw log: /tmp/opencode/task497-final-verification.log. Exact commands/statuses and preparation commands: /tmp/opencode/task497-verification.md. Controlled preparation used only https://cache.nixos.org, empty extra-substituters/builders, and accept-flake-config=false; status 0 logs task497-prepare-status.log and task497-generate-prepare-status.log.
+
+Source documentation and staged diff reviewed; git diff --check and git diff --cached --check passed. No dependencies, package/check/CI changes, database, services, or VM execution. No push or MR. Owner retains integration verification, task lock, and lifecycle status; TASK-497 remains In Progress.
 <!-- SECTION:NOTES:END -->
