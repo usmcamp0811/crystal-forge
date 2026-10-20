@@ -1,10 +1,10 @@
 ---
 id: TASK-499
 title: Restore certified rollback authority for native-evaluated deployments
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-10-20 04:21'
-updated_date: '2026-10-20 06:04'
+updated_date: '2026-10-20 20:30'
 labels: []
 dependencies: []
 references:
@@ -23,7 +23,7 @@ ordinal: 550000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The connected Delivery workflow performed real Git/native evaluation/build/publication, production UI deployment, cold candidate acquisition and live activation. The agent reported the new running generation and two later heartbeats correlated to its new state; CF marked the deployment succeeded. However pending_system_deployments.evaluation_snapshot_id was null, preventing certified generation retention and the production History rollback operation. Current primary native evaluation does not produce an available V1 artifact. Normal full Config inspection produces V2 artifacts with an independent selector, while deployment binding and retained rollback require available integrity-version-1 artifacts. Waiting or requesting V2 inventory cannot legitimately create V1 authority. Failed gate evidence /nix/store/qbzpy52pl92whcxx28p6i6v5wfwgkp5b-vm-test-run-cf-it-delivery-delivery-lifecycle-run. No repair is authorized by TASK-496; do not seed snapshots or weaken lineage. Define the supported artifact authority before repair.
+Restore certified retained-generation rollback authority for real CF-managed native deployments. At df11c800 two actual UI-requested deployments and changed-state heartbeat correlation succeeded, but both deployment snapshot bindings were null and the first generation remained rollback-ineligible. Native PRIMARY produces exact build identity but no available V1 Config inventory; Inspector V2 has an independent selector and cannot be assumed to authorize retained rollback. The owner now explicitly authorizes the smallest coherent producer/binding/retention repair while preserving exact immutable lineage, old artifact semantics, read-only historical reads and bounded fast evaluation. A forward migration is allowed only for the genuinely required typed artifact representation; no historical recertification or authority seeding.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -37,7 +37,5 @@ The connected Delivery workflow performed real Git/native evaluation/build/publi
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Cleanhostedreproductionatdf11c8005de5ab7088015757dafc7fa7602da188, pipeline2966113736, Deliveryjob17305508230. BothactualCFmanageddeploymentscompleted, states1->2->3andeachnewstatehas2laterheartbeats. Freshgeneration1aftergeneration2: notcurrent, retainedidentitynull, rollbackeligiblefalse. Actualcasehistory-ui-rollback-restores-retained-output-and-correlates-current-state failsmandatoryprerequisite, notskip/expectedfailure. Fullresultdownloadedto/tmp/opencode/hosted-delivery-df11c800.json. Nativeproducer/V1retentionauthoritymismatchconfirmedbysourceinspection; normalV2ConfiginspectioncannotproviderequiredV1authority. Productrepairnotauthorized/started; keepBackloguntilownerdecision.
-
-Final hosted pipeline2966113736 statusFAILED at clean df11c800. Delivery17305508230 failed mandatory retained rollback prerequisite after13passingcases. Access17305508229 passed23/23; component/CVE/dashboardpassed; state-machine17305508234passed517/0/0across229summaries with explicit offlinepreparation. Complexity/coverage skipped afterrequiredDeliveryfailure. Fullresult/buildlogandscreenshot downloaded/inspected; MR335updatedandstilldraft. No productionrepairorrollbackauthoritybypassauthorized.
+Verified baseline: df11c8005de5ab7088015757dafc7fa7602da188; hosted pipeline2966113736 Deliveryjob17305508230 failed mandatory rollback eligibility after13passingcases. Access23 and database517/0/0 passed; component/CVE/dashboard passed; complexity/coverage skipped. Downloaded /tmp/opencode/hosted-delivery-df11c800.json confirms fresh generation1 is not current after B, retained UUID null, eligibility false. The current owner assignment authorizes implementation. Prior nonauthorization wording is obsolete and removed. Research identifies a missing bounded native deployment-authority producer; do not solve by accepting V2 as V1 or restoring an eager full Config crawl.
 <!-- SECTION:NOTES:END -->
