@@ -1,9 +1,10 @@
 ---
 id: TASK-500
 title: Distinguish deployment-start observations from completed history entries
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-10-20 05:20'
+updated_date: '2026-10-20 20:30'
 labels: []
 dependencies: []
 references:
@@ -19,7 +20,7 @@ ordinal: 551000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The connected Delivery browser proof after two completed real deployments displays '4 deploys'. Each actual success card is accompanied by a 'Deployment started' card rendered as 'Deployed', 'success', and 'no generation activated'. Backend completed deployment/state/history correlation is separately verified, so Started must not be used as completed-activation evidence. Screenshot: integration-evidence/integration-delivery/delivery-lifecycle/browser/inspect-second/delivery-second-history-after-reload.png from /nix/store/mrs8rm4yvf5lk9vklqs01qvmzp1zl9n7-vm-test-run-cf-it-delivery-delivery-lifecycle-run. Review approved SystemDetail design and authoritative history contract before changing the labels/count. The existing rollback plan also renders Strategy 'rollback' where the approved component says 'switch_to_generation'; record and resolve that presentation difference under accepted authority. No production UI repair is authorized by the current test increment.
+Correct the verified SystemDetail History and rollback-plan presentation defects against the approved reference and authoritative history contract. After two actual deployments the current view shows four deploys and renders Started observations as Deployed/success/no generation activated. The rollback plan renders Strategy rollback instead of approved switch_to_generation. The owner now authorizes only these bounded UI repairs, count semantics grounded in accepted authority, and behavioral Started/terminal/count/reload assertions. No icon, diagram, unrelated layout or design-reference changes.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -28,3 +29,9 @@ The connected Delivery browser proof after two completed real deployments displa
 - [ ] #2 The rollback plan's strategy label follows the approved presentation or an explicitly recorded product decision.
 - [ ] #3 Behavioral browser coverage verifies Started versus completed presentation and durable reload behavior without synthetic completion evidence.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Owner authorization: current TASK-490 assignment selects TASK-500 for bounded product UI repair. Baseline hosted screenshot /tmp/opencode/hosted-delivery-history-df11c800.png and MR335 upload show the defect. Start a verified task-owned live preview before UI edits. Existing user's long-running :8080/:3445/:5432 instances must not be reused or stopped. Use dedicated worktree and native devenv isolation; coordinator owns preview processes/database and integration assertions.
+<!-- SECTION:NOTES:END -->
