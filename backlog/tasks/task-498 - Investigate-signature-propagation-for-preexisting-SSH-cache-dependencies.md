@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai
 created_date: '2026-10-20 03:51'
-updated_date: '2026-10-20 20:42'
+updated_date: '2026-10-20 22:21'
 labels: []
 dependencies: []
 references:
@@ -39,6 +39,8 @@ Dedicated worktree/branch TASK-498-publication-trust, clean base df11c800. Sol o
 2. Preserve recursive signing and normal transfer; explicitly synchronize the valid configured source signatures across the required destination closure using the supported pinned Nix operation. Publication completion must fail if required trust synchronization fails. No receiver-test key, disabled checks or privileged target import.
 3. Use focused isolated-store command/regression tests and negative propagation-failure tests; no new public check/package or test-specific VM. Preserve other cache adapters' semantics and redaction.
 4. Commit repair separately. Sol adds a missing-dependency acquisition proof inside the existing five-role Delivery lifecycle while retaining ordinary prepared activation and the original enforced receiver proof.
+
+Owner follow-up after 07616c56 (integrated by Sol as 18ef4274): bounded new commit in the same worker worktree. Sign the resolved server Nix publication root with the selected attempt cache configuration before transfer; API builder signing remains unchanged. For legacy ssh:// return only recursive configured-key destination verification, so complete CF trust succeeds despite unrelated missing signatures and missing CF trust fails without unsupported writes. Add focused regression/error tests and make local-store fixture virtual store configuration explicit for Nix build sandboxes. Sol owns default.nix test wiring; worker does not edit packaging or start databases/VMs.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
