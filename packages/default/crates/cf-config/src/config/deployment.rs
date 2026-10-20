@@ -410,7 +410,7 @@ mod tests {
             }
         }
         // Numeric overflow must also fail before it can be coerced into seconds.
-        let text = include_str!("../../test-support/deployment-config.toml")
+        let text = include_str!("../../tests/fixtures/deployment-config.toml")
             .replace("\"15m\"", "18446744073709551616");
         assert!(
             ::config::Config::builder()
@@ -448,7 +448,7 @@ mod tests {
     fn generated_nixos_deployment_config_roundtrips() {
         let text = match std::env::var("CF_TEST_GENERATED_DEPLOYMENT_CONFIG") {
             Ok(path) => std::fs::read_to_string(path).unwrap(),
-            Err(_) => include_str!("../../test-support/deployment-config.toml").to_owned(),
+            Err(_) => include_str!("../../tests/fixtures/deployment-config.toml").to_owned(),
         };
         // Use the same TOML source and root deserializer as the agent loader.
         let config: super::super::CrystalForgeConfig = ::config::Config::builder()

@@ -5,7 +5,7 @@
 # No generated script or service is executed. Nix only realizes TOML/script data.
 set -euo pipefail
 test "$PWD" = "$(git rev-parse --show-toplevel)"
-support=packages/default/crates/cf-config/test-support
+fixture=packages/default/crates/cf-config/tests/fixtures/deployment-config.toml
 temporary=$(mktemp -d)
 trap 'rm -rf "$temporary"' EXIT
 nix eval --impure --raw --offline --no-update-lock-file \
@@ -14,7 +14,7 @@ nix eval --impure --raw --offline --no-update-lock-file \
   --expr 'import ./packages/default/crates/cf-config/test-support/deployment-config.nix { root = toString ./.; }' \
   > "$temporary/generated.toml"
 # Keep the normal unit-test fixture tied to real module output.
-cmp "$support/deployment-config.toml" "$temporary/generated.toml"
+cmp "$fixture" "$temporary/generated.toml"
 CF_TEST_GENERATED_DEPLOYMENT_CONFIG="$temporary/generated.toml" \
   CARGO_NET_OFFLINE=true SQLX_OFFLINE=true \
   cargo test --offline --locked --manifest-path packages/default/Cargo.toml \

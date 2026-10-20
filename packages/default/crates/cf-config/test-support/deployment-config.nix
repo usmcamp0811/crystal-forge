@@ -1,13 +1,18 @@
 # Evaluate the real agent module and read its generated TOML, without running
 # the config-copy script, agent, or any service. The nondefault delay forces
 # emission of the deployment table, including the module's default "15m".
-# deployment-config.toml is the resulting normal component-test fixture;
+# ../tests/fixtures/deployment-config.toml is the normal component-test fixture;
 # deployment-config.sh regenerates and compares it before testing fresh output.
-{root}: let
-  flake = builtins.getFlake ("git+file://" + root);
+# Package evaluation supplies flake and system explicitly. Local regeneration
+# can supply only root and use the current system in an impure evaluation.
+{
+  root ? null,
+  flake ? builtins.getFlake ("git+file://" + root),
+  system ? builtins.currentSystem,
+}: let
   lib = flake.inputs.nixpkgs.lib;
   host = lib.nixosSystem {
-    system = builtins.currentSystem;
+    inherit system;
     modules = [
       flake.nixosModules.crystal-forge
       {
