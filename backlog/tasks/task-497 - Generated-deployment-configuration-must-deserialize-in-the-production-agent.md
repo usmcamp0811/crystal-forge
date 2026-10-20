@@ -1,9 +1,10 @@
 ---
 id: TASK-497
 title: Generated deployment configuration must deserialize in the production agent
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-10-20 03:33'
+updated_date: '2026-10-20 20:30'
 labels: []
 dependencies: []
 references:
@@ -18,7 +19,7 @@ ordinal: 548000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-A real Delivery VM could not register its agent after enabling a documented nondefault deployment option. The NixOS module emitted deployment.deployment_poll_interval as the default string "15m" while the production agent expected an integer. The agent repeatedly exited with a configuration parse error. This affects users who cause the deployment TOML block to be generated, even when they do not change the polling interval. Observed with post_agent_start_deployment_delay=0 in the connected TASK-490 increment based on 3db47c89. Failed evidence: /nix/store/bw95j4zs3j8wfi4dnxsnw8xrfnlw2hw6-vm-test-run-cf-it-delivery-delivery-lifecycle-run. No repair is authorized by TASK-496. The selected default deployment path can continue without a nondefault delay.
+The NixOS module's generated deployment configuration must be consumable by the production agent. A documented nondefault deployment option currently causes the module to emit polling interval "15m" while the production deserializer expects integer seconds. A real Delivery VM then repeatedly exits before registration. The owner now authorizes a bounded compatibility repair and real generated-configuration regression; preserve unrelated defaults and reject invalid values.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -27,3 +28,9 @@ A real Delivery VM could not register its agent after enabling a documented nond
 - [ ] #2 Polling interval units and supported configuration representations are documented consistently across module and agent.
 - [ ] #3 Regression coverage exercises generated configuration through the production deserializer and retains rejection of invalid values.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Owner authorization: current TASK-490 assignment explicitly selects TASK-497 for the smallest configuration/deserializer compatibility repair. Historical failed reproduction: /nix/store/bw95j4zs3j8wfi4dnxsnw8xrfnlw2hw6-vm-test-run-cf-it-delivery-delivery-lifecycle-run. Use a dedicated product worktree based on df11c800; no new verification package or VM solely for this boundary.
+<!-- SECTION:NOTES:END -->
