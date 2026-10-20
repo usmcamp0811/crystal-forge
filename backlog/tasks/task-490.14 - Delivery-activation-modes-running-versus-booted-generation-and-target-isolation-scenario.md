@@ -3,8 +3,9 @@ id: TASK-490.14
 title: >-
   Delivery: activation modes, running versus booted generation, and target
   isolation scenario
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - openai
 created_date: '2026-10-17 16:37'
 updated_date: '2026-10-20 03:13'
 labels:
@@ -53,6 +54,17 @@ Focused verification after composition: `nix build .#checks.x86_64-linux.integra
 - [ ] #5 Coordinator composes only the named activation fragments into delivery-lifecycle after real same-scenario build/publication setup via receipts; no packet-specific derivation or cross-derivation live-state reuse occurs
 - [ ] #6 Coordinator executes the focused delivery-lifecycle gate and records exact tested revision, command, result and evidence
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Owner-selected bounded contribution to the existing coordinator worktree /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation, branch same, existing draft MR335. Base for this increment 3db47c89; coordinator lock/ownership retained. Shared task worktree explicitly required by user. Keep .12/.10 and broader .14 acceptance open; only manual ImmediatePersist path now.
+1. Share safe pinned QEMU/test-instrumentation target baseline/network/isolation between initial VM and Git candidates. Enable switching; preserve root/store overlays, backdoor, actual production agent and runtime key. Prepare immutable baseline only, never runtime nonce outputs.
+2. Give target its own read SSH identity and pinned host trust. Use test-owned publication source/public keys; disable alternate substituters/builders. Preserve CF publication and independently inspect publisher signature before deliberate receiver-test signing.
+3. Record initial actual running/profile/generation/boot/system/state identities and two unchanged heartbeats. Deploy first real CF-built revision through production UI, require cold target before acquisition and actual marker/running/profile convergence plus succeeded pending row/history/retained lineage.
+4. Build distinct revision through same Git/evaluation/real builder/publication chain. Deploy via same production UI; require genuine full state S2/new running output, then two heartbeat rows referencing S2 without duplicate unchanged states/errors. Capture reload/system/history screenshots and receipts. No direct state writes/fabricated reports/agent stop.
+5. Supply observed retained first generation to .15 rollback in same scenario. Run normal CI owner script and Access if shared inputs change; inspect exact committed hosted pipeline/artifacts. No UI production changes or unrelated repair. Record all omitted modes explicitly.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
