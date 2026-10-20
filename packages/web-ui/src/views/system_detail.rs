@@ -5167,7 +5167,7 @@ fn DeployTab(
                                 }
 
                                 dt { "Strategy" }
-                                dd { "rollback" }
+                                dd { "switch_to_generation" }
 
                                 dt { "Policy" }
                                 dd { class: "mono", "{policy_name}" }
@@ -5707,7 +5707,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
         // Synthesize anchored lines from history entries so each timeline event has a
         // real line to jump to. The anchored (key) line carries the event id.
         for (idx, entry) in history_entries.iter().enumerate() {
-            let event_id = format!("ev{idx}");
+            let event_id = history_event_id(entry, idx);
             let kind = classify_history_entry(entry);
             let base = entry.timestamp;
             let short_msg = entry
@@ -5740,6 +5740,14 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
             };
 
             match kind {
+                HistoryEventKind::DeployStarted => {
+                    push(
+                        0,
+                        "info",
+                        format!("[reconstructed timeline] deploy started: {short_msg}"),
+                        true,
+                    );
+                }
                 HistoryEventKind::Restart | HistoryEventKind::AgentRestart => {
                     let is_agent = matches!(kind, HistoryEventKind::AgentRestart);
                     push(
@@ -8131,6 +8139,8 @@ fn render_json_value(value: &JsonValue) -> String {
 /// Kind of history timeline event, mirroring the design reference's event model.
 #[derive(Debug, Clone, PartialEq)]
 enum HistoryEventKind {
+    /// Start observation only; does not prove activation or a terminal result.
+    DeployStarted,
     /// Config deployed through Crystal Forge (generation-changing).
     Deploy,
     /// Deploy that failed to activate.
@@ -8153,6 +8163,7 @@ enum HistoryEventKind {
 #[derive(Debug, Clone, PartialEq)]
 struct HistoryEvent {
     id: String,
+    deployment_id: Option<Uuid>,
     kind: HistoryEventKind,
     timestamp: chrono::DateTime<chrono::Utc>,
     generation: Option<i32>,
@@ -8175,9 +8186,8 @@ enum TimelineItem {
 
 /// Classify a history entry's source/outcome into a timeline event kind.
 ///
-/// Prefers the authoritative `event_kind` provided by the backend (derived from
-/// `system_states.change_reason`): `cf_deployment` (CF deploy), `local_rebuild`
-/// (on-host/out-of-band activation), and `restart` (reboot). Reconciliation of an
+/// Prefers persisted `event_type`, then backend `event_kind` and outcome.
+/// A start observation never proves activation. Reconciliation of an
 /// out-of-band rebuild uses the backend `reconciled` flag (running store-path maps
 /// to a tracked flake commit). Falls back to string heuristics only for legacy
 /// payloads that predate these fields.
@@ -8185,6 +8195,7 @@ fn classify_history_entry(entry: &SystemHistoryEntry) -> HistoryEventKind {
     let outcome = entry.outcome.to_lowercase();
 
     match entry.event_type.as_str() {
+        "cf_deployment_started" => return HistoryEventKind::DeployStarted,
         "cf_deployment_succeeded" => return HistoryEventKind::Deploy,
         "cf_deployment_failed" => return HistoryEventKind::DeployFailed,
         "local_rebuild_detected" => {
@@ -8201,7 +8212,9 @@ fn classify_history_entry(entry: &SystemHistoryEntry) -> HistoryEventKind {
 
     match entry.event_kind.as_str() {
         "cf_deployment" => {
-            if outcome.contains("fail") || outcome.contains("error") {
+            if outcome == "started" {
+                HistoryEventKind::DeployStarted
+            } else if outcome.contains("fail") || outcome.contains("error") {
                 HistoryEventKind::DeployFailed
             } else {
                 HistoryEventKind::Deploy
@@ -8247,6 +8260,7 @@ fn history_event_message(entry: &SystemHistoryEntry, kind: &HistoryEventKind) ->
         raw.as_str(),
         "config_change"
             | "cf_deployment"
+            | "cf_deployment_started"
             | "cf_deployment_succeeded"
             | "cf_deployment_failed"
             | "local_rebuild_detected"
@@ -8259,6 +8273,7 @@ fn history_event_message(entry: &SystemHistoryEntry, kind: &HistoryEventKind) ->
     );
 
     match kind {
+        HistoryEventKind::DeployStarted => "Deployment started".to_string(),
         HistoryEventKind::Deploy => {
             if is_raw_reason {
                 "Deployed through Crystal Forge".to_string()
@@ -8310,6 +8325,9 @@ fn classify_history_entry_legacy(entry: &SystemHistoryEntry) -> HistoryEventKind
     let outcome = entry.outcome.to_lowercase();
     let actor = entry.actor.to_lowercase();
 
+    if outcome == "started" || reason == "cf_deployment_started" {
+        return HistoryEventKind::DeployStarted;
+    }
     if outcome.contains("fail") || outcome.contains("error") {
         return HistoryEventKind::DeployFailed;
     }
@@ -8353,8 +8371,13 @@ fn build_history_events(
     let mut running_gen = current_generation;
     // Whether any entry carries an authoritative recorded generation.
     let has_authoritative_gen = entries.iter().any(|e| e.generation.is_some());
+    let mut seen_event_ids = HashSet::new();
 
     for (idx, entry) in entries.iter().enumerate() {
+        // INVARIANT: Repeated delivery of one persisted event is one observation.
+        if entry.id.is_some_and(|id| !seen_event_ids.insert(id)) {
+            continue;
+        }
         let kind = classify_history_entry(entry);
         if matches!(kind, HistoryEventKind::StateChange) {
             continue;
@@ -8372,8 +8395,12 @@ fn build_history_events(
             HistoryEventKind::Restart
                 | HistoryEventKind::AgentRestart
                 | HistoryEventKind::DeployFailed
+                | HistoryEventKind::DeployStarted
         );
-        let (generation, prev_generation) = if has_authoritative_gen {
+        let (generation, prev_generation) = if matches!(kind, HistoryEventKind::DeployStarted) {
+            // A reported current generation on a start is not a new activation.
+            (None, None)
+        } else if has_authoritative_gen {
             // Authoritative: use the recorded generation and compare against the
             // next-older recorded generation to show a real transition.
             let current = entry.generation;
@@ -8403,7 +8430,8 @@ fn build_history_events(
         };
 
         events.push(HistoryEvent {
-            id: format!("ev{idx}"),
+            id: history_event_id(entry, idx),
+            deployment_id: entry.deployment_id,
             kind,
             timestamp: entry.timestamp,
             generation,
@@ -8421,6 +8449,46 @@ fn build_history_events(
     }
 
     events
+}
+
+// Persisted IDs keep History and Logs linked across refreshes. Positional IDs
+// retain the existing bounded fallback for legacy rows without event identity.
+fn history_event_id(entry: &SystemHistoryEntry, index: usize) -> String {
+    entry
+        .id
+        .map_or_else(|| format!("ev{index}"), |id| id.to_string())
+}
+
+/// Counts deployment attempts and local rebuilds in the loaded history window.
+///
+/// The approved SystemDetail `type: "deploy"` metric includes failed CF
+/// attempts and local rebuilds, not only successful activations. CF lifecycle
+/// observations sharing a deployment ID count once, including Started-only
+/// attempts. Persisted event IDs deduplicate repeated rows. Legacy rows without
+/// deployment IDs each count once: commit, path, generation, and timestamps
+/// cannot safely correlate retries. This pure derivation is stable on reload.
+fn history_deploy_count(entries: &[SystemHistoryEntry]) -> usize {
+    let mut event_ids = HashSet::new();
+    let mut deployment_ids = HashSet::new();
+    entries
+        .iter()
+        .filter(|entry| {
+            if entry.id.is_some_and(|id| !event_ids.insert(id)) {
+                return false;
+            }
+            match classify_history_entry(entry) {
+                HistoryEventKind::DeployStarted
+                | HistoryEventKind::Deploy
+                | HistoryEventKind::DeployFailed => entry
+                    .deployment_id
+                    .is_none_or(|id| deployment_ids.insert(id)),
+                HistoryEventKind::LocalRebuildMatched | HistoryEventKind::LocalRebuildUntracked => {
+                    true
+                }
+                _ => false,
+            }
+        })
+        .count()
 }
 
 /// Fold consecutive restart events into clusters; deploys/rebuilds stay standalone.
@@ -8554,6 +8622,7 @@ mod fold_tests {
     fn ev(kind: HistoryEventKind, generation: Option<i32>) -> HistoryEvent {
         HistoryEvent {
             id: String::new(),
+            deployment_id: None,
             kind,
             timestamp: Utc::now(),
             generation,
@@ -8710,15 +8779,7 @@ fn HistoryTab(
         .map(|generation| generation.generation)
         .collect::<HashSet<_>>();
 
-    let deploy_count = events
-        .iter()
-        .filter(|e| {
-            !matches!(
-                e.kind,
-                HistoryEventKind::Restart | HistoryEventKind::AgentRestart
-            )
-        })
-        .count();
+    let deploy_count = history_deploy_count(&entries);
     let restart_count = events
         .iter()
         .filter(|e| {
@@ -8981,7 +9042,7 @@ fn RestartLine(event: HistoryEvent) -> Element {
     }
 }
 
-/// A prominent generation-changing event row (design `DeployRow`).
+/// Renders an activation or attempt observation without promoting Started to success.
 #[component]
 fn DeployRow(
     event: HistoryEvent,
@@ -8990,6 +9051,7 @@ fn DeployRow(
     on_rollback: EventHandler<()>,
     on_view_logs: EventHandler<()>,
 ) -> Element {
+    let started = matches!(event.kind, HistoryEventKind::DeployStarted);
     let failed = matches!(event.kind, HistoryEventKind::DeployFailed);
     let matched = matches!(event.kind, HistoryEventKind::LocalRebuildMatched);
     let untracked = matches!(event.kind, HistoryEventKind::LocalRebuildUntracked);
@@ -8998,6 +9060,8 @@ fn DeployRow(
     // Accent color per event kind (mirrors the design's accent map).
     let accent = if failed {
         "var(--cf-red)"
+    } else if started {
+        "var(--cf-blue)"
     } else if untracked {
         "var(--cf-amber)"
     } else if matched {
@@ -9008,6 +9072,8 @@ fn DeployRow(
 
     let kind_label = if failed {
         "Deploy failed"
+    } else if started {
+        "Deployment started"
     } else if local {
         "Local rebuild"
     } else {
@@ -9032,10 +9098,12 @@ fn DeployRow(
         .and_then(|p| p.rsplit('/').next())
         .map(|s| s.to_string());
     let when = relative_time(event.timestamp);
-    let can_rollback = allow_mutations && rollback_eligible && !failed;
+    let can_rollback = allow_mutations && rollback_eligible && !failed && !started;
 
     rsx! {
         div { class: "tl-row",
+            "data-event-id": "{event.id}",
+            "data-deployment-id": event.deployment_id.map(|id| id.to_string()),
             // Rail node
             div { class: "tl-rail",
                 span {
@@ -9055,7 +9123,9 @@ fn DeployRow(
                         span { class: "tl-kind", style: "color: {accent};", "{kind_label}" }
 
                         // Generation transition (#prev → #cur) or "no generation activated"
-                        if let Some(gen_num) = event.generation {
+                        if started {
+                            span { class: "tl-gen tl-gen-none", "activation not yet confirmed" }
+                        } else if let Some(gen_num) = event.generation {
                             span { class: "tl-gen",
                                 if let Some(prev) = event.prev_generation {
                                     span { class: "tl-gen-prev", "#{prev}" }
@@ -9085,6 +9155,8 @@ fn DeployRow(
                                 Icon { name: IconName::X, size: 10 }
                                 " failed"
                             }
+                        } else if started {
+                            span { class: "chip chip-info", "started · nonterminal" }
                         } else {
                             span { class: "chip chip-healthy",
                                 Icon { name: IconName::Check, size: 10 }
@@ -12277,6 +12349,7 @@ mod tests {
         SystemHistoryEntry,
     };
     use chrono::{Duration, Utc};
+    use uuid::Uuid;
 
     fn config_commit(hash: char, inspectable: bool) -> SystemCommitHistory {
         SystemCommitHistory {
@@ -13139,6 +13212,103 @@ mod tests {
             generation_matches_current_store_path: Some(true),
             restart_type: None,
         }
+    }
+
+    #[test]
+    fn history_started_is_nonterminal_even_with_generation_or_misleading_outcome() {
+        let mut started = history_entry("cf_deployment_started", "crystal-forge", "cf_deployment");
+        started.event_type = "cf_deployment_started".into();
+        started.outcome = "success".into();
+        started.id = Some(Uuid::from_u128(1));
+        started.deployment_id = Some(Uuid::from_u128(10));
+        let events = build_history_events(&[started.clone()], &[], Some(42));
+        assert_eq!(events[0].kind, HistoryEventKind::DeployStarted);
+        assert_eq!(events[0].generation, None);
+        assert_eq!(events[0].prev_generation, None);
+        assert_eq!(events[0].id, Uuid::from_u128(1).to_string());
+        assert_eq!(events[0].deployment_id, started.deployment_id);
+        assert_eq!(super::history_deploy_count(&[started.clone()]), 1);
+
+        // Both compatibility paths preserve Started without a persisted type.
+        started.event_type.clear();
+        started.outcome = "started".into();
+        assert_eq!(
+            classify_history_entry(&started),
+            HistoryEventKind::DeployStarted
+        );
+        started.event_kind.clear();
+        assert_eq!(
+            classify_history_entry(&started),
+            HistoryEventKind::DeployStarted
+        );
+    }
+
+    #[test]
+    fn history_counts_attempts_including_failure_and_local_rebuild_not_observations() {
+        let mut started = history_entry("cf_deployment_started", "crystal-forge", "cf_deployment");
+        started.event_type = "cf_deployment_started".into();
+        started.id = Some(Uuid::from_u128(1));
+        started.deployment_id = Some(Uuid::from_u128(10));
+        let mut succeeded = started.clone();
+        succeeded.id = Some(Uuid::from_u128(2));
+        succeeded.event_type = "cf_deployment_succeeded".into();
+        let mut failed = started.clone();
+        failed.id = Some(Uuid::from_u128(3));
+        failed.deployment_id = Some(Uuid::from_u128(20));
+        failed.event_type = "cf_deployment_failed".into();
+        let mut failed_start = failed.clone();
+        failed_start.id = Some(Uuid::from_u128(4));
+        failed_start.event_type = "cf_deployment_started".into();
+        let local = history_entry("config_change", "root@host", "local_rebuild");
+        let restart = history_entry("startup", "agent", "restart");
+        let entries = vec![
+            succeeded.clone(),
+            started,
+            failed,
+            failed_start,
+            succeeded,
+            local,
+            restart,
+        ];
+        assert_eq!(super::history_deploy_count(&entries), 3);
+        let events = build_history_events(&entries, &[], Some(42));
+        assert_eq!(events.len(), 6, "duplicate persisted event ID is one card");
+        assert_eq!(events[0].kind, HistoryEventKind::Deploy);
+        assert_eq!(events[1].kind, HistoryEventKind::DeployStarted);
+        assert_eq!(events[2].kind, HistoryEventKind::DeployFailed);
+        assert_eq!(events[3].kind, HistoryEventKind::DeployStarted);
+
+        // Reload reconstructs identical identities/counts, with no retained state.
+        let reloaded: Vec<SystemHistoryEntry> =
+            serde_json::from_str(&serde_json::to_string(&entries).unwrap()).unwrap();
+        assert_eq!(super::history_deploy_count(&reloaded), 3);
+        assert_eq!(build_history_events(&reloaded, &[], Some(42)), events);
+        let mut reordered = reloaded;
+        reordered.reverse();
+        assert_eq!(super::history_deploy_count(&reordered), 3);
+    }
+
+    #[test]
+    fn history_without_deployment_ids_does_not_guess_lifecycle_links() {
+        let mut started = history_entry("cf_deployment_started", "crystal-forge", "cf_deployment");
+        started.event_type = "cf_deployment_started".into();
+        started.id = Some(Uuid::from_u128(1));
+        let mut terminal = started.clone();
+        terminal.id = Some(Uuid::from_u128(2));
+        terminal.event_type = "cf_deployment_failed".into();
+        assert_eq!(
+            super::history_deploy_count(&[started.clone(), terminal.clone(), terminal.clone()]),
+            2
+        );
+        started.id = None;
+        terminal.id = None;
+        let mut legacy = history_entry("deploy", "crystal-forge", "");
+        legacy.event_type.clear();
+        assert_eq!(classify_history_entry(&legacy), HistoryEventKind::Deploy);
+        assert_eq!(
+            super::history_deploy_count(&[started, terminal, legacy.clone(), legacy]),
+            4
+        );
     }
 
     #[test]
