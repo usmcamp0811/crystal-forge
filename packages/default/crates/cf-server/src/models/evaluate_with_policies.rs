@@ -2816,9 +2816,10 @@ fn record_missing_snapshot_captures(
 ) {
     // INVARIANT: Every successful system advances snapshot selection. The
     // primary evaluator does not capture Config data, and fallback results do
-    // not pass through the streaming metadata parser. Mark every success that
-    // lacks a separately captured artifact unavailable so an older available
-    // snapshot cannot remain selected for this evaluation attempt.
+    // not pass through the streaming metadata parser. Record the inventory gap;
+    // finalization preserves deployment-only identity only for this exact
+    // successful attempt. Otherwise it advances an unavailable selector so
+    // older evidence cannot authorize the new attempt.
     for successful in successful_results {
         if !evaluation_snapshots.contains_key(&successful.system_name) {
             snapshot_capture_failures
@@ -2993,12 +2994,17 @@ fn system_not_queued_reason(
 /// Retains native terminal flags and policy results in an immutable exact-attempt
 /// sidecar in this transaction. Requires selected Native discovery inventory;
 /// mutable derivation updates on a later retry cannot erase this evidence.
+/// Publishes schema-3 deployment identity in the same transaction when selected
+/// Native ownership, deployment gates, full commit, and the actual derivation
+/// row, `.drv`, and expected output all match. Excluded or incomplete results
+/// publish no authority. This manifest contains no Config option inventory.
 ///
 /// # Errors
 ///
-/// Returns an error when policy resolution, selected Native inventory proof, or
-/// database persistence fails, or when terminal evidence differs from the first
-/// write for this attempt/configuration. Errors roll back this transaction.
+/// Returns an error when policy resolution, selected Native inventory proof,
+/// artifact certification, or database persistence fails, or when terminal
+/// evidence differs from the first write for this attempt/configuration. Errors
+/// roll back this transaction.
 pub async fn persist_evaluated_system(
     pool: &PgPool,
     commit_id: i32,
@@ -3112,6 +3118,18 @@ pub async fn persist_evaluated_system(
     };
     let has_exact_config_carrier =
         !matches!(&write, SuccessfulEvalWrite::LegacyPathConflict { .. });
+    // PERSISTENCE: Native deployment identity comes from this actual result and
+    // row in the active-owner transaction, never from historical outcome data.
+    if has_exact_config_carrier && build_eligible && policy_requirements_met {
+        crate::queries::evaluation_snapshots::persist_native_deployment_identity_tx(
+            &mut tx,
+            commit_id,
+            expected_attempt,
+            assessment_derivation_id,
+            result,
+        )
+        .await?;
+    }
     if system_id.is_some() && has_exact_config_carrier {
         // FAILURE ISOLATION: Queue the cheap root fallback in the same
         // transaction as its exact derivation. Optional in-band publication
@@ -4156,12 +4174,22 @@ pub async fn finalize_evaluation_attempt(
             format!("Failed to persist evaluation snapshot for {configuration_name}")
         })?;
     }
-    // The Nix evaluation succeeded for these configurations but produced no
-    // trustworthy snapshot artifact. Persisting 'unavailable' with a redacted
-    // diagnostic keeps that state distinct from both a legitimate zero-option
-    // snapshot and a real Nix evaluation failure, and leaves the derivation
-    // and policy results untouched.
+    // Successful Native results can have certified deployment identity without
+    // Config inventory. Preserve only the exact attempt's selected manifest.
+    // Other inventory gaps advance an unavailable selector rather than leaving
+    // an older success selected. Config reads never treat a manifest as empty
+    // inventory or comparison evidence.
     for (configuration_name, reason) in &plan.snapshot_capture_failures {
+        if crate::queries::evaluation_snapshots::selected_native_deployment_identity_tx(
+            &mut tx,
+            commit_id,
+            configuration_name,
+            expected_attempt,
+        )
+        .await?
+        {
+            continue;
+        }
         crate::queries::evaluation_snapshots::persist_unavailable_snapshot_deferred_tx(
             &mut tx,
             commit_id,

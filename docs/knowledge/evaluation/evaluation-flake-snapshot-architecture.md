@@ -42,6 +42,24 @@ an unreadable option-tree root remain explicitly unavailable. Unreadable
 non-root prefixes produce a partial artifact that retains healthy sibling
 options. The worker does not fabricate an empty available snapshot.
 
+Migration `0310_native_deployment_identity.sql` adds schema 3 / integrity 3:
+a bounded Native deployment-identity manifest in `evaluation_snapshots`.
+The successful per-configuration producer publishes the manifest in the same
+transaction as the actual derivation result. The manifest records the selected
+Native attempt UUID and number, full commit SHA, actual derivation row ID,
+`.drv` path, and expected output. The enclosing artifact records the exact commit
+and configuration. Certification requires active ownership, selected Native
+inventory, and passing deployment gates. Mock, stale, excluded, failed,
+path-conflicting, and incomplete results do not create authority.
+
+The PRIMARY selector accepts legacy V1 and certified schema-3 identity. The
+independent Config selector remains V2-only. V1 / integrity 1 retains its Config
+inventory meaning; V2 / integrity 2 retains its Inspector meaning. Neither type
+is reinterpreted. Schema 3 is not Config inventory. Config reads report inventory
+unavailable and make no empty-complete or comparison claim. Finalizers preserve
+only a manifest proven to belong to that exact successful attempt; a failed
+configuration or stale retry cannot reuse an older selector.
+
 Snapshot persistence redacts metadata before storage. The server does not
 serialize the NixOS `config` tree. Missing exploration artifacts do not change
 system evaluation, policy, build, or deployment state.
@@ -90,7 +108,7 @@ per-row recomputation, then recomputes commit-wide host deltas once before the
 finalization transaction becomes visible. Replacement and failure paths use
 the same transaction-level recomputation contract.
 
-For an available configuration, `module_count` is the exact count of distinct
+For an available Config inventory, `module_count` is the exact count of distinct
 `(source_input, source_revision, source_path)` tuples in the persisted option
 definitions. The server computes this scalar after redaction and per-option
 bounding. Response-only tracked identities do not affect it. Existing snapshots

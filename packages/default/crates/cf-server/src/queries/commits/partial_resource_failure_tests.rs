@@ -1120,6 +1120,47 @@ async fn durable_state(pool: &PgPool, commit_id: i32) -> Value {
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires authoritative server-regressions sandbox PostgreSQL"]
+async fn partial_resource_failure_preserves_exact_native_deployment_identity(pool: PgPool) {
+    let mut fixture = fixture(&pool).await;
+    fixture.plan.evaluation_snapshots.clear();
+    fixture.plan.snapshot_capture_failures.insert(
+        "alpha".into(),
+        "Config inventory was not captured separately".into(),
+    );
+    let selected: Uuid=sqlx::query_scalar("SELECT current_snapshot_id FROM evaluation_snapshot_selections WHERE commit_id=$1 AND configuration_name='alpha'")
+        .bind(fixture.commit_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        sqlx::query_scalar::<_, i32>("SELECT schema_version FROM evaluation_snapshots WHERE id=$1")
+            .bind(selected)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+        3
+    );
+    finalize_partial_evaluation_resource_failure(
+        &pool,
+        fixture.commit_id,
+        fixture.attempt,
+        &fixture.plan,
+        &["remaining".into()],
+        &[],
+        "remaining: evaluator resource capacity exhausted",
+    )
+    .await
+    .unwrap();
+    let after: Uuid=sqlx::query_scalar("SELECT current_snapshot_id FROM evaluation_snapshot_selections WHERE commit_id=$1 AND configuration_name='alpha'")
+        .bind(fixture.commit_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        selected, after,
+        "a proven completed Native result keeps deployment identity when optional Config inventory is absent"
+    );
+    let remaining: String=sqlx::query_scalar("SELECT s.lifecycle FROM evaluation_snapshot_selections selection JOIN evaluation_snapshots s ON s.id=selection.current_snapshot_id WHERE selection.commit_id=$1 AND selection.configuration_name='remaining'")
+        .bind(fixture.commit_id).fetch_one(&pool).await.unwrap();
+    assert_eq!(remaining, "failed");
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires authoritative server-regressions sandbox PostgreSQL"]
 async fn partial_resource_failure_retains_completed_evidence_snapshots_and_jobs(pool: PgPool) {
     let fixture = fixture(&pool).await;
     let before = durable_state(&pool, fixture.commit_id).await;

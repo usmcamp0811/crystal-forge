@@ -1382,7 +1382,7 @@ pub async fn queue_manual_deployment_atomic(
                   JOIN evaluation_snapshots artifact
                     ON artifact.id = selection.current_snapshot_id
                    AND artifact.lifecycle = 'available'
-                   AND artifact.integrity_version = 1
+                    AND evaluation_deployment_artifact_matches(artifact.id, derivation.id, true)
                  WHERE system.id = pending.system_id
                    AND COALESCE(derivation.store_path, derivation.expected_store_path) = pending.target_store_path
                  LIMIT 1
@@ -1498,7 +1498,7 @@ async fn set_resolved_system_deployment_target_with_source(
                       JOIN evaluation_snapshots artifact
                         ON artifact.id = selection.current_snapshot_id
                        AND artifact.lifecycle = 'available'
-                       AND artifact.integrity_version = 1
+                        AND evaluation_deployment_artifact_matches(artifact.id, derivation.id, true)
                      WHERE derivation.commit_id = commit.id
                        AND derivation.derivation_type = 'nixos'
                        AND derivation.derivation_name = COALESCE(
@@ -1822,6 +1822,9 @@ pub struct RetainedGenerationDeploymentTarget {
 /// The request must supply a generation-artifact UUID or a system-local
 /// generation number. A legacy store path is only a narrowing predicate and
 /// never authorizes a rollback by itself.
+/// Certified V1 inventory and schema-3 Native deployment identity are supported;
+/// schema 3 must match the retained commit, configuration, derivation row,
+/// `.drv`, and output. The mutable PRIMARY selector is not consulted.
 ///
 /// # Errors
 ///
@@ -1858,7 +1861,7 @@ pub async fn resolve_retained_generation_deployment_target(
           AND retained.source_store_path IS NOT NULL
           AND btrim(retained.source_store_path) <> ''
           AND artifact.lifecycle = 'available'
-          AND artifact.integrity_version = 1
+          AND evaluation_deployment_artifact_matches(artifact.id, derivation.id)
           AND derivation.derivation_type = 'nixos'
           AND retained.source_store_path = COALESCE(
               derivation.store_path, derivation.expected_store_path

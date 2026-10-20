@@ -2520,7 +2520,7 @@ async fn authorize_target_with_read_at(
                     WHERE snapshot.commit_id = $1
                       AND snapshot.configuration_name = $2
                        AND snapshot.lifecycle = 'available'
-                       AND snapshot.integrity_version = 1
+                       AND evaluation_deployment_artifact_matches(snapshot.id, $4, $3::uuid IS NULL)
                       AND (($3::uuid IS NOT NULL AND snapshot.id = $3)
                         OR ($3::uuid IS NULL AND selection.current_snapshot_id IS NOT NULL))
                     LIMIT 1
@@ -2529,6 +2529,7 @@ async fn authorize_target_with_read_at(
                     .bind(exact_target.2)
                     .bind(&exact_target.3)
                     .bind(evaluation_snapshot_id)
+                    .bind(exact_target.0)
                     .fetch_optional(&mut *tx)
                     .await?
                 };

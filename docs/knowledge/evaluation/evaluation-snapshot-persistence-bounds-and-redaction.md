@@ -28,6 +28,21 @@ Snapshot rows store only option paths and digest references, so identical
 content can be shared across option paths, hosts, and revisions. Flake output
 payloads use the same content-addressed pattern at revision scope.
 
+Schema-3 Native deployment identity uses one fixed-shape JSON manifest in the
+immutable artifact row, bounded to 16 KiB of PostgreSQL JSON text. The bound
+covers two store paths and fixed identity fields; it does not depend on the
+configuration tree. The producer performs no additional Nix work. It certifies
+the manifest against the active Native attempt, selected inventory, and actual
+persisted result before advancing PRIMARY selection. The native-outcome sidecar
+remains historical presentation and cannot supply deployment authority.
+
+The manifest freezes historical derivation and attempt identity without foreign
+keys to those rows. An unconditional artifact-to-derivation foreign key would
+retain runnable history through current selectors without a bound. New binding
+and rollback require exact live joins instead. Existing pending and retained
+foreign keys protect runnable lineage while required. The 24-hour binding release
+and bounded artifact, derivation, and commit reclamation rules remain applicable.
+
 Production option persistence uses parameterized set-oriented batches of at
 most 500 rows for content and references. It does not issue two SQL statements
 for each option. Digest conflicts update no content and fail the transaction;
@@ -53,6 +68,7 @@ The current hard bounds are:
 - 2 MiB for one encoded flake-output API response. An over-limit response
   becomes unavailable rather than returning partial unmarked data.
 - 16 KiB of searchable text per option after redaction.
+- 16 KiB of schema-3 deployment-identity JSON text per artifact.
 - 16 option-tree levels before a non-empty deeper subtree becomes an explicit
   partial-inventory diagnostic. This guard bounds cyclic or recursively
   generated attribute sets. The option count then covers observed options only.

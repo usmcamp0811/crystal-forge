@@ -30,7 +30,7 @@ SELECT
       AND retained.source_store_path IS NOT NULL
       AND BTRIM(retained.source_store_path) <> ''
        AND artifact.lifecycle = 'available'
-       AND artifact.integrity_version = 1
+       AND evaluation_deployment_artifact_matches(artifact.id, derivation.id)
       AND derivation.id IS NOT NULL
       AND derivation.derivation_type = 'nixos'
       AND retained.source_store_path = COALESCE(
@@ -260,8 +260,14 @@ pub struct SystemGenerationRow {
     pub rollback_eligible: bool,
 }
 
-/// Fetch historical generations for a system by its UUID
-/// Returns generations in descending order (newest first)
+/// Returns historical generations in descending order for one system UUID.
+///
+/// Rollback eligibility requires immutable retained lineage and an exact live
+/// derivation match to certified V1 or schema-3 deployment identity. Inspector
+/// V2 and missing Config inventory do not imply deployment authority.
+///
+/// # Errors
+/// Returns a database error when generation history cannot be loaded.
 pub async fn fetch_system_generations(
     pool: &PgPool,
     system_id: Uuid,
