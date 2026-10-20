@@ -3,10 +3,10 @@ id: TASK-490.14
 title: >-
   Delivery: activation modes, running versus booted generation, and target
   isolation scenario
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-10-17 16:37'
-updated_date: '2026-10-19 02:13'
+updated_date: '2026-10-20 03:13'
 labels:
   - testing
   - integration
@@ -61,4 +61,6 @@ Current readiness: foundation bba718be passed; .12 publication and .7/.10 role/b
 
 ### Historical
 2026-10-17 review recorded unresolved foundation/package prerequisites and no VM execution at that time. Former BootOnly wording conflated boot selection with booted identity; the current AC #2 records each identity independently. The former per-packet activation derivation is no longer the composition model.
+
+Owner explicitly selected the bounded manual live-switch contribution in the connected Delivery increment, despite broader .12/.10 variants remaining open. Reuse existing actual SSH publication/build interfaces and the same five roles. This does not satisfy Niks3, other strategies, auto_latest/pinned, BootOnly/reboot or second-agent isolation. Coordinator owns target fixture/composition; no production/UI edits are authorized.
 <!-- SECTION:NOTES:END -->
