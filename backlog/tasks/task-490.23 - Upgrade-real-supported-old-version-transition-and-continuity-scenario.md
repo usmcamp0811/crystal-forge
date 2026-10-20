@@ -4,7 +4,7 @@ title: 'Upgrade: real supported old-version transition and continuity scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-18 03:31'
+updated_date: '2026-10-20 22:48'
 labels:
   - testing
   - integration
@@ -12,10 +12,8 @@ labels:
 dependencies:
   - TASK-490.7
 modified_files:
-  - >-
-    checks/integration-upgrade/scenarios/fragments/task-490.23-version-transition.py
-  - >-
-    checks/integration-upgrade/scenarios/fragments/task-490.23-version-transition.cjs
+  - checks/integration-upgrade/scenarios/version-transition.py
+  - checks/integration-upgrade/scenarios/version-transition.cjs
   - checks/integration-upgrade/fixtures/*
 parent_task_id: TASK-490
 priority: high
@@ -26,11 +24,15 @@ ordinal: 535000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-upgrade. Contract ID: upgrade.continuity. This packet owns only old/current version transition Python/browser case fragments and immutable test source fixtures beneath `checks/integration-upgrade/scenarios/fragments/` and `fixtures/`. The coordinator owns `version-transition.nix`, composition, browserSpecs mapping, pinned old source input wiring and owner registration. An implementation packet does not automatically receive a NixOS test derivation.
+Owning check: integration-upgrade. Contract ID: upgrade.continuity. Coordinator owns version-transition.nix, pinned old/current package wiring, shared roles, browserSpecs and explicit owner registration. Child owns semantic version-transition.py/.cjs case modules and immutable fixtures. No per-task derivation or cross-scenario mutable-state reuse.
 
-BLOCKED D2: no accepted support decision identifies the oldest supported in-place server release, agent/builder compatibility window, or exact pinned source. Existing tags and crate versions are not support promises. Once D2 is resolved, one fresh Upgrade VM/database runs the real old package to create identities, credentials, history and in-flight work; then the current package migrates that same database and proves continuity/recovery. The old/current phases are sequential in the same VM; separate derivations cannot share live DB state. Upgrade remains separate from current-version owners because the in-place version/schema transition mutates state that must not contaminate their proofs.
+Current usable integration base is df11c8005de5ab7088015757dafc7fa7602da188 and subsequent separately attributable authorized repairs. Foundation startup/Rust-test blockers are resolved and MUST NOT be treated as active dependencies. Access23 and real Delivery native build/deploy/state reporting execute. Upgrade itself remains unexecuted.
 
-Do not change application dependencies, run synthetic old schema or reuse another check's data. D1 uncertainty remains blocked. The coordinator owns package-input wiring, scenario composition and explicit registration. Requires TASK-490.7 shared role API, resolved D2, passing foundation and TASK-490.25/.26. Remain Backlog until all are concrete.
+D2 is the actual blocker. The owner must select the oldest supported server predecessor and immutable source, actual agent/builder revisions, permitted operations, each compatibility window and its start/expiry/refusal behavior. Candidate v0.3.1 is f9dd6b9c79530d3f911203645207bf6251552aba; v0.3.0 is f4a53b850d84dc3f6b36444ec6e0f474d344735c. Neither tag is support policy. The v0.3.1 builder still uses direct PostgreSQL access in nominal API mode; do not present it as API-only or provide DB credentials merely to pass. A proposed 24-hour old-agent window plus builder-upgrade-first rule awaits owner approval.
+
+After D2, start the actual predecessor package and its own migrations/API/UI against one fresh Upgrade VM database. Use its real data-creation workflows to create identities, credentials, history and in-flight work. Stop old writers, then start the current package normally against the same PostgreSQL data directory and let normal migrations run. Verify identity/password/history preservation, explicit in-flight recovery outcomes, approved old-client compatibility/refusal and one new real operation. No synthetic old schema, truncated current migrations, seeded successful predecessor results, same-version restart substitute or placeholder owner.
+
+Use checks/integration-upgrade/scenarios/version-transition.{nix,py,cjs} with sequential old/current phases in the one registered version-transition scenario. Run its gate and normal aggregate only once meaningful implementation exists, recording exact old/current commits, platform, command statuses, executed/reused evidence and artifacts. Unknown decisions block only dependent Upgrade cases; continue independent owners.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -45,5 +47,5 @@ Do not change application dependencies, run synthetic old schema or reuse anothe
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-10-17 organization correction: native Upgrade owner-local layout, coordinator-owned registration/shared/CI/docs and input wiring. D2 remains unresolved, as does actual foundation dependency commit. Foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands plus owner support decision required before To Do. No Luna delegation or executed slice is claimed.
+Current D2 research checked accepted release/support records and verified exact tags with git ls-remote. No approved predecessor/window found. Recommendation submitted: v0.3.1 f9dd6b9c79530d3f911203645207bf6251552aba; explicitly tested 24-hour old-agent heartbeat/supported Nix deployment window; builders upgrade first because old nominal API mode accesses PostgreSQL. Broader old-builder support requires explicit legacy-DB compatibility authority or a separate product decision, not a test credential shortcut. No Upgrade implementation or VM success claimed. Historical bootstrap/Rust failure instructions and obsolete task-numbered paths were removed from active guidance.
 <!-- SECTION:NOTES:END -->
