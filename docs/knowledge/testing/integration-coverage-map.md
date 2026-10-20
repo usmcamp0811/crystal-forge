@@ -149,6 +149,109 @@ Reporting-only follow-ups do not change the executable cases. This successful
 partial pipeline does not complete the four owners or resolve P3/TASK-492 and
 TASK-496. TASK-495's separately authorized repair is in Review, not merged.
 
+### Connected manual Delivery increment: rollback blocked
+
+The existing ten-case increment was committed and pushed as
+`3db47c8953e3cf1f29473be7595a660d69e6a988`. Its separate TASK-496 product repair
+is `d11de05967b2ade5c7e1f833317039de134c307a` (original task commit `5c8f5ee8`).
+The repair projects historical `boot_id` as null so `SystemState` decodes the
+migrated row; it preserves `systems.boot_id` and conservative real-error
+fallback. Stronger assertions are verification, not the production repair.
+
+[Pipeline 2965867360](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2965867360)
+passed all eight jobs at that exact clean commit. Downloaded artifacts confirm
+Access 23/23 and Delivery 10/10, exact source revision, signature rejection and
+acceptance, two initial heartbeat IDs, and all eight controlled network receipts.
+The database job passed 517 tests, 0 failed, 0 ignored across 229 summaries.
+Component/package, CVE, dashboard, complexity and coverage jobs also passed.
+That pipeline does **not** verify the later connected deployment increment.
+
+The connected increment extends the same five VMs/database through two real
+Git/native-evaluation/build/publication/UI-deployment workflows. Each target
+output is physically absent and invalid before actual agent acquisition. A
+pinned target-owned SSH identity reads the test service; no alternate
+substituter or local-build fallback supplies the runtime output. The target
+shares only immutable runtime prerequisites. Full cold-closure acquisition from
+a warm store remains unproved (TASK-498).
+
+CF's original builder signature is checked and cryptographically verified
+before deliberate receiver-test signing. That proof is distinct from the
+isolated receiver's enforced signature rejection/acceptance. The second job
+also requires exact native attempt/derivation/output/claimant-session and signer
+identity. Neither test-side signing nor a successful SSH login is CF signing
+evidence by itself.
+
+Both manual deployments actually activated. Independent target profile, running
+path, revision marker, unchanged boot ID and unchanged agent key agree with
+succeeded CF requests and durable history. Exactly one new full state appears
+per transition, followed by two distinct heartbeats on that state. The browser
+finds the operation, submits the real request and verifies the observed
+generation and exact success event after reload. No `system_states` mutation,
+fabricated report, stopped agent, synthetic completion or seeded authority is
+used.
+
+Latest executed local identities (`3db47c89-dirty`):
+
+| Observation | Initial | First CF deployment | Second CF deployment |
+| --- | --- | --- | --- |
+| System | `f1addf9f-3f84-4b8b-9598-c244d29ae307` | Same registered system | Same registered system |
+| Running output | `/nix/store/facrr7n1wbkhqs5i1xsxdwyga1hff8l0-nixos-system-targetA-test` | `/nix/store/wii9frwfwvkrl26a80kwizd3yrgq7q0l-nixos-system-targetA-test` | `/nix/store/cz8flym2r8cxn39k1xwfj6m6244cpdld-nixos-system-targetA-test` |
+| Commit | Harness boot, not a CF-managed revision | `e5c115237b3d026f65dbfe74a86331e820a36c78` | `9d79b584629e73ccdee7806d04d2d46217759581` |
+| Profile/generation | No system-profile link; observed generation null | `system-1-link`, generation 1, resolves to first output | `system-2-link`, generation 2, resolves to second output |
+| State ID | `1` | `2` | `3` |
+| Heartbeat IDs | `1`, `2` | `6`, `7` | `9`, `10` |
+| Completed deployment | None | `64c90169-f0e3-40b9-abb6-741d1b8fe978` | `ca1a5d9f-f3ec-4c9b-a895-2afef5f8b82d` |
+
+Boot ID stays `bc7d4cc1-0d18-4891-9848-507ceb28a5c7`; booted output remains
+the independently observed initial output. No reboot claim is made.
+
+The four added case names are:
+
+- `manual-first-cf-deployment-activates-cold-output-and-reports-new-state`: passed.
+- `second-authored-revision-builds-and-publishes-through-cf`: passed.
+- `manual-second-deployment-reports-changed-state-and-correlated-heartbeats`: passed.
+- `history-ui-rollback-restores-retained-output-and-correlates-current-state`: failed at mandatory eligibility.
+
+The original ten case names and assertions remain. The final normal Delivery
+gate fails: 13 passed, 1 failed. Fresh generation inventory after B reports A
+as not current, `generation_snapshot_id=null`, `rollback_eligible=false`.
+TASK-499 records the producer/consumer mismatch: native evaluation has no
+available V1 artifact; normal Config inspection produces V2 evidence with an
+isolated selector; deployment binding/retention/rollback require V1 authority.
+No existing supported operation found in this investigation supplies that
+authority. A production repair needs separate authorization. The rollback
+request, restored generation/state and later rollback heartbeats have **not**
+executed. The gate is not skipped or allowed to fail in CI.
+
+Local results below are on `x86_64-linux`, with dirty-tree identity explicitly
+recorded. `D` is
+`/nix/store/mrs8rm4yvf5lk9vklqs01qvmzp1zl9n7-vm-test-run-cf-it-delivery-delivery-lifecycle-run`;
+`A` is
+`/nix/store/ci1m5937pfh4b1p3hzpmgxfa88vlk47z-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run`.
+
+| Command | Tested input | Platform | Exit | Executed/reused | Cases | Evidence |
+| --- | --- | --- | --- | --- | --- | --- |
+| `sh packages/ci/integration-owner-build.sh integration-delivery` | `3db47c89-dirty`, connected code | x86_64-linux | 1 | New VM execution, driver 303.80 s | 13 passed / 1 failed | D; `integration-evidence/integration-delivery/` |
+| `sh packages/ci/integration-owner-build.sh integration-access` | Same dirty source | x86_64-linux | 0 | New VM execution, driver 53.48 s | 23 passed | A; `integration-evidence/integration-access/` |
+| `nix flake check --keep-going --no-update-lock-file -L --builders '' --max-jobs 1 --cores 2` | Same dirty source | x86_64-linux | 1 | Reused identical A/D run outputs; Delivery gate executed and failed | Same 23 and 13/1, not additional executions | A/D; TASK-499 failure |
+| Normal hosted owner scripts | Clean `3db47c8953e3cf1f29473be7595a660d69e6a988`, earlier increment | x86_64-linux | 0 | Executed in pipeline 2965867360 | Access 23 / Delivery 10 passed | Jobs 17303956146 / 17303956147 |
+| Documented offline state-machine workflow | Clean `3db47c89`, unchanged Rust repair inputs | x86_64-linux | 0 | Executed in hosted job, not rerun for fixture-only edits | 517 passed, 0 failed/ignored | Job 17303956151; downloaded raw trace |
+
+The explicit database preparation phase and host-daemon isolation limitation
+remain unchanged. Historical failures are preserved: TASK-497 configuration
+type error, TASK-498 warm dependency signature rejection, and a corrected
+direct-boot fixture GRUB attempt. The temporary Git receive process now runs
+as its repository owner; no global ownership-check exception is used.
+
+Review covered acceptance, backend/integrity, query/resource safety, UI/design
+states, end-to-end observations and regression adequacy. The exact second-build
+chain, one-state-per-transition, event identity and fresh rollback eligibility
+checks were strengthened after review. TASK-500 records Started/success history
+presentation and the rollback strategy-label difference from approved
+`SystemDetail.jsx`; screenshots prove rendered workflow, not pixel/design
+approval of those differences. No production UI changes were made. Broader
+activation modes, BootOnly/reboot, isolation and recovery remain separate gaps.
+
 ### Delivery signature and unchanged-heartbeat continuation
 
 The normal command `nix build .#checks.x86_64-linux.integration-delivery

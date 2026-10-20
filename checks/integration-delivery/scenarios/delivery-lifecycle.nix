@@ -16,13 +16,20 @@
     system = pkgs.stdenv.hostPlatform.system;
     inherit pkgs;
     specialArgs.sourceNonce = "baseline-preparation-only";
-    modules = [modulePath configuration];
+    modules = [
+      (inputs.nixpkgs + "/nixos/lib/testing/nixos-test-base.nix")
+      (inputs.nixpkgs + "/nixos/modules/virtualisation/qemu-vm.nix")
+      modulePath configuration
+    ];
   };
   # Pin the same immutable input identity as the product flake and preload its
   # exact store source on the evaluator/builders. No registry rewrite is used.
   source = pkgs.runCommand "delivery-source-fixture" {} ''
     mkdir -p "$out"
     cp ${configuration} "$out/configuration.nix"
+    cp ${../fixtures/target-baseline.nix} "$out/target-baseline.nix"
+    cp ${../fixtures/target-network.nix} "$out/target-network.nix"
+    cp ${../fixtures/network-isolation.nix} "$out/network-isolation.nix"
     # Vendor the unchanged production module into the authored source. Pure
     # evaluation must not import an undeclared absolute host/worktree path.
     cp -r ${modulePath} "$out/crystal-forge"
@@ -71,7 +78,11 @@
             })];
           };
           specialArgs.sourceNonce = builtins.readFile ./nonce;
-          modules = [./crystal-forge ./configuration.nix];
+          modules = [
+            (nixpkgs + "/nixos/lib/testing/nixos-test-base.nix")
+            (nixpkgs + "/nixos/modules/virtualisation/qemu-vm.nix")
+            ./crystal-forge ./configuration.nix
+          ];
         };
       };
     }
@@ -117,10 +128,10 @@
   };
 in harness.mkScenario {
   inherit owner name;
-  contracts = ["delivery.evaluation" "delivery.build" "delivery.publication"];
+  contracts = ["delivery.evaluation" "delivery.build" "delivery.publication" "delivery.activation.modes" "delivery.activation.recovery"];
   nodes = {
     controller = { ... }: {
-      imports = [(harness.roles.controller {}) prepared];
+      imports = [(harness.roles.controller {browser = true;}) prepared];
       environment.systemPackages = [pkgs.git];
       # The production automatic reserve is 4 GiB, equal to this entire VM.
       # Use its documented fixed-worker budget for one configuration instead.
@@ -157,7 +168,14 @@ in harness.mkScenario {
       systemd.services.crystal-forge-builder.environment.RUST_LOG = lib.mkForce "info,cf_builder::derivations::cache=debug";
     };
     builderB = {...}: {imports = [(harness.roles.builder {name = "builderB";}) prepared];};
-    targetA = {...}: {imports = [(harness.roles.target {}) offlineNetwork];};
+    targetA = {...}: {
+      imports = [(harness.roles.target {}) offlineNetwork ../fixtures/target-baseline.nix];
+      # Share immutable runtime prerequisites, not recipes or runtime candidates.
+      # Warm SSH stores do not merge signatures onto already valid baseline
+      # paths. This increment proves cold candidate acquisition, not cold
+      # acquisition of every baseline dependency from a warm cache.
+      virtualisation.additionalPaths = [baseline.config.system.build.toplevel];
+    };
   };
   facts = {
     admin = harness.facts.localUserFromDesign {
@@ -172,7 +190,24 @@ in harness.mkScenario {
      builtins.readFile ./delivery-lifecycle.py + "\n"
      + builtins.readFile ./fragments/source-build.py + "\n"
      + builtins.readFile ./fragments/publication.py + "\n"
-     + builtins.readFile ./fragments/network-boundary.py
+     + builtins.readFile ./fragments/network-boundary.py + "\n"
+     + builtins.readFile ./fragments/activation.py + "\n"
+     + builtins.readFile ./fragments/recovery.py
   );
+  browserSpecs = let
+    activation = ./fragments/activation.cjs;
+    wrapper = method: phase: pkgs.writeText "delivery-${method}-${phase}.cjs" ''
+      exports.run = ctx => require("${activation}").${method}(ctx, "${phase}");
+    '';
+  in {
+    deploy-first = wrapper "deploy" "first";
+    deploy-second = wrapper "deploy" "second";
+    inspect-first = wrapper "inspect" "first";
+    inspect-second = wrapper "inspect" "second";
+    inspect-rollback = wrapper "inspect" "rollback";
+    rollback = pkgs.writeText "delivery-rollback.cjs" ''
+      exports.run = ctx => require("${./fragments/recovery.cjs}").run(ctx, require("${activation}"));
+    '';
+  };
   timeout = 1800;
 }

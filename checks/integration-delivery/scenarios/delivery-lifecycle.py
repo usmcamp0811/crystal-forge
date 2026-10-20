@@ -65,6 +65,7 @@ with case("source-authored-commit-served-by-local-git"):
     expect_equal(len(source_commit), 40, "full authored Git identity")
     source_nonce = receipt("delivery.sourceNonce", services.succeed(
         "cat /tmp/delivery-source/nonce").strip())
+    receipt("delivery.sourceMessage", "Author nonce-bearing NixOS source")
     advertised = controller.succeed("git ls-remote " + shlex.quote(FACTS["flake"]["url"]) + " refs/heads/main")
     expect_equal(advertised.split()[0], source_commit, "real upstream advertised commit")
 
@@ -130,11 +131,30 @@ with case("api-builders-register-distinct-runtime-credentials"):
         # Verify fixture credentials before attributing a publication failure
         # to the CF workflow. No private key leaves its originating VM.
         node.succeed("runuser -u crystal-forge -- ssh -o ConnectTimeout=5 cache@services true")
+    # The target owns a separate read identity, never a builder's private key.
+    # Its root-owned credentials survive live activation outside the agent's
+    # transient RuntimeDirectory. Only public material reaches services.
+    targetA.succeed("install -d -m 0700 /root/.ssh && "
+                    "ssh-keygen -q -t ed25519 -N '' -f /root/.ssh/delivery-read")
+    read_public_key = targetA.succeed("cat /root/.ssh/delivery-read.pub").strip()
+    _vm_write(targetA, "/root/.ssh/known_hosts", "services " + host_key + "\n")
+    _vm_write(targetA, "/root/.ssh/config", "Host services\n  User cache\n"
+              "  IdentityFile /root/.ssh/delivery-read\n  IdentitiesOnly yes\n"
+              "  BatchMode yes\n  StrictHostKeyChecking yes\n"
+              "  UserKnownHostsFile /root/.ssh/known_hosts\n")
+    targetA.succeed("chmod 600 /root/.ssh/config /root/.ssh/known_hosts")
+    _vm_write(services, "/var/lib/cache/.ssh/authorized_keys", "\n".join(ssh_public_keys + [read_public_key]) + "\n")
+    services.succeed("chown cache:cache /var/lib/cache/.ssh/authorized_keys && "
+                     "chmod 600 /var/lib/cache/.ssh/authorized_keys")
+    targetA.succeed("ssh -o ConnectTimeout=5 cache@services true")
+    receipt("delivery.targetReadPublicKey", read_public_key)
+    receipt("delivery.publisherPublicKeys", signing_public_keys)
     cache = delivery_api("POST", "/api/v1/caches", {
         "name": "delivery-local-store", "cache_type": "Nix", "push_to": FACTS["cacheUrl"],
         "enabled": True, "require_sigs": True,
         "max_retries": 0,
         "signing_key_path": "/var/lib/crystal-forge/cache-sign.key",
+        "attic_public_key": " ".join(signing_public_keys),
         "environment_ids": [receipts()["delivery.environmentId"]],
     }, expected=201)
     receipt("delivery.cacheId", cache["id"])
@@ -147,6 +167,7 @@ with case("target-registers-and-reports-real-agent-state"):
     receipt("delivery.flakeId", flake["id"])
     targetA.succeed("cf-keygen -y -f /run/cf-it-agent.key")
     target_key = targetA.succeed("cat /run/cf-it-agent.pub").strip()
+    receipt("delivery.targetAgentPublicKey", target_key)
     target = delivery_api("POST", "/api/v1/systems", {
         "hostname": FACTS["target"], "system_configuration_name": FACTS["target"],
         "public_key": target_key, "environment": "delivery-proof",
@@ -165,6 +186,15 @@ with case("target-registers-and-reports-real-agent-state"):
     targetA.succeed("systemctl start crystal-forge-agent.service")
     targetA.wait_for_unit("crystal-forge-agent.service")
     actual_running = targetA.succeed("readlink -f /run/current-system").strip()
+    initial_profile_link = targetA.succeed("readlink /nix/var/nix/profiles/system || true").strip()
+    receipt("delivery.initial", {
+        "systemId": target["id"], "storePath": actual_running,
+        "profileLink": initial_profile_link or None,
+        "profile": targetA.succeed("test ! -e /nix/var/nix/profiles/system || readlink -f /nix/var/nix/profiles/system").strip() or None,
+        "generation": int(initial_profile_link.split("-")[-2]) if initial_profile_link else None,
+        "booted": targetA.succeed("readlink -f /run/booted-system").strip(),
+        "bootId": targetA.succeed("cat /proc/sys/kernel/random/boot_id").strip(),
+    })
     def target_report():
         rows = sql_json(controller, "SELECT s.id::text AS system_id, ss.id::text AS state_id, "
             "ss.store_path, ss.agent_version FROM systems s JOIN system_states ss "

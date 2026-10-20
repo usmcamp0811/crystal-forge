@@ -27,6 +27,16 @@ with case("publication-rejects-untrusted-signature-then-accepts-same-signed-outp
     before = receiver_metadata("daemon", output_path)
     expect(not before.get("ca"), "signature probe must be input-addressed, not content-addressed")
     expect(bool(before.get("signatures")), "normal publication must supply a source signature")
+    expect(any(s.startswith("delivery-builderA:") for s in before["signatures"]),
+           "CF's assigned builder did not sign its published output")
+    # Verify CF's signature before the receiver test adds any source signatures.
+    # Test-side signing below proves receiver enforcement, not CF publication.
+    services.succeed(nix + " store verify --store daemon --no-contents --sigs-needed 1 "
+                     "--option trusted-public-keys " + shlex.quote(receipts()["delivery.publisherPublicKeys"][1]) +
+                     " " + output)
+    receipt("delivery.cfPublication", {"outputPath": output_path, "narHash": before["narHash"],
+        "signatures": before["signatures"], "builderId": receipts()["delivery.builderA.id"],
+        "jobId": receipts()["delivery.jobId"], "cacheId": receipts()["delivery.cacheId"]})
     expect(not any(s.startswith("delivery-receiver:") for s in before["signatures"]),
            "receiver already trusts target before negative test")
     closure = services.succeed(nix_store + " --store daemon --query --requisites " + output).splitlines()
