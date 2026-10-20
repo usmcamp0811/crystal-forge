@@ -1,10 +1,11 @@
 ---
 id: TASK-499
 title: Restore certified rollback authority for native-evaluated deployments
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - openai
 created_date: '2026-10-20 04:21'
-updated_date: '2026-10-20 20:30'
+updated_date: '2026-10-20 20:31'
 labels: []
 dependencies: []
 references:
@@ -33,6 +34,18 @@ Restore certified retained-generation rollback authority for real CF-managed nat
 - [ ] #3 Artifact schema versions and selector/retention boundaries remain explicit and are covered by regressions and updated source documentation.
 - [ ] #4 Missing or mismatched certified lineage remains ineligible and cannot be bypassed by a supplied store path.
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Dedicated worktree/branch TASK-499-retained-authority, clean base df11c800; Sol retains integration/lock and will establish task-owned preview before browser-visible implementation. User explicitly authorizes smallest repair and necessary forward migration.
+Producer/binding/retention choice: create a separately typed bounded native deployment-identity manifest, proposed schema3/integrity3, through existing immutable evaluation-artifact infrastructure. This is NOT V1 Config inventory or V2 Inspector evidence. It records actual selected native attempt, full commit/configuration, exact persisted derivation row/.drv/output identities without any extra Nix traversal. PRIMARY selector explicitly supports V1 plus the native deployment type; Config selector remains V2-only. Ordinary deployment captures that exact certified identity; observation retention and rollback use immutable deployment/retained IDs, never mutable latest. Deployment-only Config inventory reads remain unavailable, not empty/complete. Historical V1/V2 meanings and rows are unchanged.
+1. Verify schema3 is unused and add the next forward migration only because existing schema/certification constraints and immutable selector/retention triggers cannot represent this distinct type. Validate fixed bounded shape/exact lineage and freeze manifest content; no blanket recertification or synthesis from old mutable rows. Preserve retention/deletion/24h/batch bounds and lock order snapshot writer -> commit/attempt or existing flake/system locks.
+2. Publish inside successful native per-configuration persistence after exact active owner/inventory and actual derivation checks. Mock/stale/failed/excluded/path-conflicting/incomplete results mint no authority. Keep finalizers from overwriting successful native manifest merely because optional Config inventory is absent.
+3. Update each deployment binding, reciprocal/ordinary retention, generation eligibility and rollback resolver with explicit version-aware identity validation, not accepting another integrity number generically. Preserve V2 exclusion and legacy supported V1. Fix only any demonstrated newest-request fallback defect needed to preserve existing accepted negative guarantee.
+4. Focused Rust/isolated DB regressions: real producer -> binding -> observation retention -> eligible rollback; wrong system; same output/different commit/derivation; stale/failed/uncertified/mismatched evidence; immutable retained identity after selector advance; Config reads unavailable/no mutation; migration old semantics and bounded reclamation. Update affected contracts/specs and SQLx metadata only when shapes require it.
+5. Commit independently and integrate into existing Delivery owner. Keep mandatory recovery assertion unchanged; run A -> B -> History rollback -> actual restoration -> state/twoH/reload. No new owner/scenario/package for this repair.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
