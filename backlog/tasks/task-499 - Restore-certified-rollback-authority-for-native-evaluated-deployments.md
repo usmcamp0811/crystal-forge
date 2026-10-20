@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai
 created_date: '2026-10-20 04:21'
-updated_date: '2026-10-20 21:32'
+updated_date: '2026-10-20 21:55'
 labels: []
 dependencies: []
 references:
@@ -16,6 +16,25 @@ references:
   - docs/knowledge/evaluation/evaluation-snapshot-retention-and-rollback.md
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335'
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17305508230'
+modified_files:
+  - docs/knowledge/evaluation/evaluation-flake-snapshot-architecture.md
+  - >-
+    docs/knowledge/evaluation/evaluation-snapshot-persistence-bounds-and-redaction.md
+  - docs/knowledge/evaluation/evaluation-snapshot-retention-and-rollback.md
+  - >-
+    packages/default/crates/cf-server/migrations/0310_native_deployment_identity.sql
+  - packages/default/crates/cf-server/src/deployment/mod.rs
+  - packages/default/crates/cf-server/src/handlers/api/systems.rs
+  - packages/default/crates/cf-server/src/models/evaluate_with_policies.rs
+  - packages/default/crates/cf-server/src/models/evaluation_snapshots.rs
+  - packages/default/crates/cf-server/src/queries/commits.rs
+  - >-
+    packages/default/crates/cf-server/src/queries/commits/partial_resource_failure_tests.rs
+  - packages/default/crates/cf-server/src/queries/evaluation_snapshots.rs
+  - packages/default/crates/cf-server/src/queries/scanning.rs
+  - packages/default/crates/cf-server/src/queries/system_states.rs
+  - packages/default/crates/cf-server/src/queries/systems.rs
+  - packages/default/crates/cf-server/src/services/composite_enforcement.rs
 priority: high
 type: bug
 ordinal: 550000
@@ -55,4 +74,6 @@ Verified baseline: df11c8005de5ab7088015757dafc7fa7602da188; hosted pipeline2966
 Repair implementation in TASK-499-retained-authority at df11c800: added forward 0310 for bounded schema3/integrity3 Native deployment identity, active producer certification and shared exact-live-lineage predicate; PRIMARY supports legacy V1 and certified3, Config remains V2-only. Existing binding/retention/rollback/read consumers are being updated; no historical recertification or artifact->derivation FK. Test database launcher /tmp/opencode/task499-db.sh uses fresh invocation-owned PostgreSQL 35437 and repository database-environment.sh ownership/preload checks. Baseline focused legacy deployment/finalization test passed (exit0), logs /tmp/opencode/task499-negative-before2.log. Stronger wrapper-negative and producer-chain tests in progress. Preview http://127.0.0.1:8082/systems verified HTTP200; still baseline backend, owner will refresh after build. Preview/user databases untouched. SQLx stored-query inventory inspection found no checked metadata referencing affected artifact tables or changed authority views; new SQL uses runtime queries.
 
 Focused repair evidence: initial native producer -> immutable deployment binding -> observed retention -> eligible rollback and malformed/exact-live-lineage tests passed (2 tests; /tmp/opencode/task499-focused-before.log, exit0). Added dedicated legacy-V1 ingestion wrapper negative before repairing fallback: it failed with exit101, 'ingestion fell back through newer failed request' (/tmp/opencode/task499-wrapper-before2.log and .status). Fixed ranking before identity/status checks in ordinary retention, blocked reciprocal binding through newer same-path requests, and blocked newest failed/superseded/outside-24h fallback in ingestion/current repair. Expanded native tests include actual normal finalizer preservation, V2 exclusion, Config Changed-page unavailable/no mutation, failed/uncertified certification refusal and GC; partial-resource finalizer regression added in existing test module. An expanded test compile found and corrected a test-only owned/borrowed V2 argument mismatch; verification rerunning. Documentation validation via controlled public-cache-build.sh .#okf-knowledge passed exit0 (/tmp/opencode/task499-docs.log). Offline Cargo server binary build passed on an intermediate repair revision; final backend freshness still pending.
+
+Independent repair committed d68b3c44ebc9296529bfae7eb52ed519181b239e on TASK-499-retained-authority, parent df11c800; worktree clean after commit. No push/MR/task completion. Final focused DB run /tmp/opencode/task499-final-tests4.log + .status exited0: 4 native identity/upgrade tests, 1 wrapper negative, 8 partial-resource tests, 6 native-outcome tests, 4 legacy binding/retention/GC compatibility tests =23. Existing poam_workflows external_ (5) and fleet_cve_inventory_separates_current_scheduled_and_historical_scope (1) passed, runner exit0: /tmp/opencode/task499-cve-tests2.log + .status. Fresh invocation-owned PostgreSQL 35437/35438 with repository database-environment.sh safety checks; preview DB untouched. Native negative fixtures were corrected to respect immutable carrier FKs and global single-active-evaluation ownership, without changing production derivation/ownership rules. Initial CVE test selection mistakenly selected only ignored tests (zero executed); corrected run uses --include-ignored and executed all six. Final targeted rustfmt --check and git diff --check passed. Controlled public-cache documentation validation passed exit0. SQLx metadata unchanged: no checked-query shapes reference the additive artifact column or changed authority views; runtime SQL only. Offline Cargo server build passed (binary packages/default/target/database-tests/debug/server; /tmp/opencode/task499-backend-final.log/.status). Final VM-free offline Nix core package build is still running in tmux cf-task499-package-final, /tmp/opencode/task499-package-final.log/.status. Earlier Nix builds were canceled when test source changed; no success claimed for canceled runs. Sol owns backend refresh and unchanged A->B->History rollback->actual restored state/twoH integration. Last verified preview http://127.0.0.1:8082/systems remains baseline backend until owner refresh is verified; no VM execution claimed.
 <!-- SECTION:NOTES:END -->
