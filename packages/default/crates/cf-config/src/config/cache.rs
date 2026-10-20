@@ -82,7 +82,11 @@ impl CacheConfig {
         3600 // 1 hour
     }
 
-    /// Optional signing step. If `signing_key` is set, run this BEFORE `cache_command`.
+    /// Signs the source closure before transfer when a signing key is configured.
+    ///
+    /// Source signing alone does not update already-valid destination paths.
+    /// Signed Nix publication must also run [`Self::signature_commands`] after
+    /// [`Self::cache_command`] succeeds.
     pub fn sign_command(&self, store_path: &str) -> Option<CacheCommand> {
         let key_path = self.signing_key.as_ref()?;
         Some(CacheCommand {
@@ -109,6 +113,90 @@ impl CacheConfig {
             CacheType::Attic => self.attic_cache_command(store_path),
             CacheType::Http | CacheType::Nix => self.nix_cache_command(store_path),
         }
+    }
+
+    /// Returns the ordered metadata synchronization and destination trust checks.
+    ///
+    /// Signed `Nix` publication completes only after transfer and both commands
+    /// succeed. `source_store` must identify the store used for source signing
+    /// and transfer (normally `NIX_REMOTE`, or `auto` when unset). The destination
+    /// must support `addSignatures`, as `ssh-ng://` does in Nix 2.34.8. Legacy
+    /// `ssh://` cannot update warm-path signatures and fails when an update is
+    /// required. Other cache adapters retain their native publication contract.
+    ///
+    /// `copy-sigs` checks NAR hash, size and references before adding signatures,
+    /// but silently skips mismatches. The second command verifies destination
+    /// metadata recursively with only the configured key's public half. It does
+    /// not fetch source signatures during verification or accept `ultimate` as
+    /// a substitute for trust. Nix also accepts verifiable content-addressed paths.
+    /// No private key is sent to the destination. Failure can leave transferred
+    /// paths or partial metadata updates; retrying these steps is idempotent.
+    /// The read endpoint must expose the same store metadata, and target readers
+    /// must trust the configured key's public half and enforce signature checks.
+    ///
+    /// Success establishes closure metadata trust, not target credentials,
+    /// network access, retention against GC, or a content-integrity scan.
+    ///
+    /// # Examples
+    /// ```
+    /// use cf_config::CacheConfig;
+    /// let cache = CacheConfig {
+    ///     push_to: Some("ssh-ng://cache@host".into()),
+    ///     signing_key: Some("/run/keys/cache".into()),
+    ///     ..Default::default()
+    /// };
+    /// assert_eq!(cache.signature_commands("/nix/store/output", "daemon").len(), 2);
+    /// ```
+    pub fn signature_commands(&self, store_path: &str, source_store: &str) -> Vec<CacheCommand> {
+        let (CacheType::Nix, Some(destination), Some(key)) =
+            (&self.cache_type, &self.push_to, &self.signing_key)
+        else {
+            return Vec::new();
+        };
+        vec![
+            CacheCommand {
+                command: "nix".into(),
+                args: [
+                    "store",
+                    "copy-sigs",
+                    "--store",
+                    destination,
+                    "--substituter",
+                    source_store,
+                    "--recursive",
+                    store_path,
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            },
+            CacheCommand {
+                command: "nix".into(),
+                args: [
+                    "store",
+                    "verify",
+                    "--store",
+                    destination,
+                    "--recursive",
+                    "--no-contents",
+                    "--sigs-needed",
+                    "1",
+                    "--option",
+                    "trusted-public-keys",
+                    "",
+                    "--option",
+                    "extra-trusted-public-keys",
+                    "",
+                    "--option",
+                    "secret-key-files",
+                    key,
+                    store_path,
+                ]
+                .into_iter()
+                .map(String::from)
+                .collect(),
+            },
+        ]
     }
 
     /// Legacy: still returns args only.
@@ -214,6 +302,297 @@ impl Default for CacheConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn signature_publication_is_limited_to_signed_nix_destinations() {
+        let mut cache = CacheConfig {
+            push_to: Some("ssh-ng://cache@host".into()),
+            signing_key: Some("/run/keys/cf".into()),
+            ..Default::default()
+        };
+        let commands = cache.signature_commands("/nix/store/output", "daemon");
+        assert_eq!(commands.len(), 2);
+        assert_eq!(
+            commands[0].args,
+            [
+                "store",
+                "copy-sigs",
+                "--store",
+                "ssh-ng://cache@host",
+                "--substituter",
+                "daemon",
+                "--recursive",
+                "/nix/store/output"
+            ]
+        );
+        for adapter in [
+            CacheType::S3,
+            CacheType::Http,
+            CacheType::Attic,
+            CacheType::Niks3,
+        ] {
+            cache.cache_type = adapter;
+            assert!(
+                cache
+                    .signature_commands("/nix/store/output", "daemon")
+                    .is_empty()
+            );
+        }
+        cache.cache_type = CacheType::Nix;
+        cache.signing_key = None;
+        assert!(
+            cache
+                .signature_commands("/nix/store/output", "daemon")
+                .is_empty()
+        );
+    }
+
+    // Run explicitly in the prepared Nix environment. Cargo-only builds do not
+    // supply Nix. This fixture owns local Nix databases, never the host daemon.
+    #[test]
+    #[ignore = "requires prepared Nix 2.34.8; uses only isolated local stores"]
+    fn warm_nix_publication_propagates_closure_trust() {
+        use std::io::Write;
+        use std::process::{Command, Output, Stdio};
+
+        let nix = std::env::var("NIX_TEST_BIN").unwrap_or_else(|_| "nix".into());
+        let nix_store = std::path::Path::new(&nix).with_file_name("nix-store");
+        let parent = std::env::temp_dir();
+        assert!(parent.is_dir());
+        let fixture = tempfile::Builder::new()
+            .prefix("cf-publication-")
+            .tempdir_in(parent)
+            .unwrap();
+        let source_root = fixture.path().join("source");
+        let destination_root = fixture.path().join("destination");
+        let consumer_root = fixture.path().join("consumer");
+        let store = |root: &std::path::Path| format!("local?root={}", root.display());
+        let source = store(&source_root);
+        let destination = store(&destination_root);
+        let consumer = store(&consumer_root);
+        let run = |args: &[&str]| -> Output {
+            Command::new(&nix)
+                .env("NIX_CONFIG", "experimental-features = nix-command\nsubstituters =\nbuilders =\nrequire-sigs = true\n")
+                .env_remove("NIX_REMOTE")
+                .args(args).output().unwrap()
+        };
+        let success = |output: Output| -> String {
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).unwrap()
+        };
+        // Input-addressed fixtures are registered only in the source store.
+        // A CA fixture would bypass signature checking and hide this regression.
+        let dependency = "/nix/store/00000000000000000000000000000000-dependency";
+        let output = "/nix/store/11111111111111111111111111111111-output";
+        success(run(&["store", "info", "--store", &source]));
+        let physical_store = source_root.join("nix/store");
+        std::fs::write(
+            physical_store.join(dependency.rsplit('/').next().unwrap()),
+            "dependency\n",
+        )
+        .unwrap();
+        std::fs::write(
+            physical_store.join(output.rsplit('/').next().unwrap()),
+            dependency,
+        )
+        .unwrap();
+        let mut register = Command::new(&nix_store)
+            .args(["--store", &source, "--register-validity"])
+            .env("NIX_CONFIG", "substituters =\nbuilders =\n")
+            .env_remove("NIX_REMOTE")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        write!(
+            register.stdin.take().unwrap(),
+            "{dependency}\n\n0\n{output}\n\n1\n{dependency}\n"
+        )
+        .unwrap();
+        success(register.wait_with_output().unwrap());
+        let key = fixture.path().join("cf.key");
+        let secret = success(run(&[
+            "key",
+            "generate-secret",
+            "--key-name",
+            "cf-publication-test",
+        ]));
+        std::fs::write(&key, &secret).unwrap();
+        // Public key extraction uses the same Nix implementation as production.
+        let mut convert = Command::new(&nix)
+            .args(["key", "convert-secret-to-public"])
+            .env("NIX_CONFIG", "experimental-features = nix-command\n")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        convert
+            .stdin
+            .take()
+            .unwrap()
+            .write_all(secret.as_bytes())
+            .unwrap();
+        let public = success(convert.wait_with_output().unwrap());
+        let cache = CacheConfig {
+            push_to: Some(destination.clone()),
+            signing_key: Some(key.to_str().unwrap().into()),
+            ..Default::default()
+        };
+        let execute = |operation: CacheCommand| {
+            let args = operation
+                .args
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>();
+            run(&args)
+        };
+        // Warm the destination with a different key, never trusted by consumers.
+        let other_key = fixture.path().join("other.key");
+        std::fs::write(
+            &other_key,
+            success(run(&["key", "generate-secret", "--key-name", "other"])),
+        )
+        .unwrap();
+        success(run(&[
+            "store",
+            "sign",
+            "--store",
+            &source,
+            "--key-file",
+            other_key.to_str().unwrap(),
+            dependency,
+        ]));
+        success(run(&[
+            "copy",
+            "--from",
+            &source,
+            "--to",
+            &destination,
+            "--option",
+            "secret-key-files",
+            other_key.to_str().unwrap(),
+            dependency,
+        ]));
+        let mut sign = cache.sign_command(output).unwrap();
+        sign.args.extend(["--store".into(), source.clone()]);
+        success(execute(sign));
+        let metadata = |store: &str| -> serde_json::Value {
+            serde_json::from_str(&success(run(&[
+                "path-info",
+                "--store",
+                store,
+                "--json",
+                "--recursive",
+                output,
+            ])))
+            .unwrap()
+        };
+        let source_metadata = metadata(&source);
+        for path in [dependency, output] {
+            assert!(
+                source_metadata[path]["signatures"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s.as_str().unwrap().starts_with("cf-publication-test:"))
+            );
+            assert!(source_metadata[path]["ca"].is_null());
+        }
+        let mut transfer = cache.cache_command(output).unwrap();
+        transfer.args.extend([
+            "--from".into(),
+            source.clone(),
+            "--option".into(),
+            "secret-key-files".into(),
+            key.to_str().unwrap().into(),
+        ]);
+        success(execute(transfer));
+        let before = metadata(&destination);
+        assert!(
+            before[output]["signatures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s.as_str().unwrap().starts_with("cf-publication-test:"))
+        );
+        assert!(
+            !before[dependency]["signatures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s.as_str().unwrap().starts_with("cf-publication-test:"))
+        );
+        let acquire = || {
+            run(&[
+                "copy",
+                "--from",
+                &destination,
+                "--to",
+                &consumer,
+                "--option",
+                "trusted-public-keys",
+                public.trim(),
+                "--option",
+                "extra-trusted-public-keys",
+                "",
+                "--option",
+                "secret-key-files",
+                "",
+                output,
+            ])
+        };
+        let rejected = acquire();
+        assert!(!rejected.status.success());
+        assert!(String::from_utf8_lossy(&rejected.stderr).contains("signature"));
+        assert!(
+            !run(&["path-info", "--store", &consumer, dependency])
+                .status
+                .success()
+        );
+        let commands = cache.signature_commands(output, &source);
+        // Verification alone must fail despite successful source signing/copy.
+        let untrusted = execute(commands[1].clone());
+        assert!(!untrusted.status.success());
+        for operation in commands {
+            success(execute(operation));
+        }
+        let after = metadata(&destination);
+        for path in [dependency, output] {
+            assert!(
+                after[path]["signatures"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .any(|s| s.as_str().unwrap().starts_with("cf-publication-test:"))
+            );
+        }
+        assert!(
+            after[dependency]["signatures"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|s| s.as_str().unwrap().starts_with("other:"))
+        );
+        // A retry neither requires retransferring NARs nor removes other keys.
+        for operation in cache.signature_commands(output, &source) {
+            success(execute(operation));
+        }
+        assert_eq!(after, metadata(&destination));
+        success(acquire());
+        let acquired = metadata(&consumer);
+        assert!(acquired.get(dependency).is_some());
+        assert!(acquired.get(output).is_some());
+        eprintln!(
+            "warm publication: source CF signatures=2/2; destination CF signatures before=1/2, after=2/2; pre-propagation verify={}; pre-propagation acquisition={}; post-propagation acquisition=0; repeated propagation idempotent",
+            untrusted.status, rejected.status
+        );
+    }
 
     #[test]
     fn legacy_cache_configuration_defaults_niks3_fields() {

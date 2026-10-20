@@ -63,6 +63,9 @@ impl Derivation {
     ///
     /// Database Attic attempts own their deadline and kill/reap before retry.
     /// Static attempts retain the legacy ambient login behavior.
+    /// Signed Nix destinations complete only after source signature propagation
+    /// and recursive destination trust verification; see
+    /// [`CacheConfig::signature_commands`].
     ///
     /// # Errors
     /// Returns the final safe selected-push error or legacy publication error.
@@ -192,6 +195,10 @@ impl Derivation {
     }
 
     /// Publishes through the authority that selected this job's destination.
+    ///
+    /// Signed Nix publication also synchronizes and verifies destination closure
+    /// metadata after transfer. See [`CacheConfig::signature_commands`] for the
+    /// supported protocol, trust requirements, and partial-failure contract.
     ///
     /// Database Attic uses only the selected endpoint, native cache and stored
     /// token in a private per-attempt XDG config. Static publication retains
@@ -423,6 +430,8 @@ impl Derivation {
                 anyhow::bail!("{} failed (scoped)", effective_command);
             }
 
+            run_signature_commands(cache_config, &store_path, build_config).await?;
+
             info!("Successfully pushed {} to cache (scoped)", store_path);
             return Ok(());
         }
@@ -445,9 +454,61 @@ impl Derivation {
             anyhow::bail!("{} failed", effective_command);
         }
 
+        run_signature_commands(cache_config, &store_path, build_config).await?;
+
         info!("Successfully pushed {} to cache", store_path);
         Ok(())
     }
+}
+
+// INVARIANT: Transfer can skip valid warm paths. Do not report success until
+// their metadata has been synchronized and verified against the configured key.
+async fn run_signature_commands(
+    cache: &CacheConfig,
+    store_path: &str,
+    build: &BuildConfig,
+) -> Result<()> {
+    let source = std::env::var("NIX_REMOTE").unwrap_or_else(|_| "auto".into());
+    for operation in cache.signature_commands(store_path, &source) {
+        let mut command = if build.should_use_systemd() {
+            let mut command = tokio::process::Command::new("systemd-run");
+            command.args(["--scope", "--collect", "--quiet"]);
+            apply_systemd_props_for_scope(build, &mut command);
+            apply_cache_env(&mut command);
+            apply_cache_config_env_for_scope(&mut command, cache);
+            command.arg("--").arg(operation.command);
+            command
+        } else {
+            let mut command = tokio::process::Command::new(operation.command);
+            build.apply_to_command(&mut command);
+            apply_cache_env_to_command(&mut command);
+            apply_cache_config_env_to_command(&mut command, cache);
+            command
+        };
+        command.args(operation.args);
+        require_signature_command(command).await?;
+    }
+    Ok(())
+}
+
+// SECURITY: Suppress native output and argv: store URLs can contain secrets.
+async fn require_signature_command(mut command: tokio::process::Command) -> Result<()> {
+    let status = command
+        .kill_on_drop(true)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!("Nix publication signature propagation/verification spawn failed")
+        })?;
+    if !status.success() {
+        bail!(
+            "Nix publication signature propagation/verification failed with {status}; output suppressed"
+        );
+    }
+    Ok(())
 }
 
 // CONCURRENCY: The detached owner retains private config until native exit or
@@ -625,6 +686,25 @@ mod tests {
     use std::os::unix::fs::PermissionsExt;
     use std::path::PathBuf;
     use std::time::Duration;
+
+    #[tokio::test]
+    async fn signature_publication_failure_is_required_and_redacted() {
+        let mut command = tokio::process::Command::new("/bin/sh");
+        command.args(["-c", "printf 'synthetic-private-url' >&2; exit 23"]);
+        let error = super::require_signature_command(command).await.unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("23"));
+        assert!(message.contains("signature propagation/verification failed"));
+        assert!(!message.contains("synthetic-private-url"));
+        let missing = tokio::process::Command::new("/nonexistent-cf-signature-command");
+        assert!(
+            super::require_signature_command(missing)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("spawn failed")
+        );
+    }
 
     // Use the shared preparation helper; these tests cover process ownership
     // and output suppression rather than reimplementing credential creation.
