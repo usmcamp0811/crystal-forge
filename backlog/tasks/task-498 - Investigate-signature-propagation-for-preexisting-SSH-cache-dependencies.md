@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai
 created_date: '2026-10-20 03:51'
-updated_date: '2026-10-20 20:31'
+updated_date: '2026-10-20 20:40'
 labels: []
 dependencies: []
 references:
@@ -45,4 +45,8 @@ Dedicated worktree/branch TASK-498-publication-trust, clean base df11c800. Sol o
 
 <!-- SECTION:NOTES:BEGIN -->
 Owner authorization: current TASK-490 assignment selects TASK-498 for bounded production repair. Failed reproduction: /nix/store/cbxbrqalva8jm45crs4bx4gfhpmz0jm6-vm-test-run-cf-it-delivery-delivery-lifecycle-run. Ordinary activation may share immutable prerequisites but cannot replace the separate missing-dependency acquisition assertion. Dedicated product worktree from df11c800; coordinator owns integration topology/registration.
+
+Publication worker: implemented in TASK-498-publication-trust from df11c800. Paths: packages/default/crates/cf-config/src/config/cache.rs; cf-builder/src/derivations/{build,cache}.rs; necessary server counterpart cf-server/src/derivations/{build,cache}.rs. No topology, harness, CI, Nix module or packaging edits. Pinned Nix 2.34.8 src/nix/sigs.cc uses `store copy-sigs --substituter SOURCE --store DEST --recursive OUTPUT` (not --from), compares NAR hash/size/references and silently skips mismatches. Worker therefore also requires recursive destination `store verify --no-contents --sigs-needed 1`, clearing ambient trusted-public-keys/extra-trusted-public-keys and using only configured secret-key-files to derive the public half locally. src/libstore/daemon.cc AddSignatures has no trusted-client guard; ssh-ng supports it, legacy ssh lacks addSignatures. Signed Nix publication fails on propagation/verification failure; other adapters keep native semantics.
+
+Verification so far, all exit 0: offline cf-config config::cache::tests with --include-ignored --nocapture (4 passed), offline cf-builder derivations::cache::tests (14 passed), offline cf-config --doc (16 passed), offline cf-server --lib cargo check, and explicit rustfmt --check on the five changed files. Real regression invoked with TMPDIR=/tmp/opencode and NIX_TEST_BIN=/nix/store/s9x74dmyx8wphr49pxxpnh2yrxwla1np-nix-2.34.8/bin/nix, after verifying parent and preparing evaluatorNix from cache.nixos.org. Three invocation-owned local Nix stores only; no shared PostgreSQL or daemon stack. Evidence: source CF signatures 2/2; destination before 1/2 and after 2/2; before propagation verify exit 2 and signature-enforcing consumer copy exit 1; after propagation acquisition exit 0; repeat propagation preserves metadata. Wrong warm-path key remains but consumer trusts only CF public key. The real Nix test is an explicitly selected ignored Cargo test because ordinary Cargo/package environments do not supply Nix. Initial workspace cargo fmt command exited 1 ('Failed to find targets'); explicit rustfmt on scoped files passes. Owner still owns SSH topology execution and knowledge-base composition.
 <!-- SECTION:NOTES:END -->
