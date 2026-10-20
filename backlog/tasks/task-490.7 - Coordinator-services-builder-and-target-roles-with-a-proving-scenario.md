@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-20 01:57'
+updated_date: '2026-10-20 05:24'
 labels:
   - testing
   - integration
@@ -57,7 +57,7 @@ The owner separately authorized TASK-495 after offline=true exposed an unsupport
 - [x] #5 Actual interface signatures and tested dependency/source revision, focused command, result and evidence are recorded after the real Delivery VM run
 - [x] #6 A cold input-addressed output is rejected specifically at an enforced signature boundary when unsigned or signed by an untrusted key; it remains absent/invalid, then the correctly signed equivalent succeeds with exact contents and signature evidence. Transport, access and dependencies are independently proven; no trusted-user/import/content-addressed bypass.
 - [x] #7 Controlled test-owned IPv4/IPv6 endpoints prove actual outside-boundary connection rejection with route/interface and boundary-hit evidence, while required local Git/API/SSH-store/agent traffic works. No deployed cache probe or isolation removal is permitted.
-- [ ] #8 The real agent establishes exact registered state, unchanged heartbeats correlate without duplicate full states or comparison errors, a genuine observed change creates new full-state evidence, and later heartbeats correlate to that new state after the authorized TASK-496 repair.
+- [x] #8 The real agent establishes exact registered state, unchanged heartbeats correlate without duplicate full states or comparison errors, a genuine observed change creates new full-state evidence, and later heartbeats correlate to that new state after the authorized TASK-496 repair.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -119,6 +119,10 @@ Full nix flake check --keep-going --no-update-lock-file -L --builders '' --max-j
 Prepared launcher with nix build .#devScripts.state-machine-test --no-link --builders '' --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --max-jobs 1 --cores 2 and fetched locked Cargo sources through nix develop .#sqlx with the same preparation settings. Then CARGO_NET_OFFLINE=true SQLX_OFFLINE=true nix run --offline --option substituters '' --option substitute false --option builders '' --option fallback false --option accept-flake-config false --max-jobs 0 --no-update-lock-file .#devScripts.state-machine-test -- -t=false up exited0. Actual 229 Rust summaries total517passed/0failed/0ignored; both TASK496 regressions passed and populated migration cases retained. Launcher used its fresh temporary cluster, not shared DB. Raw log /home/mcamp/.local/share/opencode/tool-output/tool_156e2d3f4001UOmCl7yY7BUZpg. Offline settings are not a host firewall-isolation claim.
 
 Updated README, coverage map and current verification/selection counts (286 ignored-library plus231integration) in docs. Final nix build .#okf-knowledge --no-link -L --builders '' --max-jobs 1 --cores 2 exited0:58tests,215Mermaid blocks/0errors,192concepts. Python syntax checks, staged/unstaged whitespace checks passed. No commit/push/new hosted run/merge/deploy. Keep In Progress and lock: AC8 and broader accepted lifecycle work remain. User retracted the unrelated glyph/Mermaid request; no implementation was performed for it.
+
+Original verified local increment committed/pushed as3db47c8953e3cf1f29473be7595a660d69e6a988, with productionfix separately attributable tod11de059 (original5c8f5ee8). Exact clean-commit hostedpipeline2965867360 passed all8jobs; downloadedAccess23/Delivery10artifacts matchsourceRevision and database517/0/0across229summaries. These hostedresults are notlateractivationverification.
+
+AC8 now has actual deployment change evidence in connected local3db47c89-dirty run: originalstate1/H1,2 -> CF-managedgeneration1/state2/H6,7 -> distinctCF-managedgeneration2/state3/H9,10. No duplicatefullstates/comparisonerrors; exactregisteredUUIDf1addf9f-3f84-4b8b-9598-c244d29ae307, running/profile/marker/request/historyandbrowserreloadverified. Latestownerexit1 overall13passed1failed solelymandatoryrollbackeligibility TASK499; no rollbackcompletion. Artifact /nix/store/mrs8rm4yvf5lk9vklqs01qvmzp1zl9n7-vm-test-run-cf-it-delivery-delivery-lifecycle-run. Alltenpreviouscasesinclsignaturenegative/positiveandcontrolleddualstackegresspassedagain. Broaderparentnotcomplete; keepInProgresswhilecurrentrequiredgatefailed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
