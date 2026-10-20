@@ -69,6 +69,11 @@ The current hard bounds are:
   becomes unavailable rather than returning partial unmarked data.
 - 16 KiB of searchable text per option after redaction.
 - 16 KiB of schema-3 deployment-identity JSON text per artifact.
+- 100 newest-first unbound requests per Native publication transaction. Each
+  request can backfill at most 100 missing generations, newest first, in one
+  statement. Repeated backfill skips retained rows. These mutation bounds match
+  the 100-row maintenance convention; ordinary ingestion still retains one
+  exact latest observation without waiting for historical backfill.
 - 16 option-tree levels before a non-empty deeper subtree becomes an explicit
   partial-inventory diagnostic. This guard bounds cyclic or recursively
   generated attribute sets. The option count then covers observed options only.

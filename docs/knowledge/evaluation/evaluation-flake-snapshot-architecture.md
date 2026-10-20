@@ -60,6 +60,13 @@ unavailable and make no empty-complete or comparison claim. Finalizers preserve
 only a manifest proven to belong to that exact successful attempt; a failed
 configuration or stale retry cannot reuse an older selector.
 
+Native publication records real insertion time after the snapshot-writer lock.
+The certificate must precede request issuance and observation; a later attempt
+cannot bind an older unbound request. V1 retains its legacy late-publication
+contract. Retention repair validates the newest request's complete immutable
+tuple, and missing CF lineage excludes external fallback. Reciprocal native
+binding and observation work use newest-first 100-row mutation pages.
+
 Snapshot persistence redacts metadata before storage. The server does not
 serialize the NixOS `config` tree. Missing exploration artifacts do not change
 system evaluation, policy, build, or deployment state.

@@ -1383,6 +1383,7 @@ pub async fn queue_manual_deployment_atomic(
                     ON artifact.id = selection.current_snapshot_id
                    AND artifact.lifecycle = 'available'
                     AND evaluation_deployment_artifact_matches(artifact.id, derivation.id, true)
+                    AND (artifact.schema_version<>3 OR artifact.created_at<=pending.issued_at)
                  WHERE system.id = pending.system_id
                    AND COALESCE(derivation.store_path, derivation.expected_store_path) = pending.target_store_path
                  LIMIT 1
@@ -1499,6 +1500,7 @@ async fn set_resolved_system_deployment_target_with_source(
                         ON artifact.id = selection.current_snapshot_id
                        AND artifact.lifecycle = 'available'
                         AND evaluation_deployment_artifact_matches(artifact.id, derivation.id, true)
+                        AND (artifact.schema_version<>3 OR artifact.created_at<=pending.issued_at)
                      WHERE derivation.commit_id = commit.id
                        AND derivation.derivation_type = 'nixos'
                        AND derivation.derivation_name = COALESCE(

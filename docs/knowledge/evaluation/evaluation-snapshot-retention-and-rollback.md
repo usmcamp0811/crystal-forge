@@ -54,6 +54,23 @@ bindings use their frozen attempt identity after the selector advances. They do
 not require a historical attempt to remain active. No migration synthesizes
 authority for historical deployments.
 
+A Native certificate must exist before its deployment request is issued.
+The producer records `created_at` with `clock_timestamp()` after acquiring the
+snapshot-writer lock. Transaction-start `NOW()` cannot prove publication order.
+Native reciprocal binding requires `artifact.created_at <= request.issued_at`,
+and retention requires the same ordering before the observation. A later native
+attempt cannot certify an older unbound request or generation, even when commit,
+derivation, and output are identical. A same-attempt lost acknowledgement reuses
+the original artifact UUID. Legacy V1 retains its deployment-before-publication
+contract.
+
+All CF retention paths rank the newest same-path request before validating the
+complete immutable tuple. A newer pending or succeeded request with missing or
+mismatched lineage blocks an older certified request. Status is not identity
+proof. Repair uses the ordinary exact-request resolver. External reconciliation
+requires no same-path CF request issued before the observation; missing CF
+lineage cannot be relabeled as an external activation.
+
 Flake timeline snapshots remain attached to their commit records. A branch
 rewrite does not reinterpret an old full SHA as a new revision. Rewrite
 acceptance archives every old-lineage commit before it removes unretained

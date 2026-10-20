@@ -2521,6 +2521,7 @@ async fn authorize_target_with_read_at(
                       AND snapshot.configuration_name = $2
                        AND snapshot.lifecycle = 'available'
                        AND evaluation_deployment_artifact_matches(snapshot.id, $4, $3::uuid IS NULL)
+                       AND (snapshot.schema_version<>3 OR snapshot.created_at<=transaction_timestamp())
                       AND (($3::uuid IS NOT NULL AND snapshot.id = $3)
                         OR ($3::uuid IS NULL AND selection.current_snapshot_id IS NOT NULL))
                     LIMIT 1
