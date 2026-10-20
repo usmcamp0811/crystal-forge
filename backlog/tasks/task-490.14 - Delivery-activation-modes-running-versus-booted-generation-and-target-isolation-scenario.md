@@ -7,13 +7,15 @@ status: In Progress
 assignee:
   - openai
 created_date: '2026-10-17 16:37'
-updated_date: '2026-10-20 05:24'
+updated_date: '2026-10-20 05:55'
 labels:
   - testing
   - integration
   - luna
 dependencies:
   - TASK-490.12
+references:
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17305508230'
 modified_files:
   - checks/integration-delivery/scenarios/fragments/activation.py
   - checks/integration-delivery/scenarios/fragments/activation.cjs
@@ -79,4 +81,6 @@ Owner explicitly selected the bounded manual live-switch contribution in the con
 Connected manual contribution executed via sh packages/ci/integration-owner-build.sh integration-delivery on x86_64-linux, input3db47c89-dirty. Latest VM evidence /nix/store/mrs8rm4yvf5lk9vklqs01qvmzp1zl9n7-vm-test-run-cf-it-delivery-delivery-lifecycle-run; driver303.80s, gateexit1 with13passed/1failed. Both real authored revisions were evaluated/built/published/acquired cold and actually activated through production UI. Target/profile/marker, one new full state per transition, two later heartbeats and exact succeeded request/history agree. Browser generation/history reload passed for both. All previous10cases retained. Rollback fails mandatory TASK499 authority prerequisite; no rollback or full .14 completion claim. Auto_latest/pinned, BootOnly/reboot, secondagentisolation and complete designparity remain open. FixtureGRUB correction is direct-boot test plumbing, not productbootloadercoverage.
 
 Original ten-case increment committed/pushed3db47c8953e3cf1f29473be7595a660d69e6a988; hostedpipeline2965867360 all8success with exact artifacts. Laterconnected code not covered bythatgreenpipeline. Access normal CI script executed fresh23/23 exit0 driver53.48s evidence /nix/store/ci1m5937pfh4b1p3hzpmgxfa88vlk47z-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run. Fullflakecheck on sameinputexit1 reusesidenticalA/DVMrunsandexecutesfailingDeliverygate. Docsvalidationexit0 58tests/215Mermaid/192concepts. DB517/0/0atclean3dbhosted; unchangedRustinputsnotrerunforfixture-onlyedits. No new production repair beyond separate d11de059 TASK496. TASK497/498/499/500 findings recorded.
+
+Connected implementation committed/pusheddf11c8005de5ab7088015757dafc7fa7602da188; coordinatorworktreeclean. Exactcleanhostedpipeline2966113736 Deliveryjob17305508230 executed14cases,13passed/1failedTASK499. NewVMdriver457.31s, artifact /nix/store/pjpcxlwrbp0qnbzgsj4f96px2h8ck7zq-vm-test-run-cf-it-delivery-delivery-lifecycle-run onrunner; downloadedresult /tmp/opencode/hosted-delivery-df11c800.json andbuildlog. BothmanualUIdeployment/activation/newstate/twoH/browserreloadcasespassed. Hostedtarget9d011241-e6c7-4ed3-bf59-ef76fb590be9, state1/H1,2 -> gen1/state2/H10,11 -> gen2/state3/H13,14. Rollbackauthoritystillnull/ineligible afterB; no rollbackrestoration. Access23/23atcleanhead;component/CVE/dashboardpassed,DBrunningatpoll. MR335descriptionandscreenshotupdated; taskremainsInProgressforbroadercriteria.
 <!-- SECTION:NOTES:END -->
