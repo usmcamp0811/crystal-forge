@@ -4,7 +4,7 @@ title: Restore certified rollback authority for native-evaluated deployments
 status: Backlog
 assignee: []
 created_date: '2026-10-20 04:21'
-updated_date: '2026-10-20 05:56'
+updated_date: '2026-10-20 06:04'
 labels: []
 dependencies: []
 references:
@@ -38,4 +38,6 @@ The connected Delivery workflow performed real Git/native evaluation/build/publi
 
 <!-- SECTION:NOTES:BEGIN -->
 Cleanhostedreproductionatdf11c8005de5ab7088015757dafc7fa7602da188, pipeline2966113736, Deliveryjob17305508230. BothactualCFmanageddeploymentscompleted, states1->2->3andeachnewstatehas2laterheartbeats. Freshgeneration1aftergeneration2: notcurrent, retainedidentitynull, rollbackeligiblefalse. Actualcasehistory-ui-rollback-restores-retained-output-and-correlates-current-state failsmandatoryprerequisite, notskip/expectedfailure. Fullresultdownloadedto/tmp/opencode/hosted-delivery-df11c800.json. Nativeproducer/V1retentionauthoritymismatchconfirmedbysourceinspection; normalV2ConfiginspectioncannotproviderequiredV1authority. Productrepairnotauthorized/started; keepBackloguntilownerdecision.
+
+Final hosted pipeline2966113736 statusFAILED at clean df11c800. Delivery17305508230 failed mandatory retained rollback prerequisite after13passingcases. Access17305508229 passed23/23; component/CVE/dashboardpassed; state-machine17305508234passed517/0/0across229summaries with explicit offlinepreparation. Complexity/coverage skipped afterrequiredDeliveryfailure. Fullresult/buildlogandscreenshot downloaded/inspected; MR335updatedandstilldraft. No productionrepairorrollbackauthoritybypassauthorized.
 <!-- SECTION:NOTES:END -->
