@@ -5,13 +5,14 @@ status: In Progress
 assignee:
   - openai
 created_date: '2026-10-17 16:37'
-updated_date: '2026-10-20 03:13'
+updated_date: '2026-10-20 05:24'
 labels:
   - testing
   - integration
   - luna
 dependencies:
   - TASK-490.14
+  - TASK-499
 modified_files:
   - checks/integration-delivery/scenarios/fragments/task-490.15-recovery.py
   - checks/integration-delivery/scenarios/fragments/task-490.15-recovery.cjs
@@ -58,4 +59,8 @@ Owner-selected retained-generation rollback contribution in existing coordinator
 Scenario isolation correction: TASK-490.14's generation/output/VM cannot be reused. Set up and perform the prior real deployment(s) in this scenario's own fresh targetA VM before exercising rollback and drift; reuse only immutable fixture definitions or role/helper code. Current foundation VM execution fails on TASK-490.25/.26, so remain Backlog.
 
 Owner explicitly selected retained-generation rollback after two actual CF-managed manual deployments in the same Delivery lifecycle. No drift/restart-recovery completion is implied. Use semantic recovery.py/.cjs filenames, not historical task-numbered paths. Coordinator owns shared fixture/composition.
+
+Mandatory rollback case executed after two completed manual CF-managed deployments and failed at fresh eligibility: firstgeneration1 is_current=false, generation_snapshot_id=null, rollback_eligible=false. No seeded snapshot/authority, alternatecommitrollback, skip/expectedfailure or allow_failure used. Actual restoration/UIrollbackrequest notexecuted. TASK499 is the newly observed blocking product dependency; its repair requires separate authorization and accepted artifact-authority strategy.
+
+Latest normal owner command sh packages/ci/integration-owner-build.sh integration-delivery exit1 on x86_64-linux at3db47c89-dirty,13passingcases and1mandatoryfailure,driver303.80s. Evidence /nix/store/mrs8rm4yvf5lk9vklqs01qvmzp1zl9n7-vm-test-run-cf-it-delivery-delivery-lifecycle-run and integration-evidence/integration-delivery. Semantic recovery.py/recovery.cjs composed into existing lifecycle only. Fresh before/after request identity checks and exact retained binding checks are implemented below the failing prerequisite but remain unexecuted. Broader drift/restart recovery notimplemented. KeepInProgress/draftMR335; neverreportrollbackpassed.
 <!-- SECTION:NOTES:END -->
