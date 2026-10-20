@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-19 05:37'
-updated_date: '2026-10-19 21:40'
+updated_date: '2026-10-20 05:23'
 labels: []
 dependencies: []
 references:
@@ -28,10 +28,10 @@ The real target agent registers and sends signed periodic heartbeat requests, bu
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 An unchanged registered target's periodic signed heartbeat is classified without a database comparison error.
-- [ ] #2 Persisted heartbeat and state identities remain correlated to the exact registered target and running generation.
-- [ ] #3 A genuine state change still creates the required full-state evidence rather than being misclassified as an unchanged heartbeat.
-- [ ] #4 An integration or isolated-database regression and affected source documentation describe and verify the intended classification and failure behavior.
+- [x] #1 An unchanged registered target's periodic signed heartbeat is classified without a database comparison error.
+- [x] #2 Persisted heartbeat and state identities remain correlated to the exact registered target and running generation.
+- [x] #3 A genuine state change still creates the required full-state evidence rather than being misclassified as an unchanged heartbeat.
+- [x] #4 An integration or isolated-database regression and affected source documentation describe and verify the intended classification and failure behavior.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -48,4 +48,10 @@ Owner-authorized narrow product repair, based on f6439851 in the dedicated TASK-
 
 <!-- SECTION:NOTES:BEGIN -->
 The owner explicitly authorized this smallest production repair and regressions in the current assignment. Dedicated worktree/branch TASK-496-heartbeat-classification is based on the refreshed coordinator reporting head f6439851. No schema redesign, deployment-policy/protocol change or unrelated agent repair is authorized.
+
+Separately attributable product repair: original5c8f5ee8 in TASK-496-heartbeat-classification; coordinator application d11de05967b2ade5c7e1f833317039de134c307a. It corrects historical SystemState row decoding with NULL::text AS boot_id; no schema/protocol redesign. systems.boot_id remains the reboot baseline. Commit3db47c8953e3cf1f29473be7595a660d69e6a988 adds consolidated-runner selections and strict unchanged-heartbeat integration assertions and is pushed to draft MR335. Hosted pipeline2965867360 passed all8jobs, exact clean3db47c89 artifacts Access23/Delivery10/DB517pass0fail0ignored229summaries. Artifacts downloaded and inspected; this pipeline proves the earlier unchanged subset, not later activation code.
+
+Changed-state acceptance now has real-agent evidence, not only a fabricated signed-handler payload: normal Delivery CI command executed in 3db47c89-dirty connected worktree on x86_64-linux. Initial running state1 has heartbeats1,2. Production UI deployed authored commit e5c115237b3d026f65dbfe74a86331e820a36c78; actual running/profile generation1 output /nix/store/wii9frwfwvkrl26a80kwizd3yrgq7q0l-nixos-system-targetA-test produced exactly one new full state2 and heartbeats6,7. Second real CF-authored/evaluated/built/published/UI-deployed revision9d79b584629e73ccdee7806d04d2d46217759581 activated generation2 output /nix/store/cz8flym2r8cxn39k1xwfj6m6244cpdld-nixos-system-targetA-test; exactly one new full state3, heartbeats9,10. Registered systemf1addf9f-3f84-4b8b-9598-c244d29ae307. No direct state writes, fake report, stopped agent, duplicate unchanged full states or comparison errors.
+
+Evidence /nix/store/mrs8rm4yvf5lk9vklqs01qvmzp1zl9n7-vm-test-run-cf-it-delivery-delivery-lifecycle-run/result.json and browser/journals. OverallDelivery remainsFAILED13passed/1failed at mandatory retained rollback eligibility (TASK499); this is independent of the now-executed changed-state classification. Keep task In Progress pending integrated publication/hosted handoff; do not mark Done. Rollback acceptance and parent overhaul are not satisfied by this task.
 <!-- SECTION:NOTES:END -->
