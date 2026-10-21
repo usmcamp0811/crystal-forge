@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-21 15:01'
+updated_date: '2026-10-21 15:36'
 labels:
   - testing
   - integration
@@ -70,4 +70,12 @@ Current readiness: bba718be controller foundation passed; .16 producer/setup, ac
 Bounded real host-triage contribution executed in current Assurance lifecycle at9f53fade-dirty (46records45passed1historicalcopyfailure overall). triage.py/.cjs create actual System CVEs Schedule patch from real scanned/deployed Current throughbrowser, compareexacthost/CVE/package/actor/disposition/POAMfindinglinkandfullbaseline viaSQL/APIandreload. Real scopedViewer withvalidCSRF cannotremovehostschedule; nine remediation-table snapshots unchanged. Evidence y2nmb68nf9raqmv4ssj07njmxca4nc44.../browser/triage-create and result.json. AC1/3checked. Batch/fleetselectedsetandunselectedisolationremainunimplemented; tasknotReview/Done. Sameinvocationonly; no seeds/cross-scenariofindings.
 
 Resumed by the user's explicit instruction to continue existing Assurance coverage after the two presentation repairs. Existing task-owned coordinator worktree/branch and TASK-490.20 lock retained. Prerequisite producer lifecycle now passes normal integration-assurance owner at clean5ef2d0b0; exact case/evidence audit pending count extraction, no wider .16 completion inferred. Continue only triage.py/.cjs and preserve downstream .21/.29 plan/verification state.
+
+Implemented and published bounded continuation asdbf50b4746a6ed3818aed85af68f26251f4b9d52 in existing draftMR335. Exactly triage.py/.cjs plus coordinator coverage record changed; no product/API/schema/fixture/composition/registration/check-inventory edits. Existing real host Schedule patch journey now reads exact persisted POA&M detail, reopens/cancels the same editor twice with fresh exact-target triageGETs, checks actor/hostscope/schedule/typedowner/date2027-02-01/authoredplan and existing metadata read-only controls, and observes no extra triage/remediation mutation. Full API detail stays equal; exposed baseline/finding/link identities are cross-checked against SQL. This is not SQL before/after proof for the browser reopen phase.
+
+New Admin invalid-host-schedule case actually executes with authenticatedAdmin and validCSRF: missingPOA&M payload returns400invalid_poam_payload; all9protectedremediationtables, originalcompletedscan seal and fullobservations remain unchanged; subsequentexacttriageGETpreserves the schedule. ScopedViewer denial and downstreammaintenance/correctedCurrent/verification/closure remain passing. Successfulfleet/batch application and unselected-finding isolation remainopen; no newauthoredfinding or scopeexpansion inferred.
+
+Normal owner `nix develop --command sh packages/ci/integration-owner-build.sh integration-assurance` passed twice with freshVMs: 5ef2d0b0-dirty47records/41distinctnames,driver246.38s,output39bxp18w8ap718xx0r6f63h9imv7fcz8,logtool_15f079864001VWEEOmUW7YS1io; then cleanpublisheddbf50b4746a6ed3818aed85af68f26251f4b9d52 exited0 with47passed/0failedrecords/41distinctnames,driver245.18s,outputnmhzwmd2dkm0l0jjkq2w4yyid284k33x,logtool_15f163a4b001tYuzXnHsCeUzqc. result.json/meta.json match exactcleanhead. Dirtyresultwasnotrelabeledaftercommit. Node syntax/PythonAST/scopedwhitespace checks passed. Knowledgevalidator58tests/215Mermaid/192concepts passedoutputx14sh5scv4c9k8pv7bh49sspm58b105c.
+
+Final clean-head evidence bundle https://gitlab.com/-/project/70402481/uploads/1e1b9abf4a07f69a1b78eda846ef8747/mr335-assurance-continuation-dbf50b47.tar.gz ; real reopened editor screenshot uploaded inlineMR335 at /uploads/843c2389ff6ad447b87273de66c37c89/triage-host-scheduled-reopened-1.png . No traces/journals/sessionheaders uploaded. MRremainsdraft; currentheadpipeline2972675961pending at singlelastsnapshot, nohostedpassclaimed. TaskInProgressandwiderACsremainopen. Coordinatorpreviewssessionsproduction8090/API3490/taskPG5490anddesign39997areverifiedandretained; no userdatabase touched.
 <!-- SECTION:NOTES:END -->
