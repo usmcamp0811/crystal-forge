@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-21 08:22'
+updated_date: '2026-10-21 15:01'
 labels:
   - testing
   - integration
@@ -55,6 +55,8 @@ Focused verification after composition: `nix build .#checks.x86_64-linux.integra
 
 <!-- SECTION:PLAN:BEGIN -->
 User selected a bounded real host-triage contribution in the continuing Assurance lifecycle (2026-10-21), in the existing coordinator worktree/branch under explicit shared composition authority. Real vulnerable builder scan and deployed Current have now executed at 9f53fade-dirty. Add only triage.py/.cjs: actual System CVEs Schedule patch, exact host/CVE/package/source identity, persisted disposition and browser reload; scoped Viewer write rejected without row changes. Reuse fresh same-scenario receipts. Batch/fleet selected-set isolation remains open; no waiver/acceptance or product changes. Coordinator owns composition/registration. Verify via normal Assurance owner and retained browser/SQL evidence.
+
+After the two authorized TASK-490.16 presentation repairs passed the normal Assurance owner locally at clean pushed5ef2d0b0, resume a bounded test-only increment in existing triage.py/.cjs. Extend the actual scheduled-host journey with editor reopen/hydration/cancel and repeated read checks; assert no extra write and unchanged protected remediation/baseline snapshots. Add authorized Admin invalid host schedule payload without POA&M:400invalid_poam_payload and no side effects with valid CSRF. Use existing real same-run finding/actor/source receipts and do not change fixture facts, APIs, product UI, composition or check inventory. Fleet/batch successful selected-set isolation remains open because the current authored set has one pair and System CVEs batch controls have a separate design gap. Coordinator owns verification/publication through the same normal Assurance lifecycle.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -66,4 +68,6 @@ Current readiness: bba718be controller foundation passed; .16 producer/setup, ac
 2026-10-17 reviews recorded foundation blockers and a need to split mixed remediation scope. That split produced .27 waiver, .28 acceptance and .29 verification; .20 is triage only. Earlier separate-run proposals could not reuse .16 live findings. Same-scenario real producer receipts are now permitted.
 
 Bounded real host-triage contribution executed in current Assurance lifecycle at9f53fade-dirty (46records45passed1historicalcopyfailure overall). triage.py/.cjs create actual System CVEs Schedule patch from real scanned/deployed Current throughbrowser, compareexacthost/CVE/package/actor/disposition/POAMfindinglinkandfullbaseline viaSQL/APIandreload. Real scopedViewer withvalidCSRF cannotremovehostschedule; nine remediation-table snapshots unchanged. Evidence y2nmb68nf9raqmv4ssj07njmxca4nc44.../browser/triage-create and result.json. AC1/3checked. Batch/fleetselectedsetandunselectedisolationremainunimplemented; tasknotReview/Done. Sameinvocationonly; no seeds/cross-scenariofindings.
+
+Resumed by the user's explicit instruction to continue existing Assurance coverage after the two presentation repairs. Existing task-owned coordinator worktree/branch and TASK-490.20 lock retained. Prerequisite producer lifecycle now passes normal integration-assurance owner at clean5ef2d0b0; exact case/evidence audit pending count extraction, no wider .16 completion inferred. Continue only triage.py/.cjs and preserve downstream .21/.29 plan/verification state.
 <!-- SECTION:NOTES:END -->
