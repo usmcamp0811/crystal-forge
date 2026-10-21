@@ -1,10 +1,11 @@
 ---
 id: TASK-490.20
 title: 'Assurance: real finding triage and batch-triage persistence scenario'
-status: Backlog
-assignee: []
+status: To Do
+assignee:
+  - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-19 02:14'
+updated_date: '2026-10-21 06:19'
 labels:
   - testing
   - integration
@@ -49,6 +50,12 @@ Focused verification after composition: `nix build .#checks.x86_64-linux.integra
 - [ ] #5 Coordinator composes only the named triage fragments into evidence-remediation-lifecycle; waiver/acceptance/plan/verification remain separate fragments and no packet-specific derivation is added
 - [ ] #6 Coordinator executes the focused evidence-remediation-lifecycle gate and records exact tested revision, command, result and evidence
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+User selected a bounded real host-triage contribution in the continuing Assurance lifecycle (2026-10-21), in the existing coordinator worktree/branch under explicit shared composition authority. Real vulnerable builder scan and deployed Current have now executed at 9f53fade-dirty. Add only triage.py/.cjs: actual System CVEs Schedule patch, exact host/CVE/package/source identity, persisted disposition and browser reload; scoped Viewer write rejected without row changes. Reuse fresh same-scenario receipts. Batch/fleet selected-set isolation remains open; no waiver/acceptance or product changes. Coordinator owns composition/registration. Verify via normal Assurance owner and retained browser/SQL evidence.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
