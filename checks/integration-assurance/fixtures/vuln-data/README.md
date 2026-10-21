@@ -18,8 +18,9 @@ Import `default.nix` with the scenario's `pkgs` and optional `years` (default
 | `packages.corrected` | Real `cf-assurance-demo-2.0` derivation. Replace 1.0 in the second system closure. |
 | `feedRoot` | Gzip NVD 2.0 tree under `feeds/json/cve/2.0/`. Only 2026, modified and recent contain the advisory. Other supported years are valid empty feeds. |
 | `faultFeedRoot` | Same filenames, valid gzip containing malformed JSON. No scanner executable is replaced. |
+| `terminalFaultFeedRoot` | Same filenames, valid gzip/JSON with the matching demo advisory's CVSS score set to `11`. Real vulnix emits the score; the real builder rejects it deterministically. Use only with the vulnerable closure. |
 | `servicesModule` | Function `{ sslCertificate, sslCertificateKey, listenAddress ? "0.0.0.0", port ? 443 }` returning a NixOS module for the existing services VM. TLS paths are strings to coordinator-provisioned files. |
-| `feedCommands.normal` / `.fault` | Root shell commands for the services VM. Atomically select the normal/fault document root. No nginx restart is needed. |
+| `feedCommands.normal` / `.fault` / `.terminalFault` | Root shell commands for the services VM. Atomically select the normal, transient-fault or terminal-fault document root. No nginx restart is needed. |
 
 `facts.json` has exact values: `scannerVersion = "vulnix 1.12.4"`,
 `package = "cf-assurance-demo"`, `vulnerableVersion = "1.0"`,
@@ -108,6 +109,8 @@ Call at real lifecycle boundaries:
 # After evaluation, before a build creates a post_build intent (not merely
 # before releasing the scanner): record systemId and derivationId first.
 assurance_cve_missing("vulnerable")
+with case("cve-missing-production-ui"):
+    run_browser(controller, "cve-missing")
 
 # Build the vulnerable closure through CF, then record the six build receipts.
 assurance_cve_completed("vulnerable", builderA)
@@ -119,6 +122,10 @@ with case("cve-first-real-scan-production-ui"):
 assurance_cve_current("vulnerable")
 with case("cve-first-current-finding-navigation"):
     run_browser(controller, "cve-current")
+# These real same-scenario sessions need read scope for this system.
+assurance_cve_permissions("assurance-viewer", "assurance-operator")
+with case("cve-viewer-production-ui"):
+    run_browser(controller, "cve-viewer")
 # Downstream triage/POA&M cases can now consume this exact finding baseline.
 
 # Build corrected in this same scenario; do not activate it yet.
@@ -130,6 +137,12 @@ with case("cve-current-versus-built-clean-production-ui"):
 # Activate corrected, then persist its actual deployment receipt.
 assurance_cve_current("corrected")
 assurance_cve_historical("vulnerable")
+with case("cve-activated-clean-production-ui"):
+    run_browser(controller, "cve-clean")
+with case("cve-historical-production-ui"):
+    run_browser(controller, "cve-historical")
+with case("cve-read-error-and-retry-production-ui"):
+    run_browser(controller, "cve-read-error")
 ```
 
 `completed()` reads the actual builder closure and package deriver, then checks
@@ -191,8 +204,8 @@ Do not restore the normal feed between the requeue event and the assertions.
 Malformed upstream JSON makes pinned vulnix exit **1**, which the production
 builder classifies as **transient**. It does not prove a terminal failed scan.
 `assurance_cve_failed(variant, scan_id)` is a separate assertion for a genuinely
-deterministic injected execution failure. No such terminal fault producer is
-provided by these NVD feeds. Keep that acceptance gap open. The helper checks
+deterministic injected execution failure. The separate terminal feed below
+provides that input. The helper checks
 failed/schema-0 evidence, no digest/observations, and the fenced
 `attempt_failed` event; it adds `failedScanId`.
 
@@ -221,7 +234,7 @@ tree. Existing assertions retain the accepted evidence meanings. Added early
 entry points extend execution timing; they do not approve production deviations.
 The first exact scan can be inspected independently of activation/rollback.
 Current still requires actual activation and agent observation. Failed/missing,
-post-activation clean and historical UI coverage remain unexecuted obligations;
+post-activation clean and historical UI exports remain unexecuted obligations;
 the existing full browser entry point proves vulnerable Current versus built
 clean only when actually run. Screenshots alone do not prove design conformance.
 
@@ -263,3 +276,161 @@ Both commands exited 0 on 2026-10-20 at base `d11de059` with these producer
 files. The scanner subprocess exits were 2 (one exact authored finding) and 0
 (`[]`, corrected). Invalid gzip payloads were rejected by the real NVD parser;
 this run did not execute the cold-download fault CLI path.
+
+## Bounded extension interface (producer `b1c8485b`, integration `0f7f94dd`)
+
+The existing `scan`, `current`, and full `run` exports retain their signatures
+and timing. Register each additional browser phase using the same adapter as
+`cve-scan`; for example:
+
+```nix
+"cve-missing" = pkgs.writeText "cve-missing.cjs" ''
+  exports.run = require("${cveSpec}").missing;
+'';
+```
+
+| browserSpecs key | `cve.cjs` export | Required lifecycle boundary and new receipt |
+| --- | --- | --- |
+| `cve-missing` | `missing` | After `missing("vulnerable")`, before build admission. Emits `assurance.cve.browserMissingDerivationId` (integer). |
+| `cve-viewer` | `viewer` | Vulnerable Current proven. `facts.cveViewer = {username, password}` must identify a real Viewer with read scope for this system. Emits `browserViewerScanId`. |
+| `cve-clean` | `clean` | Corrected activated and `current("corrected")` passed. Checks completed-empty System CVEs and exact `/scanning` execution. Emits `browserCleanScanId`. |
+| `cve-historical` | `historical` | After `historical("vulnerable")`; requires corrected Current. Checks original source, authored CVE, read-only, no triage, and exact selection after reload. Emits `browserHistoricalScanId`. |
+| `cve-read-error` | `readError` | Original vulnerable source still newest for its exact target. Aborts only its inventory GET transport, then removes interception before clicking Retry. Asserts actual retried API source/rows and no API writes. Emits `browserReadRetryScanId`. |
+| `cve-failed` | `failed` | After `terminal_fault_rescan()`, before retry. Checks original source plus failed attempt, visible failure notice, exact `/scanning` diagnostic execution and retry control. Emits `browserFailedScanId`. |
+| `cve-retry` | `retry` | After failed UI evidence and normal-feed restoration/cache reset. Clicks real Admin retry. Checks HTTP 202, exact target and fresh intent. Emits `browserRetryScanId`. |
+
+All `browser*ScanId` receipts above use the prefix `assurance.cve.` and are
+UUID strings. Each phase signs in using the real UI and records its screenshot
+through the shared runner. No success response is mocked. `readError` injects
+only a browser transport failure and never changes stored evidence.
+
+New Python interfaces (default administrator jar remains `delivery-admin`):
+
+- `assurance_cve_terminal_fault_rescan(session=...) -> scan_id`: enqueues a
+  new vulnerable-target rescan and waits for the exact deterministic failure.
+- `assurance_cve_failed(variant, scan_id, session=..., expected_error=None)`:
+  existing assertion extended with optional exact error, real scan-detail API
+  and execution diagnostic checks. Adds `failedScanId`, `failedExecutionId`
+  (UUID strings) and `failedError` (string) under `assurance.<variant>.`.
+- `assurance_cve_permissions(viewer_session, operator_session)`: both real
+  authenticated jars must have scoped system read access. Asserts Current
+  inventory matches the authored vulnerable source, diagnostics GET is 403,
+  exact rescan POST with valid CSRF is 403, and denied requests create no scan.
+  These are Admin-only scanner operations, not Operator triage operations.
+- `assurance_cve_retry(session=...)`: after `cve-retry`, checks the emitted
+  retry UUID exists as a new manual intent on the exact derivation. Checks the
+  old failure's status/execution/class/error/digest remain unchanged. Admission
+  is not completion; this helper does not claim a repaired scan is complete.
+- `missing()` adds `assurance.<variant>.missingProven = true`;
+  `historical()` adds `assurance.<variant>.historicalProven = true`.
+
+### Terminal fault and recovery sequence
+
+Keep this after downstream baseline consumers. Use the isolated scenario
+builder only. Competing remote scanners and server-local fallback must not
+claim the rescan. The coordinator owns those controls. Stop the builder unit,
+confirm scanner exit, and clear its actual vulnix cache as described above.
+Switch services to `feedCommands.terminalFault`, resume the real builder, then:
+
+```python
+try:
+    scan_id = assurance_cve_terminal_fault_rescan()
+    with case("cve-terminal-fault-production-ui"):
+        run_browser(controller, "cve-failed")
+finally:
+    services.succeed(cve_terminal_restore_command)  # feedCommands.normal
+    # Coordinator stops the isolated builder, confirms scanner exit, clears
+    # only its upstream cache, then resumes it before the recovery retry.
+
+with case("cve-real-admin-retry-production-ui"):
+    run_browser(controller, "cve-retry")
+assurance_cve_retry()
+```
+
+`cve_terminal_restore_command` is the coordinator's literal rendering of
+`cveData.feedCommands.normal`, not a new fixture export. Restore the normal
+feed even on failure. Reset the builder cache **again** before recovery: a
+warm invalid-score archive otherwise persists for two hours. Do not issue a
+second retry while another intent is active; this phase requires `enqueued=true`.
+After repaired completion, the retry scan can become the newest eligible
+vulnerable-target source. Original write-once `scanId` remains audit identity,
+not a claim that the original source stays newest.
+
+Mechanism and source rationale at producer base:
+
+1. `default.nix:terminalAdvisory` changes only authored upstream
+   `metrics.cvssMetricV31[0].cvssData.baseScore` to `11`. All year/update files
+   carry that advisory so a cold or incremental request sees the fault.
+2. Packaged vulnix 1.12.4 `vulnerability.py:Vulnerability.parse` converts the
+   score with `float()` without a range check. The real CLI emits `11.0` for
+   `cf-assurance-demo-1.0` and exits 2. It still emits `[]`/exit 0 for 2.0;
+   therefore this fault requires the vulnerable closure, not the clean one.
+3. `cf-builder/src/builder/cve_scanner.rs:parse_vulnix_output` accepts exit 2.
+   `assemble_result` rejects a score outside `0.0..=10.0` with
+   `Deterministic` / `vulnix returned an invalid CVSS score`. `execute_claim`
+   calls the real failure API rather than completion.
+4. `cf-server/src/queries/cve_scan_leases.rs:fail_remote_cve_scan` fences the
+   real builder/session/execution/lease, persists `failed`, `execution_outcome
+   = failed`, `failure_class = deterministic` and `attempt_failed`. It clears
+   lease fields and never seals a successful digest/observation set.
+5. Missing store outputs/materialization failures, ordinary scanner non-0/2
+   exits and timeouts are transient. They are not substitutes for this case.
+
+Only upstream fault data is authored. No executable, CF result, scan status,
+finding, lease or database row is replaced. The real scanner **succeeds at
+execution**; the real builder's evidence validator makes the scan terminal
+failed. This is a controlled invalid scanner-input/result fault, not proof of
+a vulnix crash. Cold HTTPS transport, CF persistence, and rendered-browser
+results require Sol's lifecycle execution.
+
+### Extension verification
+
+Executed through the task's Nix environment; no servers or VMs were started:
+
+```sh
+nix develop --command nix build --impure --no-link --print-out-paths --expr '
+  let f = builtins.getFlake (toString ./.);
+      pkgs = f.inputs.nixpkgs.legacyPackages.x86_64-linux;
+      v = import ./checks/integration-assurance/fixtures/vuln-data { inherit pkgs; };
+  in [ v.feedRoot v.faultFeedRoot v.terminalFaultFeedRoot v.packages.vulnerable v.packages.corrected ]'
+
+nix develop --command nix shell --impure --expr '
+  let f = builtins.getFlake (toString ./.);
+      p = f.inputs.nixpkgs.legacyPackages.x86_64-linux;
+  in p.python3.withPackages (_: [ p.vulnix ])' --command python3 \
+  checks/integration-assurance/fixtures/vuln-data/verify-offline.py \
+  --scanner /nix/store/bvq5j3kxzjrmmw95yb2fi4xmxfwybxi6-vulnix-1.12.4/bin/vulnix \
+  --feed-root /nix/store/8yk8qdny3y41iynzzrq7d1796d3wzaly-assurance-nvd-feeds \
+  --fault-feed-root /nix/store/smz8g0milq2kjl9cvags932s4vdrkp4z-assurance-invalid-nvd-feeds \
+  --terminal-fault-feed-root /nix/store/yq6793fml7y3p65vzccc70yb9pbsk7gx-assurance-invalid-cvss-nvd-feeds \
+  --vulnerable /nix/store/ngmjz6k50r5nx6ca4f18xyy94n72v307-cf-assurance-demo-1.0 \
+  --corrected /nix/store/qcm1b1lcn5rqw1q99f7n7xnp00w5qj5l-cf-assurance-demo-2.0
+
+nix develop --command nix shell --impure --expr \
+  '(builtins.getFlake (toString ./.)).inputs.nixpkgs.legacyPackages.x86_64-linux.nodejs' \
+  --command node --check checks/integration-assurance/scenarios/fragments/cve.cjs
+```
+
+Build and real CLI checks exited 0. Both normal and terminal feeds produced
+exit 2 for 1.0 and exit 0 for 2.0; exact CVE, package, deriver and scores were
+asserted. Every terminal gzip was parsed by the real parser. No cold download
+was exercised: this component check uses a temporary parsed upstream cache
+and a dead-loopback mirror. It does not claim CF terminal failure persistence.
+The authoritative lifecycle gate remains unexecuted by this worker. Preserve
+correct assertions on any product conflict and report the exact defect to Sol.
+
+Additional exact successful verifier commands (all exit 0):
+
+```sh
+nix develop --command nix shell --impure --expr '(builtins.getFlake (toString ./.)).inputs.nixpkgs.legacyPackages.x86_64-linux.nodejs' --command node -e 'const assert = require("node:assert/strict"); const m = require("./checks/integration-assurance/scenarios/fragments/cve.cjs"); assert.deepEqual(Object.keys(m).sort(), ["scan", "current", "run", "missing", "historical", "clean", "failed", "retry", "readError", "viewer"].sort()); for (const fn of Object.values(m)) assert.equal(typeof fn, "function"); console.log("PASS: CommonJS module and 10 phase exports");'
+
+nix develop --command python3 -c 'import ast,json; from pathlib import Path; root=Path("checks/integration-assurance"); paths=[root/"scenarios/fragments/cve.py",root/"fixtures/vuln-data/verify-offline.py"]; [ast.parse(p.read_text(),filename=str(p)) for p in paths]; json.loads((root/"fixtures/vuln-data/facts.json").read_text()); paths += [root/"scenarios/fragments/cve.cjs",root/"fixtures/vuln-data/README.md",root/"fixtures/vuln-data/default.nix"]; assert all(line.rstrip()==line for p in paths for line in p.read_text().splitlines()); print("PASS: Python AST, facts JSON and changed-file whitespace")'
+
+nix develop --command nix-instantiate --parse checks/integration-assurance/fixtures/vuln-data/default.nix
+git diff --check
+```
+
+Source comparison `git diff b1c8485b 0f7f94dd --stat --` for the scanner,
+lease-failure query, CVE/scanning handlers, CVE component and scanning/fleet
+views returned no changes. Their inspected contracts apply to the stated
+integration mapping. No product conflict was runtime-tested by this worker.

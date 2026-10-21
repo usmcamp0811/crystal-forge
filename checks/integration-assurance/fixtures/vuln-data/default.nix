@@ -18,8 +18,8 @@
 # a warm cache skips updates for two hours. Restore feedRoot after the fault.
 # This fault changes the upstream input only, never the vulnix executable.
 # vulnix exits 1 for this JSONDecodeError. cf-builder classifies exit 1 as
-# transient and requeues the attempt. This fixture does not prove terminal
-# failed-scan semantics; those require a separate deterministic execution fault.
+# transient and requeues the attempt. terminalFaultFeedRoot separately provides
+# valid JSON with an out-of-range score for a deterministic builder rejection.
 { pkgs, years ? pkgs.lib.range 2021 2031 }:
 let
   facts = builtins.fromJSON (builtins.readFile ./facts.json);
@@ -66,6 +66,22 @@ let
     timestamp = "2026-01-01T00:00:00.000";
   });
   populated = feed [ advisory ];
+  # The real parser accepts numeric scores without a range check. The real
+  # builder rejects 11 in assemble_result before it can seal observations.
+  # Keep this separate from malformed JSON, whose exit 1 is transient.
+  terminalAdvisory = pkgs.lib.recursiveUpdate advisory {
+    cve.metrics.cvssMetricV31 = [{
+      source = "assurance@example.invalid";
+      type = "Primary";
+      cvssData = {
+        version = "3.1";
+        vectorString = "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:H/I:H/A:H";
+        baseScore = 11;
+        baseSeverity = "CRITICAL";
+      };
+    }];
+  };
+  terminalFeed = feed [ terminalAdvisory ];
   empty = feed [];
   malformed = pkgs.writeText "assurance-invalid-nvd.json" "{invalid upstream JSON\n";
   package = version: pkgs.runCommand "${facts.package}-${version}" {
@@ -99,6 +115,14 @@ in rec {
       gzip -n -c ${malformed} > "$out/feeds/json/cve/2.0/nvdcve-2.0-${name}.json.gz"
     '') ((map toString years) ++ [ "modified" "recent" ])}
   '';
+  terminalFaultFeedRoot = pkgs.runCommand "assurance-invalid-cvss-nvd-feeds" {
+    nativeBuildInputs = [ pkgs.gzip ];
+  } ''
+    mkdir -p "$out/feeds/json/cve/2.0"
+    ${pkgs.lib.concatMapStringsSep "\n" (name: ''
+      gzip -n -c ${terminalFeed} > "$out/feeds/json/cve/2.0/nvdcve-2.0-${name}.json.gz"
+    '') ((map toString years) ++ [ "modified" "recent" ])}
+  '';
   # Compose this module into the existing services VM. The coordinator owns
   # certificate provisioning, builder trust, hostname routing and scan opt-in.
   servicesModule = import ./service.nix { inherit feedRoot; };
@@ -108,5 +132,6 @@ in rec {
   in {
     normal = select feedRoot;
     fault = select faultFeedRoot;
+    terminalFault = select terminalFaultFeedRoot;
   };
 }

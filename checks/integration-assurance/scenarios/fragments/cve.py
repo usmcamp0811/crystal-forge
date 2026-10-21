@@ -26,8 +26,9 @@
 # earlier completed source. These cases never manufacture failures or success.
 # fault_rescan(variant) uses faultFeedRoot and proves an actual transient failure
 # and requeue, NOT a terminal failed scan. The real pinned scanner exits 1 on
-# malformed upstream JSON; cf-builder treats that exit as transient. A separate
-# deterministic fault is required before calling failed(). Clear the builder's
+# malformed upstream JSON; cf-builder treats that exit as transient.
+# terminal_fault_rescan() instead uses the valid-JSON invalid-CVSS feed and
+# checks the deterministic builder rejection. Clear the builder's
 # upstream cache first: warm vulnix skips feed downloads for two hours. Restore
 # the normal feed afterward; do not reuse this variant's original source receipt
 # as its newest source after the repaired rescan completes.
@@ -226,7 +227,9 @@ def assurance_cve_historical(variant, session="delivery-admin"):
         expect_equal(len(sealed), 1, "historical sealed scan still exists")
         expect_equal(sealed[0], {field: r[key + "scanEvidence"][field] for field in sealed[0]},
                      "completed scan seal remains unchanged across generations")
-        return assurance_cve_inventory(variant, session=session)
+        inventory = assurance_cve_inventory(variant, session=session)
+        receipt(key + "historicalProven", True)
+        return inventory
 
 
 def assurance_cve_built_not_deployed(session="delivery-admin"):
@@ -270,9 +273,11 @@ def assurance_cve_missing(variant, session="delivery-admin"):
         expect_equal(inventory.get("attempt"), None, "never scanned has no attempt")
         expect_equal(inventory["evidence_representation"], None, "no schema-1 evidence")
         expect_equal(inventory["vulnerabilities"], [], "missing is empty without claiming clean")
+        expect_equal(inventory["read_only"], True, "missing evidence grants no mutation authority")
+        receipt(key + "missingProven", True)
 
 
-def assurance_cve_failed(variant, scan_id, session="delivery-admin"):
+def assurance_cve_failed(variant, scan_id, session="delivery-admin", expected_error=None):
     """Checks a real injected-fault rescan without replacing completed evidence."""
     key = "assurance." + variant + "."
     r = receipts()
@@ -294,6 +299,8 @@ def assurance_cve_failed(variant, scan_id, session="delivery-admin"):
         expect_equal(row["failure_class"], "deterministic", "terminal scanner failure classification")
         expect_equal(row["result_digest_sha256"], None, "failed scanner has no canonical evidence digest")
         expect(bool(row["error"] and row["execution_id"]), "failed scanner lacks execution diagnostics")
+        if expected_error is not None:
+            expect_equal(row["error"], expected_error, "controlled terminal fault cause")
         expect_equal(sql_json(controller, "SELECT scan_id FROM cve_scan_vulnerability_observations WHERE scan_id=" +
                               literal(scan_id) + "::uuid"), [], "failed execution has no sealed observations")
         diagnostics = sql_json(controller,
@@ -304,7 +311,80 @@ def assurance_cve_failed(variant, scan_id, session="delivery-admin"):
         inventory = assurance_cve_inventory(variant, session=session)
         expect_equal(inventory["attempt"]["scan_id"], scan_id, "newest failed attempt is distinct from source")
         expect_equal(inventory["attempt"]["status"], "failed", "failed inventory attempt")
+        status, detail = http(controller, "GET", "/api/v1/scanning/scans/" + scan_id, session=session)
+        expect_equal(status, 200, "exact failed scan detail")
+        expect_equal(detail["scan_id"], scan_id, "failed detail identity")
+        expect_equal(detail["derivation_id"], r[key + "derivationId"], "failed detail target")
+        expect_equal(detail["status"], "failed", "failed detail status")
+        expect(any(e["execution_id"] == row["execution_id"] and e["event_type"] == "attempt_failed"
+                   for e in detail["events"]), "failed detail lacks exact execution event")
         receipt(key + "failedScanId", scan_id)
+        receipt(key + "failedExecutionId", row["execution_id"])
+        receipt(key + "failedError", row["error"])
+
+
+def assurance_cve_terminal_fault_rescan(session="delivery-admin"):
+    """Queues a real vulnerable rescan after the owner selects terminalFaultFeedRoot.
+
+    The owner must stop competing scanners, clear only this isolated builder's
+    upstream cache, select feedCommands.terminalFault, and resume the builder.
+    Restore the normal feed in finally after failed/browser assertions finish.
+    """
+    r = receipts()
+    with case("cve-enqueue-controlled-invalid-cvss-rescan"):
+        status, queued = http(controller, "POST", "/api/v1/cves/rescan/" +
+            str(int(r["assurance.vulnerable.derivationId"])), session=session, csrf=True)
+        expect_equal(status, 202, "terminal fault rescan admitted")
+        expect_equal(queued["derivation_id"], r["assurance.vulnerable.derivationId"], "fault target")
+        expect_equal(queued["enqueued"], True, "fault needs a new exact intent")
+        scan_id = queued["scan_id"]
+    assurance_cve_failed("vulnerable", scan_id, session=session,
+                         expected_error="vulnix returned an invalid CVSS score")
+    return scan_id
+
+
+def assurance_cve_permissions(viewer_session, operator_session):
+    """Checks scoped reads and Admin-only rescan denial without creating work."""
+    r = receipts()
+    drv = str(int(r["assurance.vulnerable.derivationId"]))
+    with case("cve-read-roles-cannot-enqueue-admin-scans"):
+        before = sql_json(controller, "SELECT id::text FROM cve_scans WHERE derivation_id=" + drv + " ORDER BY id")
+        for session in (viewer_session, operator_session):
+            assurance_cve_inventory("vulnerable", current=True, session=session)
+            status, _ = http(controller, "GET", "/api/v1/scanning/scans/" +
+                             r["assurance.vulnerable.scanId"], session=session)
+            expect_equal(status, 403, "execution diagnostics are Admin-only")
+            status, _ = http(controller, "POST", "/api/v1/cves/rescan/" + drv,
+                             session=session, csrf=True)
+            expect_equal(status, 403, "only Admin may rescan even with valid CSRF")
+        expect_equal(sql_json(controller, "SELECT id::text FROM cve_scans WHERE derivation_id=" + drv +
+                              " ORDER BY id"), before, "denied role requests create no scan intent")
+
+
+def assurance_cve_retry(session="delivery-admin"):
+    """Checks the browser-admitted retry and preserves the exact failed execution.
+
+    This asserts admission, not completion. Recovery may select a new completed
+    source; do not reuse the original source receipt as the newest after retry.
+    """
+    r = receipts()
+    with case("cve-browser-retry-preserves-terminal-failure"):
+        retry = r["assurance.cve.browserRetryScanId"]
+        failed = r["assurance.vulnerable.failedScanId"]
+        expect(retry not in (failed, r["assurance.vulnerable.scanId"]), "retry reuses old evidence")
+        rows = sql_json(controller,
+            "SELECT id::text, derivation_id, source_trigger FROM cve_scans WHERE id=" + literal(retry) + "::uuid")
+        expect_equal(rows, [{"id": retry, "derivation_id": r["assurance.vulnerable.derivationId"],
+                             "source_trigger": "manual"}], "real browser retry intent")
+        rows = sql_json(controller,
+            "SELECT status, execution_id::text, failure_class, scan_metadata->>'error' AS error, "
+            "result_digest_sha256 FROM cve_scans WHERE id=" + literal(failed) + "::uuid")
+        expect_equal(rows, [{"status": "failed", "execution_id": r["assurance.vulnerable.failedExecutionId"],
+                             "failure_class": "deterministic", "error": r["assurance.vulnerable.failedError"],
+                             "result_digest_sha256": None}], "retry cannot rewrite failed execution")
+        status, detail = http(controller, "GET", "/api/v1/scanning/scans/" + failed, session=session)
+        expect_equal(status, 200, "old failed execution stays readable after retry")
+        expect_equal(detail["status"], "failed", "retry is a new intent, not a status rewrite")
 
 
 def assurance_cve_fault_rescan(variant, session="delivery-admin"):

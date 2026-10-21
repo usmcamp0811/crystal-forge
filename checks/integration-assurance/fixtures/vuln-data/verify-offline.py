@@ -22,6 +22,7 @@ def main():
     parser.add_argument("--scanner", required=True)
     parser.add_argument("--feed-root", required=True, type=Path)
     parser.add_argument("--fault-feed-root", required=True, type=Path)
+    parser.add_argument("--terminal-fault-feed-root", type=Path)
     parser.add_argument("--vulnerable", required=True)
     parser.add_argument("--corrected", required=True)
     args = parser.parse_args()
@@ -44,6 +45,20 @@ def main():
         else:
             raise AssertionError(f"fault archive unexpectedly parsed: {path}")
 
+    check_cli(args, facts, feeds, facts["cvssV3"])
+    if args.terminal_fault_feed_root:
+        terminal_feeds = args.terminal_fault_feed_root / "feeds/json/cve/2.0"
+        for path in sorted(terminal_feeds.glob("*.gz")):
+            archive = Archive(path.name)
+            archive.parse(gzip.decompress(path.read_bytes()).decode())
+            assert list(archive.advisories) == [facts["cveId"]], path
+            assert archive.advisories[facts["cveId"]].cvssv3 == 11, path
+        check_cli(args, facts, terminal_feeds, 11)
+    print("PASS: real pinned CLI identities, vulnerable score and corrected clean control")
+
+
+def check_cli(args, facts, feeds, score):
+    """Runs real CLI matching using a temporary cache of real parsed NVD inputs."""
     with tempfile.TemporaryDirectory(prefix="cf-assurance-offline-") as tmp:
         cache = str(Path(tmp) / "nvd")
         with NVD(cache_dir=cache) as nvd:
@@ -80,10 +95,9 @@ def main():
                 "name": facts["package"] + "-" + expected_version,
                 "pname": facts["package"], "version": expected_version,
                 "derivation": drv, "affected_by": [facts["cveId"]],
-                "whitelisted": [], "cvssv3_basescore": {facts["cveId"]: facts["cvssV3"]},
+                "whitelisted": [], "cvssv3_basescore": {facts["cveId"]: score},
             }.items():
                 assert entry[field] == expected, (field, entry)
-    print("PASS: upstream archive parsing and real pinned CLI package/deriver/CVE/CVSS identities; corrected output clean")
 
 
 if __name__ == "__main__":
