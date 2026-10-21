@@ -105,6 +105,38 @@ async function deploy(ctx, phase) {
   });
 }
 
+/** Inspects the actual nonterminal Started event while the real switch is held. */
+async function started(ctx, phase) {
+  const { page, expect, facts } = ctx;
+  const targetId = receipt(ctx, "delivery.targetId");
+  const deploymentId = phase === "rollback" ? receipt(ctx, "delivery.rollback.pendingId")
+    : receipt(ctx, `delivery.${phase}.request`).deployment_id;
+  await login(ctx);
+  const path = `/api/v1/systems/${targetId}/history`;
+  const [response] = await Promise.all([
+    page.waitForResponse(r => new URL(r.url()).pathname === path && r.request().method() === "GET"),
+    page.goto(ctx.url(`/systems/${targetId}?tab=history`)),
+  ]);
+  expect(response.status()).toBe(200);
+  const events = (await response.json()).filter(event => event.deployment_id === deploymentId);
+  const starts = events.filter(event => event.event_type === "cf_deployment_started");
+  expect(starts).toHaveLength(1);
+  expect(events.filter(event => event.event_type === "cf_deployment_succeeded")).toHaveLength(0);
+  const row = page.locator(`[data-event-id="${starts[0].id}"][data-deployment-id="${deploymentId}"]`);
+  await expect(page.getByRole("heading", {name:facts.target,exact:true})).toBeVisible();
+  await expect(row).toHaveCount(1);
+  await expect(row.locator("span").filter({hasText:/^Deployment started$/})).toBeVisible();
+  await expect(row.getByText("started · nonterminal", {exact:true})).toBeVisible();
+  await expect(row.getByText("activation not yet confirmed", {exact:true})).toBeVisible();
+  await expect(row.getByText("Deployed", {exact:true})).toHaveCount(0);
+  await expect(row.getByText("success", {exact:true})).toHaveCount(0);
+  await expect(row.getByRole("button", {name:"Rollback to this generation",exact:true})).toHaveCount(0);
+  await expect(page.getByRole("heading", {name:"Deployment history",exact:true}).locator("..")).toContainText(
+    `${phase === "first" ? 1 : phase === "second" ? 2 : 3} deploys`);
+  await ctx.screenshot(`delivery-${phase}-started-nonterminal`);
+  ctx.emit(`delivery.${phase}.startedEventId`, starts[0].id);
+}
+
 /** Verifies observed activation and durable production history, including reload. */
 async function inspect(ctx, phase) {
   const { page, expect, facts } = ctx;
@@ -161,23 +193,50 @@ async function inspect(ctx, phase) {
       const metric = page.getByText("Generation", { exact: true }).locator("..");
       await expect(metric.getByText(`#${observed.generation}`, { exact: true })).toBeVisible();
       await expect(page.getByRole("heading", { name: "Deployment history", exact: true })).toBeVisible();
-      // DeployRow has no card role or event ID. Its Deployed label is inside
-      // the header, whose parent is the card. Narrow before choosing a card;
-      // rollback can legitimately repeat a previous commit/generation pair.
-      const cards = page.locator("#sd-history-scroll").getByText("Deployed", { exact: true })
-        .locator("..").locator("..")
-        .filter({ has: page.getByText(intended.commit.slice(0, 7), { exact: true }) })
-        .filter({ has: page.locator("strong").filter({ hasText: new RegExp(`^#${observed.generation}$`) }) })
-        .filter({ has: page.getByText("success", { exact: true }) });
-      const exactCards = observed.previousGeneration == null ? cards : cards.filter({
-        has: page.getByText(`#${observed.previousGeneration}`, { exact: true }),
-      });
-      await expect(exactCards, `${phase}: exact previous/current generation transition`).toHaveCount(1);
-      await expect(exactCards).toBeVisible();
+      const phases = phase === "first" ? ["first"] : phase === "second" ? ["first", "second"] : ["first", "second", "rollback"];
+      const expectedEvents = phases.flatMap(p => [
+        receipt(ctx, `delivery.${p}.startedEventId`), receipt(ctx, `delivery.${p}.observed`).historyEventId,
+      ]);
+      expect(history.map(event => event.id).sort(), "entire persisted history membership").toEqual([...expectedEvents].sort());
+      const cards = page.locator("[data-event-id][data-deployment-id]");
+      await expect(cards).toHaveCount(expectedEvents.length);
+      expect((await cards.evaluateAll(nodes => nodes.map(node => node.dataset.eventId))).sort(),
+        "entire rendered history membership").toEqual([...expectedEvents].sort());
+      for (const p of phases) {
+        const prior = receipt(ctx, `delivery.${p}.observed`);
+        const success = page.locator(`[data-event-id="${prior.historyEventId}"][data-deployment-id="${prior.deploymentId}"]`);
+        await expect(success.getByText("Deployed", {exact:true})).toBeVisible();
+        await expect(success.getByText("success", {exact:true})).toBeVisible();
+        await expect(success.locator("strong")).toHaveText(`#${prior.generation}`);
+      }
+      const row = page.locator(`[data-event-id="${observed.historyEventId}"][data-deployment-id="${observed.deploymentId}"]`);
+      await expect(row, `${phase}: exact durable event and deployment`).toHaveCount(1);
+      await expect(row.getByText("Deployed", {exact:true})).toBeVisible();
+      await expect(row.getByText("success", {exact:true})).toBeVisible();
+      await expect(row.getByText(intended.commit.slice(0,7), {exact:true})).toBeVisible();
+      await expect(row.locator("strong")).toHaveText(`#${observed.generation}`);
+      if (observed.previousGeneration != null) {
+        await expect(row.getByText(`#${observed.previousGeneration}`, {exact:true})).toBeVisible();
+      }
+      for (const event of history.filter(event => event.event_type === "cf_deployment_started")) {
+        const start = page.locator(`[data-event-id="${event.id}"][data-deployment-id="${event.deployment_id}"]`);
+        await expect(start).toHaveCount(1);
+        await expect(start.locator("span").filter({hasText:/^Deployment started$/})).toBeVisible();
+        await expect(start.getByText("started · nonterminal", {exact:true})).toBeVisible();
+        await expect(start.getByText("success", {exact:true})).toHaveCount(0);
+        await expect(start.getByText("Deployed", {exact:true})).toHaveCount(0);
+        await expect(start.getByRole("button", {name:"Rollback to this generation",exact:true})).toHaveCount(0);
+      }
+      await expect(page.getByRole("heading", {name:"Deployment history",exact:true}).locator("..")).toContainText(
+        `${phase === "first" ? 1 : phase === "second" ? 2 : 3} deploys`);
     });
   }
   await ctx.screenshot(`delivery-${phase}-history-after-reload`);
+  // Scroll the oldest exact card into view so retained evidence includes the
+  // whole timeline, including cards below the initial viewport after rollback.
+  await page.locator(`[data-event-id="${receipt(ctx, "delivery.first.startedEventId")}"]`).scrollIntoViewIfNeeded();
+  await ctx.screenshot(`delivery-${phase}-history-oldest-cards`);
   ctx.emit(`delivery.${phase}.browserVerified`, true);
 }
 
-module.exports = { login, deploy, inspect };
+module.exports = { login, deploy, started, inspect };

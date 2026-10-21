@@ -15,6 +15,40 @@ generated:
 
 # Crystal Forge integration coverage and retirement map
 
+## Connected Delivery repair milestone
+
+The local `01971f7f-dirty` run passed all 15 cases in the normal Delivery
+aggregate. The driver took 463.44 seconds; the complete command took 882.70
+seconds. This remains a dirty-tree result, not a clean-commit CI pass. Evidence:
+`y93xqisak2bb96sxq7g9hpk1ran04i3f-vm-test-run-cf-it-delivery-delivery-lifecycle-run`.
+
+The run built and published A and B, activated each through the production UI,
+and restored A through retained-generation History rollback. Actual generations
+were 1, 2, and 3; state rows were 2, 3, and 4. Each state had two subsequent
+correlated heartbeats. Started cards remained nonterminal and the attempt count
+was 1, 2, then 3 after reload. This is selected workflow coverage, not broad
+visual parity, other activation modes, drift, or restart recovery.
+
+The whole-closure acquisition proof uses an independent empty rooted store
+inside targetA, with an unprivileged reader and only CF publisher trust. The
+ordinary deployment store has prepared runtime prerequisites, but each runtime
+candidate is absent before acquisition. The separate signature receiver is an
+enforcement control, not the source of CF publisher trust.
+
+Separate product repairs: TASK-497 (`6a1bf542`, `6e131456`) fixes generated
+polling-duration parsing; TASK-498 (`18ef4274`, `3d866ebf`) fixes recursive
+publication signing/trust propagation; TASK-499 (`62e86efa`, `01971f7f`)
+supplies typed native retained authority and rejects retrospective/incomplete
+lineage; TASK-500 (`594d6a12`) fixes Started presentation, attempt counting,
+and the approved `switch_to_generation` label. Normal component checks include
+generated TOML and warm-store trust tests. The isolated database runner now
+explicitly selects the native authority negatives.
+
+Publication review strengthens exact closure-manifest retention and whole
+rendered History membership. These additional assertions require their own
+committed-input hosted execution. Historical failures below remain valid for
+their recorded inputs. Assurance and Upgrade are not proved by this milestone.
+
 This map is maintained under the [integration test maintenance contract](integration-test-contract.md). Its product inventory starts from supported application boundaries and accepted requirements, not the retired tests. A source route, component, test function, or planned scenario is a discovery fact, not coverage. Twenty-three Access cases passed again after semantic source cleanup at `590ee94c635154e027317414298ebe05e9b48bbd`: five bootstrap, five session, six authorization and seven Admin-form cases. The inventory below adds no covered behavior.
 
 Current application baseline after rebase: `origin/dev` at `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064`. Overhaul branch: `TASK-490.1-integration-foundation`. Parent task: TASK-490. The earlier `b1095c8f`/`ade5080c` passing runs used the prior `33de73b0` base; the current rebased base was verified separately below.

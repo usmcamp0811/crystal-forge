@@ -73,6 +73,7 @@ with case("api-builders-register-distinct-runtime-credentials"):
     ssh_public_keys = []
     signing_public_keys = []
     host_key = services.succeed("cat /etc/ssh/ssh_host_ed25519_key.pub").strip()
+    receipt("delivery.cacheHostPublicKey", host_key)
     for node, name in ((builderA, "builderA"), (builderB, "builderB")):
         node.succeed(
             "install -d -m 0750 -o crystal-forge -g crystal-forge /var/lib/crystal-forge && "

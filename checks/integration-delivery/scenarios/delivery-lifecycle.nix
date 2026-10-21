@@ -1,7 +1,8 @@
 # One evolving controller/services/two-builder/target topology. Source ingestion,
 # native evaluation and authorized execution share exact identities through
 # receipts. Publication is a real prerequisite for native builder completion;
-# this initial proof does not establish adapter, deployment or recovery coverage.
+# this scenario also proves manual activation and retained History rollback.
+# Other adapters, activation modes and restart/drift recovery remain open.
 {harness, owner, name}: let
   inherit (harness) pkgs lib inputs;
   modulePath = inputs.self + "/modules/nixos/crystal-forge";
@@ -169,11 +170,11 @@ in harness.mkScenario {
     };
     builderB = {...}: {imports = [(harness.roles.builder {name = "builderB";}) prepared];};
     targetA = {...}: {
-      imports = [(harness.roles.target {}) offlineNetwork ../fixtures/target-baseline.nix];
+      imports = [(harness.roles.target {}) offlineNetwork ../fixtures/target-baseline.nix ../fixtures/cold-acquisition.nix];
       # Share immutable runtime prerequisites, not recipes or runtime candidates.
       # Warm SSH stores do not merge signatures onto already valid baseline
-      # paths. This increment proves cold candidate acquisition, not cold
-      # acquisition of every baseline dependency from a warm cache.
+      # paths. Ordinary deployment proves cold candidate acquisition. A separate
+      # empty rooted store in this VM proves whole-closure publisher trust.
       virtualisation.additionalPaths = [baseline.config.system.build.toplevel];
     };
   };
@@ -189,7 +190,8 @@ in harness.mkScenario {
   script = pkgs.writeText "delivery-lifecycle.py" (
      builtins.readFile ./delivery-lifecycle.py + "\n"
      + builtins.readFile ./fragments/source-build.py + "\n"
-     + builtins.readFile ./fragments/publication.py + "\n"
+      + builtins.readFile ./fragments/publication.py + "\n"
+      + builtins.readFile ./fragments/cache-acquisition.py + "\n"
      + builtins.readFile ./fragments/network-boundary.py + "\n"
      + builtins.readFile ./fragments/activation.py + "\n"
      + builtins.readFile ./fragments/recovery.py
@@ -205,6 +207,9 @@ in harness.mkScenario {
     inspect-first = wrapper "inspect" "first";
     inspect-second = wrapper "inspect" "second";
     inspect-rollback = wrapper "inspect" "rollback";
+    started-first = wrapper "started" "first";
+    started-second = wrapper "started" "second";
+    started-rollback = wrapper "started" "rollback";
     rollback = pkgs.writeText "delivery-rollback.cjs" ''
       exports.run = ctx => require("${./fragments/recovery.cjs}").run(ctx, require("${activation}"));
     '';

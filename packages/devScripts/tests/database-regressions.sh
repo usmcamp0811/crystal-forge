@@ -615,6 +615,21 @@ SQL
       -- --ignored --test-threads=1
 
     echo "=== Immutable evaluation artifact and exact-page contracts ==="
+    # These ignored database tests protect the native certificate producer and
+    # fail-closed retained rollback lineage. Normal unit builds do not run them.
+    for testName in \
+      review_native_backfill_is_bounded_newest_first_and_releases_terminal_bindings \
+      review_native_publication_never_binds_prior_attempt_history \
+      review_ingestion_refuses_newer_incomplete_or_mismatched_request \
+      native_identity_producer_binding_retention_rollback_and_config_unavailability \
+      native_identity_excluded_incomplete_and_mock_producers_mint_no_authority \
+      native_identity_upgrade_preserves_legacy_rows_without_recertification \
+      native_identity_certification_and_exact_live_lineage_fail_closed \
+      snapshot_gc_reclaims_unreferenced_exact_cve_scan_with_parent_derivation
+    do
+      cargo test --offline --package cf-server --lib "$testName" \
+        -- --ignored --test-threads=1
+    done
     cargo test --offline --package cf-server --lib \
       immutable_artifact_selection_retention_gc_and_rollback_are_isolated \
       -- --ignored --test-threads=1

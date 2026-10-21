@@ -7,6 +7,7 @@
   boot.loader.grub.enable = false;
   networking.hostName = "targetA";
   virtualisation.memorySize = 1024;
+  virtualisation.diskSize = 8192;
   services.crystal-forge = {
     enable = true;
     local-database = false;
@@ -20,8 +21,9 @@
     };
     deployment = {
       deployment_strategy = "immediate_persist";
-      # Retain the production default startup delay. Nondefault block emission
-      # currently exposes the separate TASK-497 polling-interval type defect.
+      # Exercise the documented nondefault block through the real production
+      # parser. TASK-497 preserves module duration strings and integer seconds.
+      post_agent_start_deployment_delay = 0;
       fallback_to_local_build = false;
       require_sigs = true;
     };

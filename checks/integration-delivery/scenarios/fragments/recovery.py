@@ -36,6 +36,8 @@ with case("history-ui-rollback-restores-retained-output-and-correlates-current-s
     expect_equal(pending[0]["requested_derivation_id"], retained_rows[0]["derivation_id"], "rollback retained derivation")
     expect_equal(pending[0]["requested_commit_id"], retained_rows[0]["commit_id"], "rollback retained commit")
     expect_equal(pending[0]["evaluation_snapshot_id"], retained_rows[0]["snapshot_id"], "rollback retained artifact binding")
+    receipt("delivery.rollback.pendingId", pending[0]["id"])
+    release_after_started_observation("rollback", first, pending[0]["id"])
     require_post_activation("rollback", first, second_observed, pending[0]["id"])
     run_browser(controller, "inspect-rollback")
     history = delivery_api("GET", "/api/v1/systems/" + receipts()["delivery.targetId"] + "/history")

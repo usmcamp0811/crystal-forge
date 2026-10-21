@@ -18,6 +18,19 @@ def current_target_states():
         "WHERE s.id=" + literal(receipts()["delivery.targetId"]) + "::uuid ORDER BY ss.id")
 
 
+def release_after_started_observation(phase, intended, deployment_id):
+    def started_event():
+        rows = sql_json(controller, "SELECT id::text FROM system_events WHERE system_id=" +
+            literal(receipts()["delivery.targetId"]) + "::uuid AND deployment_id=" +
+            literal(deployment_id) + "::uuid AND event_type='cf_deployment_started'")
+        return rows if rows else None
+    wait_for(started_event, phase + " actual agent Started observation", timeout=120)
+    expect(targetA.succeed("readlink -f /run/current-system").strip() != intended["outputPath"],
+           "Started was treated as completed activation before release")
+    run_browser(controller, "started-" + phase)
+    _vm_write(targetA, "/run/cf-it-allow-activation", intended["nonce"] + "\n")
+
+
 def require_post_activation(phase, intended, previous, deployment_id):
     targetA.wait_until_succeeds("test \"$(readlink -f /run/current-system)\" = " +
                               shlex.quote(intended["outputPath"]), timeout=240)
@@ -102,6 +115,7 @@ with case("manual-first-cf-deployment-activates-cold-output-and-reports-new-stat
     assert_store_absent(targetA, first["outputPath"])
     receipt("delivery.first.absentBeforeAcquisition", True)
     run_browser(controller, "deploy-first")
+    release_after_started_observation("first", first, receipts()["delivery.first.request"]["deployment_id"])
     first_observed = require_post_activation("first", first, initial, receipts()["delivery.first.request"]["deployment_id"])
     run_browser(controller, "inspect-first")
     generations = delivery_api("GET", "/api/v1/systems/" + receipts()["delivery.targetId"] + "/generations")
@@ -179,6 +193,7 @@ with case("manual-second-deployment-reports-changed-state-and-correlated-heartbe
     assert_store_absent(targetA, second["outputPath"])
     receipt("delivery.second.absentBeforeAcquisition", True)
     run_browser(controller, "deploy-second")
+    release_after_started_observation("second", second, receipts()["delivery.second.request"]["deployment_id"])
     require_post_activation("second", second, receipts()["delivery.first.observed"],
                             receipts()["delivery.second.request"]["deployment_id"])
     run_browser(controller, "inspect-second")

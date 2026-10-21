@@ -17,6 +17,14 @@ let
   # Niks3 shells out to Nix and its wrapper prepends that dependency to PATH.
   # Keep the pinned Niks3 version, but bind its CLI to the evaluator's Nix.
   niks3 = pkgs.niks3.override { nix = evaluatorNix; };
+  # Core component tests consume freshly generated module TOML, not only the
+  # checked-in compatibility snapshot. This evaluates configuration generation
+  # without starting services or traversing a system closure.
+  generatedDeploymentConfig = pkgs.writeText "generated-deployment-config.toml"
+    (import ./crates/cf-config/test-support/deployment-config.nix {
+      flake = inputs.self;
+      system = pkgs.stdenv.hostPlatform.system;
+    });
 
   # ─────────────────────────────────────────────────────────────────────────
   # Source filtering
@@ -314,6 +322,12 @@ let
         (set -euo pipefail
           ${import ./crates/cf-config/test-support/ca-bundle/compatibility.nix { inherit pkgs lib; }}
         )
+        (set -euo pipefail
+          export NIX_TEST_BIN="${evaluatorNix}/bin/nix"
+          cargo test --offline --locked --package cf-config --lib \
+            config::cache::tests::warm_nix_publication_propagates_closure_trust \
+            -- --ignored --exact --nocapture
+        )
       '';
       # Dependency-only Crane artifacts contain no installed server binary.
       # Wrap only the final component outputs, including the core variant.
@@ -340,6 +354,9 @@ let
     # embedded-ui feature, so a core build never reads this variable.
     // lib.optionalAttrs embedUi {
       CRYSTAL_FORGE_UI_DIST = "${pkgs.crystal-forge.web-ui}/public";
+    }
+    // lib.optionalAttrs (!embedUi) {
+      CF_TEST_GENERATED_DEPLOYMENT_CONFIG = generatedDeploymentConfig;
     });
 
   # Production server. Ships the embedded web UI.

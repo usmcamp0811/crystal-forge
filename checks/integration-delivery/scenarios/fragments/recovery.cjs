@@ -37,14 +37,10 @@ async function run(ctx, helpers) {
     await page.goto(ctx.url(`/systems/${targetId}?tab=history`));
     await expect(page.getByRole("heading", { name: facts.target, exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "Deployment history", exact: true })).toBeVisible();
-    // The production event card lacks a semantic role; the Deployed label's
-    // header parent identifies its card without CSS-class or positional indexes.
-    const card = page.locator("#sd-history-scroll").getByText("Deployed", { exact: true })
-      .locator("..").locator("..")
-      .filter({ has: page.getByText(intended.commit.slice(0, 7), { exact: true }) })
-      .filter({ has: page.locator("strong").filter({ hasText: new RegExp(`^#${first.generation}$`) }) })
-      .filter({ has: page.getByText("success", { exact: true }) });
+    const card = page.locator(`[data-event-id="${first.historyEventId}"][data-deployment-id="${first.deploymentId}"]`);
     await expect(card, "unique successful first-generation History card").toHaveCount(1);
+    await expect(card.getByText(intended.commit.slice(0,7), {exact:true})).toBeVisible();
+    await expect(card.locator("strong")).toHaveText(`#${first.generation}`);
     const rollback = card.getByRole("button", { name: "Rollback to this generation", exact: true });
     await expect(rollback).toBeEnabled();
     await rollback.click();
@@ -62,7 +58,7 @@ async function run(ctx, helpers) {
     await expect(value("Store Path")).toHaveText(retained.store_path);
     await expect(value("Commit")).toHaveText(intended.commit.slice(0, 7));
     await expect(value("Commit").getByRole("button")).toHaveAttribute("title", intended.commit);
-    await expect(value("Strategy")).toHaveText("rollback");
+    await expect(value("Strategy")).toHaveText("switch_to_generation");
     await expect(value("Policy")).toHaveText("manual");
     const submit = plan.getByRole("button", { name: `Switch to gen #${retained.generation}`, exact: true });
     await expect(submit).toBeEnabled();
