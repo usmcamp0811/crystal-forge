@@ -1,7 +1,7 @@
 ---
 id: TASK-501
 title: Fail dedicated database CI jobs when PostgreSQL initialization fails
-status: To Do
+status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-21 14:36'
@@ -35,8 +35,20 @@ Dedicated CVE-processing and dashboard-visibility CI jobs reported success witho
 - [ ] #4 Verification records and affected workflow documentation distinguish executed tests from setup failures and reused results.
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Audit exact CVE/dashboard declared selections against the existing consolidated database runner; preserve ignored/integration/filter/extension obligations without duplicate execution.
+2. Reuse invocation-owned PostgreSQL privilege isolation, explicit preparation/offline execution and exit-status handling. Keep unique job requirements unless proven subsumed. Retain direct real CI failure propagation through initialization, readiness, migration, test and result completion.
+3. Add bounded regression exercises using existing mechanisms for initialization failure, child-test failure, absent completion, interruption and stale/empty selection. No new flake check or generic framework.
+4. Run actual intended tests on isolated local/root-compatible invocation storage and record exact names/counts/source/commands/exits. Keep production/developer databases untouched.
+5. Review focused runner/CI/docs changes, integrate into existing MR335, and inspect current-head hosted logs/artifacts before claiming the former false-green obligations passed.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 Owner explicitly selected TASK-501 in the TASK-490 wrap-up instruction. Authorization includes actual runner, disposable database and CI execution/failure-propagation repairs, preserving declared test selections and explicit dependency preparation/offline execution. Use the existing MR335 integration as base; do not change production database configuration or add another check/wrapper hierarchy. The earlier discovery-only restriction is superseded.
+
+Preflight: dedicated worktree/branch /home/mcamp/code/crystal-forge/TASK-501-truthful-database-ci at clean dbf50b4746a6ed3818aed85af68f26251f4b9d52, based on current MR335 integration head. TASK-501.lock added under canonical backlog ownership. Integration owner worktree is clean and matches remote; origin/dev remains5ae7feab. No main worktree registered. dev contains pre-existing untracked task locks/session file; preserved. Non-UI repair requires no competing preview stack. Existing integration previews remain coordinator-owned and must not be touched by the repair worker.
 <!-- SECTION:NOTES:END -->
