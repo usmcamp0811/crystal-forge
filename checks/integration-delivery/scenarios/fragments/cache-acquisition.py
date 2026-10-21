@@ -37,8 +37,8 @@ with case("populated-cache-serves-complete-cf-trusted-closure-to-cold-target-sto
     info = json.loads(targetA.succeed(reader + nix + " store info --json --store " + shlex.quote(receiver)))
     expect_equal(info["trusted"], False, "cold target reader cannot bypass signatures")
     closure = services.succeed("nix-store --query --requisites " + output).splitlines()
-    expect_equal(targetA.succeed(reader + nix_store + " --store " + shlex.quote(receiver) +
-                                " --query --all").splitlines(), [], "receiving store starts with no valid paths")
+    expect_equal(json.loads(targetA.succeed(reader + nix + " path-info --store " + shlex.quote(receiver) +
+                                " --all --json")), {}, "receiving store starts with no valid paths")
     # Check every physical path, not only validity: the main VM has an unrelated
     # prepared store, but the rooted receiving store must contain none of it.
     targetA.succeed("for path in " + shlex.join(closure) + "; do test ! -e " + root +
@@ -54,9 +54,10 @@ with case("populated-cache-serves-complete-cf-trusted-closure-to-cold-target-sto
     targetA.succeed(reader + nix + " store verify --store " + shlex.quote(receiver) +
         " --recursive --no-contents --sigs-needed 1 --option trusted-public-keys " +
         shlex.quote(" ".join(keys)) + " --option extra-trusted-public-keys '' " + output, timeout=180)
-    raw = json.loads(targetA.succeed(reader + nix + " path-info --store " + shlex.quote(receiver) +
-                                    " --recursive --json " + output))
-    received_paths = [p["path"] for p in raw] if isinstance(raw, list) else list(raw)
+    # Only membership is needed here. Full recursive path-info JSON exceeds the
+    # driver's command-output channel; query valid requisites without metadata.
+    received_paths = targetA.succeed(reader + nix_store + " --store " + shlex.quote(receiver) +
+                                     " --query --requisites " + output).splitlines()
     expect_equal(set(received_paths), set(closure), "cold target acquired every required closure path")
     # Retain the exact source and received sets outside browser receipts. The
     # manifest establishes membership without copying CF's expected responses.

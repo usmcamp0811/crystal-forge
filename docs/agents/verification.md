@@ -91,15 +91,15 @@ nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-boo
 nix build .#checks.x86_64-linux.integration-access -L --keep-going
 ```
 
-Only Access is currently discoverable. Its coordinator-owned
-`checks/integration-access/default.nix` explicitly registers a `scenarios`
-attribute set. The normal check uses `pkgs.linkFarm` to build all registered
+Access, Delivery and Assurance are currently discoverable. Each coordinator-owned
+`checks/integration-<owner>/default.nix` explicitly registers a `scenarios`
+attribute set and uses normal `pkgs.linkFarm` aggregation to build all registered
 scenario gates. Meaningful WIP checks may be discoverable; there is no
 completeness flag. A passing registered subset does not prove missing
 obligations.
 
-Implemented integration owners run automatically in GitLab. The
-`integration-access` job is required on merge requests and `main`. It runs
+Implemented integration owners run automatically in GitLab. The three owner
+jobs are required on merge requests and `main`. For example, Access runs
 `sh packages/ci/integration-owner-build.sh integration-access`, which builds the
 normal owner aggregate (never a `.run` output) and exports evidence files to
 `integration-evidence/integration-access/`, including after a failed build.

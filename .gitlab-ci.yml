@@ -174,8 +174,8 @@ manual-version-bump:
 # Implemented integration owners run automatically and are required. The normal
 # owner aggregate builds every registered scenario gate and fails when any gate
 # fails. Never build a `.run` output here: it records a failed scenario and can
-# still build successfully. Access and Delivery have real scenarios;
-# Assurance and Upgrade owners are added when they have real scenarios. See
+# still build successfully. Access, Delivery and Assurance have real scenarios;
+# Upgrade is added only with a real approved version transition. See
 # docs/knowledge/testing/integration-coverage-map.md for the remaining gaps.
 integration-access:
   stage: check
@@ -208,6 +208,13 @@ integration-delivery:
     - sh packages/ci/integration-owner-build.sh integration-delivery
   artifacts:
     expose_as: "Integration Delivery Evidence"
+
+integration-assurance:
+  extends: integration-access
+  script:
+    - sh packages/ci/integration-owner-build.sh integration-assurance
+  artifacts:
+    expose_as: "Integration Assurance Evidence"
 
 # Ordinary component builds own unit, evaluator-protocol and schema checks.
 # Pure module assertions and developer-command selftests run directly here;

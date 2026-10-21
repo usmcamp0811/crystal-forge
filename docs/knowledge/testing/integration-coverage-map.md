@@ -15,6 +15,97 @@ generated:
 
 # Crystal Forge integration coverage and retirement map
 
+## Executed connected Assurance increment
+
+At `9f53fade-dirty` on x86_64-linux, the normal owner commands executed fresh
+VMs: Access passed 23/23 (driver 51.13 seconds), Delivery passed 15/15 (400.00
+seconds), and Assurance recorded 44 passing case records and two mandatory
+failures (266.51 seconds). Assurance has 40 distinct case names: nested Current
+and continuity checks repeat names. These are not 46 independent requirements.
+Command totals were 60.93, 817.19, and 695.96 seconds respectively.
+
+| Owner | Retained run output prefix | Outcome |
+| --- | --- | --- |
+| Access | `91fg9zs3b4x63jxn461fiwa4k5rf2yvg` | Passed selected session, authorization and form coverage. |
+| Delivery | `pkka8ycywlvpsm1z1aj7h8nj6psnbba0` | Passed real A/B deployment, complete History membership, retained rollback and exact closure acquisition. |
+| Assurance | `bfmn1qp6285mdxlw76iai3c6b2267648` | Failed historical cell copy and false-clean failed-scan summary; independent recovery cases executed. |
+
+Each prefix identifies its `vm-test-run-cf-it-<owner>-<scenario>-run` output.
+Collected results, metadata, screenshots and journals are under
+`integration-evidence/<owner>/<scenario>/`. Local results remain dirty-input
+evidence after publication; hosted CI must verify the committed inputs.
+
+Assurance authors its own source and runs native evaluation, API-only builder
+build/publication, packaged vulnix with a trusted local HTTPS NVD feed, sealed
+schema-1 ingestion, actual UI deployment and real agent observation. It proves
+missing-before-build-admission, affected Current, clean built-not-deployed,
+corrected deployed Current, and preserved historical observations. Remote
+evidence is explicitly `unverified_remote`, not server-local verification.
+Real host Schedule patch, plan edits/note/milestone, scoped Viewer denials,
+explicit verification and authoritative closure preserve the original finding,
+link and complete opened-against baseline. Plan/verification mutations use real
+APIs; the browser proves their resulting detail and reload, not every edit
+control. System triage creation itself uses the real browser workflow.
+
+Valid upstream JSON with CVSS 11 causes deterministic result rejection. Invalid
+JSON causes transient requeue; restoring the normal feed produces a new
+execution and completed source without changing corrected Current. Both faults
+use real replacement-build post-build leases. Manual retry admission is tested
+separately; manual execution on a remote-only topology is not proved.
+
+One failing browser assertion preserves the approved `SystemDetail.jsx`
+`CvesTab` cell copy `read-only`; production renders `Historical inventory`.
+Mutation controls are absent and API read-only authority is correct. Historical
+reload after that copy assertion is not executed. A second mandatory assertion
+rejects the failed scan Details summary `0 vulnerabilities across 0 packages`:
+failed schema-0 execution has no completed finding set and must not appear
+clean. Both read-only browser failures are retained and re-raised after
+independent fault/recovery; the owner gate remains failed. No production/UI
+repair is authorized for either discrepancy.
+Loading, unavailable, clean-empty, GET error/Retry, Viewer and failed-scan states
+have actual browser artifacts. Screenshots were inspected; this is not broad
+visual parity or scale/performance proof. Reopen, recurrence, batch isolation,
+waiver/acceptance, policy, hardening and interchange remain open.
+
+Checkpoint `204a4752` hosted pipeline `2970142621` failed: Delivery 9 passed/1
+failed at unsupported `nix-store --query --all`, before acquisition/deployment;
+Access passed 23, state-machine passed 525/0/0 including eight native-authority
+regressions, and core/generated-TOML/warm-Nix tests passed. Component then failed
+the missing CVE fixture manifest entry. CVE/dashboard job status was green but
+`initdb` failed as root and no tests ran. Complexity and coverage were skipped.
+Those statuses are not passing regressions. This increment corrects the test
+flag, retains exact closure membership without oversized JSON transport, and
+adds the missing documentation-manifest entry; no product repair is added.
+
+Current native inventory is Access, Delivery and Assurance. Upgrade has no
+placeholder: D2 still requires an approved predecessor and compatibility window.
+
+### Selected browser design review
+
+Reference components were inspected at tree `204a4752`, unchanged in this
+increment (last selected-component change `6e4ea520`). SC1 revision 3 and the
+normative continuity contract control evidence and permission meaning. The
+following review does not approve production differences or invent new panels.
+
+| Surface/state | Actual observation and remaining difference |
+| --- | --- |
+| System CVEs Current | Package-first sections, automatic expansion, exact finding and single triage execute. Reference batch quick-picks and batch bar are not implemented; multi-selection remains open. |
+| Exact scan Details | Real scan/job/execution identity and clean versus affected API state execute. Actual Findings precede identity in one card, rather than reference identity then separate Findings. Reference Freshness, CVE database update and Details-level View these CVEs action are absent. Failed zero-summary is a mandatory failure. |
+| Host Schedule patch | Browser creates the real host plan and reloads Scheduled. No dialog PNG was retained; dialog hierarchy is source-reviewed only. Reference Exploited context and no-upstream-patch warning remain gaps. |
+| Maintained POA&M | Actual metadata, plan, note, milestone and baseline persist. The browser reads/reloads API-authored changes. Visible reference lifecycle explanation/action and scope severity/fix/environment/commit metadata differ; lower activity outside the viewport is not called missing. |
+| Closed POA&M | Two sealed PASS attempts and original retired baseline history are visible. Large verification cards replace the compact reference confirmation and push baseline history lower. A readable baseline/Current comparison and all required metadata are not fully proven by the image. Verify/Close/Reopen browser clicks remain unexecuted. |
+| Historical | Explicit selection, original sealed source and no mutation control are proven. Cell copy fails; historical reload after that assertion is unexecuted. |
+| Missing/clean/loading | The tab distinguishes no completed scan, completed-empty and loading without enqueuing. Global green CVEs 0 above unavailable inventory remains a header/count consistency gap. |
+| Error/Retry | Held/aborted real GET exercises loading/error; restored transport supplies the real retry result without API writes. Raw stack text dominates the error frame and pushes Retry below the viewport, unlike the bounded reference message. |
+| Fleet drawer/Viewer | Exact fleet-to-Current navigation and Viewer no-control behavior execute. No drawer PNG was retained; source-only differences include Published versus Discovered, missing fleet denominator, and tier-first rather than environment-first grouping. Viewer-specific disposition copy lacks a complete approved-state comparison. |
+
+One package/finding on desktop does not prove pagination, density, responsive
+layout, focus/keyboard behavior, draft preservation across scope changes, or
+query-scale performance. Fault/recovery evidence does not independently retain
+every live lease-owner field; initial completion has the stricter full lease
+assertions. These are unfinished verification obligations, not authority for
+unrelated product edits.
+
 ## Connected Delivery repair milestone
 
 The local `01971f7f-dirty` run passed all 15 cases in the normal Delivery
@@ -108,8 +199,9 @@ completeness flag. Access and Delivery each build every gate in their own
 `scenarios` attribute set and run automatically in GitLab. Tracking tasks do not
 define source files, VM boundaries or derivations. Compatible behavior modules
 compose through the existing Nix, Python and browser scripts. Keep all scenario
-assets beneath their functional owner. Assurance and Upgrade have no placeholder
-`default.nix`. Missing obligations remain gaps; the authorized legacy source
+assets beneath their functional owner. Assurance now registers the executed
+evidence/remediation lifecycle. Upgrade has no placeholder `default.nix`.
+Missing obligations remain gaps; the authorized legacy source
 retirement does not establish replacement coverage.
 
 Scenario file contract (`<name>.nix`):
@@ -481,9 +573,9 @@ Stable contract IDs and scenario names define functional ownership. Backlog task
 
 The implemented local Access lifecycle directly concatenates bootstrap → `sessions.py` → `authorization.py` → `admin-forms.py` into one Python namespace on one controller and one evolving database. Bootstrap establishes `controller`, Admin helpers and the `admin.userId` receipt before sessions creates additional sessions. Authorization runs after the fresh-install assertions, creates the Operator/Viewer/target actors and exports `authz_state()` for the forms' protected-state cancel checks. Its Admin positive controls restore the target, retry policy and classification configuration to the installed values, including the disabled banner. Forms depend on those restored values and on design user `u3` still being absent. The corresponding `.cjs` files provide browser phases in this same scenario; each form phase returns to Python for authoritative SQL observations before the next mutation. These are explicit state dependencies, not independently runnable fragment scenarios.
 
-The scenario derivations are the local Access lifecycle, notification delivery, OIDC lifecycle, Delivery lifecycle, Assurance evidence/remediation lifecycle, and Upgrade version transition. Only the local Access lifecycle is registered. Their boundaries reflect incompatible auth/service configuration, separate owner contracts, or deliberate in-place version/database transition—not one VM per tracking task. No independent scenario may use another scenario's rows, sessions, receipts, generations, or output.
+The scenario boundaries are the local Access lifecycle, notification delivery, OIDC lifecycle, Delivery lifecycle, Assurance evidence/remediation lifecycle, and Upgrade version transition. Local Access, Delivery and Assurance are registered. Other scenarios remain planned. Their boundaries reflect incompatible auth/service configuration, separate owner contracts, or deliberate in-place version/database transition—not one VM per tracking task. No independent scenario may use another scenario's rows, sessions, receipts, generations, or output.
 
-The local-bootstrap and Delivery lifecycle attributes exist. Other targets
+The local-bootstrap, Delivery and Assurance lifecycle attributes exist. Other targets
 below remain planned and must be explicitly registered before execution. Each
 focused gate has its normal owner aggregate after the semicolon.
 

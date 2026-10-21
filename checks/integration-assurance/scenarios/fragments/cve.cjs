@@ -70,7 +70,9 @@ async function run(ctx, phase) {
     const detail = page.getByTestId("system-detail");
     const pkg = detail.locator("button[aria-controls^='system-cve-package-']").filter({ hasText: f.package });
     await expect(pkg).toHaveCount(1);
-    await pkg.click();
+    // The first package opens automatically. Do not toggle it closed before
+    // checking the finding; assert that designed default explicitly.
+    await expect(pkg).toHaveAttribute("aria-expanded", "true");
     await expect(detail.getByText(f.cveId, { exact: true })).toBeVisible();
     await expect(detail.getByTestId("system-cve-triage-open")).toBeVisible();
     await ctx.screenshot("cve-current-vulnerable");
@@ -132,7 +134,12 @@ async function run(ctx, phase) {
 
   if (phase === "scan") return;
   await ctx.step("fleet finding navigation returns to the exact Current generation", async () => {
-    const row = page.getByTestId("cve-row").filter({ hasText: f.cveId }).filter({ hasText: f.package });
+    // The designed ungrouped view exposes the exact pair's inventory action;
+    // grouped rows instead make the whole row clickable.
+    await page.getByRole("button", {name:"None", exact:true}).click();
+    const row = page.getByTestId("cve-row").filter({ hasText: f.cveId }).filter({
+      has: page.getByRole("button", { name: `Open fleet inventory for ${f.cveId} ${f.package}`, exact: true }),
+    });
     await expect(row).toHaveCount(1);
     await row.getByRole("button", { name: `Open fleet inventory for ${f.cveId} ${f.package}`, exact: true }).click();
     const drawer = page.getByTestId("cve-fleet-drawer");
@@ -168,7 +175,9 @@ exports.run = (ctx) => run(ctx, "full");
 async function signIn(ctx, account = ctx.facts.admin, role = "Admin") {
   const { page, expect } = ctx;
   await page.goto(ctx.url("/login"));
-  await page.getByPlaceholder("Enter your username", { exact: true }).fill(account.username);
+  // Admin-created accounts receive a server-generated username. Their authored
+  // email is the stable supported login identifier, also used by the API probe.
+  await page.getByPlaceholder("Enter your username", { exact: true }).fill(account.email);
   await page.getByPlaceholder("Enter your password", { exact: true }).fill(account.password);
   await page.getByRole("button", { name: "Sign In", exact: true }).click();
   await expect(page).toHaveURL(ctx.url("/"));
@@ -230,7 +239,7 @@ async function expandFixture(ctx) {
   const detail = ctx.page.getByTestId("system-detail");
   const pkg = detail.locator("button[aria-controls^='system-cve-package-']").filter({ hasText: ctx.facts.cve.package });
   await ctx.expect(pkg).toHaveCount(1);
-  await pkg.click();
+  await ctx.expect(pkg).toHaveAttribute("aria-expanded", "true");
   await ctx.expect(detail.getByText(ctx.facts.cve.cveId, { exact: true })).toBeVisible();
   return detail;
 }
@@ -238,8 +247,8 @@ async function expandFixture(ctx) {
 exports.missing = async (ctx) => {
   await signIn(ctx);
   await ctx.step("never-scanned exact target is unavailable, never clean", async () => {
-    ctx.expect(ctx.receipts["assurance.vulnerable.missingProven"]).toBe(true);
-    const inventory = await openInventory(ctx, "vulnerable", false);
+    ctx.expect(ctx.receipts["assurance.missing.missingProven"]).toBe(true);
+    const inventory = await openInventory(ctx, "missing", false);
     ctx.expect(inventory.authority).toBe("no_scan");
     ctx.expect(inventory.source).toBeNull();
     ctx.expect(inventory.attempt ?? null).toBeNull();
@@ -251,7 +260,7 @@ exports.missing = async (ctx) => {
     await ctx.expect(detail.getByRole("heading", { name: "No findings in the selected scan", exact: true })).toHaveCount(0);
     await ctx.expect(detail.getByTestId("system-cve-triage-open")).toHaveCount(0);
     await ctx.screenshot("cve-never-scanned-not-clean");
-    ctx.emit("assurance.cve.browserMissingDerivationId", ctx.receipts["assurance.vulnerable.derivationId"]);
+    ctx.emit("assurance.cve.browserMissingDerivationId", ctx.receipts["assurance.missing.derivationId"]);
   });
 };
 
@@ -263,7 +272,9 @@ exports.historical = async (ctx) => {
     completedInventory(ctx, await openInventory(ctx, "vulnerable", false), "vulnerable", false);
     const detail = await expandFixture(ctx);
     await ctx.expect(detail.getByTestId("system-cve-triage-open")).toHaveCount(0);
-    await ctx.expect(detail.getByTestId("system-cve-triage-state")).toHaveText("Read-only");
+    // Approved SystemDetail.jsx CvesTab uses this exact read-only cell copy.
+    // A production presentation difference remains a mandatory gate failure.
+    await ctx.expect(detail.getByTestId("system-cve-triage-state")).toHaveText("read-only");
     completedInventory(ctx, await openInventory(ctx, "vulnerable", false, () => ctx.page.reload()), "vulnerable", false);
     await ctx.screenshot("cve-historical-vulnerable-read-only");
     ctx.emit("assurance.cve.browserHistoricalScanId", ctx.receipts["assurance.vulnerable.scanId"]);
@@ -353,6 +364,9 @@ exports.failed = async (ctx) => {
     await dialog.getByRole("tab", { name: "Details", exact: true }).click();
     await expect(dialog.getByText(id, { exact: true })).toBeVisible();
     await ctx.screenshot("cve-terminal-failure-exact-execution");
+    // Failed execution has no completed finding set. A zero-findings summary
+    // would present missing evidence as a completed clean scan.
+    await expect(dialog).not.toContainText(/0\s+vulnerabilities across 0 packages/);
     ctx.emit("assurance.cve.browserFailedScanId", id);
   });
 };
@@ -384,7 +398,9 @@ exports.readError = async (ctx) => {
     // Abort only the real inventory transport. No success body, scan result or
     // finding is supplied. Remove the route before the user's Retry interaction.
     const routePattern = (url) => selection.matches(url);
-    const abort = (route) => route.abort("failed");
+    let releaseRead;
+    const heldRead = new Promise(resolve => { releaseRead = resolve; });
+    const abort = async (route) => { await heldRead; await route.abort("failed"); };
     const writes = [];
     const observe = (request) => {
       if (request.method() !== "GET" && new URL(request.url()).pathname.startsWith("/api/v1/")) writes.push(request.url());
@@ -393,6 +409,10 @@ exports.readError = async (ctx) => {
     try {
       await ctx.page.route(routePattern, abort);
       await ctx.page.goto(ctx.url(selection.path));
+      await ctx.expect(ctx.page.getByTestId("system-cves-loading")).toBeVisible();
+      await ctx.expect(ctx.page.getByRole("heading", { name: "No findings in the selected scan", exact: true })).toHaveCount(0);
+      await ctx.screenshot("cve-inventory-loading-not-clean");
+      releaseRead();
       const error = ctx.page.getByTestId("system-cves-error");
       await ctx.expect(error.getByRole("heading", { name: "Unable to load CVE inventory", exact: true })).toBeVisible();
       await ctx.expect(ctx.page.getByRole("heading", { name: "No findings in the selected scan", exact: true })).toHaveCount(0);
@@ -406,6 +426,7 @@ exports.readError = async (ctx) => {
       await ctx.screenshot("cve-inventory-read-retry");
       ctx.emit("assurance.cve.browserReadRetryScanId", ctx.receipts["assurance.vulnerable.scanId"]);
     } finally {
+      releaseRead();
       await ctx.page.unroute(routePattern, abort);
       ctx.page.off("request", observe);
     }

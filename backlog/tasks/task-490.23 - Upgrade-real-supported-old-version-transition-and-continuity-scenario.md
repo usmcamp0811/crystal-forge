@@ -4,13 +4,17 @@ title: 'Upgrade: real supported old-version transition and continuity scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-17 17:29'
+updated_date: '2026-10-21 08:24'
 labels:
   - testing
   - integration
   - blocked-decision
 dependencies:
   - TASK-490.7
+modified_files:
+  - checks/integration-upgrade/scenarios/version-transition.py
+  - checks/integration-upgrade/scenarios/version-transition.cjs
+  - checks/integration-upgrade/fixtures/*
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -20,32 +24,32 @@ ordinal: 535000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Current packet boundary (2026-10-18): this task owns only old/current version Python/browser fragments and immutable source fixture definitions. The coordinator owns `version-transition.nix`, pinned input wiring and Upgrade registration. Once D2 is decided, the old and current server phases run sequentially against one fresh VM/database; the in-place version/schema transition is the concrete reason Upgrade remains isolated from current-version owners. No derivation per implementation packet.
+Owning check: integration-upgrade. Contract: upgrade.continuity. Coordinator owns version-transition.nix, pinned old/current package wiring, shared roles, browserSpecs and explicit native registration. The child owns semantic version-transition.py/.cjs and immutable fixtures. No per-task derivation or cross-scenario mutable state is permitted.
 
-Owning check: integration-upgrade. Contract ID: upgrade.continuity. Exclusive scenario writes: checks/integration-upgrade/scenarios/continuity.{nix,py,cjs}; scenario fixtures/assets under that owner. Pinned old-version input wiring requires coordinator approval and coordinator-owned shared/flake changes; child cannot edit those paths unilaterally.
+Current pushed checkpoint is 204a475287b62087e28d2e9e7f1b0ff2631daaf3, plus the continuing Assurance increment. Foundation startup and Rust-test blockers are resolved and are not active dependencies. Real native build/deployment/retained rollback capabilities passed locally at 9f53fade-dirty. Pipeline 2970142621 at clean204a4752 passed Access23 and isolated database525 but failed Delivery test plumbing; it is not a clean hosted rollback pass. Upgrade itself remains unimplemented and unexecuted.
 
-BLOCKED D2: no accepted support decision names oldest supported in-place source server release, whether old agents/builders must operate with current server and for how long, or exact pinned source tag/commit. Existing v0.3.1/v0.3.0/v0.2.x tags and crate version 0.3.0 are not support promises. Owner must decide all three. Old-source flake input/fetch must not change current application dependencies. As-built D1 is evidence, not authority; other uncertain expectations also remain blocked pending owner decision.
+D2 remains the specific decision gap. Recommended server predecessor: v0.3.1 at f9dd6b9c79530d3f911203645207bf6251552aba. The owner must approve or replace this pin and specify actual agent/builder revisions, operations, compatibility windows, start/expiry/refusal behavior and predecessor in-flight recovery outcomes. The proposal is builders upgraded before server cutover, with no old-builder/current-server window or database credential exception; old v0.3.1 agents may send signed heartbeats and perform the selected supported Nix deployment for 24 hours from successful current-server startup only if approved. This must reconcile AC4, which currently includes old builders. The v0.3.1 builder uses PostgreSQL even in nominal API mode. A tag does not grant a support promise or legacy-DB trust exception.
 
-Scope once unblocked: build actual old package from its own pinned source/migrations. Through old API/UI create users/credentials, evaluation/build/deployment history, queued build and pending deployment. Current package starts normally on same PostgreSQL data directory and applies migrations. Existing passwords still sign in, exact history identities persist, in-flight work reaches specified states, representative new evaluate/build completes. Old agents/builders continue within the declared compatibility window. No same-version restart substitute, synthetic old schema or current-version seeded data. Non-goals: current-version recovery (490.15), retained non-integration server-regressions migration-prefix rehearsals. TASK-490 test-only scope applies.
+After approval, run the actual predecessor package and its own migrations/API/UI against a fresh Upgrade database. Create identities, credentials, history and in-flight work through real workflows. Stop old writers, start the current package normally against the same PostgreSQL data directory, and let normal migrations run. Verify approved continuity/recovery, mixed-version operations/refusal and one new real operation. No synthetic old schema, truncated migrations, seeded successes, same-version restart substitute or empty owner.
 
-Organization: native checks/integration-upgrade/default.nix uses { lib, inputs, pkgs, ... }, coordinator-owned explicit scenarios and normal pkgs.linkFarm aggregate of ALL registered gates. Shared helpers lib/integration-test via lib.crystal-forge.makeIntegrationTestHarness { pkgs, inputs }; scripts/fixtures/assets owner-local. No root tests/, legacyPackages.integration, mkOwner or custom discovery. Coordinator owns default.nix/shared lib/CI/docs; child files disjoint and integration requires explicit registration. Meaningful WIP may be discoverable; only Access exists now; Upgrade default.nix only with meaningful scenario after blockers, no placeholder.
-
-Prerequisite TASK-490.7 plus D2 decision. Candidate, NOT verified: nix build .#checks.x86_64-linux.integration-upgrade.scenarios.continuity -L; append .run for evidence; aggregate nix build .#checks.x86_64-linux.integration-upgrade -L. Completion requires explicit registration, real VM execution and exact old/current revisions, commands, outcomes and evidence; keep correct failing assertions and linked Backlog product bugs.
-
-READINESS: foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s), accepted D2, implemented interfaces/fixtures/registration and verified commands required before To Do. No foundation hash is invented; no delegation or executed slice is claimed.
+Use checks/integration-upgrade/scenarios/version-transition.{nix,py,cjs}. Run nix build .#checks.x86_64-linux.integration-upgrade.scenarios.version-transition -L and the normal integration-upgrade aggregate only after meaningful implementation exists. Record exact predecessor/current commits, platform, statuses, execution/reuse and artifacts. D2 blocks only dependent Upgrade cases; independent Assurance continues.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The owner decision D2 is recorded with the supported source release, compatibility window, and pinned source
-- [ ] #2 Data created by the real old release survives migration with identities, credentials, and history intact
-- [ ] #3 In-flight work recovers across the version transition and one new operation completes
-- [ ] #4 Old agents/builders within the declared window remain usable
-- [ ] #5 Executed in real VMs with recorded evidence
+- [ ] #1 The owner decision D2 names supported source release, compatibility window and pinned source
+- [ ] #2 Real old-release data survives in-place current-version migration with identities, credentials and history intact
+- [ ] #3 In-flight work recovers across version transition and one new operation completes
+- [ ] #4 Old agents/builders within the declared compatibility window remain usable
+- [ ] #5 The coordinator composes the fragments into one `version-transition` scenario; no separate derivation per implementation packet, and runtime evidence is recorded
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-2026-10-17 organization correction: native Upgrade owner-local layout, coordinator-owned registration/shared/CI/docs and input wiring. D2 remains unresolved, as does actual foundation dependency commit. Foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands plus owner support decision required before To Do. No Luna delegation or executed slice is claimed.
+D2 research inspected accepted release/support records and pinned historical builder source. No approved predecessor, client matrix or compatibility window was found. Git tag identity is not support policy. Candidate v0.3.1 resolves to f9dd6b9c79530d3f911203645207bf6251552aba; candidate v0.3.0 resolves to f4a53b850d84dc3f6b36444ec6e0f474d344735c.
+
+A compact request proposes v0.3.1, builders upgraded before server cutover without a database-credential exception, and a 24-hour window for selected old-agent heartbeat and Nix deployment operations from successful current-server startup. The owner must approve or replace the pin and define expiry/refusal and in-flight recovery. The proposal must reconcile AC4's old-builder requirement. No compatibility window, Upgrade implementation or VM test has passed.
+
+Active guidance uses version-transition.{nix,py,cjs} and the matching focused gate. Foundation startup and earlier Rust-test failures are resolved historical evidence, not active blockers. Independent Assurance execution continued while D2 remained outstanding.
 <!-- SECTION:NOTES:END -->

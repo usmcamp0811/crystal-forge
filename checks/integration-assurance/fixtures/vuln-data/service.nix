@@ -12,6 +12,7 @@
     enable = true;
     virtualHosts."nvd.nist.gov" = {
       inherit sslCertificate sslCertificateKey;
+      onlySSL = true;
       listen = [{ addr = listenAddress; inherit port; ssl = true; }];
       root = "/run/cf-assurance-nvd/active";
       locations."/feeds/json/cve/2.0/".extraConfig = ''

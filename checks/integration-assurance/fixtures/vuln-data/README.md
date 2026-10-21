@@ -1,5 +1,33 @@
 # Assurance CVE producer composition
 
+## Executable composition
+
+The native owner now registers `scenarios/evidence-remediation-lifecycle.nix`.
+Its Python body creates a fresh Assurance source/database/VM lifecycle, using
+only immutable setup code from Delivery. The local `9f53fade-dirty` owner run
+executed both real builds, scanner leases, deployments, Current and remediation
+continuity, terminal rejection, transient requeue/recovery, and production UI.
+The gate remains failed on the approved historical `read-only` cell copy versus
+production `Historical inventory`, and on a failed scan's false-clean zero
+summary. Do not report a passing owner or full parity.
+
+The actual fault composition uses normal replacement-build post-build intents,
+not the manual-rescan examples below. Manual intents lack producing-session
+affinity in this remote-only topology. The idle builder unit is frozen while
+its invocation-owned upstream cache is removed and services switches feeds;
+thaw preserves its actual producing session. The packaged server's optional
+local scanner executable is masked only in that server unit's mount namespace.
+Coordination/maintenance still run; the unchanged builder scanner executes.
+The test CA includes strict key-usage constraints; TLS verification stays on.
+The initial never-scanned configuration explicitly disables both CF and the
+instrumentation-declared agent unit, so build admission and scan intent do not
+occur. The following vulnerable and corrected revisions enable the real agent.
+
+Current/result provenance and exact commands are in the
+[coverage record](../../../../docs/knowledge/testing/integration-coverage-map.md).
+The helper interfaces below describe available producer functions, not proof
+that every example is used by the composed scenario.
+
 This fixture belongs to `assurance.scanning.cve` in the fresh
 `evidence-remediation-lifecycle` scenario. Sol owns roles, source ingestion,
 builds, deployments, TLS/routing, composition and registration. Importing this
