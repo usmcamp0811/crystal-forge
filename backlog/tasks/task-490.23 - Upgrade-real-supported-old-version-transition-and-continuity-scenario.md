@@ -47,7 +47,9 @@ Use checks/integration-upgrade/scenarios/version-transition.{nix,py,cjs}. Run ni
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Current D2 research checked accepted release/support records and verified exact tags with git ls-remote. No approved predecessor/window found. Recommendation submitted: v0.3.1 f9dd6b9c79530d3f911203645207bf6251552aba; explicitly tested 24-hour old-agent heartbeat/supported Nix deployment window; builders upgrade first because old nominal API mode accesses PostgreSQL. Broader old-builder support requires explicit legacy-DB compatibility authority or a separate product decision, not a test credential shortcut. No Upgrade implementation or VM success claimed. Historical bootstrap/Rust failure instructions and obsolete task-numbered paths were removed from active guidance.
+D2 research inspected accepted release/support records and pinned historical builder source. No approved predecessor, client matrix or compatibility window was found. Git tag identity is not support policy. Candidate v0.3.1 resolves to f9dd6b9c79530d3f911203645207bf6251552aba; candidate v0.3.0 resolves to f4a53b850d84dc3f6b36444ec6e0f474d344735c.
 
-Rechecked D2 against canonical task, release/support records and pinned historical builder source. No accepted predecessor/window was found. One compact request was presented during the MR335 continuation. v0.3.1 and a 24-hour old-agent window remain proposals, not approved support. Current active paths and gate use version-transition; obsolete foundation startup failures are historical only.
+A compact request proposes v0.3.1, builders upgraded before server cutover without a database-credential exception, and a 24-hour window for selected old-agent heartbeat and Nix deployment operations from successful current-server startup. The owner must approve or replace the pin and define expiry/refusal and in-flight recovery. The proposal must reconcile AC4's old-builder requirement. No compatibility window, Upgrade implementation or VM test has passed.
+
+Active guidance uses version-transition.{nix,py,cjs} and the matching focused gate. Foundation startup and earlier Rust-test failures are resolved historical evidence, not active blockers. Independent Assurance execution continued while D2 remained outstanding.
 <!-- SECTION:NOTES:END -->
