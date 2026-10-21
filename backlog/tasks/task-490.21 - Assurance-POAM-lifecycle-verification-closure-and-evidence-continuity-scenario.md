@@ -1,10 +1,11 @@
 ---
 id: TASK-490.21
 title: 'Assurance: create and maintain POA&M plans from real failed evidence'
-status: Backlog
-assignee: []
+status: To Do
+assignee:
+  - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-19 02:14'
+updated_date: '2026-10-21 06:19'
 labels:
   - testing
   - integration
@@ -50,6 +51,12 @@ Focused verification after composition: `nix build .#checks.x86_64-linux.integra
 - [ ] #5 Coordinator composes named plan fragments with .29 verification/closure in evidence-remediation-lifecycle using same-run receipts, with no packet derivation or cross-derivation live state
 - [ ] #6 Coordinator executes the focused evidence-remediation-lifecycle gate and records exact tested revision, command, result and evidence
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+User selected bounded CVE POA&M contribution to same fresh evidence-remediation-lifecycle in existing coordinator worktree/branch. Use .20 real host Schedule patch from .16 actual vulnerable Current, never seeded finding/plan. Add poam-plan.py/.cjs for exact finding/evidence link and persisted authored plan, approved in_progress transition, note and milestone. Check real API plus browser reload; preserve actor, scope and original baseline across built-clean and actual corrected activation. Policy-family creation and broad failure/stale-edit matrix remain open. No production edits. Coordinator normal owner gate supplies execution evidence.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
