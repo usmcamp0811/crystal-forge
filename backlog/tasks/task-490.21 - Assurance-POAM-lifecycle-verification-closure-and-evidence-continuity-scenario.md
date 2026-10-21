@@ -1,11 +1,11 @@
 ---
 id: TASK-490.21
 title: 'Assurance: create and maintain POA&M plans from real failed evidence'
-status: To Do
+status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-21 06:19'
+updated_date: '2026-10-21 06:20'
 labels:
   - testing
   - integration
