@@ -3,11 +3,11 @@ id: TASK-490.29
 title: >-
   Assurance: POA&M verification, closure, reopen, and evidence continuity
   scenario
-status: To Do
+status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 20:31'
-updated_date: '2026-10-21 06:19'
+updated_date: '2026-10-21 06:20'
 labels:
   - testing
   - integration
