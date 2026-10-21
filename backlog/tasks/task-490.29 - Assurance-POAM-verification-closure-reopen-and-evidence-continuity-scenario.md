@@ -3,10 +3,11 @@ id: TASK-490.29
 title: >-
   Assurance: POA&M verification, closure, reopen, and evidence continuity
   scenario
-status: Backlog
-assignee: []
+status: To Do
+assignee:
+  - '@openai'
 created_date: '2026-10-17 20:31'
-updated_date: '2026-10-19 02:15'
+updated_date: '2026-10-21 06:19'
 labels:
   - testing
   - integration
@@ -52,6 +53,12 @@ Focused verification after composition: `nix build .#checks.x86_64-linux.integra
 - [ ] #5 Coordinator composes named verification fragments after real .21/.16/.18 cases in evidence-remediation-lifecycle through receipts, without seeded success, packet derivation or another derivation's live state
 - [ ] #6 Coordinator executes the focused evidence-remediation-lifecycle gate and records exact tested revision, command, result and evidence; unresolved authority/role/UI states remain blocked
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+User selected bounded positive CVE verification/closure contribution to same Assurance lifecycle in existing coordinator worktree/branch. Add verification.py/.cjs: before correction assert non-completed plan and preserved baseline; built-clean must not close/remediate still-vulnerable Current. After actual corrected deployment and newer clean schema1 evidence, existing plan/finding remain stable; explicit awaiting_verification -> verify -> authoritative close retains exact baseline/current identities and persisted history after reload. Do not claim all premature-verification no-mutation behavior: research found audited rejected attempts may mutate history, a specific acceptance conflict to report. Reopen, policy verification and full stale/denial matrix remain open. No production change; normal Assurance owner verification.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 
