@@ -1221,7 +1221,7 @@ impl SystemTriageRowState {
             Self::Scheduled => "Scheduled",
             Self::AcceptedEnvironment => "Accepted · env",
             Self::ScheduledEnvironment => "Scheduled · env",
-            Self::Legacy => "Historical inventory",
+            Self::Legacy => "read-only",
             Self::ReadOnly => "Read-only",
             Self::NoScan => "No scan",
             Self::Conflict => "Conflict",
@@ -1331,6 +1331,9 @@ fn system_triage_row_title(
     state: SystemTriageRowState,
     detail: Option<&SystemCveTriageDetail>,
 ) -> String {
+    if state == SystemTriageRowState::Legacy {
+        return "This selected scan cannot authorize triage".to_string();
+    }
     let Some(detail) = detail else {
         return state.label().to_string();
     };
@@ -1954,6 +1957,14 @@ mod tests {
         assert_eq!(SystemTriageRowState::Scheduled.label(), "Scheduled");
         assert_eq!(SystemTriageRowState::Conflict.label(), "Conflict");
         assert_eq!(SystemTriageRowState::Whitelisted.label(), "Whitelisted");
+        assert_eq!(SystemTriageRowState::Legacy.label(), "read-only");
+        assert_eq!(SystemTriageRowState::Legacy.chip_class(), "chip-unknown");
+        assert_eq!(
+            system_triage_row_title(SystemTriageRowState::Legacy, None),
+            "This selected scan cannot authorize triage"
+        );
+        assert_eq!(SystemTriageRowState::ReadOnly.label(), "Read-only");
+        assert_ne!(SystemTriageRowState::Legacy, SystemTriageRowState::ReadOnly);
 
         let system_id = Uuid::from_u128(1);
         let relationship = relationship(observation(

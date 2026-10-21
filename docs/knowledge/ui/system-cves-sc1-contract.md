@@ -45,6 +45,30 @@ An operator opens System Detail, then CVEs, and can tell which running or explic
 
 Evidence checked: `mapped_running` handling in `packages/default/crates/cf-server/src/queries/cves.rs` and `packages/web-ui/src/views/system_detail.rs`, `cve_target` and `cve_mode` route parameters in `packages/web-ui/src/views/system_detail.rs`, the `binding_origin` migrations `0277` and `0278`, and the continuity migrations `0279` to `0281` with `view_current_cve_authority`. The browser checks named in Section 7 (`12ha-system-detail-cve-inventory-fallbacks`, `12h-system-detail-cves-grouped-justification`) live in `checks/web-ui/tests/integration-test.js`. The retained notes record the authoritative NixOS browser workflows as blocked at the time of writing. That status was not rechecked.
 
+## Selected evidence presentation
+
+An explicit historical selection remains inspection-only under the continuity
+design, Section 7. Its Triage cell uses `read-only`, the existing `chip-unknown`
+token, and the tooltip `This selected scan cannot authorize triage`. The reference
+is `SystemDetail.jsx`, `CvesTab`, at
+`6e4ea52022a575550a420977baea1792e3410cef`. This presentation does not change the
+`legacy` API authority or make mapped-running, loading, failed, or denied states
+equivalent. Authorized Current triage still depends on server-issued authority.
+
+The exact Scanning drawer presents numeric Findings only for `completed` scans.
+This includes completed clean scans and supported legacy completed scans. A
+failed scan can have a terminal timestamp and default zero counters without a
+completed finding set. Its drawer omits Findings and retains identity, metadata,
+failure diagnostics, logs, and retry controls. Do not substitute a previous scan's
+counts into that execution. System inventory can independently retain an earlier
+completed source after a newer attempt fails. The presentation reference is
+`ScanningView.jsx`, `ScanLogDrawer`, guarded by `cfg.found`, at the same revision.
+See the [scan operations contract](../api/cve-scan-operations-api.md).
+
+TASK-490.16 exercises these states in the existing
+`integration-assurance` scenario `evidence-remediation-lifecycle`. Presentation
+availability does not establish schema-1 integrity or Current mutation authority.
+
 ## Related concepts
 
 - [Design handoff for Systems design and System Detail CVEs](systems-design-handoff-bundle.md)
