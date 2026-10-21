@@ -7,9 +7,13 @@ Its Python body creates a fresh Assurance source/database/VM lifecycle, using
 only immutable setup code from Delivery. The local `9f53fade-dirty` owner run
 executed both real builds, scanner leases, deployments, Current and remediation
 continuity, terminal rejection, transient requeue/recovery, and production UI.
-The gate remains failed on the approved historical `read-only` cell copy versus
+That checkpoint failed on the approved historical `read-only` cell copy versus
 production `Historical inventory`, and on a failed scan's false-clean zero
-summary. Do not report a passing owner or full parity.
+summary. The two user-approved presentation repairs are now implemented but
+unverified. The normal owner run in tmux `cf-assurance-presentation-owner` has
+no reported result and predates the coordinator's bounded freeze/thaw idle-wait
+repair in the existing test helper. A final rerun is required. Do not report a
+passing owner or full parity.
 
 The actual fault composition uses normal replacement-build post-build intents,
 not the manual-rescan examples below. Manual intents lack producing-session
@@ -261,10 +265,11 @@ Sections 2.5 and 29. UI references at this worktree base `d11de059` are
 tree. Existing assertions retain the accepted evidence meanings. Added early
 entry points extend execution timing; they do not approve production deviations.
 The first exact scan can be inspected independently of activation/rollback.
-Current still requires actual activation and agent observation. Failed/missing,
-post-activation clean and historical UI exports remain unexecuted obligations;
-the existing full browser entry point proves vulnerable Current versus built
-clean only when actually run. Screenshots alone do not prove design conformance.
+Current still requires actual activation and agent observation. Later owner
+checkpoints executed missing, post-activation clean and failed UI phases, with
+the historical and failed presentation assertions failing as recorded in the
+coverage record. Updated browser assertions and the two approved repairs remain
+unverified. Screenshots alone do not prove design conformance.
 
 Sol must compose and execute the focused gate and retain its exact revision,
 result and browser artifacts:
@@ -324,13 +329,29 @@ and timing. Register each additional browser phase using the same adapter as
 | `cve-clean` | `clean` | Corrected activated and `current("corrected")` passed. Checks completed-empty System CVEs and exact `/scanning` execution. Emits `browserCleanScanId`. |
 | `cve-historical` | `historical` | After `historical("vulnerable")`; requires corrected Current. Checks original source, authored CVE, read-only, no triage, and exact selection after reload. Emits `browserHistoricalScanId`. |
 | `cve-read-error` | `readError` | Original vulnerable source still newest for its exact target. Aborts only its inventory GET transport, then removes interception before clicking Retry. Asserts actual retried API source/rows and no API writes. Emits `browserReadRetryScanId`. |
-| `cve-failed` | `failed` | After `terminal_fault_rescan()`, before retry. Checks original source plus failed attempt, visible failure notice, exact `/scanning` diagnostic execution and retry control. Emits `browserFailedScanId`. |
-| `cve-retry` | `retry` | After failed UI evidence and normal-feed restoration/cache reset. Clicks real Admin retry. Checks HTTP 202, exact target and fresh intent. Emits `browserRetryScanId`. |
+| `cve-failed` | `failed` | After the terminal replacement build and `failed("vulnerable", scan_id)`, before transient recovery. Requires `assurance.terminalFault.jobId`. Checks original source plus failed attempt, visible failure notice, exact `/scanning` diagnostic execution and retry control. Emits `browserFailedScanId`. |
+| `cve-retry` | `retry` | After real transient recovery and corrected Current revalidation. Checks the recovered historical source and exact completed execution, then clicks real Admin retry. Checks HTTP 202, exact target and fresh intent. Emits `browserRecoveryScanId` and `browserRetryScanId`. |
 
 All `browser*ScanId` receipts above use the prefix `assurance.cve.` and are
 UUID strings. Each phase signs in using the real UI and records its screenshot
 through the shared runner. No success response is mocked. `readError` injects
 only a browser transport failure and never changes stored evidence.
+
+The current `retry` phase additionally requires these same-lifecycle inputs:
+
+| Input receipt | Contract |
+| --- | --- |
+| `assurance.recovery.scanId` | UUID of the actual completed transient-fault scan; distinct from the original vulnerable source and terminal failed scan. |
+| `assurance.recovery.executionId` | UUID of its successful recovery execution, distinct from `assurance.vulnerable.faultExecutionId`. |
+| `assurance.vulnerable.faultExecutionId` | UUID from the real malformed-feed `attempt_requeued` diagnostic. |
+| `assurance.transientFault.jobId` | UUID of the replacement build that produced the recovered post-build obligation. |
+| `assurance.corrected.currentScanId` | Corrected Current source, revalidated after recovery; the corrected deployment and original completed-scan receipts remain required. |
+
+The phase checks the recovered authored affected set, completed Findings and
+execution diagnostic while corrected remains Current. It emits
+`assurance.cve.browserRecoveryScanId` before admitting the separate manual retry.
+That UUID is recovery proof, not proof that the newly admitted manual intent
+completed. Original vulnerable `scanId` and `executionId` remain immutable.
 
 New Python interfaces (default administrator jar remains `delivery-admin`):
 
@@ -354,31 +375,49 @@ New Python interfaces (default administrator jar remains `delivery-admin`):
 
 ### Terminal fault and recovery sequence
 
-Keep this after downstream baseline consumers. Use the isolated scenario
-builder only. Competing remote scanners and server-local fallback must not
-claim the rescan. The coordinator owns those controls. Stop the builder unit,
-confirm scanner exit, and clear its actual vulnix cache as described above.
-Switch services to `feedCommands.terminalFault`, resume the real builder, then:
+Keep this after downstream baseline consumers. The actual composition in
+`scenarios/evidence-remediation-lifecycle.py` uses replacement-build post-build
+obligations, not the optional manual-rescan helper. Its `select_upstream()`
+freezes the same producing session only when idle, clears that isolated cache,
+switches feeds, and thaws in `finally`. If an execution is active, the bounded
+wait thaws before polling again. Competing scanners remain excluded.
+
+The existing lifecycle order is:
 
 ```python
 try:
-    scan_id = assurance_cve_terminal_fault_rescan()
-    with case("cve-terminal-fault-production-ui"):
+    select_upstream("terminalFault")
+    terminal_scan = fault_rebuild("terminalFault")
+    assurance_cve_failed("vulnerable", terminal_scan,
+                        expected_error="vulnix returned an invalid CVSS score")
+    with case("cve-terminal-failure-production-browser"):
         run_browser(controller, "cve-failed")
 finally:
-    services.succeed(cve_terminal_restore_command)  # feedCommands.normal
-    # Coordinator stops the isolated builder, confirms scanner exit, clears
-    # only its upstream cache, then resumes it before the recovery retry.
+    select_upstream("normal")
 
-with case("cve-real-admin-retry-production-ui"):
+try:
+    select_upstream("fault")
+    fault_scan = fault_rebuild("transientFault")
+    # Existing malformed-upstream case proves requeue, schema 0, no digest,
+    # and records assurance.vulnerable.faultExecutionId from its diagnostic.
+finally:
+    select_upstream("normal")
+
+# Existing recovery case waits for fault_scan to complete with schema 1,
+# a sealed digest and a new execution; records assurance.recovery.scanId
+# and executionId; checks authored findings and the original source seal.
+assurance_cve_current("corrected")
+with case("cve-admin-browser-retry-after-recovery"):
     run_browser(controller, "cve-retry")
 assurance_cve_retry()
 ```
 
-`cve_terminal_restore_command` is the coordinator's literal rendering of
-`cveData.feedCommands.normal`, not a new fixture export. Restore the normal
-feed even on failure. Reset the builder cache **again** before recovery: a
-warm invalid-score archive otherwise persists for two hours. Do not issue a
+This ordering excerpt omits the existing SQL assertions and retained browser
+exception handling; it is not a replacement scenario body. `fault_rebuild()`
+records `assurance.<label>.jobId` and `.scanId` from actual CF operations.
+Restore the normal feed even on failure. Each upstream switch clears the
+isolated cache; a warm invalid-score archive otherwise persists for two hours.
+Do not issue a
 second retry while another intent is active; this phase requires `enqueued=true`.
 After repaired completion, the retry scan can become the newest eligible
 vulnerable-target source. Original write-once `scanId` remains audit identity,

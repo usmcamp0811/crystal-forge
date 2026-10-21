@@ -124,7 +124,12 @@ async function run(ctx, phase) {
     await dialog.getByRole("tab", { name: "Details", exact: true }).click();
     await expect(dialog.getByText(vulnerableScan, { exact: true })).toBeVisible();
     await expect(dialog.getByText(receipts["assurance.vulnerable.jobId"], { exact: true })).toBeVisible();
-    await ctx.screenshot("cve-exact-scan-details");
+    await completedFindings(ctx, dialog, scan, "vulnerable");
+    await themedEvidence(ctx, "cve-exact-scan-details", dialog, async () => {
+      const reopened = await openScanDetails(ctx, row, vulnerableScan);
+      expect(reopened).toEqual(scan);
+      await completedFindings(ctx, dialog, reopened, "vulnerable");
+    });
     ctx.emit("assurance.cve.browserExactScanId", vulnerableScan);
     await dialog.getByRole("button", { name: "Close exact scan detail", exact: true }).click();
     if (phase === "scan") return;
@@ -221,10 +226,9 @@ async function openInventory(ctx, variant, current, navigate) {
   return inventory;
 }
 
-function completedInventory(ctx, inventory, variant, current) {
-  const { expect, facts, receipts } = ctx;
-  const key = `assurance.${variant}.`;
-  expect(inventory.source.scan_id).toBe(receipts[key + "scanId"]);
+function completedInventory(ctx, inventory, variant, current, scanId = ctx.receipts[`assurance.${variant}.scanId`]) {
+  const { expect, facts } = ctx;
+  expect(inventory.source.scan_id).toBe(scanId);
   expect(inventory.evidence_representation).toBe("schema1_observations");
   expect(inventory.authority).toBe(current ? "exact" : "legacy");
   expect(inventory.read_only).toBe(!current);
@@ -242,6 +246,117 @@ async function expandFixture(ctx) {
   await ctx.expect(pkg).toHaveAttribute("aria-expanded", "true");
   await ctx.expect(detail.getByText(ctx.facts.cve.cveId, { exact: true })).toBeVisible();
   return detail;
+}
+
+// These are the authored scanner facts, not counts inferred from the API under
+// test. Only package cardinality is a binding check against the exact scan API.
+async function completedFindings(ctx, dialog, scan, variant) {
+  const n = variant === "corrected" ? 0 : 1;
+  ctx.expect(scan.status).toBe("completed");
+  ctx.expect([scan.total_vulnerabilities, scan.critical_count, scan.high_count, scan.medium_count, scan.low_count])
+    .toEqual([n, n, 0, 0, 0]);
+  ctx.expect(Number.isInteger(scan.total_packages)).toBe(true);
+  ctx.expect(scan.total_packages).toBeGreaterThanOrEqual(0);
+  const details = dialog.getByRole("tabpanel", { name: "Details", exact: true });
+  await ctx.expect(details.getByRole("heading", { name: "Findings", exact: true })).toBeVisible();
+  await ctx.expect(details.getByText(`${n} vulnerabilities across ${scan.total_packages} packages`, { exact: true })).toBeVisible();
+  for (const fact of [`${n} critical`, "0 high", "0 medium", "0 low"]) {
+    await ctx.expect(details.getByText(fact, { exact: true })).toBeVisible();
+  }
+}
+
+async function openScanDetails(ctx, row, id) {
+  const [response] = await Promise.all([
+    ctx.page.waitForResponse((r) => r.request().method() === "GET" && new URL(r.url()).pathname === `/api/v1/scanning/scans/${id}`),
+    row.getByRole("button", { name: `Open details for scan ${id}`, exact: true }).click(),
+  ]);
+  ctx.expect(response.status()).toBe(200);
+  const scan = await response.json();
+  ctx.expect(scan.scan_id).toBe(id);
+  await ctx.page.getByRole("dialog").getByRole("tab", { name: "Details", exact: true }).click();
+  return scan;
+}
+
+// Use the real theme control and restore the original preference. Dialogs must
+// close before the topbar can be used; reopen the same exact read afterward.
+// Keep the pinned viewport and capture the whole affected region, not a chip.
+async function themedEvidence(ctx, name, region, reopen) {
+  const { page, expect } = ctx;
+  const root = page.locator("html");
+  await expect(root).toHaveAttribute("data-theme", /^(dark|light)$/);
+  const original = await root.getAttribute("data-theme");
+  const viewport = page.viewportSize();
+  const closeDialog = async () => {
+    const dialog = page.getByRole("dialog");
+    if (await dialog.count()) await dialog.getByRole("button", { name: "Close exact scan detail", exact: true }).click();
+  };
+  const setTheme = async (theme) => {
+    if (await root.getAttribute("data-theme") !== theme) {
+      await closeDialog();
+      await page.getByRole("button", { name: "Toggle theme", exact: true }).click();
+      await expect(root).toHaveAttribute("data-theme", theme);
+      await reopen();
+    }
+  };
+  try {
+    for (const theme of ["dark", "light"]) {
+      await setTheme(theme);
+      expect(page.viewportSize()).toEqual(viewport);
+      await region.scrollIntoViewIfNeeded();
+      await expect(region).toBeInViewport({ ratio: 1 });
+      const capture = theme === "dark" ? name : `${name}-light`;
+      await ctx.screenshot(capture);
+      // A visible outer dialog does not prove that its scrollable metadata is
+      // captured. Retain the end of that region separately at the same viewport.
+      const details = page.getByRole("tabpanel", { name: "Details", exact: true });
+      if (await details.count()) {
+        const lastField = details.locator("dd").last();
+        await lastField.scrollIntoViewIfNeeded();
+        await ctx.screenshot(`${capture}-metadata-end`);
+        ctx.emit(`assurance.cve.visual.${capture}`, {
+          actor: ctx.facts.admin.email, url: page.url(), viewport, theme,
+          metadataEndFullyVisible: await lastField.evaluate((node) => {
+            const box = node.getBoundingClientRect();
+            if (box.top < 0 || box.bottom > window.innerHeight) return false;
+            for (let parent = node.parentElement; parent; parent = parent.parentElement) {
+              if (/(auto|scroll|hidden|clip)/.test(getComputedStyle(parent).overflowY)) {
+                const bounds = parent.getBoundingClientRect();
+                if (box.top < bounds.top || box.bottom > bounds.bottom) return false;
+              }
+            }
+            return true;
+          }),
+        });
+      } else {
+        const target = page.getByTestId("system-detail").getByText("Scan target", { exact: true });
+        await target.scrollIntoViewIfNeeded();
+        await expect(target).toBeInViewport();
+        await ctx.screenshot(`${capture}-selection`);
+        ctx.emit(`assurance.cve.visual.${capture}`, {
+          actor: ctx.facts.admin.email, url: page.url(), viewport, theme,
+        });
+      }
+    }
+  } finally {
+    await setTheme(original);
+  }
+}
+
+async function historicalReadOnly(ctx) {
+  const detail = await expandFixture(ctx);
+  const row = detail.getByRole("row").filter({ has: ctx.page.getByRole("cell", { name: ctx.facts.cve.cveId, exact: true }) });
+  const cell = row.getByRole("cell", { name: "read-only", exact: true });
+  await ctx.expect(cell).toBeVisible();
+  const chip = cell.getByText("read-only", { exact: true });
+  await ctx.expect(chip).toHaveText("read-only");
+  await ctx.expect(chip).toHaveClass(/(?:^|\s)chip(?:\s|$)/);
+  await ctx.expect(chip).toHaveClass(/(?:^|\s)chip-unknown(?:\s|$)/);
+  await ctx.expect(chip).toHaveAttribute("title", "This selected scan cannot authorize triage");
+  await ctx.expect(detail.getByTestId("system-cve-triage-open")).toHaveCount(0);
+  await ctx.expect(row.getByRole("button", { name: /triage/i })).toHaveCount(0);
+  await ctx.expect(detail.getByRole("checkbox")).toHaveCount(0);
+  await ctx.expect(detail.getByRole("button", { name: /triage/i })).toHaveCount(0);
+  return detail.getByRole("table").filter({ has: ctx.page.getByRole("cell", { name: ctx.facts.cve.cveId, exact: true }) });
 }
 
 exports.missing = async (ctx) => {
@@ -269,14 +384,29 @@ exports.historical = async (ctx) => {
   await ctx.step("formerly Current vulnerable evidence remains exact and read-only after activation", async () => {
     ctx.expect(ctx.receipts["assurance.vulnerable.historicalProven"]).toBe(true);
     completedInventory(ctx, await openInventory(ctx, "corrected", true), "corrected", true);
+    const correctedReadOnly = async () => {
+      const detail = ctx.page.getByTestId("system-detail");
+      await ctx.expect(detail.getByRole("heading", { name: "No findings in the selected scan", exact: true })).toBeVisible();
+      await ctx.expect(detail.getByTestId("system-cve-triage-open")).toHaveCount(0);
+      await ctx.expect(detail.getByRole("button", { name: /triage/i })).toHaveCount(0);
+      await ctx.expect(detail.getByRole("checkbox")).toHaveCount(0);
+    };
+    await correctedReadOnly();
+    completedInventory(ctx, await openInventory(ctx, "corrected", true, () => ctx.page.reload()), "corrected", true);
+    await correctedReadOnly();
     completedInventory(ctx, await openInventory(ctx, "vulnerable", false), "vulnerable", false);
-    const detail = await expandFixture(ctx);
-    await ctx.expect(detail.getByTestId("system-cve-triage-open")).toHaveCount(0);
-    // Approved SystemDetail.jsx CvesTab uses this exact read-only cell copy.
-    // A production presentation difference remains a mandatory gate failure.
-    await ctx.expect(detail.getByTestId("system-cve-triage-state")).toHaveText("read-only");
+    // SystemDetail.jsx:1825 owns the exact read-only cell/token/title contract.
+    // Repeat the prohibition after reload and after leaving and returning.
+    await historicalReadOnly(ctx);
     completedInventory(ctx, await openInventory(ctx, "vulnerable", false, () => ctx.page.reload()), "vulnerable", false);
-    await ctx.screenshot("cve-historical-vulnerable-read-only");
+    await historicalReadOnly(ctx);
+    completedInventory(ctx, await openInventory(ctx, "corrected", true), "corrected", true);
+    await correctedReadOnly();
+    completedInventory(ctx, await openInventory(ctx, "vulnerable", false), "vulnerable", false);
+    const table = await historicalReadOnly(ctx);
+    await themedEvidence(ctx, "cve-historical-vulnerable-read-only", table, async () => {
+      await historicalReadOnly(ctx);
+    });
     ctx.emit("assurance.cve.browserHistoricalScanId", ctx.receipts["assurance.vulnerable.scanId"]);
   });
 };
@@ -316,7 +446,12 @@ exports.clean = async (ctx) => {
     const dialog = ctx.page.getByRole("dialog");
     await dialog.getByRole("tab", { name: "Details", exact: true }).click();
     await ctx.expect(dialog.getByText(id, { exact: true })).toBeVisible();
-    await ctx.screenshot("cve-clean-exact-scan-details");
+    await completedFindings(ctx, dialog, scan, "corrected");
+    await themedEvidence(ctx, "cve-clean-exact-scan-details", dialog, async () => {
+      const reopened = await openScanDetails(ctx, row, id);
+      ctx.expect(reopened).toEqual(scan);
+      await completedFindings(ctx, dialog, reopened, "corrected");
+    });
   });
 };
 
@@ -356,23 +491,87 @@ exports.failed = async (ctx) => {
     const scan = await response.json();
     expect(scan.scan_id).toBe(id);
     expect(scan.derivation_id).toBe(receipts["assurance.vulnerable.derivationId"]);
+    expect(scan.build_job_id).toBe(receipts["assurance.terminalFault.jobId"]);
     expect(scan.status).toBe("failed");
     expect(scan.failure).toBe("vulnix returned an invalid CVSS score");
     expect(scan.events.some((e) => e.execution_id === receipts["assurance.vulnerable.failedExecutionId"] && e.event_type === "attempt_failed")).toBe(true);
     const dialog = page.getByRole("dialog");
-    await expect(dialog.getByRole("button", { name: "Retry scan", exact: true })).toBeVisible();
-    await dialog.getByRole("tab", { name: "Details", exact: true }).click();
-    await expect(dialog.getByText(id, { exact: true })).toBeVisible();
-    await ctx.screenshot("cve-terminal-failure-exact-execution");
-    // Failed execution has no completed finding set. A zero-findings summary
-    // would present missing evidence as a completed clean scan.
-    await expect(dialog).not.toContainText(/0\s+vulnerabilities across 0 packages/);
+    const failedDetails = async () => {
+      await expect(dialog.getByRole("button", { name: "Retry scan", exact: true })).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Retry scan", exact: true })).toBeEnabled();
+      await expect(dialog.getByRole("alert")).toContainText(receipts["assurance.vulnerable.failedError"]);
+      await dialog.getByRole("tab", { name: "Log", exact: true }).click();
+      const event = scan.events.find((e) => e.execution_id === receipts["assurance.vulnerable.failedExecutionId"] && e.event_type === "attempt_failed");
+      const diagnostic = dialog.getByTestId(`scan-event-${event.id}`);
+      await expect(diagnostic).toContainText(`execution ${event.execution_id}`);
+      await expect(diagnostic).toContainText("attempt_failed");
+      await expect(diagnostic).toContainText(scan.failure);
+      await dialog.getByRole("tab", { name: "Details", exact: true }).click();
+      const details = dialog.getByRole("tabpanel", { name: "Details", exact: true });
+      await expect(details.getByText(id, { exact: true })).toBeVisible();
+      await expect(details.locator("code").filter({ hasText: new RegExp(`^${scan.derivation_id}$`) })).toBeVisible();
+      await expect(details.getByText(scan.build_job_id, { exact: true })).toBeVisible();
+      await expect(details.getByText("Failed", { exact: true })).toBeVisible();
+      await expect(details.getByText(scan.failure, { exact: true })).toBeVisible();
+      // ScanningView.jsx:480 omits Findings when no completed set exists.
+      // Protect the whole section, including numeric and severity summaries.
+      await expect(dialog.getByRole("heading", { name: "Findings", exact: true })).toHaveCount(0);
+      await expect(dialog.getByText(/\d+\s+vulnerabilities across\s+\d+\s+packages/)).toHaveCount(0);
+      await expect(dialog.getByText(/^\d+\s+(critical|high|medium|low)$/)).toHaveCount(0);
+    };
+    await failedDetails();
+    await themedEvidence(ctx, "cve-terminal-failure-exact-execution", dialog, async () => {
+      expect(await openScanDetails(ctx, row, id)).toEqual(scan);
+      await failedDetails();
+    });
     ctx.emit("assurance.cve.browserFailedScanId", id);
   });
 };
 
 exports.retry = async (ctx) => {
   await signIn(ctx);
+  // The existing lifecycle invokes this adapter after real transient recovery,
+  // before manual retry admission. Original source receipts remain immutable.
+  await ctx.step("recovered execution supplies a new completed historical source while corrected stays Current", async () => {
+    const id = ctx.receipts["assurance.recovery.scanId"];
+    ctx.expect(typeof id).toBe("string");
+    ctx.expect(id).not.toBe(ctx.receipts["assurance.vulnerable.scanId"]);
+    ctx.expect(id).not.toBe(ctx.receipts["assurance.vulnerable.failedScanId"]);
+    ctx.expect(ctx.receipts["assurance.recovery.executionId"]).not.toBe(ctx.receipts["assurance.vulnerable.faultExecutionId"]);
+    completedInventory(ctx, await openInventory(ctx, "corrected", true), "corrected", true);
+    const inventory = await openInventory(ctx, "vulnerable", false);
+    completedInventory(ctx, inventory, "vulnerable", false, id);
+    await historicalReadOnly(ctx);
+    await ctx.screenshot("cve-recovery-completed-historical-source");
+    await ctx.page.goto(ctx.url("/scanning"));
+    await ctx.page.getByRole("tab", { name: /^Completed/ }).click();
+    await ctx.page.getByRole("textbox", { name: "Search scans by configuration, flake, revision, scan ID, or derivation ID", exact: true }).fill(id);
+    const row = ctx.page.getByTestId(`scanning-record-${id}`);
+    const scan = await openScanDetails(ctx, row, id);
+    ctx.expect(scan.derivation_id).toBe(ctx.receipts["assurance.vulnerable.derivationId"]);
+    ctx.expect(scan.build_job_id).toBe(ctx.receipts["assurance.transientFault.jobId"]);
+    // The detail API retains the prior attempt's error metadata after recovery.
+    // Completed status and the exact completion event establish the new result;
+    // diagnostic retention must not be mistaken for a terminal failed lifecycle.
+    const completed = scan.events.find((e) => e.execution_id === ctx.receipts["assurance.recovery.executionId"] && e.event_type === "attempt_completed");
+    ctx.expect(completed).toBeDefined();
+    const requeued = scan.events.find((e) => e.execution_id === ctx.receipts["assurance.vulnerable.faultExecutionId"] && e.event_type === "attempt_requeued");
+    ctx.expect(requeued).toBeDefined();
+    ctx.expect(requeued.message).toContain("vulnix process failed");
+    const dialog = ctx.page.getByRole("dialog");
+    await dialog.getByRole("tab", { name: "Log", exact: true }).click();
+    const event = completed;
+    await ctx.expect(dialog.getByTestId(`scan-event-${event.id}`)).toContainText(`execution ${event.execution_id}`);
+    await dialog.getByRole("tab", { name: "Details", exact: true }).click();
+    const details = dialog.getByRole("tabpanel", { name: "Details", exact: true });
+    await ctx.expect(details.getByText(id, { exact: true })).toBeVisible();
+    await ctx.expect(details.locator("code").filter({ hasText: new RegExp(`^${scan.derivation_id}$`) })).toBeVisible();
+    await ctx.expect(details.getByText(scan.build_job_id, { exact: true })).toBeVisible();
+    await completedFindings(ctx, dialog, scan, "vulnerable");
+    await ctx.screenshot("cve-recovery-exact-scan-details");
+    await dialog.getByRole("button", { name: "Close exact scan detail", exact: true }).click();
+    ctx.emit("assurance.cve.browserRecoveryScanId", id);
+  });
   await ctx.step("Admin retry admits a new exact scan without rewriting failed evidence", async () => {
     const { id, row } = await failedRecord(ctx);
     const drv = ctx.receipts["assurance.vulnerable.derivationId"];

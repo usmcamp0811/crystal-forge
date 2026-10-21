@@ -60,8 +60,10 @@ reload after that copy assertion is not executed. A second mandatory assertion
 rejects the failed scan Details summary `0 vulnerabilities across 0 packages`:
 failed schema-0 execution has no completed finding set and must not appear
 clean. Both read-only browser failures are retained and re-raised after
-independent fault/recovery; the owner gate remains failed. No production/UI
-repair is authorized for either discrepancy.
+independent fault/recovery; that checkpoint's owner gate remains failed. The
+user subsequently authorized exactly two presentation repairs: the historical
+Legacy row's `read-only` tooltip chip, and omission of Findings unless the scan
+is completed. Both are implemented in the current working tree but unverified.
 Loading, unavailable, clean-empty, GET error/Retry, Viewer and failed-scan states
 have actual browser artifacts. Screenshots were inspected; this is not broad
 visual parity or scale/performance proof. Reopen, recurrence, batch isolation,
@@ -80,21 +82,66 @@ adds the missing documentation-manifest entry; no product repair is added.
 Current native inventory is Access, Delivery and Assurance. Upgrade has no
 placeholder: D2 still requires an approved predecessor and compatibility window.
 
+### Hosted checkpoint and pending presentation verification
+
+[Pipeline 2971039033](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2971039033)
+failed at exact revision `3ec99f7273736e69df9c4918727f8328db1cecb1`.
+The 2026-10-21 single-snapshot audit is retained at
+`/tmp/opencode/pipeline-2971039033/report.md`.
+
+| Job | Audited result |
+| --- | --- |
+| Access / Delivery | Fresh owner executions passed 23/23 and 15/15 respectively. |
+| Assurance | 40 passed / 2 failed case records: 42 records, 37 distinct names. Historical `read-only` mismatch and failed-scan false-clean summary failed again. |
+| State machine | Actual DB execution: 525 passed, 0 failed, 0 ignored across 237 Rust summaries; migration/rehearsal and regression phases exited 0. |
+| Component | Actual passing execution: nine Rust summaries, 1,935 passing executions, 0 failures, 779 ignored entries. These are execution totals, not unique tests or all DB regressions. |
+| CVE / dashboard | Hosted statuses were green, but both launchers failed root `initdb` and ran no Rust tests. These are false-green statuses. |
+| Complexity / coverage | Skipped; no measured result. |
+
+After the two retained UI failures, Assurance proved malformed-feed requeue but
+aborted when normal-feed restoration found an `in_progress` retry at the
+idle-scanner precondition. Recovery and administrator browser retry were not
+reached in this hosted run. This active-retry/idle-precondition race does not
+prove permanent scanner failure. The earlier `9f53fade-dirty` recovery evidence
+above remains valid only for its recorded inputs.
+
+The coordinator added a bounded freeze/thaw idle wait to the existing test
+helper, not product code. The normal local owner run in tmux
+`cf-assurance-presentation-owner` has no reported result and predates that race
+fix. Both presentation repairs and updated browser assertions remain
+implemented but unverified; a final rerun with the idle-wait fix is required.
+
+Preview: ready (owner-reported), production `http://127.0.0.1:8090/`, API
+`http://127.0.0.1:3490/`, isolated task PostgreSQL port `5490`, design
+`http://127.0.0.1:39997/crystal-forge.html`. Existing supervisors are
+`cf-assurance-production-start` and `cf-assurance-design`; backend freshness
+remains with the coordinator. Stock fixtures have no scans or historical
+selections, so they cannot demonstrate the populated repairs. No scan results
+were seeded. Genuine before evidence remains dark-theme `9f53fade-dirty` VM
+captures; new reference captures cover both themes. Live empty-state captures
+are not populated-state verification. Inspection and capture paths remain in
+`/tmp/opencode/cf-assurance-browser-inspection.md`; references are unchanged.
+
 ### Selected browser design review
 
-Reference components were inspected at tree `204a4752`, unchanged in this
-increment (last selected-component change `6e4ea520`). SC1 revision 3 and the
+Reference components were inspected at tree `204a4752`, with the selected
+reference contracts at `6e4ea520`: `SystemDetail.jsx` `CvesTab` line 1825
+specifies the `read-only` chip (`chip chip-unknown`, title
+`This selected scan cannot authorize triage`); `ScanningView.jsx`
+`ScanLogDrawer` uses `cfg.found` to omit Findings without a completed set.
+The approved repair adds no unavailable replacement banner. SC1 revision 3 and the
 normative continuity contract control evidence and permission meaning. The
-following review does not approve production differences or invent new panels.
+continuity specification retains precedence for Current authority. The following
+whole-region gaps carry no authorization for additional product repairs.
 
 | Surface/state | Actual observation and remaining difference |
 | --- | --- |
 | System CVEs Current | Package-first sections, automatic expansion, exact finding and single triage execute. Reference batch quick-picks and batch bar are not implemented; multi-selection remains open. |
-| Exact scan Details | Real scan/job/execution identity and clean versus affected API state execute. Actual Findings precede identity in one card, rather than reference identity then separate Findings. Reference Freshness, CVE database update and Details-level View these CVEs action are absent. Failed zero-summary is a mandatory failure. |
+| Exact scan Details | Real scan/job/execution identity and clean versus affected API state execute. Retained before evidence puts Findings first and merges summary/metadata in a dense inset card; the failed reference has plain metadata with no Findings. Freshness and CVE database are absent; several execution timestamps replace Last scan. Configuration/Revision labels and order differ from Config/Commit. Extra execution diagnostics do not establish reference parity. Scanner renders duplicated `vulnix vulnix 1.12.4`; the version difference itself is fixture data. Details-level View these CVEs remains absent. Failed zero-summary is a historical mandatory failure; the approved omission is implemented but unverified. |
 | Host Schedule patch | Browser creates the real host plan and reloads Scheduled. No dialog PNG was retained; dialog hierarchy is source-reviewed only. Reference Exploited context and no-upstream-patch warning remain gaps. |
 | Maintained POA&M | Actual metadata, plan, note, milestone and baseline persist. The browser reads/reloads API-authored changes. Visible reference lifecycle explanation/action and scope severity/fix/environment/commit metadata differ; lower activity outside the viewport is not called missing. |
 | Closed POA&M | Two sealed PASS attempts and original retired baseline history are visible. Large verification cards replace the compact reference confirmation and push baseline history lower. A readable baseline/Current comparison and all required metadata are not fully proven by the image. Verify/Close/Reopen browser clicks remain unexecuted. |
-| Historical | Explicit selection, original sealed source and no mutation control are proven. Cell copy fails; historical reload after that assertion is unexecuted. |
+| Historical | Explicit selection, original sealed source and no mutation control are proven at the recorded checkpoints. Cell copy failed and prevented historical reload. The approved tooltip-chip repair and reload/leave-return assertions are implemented but unverified. Generation versus commit selection and fixture values are context differences; extra package-load metadata is an observed difference, not an authorized removal. |
 | Missing/clean/loading | The tab distinguishes no completed scan, completed-empty and loading without enqueuing. Global green CVEs 0 above unavailable inventory remains a header/count consistency gap. |
 | Error/Retry | Held/aborted real GET exercises loading/error; restored transport supplies the real retry result without API writes. Raw stack text dominates the error frame and pushes Retry below the viewport, unlike the bounded reference message. |
 | Fleet drawer/Viewer | Exact fleet-to-Current navigation and Viewer no-control behavior execute. No drawer PNG was retained; source-only differences include Published versus Discovered, missing fleet denominator, and tier-first rather than environment-first grouping. Viewer-specific disposition copy lacks a complete approved-state comparison. |

@@ -193,8 +193,19 @@ with case("cve-inventory-read-error-and-retry"):
 def select_upstream(mode):
     # Freeze the idle real unit rather than replace its process/session. Scan
     # affinity must keep the exact producing build session across input faults.
-    builderA.succeed("systemctl freeze crystal-forge-builder.service")
+    # A transient retry can claim between observing requeue and freezing. Let
+    # that real attempt finish, then retry the freeze-and-idle check. Never
+    # change upstream data while an execution is active or wait while frozen.
+    def freeze_idle():
+        builderA.succeed("systemctl freeze crystal-forge-builder.service")
+        active = sql_json(controller, "SELECT id FROM cve_scans WHERE status='in_progress'")
+        if active:
+            builderA.succeed("systemctl thaw crystal-forge-builder.service")
+            return False
+        return True
+
     try:
+        wait_for(freeze_idle, "idle scanner before upstream switch", timeout=180)
         expect_equal(sql_json(controller, "SELECT id FROM cve_scans WHERE status='in_progress'"), [],
                      "upstream switch requires idle scanner")
         builderA.succeed("rm -rf /var/lib/crystal-forge/.cache/vulnix")
