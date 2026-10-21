@@ -1,9 +1,11 @@
 ---
 id: TASK-501
 title: Fail dedicated database CI jobs when PostgreSQL initialization fails
-status: Backlog
-assignee: []
+status: To Do
+assignee:
+  - '@openai'
 created_date: '2026-10-21 14:36'
+updated_date: '2026-10-21 23:56'
 labels: []
 dependencies: []
 references:
@@ -32,3 +34,9 @@ Dedicated CVE-processing and dashboard-visibility CI jobs reported success witho
 - [ ] #3 Regression coverage proves failure propagation and the supported successful root-runner path with actual test counts.
 - [ ] #4 Verification records and affected workflow documentation distinguish executed tests from setup failures and reused results.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Owner explicitly selected TASK-501 in the TASK-490 wrap-up instruction. Authorization includes actual runner, disposable database and CI execution/failure-propagation repairs, preserving declared test selections and explicit dependency preparation/offline execution. Use the existing MR335 integration as base; do not change production database configuration or add another check/wrapper hierarchy. The earlier discovery-only restriction is superseded.
+<!-- SECTION:NOTES:END -->
