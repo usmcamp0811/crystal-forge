@@ -53,17 +53,15 @@ execution and completed source without changing corrected Current. Both faults
 use real replacement-build post-build leases. Manual retry admission is tested
 separately; manual execution on a remote-only topology is not proved.
 
-One failing browser assertion preserves the approved `SystemDetail.jsx`
-`CvesTab` cell copy `read-only`; production renders `Historical inventory`.
-Mutation controls are absent and API read-only authority is correct. Historical
-reload after that copy assertion is not executed. A second mandatory assertion
-rejects the failed scan Details summary `0 vulnerabilities across 0 packages`:
-failed schema-0 execution has no completed finding set and must not appear
-clean. Both read-only browser failures are retained and re-raised after
-independent fault/recovery; that checkpoint's owner gate remains failed. The
-user subsequently authorized exactly two presentation repairs: the historical
-Legacy row's `read-only` tooltip chip, and omission of Findings unless the scan
-is completed. Both are implemented in the current working tree but unverified.
+At the historical `9f53fade-dirty` checkpoint, the approved `SystemDetail.jsx`
+`CvesTab` cell-copy assertion failed: production rendered `Historical inventory`
+instead of `read-only`. Mutation controls were absent and API authority was
+correct, but the copy failure prevented historical reload. The second failure
+rejected `0 vulnerabilities across 0 packages` in failed scan Details without a
+completed finding set. Both failures remain in that checkpoint's evidence.
+The user subsequently authorized exactly two presentation repairs: the historical
+Legacy row's `read-only` tooltip chip, and omission of unsupported Findings.
+Both repairs passed the normal Assurance owner at clean committed `5ef2d0b0`.
 Loading, unavailable, clean-empty, GET error/Retry, Viewer and failed-scan states
 have actual browser artifacts. Screenshots were inspected; this is not broad
 visual parity or scale/performance proof. Reopen, recurrence, batch isolation,
@@ -75,14 +73,15 @@ Access passed 23, state-machine passed 525/0/0 including eight native-authority
 regressions, and core/generated-TOML/warm-Nix tests passed. Component then failed
 the missing CVE fixture manifest entry. CVE/dashboard job status was green but
 `initdb` failed as root and no tests ran. Complexity and coverage were skipped.
-Those statuses are not passing regressions. This increment corrects the test
-flag, retains exact closure membership without oversized JSON transport, and
-adds the missing documentation-manifest entry; no product repair is added.
+Those statuses are not passing regressions. The subsequent test increment
+corrected the flag, retained exact closure membership without oversized JSON
+transport, and added the missing documentation-manifest entry without a product
+repair. The later authorized presentation repairs are recorded separately below.
 
 Current native inventory is Access, Delivery and Assurance. Upgrade has no
 placeholder: D2 still requires an approved predecessor and compatibility window.
 
-### Hosted checkpoint and pending presentation verification
+### Hosted checkpoint and presentation repair verification
 
 [Pipeline 2971039033](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2971039033)
 failed at exact revision `3ec99f7273736e69df9c4918727f8328db1cecb1`.
@@ -106,10 +105,43 @@ prove permanent scanner failure. The earlier `9f53fade-dirty` recovery evidence
 above remains valid only for its recorded inputs.
 
 The coordinator added a bounded freeze/thaw idle wait to the existing test
-helper, not product code. The normal local owner run in tmux
-`cf-assurance-presentation-owner` has no reported result and predates that race
-fix. Both presentation repairs and updated browser assertions remain
-implemented but unverified; a final rerun with the idle-wait fix is required.
+helper, not product code. The first local repair run ended with 44 passed and
+one failed case at `3ec99f72-dirty`. Both original presentation cases passed;
+an added recovery assertion incorrectly required retained error metadata to be
+null. The assertion was corrected to require the completed lifecycle and exact
+completion event while preserving the earlier requeue diagnostic. No production
+error metadata was changed to satisfy that test.
+
+At clean committed `5ef2d0b0622fd45e59276754c0c7e0f8cd67e030`,
+`nix develop --command sh packages/ci/integration-owner-build.sh integration-assurance`
+exited 0 with a fresh VM execution: **46 passed case records**, 40 distinct names,
+driver 215.53 seconds. The run includes the idle-wait fix. Evidence output:
+`nggxx00r5f9dnwm69b3jzzjz1bk7fk99-vm-test-run-cf-it-assurance-evidence-remediation-lifecycle-run`.
+Both `result.json` and `meta.json` identify the clean commit. Historical
+reload/leave-return, exact chip/title/no-control assertions, completed zero/nonzero
+summaries, failed Findings omission with retained diagnostics, and real
+recovery/retry admission passed. Full Web UI Rust tests passed 766/0/1 ignored;
+the Web UI package build reused its result. This is not a hosted-CI pass.
+Pipeline `2972524672` was running at the last snapshot.
+
+The repair [reference/before/after bundle](https://gitlab.com/-/project/70402481/uploads/1e12d6f176a94ed55edb3da0cd22c08b/mr335-assurance-presentation-5ef2d0b0.tar.gz)
+and six inline MR335 images retain the approved reference, genuine prior dark
+before states, and real clean-commit after states. After captures cover dark and
+light at 1440 by 900 pixels, with actor, exact selected evidence and scenario
+metadata. Supplementary metadata-end captures record actual clipping checks;
+the retained receipt reports all eight captured metadata ends fully visible.
+No light-theme before state was available.
+
+TASK-490.20 then resumed without product or fixture changes. The normal owner
+passed 47 case records with 41 distinct names at `5ef2d0b0-dirty`, driver 246.38
+seconds, evidence `39bxp18w8ap718xx0r6f63h9imv7fcz8`.
+The existing host-schedule browser journey now reopens and cancels the exact
+hydrated editor twice without an additional remediation write. Complete POA&M
+API detail remains unchanged and its exposed baseline agrees with SQL. The
+separate valid-CSRF Admin request without POA&M metadata returns
+`400 invalid_poam_payload`, preserving nine remediation tables, the original
+scan seal and all observations. This is not SQL before/after proof of browser
+reopen, successful batch application, or unselected-finding isolation.
 
 Preview: ready (owner-reported), production `http://127.0.0.1:8090/`, API
 `http://127.0.0.1:3490/`, isolated task PostgreSQL port `5490`, design
@@ -137,11 +169,11 @@ whole-region gaps carry no authorization for additional product repairs.
 | Surface/state | Actual observation and remaining difference |
 | --- | --- |
 | System CVEs Current | Package-first sections, automatic expansion, exact finding and single triage execute. Reference batch quick-picks and batch bar are not implemented; multi-selection remains open. |
-| Exact scan Details | Real scan/job/execution identity and clean versus affected API state execute. Retained before evidence puts Findings first and merges summary/metadata in a dense inset card; the failed reference has plain metadata with no Findings. Freshness and CVE database are absent; several execution timestamps replace Last scan. Configuration/Revision labels and order differ from Config/Commit. Extra execution diagnostics do not establish reference parity. Scanner renders duplicated `vulnix vulnix 1.12.4`; the version difference itself is fixture data. Details-level View these CVEs remains absent. Failed zero-summary is a historical mandatory failure; the approved omission is implemented but unverified. |
-| Host Schedule patch | Browser creates the real host plan and reloads Scheduled. No dialog PNG was retained; dialog hierarchy is source-reviewed only. Reference Exploited context and no-upstream-patch warning remain gaps. |
+| Exact scan Details | Real scan/job/execution identity and clean versus affected states execute. Failed Findings omission passed at clean `5ef2d0b0`, with failure context and all metadata retained. Completed Findings-first/inset-card structure still differs from the reference. Freshness and CVE database are absent; several execution timestamps replace Last scan. Configuration/Revision labels and order differ from Config/Commit. Extra execution diagnostics do not establish reference parity. Scanner renders duplicated `vulnix vulnix 1.12.4`; the version difference itself is fixture data. Details-level View these CVEs remains absent. |
+| Host Schedule patch | Browser creates the real host plan and reloads Scheduled. The subsequent `5ef2d0b0-dirty` run reopens/cancels twice, checks hydration and no additional remediation writes, and retains two dialog images. This is not full dialog parity. Reference Exploited context and no-upstream-patch warning remain gaps. |
 | Maintained POA&M | Actual metadata, plan, note, milestone and baseline persist. The browser reads/reloads API-authored changes. Visible reference lifecycle explanation/action and scope severity/fix/environment/commit metadata differ; lower activity outside the viewport is not called missing. |
 | Closed POA&M | Two sealed PASS attempts and original retired baseline history are visible. Large verification cards replace the compact reference confirmation and push baseline history lower. A readable baseline/Current comparison and all required metadata are not fully proven by the image. Verify/Close/Reopen browser clicks remain unexecuted. |
-| Historical | Explicit selection, original sealed source and no mutation control are proven at the recorded checkpoints. Cell copy failed and prevented historical reload. The approved tooltip-chip repair and reload/leave-return assertions are implemented but unverified. Generation versus commit selection and fixture values are context differences; extra package-load metadata is an observed difference, not an authorized removal. |
+| Historical | Explicit selection, original sealed source and no mutation control are proven. The original cell-copy failure is preserved as historical evidence. Approved tooltip-chip rendering and reload/leave-return assertions passed at clean `5ef2d0b0` in both themes. Generation versus commit selection and fixture values are context differences; extra package-load metadata is an observed difference, not an authorized removal. |
 | Missing/clean/loading | The tab distinguishes no completed scan, completed-empty and loading without enqueuing. Global green CVEs 0 above unavailable inventory remains a header/count consistency gap. |
 | Error/Retry | Held/aborted real GET exercises loading/error; restored transport supplies the real retry result without API writes. Raw stack text dominates the error frame and pushes Retry below the viewport, unlike the bounded reference message. |
 | Fleet drawer/Viewer | Exact fleet-to-Current navigation and Viewer no-control behavior execute. No drawer PNG was retained; source-only differences include Published versus Discovered, missing fleet denominator, and tier-first rather than environment-first grouping. Viewer-specific disposition copy lacks a complete approved-state comparison. |
