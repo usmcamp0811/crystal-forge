@@ -1,11 +1,11 @@
 ---
 id: TASK-490.20
 title: 'Assurance: real finding triage and batch-triage persistence scenario'
-status: To Do
+status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-21 06:19'
+updated_date: '2026-10-21 06:20'
 labels:
   - testing
   - integration
