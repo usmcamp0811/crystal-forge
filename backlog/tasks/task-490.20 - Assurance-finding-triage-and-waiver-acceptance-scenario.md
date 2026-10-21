@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-21 06:20'
+updated_date: '2026-10-21 08:22'
 labels:
   - testing
   - integration
@@ -43,9 +43,9 @@ Focused verification after composition: `nix build .#checks.x86_64-linux.integra
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Real scan-produced findings from earlier .16 cases in the same Assurance scenario are consumed through receipts; no finding/triage result is seeded or imported from another derivation
+- [x] #1 Real scan-produced findings from earlier .16 cases in the same Assurance scenario are consumed through receipts; no finding/triage result is seeded or imported from another derivation
 - [ ] #2 Single/fleet and batch triage persist actor, exact scope, status and justification for exactly the authored selected set; unselected findings remain unchanged
-- [ ] #3 Unauthorized Viewer triage is rejected without a database side effect
+- [x] #3 Unauthorized Viewer triage is rejected without a database side effect
 - [ ] #4 Browser navigation reaches exact CVE/finding/system identity and displays persisted triage state
 - [ ] #5 Coordinator composes only the named triage fragments into evidence-remediation-lifecycle; waiver/acceptance/plan/verification remain separate fragments and no packet-specific derivation is added
 - [ ] #6 Coordinator executes the focused evidence-remediation-lifecycle gate and records exact tested revision, command, result and evidence
@@ -64,4 +64,6 @@ Current readiness: bba718be controller foundation passed; .16 producer/setup, ac
 
 ### Historical
 2026-10-17 reviews recorded foundation blockers and a need to split mixed remediation scope. That split produced .27 waiver, .28 acceptance and .29 verification; .20 is triage only. Earlier separate-run proposals could not reuse .16 live findings. Same-scenario real producer receipts are now permitted.
+
+Bounded real host-triage contribution executed in current Assurance lifecycle at9f53fade-dirty (46records45passed1historicalcopyfailure overall). triage.py/.cjs create actual System CVEs Schedule patch from real scanned/deployed Current throughbrowser, compareexacthost/CVE/package/actor/disposition/POAMfindinglinkandfullbaseline viaSQL/APIandreload. Real scopedViewer withvalidCSRF cannotremovehostschedule; nine remediation-table snapshots unchanged. Evidence y2nmb68nf9raqmv4ssj07njmxca4nc44.../browser/triage-create and result.json. AC1/3checked. Batch/fleetselectedsetandunselectedisolationremainunimplemented; tasknotReview/Done. Sameinvocationonly; no seeds/cross-scenariofindings.
 <!-- SECTION:NOTES:END -->
