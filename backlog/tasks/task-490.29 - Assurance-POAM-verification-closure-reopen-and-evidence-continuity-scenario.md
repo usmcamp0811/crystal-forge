@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 20:31'
-updated_date: '2026-10-21 06:20'
+updated_date: '2026-10-21 08:22'
 labels:
   - testing
   - integration
@@ -47,7 +47,7 @@ Focused verification after composition: `nix build .#checks.x86_64-linux.integra
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 Premature verification before Current evidence changes is rejected with no state mutation
-- [ ] #2 After actual target/scanner/evaluation remediation changes Current evidence to passing, verification succeeds only under approved role/evidence rules and expected decision/history
+- [x] #2 After actual target/scanner/evaluation remediation changes Current evidence to passing, verification succeeds only under approved role/evidence rules and expected decision/history
 - [ ] #3 Closure follows successful verification; closure/reopen preserve original exact finding/evidence identities and documented transitions, while stale revisions have no side effect
 - [ ] #4 UI distinguishes independently observed Current from historical/built evidence and returns to the exact approved finding/system/plan identity
 - [ ] #5 Coordinator composes named verification fragments after real .21/.16/.18 cases in evidence-remediation-lifecycle through receipts, without seeded success, packet derivation or another derivation's live state
@@ -67,4 +67,6 @@ Current readiness: foundation bba718be passed. Real plan/failed-evidence produce
 
 ### Historical
 The packet split higher-authority verification/closure/reopen from plan entry. Legacy canonical/29g-29m flows used SQL-seeded failure evidence. Earlier isolation notes assumed separate runs and unresolved foundation startup. Current fragments consume earlier real same-scenario plans/evidence through receipts, perform real remediation and prohibit cross-derivation live-state reuse.
+
+Bounded positive verification/closure contribution executed at9f53fade-dirty in Assurance normalowner, evidence y2nmb68nf9raqmv4ssj07njmxca4nc44.../browser/poam-verify-close and result.json. Actualcorrectedactivation/newercompletedcleanscan givesexactCurrent; existingplanstaysin_progressuntilrealawaiting_verificationtransition,explicitverifythenauthoritativeclose. Verificationandclosurehavedifferentacceptedsealedattempts,exactfinding/system/baseline/currentScan/derivation/output/generationandnewerthanbaselinechecks. SQL/API/productionbrowserreloadpreserveoriginalretiredlinkandclosurehistory. RealViewerverify/close/notevalidCSRFdenialsproducenoremediationwrites. AC2checked; reopen/stalerevisions/fullrole/policy/completeUIremainopen. Premature no-mutationprobe coversinvalidstatein_progress409only,notawaiting_verificationrejectionwhichisaudited; do notsilentlydeclareAC1satisfied. Ownergatefailsmandatoryhistoricalcopydiscrepancyoutsideauthorizedrepair.
 <!-- SECTION:NOTES:END -->
