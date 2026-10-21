@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-21 15:36'
+updated_date: '2026-10-21 15:37'
 labels:
   - testing
   - integration
@@ -24,21 +24,19 @@ ordinal: 532000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-assurance. Contract ID: assurance.remediation.triage. Goal: prove single/fleet and batch triage persistence and exact selection. Risk: medium. Non-goals: waiver (.27), acceptance register (.28), POA&M plan (.21), verification/closure (.29), product changes.
+Owning check: integration-assurance. Contract: assurance.remediation.triage. Proves single/fleet and batch triage persistence and exact selection from real scan-produced findings in the same fresh Assurance lifecycle. Risk: medium. Non-goals: waiver (.27), acceptance register (.28), plan maintenance (.21), verification/closure (.29), and product changes.
 
-Writable paths (only):
-- checks/integration-assurance/scenarios/fragments/triage.py
-- checks/integration-assurance/scenarios/fragments/triage.cjs
+Writable worker paths remain only checks/integration-assurance/scenarios/fragments/triage.py and triage.cjs. Coordinator owns shared composition, browserSpecs, registration, coverage records and normal-owner verification. Never consume another scenario's database, findings, outputs or receipts. Do not seed finding/triage outcomes or add a task-specific derivation.
 
-Composition target: checks/integration-assurance/scenarios/evidence-remediation-lifecycle.nix. Coordinator owns Nix/Python composition, browserSpecs and explicit registration/normal aggregation. After .16 real scans earlier in this fresh Assurance VM/database, consume finding/system identities through receipts. Earlier real import/policy records may provide context. Never consume another derivation's live findings, database, outputs or receipts. No packet-specific derivation and no seeded findings/triage results.
+The existing host Schedule patch journey now executes against real vulnerable Current. It proves actor/scope/disposition/plan/finding/link/baseline identities and Scheduled reload. The bounded continuation reopens and cancels the exact hydrated editor twice without another remediation write and preserves complete authenticated POA&M API detail. Python cross-checks exposed baseline fields against SQL. This does not claim SQL before/after proof for editor reopening. Valid-CSRF Viewer denial remains covered. A separate authenticated Admin missing-POA&M request returns400invalid_poam_payload without changing nine remediation tables, the original scan seal or observations.
 
-Single/fleet triage and batch triage persist actor, exact scope, status and justification for independently authored selected findings. Unselected findings remain unchanged. Unauthorized Viewer writes fail with no row change. Browser navigation reaches exact CVE/finding/system identity and displays persisted triage state. Expected sets derive from authored facts and producer receipts, never the list response under test.
+Current published checkpointdbf50b4746a6ed3818aed85af68f26251f4b9d52 passed the normal Assurance owner locally with fresh47passing case records/41distinctnames, driver245.18seconds. Its exact-head hosted pipeline2972675961 is pending at the last snapshot. The earlier47pass5ef2d0b0-dirty run remains separately identified. MR335 stays draft and task stays InProgress; no merge/deployment or full triage coverage claim.
 
-Dependencies/readiness: TASK-490.16 real finding producer must be integrated with actual tested role/setup prerequisites and same-scenario placement. Foundation bba718befbc183863781656df2df272e5f735d5a on origin/dev 5ae7feab already passed with .25/.26. This packet awaits selection, accepted triage actor/scope/UI authority and coordinator composition; no triage fragment execution is claimed. The prior decomposition is resolved by .27/.28/.29, not an additional unsplit-work blocker.
+Successful fleet/batch mutation and unselected-finding isolation remain open. The present independently authored scanner set contains one pair; additional scans or generations of that same pair are not independent unselected controls. System CVEs batch quick-picks/bar remain a recorded UI gap, not authorization for product edits. Expected selected sets must come from authored facts, never the API list under test.
 
-Read-only sources/authority: cf-server api/cves.rs triage/batch/justification, related queries/models/routes; web-ui CVE views and triage dialogs. Read owner-approved cve-poam-evidence-continuity-design-spec.md only for its approved scope. D1/as-built knowledge is evidence, not acceptance authority. Uncertain cases remain blocked: decision/design gap. Production, shared lib/driver helpers, composition, registration, CI, docs and design are read-only; use documented case/expect/receipt/http/sql_json/run_browser interfaces.
+Authority: approved CVE/POA&M evidence-continuity specification for identity, Current authority, immutable baseline and scope; approved CVE triage design for presentation. Server handlers/services/models and production components provide as-built evidence, not approval for new semantics. Uncertain decisions remain blocked. Production, shared helpers, fixture facts, composition, CI and design remain read-only for this worker increment.
 
-Focused verification after composition: `nix build .#checks.x86_64-linux.integration-assurance.scenarios.evidence-remediation-lifecycle -L`. Coordinator records exact tested revision, command, result and evidence; keep correct failures and linked defects and escalate helper/authority gaps.
+Verification: run the existing evidence-remediation-lifecycle gate through normal integration-assurance owner; record exact revision, actual exit, execution/reuse, browser/SQL evidence and pending hosted checks. Preserve correct failures and downstream .21/.29 state.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
