@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-19 02:12'
+updated_date: '2026-10-22 01:58'
 labels:
   - testing
   - integration
@@ -58,6 +58,8 @@ Use existing case/expect/receipt/http/sql_json/run_browser helpers, same-scenari
 
 <!-- SECTION:PLAN:BEGIN -->
 Latest owner selects next runnable product coverage progress. Implement bounded accepted Admin form success subset after existing16Access cases: production UI user creation, role edit/reload, disable/login401 and cancel no mutation; classification/retry settings saves/reload if feasible. Use design identities not already created in .2, same-scenario receipts, independent browser login and DB before/after. No new VM/owner and no production changes. Do not claim complete .3: environment CRUD and specific unresolved failed-save/presentation states remain separate outstanding cases. Coordinator owns facts/composition/registration; fragment writer owns admin-forms.py/.cjs only. Execute actual normal Access CI path and preserve accurate failed assertion if a product defect emerges. TASK-490.7 remains next Delivery roles/proving work after this bounded controller progress; no blanket D1 blocker.
+
+Owner's wrap-up selects dependency-ready accepted functional work. Extend only environment-forms.py/.cjs in the existing coordinator lifecycle with real Admin UI create/edit/delete, cancel and duplicate validation, explicit nonempty account-environment membership and independent SQL/reload checks. Preserve Admin23 and actor state; no product or design changes. Deferred visual states belong in the canonical punch list, not fabricated assertions. Coordinator composes and executes the normal Access owner after compatible shell/preferences work.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
