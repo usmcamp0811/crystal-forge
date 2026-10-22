@@ -276,44 +276,28 @@ component-tests:
     - merge_requests
     - main
 
-# Runs the CVE scan loop processing test (scan_cycle_processes_target_with_fake_runner)
-# via the repo-owned `devScripts.cve-test` process-compose project. That target
-# starts the DB service, waits for health, runs migrations + the targeted test,
-# and then shuts itself down so `up --tui=false` exits cleanly.
+# Preserve the CVE workspace library filters (including the three ignored
+# scanning filters) and dashboard's two ignored visibility groups. All three
+# apps share invocation-owned initialization, root privilege separation and
+# fail-closed completion receipts; they do not share a running database.
 cve-processing-test:
-  stage: check
-  tags:
-    - nix
-  before_script:
-    - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
-    - echo "login gitlab-ci-token" >> ~/.netrc
-    - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
-    - chmod 600 ~/.netrc
-  script:
-    - nix run .#devScripts.cve-test -- up --tui=false
-  only:
-    - merge_requests
-    - main
+  extends: state-machine-tests
+  variables:
+    DATABASE_TEST_APP: cve-test
+  artifacts: &database-ci-evidence
+    when: always
+    expire_in: 30 days
+    paths:
+      - database-ci-evidence/
 
 # Runs the dashboard aggregate visibility regressions (queries::dashboard::tests::visibility_
 # and handlers::api::dashboard::tests::visibility_, all #[ignore]-marked) via the
-# repo-owned `devScripts.dashboard-visibility-test` process-compose project. That
-# target starts an isolated DB, applies migrations, runs the authorization-sensitive
-# scoping tests with --ignored, and exits.
+# repo-owned `devScripts.dashboard-visibility-test` isolated process-compose app.
 dashboard-visibility-tests:
-  stage: check
-  tags:
-    - nix
-  before_script:
-    - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
-    - echo "login gitlab-ci-token" >> ~/.netrc
-    - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
-    - chmod 600 ~/.netrc
-  script:
-    - nix run .#devScripts.dashboard-visibility-test -- up --tui=false
-  only:
-    - merge_requests
-    - main
+  extends: state-machine-tests
+  variables:
+    DATABASE_TEST_APP: dashboard-visibility-test
+  artifacts: *database-ci-evidence
 
 # One invocation-owned PostgreSQL cluster and Cargo target directory run the
 # unique ignored library/integration regressions and populated migration
@@ -330,14 +314,38 @@ state-machine-tests:
   script:
     # Preparation may acquire missing closures and Cargo sources. Execution below
     # must fail on missing prerequisites instead of fetching them during tests.
-    - nix build .#devScripts.state-machine-test --no-link --builders '' --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --max-jobs 1 --cores 2
+    - nix build ".#devScripts.${DATABASE_TEST_APP:-state-machine-test}" --no-link --builders '' --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --max-jobs 1 --cores 2
     - nix develop .#sqlx --builders '' --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --max-jobs 1 --cores 2 -c cargo fetch --locked --manifest-path packages/default/Cargo.toml
+    - |
+      if [ -n "${DATABASE_TEST_APP:-}" ]; then
+        nix shell --impure --expr '
+          let
+            f = builtins.getFlake ("git+file://" + toString ./.);
+            p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
+          in p.python3
+        ' --builders '' --option substituters https://cache.nixos.org \
+          --option extra-substituters '' --option accept-flake-config false \
+          --max-jobs 1 --cores 2 --command true
+      fi
+    - |
+      if [ -n "${DATABASE_TEST_APP:-}" ]; then
+        nix shell --offline --option substituters '' --option substitute false \
+          --option builders '' --option fallback false \
+          --option accept-flake-config false --max-jobs 0 --no-update-lock-file \
+          --impure --expr '
+            let
+              f = builtins.getFlake ("git+file://" + toString ./.);
+              p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
+            in p.python3
+          ' --command python3 packages/devScripts/tests/database-ci-test.py \
+            "database-ci-evidence/$DATABASE_TEST_APP" "$DATABASE_TEST_APP"
+      fi
     - |
       export CARGO_NET_OFFLINE=true SQLX_OFFLINE=true
       nix run --offline --option substituters '' --option substitute false \
         --option builders '' --option fallback false \
         --option accept-flake-config false --max-jobs 0 --no-update-lock-file \
-        .#devScripts.state-machine-test -- -t=false up
+        ".#devScripts.${DATABASE_TEST_APP:-state-machine-test}" -- -t=false up
   only:
     - merge_requests
     - main

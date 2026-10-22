@@ -39,3 +39,49 @@ export SQLX_OFFLINE=true CARGO_NET_OFFLINE=true
 # from ordinary package builds, whose feature/profile settings can differ.
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PROJECT_ROOT/packages/default/target/database-tests}"
 cd "$PROJECT_ROOT/packages/default"
+
+# Cargo/libtest returns zero for a stale filter or an ignored-only selection.
+# Require a positive executed count for every test invocation, including broad
+# state-machine groups. Compilation and SQLx commands have no libtest receipt.
+# Preserve Cargo's real failure through tee and keep repeated rustc diagnostics
+# out of CI's bounded log unless the command fails. Nested exact-test shells
+# inherit this same guard; there is no second test execution for counting.
+cargo() {
+  local output errors status=0 passed=0 failed=0 ignored=0 line argument execution=false
+  if [[ "${1:-}" == test ]]; then
+    execution=true
+    for argument in "$@"; do
+      case "$argument" in --no-run|--list) execution=false ;; esac
+    done
+  fi
+  output="$(mktemp "$TMPDIR/cargo-stdout.XXXXXX")"
+  errors="$(mktemp "$TMPDIR/cargo-stderr.XXXXXX")"
+  if (set -o pipefail; command cargo "$@" 2>"$errors" | tee "$output"); then
+    status=0
+  else
+    status=$?
+  fi
+  if [[ "$execution" == true ]]; then
+    while IFS= read -r line; do
+      if [[ "$line" =~ ^test\ result:\ (ok|FAILED)\.\ ([0-9]+)\ passed\;\ ([0-9]+)\ failed\;\ ([0-9]+)\ ignored\; ]]; then
+        passed=$((passed + BASH_REMATCH[2]))
+        failed=$((failed + BASH_REMATCH[3]))
+        ignored=$((ignored + BASH_REMATCH[4]))
+      fi
+    done < "$output"
+    if (( status == 0 && passed == 0 )); then
+      echo "Database test selection executed no successful tests: $*" >&2
+      status=1
+    fi
+    printf 'DATABASE_SELECTION passed=%s failed=%s ignored=%s exit=%s command=cargo' \
+      "$passed" "$failed" "$ignored" "$status"
+    printf ' %q' "$@"
+    printf '\n'
+  fi
+  if (( status != 0 )); then
+    tail -n 400 "$errors" >&2
+  fi
+  rm -f -- "$output" "$errors"
+  return "$status"
+}
+export -f cargo

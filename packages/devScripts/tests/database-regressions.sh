@@ -53,30 +53,8 @@ set -euo pipefail
       return "$status"
     }
 
-    # LOGGING: Cargo replays cached rustc diagnostics across the many exact
-    # test invocations. Their combined output exhausted GitLab's 4 MiB job-log
-    # limit before the failing selection ran, so its cause was unrecoverable.
-    # Keep stdout (libtest results and panic reports) and exit statuses
-    # unchanged. Capture stderr (compiler diagnostics and "Running" lines) in
-    # a file and print its tail only when Cargo fails. Export this function so
-    # the nested `bash -c` selections below use it too.
-    cargoStderrTail=400
-    cargo() {
-      local stderrLog status
-      stderrLog="$(mktemp "$TMPDIR/cargo-stderr.XXXXXX")"
-      if command cargo "$@" 2>"$stderrLog"; then
-        status=0
-      else
-        status=$?
-        printf 'cargo %s failed with exit %s; last %s stderr lines follow\n' \
-          "$1" "$status" "$cargoStderrTail" >&2
-        tail -n "$cargoStderrTail" "$stderrLog" >&2
-      fi
-      rm -f "$stderrLog"
-      return "$status"
-    }
-    export -f cargo
-    export cargoStderrTail
+    # Inherit the common Cargo status/count guard from database-environment.sh.
+    # Exact-test checks below additionally require each named success line.
 
     beginPhase migrations-and-upgrade-rehearsals
     # Public sandbox-only fixture key. Never inherit deployment credentials.
@@ -686,12 +664,14 @@ SQL
       manual_and_automatic_retry_serialize_to_one_active_child \
       automatic_retry_creates_one_delayed_linked_child_and_keeps_source_terminal \
       manually_requeued_attempt_claims_through_production_path \
-      authoritative_re_evaluation_replaces_obsolete_job_during_activation \
-      visibility_scope_handles_ambiguous_systems_cache_pushes_and_eval_attempts
+      authoritative_re_evaluation_replaces_obsolete_job_during_activation
     do
       cargo test --offline --package cf-server --lib "$testName" \
         -- --ignored --test-threads=1
     done
+
+    # The dashboard job owns the complete ignored query prefix. Its
+    # ambiguous-system visibility test must not execute in this job too.
 
     echo "=== Exact build-attempt authorization and production-scale query plan ==="
     cargo test --offline --package cf-server --lib \

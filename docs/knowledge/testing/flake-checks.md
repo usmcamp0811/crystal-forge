@@ -118,18 +118,50 @@ and the [verification guide](../../agents/verification.md#consolidated-component
 for commands. `.#okf-knowledge` and `.#ui-screenshots` remain ordinary packages;
 mocked screenshots provide design feedback, not semantic proof.
 
-The three database jobs remain. `state-machine-tests` owns one fresh invocation
-of PostgreSQL on port 35433 with temporary data, `LOGIN SUPERUSER CREATEDB`, and
-`pg_stat_statements` preload. Its SQLx shell exports both `DATABASE_URL` and
-`TEST_DATABASE_URL`; all selections share `target/database-tests`. The source
-and compiled-test audit retains 286 unique ignored library tests and fourteen
-integration targets containing 231 cases. Two library selections cover TASK-496
+The three database jobs remain. Their existing apps share the state-machine
+invocation-owned launcher and PostgreSQL module. CVE uses port 35432,
+state-machine uses 35433, and dashboard uses 35434. Each invocation has fresh
+temporary data and short socket directories, `LOGIN SUPERUSER CREATEDB`, and
+`pg_stat_statements` preload. PostgreSQL children alone drop privileges on root
+runners. The SQLx shell verifies data-directory ownership before migrations and
+exports both `DATABASE_URL` and `CRYSTAL_FORGE_TEST_DATABASE_URL`; all selections
+share `target/database-tests`. The state-machine source retains its selected
+ignored library regressions and fourteen integration targets. Its current
+execution count requires a fresh normal run. Two library selections cover TASK-496
 heartbeat/state decoding. Six repeated ignored selections and
 94 nonignored library selections are removed; normal package `--lib --bins`
 owns the latter. The whole `composite_policy` target owns two tests removed from
 the CVE job. Both populated migration rehearsals and exact missing-test guards
-remain. Dashboard execution is unchanged. Selection totals are not distinct-test
-counts.
+remain. CVE retains its 27 workspace library filters, selecting 27 nonignored
+and three ignored tests. Dashboard retains both ignored visibility prefixes,
+selecting four tests. The dashboard query prefix owns
+`visibility_scope_handles_ambiguous_systems_cache_pushes_and_eval_attempts`;
+TASK-501 removes that one duplicate from the consolidated runner. The other
+dedicated selections do not overlap its database selections. Neither dedicated
+job is fully subsumed, so both remain. Dashboard runs both groups and retains
+any failure.
+
+All three apps preserve the actual Cargo status and reject zero-test selections.
+The launcher rejects absent/invalid completion receipts even if process-compose
+returns zero. Cleanup waits for PostgreSQL before removing invocation storage
+and preserves earlier errors. CI prepares closures/Cargo sources explicitly;
+outer execution, nested SQLx shells, and descendant Nix commands disable remote
+builders, substitution and fetch fallback. See the
+[database commands and failure-path regression](../../agents/verification.md#database-ci-failure-path-regression).
+The dedicated jobs run the direct Python regression with temporary fault
+configurations and retain `database-ci-evidence/`. That controlled evidence does
+not count as product-test execution or add a flake check.
+
+TASK-501 local execution at `dbf50b47` plus the runner changes exposed failing
+assertions: CVE returned 101 after one passing and one failing test; normal
+dashboard execution returned 101 with three passing and one failing test on
+both root/nonroot paths. The failing tests are
+`recorded_derivation_path_restores_when_output_deriver_is_unknown` and
+`visibility_deployment_status_preserves_ahead_as_up_to_date`. Rust code and
+assertions remain unchanged. Separate selection diagnostics and controlled
+failure-path checks must not be reported as a passing full CVE/dashboard job.
+Selection inventory is not execution evidence. The task notes retain exact
+names, counts, statuses, source and raw evidence locations.
 
 Removed verification derivations total eighteen: fifteen public roots, the
 nested module-validation derivation, and the CA fixture and runner. Twenty-two

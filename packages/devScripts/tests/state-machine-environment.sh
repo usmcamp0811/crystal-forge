@@ -12,9 +12,39 @@ if pg_isready -h 127.0.0.1 -p "$CF_STATE_MACHINE_PORT" >/dev/null 2>&1; then
 fi
 testRoot="$(mktemp -d "${TMPDIR:-/tmp}/cf-state-machine.XXXXXX")"
 socketRoot=""
+# ShellCheck does not resolve this function's EXIT-trap invocation.
+# shellcheck disable=SC2329
 cleanup() {
-  rm -rf -- "$testRoot"
-  if [[ -n "$socketRoot" ]]; then rm -rf -- "$socketRoot"; fi
+  local status=$? cleanup_status=0
+  trap - EXIT
+  # Process-compose can finish before a signalled server's final checkpoint.
+  # Reap the invocation's PostgreSQL explicitly before removing its files. The
+  # PID file is inside our fresh data directory, never a foreign/default DB.
+  local -a postgres_owner=()
+  if (( EUID == 0 )) && [[ -n "${CF_STATE_MACHINE_POSTGRES_UID:-}" ]]; then
+    postgres_owner=(setpriv --reuid="$CF_STATE_MACHINE_POSTGRES_UID"
+      --regid="$CF_STATE_MACHINE_POSTGRES_GID" --clear-groups --no-new-privs)
+  fi
+  if [[ -s "$CF_STATE_MACHINE_DATA_DIR/postmaster.pid" ]] &&
+    "${postgres_owner[@]}" pg_ctl -D "$CF_STATE_MACHINE_DATA_DIR" status >/dev/null 2>&1; then
+    if "${postgres_owner[@]}" pg_ctl -D "$CF_STATE_MACHINE_DATA_DIR" -m fast -w stop; then
+      cleanup_status=0
+    else
+      cleanup_status=$?
+      if "${postgres_owner[@]}" pg_ctl -D "$CF_STATE_MACHINE_DATA_DIR" status >/dev/null 2>&1; then
+        echo "PostgreSQL is still running; retaining invocation storage: $testRoot" >&2
+        if (( status == 0 )); then status=$cleanup_status; fi
+        exit "$status"
+      fi
+    fi
+  fi
+  rm -rf -- "$testRoot" || cleanup_status=$?
+  if [[ -n "$socketRoot" ]]; then
+    rm -rf -- "$socketRoot" || cleanup_status=$?
+  fi
+  # Cleanup must not hide initialization, Cargo, receipt or signal failures.
+  if (( status == 0 )); then status=$cleanup_status; fi
+  exit "$status"
 }
 trap cleanup EXIT
 export CF_STATE_MACHINE_DATA_DIR="$testRoot/data/state-machine-db"
@@ -42,6 +72,10 @@ if (( EUID == 0 )); then
   chown "$CF_STATE_MACHINE_POSTGRES_UID:$CF_STATE_MACHINE_POSTGRES_GID" "$socketRoot"
   chmod 711 "$testRoot"
 fi
+printf 'Database invocation: runner_uid=%s data_root=%s socket_root=%s\n' \
+  "$EUID" "$testRoot" "$socketRoot"
+# ShellCheck does not resolve this function's INT/TERM-trap invocation.
+# shellcheck disable=SC2329
 stop() {
   trap '' INT TERM
   kill -TERM "$composePid" 2>/dev/null || true
@@ -67,5 +101,6 @@ if [[ ! "$test_status" =~ ^[0-9]+$ ]] || (( test_status > 255 )); then
   echo "Invalid state-machine test exit-status receipt" >&2
   exit 1
 fi
+printf 'Database completion: test_exit=%s compose_exit=%s\n' "$test_status" "$compose_status"
 if (( test_status != 0 )); then exit "$test_status"; fi
 exit "$compose_status"

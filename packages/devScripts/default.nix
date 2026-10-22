@@ -685,8 +685,15 @@ let
       export PROJECT_ROOT="''${PROJECT_ROOT:-$PWD}"
       : "''${CF_STATE_MACHINE_STATUS_FILE:?Use the isolated state-machine-test launcher}"
       status=0
-      nix develop ${stateMachineOfflineArgs} "$PROJECT_ROOT#sqlx" \
-        -c ${pkgs.bash}/bin/bash ${./tests/state-machine-tests.sh} || status=$?
+      case "''${CF_DATABASE_TEST_SUITE:-state-machine}" in
+        cve) ${lib.getExe runCveProcessingTest} || status=$? ;;
+        dashboard) ${lib.getExe runDashboardVisibilityTests} || status=$? ;;
+        state-machine)
+          nix develop ${stateMachineOfflineArgs} "$PROJECT_ROOT#sqlx" \
+            -c ${pkgs.bash}/bin/bash ${./tests/state-machine-tests.sh} || status=$?
+          ;;
+        *) echo "Unknown database test suite" >&2; status=1 ;;
+      esac
       printf '%s\n' "$status" > "$CF_STATE_MACHINE_STATUS_FILE"
       exit "$status"
     '';
@@ -699,19 +706,21 @@ let
       set -euo pipefail
 
       REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
-      DB_URL="postgresql://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge"
-
-      nix develop "$REPO_ROOT#sqlx" -c ${pkgs.bash}/bin/bash -euo pipefail -c "
-        cd \"$REPO_ROOT/packages/default\"
-        DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source crates/cf-server/migrations
-        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+      nix develop ${stateMachineOfflineArgs} "$REPO_ROOT#sqlx" -c ${pkgs.bash}/bin/bash -euo pipefail -c "
+        source \"$REPO_ROOT/packages/devScripts/tests/database-environment.sh\"
+        DB_URL=\"\$DATABASE_URL\"
+        cargo sqlx migrate run --source crates/cf-server/migrations
+        # Exercise both visibility groups while preserving any failed status.
+        status=0
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"\$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           -p cf-server --lib queries::dashboard::tests::visibility_ \
-          -- --ignored --test-threads=1
-        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          -- --ignored --test-threads=1 || status=\$?
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"\$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           -p cf-server --lib handlers::api::dashboard::tests::visibility_ \
-          -- --ignored --test-threads=1
+          -- --ignored --test-threads=1 || status=\$?
+        exit \"\$status\"
       "
     '';
   };
@@ -723,12 +732,13 @@ let
       set -euo pipefail
 
       REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
-      DB_URL="''${CRYSTAL_FORGE_CVE_TEST_DATABASE_URL:?Set CRYSTAL_FORGE_CVE_TEST_DATABASE_URL to a dedicated CVE test database}"
-
-      nix develop "$REPO_ROOT#sqlx" -c ${pkgs.bash}/bin/bash -euo pipefail -c "
-        cd \"$REPO_ROOT/packages/default\"
-        export DATABASE_URL=\"$DB_URL\"
-        DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source crates/cf-server/migrations
+      : "''${CF_STATE_MACHINE_DATA_DIR:?Use the isolated cve-test launcher}"
+      DB_URL="postgresql://crystal_forge@127.0.0.1:''${CF_STATE_MACHINE_PORT:?Missing isolated port}/crystal_forge"
+      # The nested shell resets development URLs and verifies cluster ownership.
+      # Keep the declared workspace --lib selections and libtest modes below.
+      nix develop ${stateMachineOfflineArgs} "$REPO_ROOT#sqlx" -c ${pkgs.bash}/bin/bash -euo pipefail -c "
+        source \"$REPO_ROOT/packages/devScripts/tests/database-environment.sh\"
+        cargo sqlx migrate run --source crates/cf-server/migrations
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib builder::cve_worker::tests::scan_cycle_processes_target_with_fake_runner
@@ -1348,28 +1358,6 @@ let
     };
   };
 
-  cve-test-module = {
-    services.postgres."db" = {
-      port = mkForce cve_test_db_port;
-      dataDir = mkForce "./data/cve-test-db";
-      initialScript.before = mkForce ''
-        CREATE USER crystal_forge CREATEDB LOGIN;
-        CREATE DATABASE crystal_forge OWNER crystal_forge;
-        GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
-      '';
-    };
-    settings.processes.cve-processing-test = {
-      inherit namespace;
-      command = runCveProcessingTest;
-      availability.exit_on_end = true;
-      depends_on."db".condition = "process_healthy";
-      environment.CRYSTAL_FORGE_CVE_TEST_DATABASE_URL =
-        "postgresql://crystal_forge:${db_password}@127.0.0.1:${
-          toString cve_test_db_port
-        }/crystal_forge";
-    };
-  };
-
   # CI can launch process-compose as root, but PostgreSQL must never run as
   # root. Drop only its initialization/server children; Cargo and evidence
   # retain the invoking user's permissions and compilation cache.
@@ -1389,19 +1377,22 @@ let
       if (( EUID == 0 )); then
         : "''${CF_STATE_MACHINE_POSTGRES_UID:?Missing isolated PostgreSQL owner}"
         : "''${CF_STATE_MACHINE_POSTGRES_GID:?Missing isolated PostgreSQL group}"
+        printf 'Database PostgreSQL child: invoking_uid=%s child_uid=%s child_gid=%s\n' \
+          "$EUID" "$CF_STATE_MACHINE_POSTGRES_UID" "$CF_STATE_MACHINE_POSTGRES_GID"
         exec setpriv --reuid="$CF_STATE_MACHINE_POSTGRES_UID" \
           --regid="$CF_STATE_MACHINE_POSTGRES_GID" --clear-groups \
           --no-new-privs ${lib.getExe command} "$@"
       fi
+      printf 'Database PostgreSQL child: invoking_uid=%s child_uid=%s\n' "$EUID" "$EUID"
       exec ${lib.getExe command} "$@"
     '';
   };
 
-  state-machine-test-module = { config, ... }: {
+  state-machine-test-module = { suite ? "state-machine", port ? state_machine_test_db_port }: { config, ... }: {
     # The launcher enters a fresh temporary directory before process-compose.
     # Never reuse the development database path or port for these regressions.
     services.postgres."db" = {
-      port = mkForce state_machine_test_db_port;
+      port = mkForce port;
       listen_addresses = mkForce "127.0.0.1";
       dataDir = mkForce "./data/state-machine-db";
       # services-flake expands this at runtime. Keep initialization sockets
@@ -1422,15 +1413,7 @@ let
     settings.processes.state-machine-tests = {
       inherit namespace;
       command = runStateMachineTests;
-      availability.exit_on_end = true;
-      depends_on."db".condition = "process_healthy";
-    };
-  };
-
-  dashboard-visibility-test-module = {
-    settings.processes.dashboard-visibility-tests = {
-      inherit namespace;
-      command = runDashboardVisibilityTests;
+      environment.CF_DATABASE_TEST_SUITE = suite;
       availability.exit_on_end = true;
       depends_on."db".condition = "process_healthy";
     };
@@ -1472,7 +1455,7 @@ let
     modules = [
       inputs.services-flake.processComposeModules.default
       db-core-module
-      cve-test-module
+      (state-machine-test-module { suite = "cve"; port = cve_test_db_port; })
     ];
   };
 
@@ -1480,7 +1463,7 @@ let
     modules = [
       inputs.services-flake.processComposeModules.default
       db-core-module
-      state-machine-test-module
+      (state-machine-test-module {})
     ];
   };
 
@@ -1488,7 +1471,7 @@ let
     modules = [
       inputs.services-flake.processComposeModules.default
       db-core-module
-      dashboard-visibility-test-module
+      (state-machine-test-module { suite = "dashboard"; port = 35434; })
     ];
   };
 
@@ -1501,18 +1484,14 @@ let
       server-oidc-module
     ];
   };
-in full-stack.config.outputs.package // {
-  inherit runServer runAgent runBuilder simulatePush startBuilderApi
-    runUiDev runUiFrontend webUiTest runCveProcessingTest bootstrapDevBuilder
-    envExports;
-  cve-test = cveTest.config.outputs.package;
+
   # Preserve the existing app and its process-compose CLI. The private launcher
   # owns cleanup and refuses an occupied dedicated port before initialization.
-  state-machine-test = pkgs.writeShellApplication {
+  isolatedDatabaseTest = compose: port: pkgs.writeShellApplication {
     name = "process-compose";
     meta.description =
       "Runs selected database contracts in a fresh disposable PostgreSQL cluster";
-    runtimeInputs = with pkgs; [ bash nix coreutils postgresql ];
+    runtimeInputs = with pkgs; [ bash nix coreutils postgresql util-linux ];
     text = ''
       export PROJECT_ROOT="''${PROJECT_ROOT:-$PWD}"
       export CARGO_NET_OFFLINE=true SQLX_OFFLINE=true
@@ -1532,12 +1511,18 @@ in full-stack.config.outputs.package // {
         echo "Prepare separately: nix build .#devScripts.state-machine-test; nix develop .#sqlx -c cargo fetch --locked --manifest-path packages/default/Cargo.toml" >&2
         exit 1
       fi
-      export CF_STATE_MACHINE_PORT=${toString state_machine_test_db_port}
+      export CF_STATE_MACHINE_PORT=${toString port}
       exec ${pkgs.bash}/bin/bash ${./tests/state-machine-environment.sh} \
-        ${stateMachineTest.config.outputs.package}/bin/process-compose "$@"
+        ${compose.config.outputs.package}/bin/process-compose "$@"
     '';
   };
-  dashboard-visibility-test = dashboardVisibilityTest.config.outputs.package;
+in full-stack.config.outputs.package // {
+  inherit runServer runAgent runBuilder simulatePush startBuilderApi
+    runUiDev runUiFrontend webUiTest runCveProcessingTest bootstrapDevBuilder
+    envExports;
+  cve-test = isolatedDatabaseTest cveTest cve_test_db_port;
+  state-machine-test = isolatedDatabaseTest stateMachineTest state_machine_test_db_port;
+  dashboard-visibility-test = isolatedDatabaseTest dashboardVisibilityTest 35434;
   db-only = dbOnly.config.outputs.package;
   server-only = server-only.config.outputs.package;
   server-stack-mock = server-stack-mock.config.outputs.package;

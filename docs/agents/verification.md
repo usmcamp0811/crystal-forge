@@ -107,8 +107,9 @@ TASK-490.24 authorizes retirement of the nine legacy suite directories before
 replacement coverage is complete. `legacy-flake-check`, `web-ui-check`, and
 `web-ui-baseline-candidates` are removed. One explicit `component-tests` job
 replaces the six-entry package matrix. All fifteen public `verify-*` wrappers
-are removed. Three process-compose database Rust jobs remain; the existing
-state-machine workflow now owns the consolidated server regressions. The
+are removed. Three process-compose database Rust jobs remain and share the
+invocation-owned launcher. The state-machine workflow owns the consolidated
+server regressions. The
 [coverage map](../knowledge/testing/integration-coverage-map.md#current-gitlab-selection)
 lists the obligations that have no automatic integration coverage.
 
@@ -249,7 +250,8 @@ Prepare the launcher, SQLx environment and locked Cargo sources separately.
 Only this preparation phase permits network acquisition:
 
 ```bash
-nix build .#devScripts.state-machine-test --no-link --builders '' \
+nix build .#devScripts.state-machine-test .#devScripts.cve-test \
+  .#devScripts.dashboard-visibility-test --no-link --builders '' \
   --option substituters https://cache.nixos.org --option extra-substituters '' \
   --option accept-flake-config false --max-jobs 1 --cores 2
 nix develop .#sqlx --builders '' \
@@ -258,14 +260,16 @@ nix develop .#sqlx --builders '' \
   -c cargo fetch --locked --manifest-path packages/default/Cargo.toml
 ```
 
-Run the consolidated database workflow offline:
+Run one prepared database workflow offline. Select `state-machine-test`,
+`cve-test`, or `dashboard-visibility-test` explicitly:
 
 ```bash
+DATABASE_TEST_APP=state-machine-test
 CARGO_NET_OFFLINE=true SQLX_OFFLINE=true \
 nix run --offline --option substituters '' --option substitute false \
   --option builders '' --option fallback false \
   --option accept-flake-config false --max-jobs 0 --no-update-lock-file \
-  .#devScripts.state-machine-test -- -t=false up
+  ".#devScripts.$DATABASE_TEST_APP" -- -t=false up
 ```
 
 The nested SQLx shell uses the same Nix settings. Missing shell or Cargo inputs
@@ -275,20 +279,127 @@ locally, but must not substitute, use remote builders or fall back to fetching.
 The launch chain declares Bash and uses absolute Nix executables. On root CI
 runners, only PostgreSQL children drop to the resolved `nobody` UID/GID; Cargo
 and evidence retain the invoking user's permissions. Cluster and short socket
-directories are invocation-owned and removed on exit.
+directories are invocation-owned. The launcher waits for PostgreSQL shutdown
+before removing them. Cleanup preserves an earlier failure or signal status.
+If PostgreSQL cannot stop, the launcher retains its storage and fails.
 
-The launcher owns a fresh temporary cluster on port 35433, verifies its data
+Each launcher owns a fresh temporary cluster: CVE uses port 35432, state-machine
+uses 35433, and dashboard uses 35434. An occupied port fails; an existing server
+is never reused. The SQLx shell verifies the actual data
 directory, role privileges (`LOGIN SUPERUSER CREATEDB`) and `pg_stat_statements`
 preload, and exports both database URLs inside the SQLx shell. All selections
-share `target/database-tests`. It preserves both populated migration rehearsals,
-286 unique ignored library tests and fourteen integration targets (231 cases).
+share `target/database-tests`. The state-machine selection preserves both
+populated migration rehearsals, its ignored library regressions, and fourteen
+integration targets. Its current execution count requires a fresh normal run.
 The library selections include two TASK-496 heartbeat/state-decoding regressions.
 Six repeated ignored selections and 94 nonignored library selections were
 removed; normal package tests own the latter. Two repeated `composite_policy`
 executions were removed from the CVE job because the full target owns them.
-The CVE and dashboard jobs remain separate. Do not interpret selection counts
-as distinct-test counts. See the [component ownership table](../knowledge/testing/flake-checks.md#current-inventory-and-commands)
+The CVE and dashboard jobs remain separate. CVE retains 27 workspace `--lib`
+filters: 24 nonignored filters select 27 tests, and three `--ignored` filters
+select one test each. Dashboard retains two `cf-server --lib --ignored`
+visibility prefixes, each selecting two tests. Both dashboard groups execute
+even when one fails; any failure makes the job fail. These selections are not
+fully subsumed by the consolidated state-machine runner. The dashboard query
+prefix owns `visibility_scope_handles_ambiguous_systems_cache_pushes_and_eval_attempts`;
+TASK-501 removes that one duplicate from the state-machine job. The other
+dedicated selections do not overlap the consolidated database selections.
+Ordinary nonignored package
+tests do not replace live-database execution: some CVE tests return early when
+`CRYSTAL_FORGE_TEST_DATABASE_URL` is absent.
+
+Every executed Cargo selection reports its command, passed/failed/ignored
+counts, and exit status. A successful Cargo exit with zero passed tests fails
+the runner. Workspace libraries with zero matches do not establish success;
+the selection must execute at least one test across the selected libraries.
+Compilation-only commands do not count as executed tests. The outer launcher
+also requires a valid invocation-owned completion receipt. Process-compose
+success without that receipt fails. Never interpret selection inventory,
+compilation, or a reused build as passing test execution.
+
+See the [component ownership table](../knowledge/testing/flake-checks.md#current-inventory-and-commands)
 for the exact source homes and the task notes for the assertion audit.
+
+### Database CI failure-path regression
+
+The dedicated CVE/dashboard jobs run
+`packages/devScripts/tests/database-ci-test.py` before their normal entry.
+The script reads the actual offline execution block from `.gitlab-ci.yml` and
+uses temporary process-compose fault configurations. It proves initialization
+failure, Cargo-child failure, empty selection, missing/malformed completion,
+failed receipt with successful compose exit, and interruption. It checks actual
+statuses and removal of the invocation's data/socket directories. Its controlled
+runner inputs are launcher regression evidence, not product integration tests.
+CI retains logs and `results.json` under `database-ci-evidence/`, including after
+a failed job.
+
+Prepare the pinned Nix Python separately, then run the script offline. This
+uses the same Python expression as CI and adds no flake check or verification
+package:
+
+```bash
+python_expression='let
+  f = builtins.getFlake ("git+file://" + toString ./.);
+  p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
+in p.python3'
+nix shell --impure --expr "$python_expression" --builders '' \
+  --option substituters https://cache.nixos.org --option extra-substituters '' \
+  --option accept-flake-config false --max-jobs 1 --cores 2 --command true
+nix shell --offline --option substituters '' --option substitute false \
+  --option builders '' --option fallback false \
+  --option accept-flake-config false --max-jobs 0 --no-update-lock-file \
+  --impure --expr "$python_expression" --command python3 \
+  packages/devScripts/tests/database-ci-test.py /tmp/task501-database-evidence
+```
+
+An optional app argument limits the script to `cve-test` or
+`dashboard-visibility-test`. Run on a disposable root CI runner to exercise
+privilege separation. On Linux hosts with subordinate-ID user namespaces,
+prefix the offline command with
+`unshare --user --map-auto --map-root-user`. This exercises UID 0 in that
+namespace, not a hosted runner. Nonroot execution checks the ordinary path.
+
+TASK-501 local verification exposed assertions that the former false-green
+jobs did not execute. At base `dbf50b47` plus the runner repair, the full CVE
+entry executed one passing test, then failed
+`recorded_derivation_path_restores_when_output_deriver_is_unknown` at
+`cve_worker.rs:2705` (scanner calls 0, expected 1), returning 101. The normal
+dashboard entry executed all four declared tests on root/nonroot paths:
+three passed and `visibility_deployment_status_preserves_ahead_as_up_to_date`
+failed at `queries/dashboard.rs:2723` (0, expected 2), returning 101.
+These are failing product-test gates, not passing TASK-501 integration evidence.
+The recorded-derivation failure also reproduced without root. Its fixture writes
+a legacy completed cache publication for `file:///unused-test-cache` but creates
+no matching eligible cache destination. Disposable-database inspection found
+zero matching enabled destinations and a failed scan with unavailable inputs.
+Migration `0301` and the materialization resolver require that match. This is a
+fixture precondition mismatch, not evidence of a root or offline-toolchain fault.
+
+Independent CVE selector diagnostics executed the remaining declared tests,
+including each of the three ignored tests once with one passing result. Across
+the root first test and those separate diagnostics, all 30 distinct selected
+names executed: 27 passed and three failed. Besides the recorded-derivation
+assertion, `policy_scan_heartbeat_prevents_recovery_and_ownership_loss_cancels_execution`
+timed out waiting for its first scanner invocation, and
+`remote_lease_claim_heartbeat_validation_and_clean_completion` observed one
+diagnostic where its assertion expected zero. These independent results do not
+constitute a successful full CVE job. Dashboard's failing fixture also lacks
+the deployable same-flake target required by the current deployment view;
+disposable-database inspection classified its two hosts as `unknown`.
+
+The controlled fault regression passed all seven cases for both apps on both
+root-namespace and nonroot paths: 28 verified case results. An interruption
+exercise exposed a cleanup race; the launcher now waits for the invocation's
+PostgreSQL shutdown before removing files. The final exercises verified clean
+shutdown, removed data/socket directories, and preserved exit 143. A separate
+intermediate execution correctly failed before cluster creation when a changed
+launcher closure had not yet been prepared; that attempt is not a passing fault
+case. After explicit preparation, the nonroot fault regression passed.
+
+Production Rust and assertions remain unchanged. The canonical task notes
+retain raw logs, selection inventory, independent diagnostic results, and
+remaining verification. Full-flake/VM and exact-head hosted verification remain
+coordinator-owned; no local fault result substitutes for those checks.
 
 ## Output handling
 
