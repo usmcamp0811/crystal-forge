@@ -464,6 +464,15 @@ SQL
     runRegressionCommand cf-server-lib compile \
       cargo test --offline --package cf-server --lib --no-run
     echo "=== Selected POA&M authorization, setup, notification, and overdue regressions ==="
+    # Current counts and optional assignments have distinct database contracts.
+    # Keep these ignored regressions on the normal isolated execution path.
+    cargo test --offline --package cf-server --lib \
+      queries::cves::tests::current_header_metadata_distinguishes_cves_findings_and_unknown \
+      -- --ignored --exact --test-threads=1
+    cargo test --offline --package cf-server --lib \
+      queries::environments::tests::db_tests::optional_policy_sets_accept_empty_and_reject_invalid_without_changes \
+      -- --ignored --exact --test-threads=1
+
     cargo test --offline --package cf-server --lib \
       handlers::api::poam::tests::http_requires_session_csrf_and_mutator_role \
       -- --ignored --test-threads=1
