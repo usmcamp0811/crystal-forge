@@ -1,12 +1,37 @@
 //! Add environment form component.
 
 use dioxus::prelude::*;
+use uuid::Uuid;
 
 use super::{EnvironmentItem, NewEnvironmentDraft, PolicyOption, required_policy_names};
 use crate::components::layout::Card;
 use crate::theme;
 
-/// Validate a new environment draft.
+/// Validates optional gate IDs against the authoritative assignable catalog.
+///
+/// An empty set is valid. The mandatory CF-agent invariant is not an optional
+/// gate. Unknown or no-longer-assignable IDs are rejected, never discarded.
+///
+/// # Errors
+/// Returns an explicit validation message if any selected ID is absent.
+pub fn validate_optional_policy_ids(
+    ids: &[Uuid],
+    policy_library: &[PolicyOption],
+) -> Result<(), String> {
+    if ids
+        .iter()
+        .any(|id| !policy_library.iter().any(|p| p.id == *id))
+    {
+        return Err("One or more selected policies are invalid.".to_string());
+    }
+    Ok(())
+}
+
+/// Validates a new environment draft with an authoritative assignable catalog.
+///
+/// # Errors
+/// Returns a message for an empty or duplicate name, invalid color, or an
+/// explicitly selected policy that is not assignable. Zero optional gates pass.
 pub fn validate_environment(
     draft: &NewEnvironmentDraft,
     existing: &[EnvironmentItem],
@@ -25,17 +50,7 @@ pub fn validate_environment(
     if !super::looks_like_hex_color(&draft.color_hex) {
         return Err("Environment color must be a valid hex value.".to_string());
     }
-    if draft.required_policy_ids.is_empty() {
-        return Err("At least one required policy must be selected.".to_string());
-    }
-    if draft
-        .required_policy_ids
-        .iter()
-        .any(|id| !policy_library.iter().any(|p| p.id == *id))
-    {
-        return Err("One or more selected policies are invalid.".to_string());
-    }
-    Ok(())
+    validate_optional_policy_ids(&draft.required_policy_ids, policy_library)
 }
 
 /// Props for the add environment form.
