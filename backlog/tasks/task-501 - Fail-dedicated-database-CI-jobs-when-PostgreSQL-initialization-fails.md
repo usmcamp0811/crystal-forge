@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-21 14:36'
-updated_date: '2026-10-22 00:53'
+updated_date: '2026-10-22 00:56'
 labels: []
 dependencies: []
 references:
@@ -43,6 +43,8 @@ Dedicated CVE-processing and dashboard-visibility CI jobs reported success witho
 3. Add bounded regression exercises using existing mechanisms for initialization failure, child-test failure, absent completion, interruption and stale/empty selection. No new flake check or generic framework.
 4. Run actual intended tests on isolated local/root-compatible invocation storage and record exact names/counts/source/commands/exits. Keep production/developer databases untouched.
 5. Review focused runner/CI/docs changes, integrate into existing MR335, and inspect current-head hosted logs/artifacts before claiming the former false-green obligations passed.
+
+Authorized follow-up at ee32c209: change only cfg(test) fixtures for the four named failures, plus their verification record. Keep names/selections and original semantic/denial assertions. Pins: migration0301 and cve_worker::materialization_source_for_reference require one eligible legacy destination; create_cve_scan_with_trigger requires a recent authoritative successful build_jobs row for PostBuild; cve_scan_diagnostics declares append-only events and the same test already persists/asserts one scanner_started event before expiry; migration0291 requires a deployable published target plus same-flake current identity for ahead. Add prerequisite data and full before/after diagnostic-row comparison, not relaxed production decisions. Run unchanged normal root CVE/dashboard jobs and feasible nonroot equivalents offline using prepared caches; compare actual names/counts against the existing30/4 selection inventory. Recheck controlled failure cases where needed. Separate follow-up commit; no production changes or Review/AC transitions.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
