@@ -242,9 +242,9 @@ in
       + "\n"
       + builtins.readFile ./fragments/admin-forms.py
       + "\n"
-      + builtins.readFile ./fragments/preferences.py
-      + "\n"
       + builtins.readFile ./fragments/environment-forms.py
+      + "\n"
+      + builtins.readFile ./fragments/preferences.py
       + "\n"
       + builtins.readFile ./fragments/shell-navigation.py
     );

@@ -17,23 +17,40 @@ generated:
 
 **Status:** Adopted by the owner on 2026-10-17 through TASK-490. The maintenance
 rules below are in force. `implementation_status: partial` describes coverage,
-not the rules. The harness exists under `lib/integration-test/`; Access and
-Delivery are registered and run automatically in GitLab. Access's
-local-bootstrap scenario passed all 23 cases through the CI job script at
-`c254b1c54e0f40adfaa9d05b5766cfeffae9bb89`: the original five bootstrap,
-five session and six Operator/Viewer authorization cases, then seven real
-Admin-form cases with reload and independent SQL observations. The VM
-executed newly. Earlier ten- and sixteen-case results remain
-in the execution history. This proves the selected subset, not complete Access,
-Delivery, Assurance, Upgrade, or the overhaul. TASK-490.25/.26 startup repairs
-remain integrated; unrelated TASK-492 is separate. TASK-490.1 and the repairs
-are in `Review`; TASK-490.2, TASK-490.3 and TASK-490.24 remain `In Progress`. Exact
-environment scope and registration policy still await their own decisions.
+not the rules. The wrap-up follows baseline `77251b04` in the existing MR.
+TASK-501's three commits are integrated; local root/nonroot CVE 30/dashboard 4
+and the final 32-case launcher matrix have execution evidence. Current-header
+repair passed dirty normal Assurance 47 case records / 41 names (264.00 s),
+and is committed as `d422cfca` with durable local evidence. Expanded Access is
+failed at changed-Light PATCH waiting after the original 23, six environment
+cases and A/B baseline passes (31 passed, one failed). Environment repair
+`fd4c8196` and mobile repair `66dd27aa` are not a full owner pass. Analysis-launcher
+fixtures pass, real analysis and the 500-line policy conflict remain unresolved.
+No new current-head push/hosted result is claimed. The
+[current evidence ledger](integration-coverage-map.md#current-repair-evidence-and-publication-gaps)
+records source limits and durable uploads; the nine-green `dbf50b47` pipeline
+includes false-green database/analysis jobs and is historical evidence only.
+
+The harness exists under
+`lib/integration-test/`; Access, Delivery and Assurance are registered real
+owners and run automatically in GitLab. Upgrade is absent pending D2's supported
+predecessor and compatibility window; the decision request is delivered, not
+accepted, and no proposed 24-hour window is approved. No fourth placeholder
+exists. Executed subsets, exact revisions, results and historical failures are in the coverage
+map; none establishes complete owner coverage. Exact environment scope and
+registration policy still await their own decisions.
 The owner now authorizes legacy source retirement before replacement coverage
 is complete. The former optional-manual coexistence policy is superseded.
 The [coverage map](integration-coverage-map.md) preserves receipts, reviewer
 artifacts, execution history, packet groupings, source dispositions and gaps.
 Documentation-only changes do not require another VM run.
+
+**Current review list:** [Deferred UI design-parity punch list](integration-coverage-map.md#deferred-ui-design-parity-punch-list).
+The owner's explicit docs-only coordinator instruction accepts deferral of
+verified remaining visual parity only; TASK-490.24 notes will record that
+instruction. The list distinguishes accepted presentation follow-ups, unresolved
+product blockers, unverified contracts/evidence and closed protected repairs.
+Semantic, security and functional integration requirements remain mandatory.
 
 **Source baseline:** Crystal Forge `origin/dev` at `5ae7feab8a7b372e8efe0d2dd21b6f53f0625064` after TASK-488 merged. Earlier execution records identify their pre-rebase base where relevant. Source links appear at the end of this document. The existing check implementations were not used to choose the four-check structure.
 
@@ -64,12 +81,14 @@ coverage is complete. The initial seventeen-definition package relocation is
 superseded: all fifteen public `verify-*` wrappers are removed. Unique assertions
 run in ordinary component tests, direct CI commands and existing isolated-DB
 workflows. Documentation and screenshot tools remain ordinary packages.
-The current inventory is Access and Delivery (two versus 27), with selected
-bootstrap, session, role-authorization and Admin-form persistence coverage.
-The earlier 16-case subset remains first and unchanged; seven Admin-form cases
-extend the recorded Access run to 23 cases. Delivery contains the source,
-native evaluation, API-builder and target-agent lifecycle. Its exact execution
-record is in the coverage map. Assurance and Upgrade are absent.
+The current wrap-up inventory is Access, Delivery and
+Assurance (three real attributes versus 27 before retirement). Access includes selected bootstrap,
+session, role-authorization and Admin-form persistence coverage. Delivery contains
+the source/native-evaluation/API-builder/target-agent lifecycle, deployment and
+retained rollback subset. Assurance registers `evidence-remediation-lifecycle`
+with real scanner/evidence/triage/plan/verification subsets. Their exact execution
+records and remaining obligations are in the coverage map. Upgrade is absent
+pending D2; tags or version strings do not select a supported predecessor.
 This is not final four-owner completion. No placeholder owner is permitted.
 The earlier optional-manual CI transition remains in the execution history;
 it does not describe the current source-retirement policy.
@@ -100,8 +119,8 @@ Each check MUST run independently. Checks MAY share immutable Nix inputs, fixtur
 `lib/integration-test/`. Native owner checks call
 `lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }` and
 explicitly register `scenarios` in their own `default.nix`. The normal
-`pkgs.linkFarm` aggregate builds every registered scenario gate. Access and
-Delivery are currently discoverable. Compatible behavior modules use the
+`pkgs.linkFarm` aggregate builds every registered scenario gate. Access, Delivery
+and Assurance are currently discoverable. Compatible behavior modules use the
 existing Nix, Python and browser-script composition inside a shared lifecycle;
 tracking tasks do not define files or derivations. Focused execution selects
 `checks.x86_64-linux.<owner>.scenarios.<scenario>`; `.run` is evidence only.
@@ -199,6 +218,60 @@ Before editing acceptance expectations, map each affected contract to its owner 
 For a shared component or token, inspect consumers and list the distinct layouts, data bindings, and navigation contracts affected. A small source diff can affect many screens.
 
 Every changed accepted behavior must have a disposition: **retain**, **update**, **extend**, **add**, or **remove**. If existing coverage is sufficient, cite the scenario and explain which assertion proves it. No test change is a valid outcome when it is justified.
+
+### Deferred UI design-parity follow-up
+
+Before a future touch to a listed page/component/state, read the canonical
+[punch list](integration-coverage-map.md#deferred-ui-design-parity-punch-list)
+and cite the affected stable behavior IDs in the task/MR impact record. Recheck
+the current production source, approved design revision/path/section and retained
+artifacts before carrying a difference forward. Search existing task records and
+use the matching task and read its status from canonical `dev/backlog/tasks/`,
+not the integration-worktree mirror. A historic Done or Review record does not
+authorize a new repair or imply completion at the current revision.
+
+The owner's visual-deferral decision does not alter the approved design, approve
+new backend facts, or waive a passing assertion. Only verified presentation-only
+differences may be `acceptedUIFollowup`. Missing controls, broken navigation,
+wrong counts, unavailable-as-clean, authorization, identity, persistence and
+evidence semantics remain functional/domain obligations. Record substantiated
+defects as `unresolvedProductBlocker`; record absent data contracts or insufficient
+equivalent-state evidence as `unverified`. Identify the exact missing fact.
+Required but unexecuted browser actions remain coverage gaps even if their APIs
+passed. The closed historical chip and failed Findings regressions stay protected.
+
+Record a repaired defect's local implementation/verification state separately
+from committed-input and publication status. Do not keep claiming that a locally
+proved repair is unimplemented, or call it fully closed before required evidence
+exists. Current-header distinct-CVE semantics follow Systems D3 / §9.2; tab
+CVE/package finding counts and historical inspection have separate scope.
+Owner approval for header, environment optional gates or a mobile close target
+does not authorize unrelated preference fixes, scalable-picker repairs, or
+assertion removal. A new required functional assertion that fails remains visible.
+
+Route each follow-up to its functional owner: environment forms, shell/mobile and
+preferences extend Access's existing `lifecycle-local-bootstrap` fragments;
+Assurance evidence/remediation extends `evidence-remediation-lifecycle`. A passing
+original subset or baseline read does not prove later changed-value persistence,
+backdrop dismissal or searched selection. Preserve their failure evidence and
+the full normal-owner requirement. No new endpoint, check or Upgrade placeholder
+is needed to report these gaps.
+
+For each affected ID, maintain page/component, state, actor and selected evidence;
+approved design revision/path/section; expected versus actual result; category
+(missing section, order, merged concepts, metadata, interaction or visual
+hierarchy); impact/severity; durable MR/GitLab image or archive member with
+source/theme/viewport; disposition; concrete acceptance criteria; existing owning
+scenario/test location; and the searched existing task link/status. State an
+absent comparable image explicitly. Local temporary paths are not durable proof.
+
+Close a follow-up only after the smallest existing scenario proves its acceptance
+criteria with retained valid assertions, whole-region design comparison and
+durable evidence at the submitted revision. Update the list in the same change;
+preserve prior failures, provenance and unique obligations. Do not create a new
+task family, image framework, placeholder owner, or application-derived design
+baseline to clear the list. Keep unresolved functional and security cases visible
+in final acceptance, irrespective of visual deferral.
 
 ### Step 3: Update the smallest owning scenario
 
@@ -460,7 +533,9 @@ The automatic owner job builds the normal owner aggregate, because a `.run` outp
 
 ## Source references
 
-These sources establish repository context and tooling behavior. The four-check inventory and maintenance rules above are recommendations, not claims that these sources already prescribe that inventory.
+These sources establish repository context and tooling behavior. The adopted
+owner decision above controls the four-check inventory and maintenance rules;
+the historical source links do not independently prescribe that inventory.
 
 - [Crystal Forge AGENTS.md](https://gitlab.com/crystal-forge/crystal-forge/-/blob/33de73b013b735304dfac9c69745a074a3e76ebd/AGENTS.md): task authority, design requirements, knowledge-base location, UI verification, and evidence reporting.
 - [Systems design authority and status](https://gitlab.com/crystal-forge/crystal-forge/-/blob/33de73b013b735304dfac9c69745a074a3e76ebd/docs/design/CrystalForge/docs/crystal-forge-systems-design/systems-view-design-v0.1.md): approved UI authority, domain/presentation distinction, and treatment of design gaps.

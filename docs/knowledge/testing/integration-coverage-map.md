@@ -15,7 +15,87 @@ generated:
 
 # Crystal Forge integration coverage and retirement map
 
-## Executed connected Assurance increment
+## Current status
+
+Wrap-up implementation follows baseline `77251b04`. TASK-501 is integrated as
+`16409b1e`, `856dc7db`, `77251b04`: actual
+root/nonroot CVE 30 and dashboard 4 passed; the final launcher matrix passed
+32 controlled fault cases. The latest membership correction reran normal root
+30/4; nonroot normal 30/4 belongs to the preceding fixture checkpoint.
+Current-header repair `d422cfca` is **locally verified**: normal dirty Assurance
+passed 47 case records / 41 distinct names, driver 264.00 seconds. Full expanded
+Access is **not passing**: the latest `0b17e4bb-dirty` run passed the original 23,
+all six environment cases, and preference A/B baselines, then failed the changed-Light
+PATCH wait: 31 passed records, one failed, driver 97.93 seconds. Environment repair
+`fd4c8196` therefore has normal-owner case proof, not a passing full owner. Mobile
+repair `66dd27aa` has focused close-control proof; picker search and backdrop failures
+remain required. Analysis-launcher fixtures pass; real analysis and the 500-line
+policy conflict remain unresolved. Analysis execution repair is `0b17e4bb`.
+No submitted-head hosted result is
+claimed. [Evidence and publication gaps](#current-repair-evidence-and-publication-gaps)
+separate these local results from the historical nine-green pipeline.
+
+Three real native owners exist: Access, Delivery and Assurance. Upgrade remains
+absent under D2: the predecessor pin/client window request was delivered, but no
+decision is accepted. In particular, no proposed 24-hour window is a support
+promise. There is no new endpoint, check or Upgrade placeholder.
+
+**Review next:** [Deferred UI design-parity punch list](#deferred-ui-design-parity-punch-list).
+The owner accepts deferral of verified remaining visual differences only.
+Semantic/security and functional integration obligations remain required.
+The header defect is repaired locally with committed-input proof/publication
+pending; missing required interactions and current Access failures are not UI debt.
+Historical chip and failed Findings repairs are closed and regression-protected.
+
+### Current repair evidence and publication gaps
+
+| Scope | Actual evidence and limit | Integrated disposition |
+| --- | --- | --- |
+| TASK-501, integrated commits above | Worker handoffs `task501-fixture-handoff.md` and `task501-membership-handoff.md` under `/tmp/opencode/`: original 30/4 names/modes passed root and nonroot after fixture repair; final guard compares native selected/executed name multisets, including ignored/expected-panic handling. Final root/nonroot matrix is 16+16 controlled cases, with exact main-postmaster shutdown and removed data/socket paths, 28 live PID identities and eight rejected log mutations. Controlled launcher cases are not product integration tests. | Durable MR archive of named normal results, invocation/cleanup proof and 32-case matrix, with integrated source mapping. Current-head hosted CVE/dashboard execution is pending; historical false greens below are not this proof. |
+| Current header, `77251b04-dirty` | Owner-authorized narrow repair; normal Assurance exit 0, 47/41, driver 264.00 s. Exact-source API, target/agent and browser evidence agree. Mounted A recovers B after one paired detail/Current read per selection, without document reload. Original chip/failed-Findings, permissions, stale-response and recovery assertions pass. | Commit `d422cfca`; wrap-up archive below includes exact identity proof and `browser/deploy-second/cve-mounted-activation-{before-current-refresh,current-recovered}.png` (Admin, dark, 1440×900). Hosted submitted-input result pending. |
+| Expanded Access | Latest `j7kdmhw3104nzld4iqrx44al1prda5fc` run identifies `0b17e4bb-dirty`: original 23, six environment cases and A/B baselines passed; appearance failed at the real changed-value PATCH wait. The owner exits 1. Later shell/notification phases are not covered by this run. | Wrap-up archive `expanded-access/` retains results, metadata and images. Full-owner success remains blocked, not inferred from passing subsets or ready fragments. |
+| Environment optional gates | `/tmp/opencode/cf-environment-handoff.md`: real UI zero-gate create, SQL verification, visible Custom Check assignment, metadata-edit retention, reload/reopen and invalid built-in/missing-ID denials passed. Native UI 2 optional-policy + 21 environment tests and isolated DB regressions passed; normal core build passed. Populated picker still truncates to 12 with no-op search. Full Access pending. | Final SHA, durable focused images/HTTP+SQL receipts and full owner result. The first unreachable-policy probe remains failed evidence; substituting the visible policy in focused inspection does not prove scalable search. |
+| Mobile close target | Narrow padding/icon repair is source/focused-preview verified: 40×40 close target with 24px icon, real close and original link dismissal. `/tmp/opencode/cf-mobile-after.json` retains the new backdrop failure: 375×0, static position, at 375×812; protected/routes/keyboard/unknown probes passed. No full Access result. | Final SHA, durable before/after/geometry/result archive; preserve and execute the required backdrop assertion in `shell-navigation.cjs`. No visual-deferral waiver. |
+| Analysis launchers | Current dirty `packages/{code-metrics,coverage}` and CI repairs supply explicit Rust/OpenSSL/pkg-config/runtime/offline settings and fail on missing/incomplete measurements. Coordinator reports 24 controlled launcher fixtures plus CI-policy tests passed. Real complete Clippy/Tarpaulin measurement is **unverified**. Existing 500-line JUnit failures versus deferred strict shell gate remain a policy conflict; no threshold/policy change is accepted here. | Final SHA, durable fixture/CI-policy logs and actual complete analysis reports/exit statuses. Missing reports or masked analysis cannot establish green; the old coverage 60% warning is not authority for an unrelated policy change. |
+
+The [wrap-up evidence bundle](https://gitlab.com/-/project/70402481/uploads/299c2d993d7ce0f585efe4a93b405490/mr335-truthful-ci-and-functional-repairs.tar.gz)
+provides durable local proof for this table: `receipts/task501-*.json` contains
+named selections, source comparisons and the final fault matrix;
+`cf-current-header-before/` and `cf-current-header-p2-after/` contain full normal
+Assurance results, metadata and images; `cf-environment-preview-verified/` contains
+focused API/SQL receipts; `expanded-access/` contains the 31-pass/one-failure run;
+`mobile/` and `receipts/cf-mobile-*.json` retain real geometry and failures.
+No traces, journals or session headers are uploaded. Local handoff paths identify
+supplementary inputs, not the sole evidence. Dirty results retain their original
+source identities and are not relabeled after commit. Current submitted-head
+hosted verification remains required.
+
+### Historical hosted baseline: `dbf50b47`
+
+[Pipeline 2972675961](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2972675961)
+is terminal with nine green job statuses at clean
+`dbf50b4746a6ed3818aed85af68f26251f4b9d52`. The retained single-snapshot audit
+inspected all nine complete traces and five artifact archives. Actual execution
+differs from GitLab status:
+
+| Durable job | Audited evidence |
+| --- | --- |
+| [Access 17354378645](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17354378645) | Fresh VM, 23 passed / 23 distinct names. |
+| [Delivery 17354378646](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17354378646) | Fresh VM, 15 passed / 15 distinct names. |
+| [Assurance 17354378647](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17354378647) | Fresh VM, 47 passed case records / 41 distinct names; exact source/design metadata. This predates the Current-header repair. |
+| [Component 17354378648](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17354378648) | 58 Python validator tests, three module suites and six shell suites executed; core result reused, no fresh Rust execution count assigned. |
+| [CVE 17354378649](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17354378649) | False green: root `initdb` failure, zero Rust tests. |
+| [Dashboard 17354378650](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17354378650) | False green: root `initdb` failure, zero Rust tests. |
+| [State machine 17354378651](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17354378651) | 525 distinct named Rust passes, no failed/ignored executions; migration rehearsals separately exited 0. |
+| [Complexity 17354378652](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17354378652) | Fresh 577-file inventory, not 577 Rust tests; failed OpenSSL/default and Web UI Clippy analysis was masked. No valid clean-analysis conclusion. |
+| [Coverage 17354378653](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17354378653) | False green: missing Cargo executable, zero packages/tests/measured lines; displayed 0% is not application coverage. |
+
+This is baseline evidence, not readiness for `77251b04` or dirty repairs. TASK-501
+local execution supersedes the database-launcher defect locally; it does not
+rewrite these historical job outcomes. Analysis truth repairs likewise need new
+real execution. No new push or refreshed hosted snapshot is claimed.
+
+## Historical execution evidence: connected Assurance increment
 
 At `9f53fade-dirty` on x86_64-linux, the normal owner commands executed fresh
 VMs: Access passed 23/23 (driver 51.13 seconds), Delivery passed 15/15 (400.00
@@ -154,7 +234,29 @@ captures; new reference captures cover both themes. Live empty-state captures
 are not populated-state verification. Inspection and capture paths remain in
 `/tmp/opencode/cf-assurance-browser-inspection.md`; references are unchanged.
 
-### Selected browser design review
+### Deferred UI design-parity punch list
+
+This is the canonical successor to **Selected browser design review**. Stable
+behavior IDs below preserve that review's candidates without turning an image
+or a source observation into integration coverage. Owner decision: the explicit
+TASK-490 wrap-up instruction accepts maintained visual follow-ups, not functional
+or semantic defects. The coordinator recorded that decision in
+[TASK-490.24](../../../backlog/tasks/task-490.24%20-%20Coordinator-four-owner-cutover-CI-entry-point-and-legacy-integration-retirement.md).
+
+Disposition meanings:
+
+- `acceptedUIFollowup`: verified presentation difference accepted for later UI work.
+- `unresolvedProductBlocker`: semantic or required functional difference; visual
+  deferral does not waive it or authorize a production repair.
+- `unverified`: source candidate, missing contract, or insufficient comparable
+  browser evidence. It is not an accepted deferral or a passing assertion.
+
+Closed/protected rows are retained separately below; they are not open punch items.
+A locally verified repair records its implementation state separately from
+`unverified` committed-input/publication status. It is not still an unrepaired
+defect, nor is it accepted visual debt.
+
+#### Reference and evidence ledger
 
 Reference components were inspected at tree `204a4752`, with the selected
 reference contracts at `6e4ea520`: `SystemDetail.jsx` `CvesTab` line 1825
@@ -163,20 +265,472 @@ specifies the `read-only` chip (`chip chip-unknown`, title
 `ScanLogDrawer` uses `cfg.found` to omit Findings without a completed set.
 The approved repair adds no unavailable replacement banner. SC1 revision 3 and the
 normative continuity contract control evidence and permission meaning. The
-continuity specification retains precedence for Current authority. The following
-whole-region gaps carry no authorization for additional product repairs.
+continuity specification retains precedence for Current authority. A scoped Git
+comparison found no changes to the four reference components below between
+`6e4ea520` and `dbf50b47`. Exact sections are named in each entry. All design
+paths below are relative to `docs/design/CrystalForge/components/`; all production
+UI paths are relative to `packages/web-ui/src/` unless a full repository path is
+given. Assurance entries use the existing
+`checks/integration-assurance/scenarios/evidence-remediation-lifecycle` under
+`integration-assurance`; `fragments/` means
+`checks/integration-assurance/scenarios/fragments/` in those entries. Access entries
+explicitly name `checks/integration-access/scenarios/lifecycle-local-bootstrap`
+and its Access-local fragments. Ownership follows the behavior; shell/preferences
+and environment interactions are not assigned to Assurance. All entries extend
+their existing scenario, not a new owner or VM. The normative Assurance reference is
+`docs/design/CrystalForge/cve-poam-evidence-continuity-design-spec.md`, especially
+Sections 2.5 and 29 (including no-evidence-is-not-clean), at `dbf50b47`.
 
-| Surface/state | Actual observation and remaining difference |
-| --- | --- |
-| System CVEs Current | Package-first sections, automatic expansion, exact finding and single triage execute. Reference batch quick-picks and batch bar are not implemented; multi-selection remains open. |
-| Exact scan Details | Real scan/job/execution identity and clean versus affected states execute. Failed Findings omission passed at clean `5ef2d0b0`, with failure context and all metadata retained. Completed Findings-first/inset-card structure still differs from the reference. Freshness and CVE database are absent; several execution timestamps replace Last scan. Configuration/Revision labels and order differ from Config/Commit. Extra execution diagnostics do not establish reference parity. Scanner renders duplicated `vulnix vulnix 1.12.4`; the version difference itself is fixture data. Details-level View these CVEs remains absent. |
-| Host Schedule patch | Browser creates the real host plan and reloads Scheduled. The subsequent `5ef2d0b0-dirty` run reopens/cancels twice, checks hydration and no additional remediation writes, and retains two dialog images. This is not full dialog parity. Reference Exploited context and no-upstream-patch warning remain gaps. |
-| Maintained POA&M | Actual metadata, plan, note, milestone and baseline persist. The browser reads/reloads API-authored changes. Visible reference lifecycle explanation/action and scope severity/fix/environment/commit metadata differ; lower activity outside the viewport is not called missing. |
-| Closed POA&M | Two sealed PASS attempts and original retired baseline history are visible. Large verification cards replace the compact reference confirmation and push baseline history lower. A readable baseline/Current comparison and all required metadata are not fully proven by the image. Verify/Close/Reopen browser clicks remain unexecuted. |
-| Historical | Explicit selection, original sealed source and no mutation control are proven. The original cell-copy failure is preserved as historical evidence. Approved tooltip-chip rendering and reload/leave-return assertions passed at clean `5ef2d0b0` in both themes. Generation versus commit selection and fixture values are context differences; extra package-load metadata is an observed difference, not an authorized removal. |
-| Missing/clean/loading | The tab distinguishes no completed scan, completed-empty and loading without enqueuing. Global green CVEs 0 above unavailable inventory remains a header/count consistency gap. |
-| Error/Retry | Held/aborted real GET exercises loading/error; restored transport supplies the real retry result without API writes. Raw stack text dominates the error frame and pushes Retry below the viewport, unlike the bounded reference message. |
-| Fleet drawer/Viewer | Exact fleet-to-Current navigation and Viewer no-control behavior execute. No drawer PNG was retained; source-only differences include Published versus Discovered, missing fleet denominator, and tier-first rather than environment-first grouping. Viewer-specific disposition copy lacks a complete approved-state comparison. |
+- **P — presentation bundle:** [MR335 reference/before/after archive](https://gitlab.com/-/project/70402481/uploads/1e12d6f176a94ed55edb3da0cd22c08b/mr335-assurance-presentation-5ef2d0b0.tar.gz).
+  `before/` is genuine `9f53fade-dirty`, dark only; `after/` is clean `5ef2d0b0`.
+  `reference/` retains historical and failed-Details design captures in dark/light.
+  The archived inspection report and capture metadata identify reference actors
+  and fixture selections. These references do not depict every state below.
+- **C — continuation bundle:** [MR335 continuation archive](https://gitlab.com/-/project/70402481/uploads/1e1b9abf4a07f69a1b78eda846ef8747/mr335-assurance-continuation-dbf50b47.tar.gz).
+  `meta.json` identifies clean production and reference source `dbf50b47`, fixture
+  digest, `cf-it-render-v1`, Playwright 1.59.1, UTC, device scale 1 and desktop
+  **1440 × 900**. Browser result files bind exact identities through receipts.
+  Images below are dark unless explicitly marked light; exact Details and
+  historical images have light counterparts. No narrow comparison is claimed.
+- **C actors and evidence:** Admin Mira Reyes; targetA
+  `eb997215-9461-4e4a-9236-ba05f06fddef`; vulnerable generation 1, derivation 2,
+  scan `d04d3062-f37a-4c7a-89fc-e3154a034be2`, `cf-assurance-demo` 1.0,
+  `CVE-2026-49001`, CVSS 9.8, pending fix. Host plan
+  `6bfa264c-5f91-46d7-8fcd-78e7e62a4a5c` / POAM-0001 uses that baseline.
+  Missing state precedes scan admission; closed state follows corrected Current.
+  Viewer capture uses Jordan Park; the browser assertion verifies the Viewer role.
+  Reference mock names/versions are presentation inputs, not backend evidence.
+
+Archive-relative image paths are durable through those GitLab links. A local
+`/tmp/opencode` path alone is not a durable evidence source. No new image
+framework, baseline, mock backend data or placeholder image is introduced here.
+
+- **W — wrap-up evidence:** [TASK-501 and functional repair bundle](https://gitlab.com/-/project/70402481/uploads/299c2d993d7ce0f585efe4a93b405490/mr335-truthful-ci-and-functional-repairs.tar.gz).
+  It retains original worker/dirty-input metadata, not substituted clean-commit
+  claims. Header before/after is Admin at 1440 by 900, dark/light after; mobile
+  geometry is 375 by 812, dark. `expanded-access/` identifies `0b17e4bb-dirty` and
+  contains exact environment request/persistence receipts and the preference
+  failure. The task-specific normal results and controlled fault matrix are
+  separate evidence classes; none implies current hosted success.
+
+#### Verified presentation follow-ups
+
+**`assurance.scan-details.structure` — Exact scan Details hierarchy.**
+
+- State/actor: Admin, completed affected and clean exact scans; failed state keeps
+  its repaired omission. Reference `6e4ea520:ScanningView.jsx`, `ScanLogDrawer`,
+  Details block lines 468–494: metadata first, then separate Findings. Actual
+  `views/scanning.rs::detail_summary` places Findings first inside an inset
+  summary with execution metadata; Config/Commit become Configuration/Revision.
+- Category: order, merged concepts, visual hierarchy, metadata. Impact: medium
+  review/readability debt; this does not permit hiding execution identity or logs.
+  Disposition: `acceptedUIFollowup`.
+- Evidence: C `browser/cve/cve-exact-scan-details.png` and `-light.png`, plus
+  `*-metadata-end.png`; P `reference/cf-assurance-design-failed-details-dark.png`
+  and light counterpart establish the failed-state metadata structure only.
+  Completed-state comparison is also verified against the unchanged source.
+- AC/regression: render the approved metadata/Findings order and distinct groups
+  in both themes; retain exact scan/job/execution, zero/nonzero counts and failed
+  omission. Extend existing `evidence-remediation-lifecycle`,
+  `checks/integration-assurance/scenarios/fragments/cve.cjs` (exact Details,
+  `completedFindings`, `themedEvidence`). Existing product tracking:
+  [TASK-326.2][task-scanning] **In Progress**; coverage [TASK-490.16][task-scan] **In Progress**.
+
+**`assurance.scan-details.scanner-label` — Duplicated scanner name.**
+
+- State/actor: Admin, exact completed scan in C. Reference
+  `6e4ea520:ScanningView.jsx::ScanLogDrawer`, Scanner line 477 prints one name.
+  Actual `views/scanning.rs` concatenates `scanner_name` and `scanner_version`;
+  retained execution displays `vulnix vulnix 1.12.4`. The version number difference
+  from the reference is fixture data, not a defect.
+- Category: metadata. Impact: low formatting debt. Disposition: `acceptedUIFollowup`.
+- Evidence: C `browser/cve/cve-exact-scan-details.png`, light and metadata-end
+  counterparts; P failed-Details references, same desktop profile.
+- AC/regression: show one scanner name and the recorded version without changing
+  stored provenance. Extend exact Details in `fragments/cve.cjs` under the same
+  Assurance scenario. [TASK-326.2][task-scanning] **In Progress**;
+  [TASK-490.16][task-scan] **In Progress**.
+
+**`assurance.poam.lifecycle-explanation` — Maintained plan explanation.**
+
+- State/actor: Admin, API-maintained In Progress POAM-0001. Reference
+  `6e4ea520:PoamViews.jsx::PoamDetailTray`, Lifecycle lines 478–497 explains
+  that work status is not verification. Actual
+  `components/poam/mod.rs::LifecycleSection` has status controls/tooltips but
+  omits that visible explanation in this state. The separate Mark remediation
+  complete control is also absent; Awaiting Verification is available through
+  the status segment. That alternative's functional equivalence is not proved here.
+- Category: missing section, interaction. Impact: medium comprehension debt for
+  the explanation only; no deferral of the status-transition journey.
+  Disposition: `acceptedUIFollowup` for explanatory copy; action equivalence is
+  `unverified` under `assurance.poam.browser-actions` below.
+- Evidence: C `browser/poam-maintain/poam-maintained-real-finding-reloaded.png`,
+  dark desktop; matching design is source-verified, no comparable design PNG retained.
+- AC/regression: restore visible work-versus-verification explanation while
+  retaining independent finding outcomes and server authority. Extend
+  `fragments/poam-plan.cjs` in the existing Assurance scenario.
+  [TASK-490.21][task-plan] **In Progress** tracks coverage; historic implementation
+  [TASK-433.7][task-poam-product] is **Done**, not reopened by this row.
+
+**`assurance.poam.closure-hierarchy` — Closed plan verification density.**
+
+- State/actor: Admin, completed POAM-0001 with two accepted PASS attempts and
+  retired vulnerable baseline. Reference `6e4ea520:PoamViews.jsx::PoamDetailTray`,
+  completed confirmation lines 532–541 is compact. Actual
+  `components/poam/mod.rs::LifecycleSection` renders two large verification cards
+  before vulnerability history. Baseline remains visible lower down.
+- Category: visual hierarchy, order. Impact: medium audit readability debt.
+  Disposition: `acceptedUIFollowup` for density, not permission to remove attempts.
+- Evidence: C `browser/poam-verify-close/poam-closed-real-current-history-reloaded.png`,
+  dark desktop. Source establishes the reference; a matching design PNG is absent.
+- AC/regression: make closure confirmation compact and keep both attempts and
+  immutable baseline readable; do not label lower activity missing from one
+  viewport. Extend `fragments/verification.cjs` in the existing scenario.
+  [TASK-490.29][task-verification] **In Progress**; baseline/Current metadata proof
+  remains separate below.
+
+**`assurance.inventory.error-presentation` — Bounded error frame.**
+
+- State/actor: Admin, held/aborted real inventory GET followed by restored Retry.
+  Reference `6e4ea520:SystemDetail.jsx::CvesTab`, error lines 1743–1749 gives a
+  bounded message and Retry. Actual `components/cve/mod.rs::CvesTab` prints the
+  transport message directly; C shows a WASM stack dominating the frame and Retry
+  below the viewport. Retry itself passed; no write or scan was enqueued.
+- Category: visual hierarchy. Impact: medium discoverability debt.
+  Disposition: `acceptedUIFollowup` for bounded presentation; sensitive-data
+  redaction is a security obligation, not waived or established by this image.
+- Evidence: C `browser/cve-read-error/cve-inventory-read-error.png` and
+  `cve-inventory-read-retry.png`, dark desktop; source-only reference comparison.
+- AC/regression: bound diagnostic presentation and keep Retry visible/reachable;
+  preserve real error, loading, successful retry identity and no-write assertions
+  in `fragments/cve.cjs::readError`, existing scenario.
+  [TASK-338.2][task-system-parity] **Backlog**;
+  [TASK-490.16][task-scan] **In Progress** for integration coverage.
+
+#### Functional obligations, local repairs and unverified candidates
+
+**`assurance.inventory.header-meaning` — Current header repaired locally.**
+
+- State/actor: Admin/Viewer, running affected A, clean B built but undeployed,
+  then actual B activation; missing/error/historical/stale reads. Approved
+  `6e4ea520:SystemDetail.jsx` header lines 147–153 and Systems design
+  `docs/design/CrystalForge/docs/crystal-forge-systems-design/systems-view-design-v0.1.md`
+  **D3 / §9.2** require distinct canonical CVE IDs in the running header, versus
+  CVE/package pairs in the tab. Continuity §§2.5, 6–7, 29 controls Current evidence.
+  Historical inspection must not change running-header scope.
+- Expected versus actual: historical C images and a failed normal baseline proved
+  the old list-derived header could show green zero above affected A after B's
+  clean build. The owner-authorized repair at `77251b04-dirty` now uses the
+  existing unfiltered Current resolver shared by header/tab, distinct total and
+  optional distinct critical/high metadata. Missing/old-server/error metadata
+  stays unavailable. Coordinated detail/Current refresh preserves generation and
+  request fences and recovers mounted A to B without a polling/retry loop.
+- Category: merged concepts, metadata. Original impact: high semantic defect.
+  **Repair status: locally verified and committed as `d422cfca`; W supplies
+  durable before/after and identity proof. Hosted submitted-input verification
+  remains pending (`unverified` for that claim).**
+  This is no longer listed as an unrepaired header blocker or UI deferral.
+- Evidence: original durable C `browser/cve/cve-current-vulnerable.png`,
+  `browser/cve-missing/cve-never-scanned-not-clean.png` and
+  `browser/cve-viewer/cve-viewer-current-read-only.png` remain. The later Viewer
+  frame shows 1, so the original defect was not universal. Baseline hosted
+  [Assurance job 17354378647](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17354378647)
+  predates the repair. P2 handoff records normal dirty Assurance 47/41, driver
+  264.00 s, and exact target/agent/browser receipts. Mounted proof selects B then
+  Current with request sequence `detail,current,detail,current`, same document.
+  New dark 1440×900 whole-region images and proof archive await upload; see the
+  [publication ledger](#current-repair-evidence-and-publication-gaps). Local paths
+  do not establish durable handoff.
+- AC/regression: retain distinct-ID versus finding-unit checks, A despite B's
+  build, actual B after activation, unavailable/failed/loading and historical
+  independence, stale-response fencing and mounted recovery. Existing Assurance
+  `fragments/cve.{py,cjs}` and wrapped `deploy-second` use the original deployment
+  once; no new endpoint, scenario or historical-scope change. Original chip and
+  failed Findings regressions also passed. [TASK-490.16][task-scan] **In Progress**;
+  [TASK-338.1][task-header] **Backlog** remains a surface tracking home, not a
+  claim of broad header parity or task completion.
+
+**`assurance.scan-details.finding-navigation` — Missing Details action.**
+
+- State/actor: Admin, exact affected completed scan. Reference
+  `6e4ea520:ScanningView.jsx::ScanLogDrawer`, lines 488–491 requires View these
+  CVEs for critical/high findings. Actual `views/scanning.rs::detail_summary`
+  has no action; the list-row View CVEs exists and is exercised instead.
+- Category: interaction, missing section. Impact: medium functional blocker.
+  Disposition: `unresolvedProductBlocker`; list navigation does not prove the
+  designed Details interaction.
+- Evidence: C `browser/cve/cve-exact-scan-details.png`, light and metadata-end
+  images, and `browser/cve/result.json`. Reference is source-verified; no
+  completed-reference PNG was retained.
+- AC/regression: click the Details action and assert the approved destination
+  with correct selection context; retain exact scan identity and existing row
+  navigation proof. Extend `fragments/cve.cjs` in the same scenario.
+  [TASK-326.2][task-scanning] **In Progress**;
+  [TASK-490.16][task-scan] **In Progress**. No new product scope is silently deferred.
+
+**`assurance.system-cves.batch-interaction` — System batch selection.**
+
+- State/actor: Admin, exact affected Current. Reference
+  `6e4ea520:SystemDetail.jsx::CvesTab`, lines 1716–1733, 1763–1770 and batch
+  modal block at 1852 specifies quick picks, package multi-selection and batch
+  triage. Actual `components/cve/mod.rs::CvesTab` implements package disclosure
+  and single triage only. Fleet `views/cves.rs::CveBatchTriageDialog` exists;
+  its existence does not supply the System controls or passing batch integration.
+- Category: interaction, missing section. Impact: high functional coverage gap.
+  Disposition: `unresolvedProductBlocker` for the absent System interaction;
+  fleet batch/unselected-set integration remains unverified, not a proven defect.
+- Evidence: C `browser/cve/cve-current-vulnerable.png` dark desktop, plus
+  `browser/triage-create/result.json` proves only single-host creation/reopen.
+  Reference is source-verified; no multi-finding browser pair retained.
+- AC/regression: use at least two distinguishable real findings and an unselected
+  control; select exact pairs, apply through the browser, reload, and prove
+  selected actor/scope/persistence, unselected isolation and denied no-write.
+  Historical/Viewer remain non-mutating. Extend `fragments/triage.{py,cjs}` in the
+  existing scenario. [TASK-490.20][task-triage] **In Progress**;
+  [TASK-338.2][task-system-parity] **Backlog**. Single-finding screenshots do not
+  complete this obligation.
+
+**`assurance.scan-details.data-contract` — Freshness, Last scan, CVE database.**
+
+- State/actor: Admin, exact completed/failed Details. Reference
+  `6e4ea520:ScanningView.jsx::ScanLogDrawer`, metadata lines 473–478. Actual
+  `views/scanning.rs` omits Freshness and CVE database and exposes several real
+  lifecycle times instead of Last scan. Server
+  `packages/default/crates/cf-server/src/api/models.rs::ScanningScanDetailResponse`
+  has lifecycle timestamps but no freshness or CVE-database update field; the
+  collection's freshness value does not define exact-detail time semantics.
+- Category: metadata, missing section. Impact: medium unresolved data contract.
+  Disposition: `unverified`, not visual deferral. Missing facts: exact-detail
+  deployed/recent/superseded derivation rule and observation time; which event
+  Last scan denotes for failed/queued runs; authoritative feed identity/update
+  timestamp, provenance and unavailable behavior for the CVE database. Design
+  `SCAN_POLICY.dbAge` must not become invented backend data.
+- Evidence: C exact Details dark/light/metadata-end images; P failed Details
+  references. No image proves the absent backend contract.
+- AC/regression: resolve those exact mappings, then bind real values or the
+  approved unavailable state without deleting execution diagnostics. Extend
+  exact-detail API/browser checks in `fragments/cve.{py,cjs}`, same scenario.
+  [TASK-326.2][task-scanning] **In Progress**;
+  [TASK-490.16][task-scan] **In Progress**. Contract resolution precedes parity closure.
+
+**`assurance.triage.advisory-context` — Exploited and no-patch context.**
+
+- State/actor: Admin, Schedule patch and hydrated reopen for pending-fix demo1.0.
+  Reference `6e4ea520:CvesView.jsx::CveTriageModal`, vulnerability summary line
+  1237 and no-upstream-patch warning line 1332. Actual
+  `components/cve/triage.rs::SystemCveTriageDialog` summary has Fix but no Exploited
+  field or warning. A missing advisory fact is not authority to fabricate one.
+- Category: metadata, missing section. Impact: medium decision-context gap.
+  Disposition: `unverified` pending equivalent advisory-state browser comparison
+  and confirmation of the real System triage DTO's advisory contract.
+- Evidence: [C inline reopened dialog](https://gitlab.com/-/project/70402481/uploads/843c2389ff6ad447b87273de66c37c89/triage-host-scheduled-reopened-1.png)
+  and C `browser/triage-create/triage-host-scheduled-reopened-2.png`, dark desktop.
+  No matching design-state PNG is retained.
+- AC/regression: compare the same pending/available and known/unknown exploitation
+  states; render supported context without changing triage authority. Preserve
+  real creation, hydrated reopen/cancel and no-extra-write assertions in
+  `fragments/triage.cjs`, same scenario. [TASK-326.2][task-scanning] **In Progress**;
+  [TASK-490.20][task-triage] **In Progress**.
+
+**`assurance.poam.scope-metadata` — Scope and baseline/Current readability.**
+
+- State/actor: Admin, maintained and completed POAM-0001. Reference
+  `6e4ea520:PoamViews.jsx::PoamDetailTray`, Vulnerability scope lines 596–637
+  shows severity/CVSS/fix/environment/commit. Actual
+  `components/poam/mod.rs` scope shows version, scan and evidence access; its
+  documented DTO boundary does not supply severity/CVSS/fixed version. Retired
+  baseline is visible, but one closed-frame image does not prove a readable full
+  baseline-versus-Current comparison. Continuity Section 29 controls semantics;
+  mock scope text cannot authorize automatic closure or mutable baseline.
+- Category: metadata. Impact: medium audit-contract gap. Disposition: `unverified`.
+- Evidence: C maintained and closed POA&M PNGs named above, dark desktop, with
+  exact plan and immutable baseline receipts. No equivalent design PNG retained.
+- AC/regression: identify authoritative sources for absent scope fields; compare
+  complete baseline and Current identity/timestamps/versions in expanded evidence
+  and after reload. Do not infer metadata absent merely because it is below fold.
+  Extend `fragments/poam-plan.cjs` and `verification.cjs` in the existing scenario.
+  [TASK-490.21][task-plan] and [TASK-490.29][task-verification] **In Progress**;
+  historical [TASK-433.7][task-poam-product] **Done** is not reopened.
+
+**`assurance.poam.browser-actions` — Lifecycle controls not executed.**
+
+- State/actor: Admin, maintained/awaiting/closed plan. Reference
+  `6e4ea520:PoamViews.jsx::PoamDetailTray`, Lifecycle lines 478–541, interpreted
+  under normative continuity Sections 2.5 and 29. Actual
+  `components/poam/mod.rs::LifecycleSection` exposes status transitions,
+  Verify now, Authoritative close and Reopen; API-authored outcomes are reloaded
+  by the browser, but these browser clicks are not executed in retained cases.
+- Category: interaction. Impact: high unfinished functional integration proof.
+  Disposition: `unverified`; this required coverage is not accepted UI debt and
+  does not establish a product defect before execution.
+- Evidence: C `browser/poam-maintain/result.json` and
+  `browser/poam-verify-close/result.json` plus their PNGs, dark desktop. Static
+  control visibility does not prove the mutation, error, stale or reload path.
+- AC/regression: execute existing controls through real authorized APIs, prove
+  independent verification/closure/reopen effects and negative no-write states,
+  and retain exact baseline/history. Confirm the alternate status action against
+  the designed Mark remediation complete workflow. Extend `fragments/poam-plan.cjs`
+  and `verification.{py,cjs}`, same scenario; [TASK-490.21][task-plan] and
+  [TASK-490.29][task-verification] **In Progress**.
+
+**`assurance.fleet.drawer-comparison` — Fleet drawer and Viewer comparison.**
+
+- State/actor: Admin fleet finding and Viewer Current. Reference
+  `6e4ea520:CvesView.jsx::CveDrawer`, Discovered statistic at line 863 and
+  environment triage/affected grouping at 919 onward. Actual
+  `views/cves.rs::FleetCveDetailBody` says Published, shows no reference fleet
+  denominator and organizes relationship tiers before environment groups.
+  Published and Discovered may denote different data; do not relabel blindly.
+  Viewer disposition copy has no complete approved-state comparison.
+- Category: metadata, order, merged concepts. Impact: medium meaning/comparison
+  gap. Disposition: `unverified`, not accepted visual follow-up.
+- Evidence: C `browser/cve/result.json` proves fleet-to-exact-Current navigation;
+  `browser/cve-viewer/cve-viewer-current-read-only.png` is dark desktop Viewer
+  evidence only. **No fleet drawer PNG retained**; no durable comparable image
+  exists for drawer/theme/viewport, so source differences are not visual proof.
+- AC/regression: retain a real populated drawer and approved counterpart with
+  actor/scope, timestamp meaning, denominator and tier/environment identities;
+  exercise Viewer no-control and copy states. Extend fleet navigation/Viewer
+  in `fragments/cve.cjs`, same scenario. [TASK-490.16][task-scan] **In Progress**;
+  [TASK-331][task-fleet-parity] **Backlog**. Current browser evidence is required.
+
+#### Access functional obligations and local repairs
+
+These entries belong to `integration-access`, existing
+`checks/integration-access/scenarios/lifecycle-local-bootstrap`.
+`Access fragments/` below means `checks/integration-access/scenarios/fragments/`.
+The latest expanded owner is failed, not covered by the historical
+[23-case Access job](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17354378645).
+New local artifacts await durable upload; the previous MR Assurance bundles do
+not prove these Access states.
+
+**`access.environments.optional-gates` — Narrow gate repair, full owner pending.**
+
+- State/actor: real Admin, new zero-gate environment, selected enabled Custom Check,
+  then metadata edit/reopen; invalid built-in/missing policy IDs. Approved
+  `6e4ea520:EnvironmentsView.jsx::EnvFormModal`, Policy enforcement lines 745–760,
+  allows no extra gates. TASK-339.1 owns the environment editor; the mandatory
+  CF-agent invariant is not an optional assignable gate.
+- Expected versus actual: owner-authorized dirty repair now permits empty optional
+  gate sets and preserves explicit selected gates during metadata edits. UI,
+  server validation and assignment rows agree in focused browser/SQL proof.
+  Category: interaction, metadata. Original impact: high functional failure.
+  Repair is **committed as `fd4c8196` with all six normal-owner environment cases
+  passing in the recorded 31-pass/one-failure run**; `unverified` for full
+  submitted-input Access coverage/publication, not visual deferral.
+- Evidence: `cf-environment-handoff.md` and
+  `cf-environment-preview-verified/{result.json,created-zero-gates.png,edited-preserved-gate.png}`
+  under `/tmp/opencode/`, Admin, 1440×900; theme not independently recorded by
+  this documentation audit. Exact environment UUID and POST/PATCH/SQL receipts
+  are retained. Durable upload is pending, not replaced by temporary paths.
+- AC/regression: run the normal Access owner with zero-gate create, nonempty
+  assignment/edit preservation, invalid-policy no-write, membership restoration,
+  cancel/duplicate/delete and reload. Retain the original 23. Existing
+  `Access fragments/environment-forms.{py,cjs}`; [TASK-490.3][task-environment-tests]
+  and [TASK-339.1][task-environment-product] **In Progress**. The multi-request
+  workflow does not claim that metadata POST rolls back on a later policy error.
+
+**`access.environments.policy-picker-search` — First-12/no-op search defect.**
+
+- State/actor: Admin, populated catalog of 158 assignable policies, editing gate
+  selection. Approved `77251b04:EnvironmentsView.jsx::GatePolicyPicker`, lines
+  897–960, requires searchable/scalable selection. Current
+  `components/environments/environment_form_modal.rs` lines 352–361 has a no-op
+  `oninput` and `.take(12)`; enabled Require Packages was unreachable in the
+  focused preview. This is separate from the repaired zero-gate contract.
+- Category: interaction, missing section. Impact: high required functional
+  accessibility gap. Disposition: `unresolvedProductBlocker`, not UI debt.
+- Evidence: environment worker's retained failed picker probe and source above;
+  later Custom Check success proves only a visible selection. Admin desktop
+  probe 1440×900; no durable comparable picker image/theme record published yet.
+  Upload the failed probe alongside the passing narrow repair, not only its
+  successful substitute. Existing historical job/bundles do not prove search.
+- AC/regression: reach an authored enabled policy beyond the initial twelve by
+  actual search, select it, save/reopen and prove exact rows; preserve selected
+  values and invalid-policy denials. Extend `Access fragments/environment-forms.{py,cjs}`
+  in the same Access lifecycle. [TASK-339.1][task-environment-product] and
+  [TASK-490.3][task-environment-tests] **In Progress** are existing matching homes;
+  no new family or unrelated repair is authorized by this doc entry.
+
+**`access.shell.mobile-dismissal` — Close target repaired; backdrop still fails.**
+
+- State/actor: authenticated Admin, open mobile navigation at 375×812.
+  TASK-490.4's accepted shell interaction and the owner's narrow close-target
+  repair instruction control behavior. `77251b04:Shell.jsx::Sidebar` supplies the
+  desktop design; no complete approved narrow drawer/backdrop reference is
+  identified, so broad mobile visual parity remains unverified. Production
+  `components/layout/sidebar.rs` retains actual close/backdrop handlers.
+- Expected versus actual: dirty local padding/24px-icon repair restores a usable
+  40×40 close hit target and actual close; original link dismissal passes.
+  The added normal-hit-test backdrop assertion fails: overlay is static with
+  bounds 375×0, so it cannot provide dismissal. Category: interaction.
+  Impact: high functional blocker for backdrop. Disposition:
+  `unresolvedProductBlocker`; close-target subrepair is focused-verified only.
+- Evidence: local `cf-mobile-after.json`, `cf-mobile-after.png` and
+  `cf-mobile-after-backdrop-failure.png` under `/tmp/opencode/`, dark 375×812;
+  source/focused preview, not a normal-owner pass. Durable archive/image and
+  final repair SHA remain pending. Desktop reference capture at 1440×900 does
+  not prove narrow parity. No sensitive-data or domain proof is inferred.
+- AC/regression: preserve close target, real close and link dismissal; require
+  visible viewport-covering backdrop and a real exposed-overlay click to dismiss
+  through normal hit testing. Keep the new failing assertion in
+  `Access fragments/shell-navigation.cjs` mobile phase and execute the existing
+  `shell-navigation.py` case in full Access. [TASK-490.4][task-shell-preferences]
+  **In Progress**; do not remove the assertion or defer it as appearance debt.
+
+**`access.preferences.changed-theme-persistence` — Changed-Light PATCH failure.**
+
+- State/actor: independent Admin user A and Operator user B; both baseline UI/API
+  reads and reloads pass. Approved `77251b04:ProfileView.jsx::ProfileView`,
+  Appearance lines 75–79, and TASK-490.4 require real per-user persistence.
+  `views/profile.rs` wires the theme segment to account-preference mutation.
+- Expected versus actual: an unchanged selected setting is a no-op; a genuinely
+  changed Light selection must issue the real PATCH and survive reload without
+  changing B. The retained expanded run fails awaiting that changed-value PATCH
+  (`page.waitForResponse`, 15000 ms). The coordinator's changed-Light diagnosis
+  is not a successful persistence result or authority for a product repair.
+- Category: interaction. Impact: high functional integration blocker.
+  Disposition: `unresolvedProductBlocker` for the failed required proof; exact
+  production cause remains unverified. Header/environment/mobile repair authority
+  does not authorize fixing unrelated preferences.
+- Evidence: failed owner output `ri6pa2gcpmfxm4kdn6kkgbakbdz1l7vy`,
+  `browser/preferences-appearance/{result.json,failure.png,trace.zip}`, source
+  `77251b04-dirty`, desktop 1440×900, initial dark profile; target Light is the
+  action, not a claimed final saved theme. Durable failure upload pending.
+  The historical 23-case job contains no changed-preference proof.
+- AC/regression: distinguish true no-op clicks from changed values, retain the
+  failing real PATCH expectation, independently read/reload A and check B
+  unchanged; execute later notification/error/loading phases rather than implying
+  they passed after this abort. Existing `Access fragments/preferences.{py,cjs}`
+  in the same lifecycle; [TASK-490.4][task-shell-preferences] **In Progress**.
+
+#### Closed and protected regressions
+
+| Stable behavior ID | Protected contract and evidence | Existing responsibility |
+| --- | --- | --- |
+| `assurance.historical.read-only-chip` | **CLOSED**. Exact historical sealed source, no mutation controls, `read-only` chip with title `This selected scan cannot authorize triage`, reload and leave/return passed at clean `5ef2d0b0`; C retains the continuation. Reference `6e4ea520:SystemDetail.jsx::CvesTab` line 1825. [Reference](https://gitlab.com/-/project/70402481/uploads/303dc878ddde39ec2a7bd77573fe23cb/cf-assurance-design-historical-dark.png), [genuine failing before](https://gitlab.com/-/project/70402481/uploads/448031f5e1ca0c5f691cfe0aa9cd011e/failure.png), [passing after](https://gitlab.com/-/project/70402481/uploads/a5356f2463c9fe57b7dbca6d7196ae75/cve-historical-vulnerable-read-only.png); P/C include light after. Generation versus commit selection and fixture values are context differences; extra package-load metadata is not authorized for removal. | [TASK-490.16][task-scan] In Progress; `fragments/cve.cjs::historical`, existing Assurance scenario. Retain assertions; do not reopen the repaired chip. |
+| `assurance.scan-details.failed-findings-omission` | **CLOSED**. Failed Details omits unsupported Findings, zero summary and zero severity chips; retains failure, exact execution and all metadata; no replacement unavailable banner. Clean completed zero/nonzero summaries remain. Reference `6e4ea520:ScanningView.jsx::ScanLogDrawer` `cfg.found`. [Reference](https://gitlab.com/-/project/70402481/uploads/cdad2e9d962c0e76c2784d064613ad49/cf-assurance-design-failed-details-dark.png), [genuine failing before](https://gitlab.com/-/project/70402481/uploads/3206bfada4bb5395e1491e687ff67180/cve-terminal-failure-exact-execution.png), [passing after](https://gitlab.com/-/project/70402481/uploads/6b18a8c162c71823f7bd1fafa4e1577d/cve-terminal-failure-exact-execution.png). P/C retain dark/light and metadata ends, desktop. | [TASK-490.16][task-scan] In Progress; `fragments/cve.cjs::failed`, `completedFindings`, same scenario. Historical failures above remain historical; no assertion waiver. |
+
+Task status labels above are read from canonical `dev/backlog/tasks/`, not the
+older integration-worktree mirror, inferred from an MR, or changed by this
+contribution. TASK-326.2 is **In Progress**, superseding the mirror's Review label.
+TASK-348.2 is
+Backlog but explicitly superseded by TASK-326.2; do not use it as a second owner.
+Existing task links assign tracking/coverage homes, not new product-repair
+authorization. Future touches follow the [maintenance procedure](integration-test-contract.md#deferred-ui-design-parity-follow-up).
+
+[task-scanning]: ../../../backlog/tasks/task-326.2%20-%20Bring-Scanning-queue-and-scan-log-interactions-to-updated-design-parity.md
+[task-scan]: ../../../backlog/tasks/task-490.16%20-%20Assurance-real-CVE-scanning-evidence-distinctions-and-finding-navigation-scenario.md
+[task-triage]: ../../../backlog/tasks/task-490.20%20-%20Assurance-finding-triage-and-waiver-acceptance-scenario.md
+[task-plan]: ../../../backlog/tasks/task-490.21%20-%20Assurance-POAM-lifecycle-verification-closure-and-evidence-continuity-scenario.md
+[task-verification]: ../../../backlog/tasks/task-490.29%20-%20Assurance-POAM-verification-closure-reopen-and-evidence-continuity-scenario.md
+[task-poam-product]: ../../../backlog/tasks/task-433.7%20-%20TASK-433-Phase-6-POAM-integration-in-evidence-finding-system-bundle-assignment-UI.md
+[task-system-parity]: ../../../backlog/tasks/task-338.2%20-%20System-Detail-Deploy-CVEs-and-Config-tab-parity.md
+[task-header]: ../../../backlog/tasks/task-338.1%20-%20System-Detail-tab-bar-Overview-tab-parity.md
+[task-fleet-parity]: ../../../backlog/tasks/task-331%20-%20Close-parity-gaps-across-remaining-web-ui-views-Flakes-Builds-Evals-CVEs-Caches-Compliance-Admin.md
+[task-environment-tests]: ../../../backlog/tasks/task-490.3%20-%20Access-administration-and-environment-form-persistence-scenarios.md
+[task-environment-product]: ../../../backlog/tasks/task-339.1%20-%20Environments-view-parity-add-edit-remove-flows.md
+[task-shell-preferences]: ../../../backlog/tasks/task-490.4%20-%20Access-application-shell-navigation-and-profile-notification-preference-scenarios.md
 
 One package/finding on desktop does not prove pagination, density, responsive
 layout, focus/keyboard behavior, draft preservation across scope changes, or
@@ -246,7 +800,7 @@ The owner's explicit TASK-490.2 selections authorize the five session cases and 
 | --- | --- | --- |
 | D1-scope | Select the cross-environment endpoint/method and accepted visibility/mutation rule, including hidden-versus-absent response. The environment handler currently filters membership and returns non-enumerating 404 for a hidden detail; that is evidence, not the owner's selection for TASK-490.2. | Selected admin denials, forms, and already-approved system/CVE non-disclosure checks. |
 | D1-registration | With an existing user and `allow_registration = false`, specify registration denial/status and whether first-admin bootstrap is the sole exception. | Fresh bootstrap and ordinary login/session cases. |
-| D2-upgrade | Name oldest supported in-place server release, pinned source, and agent/builder mixed-version support window. Tags and crate version strings do not establish support. | Current-version restart recovery and migration/component verification. |
+| D2-upgrade | Name oldest supported in-place server release, pinned source, and agent/builder mixed-version support window. Request delivered; no accepted pin/window decision exists. Candidate tags and the proposed 24-hour agent window do not establish support; legacy builder database access has no approved exception. | Current-version restart recovery and migration/component verification. No Upgrade placeholder or new endpoint. |
 | D3-form-state | Identify approved `AdminView.jsx` / `EnvironmentsView.jsx` state for real failed-save draft retention and any missing fresh-empty, pending, or disabled-save state. | TASK-490.3 accepted success, cancel, duplicate validation, reload and disabled-account login cases. |
 | D4-auth-transport | For `POST /webhook`, specify whether unsigned public ingress is accepted or requires authenticated origin, and the rejection/no-enqueue outcome. Separately, specify missing/mismatched-CSRF outcomes for cookie-authenticated `POST /api/v1/admin/users`, `PATCH/DELETE /api/v1/admin/users/:id`, `PUT /api/v1/admin/{classification-config,automatic-retry-policy}`, and `POST /api/v1/environments`, `PATCH/DELETE /api/v1/environments/:id`; these handlers do not call the shared CSRF guard. Do not infer universal 401/403/CSRF policy from routing. | Valid-CSRF role denials already proved; authenticated form success; selected session CSRF cases; builder signatures/job authorization. |
 | D5-interchange | Approve the exact draft CF-XCCDF portable identity/digest/trust reconciliation rules and policy-interchange conflict outcomes before making those draft-only details release gates. | Accepted STIG preview/import atomicity, authored rule identities, schema validation, download content/scope. |
@@ -274,7 +828,7 @@ Shared helpers and registration points:
 | `checks/integration-access/scenarios/fragments/admin-forms.{py,cjs}` | Admin account and settings workflows appended after authorization; browser phases return to Python for independent SQL verification. | TASK-490.3 |
 
 Registration is explicit and coordinator-owned; there is no custom discovery or
-completeness flag. Access and Delivery each build every gate in their own
+completeness flag. Access, Delivery and Assurance each build every gate in their own
 `scenarios` attribute set and run automatically in GitLab. Tracking tasks do not
 define source files, VM boundaries or derivations. Compatible behavior modules
 compose through the existing Nix, Python and browser scripts. Keep all scenario
@@ -324,6 +878,14 @@ Isolation and shared store: each separately built scenario is its own NixOS test
 Host resources (`sledge`, inspected 2026-10-17): 32 cores, 123 GiB RAM with about 45 GiB available. The controller is configured for 4 GiB and 4 cores. One VM run failed during server startup; peak usage and safe parallel capacity remain unmeasured. Run one VM test at a time until measurements establish capacity.
 
 ## Obligation map
+
+The product-discovery tables retain the earlier research snapshot's row statuses
+and unique case obligations. Later connected execution records above qualify
+those statuses with named passing subsets and remaining variants; a historical
+`planned` row does not negate that later evidence or imply that Assurance is
+absent. Use the current status and punch list for the present owner inventory
+and design dispositions. The historical totals below are not current coverage
+counts.
 
 ### Verified corrective and initial Delivery code
 
@@ -967,9 +1529,16 @@ integration proof.
 | Interchange | XCCDF 1.2 XML/ZIP and policy interchange; server/client export variants listed above. CKL import is `out of scope` (no importer); draft-only proposed features do not become supported surfaces. |
 | Historical test artifacts | Mocked responses, seeded successful scans/builds/publications, incidental Grafana checks and baseline-approval tooling are `out of scope` as integration proof. Retired code is not a requirement source. |
 
-### Inventory totals, missing assignments and next runnable milestone
+### Historical inventory totals, missing assignments and next runnable milestone
 
 Counts below count **obligation rows**, not endpoints, test cases or percentage coverage. Route and browser indexes overlap these obligations and must not be added to them. A row can contain several variants, so even an Integration-covered row is limited to its named executed subset.
+
+The 11/59/9 distribution is the earlier Access/initial-Delivery research
+snapshot, not current coverage or owner inventory at `77251b04` plus dirty repairs. Retain the
+79-row discovery catalog and its unique obligations. Later connected Delivery
+and Assurance evidence at the start of this document supplements that snapshot;
+the current source inventory is three real owners, with Upgrade absent under D2.
+No current coverage percentage or recomputed row total is claimed here.
 
 | Contract family | Rows | Integration-covered subset rows | Planned | Blocked |
 | --- | ---: | ---: | ---: | ---: |
@@ -988,8 +1557,9 @@ Counts below count **obligation rows**, not endpoints, test cases or percentage 
 | **Total** | **79** | **11 (Access and Delivery executed subsets; not complete rows)** | **59** | **9** |
 
 Existing Rust/component/DB assertions remain lower-level evidence, not product
-integration coverage. The 11 rows contain passed subsets only. Failing runtime
-variants (P3/TASK-492 and TASK-496) remain explicit within their row; they are
+integration coverage. The snapshot's 11 rows contain passed subsets only.
+Historically failing runtime variants (P3/TASK-492 and TASK-496) remain explicit
+within their recorded row/revision; they are
 not extra rows or silently covered by a positive subset. Exclusions are not
 added to the 79 required/discovered obligations.
 
@@ -1001,11 +1571,15 @@ started successfully or resolve this separate product defect.
 
 Discovered **tracking-selection gaps** include resource forms omitted by .3; session remainder; setup/config-health/audit; Git credential lifecycle; evaluation ordering/cancel/log/retained-attempt navigation; Config request/observation lifecycle; builder key lifecycle/metrics/order; cache discovery/probes/secret merge/read capability/queue controls; agent ingress/callback/retained rollback; approval/canary phases; scanner lease/console/archive/schedule; bundle/grouping/version/trust/deletion lifecycle; framework mapping/recovery; CVE cross-revision/environment-membership concurrency; mixed register aggregates; client exports. Rows assign a primary owner/scenario, but the coordinator must explicitly extend/select tracking scope before implementing those details. No task is created or changed by this inventory.
 
-**Next controller-only milestone:** environment success, duplicate validation and
-remaining form details in L. The semantic cleanup preserved all 23 existing
-Access cases and the normal aggregate passed again at `590ee94c`; this is no
-longer a pending rerun. Tracking: TASK-490.3. These workflows have no Delivery-role
+**Current controller-only continuation:** environment, shell and preference
+fragments are integrated in L; full normal Access remains pending/failed, not a
+passing extension. The retained expanded run passed the original 23 and A/B
+preference baselines, then failed changed-Light PATCH waiting. Focused optional
+gate and mobile close-target repairs do not prove later phases; picker search
+and backdrop failures remain explicit above. Tracking: TASK-490.3/.4 and the
+existing TASK-339.1 environment editor. These workflows have no Delivery-role
 dependency. D3 blocks only the unspecified failed-save/presentation states.
+The `590ee94c` 23-case pass remains historical evidence, not current readiness.
 
 **Delivery foundation:** the concrete roles and D's source/evaluation/real-build
 proof now exist and executed locally. Tracking: TASK-490.7. Later ingestion,
@@ -1045,12 +1619,13 @@ and `integration-upgrade`. Every separate verification package or CI test job
 must have a distinct necessary purpose. Preserve useful assertions, assign
 primary execution ownership, and consolidate or justify duplicate execution.
 
-Recorded inventory after the source-retirement milestone: one attribute, `integration-access`, versus
-27 before retirement. That historical run passed 16 cases; the later `c254b1c5`
-run passed 23 with seven Admin-form additions. The post-cleanup rerun is pending.
-Delivery, Assurance, and Upgrade
-are absent. XML fixtures alone do not constitute an Assurance owner. This is
-not final completion. Final acceptance also needs complete accepted coverage,
+Historical inventory immediately after source retirement: one attribute,
+`integration-access`, versus 27 before retirement. That run passed 16 cases;
+`c254b1c5` later passed 23 with seven Admin-form additions, and the cleanup rerun
+at `590ee94c` passed the same 23. At `dbf50b47`, Access, Delivery and Assurance
+are real registered owners. Upgrade remains absent under D2. XML fixtures alone
+never established an Assurance owner; its registered real lifecycle now exists.
+This is not final completion. Final acceptance also needs complete accepted coverage,
 passing aggregates, justified scenario isolation, and measured execution and
 resource costs. Multiple attributes can share a derivation; a smaller name
 count does not by itself remove duplicate work.
@@ -1086,8 +1661,8 @@ with `false` is not completion. No placeholders may fill missing names.
 | `checks/config-inspector`, `config-observer`, `evaluator-snapshot-isolation`, `verified-source-evaluator-parity`, `nixos-options-metadata`, `niks3-ca-bundle` | Nix/Rust contracts | consolidated | Core-only evaluator `postCheck` fragments, explicit normal `cf-config` library selection and Go/Rust CA comparison; ordinary metadata package assertions. [Exact homes](flake-checks.md#current-inventory-and-commands); no D integration proof. |
 | `checks/builder-cve-contract`, `oscal-export`, `xccdf-schema`, `stig` | Contracts/unit | consolidated | Direct module boolean evaluations, ordinary OSCAL fixture check phase and actual installed XCCDF writer/schema command. [Exact homes](flake-checks.md#current-inventory-and-commands); no A integration proof. |
 | `checks/test-keys` | Unused placeholders | removed | No executable consumers; not a coverage obligation. |
-| Legacy browser XCCDF XML V1R1 and V1R2 | Immutable fixtures | relocated | `checks/integration-assurance/fixtures/xccdf/`; no `default.nix` and no placeholder check. |
-| CI `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | DB-backed Rust | existing DB mechanisms; consolidated selections | State-machine workflow owns 286 unique ignored library tests, fourteen integration targets/231 cases and both migration rehearsals in fresh invocation-owned PostgreSQL. Includes the two TASK-496 regressions. Six ignored duplicates and 94 normal-library selections removed; two duplicate `composite_policy` executions removed from CVE job. Dashboard unchanged. Local offline continuation passed 517 cases; current hosted evidence remains pending. |
+| Legacy browser XCCDF XML V1R1 and V1R2 | Immutable fixtures | relocated | `checks/integration-assurance/fixtures/xccdf/`; fixtures are not proof of XCCDF coverage. The real Assurance owner registers its evidence/remediation lifecycle separately. |
+| CI `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | DB-backed Rust | existing DB mechanisms; consolidated selections | Historical consolidation retained 286 unique ignored-library selections, fourteen targets/231 cases and both migration rehearsals; removed six ignored duplicates, 94 normal-library duplicates and two CVE `composite_policy` executions. Later baseline hosted state-machine execution passed 525 at `dbf50b47`; dedicated CVE/dashboard jobs were false green. Integrated TASK-501 now has actual local root/nonroot 30/4 plus final 32 controlled launcher cases; exact current-head hosted proof remains pending. See current evidence ledger for membership/shutdown scope. |
 | CI `legacy-flake-check`, `web-ui-check`, `web-ui-baseline-candidates` | Legacy/manual jobs | removed | Sources and candidate-baseline workflow retired; no replacement pass claimed. |
 | CI `web-ui-screenshots-mr-comment` | Reporter | already removed in early transition | No replacement comment bot. Access exports its own evidence. |
 
@@ -1108,28 +1683,31 @@ below remain records of what actually ran at their recorded revisions.
 | --- | --- | --- |
 | `integration-access` | Automatic and required on merge requests and `main` | Builds the normal owner aggregate `checks.x86_64-linux.integration-access`. Exports `integration-evidence/integration-access/` even when the build fails. |
 | `integration-delivery` | Automatic and required on merge requests and `main` | Builds the normal native Delivery aggregate and exports `integration-evidence/integration-delivery/`, including failed-run evidence. Inherits the existing owner job's resource/cache/exit-status rules. |
+| `integration-assurance` | Automatic and required on merge requests and `main` | Builds the normal native Assurance aggregate and exports its registered evidence/remediation lifecycle, including failed-run evidence. No complete Assurance coverage is implied. |
 | `legacy-flake-check`, `web-ui-check`, `web-ui-baseline-candidates` | Removed | No optional legacy execution remains. |
 | `component-tests` | One explicit job replaces the six-entry package matrix | Builds core, metadata, OSCAL and docs; runs pure module evaluations, independent-store discovery, installed wrappers/schema and tool selftests directly. Fifteen verification wrappers removed. |
-| `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | Three automatic disposable-DB paths | Expanded state-machine invocation owns consolidated regressions on temporary PostgreSQL port 35433 with `SUPERUSER CREATEDB`, stats preload, both DB URLs in SQLx shell and one Cargo target directory. CVE exact duplicates removed; dashboard unchanged. |
-| `coverage-check`, `complexity-check`, `auto-bump-patch` | Unchanged | Release and version behavior is unchanged. |
+| `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | Three automatic disposable-DB paths | State-machine retains consolidated selections, both DB URLs, isolated PostgreSQL and shared Cargo target. TASK-501 integrated failure propagation, native selection-name membership, root/nonroot execution and main-postmaster cleanup proof; original declared test selections remain. Current-head hosted execution is not yet recorded. |
+| `coverage-check`, `complexity-check` | Existing analysis jobs; dirty launcher/CI truth repairs | 24 controlled launcher fixtures plus CI-policy tests reported passing; explicit runtime/offline dependencies and invalid-report failure propagation are implemented. Complete real analysis remains unverified; 500-line JUnit/shell-gate policy conflict unresolved. No policy is changed by this documentation. |
+| `auto-bump-patch` | Unchanged | Release/version behavior is unchanged. |
 
-Executed integration subsets are twenty-three Access cases and eight initial
-Delivery cases. GitLab schedules both normal owner aggregates automatically.
-Exact results and revisions are recorded separately. The following
+Executed integration subsets include twenty-three Access cases, fifteen connected
+Delivery cases, and the selected Assurance lifecycle. Exact results, revisions,
+case-record versus distinct-name counts and hosted/local distinctions are recorded
+above. GitLab schedules all three real owner aggregates automatically. The following
 accepted obligations have **no integration owner coverage** until implemented;
 there is no longer a manual legacy fallback:
 
 - Access: registration policy, cross-environment scope, OIDC, remaining resource/environment forms and nonempty assignments, preferences, notifications, shell behavior, and authorization beyond the selected admin-only operations.
 - Accepted browser and design behavior beyond the selected Access proof. Legacy mocked steps are not automatically mandatory requirements.
-- Remaining Delivery obligations: ingestion variants, verified-source execution, scheduling/cancellation/fencing/retry, Niks3/Attic/S3/HTTP adapters, cold agent retrieval, activation, rollback and recovery. The positive source/native-build/local signed-publication foundation is not complete Delivery coverage.
-- All Assurance obligations.
+- Remaining Delivery obligations: ingestion variants, verified-source execution, scheduling/cancellation/fencing/retry, distinct Niks3/Attic/S3/HTTP adapters, broader activation modes, target isolation, drift and restart recovery. The selected exact closure retrieval, A/B activation and retained rollback proofs do not complete those families.
+- Remaining Assurance obligations beyond the recorded real scan/evidence, single-host triage, plan maintenance and API verification/closure subsets: batch/fleet isolation, browser lifecycle actions, recurrence, waiver/acceptance, policy, hardening and interchange. The punch list preserves semantic and functional blockers separately from accepted visual follow-ups.
 - All Upgrade obligations.
 
 This is an explicit owner-authorized coverage gap during construction. Source
 retirement removes implementations; it does not remove accepted obligations or
 claim their replacement passed.
 
-Final TASK-490.24 completion still requires the two absent owners, complete
+Final TASK-490.24 completion still requires the absent Upgrade owner, complete
 accepted coverage, four passing normal aggregates, the exact four-name
 inventory/CI allowlist, execution-cost evidence, and duplicate-execution
 resolution. Source removal and fixture relocation alone do not satisfy it.
