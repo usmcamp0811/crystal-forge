@@ -167,8 +167,14 @@ second = real_build("corrected", FACTS["cve"]["correctedVersion"], "Author corre
 assurance_cve_completed("corrected", builderA)
 assurance_cve_built_not_deployed()
 assurance_poam_built_not_deployed()
-with case("cve-clean-build-keeps-vulnerable-current-production-ui"):
-    run_browser(controller, "cve")
+header_browser_error = None
+try:
+    with case("cve-clean-build-keeps-vulnerable-current-production-ui"):
+        run_browser(controller, "cve")
+except ScenarioFailure as error:
+    # Retain the read-only header failure and continue independent fault/recovery
+    # proof. The normal owner still fails after all mandatory cases execute.
+    header_browser_error = error
 
 deploy_observed("corrected", "second", second)
 assurance_cve_current("corrected")
@@ -305,6 +311,6 @@ with case("cve-upstream-recovery-has-new-execution-and-completed-source"):
 with case("cve-admin-browser-retry-after-recovery"):
     run_browser(controller, "cve-retry")
 assurance_cve_retry()
-if historical_browser_error is not None or scanner_browser_error is not None:
+if header_browser_error is not None or historical_browser_error is not None or scanner_browser_error is not None:
     raise ScenarioFailure("\n".join(str(error) for error in
-        (historical_browser_error, scanner_browser_error) if error is not None))
+        (header_browser_error, historical_browser_error, scanner_browser_error) if error is not None))

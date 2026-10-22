@@ -447,6 +447,8 @@ struct SystemCveInventoryMetadataRow {
     total_findings: i64,
     total_cves: i64,
     total_packages: i64,
+    cve_critical: i64,
+    cve_high: i64,
     critical: i64,
     high: i64,
     medium: i64,
@@ -1312,6 +1314,8 @@ async fn fetch_inventory_page_for_source(
             total_findings: metadata.total_findings,
             total_cves: metadata.total_cves,
             total_packages: metadata.total_packages,
+            cve_critical: Some(metadata.cve_critical),
+            cve_high: Some(metadata.cve_high),
             severity: SystemCveInventorySeverityCounts {
                 critical: metadata.critical,
                 high: metadata.high,
@@ -1331,7 +1335,9 @@ fn inventory_metadata_sql(cte: &str) -> String {
         r#"{cte}
            SELECT COUNT(*)::bigint AS total_findings,
                   COUNT(DISTINCT cve_id)::bigint AS total_cves,
-                  COUNT(DISTINCT canonical_package_name)::bigint AS total_packages,
+                   COUNT(DISTINCT canonical_package_name)::bigint AS total_packages,
+                   COUNT(DISTINCT cve_id) FILTER (WHERE severity='critical')::bigint AS cve_critical,
+                   COUNT(DISTINCT cve_id) FILTER (WHERE severity='high')::bigint AS cve_high,
                   COUNT(*) FILTER (WHERE severity='critical')::bigint AS critical,
                   COUNT(*) FILTER (WHERE severity='high')::bigint AS high,
                   COUNT(*) FILTER (WHERE severity='medium')::bigint AS medium,
@@ -2982,6 +2988,55 @@ mod tests {
     use crate::queries::systems::insert_system;
 
     use super::*;
+
+    #[tokio::test]
+    #[ignore = "requires an explicitly selected PostgreSQL connection; reads VALUES only"]
+    async fn current_header_metadata_distinguishes_cves_findings_and_unknown() {
+        let pool = PgPool::connect(
+            &std::env::var("DATABASE_URL").expect("explicit test connection required"),
+        )
+        .await
+        .expect("read-only test connection should open");
+        // Read authored rows only. No schema, migration, fixture, or product row
+        // is created. A shared CVE across packages must remain one header CVE.
+        let cte = r#"WITH inventory(cve_id,canonical_package_name,package_name,installed_version,severity,status) AS (
+            VALUES ('CVE-2099-1','a','a','1','critical','open'),
+                   ('CVE-2099-1','b','b','1','critical','open'),
+                   ('CVE-2099-2','c','c','1','high','open'),
+                   ('CVE-2099-3','d','d','1','unknown','open')
+        ), filtered AS (SELECT * FROM inventory
+            WHERE ($3::text IS NULL OR package_name ILIKE $3)
+              AND (cardinality($4::text[])=0 OR severity=ANY($4))
+              AND (cardinality($5::text[])=0 OR status=ANY($5)))"#;
+        let sql = inventory_metadata_sql(cte);
+        for (filter, expected) in [
+            (vec![], (4, 3, 1, 1, 2, 1)),
+            (vec!["critical".to_string()], (2, 1, 1, 0, 2, 0)),
+        ] {
+            let row = sqlx::query_as::<_, SystemCveInventoryMetadataRow>(&sql)
+                .bind(Uuid::from_u128(1))
+                .bind(Uuid::from_u128(2))
+                .bind(None::<String>)
+                .bind(filter)
+                .bind(Vec::<String>::new())
+                .bind("exact")
+                .fetch_one(&pool)
+                .await
+                .expect("metadata query should execute");
+            assert_eq!(
+                (
+                    row.total_findings,
+                    row.total_cves,
+                    row.cve_critical,
+                    row.cve_high,
+                    row.critical,
+                    row.unknown
+                ),
+                expected
+            );
+        }
+        pool.close().await;
+    }
 
     #[test]
     fn projection_page_bounds_and_scope_intersection() {

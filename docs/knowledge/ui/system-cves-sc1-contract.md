@@ -47,6 +47,46 @@ Evidence checked: `mapped_running` handling in `packages/default/crates/cf-serve
 
 ## Selected evidence presentation
 
+### Running-header evidence binding
+
+The owner-authorized TASK-490.16 header repair uses the existing Current
+inventory resolver independently of an explicit CVEs tab selection. The header
+reuses the Current read when that target is selected. Historical inspection adds
+one bounded Current read for the header. Both reads use the existing refresh
+epochs. No new polling or mutation occurs.
+
+A user CVE refresh or target selection also refreshes system detail in the same
+epoch. This bounded pair of reads lets a mounted page recover after an external
+activation. Until the new detail generation matches Current, the header stays
+unavailable. The dependency does not increment a refresh nonce or restart the
+Current resource. It cannot create a mismatch-retry loop or duplicate resolver
+read. The existing Assurance B deployment keeps an A CVEs page mounted in a
+second tab to verify this transition around the sole real activation.
+
+The [Systems contract](../../design/CrystalForge/docs/crystal-forge-systems-design/systems-view-design-v0.1.md),
+Section 9.2 and decision D3, defines header CVEs as distinct canonical CVE IDs.
+The tab's findings remain canonical CVE/package pairs. The header uses the
+unfiltered Current metadata `total_cves`, `cve_critical`, and `cve_high`, never
+loaded rows, scan occurrence counters, or the legacy system-detail summary.
+The two severity fields count distinct IDs over the same complete source and
+filter scope; the existing `severity` fields still count findings. Unknown
+severity remains included in `total_cves`.
+
+Only a validated completed Current source with matching system, request epoch,
+and reported generation supplies numeric header values. A newer failed attempt
+does not replace an eligible earlier completed source. Loading, read failure,
+missing source, invalid running identity, and older servers without distinct
+severity metadata use the existing `—` and `running exposure unavailable`
+treatment. A completed empty source supplies zero. Explicit historical or
+built-not-deployed inspection cannot rewrite the running header.
+
+The presentation reference is `SystemDetail.jsx`, header metric strip, at
+`6e4ea52022a575550a420977baea1792e3410cef`. The repair preserves the metric's
+layout, label, icons, and token styles. SC1's original header exclusion remains
+historical scope, not a claim that this later narrow repair completes SC2.
+
+### Historical and exact-scan presentation
+
 An explicit historical selection remains inspection-only under the continuity
 design, Section 7. Its Triage cell uses `read-only`, the existing `chip-unknown`
 token, and the tooltip `This selected scan cannot authorize triage`. The reference

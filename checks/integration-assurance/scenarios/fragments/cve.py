@@ -165,6 +165,9 @@ def assurance_cve_inventory(variant, current=False, session="delivery-admin"):
     expect_equal([v["cvss_score"] for v in inventory["vulnerabilities"]],
                  [] if variant == "corrected" else [facts["cvssV3"]], "authored CVSS score")
     expect_equal(inventory["metadata"]["total_findings"], len(expected), "full finding total")
+    expect_equal(inventory["metadata"]["total_cves"], len(expected), "authored distinct CVE total")
+    expect_equal([inventory["metadata"][field] for field in ("cve_critical", "cve_high")],
+                 [len(expected), 0], "authored distinct CVE severity totals")
     expect_equal(inventory["has_more"], False, "authored set fits one complete page")
     return inventory
 
@@ -195,6 +198,8 @@ def assurance_cve_current(variant, session="delivery-admin"):
             "WHERE system.id=" + literal(r[key + "systemId"]) + "::uuid")
         expect_equal(latest, [observed],
                      "latest agent report binds the actually activated output")
+        actual_output = targetA.succeed("readlink -f /run/current-system").strip()
+        expect_equal(actual_output, r[key + "outputPath"], "live agent target still runs the intended output")
         authority = sql_json(controller,
             "SELECT DISTINCT derivation_id, generation, store_path, scan_id::text AS scan_id "
             "FROM view_current_cve_authority WHERE system_id=" + literal(r[key + "systemId"]) + "::uuid")
@@ -204,6 +209,19 @@ def assurance_cve_current(variant, session="delivery-admin"):
         inventory = assurance_cve_inventory(variant, current=True, session=session)
         expect_equal(inventory["running_target"]["derivation_id"], r[key + "derivationId"], "Current target")
         expect_equal(inventory["running_target"]["generation"], deployed["generation"], "Current generation")
+        # Retain the complete header input alongside independently checked agent
+        # and Current identities. This diagnoses the legacy latest-build binding
+        # without treating a screenshot or CF count as an expected result.
+        status, detail = http(controller, "GET", "/api/v1/systems/" + r[key + "systemId"], session=session)
+        expect_equal(status, 200, "running header detail read")
+        phase = "built-clean" if r.get("assurance.corrected.scanId") and variant == "vulnerable" else variant
+        # Receipts are immutable. Subsequent honest heartbeats can change the
+        # detail's uptime and observation timestamp without changing Current.
+        if "assurance.header." + phase not in receipts():
+            receipt("assurance.header." + phase, {
+                "detail": detail, "current": inventory, "persistedLatestAgent": latest,
+                "persistedAuthority": authority, "deployment": deployed, "actualRunningOutput": actual_output,
+            })
         receipt(key + "currentScanId", r[key + "scanId"])
 
 

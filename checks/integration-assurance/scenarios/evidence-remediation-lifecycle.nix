@@ -114,7 +114,9 @@ in harness.mkScenario {
       exports.run = ctx => require("${delivery + "/scenarios/fragments/activation.cjs"}").deploy(ctx, "first");
     '';
     deploy-second = pkgs.writeText "assurance-deploy-second.cjs" ''
-      exports.run = ctx => require("${delivery + "/scenarios/fragments/activation.cjs"}").deploy(ctx, "second");
+      // Keep one A page mounted around the existing sole B deployment action.
+      exports.run = ctx => require("${cveSpec}").mountedActivation(ctx,
+        require("${delivery + "/scenarios/fragments/activation.cjs"}").deploy);
     '';
   };
   timeout = 1800;

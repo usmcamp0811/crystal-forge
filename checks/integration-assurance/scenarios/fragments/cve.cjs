@@ -168,6 +168,24 @@ async function run(ctx, phase) {
     ctx.emit("assurance.cve.browserCurrentScanId", vulnerableScan);
     if (phase === "full") ctx.emit("assurance.cve.browserBuiltNotDeployedScanId", correctedScan);
   });
+  await ctx.step("running header retains authored vulnerable CVEs after later clean build", async () => {
+    const metric = page.getByTestId("system-current-cves");
+    ctx.emit(`assurance.header.browser.${phase}`, { text: await metric.innerText(), systemId, vulnerableScan, vulnerableDrv, deployed });
+    await ctx.screenshot(`cve-running-header-${phase}`);
+    await runningHeader(ctx, "vulnerable");
+    if (phase === "full") await themedEvidence(ctx, "cve-running-header-built-clean", metric,
+      () => runningHeader(ctx, "vulnerable"));
+  });
+  if (phase === "full") await ctx.step("reload and built-clean inspection keep the running header vulnerable", async () => {
+    await openInventory(ctx, "vulnerable", true, () => page.reload());
+    await runningHeader(ctx, "vulnerable");
+    completedInventory(ctx, await openInventory(ctx, "corrected", false), "corrected", false);
+    await runningHeader(ctx, "vulnerable");
+    completedInventory(ctx, await openInventory(ctx, "corrected", false, () => page.reload()), "corrected", false);
+    await runningHeader(ctx, "vulnerable");
+    await ctx.screenshot("cve-running-header-built-clean-inspection");
+    await staleHistoricalRead(ctx);
+  });
 }
 
 exports.scan = (ctx) => run(ctx, "scan");
@@ -237,6 +255,57 @@ function completedInventory(ctx, inventory, variant, current, scanId = ctx.recei
   expect(inventory.vulnerabilities.map((v) => [v.cve_id, v.canonical_package_name, v.installed_version, v.cvss_score]))
     .toEqual(variant === "corrected" ? [] : [[f.cveId, f.package, f.vulnerableVersion, f.cvssV3]]);
   expect(inventory.metadata.total_findings).toBe(variant === "corrected" ? 0 : 1);
+}
+
+// Systems design §9.2/D3 counts distinct CVE IDs in the running source. The
+// authored feed contains exactly one critical ID in A and none in B.
+async function runningHeader(ctx, variant) {
+  const metric = ctx.page.getByTestId("system-current-cves");
+  const n = variant === "vulnerable" ? 1 : 0;
+  await ctx.expect(metric.getByTestId("system-current-cves-total")).toHaveText(String(n));
+  await ctx.expect(metric.getByTestId("system-current-cves-severity")).toHaveText(`${n} critical · 0 high`);
+}
+
+async function unavailableHeader(ctx) {
+  const metric = ctx.page.getByTestId("system-current-cves");
+  await ctx.expect(metric.getByTestId("system-current-cves-total")).toHaveText("—");
+  await ctx.expect(metric.getByTestId("system-current-cves-severity")).toHaveText("running exposure unavailable");
+}
+
+async function staleHistoricalRead(ctx) {
+  const { page, expect } = ctx;
+  const historical = selectedRead(ctx, "corrected", false);
+  const current = selectedRead(ctx, "vulnerable", true);
+  const selector = page.getByRole("combobox", { name: "Scan target", exact: true });
+  await Promise.all([current.response(), selector.selectOption("current")]);
+  let release;
+  const held = new Promise(resolve => { release = resolve; });
+  let observed = false;
+  let delivered = false;
+  const pattern = url => historical.matches(url);
+  const delay = async route => {
+    // Delay an actual production response; never supply an authored success body.
+    const response = await route.fetch();
+    observed = true;
+    await held;
+    try { await route.fulfill({ response }); } finally { delivered = true; }
+  };
+  try {
+    await page.route(pattern, delay);
+    await selector.selectOption(`derivation:${historical.drv}`);
+    await expect.poll(() => observed).toBe(true);
+    const [response] = await Promise.all([current.response(), selector.selectOption("current")]);
+    completedInventory(ctx, await response.json(), "vulnerable", true);
+    release();
+    await expect.poll(() => delivered).toBe(true);
+    await expect(selector).toHaveValue("current");
+    await expandFixture(ctx);
+    await runningHeader(ctx, "vulnerable");
+    await ctx.screenshot("cve-running-header-stale-historical-fenced");
+  } finally {
+    release();
+    await page.unroute(pattern, delay);
+  }
 }
 
 async function expandFixture(ctx) {
@@ -374,6 +443,7 @@ exports.missing = async (ctx) => {
     await ctx.expect(detail.getByRole("heading", { name: "No completed CVE scan for this target", exact: true })).toBeVisible();
     await ctx.expect(detail.getByRole("heading", { name: "No findings in the selected scan", exact: true })).toHaveCount(0);
     await ctx.expect(detail.getByTestId("system-cve-triage-open")).toHaveCount(0);
+    await unavailableHeader(ctx);
     await ctx.screenshot("cve-never-scanned-not-clean");
     ctx.emit("assurance.cve.browserMissingDerivationId", ctx.receipts["assurance.missing.derivationId"]);
   });
@@ -390,6 +460,7 @@ exports.historical = async (ctx) => {
       await ctx.expect(detail.getByTestId("system-cve-triage-open")).toHaveCount(0);
       await ctx.expect(detail.getByRole("button", { name: /triage/i })).toHaveCount(0);
       await ctx.expect(detail.getByRole("checkbox")).toHaveCount(0);
+      await runningHeader(ctx, "corrected");
     };
     await correctedReadOnly();
     completedInventory(ctx, await openInventory(ctx, "corrected", true, () => ctx.page.reload()), "corrected", true);
@@ -398,8 +469,10 @@ exports.historical = async (ctx) => {
     // SystemDetail.jsx:1825 owns the exact read-only cell/token/title contract.
     // Repeat the prohibition after reload and after leaving and returning.
     await historicalReadOnly(ctx);
+    await runningHeader(ctx, "corrected");
     completedInventory(ctx, await openInventory(ctx, "vulnerable", false, () => ctx.page.reload()), "vulnerable", false);
     await historicalReadOnly(ctx);
+    await runningHeader(ctx, "corrected");
     completedInventory(ctx, await openInventory(ctx, "corrected", true), "corrected", true);
     await correctedReadOnly();
     completedInventory(ctx, await openInventory(ctx, "vulnerable", false), "vulnerable", false);
@@ -420,6 +493,7 @@ exports.clean = async (ctx) => {
     await ctx.expect(detail.getByText(/This scan reported no eligible findings/)).toBeVisible();
     await ctx.expect(detail.getByRole("heading", { name: "No completed CVE scan for this target", exact: true })).toHaveCount(0);
     await ctx.expect(detail.getByTestId("system-cve-triage-open")).toHaveCount(0);
+    await runningHeader(ctx, "corrected");
     await ctx.screenshot("cve-deployed-clean-completed");
     ctx.emit("assurance.cve.browserCleanScanId", ctx.receipts["assurance.corrected.scanId"]);
   });
@@ -478,6 +552,7 @@ exports.failed = async (ctx) => {
     expect(inventory.attempt.scan_id).toBe(receipts["assurance.vulnerable.failedScanId"]);
     expect(inventory.attempt.status).toBe("failed");
     await expandFixture(ctx);
+    await runningHeader(ctx, "corrected");
     await expect(page.getByText("A newer scan failed. Showing the last completed scan for this target.", { exact: true })).toBeVisible();
     await ctx.screenshot("cve-failed-attempt-preserves-source");
   });
@@ -596,7 +671,8 @@ exports.readError = async (ctx) => {
     const selection = selectedRead(ctx, "vulnerable", false);
     // Abort only the real inventory transport. No success body, scan result or
     // finding is supplied. Remove the route before the user's Retry interaction.
-    const routePattern = (url) => selection.matches(url);
+    const currentSelection = selectedRead(ctx, "corrected", true);
+    const routePattern = (url) => selection.matches(url) || currentSelection.matches(url);
     let releaseRead;
     const heldRead = new Promise(resolve => { releaseRead = resolve; });
     const abort = async (route) => { await heldRead; await route.abort("failed"); };
@@ -609,11 +685,13 @@ exports.readError = async (ctx) => {
       await ctx.page.route(routePattern, abort);
       await ctx.page.goto(ctx.url(selection.path));
       await ctx.expect(ctx.page.getByTestId("system-cves-loading")).toBeVisible();
+      await unavailableHeader(ctx);
       await ctx.expect(ctx.page.getByRole("heading", { name: "No findings in the selected scan", exact: true })).toHaveCount(0);
       await ctx.screenshot("cve-inventory-loading-not-clean");
       releaseRead();
       const error = ctx.page.getByTestId("system-cves-error");
       await ctx.expect(error.getByRole("heading", { name: "Unable to load CVE inventory", exact: true })).toBeVisible();
+      await unavailableHeader(ctx);
       await ctx.expect(ctx.page.getByRole("heading", { name: "No findings in the selected scan", exact: true })).toHaveCount(0);
       await ctx.screenshot("cve-inventory-read-error");
       await ctx.page.unroute(routePattern, abort);
@@ -621,6 +699,7 @@ exports.readError = async (ctx) => {
         () => error.getByRole("button", { name: "Retry inventory read", exact: true }).click());
       completedInventory(ctx, inventory, "vulnerable", false);
       await expandFixture(ctx);
+      await runningHeader(ctx, "corrected");
       ctx.expect(writes).toEqual([]);
       await ctx.screenshot("cve-inventory-read-retry");
       ctx.emit("assurance.cve.browserReadRetryScanId", ctx.receipts["assurance.vulnerable.scanId"]);
@@ -638,8 +717,146 @@ exports.viewer = async (ctx) => {
   await ctx.step("scoped Viewer reads Current finding without mutation controls", async () => {
     completedInventory(ctx, await openInventory(ctx, "vulnerable", true), "vulnerable", true);
     const detail = await expandFixture(ctx);
+    await runningHeader(ctx, "vulnerable");
     await ctx.expect(detail.getByTestId("system-cve-triage-open")).toHaveCount(0);
     await ctx.screenshot("cve-viewer-current-read-only");
     ctx.emit("assurance.cve.browserViewerScanId", ctx.receipts["assurance.vulnerable.scanId"]);
   });
+};
+
+// Wrap only the existing deploy-second action. Its normal UI login, plan,
+// POST/202 assertion and receipt stay intact; no second activation is requested.
+// The driver subsequently checks the real target/profile and persisted report
+// in deploy_observed(), before it grants corrected Current to downstream cases.
+exports.mountedActivation = async (ctx, deploy) => {
+  const { expect, receipts } = ctx;
+  const system = receipts["assurance.vulnerable.systemId"];
+  const prior = receipts["assurance.vulnerable.deployment"];
+  const corrected = receipts["delivery.second"];
+  let holder;
+  let holderCtx;
+  let marker;
+  let accepted;
+  let outputDirectory;
+  const deploymentCtx = {
+    ...ctx,
+    async screenshot(name) {
+      const file = await ctx.screenshot(name);
+      outputDirectory = require("node:path").dirname(file);
+      return file;
+    },
+    emit(key, value) {
+      if (key === "delivery.second.request") accepted = value;
+      return ctx.emit(key, value);
+    },
+    async step(name, action) {
+      return ctx.step(name, async () => {
+        if (name === "second: select authored commit and verify deployment plan") {
+          holder = await ctx.context.newPage();
+          holder.setDefaultTimeout(ctx.profile.defaultTimeoutMs);
+          holderCtx = {
+            ...ctx, page: holder,
+            async screenshot(capture) {
+              const file = require("node:path").join(outputDirectory, `${capture}.png`);
+              await holder.screenshot({ path: file, fullPage: false, animations: "disabled" });
+              return file;
+            },
+          };
+          completedInventory(ctx, await openInventory(holderCtx, "vulnerable", true), "vulnerable", true);
+          await runningHeader(holderCtx, "vulnerable");
+          await expect(holder.getByText(`#${prior.generation}`, { exact: true })).toBeVisible();
+          marker = await holder.evaluate(() => {
+            window.__cfMountedHeaderReview = crypto.randomUUID();
+            return window.__cfMountedHeaderReview;
+          });
+        }
+        return action();
+      });
+    },
+  };
+  try {
+    await deploy(deploymentCtx, "second");
+    expect(holder).toBeTruthy();
+    expect(accepted.request.commit_sha).toBe(corrected.commit);
+    await ctx.step("mounted A page refreshes detail and Current once after the sole real B activation", async () => {
+      let observed;
+      // Test-only observation of the existing deployment: allow agent heartbeat,
+      // real copy/activation and report ingestion. No application polling is added.
+      await expect.poll(async () => {
+        const response = await holder.evaluate(async path => {
+          const response = await fetch(path, { credentials: "same-origin" });
+          return { status: response.status, body: await response.json() };
+        }, `/api/v1/systems/${system}`);
+        expect(response.status).toBe(200);
+        observed = response.body;
+        return observed.current_store_path === corrected.outputPath &&
+          observed.generation === prior.generation + 1 &&
+          observed.generation_matches_current_store_path === true;
+      }, { timeout: 180000, intervals: [500, 1000, 2000] }).toBe(true);
+
+      // This document still holds A's cached detail. B's actual observation was
+      // obtained independently above, not injected into the mounted application.
+      await expect(holder.getByText(`#${prior.generation}`, { exact: true })).toBeVisible();
+      await runningHeader(holderCtx, "vulnerable");
+      await holderCtx.screenshot("cve-mounted-activation-before-current-refresh");
+      const detailPath = `/api/v1/systems/${system}`;
+      const read = selectedRead(holderCtx, "corrected", true);
+      const exact = selectedRead(holderCtx, "corrected", false);
+      const reads = [];
+      const observe = request => {
+        const url = new URL(request.url());
+        if (request.method() === "GET" && url.pathname === detailPath) reads.push("detail");
+        if (request.method() === "GET" && read.matches(url)) reads.push("current");
+      };
+      const detailResponse = () => holder.waitForResponse(response =>
+        response.request().method() === "GET" && new URL(response.url()).pathname === detailPath);
+      holder.on("request", observe);
+      try {
+        // Switching mode alone does not refresh. Each actual target selection
+        // must issue one detail read and one shared unfiltered Current read.
+        await holder.getByRole("button", { name: "Commits", exact: true }).click();
+        const selector = holder.getByRole("combobox", { name: "Scan target", exact: true });
+        const [detail, current, selected] = await Promise.all([
+          detailResponse(), read.response(), exact.response(),
+          selector.selectOption(`derivation:${corrected.derivationId}`),
+        ]);
+        expect(detail.status()).toBe(200);
+        expect((await detail.json()).generation).toBe(observed.generation);
+        expect(current.status()).toBe(200);
+        completedInventory(ctx, await selected.json(), "corrected", false);
+        completedInventory(ctx, await current.json(), "corrected", true);
+        await runningHeader(holderCtx, "corrected");
+        expect(reads).toEqual(expect.arrayContaining(["detail", "current"]));
+        expect(reads.filter(value => value === "detail")).toHaveLength(1);
+        expect(reads.filter(value => value === "current")).toHaveLength(1);
+
+        const [detailAgain, currentAgain] = await Promise.all([
+          detailResponse(), read.response(), selector.selectOption("current"),
+        ]);
+        expect(detailAgain.status()).toBe(200);
+        expect((await detailAgain.json()).generation).toBe(observed.generation);
+        const inventory = await currentAgain.json();
+        completedInventory(ctx, inventory, "corrected", true);
+        expect(inventory.running_target.derivation_id).toBe(corrected.derivationId);
+        expect(inventory.running_target.generation).toBe(observed.generation);
+        await runningHeader(holderCtx, "corrected");
+        await expect(holder.getByText(`#${observed.generation}`, { exact: true })).toBeVisible();
+        expect(await holder.evaluate(() => window.__cfMountedHeaderReview)).toBe(marker);
+        expect(reads.filter(value => value === "detail")).toHaveLength(2);
+        expect(reads.filter(value => value === "current")).toHaveLength(2);
+        await holderCtx.screenshot("cve-mounted-activation-current-recovered");
+        ctx.emit("assurance.header.mountedActivation", {
+          systemId: system, deploymentId: accepted.deployment_id,
+          priorGeneration: prior.generation, observedGeneration: observed.generation,
+          actualReportedOutput: observed.current_store_path, current: inventory,
+          reads, sameDocument: true,
+        });
+      } finally { holder.off("request", observe); }
+    });
+  } catch (error) {
+    if (holder && outputDirectory) await holderCtx.screenshot("cve-mounted-activation-refresh-failure");
+    throw error;
+  } finally {
+    if (holder) await holder.close();
+  }
 };

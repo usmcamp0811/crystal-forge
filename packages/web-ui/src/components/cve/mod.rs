@@ -1567,6 +1567,8 @@ mod tests {
                 total_cves: total_findings,
                 total_packages: total_findings,
                 severity: Default::default(),
+                cve_critical: None,
+                cve_high: None,
             },
             inventory_revision: scan_id.to_string(),
             has_more: next_cursor.is_some(),

@@ -170,6 +170,84 @@ impl VulnerabilitiesLoad {
     }
 }
 
+// Keep Current independent of explicit revision inspection. Both consumers use
+// the same server resolver, response validation, and refresh epochs.
+async fn load_cve_inventory(
+    id: String,
+    selection: SystemCveInventorySelection,
+    refresh_nonce: u64,
+    detail_nonce: u64,
+) -> VulnerabilitiesLoad {
+    let mut load = VulnerabilitiesLoad {
+        system_id: id.clone(),
+        selection,
+        refresh_nonce,
+        detail_nonce,
+        inventory: None,
+        error: None,
+        redirect_to_login: false,
+    };
+    let Ok(system_id) = Uuid::parse_str(&id) else {
+        load.error = Some("Invalid system identifier.".to_string());
+        return load;
+    };
+    match fetch_system_cve_inventory_for_target(&system_id, None, selection).await {
+        Ok(inventory) if cve_page_matches_request(system_id, selection, &inventory) => {
+            load.inventory = Some(inventory);
+        }
+        Ok(_) => {
+            load.error = Some(
+                "The server returned a different system, target, source, or read capability."
+                    .to_string(),
+            );
+        }
+        Err(ApiClientError::Status {
+            code: 401 | 403, ..
+        }) => load.redirect_to_login = true,
+        Err(error) => load.error = Some(format!("Unable to load vulnerabilities: {error}")),
+    }
+    load
+}
+
+// INVARIANT: Header CVEs are distinct IDs from the unfiltered Current source,
+// including unknown severity. A page's finding counts, historical selection,
+// newest attempt, and legacy system summary cannot supply running exposure.
+// CONCURRENCY: A matching request epoch and reported generation are required
+// before independently loaded detail and Current reads can be shown together.
+fn current_header_cves(
+    load: Option<&VulnerabilitiesLoad>,
+    system_id: &str,
+    generation: Option<i32>,
+    refresh_nonce: u64,
+    detail_nonce: u64,
+) -> Option<(i64, i64, i64)> {
+    let selection = SystemCveInventorySelection::Current;
+    let load = load.filter(|load| {
+        load.matches_request(system_id, selection, refresh_nonce, detail_nonce)
+            && load.error.is_none()
+            && !load.redirect_to_login
+    })?;
+    let page = load.inventory.as_ref()?;
+    if !cve_page_matches_request(Uuid::parse_str(system_id).ok()?, selection, page)
+        || !matches!(
+            page.authority,
+            SystemCveInventoryAuthority::Exact | SystemCveInventoryAuthority::MappedRunning
+        )
+        || generation.is_none()
+        || page.running_target.as_ref()?.generation != generation
+    {
+        return None;
+    }
+    let metadata = &page.metadata;
+    let (total, critical, high) = (
+        metadata.total_cves,
+        metadata.cve_critical?,
+        metadata.cve_high?,
+    );
+    (total >= 0 && critical >= 0 && high >= 0 && critical <= total && high <= total - critical)
+        .then_some((total, critical, high))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RevisionScopeMode {
     Generations,
@@ -1307,11 +1385,14 @@ pub fn SystemDetailView(
     });
     let now = now_tick();
 
-    // System data state — use_resource reads detail_reload as a dependency so that
-    // incrementing the reload nonce (e.g. after saving edits) triggers a re-fetch.
+    // CONCURRENCY: A CVE refresh can resolve an externally activated generation.
+    // Refresh detail in the same epoch so its cached generation cannot leave the
+    // header permanently fenced. This dependency does not increment either
+    // nonce or restart Current, so each user refresh causes one read per resource.
     let id_for_detail = id.clone();
     let mut detail_resource = use_resource(move || {
         let _ = detail_reload();
+        let _ = cve_refresh();
         let id = id_for_detail.clone();
         async move { load_system_detail_with_fallback(&id).await }
     });
@@ -1391,70 +1472,34 @@ pub fn SystemDetailView(
         });
     }
 
+    let id_for_current_cves = id.clone();
+    let current_cves_resource = use_resource(move || {
+        load_cve_inventory(
+            id_for_current_cves.clone(),
+            SystemCveInventorySelection::Current,
+            cve_refresh(),
+            detail_reload(),
+        )
+    });
     let id_for_vulns = id.clone();
-    let mut vulnerabilities_resource = use_resource(move || {
+    let selected_cves_resource = use_resource(move || {
         let id = id_for_vulns.clone();
         let selection = cve_selection();
         let refresh_nonce = cve_refresh();
         let detail_nonce = detail_reload();
         async move {
-            // Security data must never fall back to mock CVEs in production paths.
-            // Surface a real error/empty state instead so an API outage cannot
-            // render fake vulnerabilities (TASK-353 review).
-            let Ok(system_id) = Uuid::parse_str(&id) else {
-                return VulnerabilitiesLoad {
-                    system_id: id,
-                    refresh_nonce,
-                    detail_nonce,
-                    selection,
-                    inventory: None,
-                    error: Some("Invalid system identifier.".to_string()),
-                    redirect_to_login: false,
-                };
-            };
-
-            match fetch_system_cve_inventory_for_target(&system_id, None, selection).await {
-                Ok(inventory) if !cve_page_matches_request(system_id, selection, &inventory) => {
-                    VulnerabilitiesLoad {
-                        system_id: id,
-                        refresh_nonce,
-                        detail_nonce,
-                        selection,
-                        inventory: None,
-                        error: Some("The server returned a different system, target, source, or read capability.".to_string()),
-                        redirect_to_login: false,
-                    }
-                }
-                Ok(inventory) => VulnerabilitiesLoad {
-                    system_id: id,
-                    refresh_nonce,
-                    detail_nonce,
-                    selection,
-                    inventory: Some(inventory),
-                    error: None,
-                    redirect_to_login: false,
-                },
-                Err(ApiClientError::Status {
-                    code: 401 | 403, ..
-                }) => VulnerabilitiesLoad {
-                    system_id: id,
-                    refresh_nonce,
-                    detail_nonce,
-                    selection,
-                    inventory: None,
-                    error: None,
-                    redirect_to_login: true,
-                },
-                Err(err) => VulnerabilitiesLoad {
-                    system_id: id,
-                    refresh_nonce,
-                    detail_nonce,
-                    selection,
-                    inventory: None,
-                    error: Some(format!("Unable to load vulnerabilities: {err}")),
-                    redirect_to_login: false,
-                },
+            if selection == SystemCveInventorySelection::Current {
+                None
+            } else {
+                Some(load_cve_inventory(id, selection, refresh_nonce, detail_nonce).await)
             }
+        }
+    });
+    let vulnerabilities_resource = use_memo(move || {
+        if cve_selection() == SystemCveInventorySelection::Current {
+            current_cves_resource.read().clone()
+        } else {
+            selected_cves_resource.read().clone().flatten()
         }
     });
     use_effect(move || {
@@ -2222,9 +2267,16 @@ pub fn SystemDetailView(
                 } else {
                     format!("activated · {last_seen_text}")
                 };
-                let cve_total = system.cve_counts.total();
-                let cve_critical = system.cve_counts.critical;
-                let cve_high = system.cve_counts.high;
+                let cve_counts = current_header_cves(
+                    current_cves_resource.read().as_ref(), &id, system.generation,
+                    cve_refresh(), detail_reload(),
+                );
+                let cve_total = cve_counts.map_or_else(|| "—".to_string(), |counts| counts.0.to_string());
+                let cve_subtext = cve_counts.map_or_else(
+                    || "running exposure unavailable".to_string(),
+                    |(_, critical, high)| format!("{critical} critical · {high} high"),
+                );
+                let cve_critical = cve_counts.map_or(0, |counts| counts.1);
                 let deploy_stage = deployment_progress.as_ref().map(|p| p.stage.clone());
                 let deploy_started_at_ms = deployment_progress
                     .as_ref()
@@ -2266,13 +2318,15 @@ pub fn SystemDetailView(
                         // CVEs
                         div {
                             class: "sd-metric",
+                            "data-testid": "system-current-cves",
                             div { class: "sd-metric-label", "CVEs" }
                             div {
                                 class: "sd-metric-val-num",
+                                "data-testid": "system-current-cves-total",
                                 style: if cve_critical > 0 { "color: #f87171;" } else { "color: #34d399;" },
                                 "{cve_total}"
                             }
-                            div { class: "sd-metric-sub", "{cve_critical} critical · {cve_high} high" }
+                            div { class: "sd-metric-sub", "data-testid": "system-current-cves-severity", "{cve_subtext}" }
                         }
                         // Policy
                         div {
@@ -12500,6 +12554,160 @@ mod tests {
         assert!(!stale.matches_request(&stale.system_id, selection, 3, 0));
         assert!(!stale.matches_request(&stale.system_id, selection, 1, 1));
         assert!(!stale.matches_request(&uuid::Uuid::from_u128(20).to_string(), selection, 1, 0));
+    }
+
+    fn header_load() -> super::VulnerabilitiesLoad {
+        super::VulnerabilitiesLoad {
+            system_id: uuid::Uuid::from_u128(19).to_string(),
+            refresh_nonce: 3,
+            detail_nonce: 4,
+            selection: SystemCveInventorySelection::Current,
+            inventory: Some(serde_json::from_value(serde_json::json!({
+                "system_id": uuid::Uuid::from_u128(19), "selection": {"kind":"current"},
+                "authority":"exact", "current_state":"exact_current_scan",
+                "exact_authority_failure":null, "read_only":false,
+                "running_target":{"derivation_id":41,"generation":7,"commit_hash":"a".repeat(40),"reported_at":"2026-09-14T20:00:00Z"},
+                "source":{"scan_id":uuid::Uuid::from_u128(55),"scanner_name":"vulnix","scanner_version":null,"completed_at":"2026-09-14T21:00:00Z"},
+                "evidence_representation":"schema1_observations", "vulnerabilities":[],
+                "metadata":{"total_findings":120,"total_cves":3,"total_packages":120,
+                    "severity":{"critical":90,"high":29,"medium":0,"low":0,"unknown":1},
+                    "cve_critical":1,"cve_high":1},
+                "inventory_revision":"a","has_more":true,"next_cursor":"bounded-page"
+            })).expect("authored full-scope metadata should parse")),
+            error: None,
+            redirect_to_login: false,
+        }
+    }
+
+    #[test]
+    fn current_header_counts_distinct_cves_not_findings_or_loaded_pages() {
+        let mut load = header_load();
+        let counts = |load: &super::VulnerabilitiesLoad| {
+            super::current_header_cves(Some(load), &load.system_id, Some(7), 3, 4)
+        };
+        assert_eq!(counts(&load), Some((3, 1, 1)));
+        // A newer failed attempt does not remove the retained completed source.
+        load.inventory.as_mut().unwrap().attempt = Some(serde_json::from_value(serde_json::json!({
+            "scan_id":uuid::Uuid::from_u128(56),"derivation_id":41,"status":"failed","created_at":null
+        })).unwrap());
+        assert_eq!(counts(&load), Some((3, 1, 1)));
+        let metadata = &mut load.inventory.as_mut().unwrap().metadata;
+        metadata.total_cves = 1;
+        metadata.cve_critical = Some(0);
+        metadata.cve_high = Some(0);
+        assert_eq!(
+            counts(&load),
+            Some((1, 0, 0)),
+            "unknown severity is still a CVE"
+        );
+        load.inventory.as_mut().unwrap().metadata.total_cves = 0;
+        assert_eq!(
+            counts(&load),
+            Some((0, 0, 0)),
+            "completed empty is available"
+        );
+    }
+
+    #[test]
+    fn current_header_rejects_historical_unavailable_old_server_and_stale_reads() {
+        let load = header_load();
+        let counts = |load: &super::VulnerabilitiesLoad| {
+            super::current_header_cves(Some(load), &load.system_id, Some(7), 3, 4)
+        };
+        assert_eq!(
+            super::current_header_cves(None, &load.system_id, Some(7), 3, 4),
+            None
+        );
+        assert_eq!(
+            super::current_header_cves(Some(&load), &load.system_id, Some(7), 4, 4),
+            None
+        );
+        assert_eq!(
+            super::current_header_cves(Some(&load), &load.system_id, Some(7), 3, 5),
+            None
+        );
+        assert_eq!(
+            super::current_header_cves(Some(&load), &load.system_id, Some(8), 3, 4),
+            None
+        );
+        assert_eq!(
+            super::current_header_cves(
+                Some(&load),
+                &uuid::Uuid::from_u128(20).to_string(),
+                Some(7),
+                3,
+                4
+            ),
+            None
+        );
+        let mut changed = load.clone();
+        changed.selection = SystemCveInventorySelection::ExactDerivation { derivation_id: 41 };
+        assert_eq!(counts(&changed), None);
+        changed = load.clone();
+        changed.error = Some("read failed".into());
+        assert_eq!(counts(&changed), None);
+        changed = load.clone();
+        changed.inventory.as_mut().unwrap().metadata.cve_critical = None;
+        assert_eq!(counts(&changed), None, "old servers cannot imply zero");
+        changed = load.clone();
+        changed.inventory.as_mut().unwrap().source = None;
+        assert_eq!(
+            counts(&changed),
+            None,
+            "failed-only and missing sources are unavailable"
+        );
+        changed = load;
+        changed.inventory.as_mut().unwrap().system_id = Some(uuid::Uuid::from_u128(20));
+        assert_eq!(counts(&changed), None);
+    }
+
+    #[test]
+    fn mounted_current_header_recovers_when_coordinated_detail_refresh_finishes() {
+        let old = header_load();
+        let mut current = old.clone();
+        current.refresh_nonce += 1;
+        let page = current.inventory.as_mut().unwrap();
+        page.running_target.as_mut().unwrap().generation = Some(8);
+        page.running_target.as_mut().unwrap().derivation_id = 42;
+        page.running_target.as_mut().unwrap().commit_hash = "b".repeat(40);
+        page.source.as_mut().unwrap().scan_id = uuid::Uuid::from_u128(56);
+        page.metadata.total_cves = 0;
+        page.metadata.total_findings = 0;
+        page.metadata.total_packages = 0;
+        page.metadata.severity = Default::default();
+        page.metadata.cve_critical = Some(0);
+        page.metadata.cve_high = Some(0);
+        page.has_more = false;
+        page.next_cursor = None;
+        page.inventory_revision = "b".to_string();
+        let counts = |load: &super::VulnerabilitiesLoad, generation| {
+            super::current_header_cves(Some(load), &old.system_id, generation, 4, 4)
+        };
+        assert_eq!(
+            counts(&old, Some(7)),
+            None,
+            "old Current epoch stays fenced"
+        );
+        assert_eq!(
+            counts(&current, Some(7)),
+            None,
+            "new Current cannot borrow old detail identity"
+        );
+        assert_eq!(
+            counts(&current, Some(8)),
+            Some((0, 0, 0)),
+            "one matching detail response restores exposure"
+        );
+        assert_eq!(
+            counts(&old, Some(8)),
+            None,
+            "late old Current cannot undo recovery"
+        );
+        assert_eq!(
+            counts(&current, Some(8)),
+            Some((0, 0, 0)),
+            "settled reads need no further refresh"
+        );
     }
 
     #[test]

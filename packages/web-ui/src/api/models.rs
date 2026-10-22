@@ -5708,6 +5708,17 @@ pub struct SystemCveInventoryMetadata {
     pub total_packages: i64,
     /// Counts severities over the same scope as the totals.
     pub severity: SystemCveInventorySeverityCounts,
+    /// Counts distinct critical CVE IDs over the complete active filter scope.
+    ///
+    /// Absent for a missing completed source or an older server. It must not
+    /// fall back to the finding count in `severity.critical`.
+    #[serde(default)]
+    pub cve_critical: Option<i64>,
+    /// Counts distinct high CVE IDs over the complete active filter scope.
+    ///
+    /// Absent for a missing completed source or an older server.
+    #[serde(default)]
+    pub cve_high: Option<i64>,
 }
 
 /// Contains one non-unioned source for a system CVE inventory.
