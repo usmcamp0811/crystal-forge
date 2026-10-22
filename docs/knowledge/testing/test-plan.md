@@ -272,7 +272,65 @@ nix run .#coverage.coverage-report
 
 The GitLab job `coverage-check` runs this command on merge requests, keeps `coverage-report/` as an artifact, and posts the summary to the merge request. The command reports coverage. It does not enforce the numeric targets above.
 
+The launcher executes the pinned `cargo-tarpaulin` binary with the pinned
+Cargo and Rust compiler. Native OpenSSL development inputs and `pkg-config`
+are supplied. SQLx uses checked-in offline metadata. Cargo uses two build
+jobs and preserves any caller-declared offline policy; the launcher does not
+fetch dependencies as a recovery step.
+
+The `coverage-check` and `complexity-check` CI jobs first build their launcher
+and run explicit online `cargo fetch --locked` preparation. Complexity prepares
+both selected workspaces. Their analysis phases set `CARGO_NET_OFFLINE=true`
+and `SQLX_OFFLINE=true`. Outer and nested Nix disable substitution, remote
+builders, fallback, and flake-provided configuration. Local Nix builds remain
+enabled with one job and two cores for analysis fixtures. Missing prepared
+dependencies fail instead of causing an online retry. This is enforced tool
+offline policy, not proof of a network namespace or firewall boundary.
+
+Required execution failures return nonzero. These include a missing workspace
+manifest, a failed analysis, missing JSON or HTML, malformed JSON, inconsistent
+counts, and zero coverable lines. The JSON denominator is Tarpaulin's
+`coverable` field. A valid measurement of zero covered lines out of a positive
+denominator succeeds. Coverage percentage remains advisory in the shell and
+JUnit. An incomplete run removes the previous success summary and writes a
+JUnit error instead of publishing an empty successful measurement.
+
 **Proposed.** A gate that fails when coverage falls below the targets does not exist. A way to prove that the integration tests cover everything they should is also an open item.
+
+### Complexity launcher execution
+
+`nix run .#code-metrics.complexity-report` retains native all-target,
+all-feature Clippy analysis for `packages/default` and `packages/web-ui`.
+It supplies the pinned compiler, native OpenSSL inputs, offline SQLx metadata,
+source UI assets for embedding, and two Cargo build jobs. Source selections,
+lint codes, and thresholds are unchanged.
+
+The launcher parses Cargo JSON diagnostic codes. Repeated source diagnostics
+count once; lint names in diagnostic prose do not count. Each required package
+must emit valid JSON with a compiler artifact and a final successful
+`build-finished` message. A compiler error, failed process, missing manifest,
+empty or partial stream, failed LOC tool, or empty measured source population
+cannot produce a successful report. Diagnostic artifacts and per-package
+statuses remain available when Clippy fails. Reused output directories cannot
+supply previous successful summaries or appended diagnostics.
+
+The existing JUnit clause marks files over 500 lines as failures. TASK-470
+also records a later decision to defer strict shell enforcement of that clause.
+This policy conflict remains unresolved. When that clause is the only failure,
+the launcher reports `POLICY_BLOCKED` and returns nonzero pending a coordinator
+decision. This behavior does not establish a newly approved strict policy or
+claim that existing source files comply. Selected Clippy violations still fail;
+incomplete analysis reports `INCOMPLETE`.
+
+Adjacent `packages/coverage/test-report.py` and
+`packages/code-metrics/test-report.py` exercise installed launchers with
+controlled tool responses. They verify execution and report handling without
+compiling application code. They do not prove current application coverage,
+Clippy compliance, or hosted CI success.
+The existing `component-tests` job builds both launchers, resolves their output
+paths with `nix eval`, and runs all 24 cases directly with Nix-provided Python
+and Bash. The fixture invocations set Cargo offline; launcher runtime paths
+supply the remaining tools. No additional flake check owns these regressions.
 
 ## Test Documentation
 

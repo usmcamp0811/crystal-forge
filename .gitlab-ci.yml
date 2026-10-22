@@ -63,7 +63,26 @@ coverage-check:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - nix run .#coverage.coverage-report --builders '' --max-jobs 1 --cores 2
+    # Preparation is online. Analysis below cannot acquire missing dependencies.
+    - nix build .#coverage.coverage-report --no-link --option substitute true --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2
+    - nix develop .#sqlx --option substitute true --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2 -c env CARGO_NET_OFFLINE=false cargo fetch --locked --manifest-path packages/default/Cargo.toml
+    - |
+      export CARGO_NET_OFFLINE=true
+      export SQLX_OFFLINE=true
+      export NIX_CONFIG="${NIX_CONFIG:-}
+      substituters =
+      extra-substituters =
+      substitute = false
+      builders =
+      builders-use-substitutes = false
+      fallback = false
+      accept-flake-config = false
+      max-jobs = 1
+      cores = 2
+      "
+      nix run --offline --option substituters '' --option substitute false \
+        --builders '' --option fallback false --option accept-flake-config false \
+        --max-jobs 1 --cores 2 .#coverage.coverage-report
   artifacts:
     when: always
     expire_in: 30 days
@@ -131,7 +150,26 @@ complexity-check:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - nix run .#code-metrics.complexity-report --builders '' --max-jobs 1 --cores 2
+    - nix build .#code-metrics.complexity-report --no-link --option substitute true --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2
+    - nix develop .#sqlx --option substitute true --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2 -c env CARGO_NET_OFFLINE=false cargo fetch --locked --manifest-path packages/default/Cargo.toml
+    - nix develop .#sqlx --option substitute true --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2 -c env CARGO_NET_OFFLINE=false cargo fetch --locked --manifest-path packages/web-ui/Cargo.toml
+    - |
+      export CARGO_NET_OFFLINE=true
+      export SQLX_OFFLINE=true
+      export NIX_CONFIG="${NIX_CONFIG:-}
+      substituters =
+      extra-substituters =
+      substitute = false
+      builders =
+      builders-use-substitutes = false
+      fallback = false
+      accept-flake-config = false
+      max-jobs = 1
+      cores = 2
+      "
+      nix run --offline --option substituters '' --option substitute false \
+        --builders '' --option fallback false --option accept-flake-config false \
+        --max-jobs 1 --cores 2 .#code-metrics.complexity-report
   artifacts:
     when: always
     expire_in: 30 days
@@ -236,6 +274,7 @@ component-tests:
   script:
     - sh packages/ci/public-cache-build.sh .#default.cf-server-core-drv -L --show-trace --builders '' --max-jobs 1 --cores 2
     - nix build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge .#xccdf-1-2-schemas -L --show-trace --builders '' --max-jobs 1 --cores 2
+    - nix build .#coverage.coverage-report .#code-metrics.complexity-report --no-link --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2
     - |
       for suite in builder-cve stig packaging; do
         nix eval --impure --json --expr "
@@ -271,6 +310,10 @@ component-tests:
         bash packages/devScripts/db-only-start-test.sh packages/devScripts/db-only-start.sh
         bash packages/devScripts/web-ui/tests/web-ui-test-runner-test.sh \
           packages/devScripts/web-ui/tests/web-ui-test.sh packages/devScripts/web-ui/coverage-manifest.json
+        coverage=$(nix eval --raw .#coverage.coverage-report.outPath)
+        complexity=$(nix eval --raw .#code-metrics.complexity-report.outPath)
+        CARGO_NET_OFFLINE=true python3 packages/coverage/test-report.py "$coverage/bin/coverage-report"
+        CARGO_NET_OFFLINE=true python3 packages/code-metrics/test-report.py "$complexity/bin/complexity-report"
       '
   only:
     - merge_requests

@@ -78,6 +78,51 @@ if os.environ.get('OLD_CLI'):
                       'substituters-extra = https://unknown.invalid/private-marker'])
         print('\\n'.join(lines))
         sys.exit(0)
+if os.environ.get('METRICS_RECORD') and sys.argv[1] in ('build', 'develop', 'run'):
+    # Record only allowlisted effective settings. The real CLI receives the
+    # invocation's actual policy flags and inherited offline-phase environment.
+    controls = []
+    arguments = sys.argv[2:]
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == '--option':
+            controls.extend(arguments[index:index + 3])
+            index += 3
+        elif argument in ('--builders', '--max-jobs', '--cores'):
+            controls.extend(arguments[index:index + 2])
+            index += 2
+        elif argument == '--offline':
+            controls.append(argument)
+            index += 1
+        elif argument == '-c':
+            break
+        else:
+            index += 1
+    effective = json.loads(subprocess.check_output(
+        [os.environ['REAL_NIX'], *controls, 'config', 'show', '--json'], text=True))
+    settings = {key: effective[key]['value'] for key in (
+        'substituters', 'substitute', 'builders', 'builders-use-substitutes',
+        'fallback', 'accept-flake-config', 'max-jobs', 'cores')}
+    nested_settings = None
+    if sys.argv[1] == 'run':
+        nested = json.loads(subprocess.check_output(
+            [os.environ['REAL_NIX'], 'config', 'show', '--json'], text=True))
+        nested_settings = {key: nested[key]['value'] for key in settings}
+    record = os.environ['METRICS_RECORD']
+    try:
+        with open(record) as previous:
+            invocation = sum(1 for _ in previous)
+    except FileNotFoundError:
+        invocation = 0
+    with open(record, 'a') as output:
+        output.write(json.dumps(dict(argv=sys.argv[1:], settings=settings,
+                                    nested_settings=nested_settings,
+                                    cargo_offline=os.environ.get('CARGO_NET_OFFLINE'),
+                                    sqlx_offline=os.environ.get('SQLX_OFFLINE'))) + '\\n')
+    if sys.argv[1] == 'run':
+        sys.exit(int(os.environ.get('RUN_EXIT', '0')))
+    sys.exit(23 if invocation == int(os.environ.get('METRICS_FAIL_AT', '-1')) else 0)
 if sys.argv[1] in ('build', 'run'):
     with open(os.environ['ARGV_RECORD'], 'w') as record:
         json.dump(sys.argv[1:], record)
@@ -143,25 +188,73 @@ cores = 4
             expected = {"builders": b"\n", "max-jobs": b"1\n", "cores": b"2\n"}.get(
                 setting, inherited_controls[setting])
             assert effective == expected, (installables, setting)
-    for job, installable in (("complexity-check", ".#code-metrics.complexity-report"),
-                             ("coverage-check", ".#coverage.coverage-report")):
+    # Metrics preparation may acquire dependencies. Only the final analysis
+    # phase is offline. Execute the actual YAML script through the same probe;
+    # this checks orchestration and real CLI policy, not application analysis.
+    online = [
+        "--option", "substitute", "true",
+        "--option", "substituters", "https://cache.nixos.org",
+        "--option", "extra-substituters", "",
+        "--option", "accept-flake-config", "false", *LOCAL_EXECUTION,
+    ]
+    offline = [
+        "--offline", "--option", "substituters", "",
+        "--option", "substitute", "false", "--builders", "",
+        "--option", "fallback", "false",
+        "--option", "accept-flake-config", "false",
+        "--max-jobs", "1", "--cores", "2",
+    ]
+    for job, installable, manifests in (
+        ("complexity-check", ".#code-metrics.complexity-report",
+         ["packages/default/Cargo.toml", "packages/web-ui/Cargo.toml"]),
+        ("coverage-check", ".#coverage.coverage-report", ["packages/default/Cargo.toml"]),
+    ):
         script = new[job]["script"]
-        assert len(script) == 1, job
-        result = subprocess.run(["sh", "-euc", script[0]], cwd=ROOT,
-                                env=env, capture_output=True, text=True)
-        assert result.returncode == 0, job
-        recorded = json.loads((directory / "argv").read_text())
-        assert recorded == ["run", installable, *LOCAL_EXECUTION], job
-        assert "private-marker" not in result.stdout + result.stderr
-        for setting in inherited_controls:
-            effective = subprocess.check_output(
-                [real_nix, *LOCAL_EXECUTION, "config", "show", setting], env=env)
-            expected = {"builders": b"\n", "max-jobs": b"1\n", "cores": b"2\n"}.get(
-                setting, inherited_controls[setting])
-            assert effective == expected, (job, setting)
-        failed = subprocess.run(["sh", "-euc", script[0]], cwd=ROOT,
-                                env=dict(env, RUN_EXIT="17"), capture_output=True, text=True)
-        assert failed.returncode == 17, job
+        assert len(script) == len(manifests) + 2, job
+        expected_preparation = [["build", installable, "--no-link", *online]] + [
+            ["develop", ".#sqlx", *online, "-c", "env", "CARGO_NET_OFFLINE=false",
+             "cargo", "fetch", "--locked", "--manifest-path", manifest]
+            for manifest in manifests
+        ]
+        expected_run = ["run", *offline, installable]
+        record = directory / "metrics.jsonl"
+        cases = [(0, -1), (17, -1)] + [
+            (23, index) for index in range(len(expected_preparation))
+        ]
+        for expected_status, failed_preparation in cases:
+            record.unlink(missing_ok=True)
+            result = subprocess.run(
+                ["sh", "-euc", "\n".join(script)], cwd=ROOT,
+                env=dict(env, METRICS_RECORD=str(record),
+                         METRICS_FAIL_AT=str(failed_preparation),
+                         RUN_EXIT="17" if expected_status == 17 else "0"),
+                capture_output=True, text=True,
+            )
+            assert result.returncode == expected_status, (job, expected_status)
+            assert "private-marker" not in result.stdout + result.stderr
+            assert "127.0.0.1" not in result.stdout + result.stderr
+            recorded = [json.loads(line) for line in record.read_text().splitlines()]
+            expected = (expected_preparation[:failed_preparation + 1]
+                        if failed_preparation >= 0 else [*expected_preparation, expected_run])
+            assert [entry["argv"] for entry in recorded] == expected, job
+            for entry in recorded:
+                settings = entry["settings"]
+                assert not settings["builders"], job
+                assert str(settings["max-jobs"]) == "1" and settings["cores"] == 2, job
+                assert settings["accept-flake-config"] is False, job
+                if entry["argv"][0] == "run":
+                    assert entry["nested_settings"] == settings, job
+                    assert entry["cargo_offline"] == "true", job
+                    assert entry["sqlx_offline"] == "true", job
+                    assert settings["substituters"] == [], job
+                    for key in ("substitute", "builders-use-substitutes", "fallback"):
+                        assert settings[key] is False, (job, key)
+                else:
+                    assert settings["substituters"] == ["https://cache.nixos.org"], job
+                    assert settings["substitute"] is True, job
+            print(f"PASS {job}: preparation fault={failed_preparation}, "
+                  f"propagated exit={result.returncode}, "
+                  f"analysis started={failed_preparation < 0}")
     configured = run(["--check-config"])
     assert configured.returncode == 0
     for setting in ("require-sigs=true", "fallback=true"):
