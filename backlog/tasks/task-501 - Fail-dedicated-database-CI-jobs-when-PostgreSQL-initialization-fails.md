@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-21 14:36'
-updated_date: '2026-10-22 01:14'
+updated_date: '2026-10-22 01:24'
 labels: []
 dependencies: []
 references:
@@ -45,6 +45,8 @@ Dedicated CVE-processing and dashboard-visibility CI jobs reported success witho
 5. Review focused runner/CI/docs changes, integrate into existing MR335, and inspect current-head hosted logs/artifacts before claiming the former false-green obligations passed.
 
 Authorized follow-up at ee32c209: change only cfg(test) fixtures for the four named failures, plus their verification record. Keep names/selections and original semantic/denial assertions. Pins: migration0301 and cve_worker::materialization_source_for_reference require one eligible legacy destination; create_cve_scan_with_trigger requires a recent authoritative successful build_jobs row for PostBuild; cve_scan_diagnostics declares append-only events and the same test already persists/asserts one scanner_started event before expiry; migration0291 requires a deployable published target plus same-flake current identity for ahead. Add prerequisite data and full before/after diagnostic-row comparison, not relaxed production decisions. Run unchanged normal root CVE/dashboard jobs and feasible nonroot equivalents offline using prepared caches; compare actual names/counts against the existing30/4 selection inventory. Recheck controlled failure cases where needed. Separate follow-up commit; no production changes or Review/AC transitions.
+
+Review follow-up at0f9e6715: strengthen existing Cargo guard with runtime libtest listed-selection versus emitted-name multiset comparison. Preserve original Cargo argv/filter/target and libtest ignored/exact/skip modes; default listing needs subtraction of ignored-only listing because libtest --list includes ignored tests. Listing never executes test bodies. Keep original Cargo failure status. Audit shows current commands are native --lib/workspace and --test integration targets, with --ignored/--exact/thread/color options and compilation --no-run; no custom harness/doc-test path. Verify a real broad mixed ignored/nonignored selection in addition to unchanged normal root30/4 jobs. Strengthen the existing controlled regression's cleanup verifier to require nonempty reported data/socket sets, [db]-prefixed main postmaster PID shutdown, and /proc starttime/death evidence where readable. Add unrelated positive-name/count fixture that forwards real listing, plus negative evidence mutations proving missing main shutdown and missing path reports fail. Repeat root/nonroot controlled matrix, update only verification/flake-check docs, and commit separately. No production Rust or coverage-contract edits.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
