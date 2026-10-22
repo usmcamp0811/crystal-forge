@@ -115,6 +115,78 @@ in
         };
       };
 
+      environmentForms = let
+        create = {
+          name = "cf-it-form-tier";
+          description = "Environment form creation probe";
+          colorName = "blue";
+          color_hex = "#2563EB";
+          default_policy = "manual";
+          auto_sync = true;
+          requires_approval = true;
+          is_production = false;
+        };
+        edit = create // {
+          name = "cf-it-form-tier-edited";
+          description = "Environment form edited probe";
+          colorName = "emerald";
+          color_hex = "#059669";
+          default_policy = "pinned";
+          auto_sync = false;
+          requires_approval = false;
+          is_production = true;
+        };
+      in {
+        inherit create edit;
+        # Canonical enabled optional policy from migration 0081. The legacy
+        # agent policy is a global invariant, not an environment assignment.
+        optionalPolicy = {
+          id = "00000000-0000-0000-0000-000000000003";
+          name = "Custom Check";
+          policy_type = "custom_check";
+        };
+        invalidPolicyIds = [
+          "00000000-0000-0000-0000-000000000001"
+          "ffffffff-ffff-4fff-8fff-ffffffffffff"
+        ];
+        cancelName = "cf-it-form-cancelled-create";
+        cancel = create // {
+          name = "cf-it-form-cancelled-edit";
+          description = "Cancelled environment draft";
+          colorName = "red";
+          color_hex = "#DC2626";
+        };
+        duplicate = edit // {
+          description = "Retained duplicate environment draft";
+          colorName = "violet";
+          color_hex = "#7C3AED";
+          default_policy = "auto_latest";
+          auto_sync = true;
+          requires_approval = true;
+          is_production = false;
+        };
+      };
+
+      # Authored changed targets for u1; u2 retains its same-run UI baseline.
+      # Email delivery is unavailable in this local-auth controller.
+      preferences = {
+        appearance = {
+          theme = "light";
+          density = "compact";
+          sidebar_collapsed = true;
+          default_systems_view = "table";
+        };
+        notifications = {
+          deploy_failures = false;
+          build_failures = false;
+          critical_cves = false;
+          policy_violations = false;
+          heartbeat_lost = true;
+          weekly_digest = false;
+          delivery_channel = "in_app";
+        };
+      };
+
       # Authored request payloads for the admin-only operations. Each denied
       # request uses a payload that the Admin control case first proves is
       # accepted, so a 403 can only be caused by the actor's role.
@@ -155,6 +227,12 @@ in
     # fresh-install assertions and exports authz_state() for form cancel checks.
     # Forms require u3 still absent and authorization's retry/banner controls
     # restored to installed values (banner disabled). Keep direct concatenation.
+    # Preserve all 23 existing cases before shell/preferences. Shell leaves u1's
+    # sidebar collapsed; preferences then changes u1 and snapshots active u2,
+    # not u3 (disabled by Admin forms). Each phase uses independent browser state.
+    # TASK-490.4 visual parity is explicitly deferred by the owner: no comparison
+    # or passing visual placeholder is composed. Crop, fixed justified threshold,
+    # helper execution and retained reference/actual/diff evidence remain unverified.
     script = harness.pkgs.writeText "access-local-lifecycle.py" (
       builtins.readFile ./lifecycle-local-bootstrap.py
       + "\n"
@@ -163,6 +241,12 @@ in
       + builtins.readFile ./fragments/authorization.py
       + "\n"
       + builtins.readFile ./fragments/admin-forms.py
+      + "\n"
+      + builtins.readFile ./fragments/preferences.py
+      + "\n"
+      + builtins.readFile ./fragments/environment-forms.py
+      + "\n"
+      + builtins.readFile ./fragments/shell-navigation.py
     );
     browserSpecs = {
       bootstrap-sign-in = ./lifecycle-local-bootstrap.cjs;
@@ -177,6 +261,30 @@ in
       admin-form-retry = ./fragments/admin-forms.cjs;
       admin-form-classification-enable = ./fragments/admin-forms.cjs;
       admin-form-classification = ./fragments/admin-forms.cjs;
+      environment-form-create = ./fragments/environment-forms.cjs;
+      environment-form-edit = ./fragments/environment-forms.cjs;
+      environment-form-optional = ./fragments/environment-forms.cjs;
+      environment-form-cancel = ./fragments/environment-forms.cjs;
+      environment-form-duplicate = ./fragments/environment-forms.cjs;
+      environment-form-membership = ./fragments/environment-forms.cjs;
+      environment-form-membership-restore = ./fragments/environment-forms.cjs;
+      environment-form-delete = ./fragments/environment-forms.cjs;
+      shell-protected = ./fragments/shell-navigation.cjs;
+      shell-routes = ./fragments/shell-navigation.cjs;
+      shell-keyboard = ./fragments/shell-navigation.cjs;
+      shell-mobile = ./fragments/shell-navigation.cjs;
+      shell-sidebarPersistence = ./fragments/shell-navigation.cjs;
+      shell-unknown = ./fragments/shell-navigation.cjs;
+      preferences-baseline-a = ./fragments/preferences.cjs;
+      preferences-baseline-b = ./fragments/preferences.cjs;
+      preferences-appearance = ./fragments/preferences.cjs;
+      preferences-appearance-read-failure = ./fragments/preferences.cjs;
+      preferences-appearance-save-failure = ./fragments/preferences.cjs;
+      preferences-notifications = ./fragments/preferences.cjs;
+      preferences-notification-read-failure = ./fragments/preferences.cjs;
+      preferences-notification-save-failure = ./fragments/preferences.cjs;
+      preferences-notification-loading = ./fragments/preferences.cjs;
+      preferences-verify-b = ./fragments/preferences.cjs;
     };
     timeout = 900;
   }
