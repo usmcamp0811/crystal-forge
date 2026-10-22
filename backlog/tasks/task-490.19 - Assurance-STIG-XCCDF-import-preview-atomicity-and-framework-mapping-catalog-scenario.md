@@ -3,10 +3,11 @@ id: TASK-490.19
 title: >-
   Assurance: STIG XCCDF import, preview atomicity, and framework mapping catalog
   scenario
-status: Backlog
-assignee: []
+status: To Do
+assignee:
+  - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-19 02:14'
+updated_date: '2026-10-22 22:20'
 labels:
   - testing
   - integration
@@ -71,4 +72,6 @@ Current readiness: controller prerequisite bba718be passed. Await selection, fix
 
 ### Historical
 2026-10-17 review recorded foundation/package blockers and no VM execution at that time. Legacy canonical STIG/20ad/20aa proofs were buried in the browser monolith and reconciliation used route mocks. A standalone import scenario was a former proposal; current import cases compose in the single Assurance lifecycle and retain owner-local input provenance.
+
+Owner's wrap-up explicitly selects dependency-ready TASK-490 functional work; this controller-only contribution is selected, not blocked by D2 or target-mode coverage. Existing approved preview/import atomicity, input-derived identity and mapping criteria remain unchanged. Use the existing Assurance lifecycle; coordinator retains composition/normal-owner execution and all production files remain read-only for this test contribution.
 <!-- SECTION:NOTES:END -->
