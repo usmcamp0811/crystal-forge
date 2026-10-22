@@ -76,8 +76,8 @@ Only a validated completed Current source with matching system, request epoch,
 and reported generation supplies numeric header values. A newer failed attempt
 does not replace an eligible earlier completed source. Loading, read failure,
 missing source, invalid running identity, and older servers without distinct
-severity metadata use the existing `—` and `running exposure unavailable`
-treatment. A completed empty source supplies zero. Explicit historical or
+severity metadata use `—` in the existing total and critical/high count positions.
+No explanatory UI is added. A completed empty source supplies zero. Historical or
 built-not-deployed inspection cannot rewrite the running header.
 
 The presentation reference is `SystemDetail.jsx`, header metric strip, at

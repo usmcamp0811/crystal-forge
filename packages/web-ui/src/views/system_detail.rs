@@ -2273,7 +2273,7 @@ pub fn SystemDetailView(
                 );
                 let cve_total = cve_counts.map_or_else(|| "—".to_string(), |counts| counts.0.to_string());
                 let cve_subtext = cve_counts.map_or_else(
-                    || "running exposure unavailable".to_string(),
+                    || "— critical · — high".to_string(),
                     |(_, critical, high)| format!("{critical} critical · {high} high"),
                 );
                 let cve_critical = cve_counts.map_or(0, |counts| counts.1);

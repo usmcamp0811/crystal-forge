@@ -269,7 +269,7 @@ async function runningHeader(ctx, variant) {
 async function unavailableHeader(ctx) {
   const metric = ctx.page.getByTestId("system-current-cves");
   await ctx.expect(metric.getByTestId("system-current-cves-total")).toHaveText("—");
-  await ctx.expect(metric.getByTestId("system-current-cves-severity")).toHaveText("running exposure unavailable");
+  await ctx.expect(metric.getByTestId("system-current-cves-severity")).toHaveText("— critical · — high");
 }
 
 async function staleHistoricalRead(ctx) {
