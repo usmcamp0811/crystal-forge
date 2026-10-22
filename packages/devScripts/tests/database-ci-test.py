@@ -43,6 +43,78 @@ offline = [
 ]
 results = []
 
+
+def process_identity(pid):
+    """Reads the reported task postmaster's state and PID-reuse identity."""
+    if not Path("/proc").is_dir():
+        return {"unavailable": True}
+    try:
+        # comm can contain spaces/parentheses. Fields after its final ')' start
+        # with field 3; field 22 is the kernel starttime, not wall-clock time.
+        stat = (Path("/proc") / str(pid) / "stat").read_text()
+        fields = stat[stat.rfind(")") + 2:].split()
+        return {"state": fields[0], "starttime": int(fields[19])}
+    except (FileNotFoundError, ProcessLookupError):
+        return None
+    except PermissionError:
+        return {"unavailable": True}
+
+
+def main_postmasters(text):
+    """Selects main-service startup PIDs, excluding db-init's temporary server."""
+    return set(map(int, re.findall(
+        r"^\[db\s*\].*?\[(\d+)\] LOG:  starting PostgreSQL", text, re.M
+    )))
+
+
+def verify_cleanup(text, observed, initialization=False):
+    """Requires actual invocation paths and main-server shutdown/death evidence."""
+    reports = re.findall(
+        r"^Database invocation: runner_uid=\d+ data_root=(\S+) socket_root=(\S+)$",
+        text, re.M,
+    )
+    assert len(reports) == 1, "Expected one nonempty invocation path report"
+    data_roots = {report[0] for report in reports}
+    socket_roots = {report[1] for report in reports}
+    assert data_roots and socket_roots and data_roots.isdisjoint(socket_roots)
+    for paths, prefix in ((data_roots, "cf-state-machine."), (socket_roots, "cf-sm-sockets.")):
+        for path in paths:
+            assert Path(path).is_absolute() and Path(path).name.startswith(prefix)
+            assert not Path(path).exists(), f"Leaked invocation directory: {path}"
+    pids = main_postmasters(text)
+    if initialization:
+        assert not pids, "Initialization fault unexpectedly started the main server"
+    else:
+        assert len(pids) == 1, "Expected one actual main PostgreSQL startup identity"
+    servers = []
+    for pid in sorted(pids):
+        prefix = rf"^\[db\s*\].*?\[{pid}\] LOG:  "
+        assert re.search(prefix + r"database system is shut down\s*$", text, re.M), (
+            f"Missing main PostgreSQL shutdown for PID {pid}"
+        )
+        socket_root = next(iter(socket_roots))
+        assert re.search(
+            prefix + r'listening on Unix socket "' + re.escape(socket_root)
+            + r'/\.s\.PGSQL\.\d+"', text, re.M,
+        ), "Main postmaster does not match the reported invocation socket"
+        before = observed.get(pid)
+        after = process_identity(pid)
+        if after is None:
+            # hidepid can make an unobservable PID look absent. Claim /proc
+            # death corroboration only after observing its live starttime.
+            death = "pid-absent" if before and "starttime" in before else "proc-unobserved"
+        elif after.get("unavailable"):
+            death = "proc-unavailable"
+        elif before and not before.get("unavailable") and before["starttime"] != after["starttime"]:
+            death = "pid-reused"
+        else:
+            assert after["state"] in ("Z", "X"), f"Main PostgreSQL PID {pid} is still alive"
+            death = "dead-process"
+        servers.append(dict(pid=pid, observed=before, after=after, death=death))
+    assert "PANIC:" not in text, "Storage was removed before PostgreSQL stopped"
+    return dict(data_roots=sorted(data_roots), socket_roots=sorted(socket_roots), main_postmasters=servers)
+
+
 with tempfile.TemporaryDirectory(prefix="cf-database-ci-") as temporary:
     temporary = Path(temporary)
     for app in (sys.argv[2:] or ("cve-test", "dashboard-visibility-test")):
@@ -61,6 +133,7 @@ with tempfile.TemporaryDirectory(prefix="cf-database-ci-") as temporary:
             ("initialization", 1),
             ("cargo-failure", 73),
             ("empty-selection", 1),
+            ("unrelated-positive", 1),
             ("missing-completion", 1),
             ("malformed-completion", 1),
             ("receipt-over-compose", 73),
@@ -74,13 +147,36 @@ with tempfile.TemporaryDirectory(prefix="cf-database-ci-") as temporary:
                 processes["db-init"]["command"] = (
                     'initdb --invalid-task501-option -D "$CF_STATE_MACHINE_DATA_DIR"'
                 )
-            elif fault in ("cargo-failure", "empty-selection"):
+            elif fault in ("cargo-failure", "empty-selection", "unrelated-positive"):
                 runner = temporary / f"{fault}.sh"
-                runner.write_text(
-                    "#!/usr/bin/env bash\nexit 73\n"
+                body = (
+                    "exit 73\n"
                     if fault == "cargo-failure"
-                    else '#!/usr/bin/env bash\nexec "$@" --skip ""\n'
+                    else 'exec "$@" --skip ""\n'
                 )
+                if fault == "unrelated-positive":
+                    # Keep the real selected count (including empty workspace
+                    # targets), but replace every executed name. A positive or
+                    # even equal count must not prove intended-suite execution.
+                    body = '''listing=$("$@" --list) || exit $?
+count=0
+while IFS= read -r line; do
+  if [[ "$line" == *": test" ]]; then count=$((count + 1)); fi
+done <<< "$listing"
+printf 'running %s tests\\n' "$count"
+for ((index=0; index<count; index++)); do
+  printf 'test task501_unrelated::case_%s ... ok\\n' "$index"
+done
+printf 'test result: ok. %s passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\\n' "$count"
+'''
+                # Listings always reach the real native libtest binary. Only
+                # execution is controlled; no Rust test bodies run in this fault.
+                runner.write_text('''#!/usr/bin/env bash
+set -euo pipefail
+for argument in "$@"; do
+  if [[ "$argument" == --list ]]; then exec "$@"; fi
+done
+''' + body)
                 runner.chmod(0o755)
                 tests["environment"].append(
                     f"CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER={runner}"
@@ -101,25 +197,34 @@ with tempfile.TemporaryDirectory(prefix="cf-database-ci-") as temporary:
             )
             log = evidence / f"{app}-{fault}.log"
             environment = dict(os.environ, DATABASE_TEST_APP=app)
+            observed = {}
             with log.open("w") as output:
                 process = subprocess.Popen(
                     ["bash", "-euo", "pipefail", "-c", command],
                     env=environment, stdout=output, stderr=subprocess.STDOUT,
                 )
                 try:
-                    if fault == "interruption":
-                        for _ in range(600):
-                            if marker.exists() or process.poll() is not None:
-                                break
-                            time.sleep(0.1)
-                        assert marker.exists(), "interruption never reached ready child"
-                        process.send_signal(signal.SIGTERM)
-                        marker.unlink()
                     # A cold CI target must compile the unchanged workspace
                     # before Cargo invokes the controlled runner. Bound that
                     # compilation separately from setup/receipt-only faults.
-                    timeout = 1200 if fault in ("cargo-failure", "empty-selection") else 180
-                    status = process.wait(timeout=timeout)
+                    timeout = 1200 if fault in ("cargo-failure", "empty-selection", "unrelated-positive") else 180
+                    deadline = time.monotonic() + timeout
+                    interrupted = False
+                    while process.poll() is None:
+                        current = log.read_text()
+                        for pid in main_postmasters(current):
+                            if not observed.get(pid):
+                                observed[pid] = process_identity(pid)
+                        if fault == "interruption" and not interrupted and marker.exists() and main_postmasters(current):
+                            process.send_signal(signal.SIGTERM)
+                            marker.unlink()
+                            interrupted = True
+                        if time.monotonic() >= deadline:
+                            raise subprocess.TimeoutExpired(command, timeout)
+                        time.sleep(0.1)
+                    status = process.wait()
+                    if fault == "interruption":
+                        assert interrupted, "Interruption never reached ready child"
                 except BaseException:
                     process.terminate()
                     process.wait(timeout=30)
@@ -133,22 +238,39 @@ with tempfile.TemporaryDirectory(prefix="cf-database-ci-") as temporary:
                 assert "Database test selection executed no successful tests" in text
             elif fault == "cargo-failure":
                 assert "exit status: 73" in text
+            elif fault == "unrelated-positive":
+                assert "Database test selection membership mismatch" in text
+                assert "task501_unrelated::case_" in text
+                counts = re.findall(r"DATABASE_MEMBERSHIP expected=(\d+) emitted=(\d+) exit=1", text)
+                assert counts and all(int(a) == int(b) > 0 for a, b in counts)
             elif fault == "missing-completion":
                 assert "did not produce an exit-status receipt" in text
             elif fault == "malformed-completion":
                 assert "Invalid state-machine test exit-status receipt" in text
             elif fault == "receipt-over-compose":
                 assert "Database completion: test_exit=73 compose_exit=0" in text
-            if fault != "initialization":
-                assert "database system is shut down" in text
-                assert "PANIC:" not in text, "Storage was removed before PostgreSQL stopped"
-            # Every fixture uses a new launcher-owned data/socket pair. Verify
-            # shutdown removed the actual paths reported by the real children.
-            for path in re.findall(r"/tmp/cf-sm-sockets\.[A-Za-z0-9]+", text):
-                assert not Path(path).exists(), f"Leaked socket directory: {path}"
-            for path in re.findall(r"data_root=(\S+)", text):
-                assert not Path(path).exists(), f"Leaked data directory: {path}"
-            result = dict(app=app, fault=fault, exit=status, invoking_uid=os.geteuid())
+            cleanup = verify_cleanup(text, observed, initialization=fault == "initialization")
+            rejected_mutations = []
+            if fault == "interruption":
+                # db-init's earlier shutdown remains in this fixture. The
+                # verifier must reject absence of the later actual DB shutdown.
+                mutations = {
+                    "missing-main-shutdown": re.sub(
+                        r"^\[db\s*\].*database system is shut down.*$", "", text, flags=re.M
+                    ),
+                    "missing-path-report": re.sub(r"^Database invocation:.*$", "", text, flags=re.M),
+                }
+                for mutation, mutated in mutations.items():
+                    (evidence / f"{app}-{mutation}.fixture.log").write_text(mutated)
+                    try:
+                        verify_cleanup(mutated, observed)
+                    except AssertionError as error:
+                        required = "main PostgreSQL shutdown" if mutation == "missing-main-shutdown" else "invocation path report"
+                        assert required in str(error), str(error)
+                        rejected_mutations.append(mutation)
+                    else:
+                        raise AssertionError(f"Cleanup verifier accepted {mutation}")
+            result = dict(app=app, fault=fault, exit=status, invoking_uid=os.geteuid(), cleanup=cleanup, rejected_mutations=rejected_mutations)
             results.append(result)
             print(json.dumps(result), flush=True)
             (evidence / "results.json").write_text(json.dumps(results, indent=2) + "\n")

@@ -141,7 +141,12 @@ dedicated selections do not overlap its database selections. Neither dedicated
 job is fully subsumed, so both remain. Dashboard runs both groups and retains
 any failure.
 
-All three apps preserve the actual Cargo status and reject zero-test selections.
+All three apps preserve the actual Cargo status and bind actual emitted native
+libtest names to the listed executable selection. The guard preserves Cargo
+targets/filters and libtest ignored/exact options, subtracts ignored-only names
+from default listings, rejects empty executable selections, and compares name
+multisets and result counts. Listing does not execute test bodies. Unrelated
+positive results with the same count fail; no static registry is used.
 The launcher rejects absent/invalid completion receipts even if process-compose
 returns zero. Cleanup waits for PostgreSQL before removing invocation storage
 and preserves earlier errors. CI prepares closures/Cargo sources explicitly;
@@ -182,6 +187,18 @@ the earlier failing checkpoint and its separate selector diagnostics. See the
 [fixture follow-up record](../../agents/verification.md#authorized-fixture-follow-up-to-ee32c209)
 for source pins, retained failed environmental attempt, raw logs, formatting
 limitations and remaining coordinator-owned verification.
+
+The subsequent review correction strengthens the existing CI regression's
+cleanup evidence: nonempty reported data/socket sets, actual `[db]` postmaster
+PID and socket identity, same-PID final shutdown, and `/proc` starttime/death
+corroboration where readable. Temporary `db-init` shutdown is not accepted.
+The repeated root/nonroot matrix passed 32 controlled process cases, including
+unrelated positive names, and rejected eight mutated evidence fixtures missing
+the main shutdown or path report. Normal root CVE/dashboard entries passed
+30/4 unchanged test names with runtime membership checks. Focused broad mixed
+library/expected-panic/exact ignored integration checks also passed; the full
+state-machine run remains unverified locally. See the
+[runtime evidence record](../../agents/verification.md#runtime-membership-and-main-server-evidence-follow-up).
 
 Removed verification derivations total eighteen: fifteen public roots, the
 nested module-validation derivation, and the CA fixture and runner. Twenty-two

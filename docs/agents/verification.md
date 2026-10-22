@@ -309,9 +309,15 @@ tests do not replace live-database execution: some CVE tests return early when
 `CRYSTAL_FORGE_TEST_DATABASE_URL` is absent.
 
 Every executed Cargo selection reports its command, passed/failed/ignored
-counts, and exit status. A successful Cargo exit with zero passed tests fails
-the runner. Workspace libraries with zero matches do not establish success;
-the selection must execute at least one test across the selected libraries.
+counts, and exit status. The guard first derives the expected native libtest
+names using the same Cargo targets, filters and libtest options with `--list`.
+Listing does not execute test bodies. Default listings include ignored tests,
+so the guard subtracts an ignored-only listing unless those tests are explicitly
+enabled. The expected executable selection must be nonempty. Executed names
+must match the listed multiset, including repeated names across workspace
+targets, and emitted results must agree with summary counts. A positive count
+from an unrelated suite cannot pass. Workspace libraries with zero matches do
+not establish success for the selection.
 Compilation-only commands do not count as executed tests. The outer launcher
 also requires a valid invocation-owned completion receipt. Process-compose
 success without that receipt fails. Never interpret selection inventory,
@@ -326,9 +332,15 @@ The dedicated CVE/dashboard jobs run
 `packages/devScripts/tests/database-ci-test.py` before their normal entry.
 The script reads the actual offline execution block from `.gitlab-ci.yml` and
 uses temporary process-compose fault configurations. It proves initialization
-failure, Cargo-child failure, empty selection, missing/malformed completion,
-failed receipt with successful compose exit, and interruption. It checks actual
-statuses and removal of the invocation's data/socket directories. Its controlled
+failure, Cargo-child failure, empty selection, unrelated positive results,
+missing/malformed completion, failed receipt with successful compose exit, and
+interruption. It requires a nonempty invocation data/socket path report and
+checks removal of those exact paths. Main-server evidence must identify the
+`[db]` postmaster's startup PID, reported listening socket and same-PID final
+shutdown; `db-init`'s temporary-server shutdown does not qualify. The script
+records the live PID's kernel starttime and corroborates death through `/proc`
+where readable. Unavailable/unobserved process evidence is explicit, not a
+claim that an unreadable PID died. Its controlled
 runner inputs are launcher regression evidence, not product integration tests.
 CI retains logs and `results.json` under `database-ci-evidence/`, including after
 a failed job.
@@ -387,7 +399,7 @@ constitute a successful full CVE job. Dashboard's failing fixture also lacks
 the deployable same-flake target required by the current deployment view;
 disposable-database inspection classified its two hosts as `unknown`.
 
-The controlled fault regression passed all seven cases for both apps on both
+At the runner-only checkpoint, the controlled regression passed all seven cases for both apps on both
 root-namespace and nonroot paths: 28 verified case results. An interruption
 exercise exposed a cleanup race; the launcher now waits for the invocation's
 PostgreSQL shutdown before removing files. The final exercises verified clean
@@ -447,6 +459,49 @@ Targeted Rust formatting passed for all three changed files. The crate-wide
 difference in unchanged `src/bin/server.rs:1196`. No production formatting
 change is included. Full-flake/VM and exact-head hosted verification remain
 coordinator-owned.
+
+### Runtime membership and main-server evidence follow-up
+
+Independent review identified two gaps after `0f9e6715`: a positive aggregate
+count did not enforce intended-suite membership at runtime, and the cleanup
+verifier could accept `db-init` shutdown or missing path reports. The existing
+Cargo guard and direct CI regression now enforce the stronger contracts above.
+No static selection registry, repeated test execution, new wrapper or flake
+check was added. The listing passes preserve the original argv, including
+ignored/exact filters; compilation-only commands remain exempt. Original Cargo
+failures remain authoritative through comparison and cleanup.
+
+The controlled unrelated-result fixture forwards listings to the real test
+binary, then emits unrelated successful names with the same positive count.
+Both apps reject that fixture with exit 1 on root/nonroot paths. All eight
+controlled process cases passed for each app and role: 32 case results.
+All 32 reported nonempty removed data/socket sets. All 28 non-initialization
+cases recorded a live main-postmaster starttime and its later absent PID,
+along with the matching `[db]` final shutdown. Initialization faults correctly
+recorded no main-server startup. Eight additional evidence mutations were
+rejected: removing the later main-server shutdown while retaining `db-init`'s
+shutdown, or removing the invocation path report. Those are verifier fixtures,
+not additional process executions or product integration tests.
+
+Normal root-namespace offline entries passed with runtime membership enforced:
+CVE 30 passed/0 failed/0 ignored and dashboard 4 passed/0 failed/0 ignored,
+each exit 0. These were the unchanged normal selections, including the three
+explicitly enabled ignored CVE tests. The fault matrix also ran nonroot;
+nonroot normal-entry results in the earlier fixture record are separate evidence.
+
+Focused shared-guard checks exercised a real broad mixed library prefix
+(3 passed, 1 intentionally ignored), a six-test group containing expected-panic
+display annotations (6 passed), compilation-only integration target selection,
+and one exact ignored integration test (1 passed). A default ignored-only
+selection was rejected before execution despite its positive `--list` inventory.
+All focused checks used a fresh invocation database and exited 0 overall with
+that expected rejection explicitly checked. This proves those native argv and
+output shapes; it does not claim the full state-machine workflow passed.
+
+Evidence is under `/tmp/opencode/task501-membership-*` and
+`/tmp/opencode/task501-mixed-*`, including per-case reported paths, PID/starttime
+and death records in `results.json`. Full state-machine and exact-head hosted
+verification remain coordinator-owned.
 
 ## Output handling
 
