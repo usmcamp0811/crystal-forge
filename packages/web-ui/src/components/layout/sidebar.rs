@@ -671,11 +671,16 @@ pub fn MobileDrawer() -> Element {
                 }
                 button {
                     "data-testid": "mobile-drawer-close",
-                    class: "p-2 rounded-lg {theme::interactive::HOVER_BG} {theme::text::SECONDARY}",
+                    // The packaged utility sheet omits p-2 and w-6/h-6.
+                    // Preserve their intended padding and icon size locally so
+                    // this icon-only close control retains its hit area.
+                    class: "rounded-lg {theme::interactive::HOVER_BG} {theme::text::SECONDARY}",
+                    style: "padding: calc(var(--spacing) * 2);",
                     onclick: move |_| is_mobile_drawer_open.set(false),
                     "aria-label": "Close menu",
                     svg {
-                        class: "w-6 h-6",
+                        width: "24",
+                        height: "24",
                         fill: "none",
                         stroke: "currentColor",
                         stroke_width: "2",

@@ -124,6 +124,23 @@ Used for:
 - Hamburger menu in top bar
 - Tap to open slide-out drawer
 - Full navigation in drawer
+- Close menu and navigation links dismiss the drawer. The menu can reopen it
+  afterward. The backdrop also has a dismissal handler, but the current served
+  styles leave that element at zero height with `position: static`. Backdrop
+  clicking remains a separate unresolved functional defect; the mobile Access
+  assertion retains that failure.
+
+The existing mobile close control uses a 24px SVG and 8px padding on each side
+(`--spacing` × 2), for a 40px hit area. `MobileDrawer` expresses these existing
+dimensions with SVG attributes and local padding. The packaged utility sheet
+does not define `p-2`, `w-6`, or `h-6`; relying on those classes alone gives the
+icon-only control zero area. This local sizing does not change the drawer
+placement, breakpoint, icon, or desktop sidebar.
+
+The approved `Shell.jsx` reference defines the desktop shell. It has no mobile
+drawer or Close menu state. The accepted Access task requires the mobile
+interaction; these dimensions preserve the existing Rust component's intent.
+Functional mobile verification does not establish full mobile design parity.
 
 ## File Organization
 
