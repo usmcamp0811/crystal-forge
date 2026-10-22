@@ -3,7 +3,7 @@ id: TASK-490.19
 title: >-
   Assurance: STIG XCCDF import, preview atomicity, and framework mapping catalog
   scenario
-status: To Do
+status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
@@ -65,6 +65,15 @@ Focused verification after composition: `nix build .#checks.x86_64-linux.integra
 - [ ] #6 Coordinator executes the focused evidence-remediation-lifecycle gate and records exact tested revision, command, outcome and evidence; uncertain authority/design states remain explicitly blocked
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Preserve byte-faithful existing V1R1/V1R2 inputs and derive independent namespace-aware rule/version/identity facts from XML, plus authored malformed inputs.
+2. Implement only named stig-import.py/.cjs and owner-local fixtures: actual preview with no policy/framework writes, real import/version preservation, visible malformed-input rejection and real UI requirement mapping with SQL/reload where approved.
+3. Consume same-scenario controller/Admin helpers; expose typed facts/receipts and browser-phase interfaces to the coordinator. No new scenario/check, seeded outcome, mocked CF success, product fix, shared helper or registration change.
+4. Verify syntax/input facts in the dedicated worker; coordinator composes into the existing Assurance lifecycle and executes its normal owner. Preserve any functional failure and escalate new defects rather than weakening accepted criteria.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
@@ -74,4 +83,6 @@ Current readiness: controller prerequisite bba718be passed. Await selection, fix
 2026-10-17 review recorded foundation/package blockers and no VM execution at that time. Legacy canonical STIG/20ad/20aa proofs were buried in the browser monolith and reconciliation used route mocks. A standalone import scenario was a former proposal; current import cases compose in the single Assurance lifecycle and retain owner-local input provenance.
 
 Owner's wrap-up explicitly selects dependency-ready TASK-490 functional work; this controller-only contribution is selected, not blocked by D2 or target-mode coverage. Existing approved preview/import atomicity, input-derived identity and mapping criteria remain unchanged. Use the existing Assurance lifecycle; coordinator retains composition/normal-owner execution and all production files remain read-only for this test contribution.
+
+Preflight: clean dedicated worktree/branch TASK-490.19-stig-import at0666c65e7e4bd424568f0800cdb5781c4d665556, based on current MR integration. Task-owned lock created. Coordinator retains main worktree, preview, composition and all VM ownership. No main integration worktree registered; existing dev untracked operational files and all other ownership remain preserved. Worker may not start a competing stack or VM.
 <!-- SECTION:NOTES:END -->
