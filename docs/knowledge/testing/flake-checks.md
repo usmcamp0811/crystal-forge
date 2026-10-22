@@ -152,16 +152,36 @@ The dedicated jobs run the direct Python regression with temporary fault
 configurations and retain `database-ci-evidence/`. That controlled evidence does
 not count as product-test execution or add a flake check.
 
-TASK-501 local execution at `dbf50b47` plus the runner changes exposed failing
+Initial TASK-501 local execution at `dbf50b47` plus the runner changes exposed failing
 assertions: CVE returned 101 after one passing and one failing test; normal
 dashboard execution returned 101 with three passing and one failing test on
 both root/nonroot paths. The failing tests are
 `recorded_derivation_path_restores_when_output_deriver_is_unknown` and
 `visibility_deployment_status_preserves_ahead_as_up_to_date`. Rust code and
-assertions remain unchanged. Separate selection diagnostics and controlled
+assertions were unchanged at the runner-only checkpoint `ee32c209`. Separate selection diagnostics and controlled
 failure-path checks must not be reported as a passing full CVE/dashboard job.
 Selection inventory is not execution evidence. The task notes retain exact
 names, counts, statuses, source and raw evidence locations.
+
+The authorized follow-up corrects only four `cfg(test)` fixtures under the
+existing source contracts: one eligible destination for legacy cache
+materialization, an authoritative successful post-build job, complete retention
+of the known authorized diagnostic-event baseline after stale completion, and
+a same-flake deployable target for ahead classification. The expired-lease
+denial now compares every persisted event field before/after the rejected call;
+it does not assume that the earlier valid `scanner_started` event disappeared.
+Production logic and original semantic/side-effect denial assertions are
+preserved. Test names and runner selections are unchanged.
+
+Normal prepared offline CVE/dashboard entries now executed successfully on both
+root-namespace and nonroot paths: CVE 30 passed/0 failed/0 ignored, dashboard
+4 passed/0 failed/0 ignored, each exit 0. Every output name and per-selection
+mode/count matched the existing inventory, including the three explicitly
+enabled ignored CVE tests. This is local normal-entry evidence, distinct from
+the earlier failing checkpoint and its separate selector diagnostics. See the
+[fixture follow-up record](../../agents/verification.md#authorized-fixture-follow-up-to-ee32c209)
+for source pins, retained failed environmental attempt, raw logs, formatting
+limitations and remaining coordinator-owned verification.
 
 Removed verification derivations total eighteen: fifteen public roots, the
 nested module-validation derivation, and the CA fixture and runner. Twenty-two

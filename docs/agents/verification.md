@@ -359,7 +359,7 @@ prefix the offline command with
 `unshare --user --map-auto --map-root-user`. This exercises UID 0 in that
 namespace, not a hosted runner. Nonroot execution checks the ordinary path.
 
-TASK-501 local verification exposed assertions that the former false-green
+Initial TASK-501 local verification exposed assertions that the former false-green
 jobs did not execute. At base `dbf50b47` plus the runner repair, the full CVE
 entry executed one passing test, then failed
 `recorded_derivation_path_restores_when_output_deriver_is_unknown` at
@@ -367,7 +367,7 @@ entry executed one passing test, then failed
 dashboard entry executed all four declared tests on root/nonroot paths:
 three passed and `visibility_deployment_status_preserves_ahead_as_up_to_date`
 failed at `queries/dashboard.rs:2723` (0, expected 2), returning 101.
-These are failing product-test gates, not passing TASK-501 integration evidence.
+Those initial results are failing gates, not passing integration evidence.
 The recorded-derivation failure also reproduced without root. Its fixture writes
 a legacy completed cache publication for `file:///unused-test-cache` but creates
 no matching eligible cache destination. Disposable-database inspection found
@@ -396,10 +396,57 @@ intermediate execution correctly failed before cluster creation when a changed
 launcher closure had not yet been prepared; that attempt is not a passing fault
 case. After explicit preparation, the nonroot fault regression passed.
 
-Production Rust and assertions remain unchanged. The canonical task notes
+The runner-only checkpoint `ee32c209` changed no Rust code or assertions. The canonical task notes
 retain raw logs, selection inventory, independent diagnostic results, and
 remaining verification. Full-flake/VM and exact-head hosted verification remain
 coordinator-owned; no local fault result substitutes for those checks.
+
+### Authorized fixture follow-up to `ee32c209`
+
+The coordinator authorized corrections to the four named test fixtures after
+classifying the failures as prerequisite/expectation drift. The follow-up changes
+only `cfg(test)` code in `cve_worker.rs`, `cve_scan_leases.rs`, and
+`queries/dashboard.rs`. Production code, test names, runner selections and
+migrations remain unchanged. The source contracts below authorize the fixture
+data; a failing test result alone does not authorize an expectation change.
+
+| Fixture | Source contract and correction |
+| --- | --- |
+| Recorded derivation restoration | Migration `0301_cache_push_destination_identity.sql` and `materialization_source_for_reference` require one current eligible destination for a legacy publication. The fixture retains its legacy publication and adds one matching enabled Nix destination. It still requires one scanner call, restoration of only the recorded `.drv`, no output recopy, and completed status. |
+| Post-build heartbeat ownership | `queries::cve_scans::create_cve_scan_with_trigger` binds PostBuild claims to the latest successful build job within the recovery window. The fixture adds that successful job and verifies the scan's exact job binding. Heartbeat renewal, stale-recovery prevention, cancellation on revocation, nonoverlap and terminal-state assertions remain unchanged. |
+| Expired remote diagnostic denial | `cve_scan_diagnostics` defines append-only events. This test already persists and identifies one valid `scanner_started` event before expiry. The fixture snapshots every persisted event field before the stale completion, verifies the known event's ID/type, then requires the complete ordered row set to remain identical. This replaces an incorrect empty-baseline assumption and detects insertion, deletion and mutation. The `RemoteCompletion::Stale` assertion and all other fencing/denial assertions remain unchanged. |
+| Ahead deployment normalization | Migration `0291_prefer_deployable_running_path_identity.sql` requires a published deployable target and same-flake configuration identity. The fixture seeds the older eligible target and observes a newer unpublished path in that same flake. An additional assertion requires the actual view status to be `ahead`; all original unscoped/scoped normalization, visibility and unknown-count assertions remain unchanged. |
+
+Normal offline entries executed their complete unchanged selections on both
+root-namespace and nonroot paths:
+
+| Entry | Root namespace | Nonroot |
+| --- | --- | --- |
+| `devScripts.cve-test` | 30 passed / 0 failed / 0 ignored; exit 0 | 30 passed / 0 failed / 0 ignored; exit 0 |
+| `devScripts.dashboard-visibility-test` | 4 passed / 0 failed / 0 ignored; exit 0 | 4 passed / 0 failed / 0 ignored; exit 0 |
+
+The three explicitly enabled ignored CVE tests each executed once per normal
+invocation and passed. Exact output names, libtest modes, per-selection counts,
+completion receipts and removed data/socket paths were checked against the
+30/4-name inventory. Compiled test programs executed from the prepared shared
+target cache; cached compilation is not reused test-result evidence. No runner
+selection was added or duplicated.
+
+Raw logs and statuses use `/tmp/opencode/task501-fixtures-*`; the successful
+root CVE attempt is `task501-fixtures-root-cve-retry`. Its initial attempt
+failed in the unchanged first test with `PoolTimedOut` while the task-owned
+PostgreSQL process was in uninterruptible I/O state. That failed attempt remains
+retained and is not counted as a pass. The successful retry used the same normal
+entry and assertions after the process recovered. The complete named result
+comparison is `/tmp/opencode/task501-fixture-execution-proof.json`; the
+production-prefix/test-name/assertion preservation audit is
+`/tmp/opencode/task501-fixture-scope-proof.json`.
+
+Targeted Rust formatting passed for all three changed files. The crate-wide
+`cargo fmt -p cf-server -- --check` remains blocked by a pre-existing formatting
+difference in unchanged `src/bin/server.rs:1196`. No production formatting
+change is included. Full-flake/VM and exact-head hosted verification remain
+coordinator-owned.
 
 ## Output handling
 

@@ -2664,6 +2664,17 @@ exec sleep 30
         .execute(&pool)
         .await
         .expect("recorded-path derivation should be build-complete");
+        // Migration 0301 leaves uncertain publication rows as legacy. The
+        // materialization resolver accepts them only with one current enabled
+        // eligible destination; a historical URL alone does not grant access.
+        let destination_id: i32 = sqlx::query_scalar(
+            "INSERT INTO cache_destinations (name, cache_type, push_to, enabled) \
+             VALUES ($1, 'Nix', 'file:///unused-test-cache', TRUE) RETURNING id",
+        )
+        .bind(format!("recorded-path-cache-{}", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .expect("recorded-path cache destination should be eligible");
         sqlx::query(
             r#"
             INSERT INTO cache_push_jobs (
@@ -2731,6 +2742,11 @@ exec sleep 30
             .execute(&pool)
             .await
             .expect("recorded-path cache pushes should be deleted");
+        sqlx::query("DELETE FROM cache_destinations WHERE id = $1")
+            .bind(destination_id)
+            .execute(&pool)
+            .await
+            .expect("recorded-path cache destination should be deleted");
         sqlx::query("DELETE FROM derivations WHERE id = $1")
             .bind(derivation.id)
             .execute(&pool)
@@ -3577,6 +3593,17 @@ exec sleep 30
         .expect("policy lease derivation should be inserted");
         derivation.store_path = Some(store_path.to_string_lossy().to_string());
         derivation.derivation_path = Some(derivation_path.to_string_lossy().to_string());
+        // PostBuild claims bind to the newest successful build attempt within
+        // the recovery window (create_cve_scan_with_trigger). A derivation's
+        // in-memory paths alone do not authorize a post-build execution.
+        let completed_build_job_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) \
+             VALUES ($1, 'success', NOW()) RETURNING id",
+        )
+        .bind(derivation.id)
+        .fetch_one(&pool)
+        .await
+        .expect("policy lease fixture should have an authoritative successful build");
         let derivation = Arc::new(derivation);
 
         let runner = BlockingRunner {
@@ -3605,16 +3632,18 @@ exec sleep 30
         });
         wait_for_counter(&runner.calls, 1, "first policy scanner invocation").await;
 
-        let (scan_id, execution_id, initial_heartbeat): (
+        let (scan_id, execution_id, initial_heartbeat, linked_build_job_id): (
             Uuid,
             Uuid,
             chrono::DateTime<chrono::Utc>,
+            Option<Uuid>,
         ) = sqlx::query_as(
             r#"
             SELECT
                 id,
                 (scan_metadata ->> 'execution_id')::uuid,
-                (scan_metadata ->> 'execution_heartbeat_at')::timestamptz
+                (scan_metadata ->> 'execution_heartbeat_at')::timestamptz,
+                completed_build_job_id
             FROM cve_scans
             WHERE derivation_id = $1 AND status = 'in_progress'
             "#,
@@ -3623,6 +3652,7 @@ exec sleep 30
         .fetch_one(&pool)
         .await
         .expect("policy-created execution should have lease metadata");
+        assert_eq!(linked_build_job_id, Some(completed_build_job_id));
 
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
@@ -3756,6 +3786,11 @@ exec sleep 30
             .execute(&pool)
             .await
             .expect("policy lease scans should be deleted");
+        sqlx::query("DELETE FROM build_jobs WHERE id = $1")
+            .bind(completed_build_job_id)
+            .execute(&pool)
+            .await
+            .expect("policy lease build job should be deleted");
         sqlx::query("DELETE FROM derivations WHERE id = $1")
             .bind(derivation.id)
             .execute(&pool)

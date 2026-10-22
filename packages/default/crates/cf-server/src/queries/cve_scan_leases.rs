@@ -2616,6 +2616,23 @@ mod tests {
                 truncated: false,
             }],
         };
+        // Diagnostics are append-only across reclaimed executions. The valid
+        // scanner_started event above must survive; an expired lease must not
+        // append, remove, or modify any part of that preexisting event set.
+        let diagnostics_before: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT to_jsonb(event) FROM cve_scan_diagnostic_events event \
+             WHERE scan_id = $1 ORDER BY id",
+        )
+        .bind(scan_id)
+        .fetch_all(&pool)
+        .await
+        .expect("preexisting authorized diagnostics should be readable");
+        assert_eq!(diagnostics_before.len(), 1);
+        assert_eq!(
+            diagnostics_before[0]["id"].as_i64(),
+            Some(live_events.events[0].id)
+        );
+        assert_eq!(diagnostics_before[0]["event_type"], "scanner_started");
         sqlx::query(
             "UPDATE cve_scans SET lease_expires_at = NOW() - INTERVAL '1 second' WHERE id = $1",
         )
@@ -2629,16 +2646,17 @@ mod tests {
                 .expect("expired completion should be classified"),
             RemoteCompletion::Stale
         );
-        let diagnostic_count: i64 = sqlx::query_scalar(
-            "SELECT COUNT(*) FROM cve_scan_diagnostic_events WHERE scan_id = $1",
+        let diagnostics_after: Vec<serde_json::Value> = sqlx::query_scalar(
+            "SELECT to_jsonb(event) FROM cve_scan_diagnostic_events event \
+             WHERE scan_id = $1 ORDER BY id",
         )
         .bind(scan_id)
-        .fetch_one(&pool)
+        .fetch_all(&pool)
         .await
-        .expect("stale remote diagnostics should be countable");
+        .expect("diagnostics after stale completion should be readable");
         assert_eq!(
-            diagnostic_count, 0,
-            "an expired remote lease must not append diagnostics"
+            diagnostics_after, diagnostics_before,
+            "an expired remote lease must not append, remove, or modify diagnostics"
         );
         assert_eq!(
             requeue_expired_remote_cve_scans(&pool, 10)
