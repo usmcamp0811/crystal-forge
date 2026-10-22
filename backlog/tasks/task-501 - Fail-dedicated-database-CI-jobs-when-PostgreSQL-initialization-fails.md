@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-21 14:36'
-updated_date: '2026-10-21 23:56'
+updated_date: '2026-10-22 00:21'
 labels: []
 dependencies: []
 references:
@@ -51,4 +51,6 @@ Dedicated CVE-processing and dashboard-visibility CI jobs reported success witho
 Owner explicitly selected TASK-501 in the TASK-490 wrap-up instruction. Authorization includes actual runner, disposable database and CI execution/failure-propagation repairs, preserving declared test selections and explicit dependency preparation/offline execution. Use the existing MR335 integration as base; do not change production database configuration or add another check/wrapper hierarchy. The earlier discovery-only restriction is superseded.
 
 Preflight: dedicated worktree/branch /home/mcamp/code/crystal-forge/TASK-501-truthful-database-ci at clean dbf50b4746a6ed3818aed85af68f26251f4b9d52, based on current MR335 integration head. TASK-501.lock added under canonical backlog ownership. Integration owner worktree is clean and matches remote; origin/dev remains5ae7feab. No main worktree registered. dev contains pre-existing untracked task locks/session file; preserved. Non-UI repair requires no competing preview stack. Existing integration previews remain coordinator-owned and must not be touched by the repair worker.
+
+Selection/implementation decision: retain all three CI jobs. CVE's workspace-wide --lib filters and three --ignored scanning filters, and dashboard's two --ignored visibility prefixes are not fully subsumed by database-regressions.sh/state-machine-tests.sh. Reuse the existing state-machine module/launcher/status receipt with suite-specific commands and dedicated ports (35432 CVE, 35433 state-machine, 35434 dashboard). Preserve original Cargo filters/modes. Common Cargo guard rejects zero executed tests without a second execution. Root verification uses an isolated user namespace (unshare --user --map-auto --map-root-user), with PostgreSQL alone setpriv to nobody; no sudo or preview services required.
 <!-- SECTION:NOTES:END -->
