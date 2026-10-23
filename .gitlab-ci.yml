@@ -254,6 +254,13 @@ integration-assurance:
   artifacts:
     expose_as: "Integration Assurance Evidence"
 
+integration-upgrade:
+  extends: integration-access
+  script:
+    - sh packages/ci/integration-owner-build.sh integration-upgrade
+  artifacts:
+    expose_as: "Integration Upgrade Evidence"
+
 # Ordinary component builds own unit, evaluator-protocol and schema checks.
 # Pure module assertions and developer-command selftests run directly here;
 # there is no verification package per former suite.
