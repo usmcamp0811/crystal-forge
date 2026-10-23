@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-23 16:17'
+updated_date: '2026-10-23 16:20'
 labels:
   - testing
   - integration
@@ -95,4 +95,10 @@ Narrow parser repair implemented: direct namespace-qualified benchmark/rule vers
 Focused verification: parser 44 passed/1 ignored; adapter 27 passed; complete compliance::xccdf:: selection 297 passed/1 ignored. Knowledge validation passed (192 concepts; 215 Mermaid blocks). Isolated launcher (verified fresh data directory and actual DB role) passed framework_version_release_conflict, framework_preview_matches_commit_release_digest_semantics, and cf_native_reimport_reuses_exact_identities, with expected=emitted=1 per selection and test_exit=compose_exit=0.
 
 Retained failure: existing phase_22_shared_creation_exact_reimport_is_idempotent failed before import at compliance_interchange.rs:4212, IMPORT_NATIVE_CHECK_INVALID (assertion expression must use canonical config binding). Expected=emitted=1; launcher test_exit=compose_exit=101. No unrelated fixture/product repair made. Exact-artifact foreign reimport statically returns original rows before normalization, so old null revisions remain; differing artifact bytes for the same release can conflict on corrected canonical metadata. No historical backfill/migration is introduced. Coordinator retains normal Assurance execution.
+
+Committed narrow repair separately as 81ed0959a5752ced983058dcab2abe84f36a48b3 (parent b9bef89fa20ba7611ddec45f841ffd5769754ef9); four files only: parser.rs, existing disa_stig_adapter.rs tests, testdata/xccdf/anduril-v1r2-rule-versions.json, directly related interchange operator guide. Official XML and Assurance assertions unchanged. Worktree clean after commit. Public parse_xccdf contract/example updated; targeted doctest 1 passed and rustfmt checks passed. Knowledge validation rerun after final prose change.
+
+Exact Rust test environment: nix develop --command bash -c with SQLX_OFFLINE=true CARGO_NET_OFFLINE=true CARGO_TARGET_DIR=/tmp/opencode/task49019-target CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0; cargo test --locked --offline --manifest-path packages/default/Cargo.toml -p cf-server --lib compliance::xccdf:: -- --test-threads=2 => 297 passed/1 ignored, exit 0. Targeted parser and adapter selections also passed; cargo test with --doc compliance::xccdf::parser::parse_xccdf passed. Initial 120-second cold compilation timed out; subsequent completed checks used the same worker-owned compilation directory, not a global compiled-artifact fallback.
+
+Database verification used existing devScripts.state-machine-test launcher with a temporary process-compose command selection override, existing database-environment.sh safety/membership guard, repository migrations, no substitutes/fallback, and the same worker compilation directory. Logs: /tmp/opencode/task49019-db-tests.log (retained foreign shared-reimport fixture failure, exit 101) and task49019-db-conflict-tests.log (three remaining exact selections passed, exit 0). Independent XML map/source-byte proof: task49019-source-facts.log. Other logs: task49019-parser-tests.log, task49019-adapter-tests.log, task49019-xccdf-tests.log, task49019-rustdoc.log, task49019-knowledge-final.log. No VM or normal Assurance run was started; coordinator owns that evidence.
 <!-- SECTION:NOTES:END -->
