@@ -130,8 +130,27 @@ with case("cve-real-scanner-trusted-local-upstream"):
     # scanner failure to CF. No -k or disabled certificate validation is used.
     builderA.succeed("curl --fail --cacert /etc/ssl/certs/ca-certificates.crt "
                      "https://nvd.nist.gov/feeds/json/cve/2.0/nvdcve-2.0-2026.json.gz -o /tmp/nvd-feed.gz")
+    # Prepare the real executable before CF's bounded capability probe. This
+    # scenario injects upstream faults, not cold Python startup contention.
+    # Production probing is unchanged; its actual advertisement must still pass.
+    scanner_version = builderA.succeed(
+        "runuser -u crystal-forge -- env HOME=/var/lib/crystal-forge " +
+        shlex.quote(FACTS["scannerExecutable"]) + " --version", timeout=60).strip()
+    expect_equal(scanner_version, FACTS["cve"]["scannerVersion"], "real scanner preflight identity")
+    receipt("assurance.scannerPreflightVersion", scanner_version)
     builderA.succeed("systemctl start crystal-forge-builder.service")
     builderA.wait_for_unit("crystal-forge-builder.service")
+    def scanner_registration():
+        rows = sql_json(controller,
+            "SELECT current_session_id::text, cve_scanning_enabled, cve_scan_schema_version "
+            "FROM builders WHERE id=" + literal(receipts()["delivery.builderA.id"]) +
+            "::uuid AND current_session_id IS NOT NULL")
+        return (rows[0] if rows and rows[0]["cve_scanning_enabled"]
+                and rows[0]["cve_scan_schema_version"] == 1 else None)
+    capability = wait_for(scanner_registration, "real builder scanner registration", timeout=30)
+    expect_equal(capability["cve_scanning_enabled"], True, "registered real scanner capability")
+    expect_equal(capability["cve_scan_schema_version"], 1, "registered scanner evidence schema")
+    receipt("assurance.scannerRegistration", capability)
     services.succeed(FACTS["feedCommands"]["normal"])
 
 first = real_build("vulnerable", FACTS["cve"]["vulnerableVersion"], "Author vulnerable Assurance generation")

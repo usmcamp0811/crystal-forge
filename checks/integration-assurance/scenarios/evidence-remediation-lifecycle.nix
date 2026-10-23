@@ -5,6 +5,17 @@
   inherit (harness) pkgs lib;
   native = import ../fixtures/source.nix {inherit harness;};
   data = import ../fixtures/vuln-data {inherit pkgs;};
+  stigFiles = [
+    "stig-import-U_Anduril_NixOS_STIG_V1R1_Manual-xccdf.xml"
+    "stig-import-U_Anduril_NixOS_STIG_V1R2_Manual-xccdf.xml"
+    "stig-import-truncated.xml"
+    "stig-import-non-xccdf.xml"
+  ];
+  # Expected facts come from an independent namespace-aware parser of immutable
+  # input bytes, never the importer response or persisted successful outcome.
+  stigFacts = pkgs.runCommand "assurance-stig-input-facts.json" {} ''
+    ${pkgs.python3}/bin/python3 ${../fixtures/stig-import-facts.py} ${../fixtures} > "$out"
+  '';
   delivery = ../../integration-delivery;
   tls = pkgs.runCommand "assurance-nvd-tls" {nativeBuildInputs = [pkgs.openssl];} ''
     mkdir -p "$out"
@@ -26,13 +37,20 @@
   wrapper = phase: pkgs.writeText "cve-${phase}.cjs" ''
     exports.run = require("${cveSpec}").${phase};
   '';
+  stigWrapper = phase: pkgs.writeText "stig-${phase}.cjs" ''
+    exports.run = require("${./fragments/stig-import.cjs}").${phase};
+  '';
 in harness.mkScenario {
   inherit owner name;
-  contracts = ["assurance.scanning.cve" "assurance.remediation.triage" "assurance.remediation.poam-plan" "assurance.remediation.poam-verification"];
+  contracts = ["assurance.scanning.cve" "assurance.remediation.triage" "assurance.remediation.poam-plan" "assurance.remediation.poam-verification" "assurance.policy.stig-import"];
   nodes = {
     controller = {...}: {
       imports = [(harness.roles.controller {browser = true;}) native.prepared];
       environment.systemPackages = [pkgs.git];
+      environment.etc = lib.listToAttrs (map (file: {
+        name = "cf-it/stig/${file}";
+        value.source = ../fixtures + "/${file}";
+      }) stigFiles);
       services.crystal-forge = {
         server = {eval_workers = 1; eval_max_memory_mb = 1024;};
         build.remote_execution_strategy = "server_derivation";
@@ -74,6 +92,8 @@ in harness.mkScenario {
     target = "targetA"; cacheUrl = "ssh-ng://cache@services";
     receiverNix = "${pkgs.crystal-forge.default.evaluatorNix}";
     cve = data.facts;
+    scannerExecutable = "${pkgs.vulnix}/bin/vulnix";
+    stigImport = builtins.fromJSON (builtins.readFile stigFacts);
     feedCommands = data.feedCommands;
     cveViewer = harness.facts.localUserFromDesign {id = "u2"; username = "echan"; password = "cf-it-assurance-viewer-1";};
     cveOperator = harness.facts.localUserFromDesign {id = "u3"; username = "rpatel"; password = "cf-it-assurance-operator-1";};
@@ -98,7 +118,9 @@ in harness.mkScenario {
     + builtins.readFile ./fragments/triage.py + "\n"
     + builtins.readFile ./fragments/poam-plan.py + "\n"
     + builtins.readFile ./fragments/verification.py + "\n"
+    + builtins.readFile ./fragments/stig-import.py + "\n"
     + builtins.readFile ./evidence-remediation-lifecycle.py
+    + "\nassurance_stig_import()\n"
   );
   browserSpecs = {
     cve = cveSpec;
@@ -110,6 +132,13 @@ in harness.mkScenario {
     triage-create = ./fragments/triage.cjs;
     poam-maintain = ./fragments/poam-plan.cjs;
     poam-verify-close = ./fragments/verification.cjs;
+    stig-preview-v1r1 = stigWrapper "previewV1R1";
+    stig-invalid-truncated = stigWrapper "invalidTruncated";
+    stig-invalid-non-xccdf = stigWrapper "invalidNonXccdf";
+    stig-import-v1r1 = stigWrapper "importV1R1";
+    stig-import-v1r2 = stigWrapper "importV1R2";
+    stig-mapping = stigWrapper "mapping";
+    stig-mapping-reload = stigWrapper "mappingReload";
     deploy-first = pkgs.writeText "assurance-deploy-first.cjs" ''
       exports.run = ctx => require("${delivery + "/scenarios/fragments/activation.cjs"}").deploy(ctx, "first");
     '';
