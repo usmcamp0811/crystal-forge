@@ -20,6 +20,7 @@ tags:
 | `checks/integration/README.md` | historical scope in [integration section](../../testing/flake-checks.md#integration); source retired by TASK-490.24 | merged | complete |
 | `checks/integration-access/README.md` | new TASK-490.1 runbook retained beside the native check; see [coverage map](../../testing/integration-coverage-map.md) | retained | complete |
 | `checks/integration-delivery/README.md` | behavior-oriented source/build lifecycle runbook retained beside its native owner; see [coverage map](../../testing/integration-coverage-map.md) | retained | complete |
+| `checks/integration-upgrade/README.md` | supported predecessor transition runbook retained beside its native owner; see [coverage map](../../testing/integration-coverage-map.md) | retained | complete |
 | `checks/integration-assurance/fixtures/xccdf/README.md` | retained fixture provenance for planned Assurance import coverage; [retirement map](../../testing/integration-coverage-map.md#legacy-retirement-map) | retained | complete |
 | `checks/integration-assurance/fixtures/vuln-data/README.md` | retained CVE producer fixture composition and scanner contracts; see [coverage map](../../testing/integration-coverage-map.md) | retained | complete |
 | `checks/builder-evaluator-packaging/README.md` | relocated source cataloged in [builder-evaluator-packaging section](../../testing/flake-checks.md#builder-evaluator-packaging) | merged | complete |

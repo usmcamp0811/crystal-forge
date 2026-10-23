@@ -91,14 +91,14 @@ nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-boo
 nix build .#checks.x86_64-linux.integration-access -L --keep-going
 ```
 
-Access, Delivery and Assurance are currently discoverable. Each coordinator-owned
+Access, Delivery, Assurance and Upgrade are currently discoverable. Each coordinator-owned
 `checks/integration-<owner>/default.nix` explicitly registers a `scenarios`
 attribute set and uses normal `pkgs.linkFarm` aggregation to build all registered
 scenario gates. Meaningful WIP checks may be discoverable; there is no
 completeness flag. A passing registered subset does not prove missing
 obligations.
 
-Implemented integration owners run automatically in GitLab. The three owner
+Implemented integration owners run automatically in GitLab. The four owner
 jobs are required on merge requests and `main`. For example, Access runs
 `sh packages/ci/integration-owner-build.sh integration-access`, which builds the
 normal owner aggregate (never a `.run` output) and exports evidence files to
@@ -168,11 +168,14 @@ package for design iteration, without semantic integration proof.
 
 ## Final inventory verification
 
-Current inventory: `integration-access` and `integration-delivery`,
-versus 27 before retirement. Access's original 16 cases remain unchanged; seven
+Current inventory: `integration-access`, `integration-assurance`,
+`integration-delivery` and `integration-upgrade`, versus 27 before retirement.
+Access's original 16 cases remain unchanged; seven
 Admin-form cases now follow them and passed at `c254b1c5` through the normal
 owner CI script, with a new VM and independent SQL/reload evidence.
-Assurance and Upgrade are absent; retained XML fixtures create no check.
+Assurance owns the real evidence/remediation lifecycle. Upgrade owns the approved
+real predecessor transition. Their registration does not prove complete coverage;
+the coverage map separates local results from final integrated and hosted proof.
 Delivery's `delivery-lifecycle` registers real Git/native evaluation, API-only
 builders and target-agent proof. Run its normal aggregate with
 `sh packages/ci/integration-owner-build.sh integration-delivery`; exact tested

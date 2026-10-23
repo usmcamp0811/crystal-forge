@@ -62,12 +62,15 @@ sources:
 ## Current inventory and commands
 
 TASK-490.24 authorizes source retirement before four-owner completion. The
-current `checks.x86_64-linux` inventory contains `integration-access` and
-`integration-delivery` (two total attributes, previously 27). Access's bootstrap,
+current `checks.x86_64-linux` inventory contains `integration-access`,
+`integration-assurance`, `integration-delivery` and `integration-upgrade`
+(four total attributes, previously 27). Access's bootstrap,
 session, authorization and Admin-form subset does not complete Access. Delivery
 has a real source/evaluation/build/agent lifecycle, not complete Delivery coverage.
-Assurance and Upgrade are absent. No placeholders
-are registered, including beneath the retained Assurance fixture directory.
+Assurance registers the real evidence/remediation lifecycle. Upgrade registers
+the approved predecessor transition. No placeholders are registered. Local
+execution records and remaining same-head/hosted obligations are in the coverage
+map; four registered owners do not establish complete accepted coverage.
 
 The final inventory must contain exactly four TOTAL names. Verify the full set:
 

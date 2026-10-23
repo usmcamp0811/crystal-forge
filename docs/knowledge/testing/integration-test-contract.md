@@ -21,22 +21,66 @@ not the rules. The wrap-up follows baseline `77251b04` in the existing MR.
 TASK-501's three commits are integrated; local root/nonroot CVE 30/dashboard 4
 and the final 32-case launcher matrix have execution evidence. Current-header
 repair passed dirty normal Assurance 47 case records / 41 names (264.00 s),
-and is committed as `d422cfca` with durable local evidence. Expanded Access is
+and is committed as `d422cfca` with durable local evidence. Historical expanded Access
 failed at changed-Light PATCH waiting after the original 23, six environment
 cases and A/B baseline passes (31 passed, one failed). Environment repair
-`fd4c8196` and mobile repair `66dd27aa` are not a full owner pass. Analysis-launcher
-fixtures pass, real analysis and the 500-line policy conflict remain unresolved.
-No new current-head push/hosted result is claimed. The
+`fd4c8196` and mobile repair `66dd27aa` are not a full owner pass. Four subsequent
+authorized dirty corrections now have focused real-preview proof: actual
+preference-queue read/subscription with serial PATCH 200, reload/error/Retry/idle
+probes; full-catalog picker search with exact beyond-twelve persistence in a
+158-policy catalog and 24 environment unit tests; intended fixed mobile backdrop
+and drawer stacking with normal close/backdrop/reopen/link/page/keyboard behavior
+after full frontend rebuild (`/tmp/opencode/cf-shell-preference-repair/run11/result.json`).
+Normal Access subsequently passed locally: 37 passed case records / 37 distinct
+names, no failed cases, driver 120.05 seconds and one collected scenario at
+`a03bb8e30033ef172ceea5d84f890e417e84945b-dirty`. The actual command was
+`nix develop --command sh packages/ci/integration-owner-build.sh integration-access`;
+`/tmp/opencode/cf-access-authorized-corrections-v2.status` is `0`. Exported
+`integration-evidence/integration-access/lifecycle-local-bootstrap/{result,meta}.json`
+retain that source. Passing artifact:
+`/nix/store/r8r9fd091nr64q9xzml8x1h38yir9iz9-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run`.
+The count is original 23 + six environment + five grouped preference + three
+grouped shell cases. Keyboard, mobile, sidebar persistence and required preference
+failure/loading/Retry/idle phases have receipts within cases, not extra case names.
+Real independent A/B sign-in/read/reload proves changed A persistence and unchanged
+B. Normal picker proof selects Custom Check beyond twelve using twelve unassigned
+prerequisite policies; the 158-policy Require Packages preview remains separate.
+
+The first correction run exited `1` (31 passed / one failed) at duplicate immutable
+idle-checkpoint receipt objects; only receipt names changed to unique checkpoints,
+with no assertion change. Preserve `/tmp/opencode/cf-access-authorized-corrections.status`
+and artifact
+`/nix/store/rd3cyx0chwkf8cjrsbjfmjl1jk8xr7kb-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run`.
+Native UI 774 passed / one ignored and server package 1,838 passed / 780 ignored
+(plus one isolated configuration-fixture case) validated build prerequisites.
+These are not final four-owner, hosted or complete-coverage results. The repairs
+are locally normal-owner passed, not closed; durable MR publication and final
+submitted same-head all-owner verification remain pending. No new visual approval
+is claimed. The approved `6e4ea520` design is unchanged.
+Analysis follows explicit owner-approved execution-only enforcement: complete
+measured complexity/file-size debt is nonblocking. Missing tools, failed
+compilation/preparation, crashes/timeouts and incomplete, malformed, stale or
+wrong-scope reports block. No real valid coverage percentage is proved. Native
+two-site `never_loop` corrections passed 72 evaluation tests and pinned Clippy
+locally, not final metrics execution. Hosted `0666c65e` pipeline `2978488031`
+failed CVE/dashboard because Bash was missing; `8459a039` fixes the declaration
+but has no new hosted proof. TASK-502 `8024bfa4` locally fixes recursive private
+permissions, not final hosted proof. The
 [current evidence ledger](integration-coverage-map.md#current-repair-evidence-and-publication-gaps)
 records source limits and durable uploads; the nine-green `dbf50b47` pipeline
 includes false-green database/analysis jobs and is historical evidence only.
 
 The harness exists under
-`lib/integration-test/`; Access, Delivery and Assurance are registered real
-owners and run automatically in GitLab. Upgrade is absent pending D2's supported
-predecessor and compatibility window; the decision request is delivered, not
-accepted, and no proposed 24-hour window is approved. No fourth placeholder
-exists. Executed subsets, exact revisions, results and historical failures are in the coverage
+`lib/integration-test/`; Access, Delivery, Assurance and Upgrade are registered
+real owners and run automatically in GitLab. D2 is approved for genuine `v0.3.1`
+at `f9dd6b9c79530d3f911203645207bf6251552aba`. Upgrade is integrated as `898fdc65`;
+the worker's thirteen-case pass is local evidence, with final integrated same-head
+and hosted proof pending. Stop old builders; install current packages held
+stopped; start/migrate the current server normally; then start current API-only
+builders. The exact old agent must prove signed full `SystemState` heartbeat and
+current-server deployment before deliberate replacement, preserving identity and
+history. No 24-hour expiry or old-builder/current-server window is approved.
+Executed subsets, exact revisions, results and historical failures are in the coverage
 map; none establishes complete owner coverage. Exact environment scope and
 registration policy still await their own decisions.
 The owner now authorizes legacy source retirement before replacement coverage
@@ -67,7 +111,7 @@ Crystal Forge has four integration check owners. Browser tests run inside the ow
 | `integration-access` | Fresh installation, bootstrap, authentication, sessions, role and environment authorization, administration, resource configuration, profile preferences, notifications, and common application-shell behavior. | A real browser action reaches the server, produces its authorized result, and survives a subsequent read. Denied actions have no protected side effect. |
 | `integration-delivery` | Git ingestion, exact evaluation, Config Inspector, build scheduling and execution, builder transports, cache publication and retrieval, agent delivery, activation, rollback, and operational recovery. | The selected source produces the intended output; the intended target actually runs it; CF reports the corresponding identities and states. |
 | `integration-assurance` | CVE scanning, evidence authority, policy evaluation and enforcement, compliance, STIG controls, hardening, triage, waivers, POA&M, and assurance imports/exports. | Real inputs produce independently expected evidence and decisions. UI, stored records, enforcement, and exported records agree on identity and scope. |
-| `integration-upgrade` | The supported upgrade path, migrations, persisted identities and history, recovery of migrated or in-flight state across the version transition, and the explicitly supported agent/builder compatibility window. | A real supported older version creates data; the new version migrates and uses it, then completes a representative new operation. |
+| `integration-upgrade` | The approved D2 upgrade ordering, normal migrations, persisted identities/history, recovery across the version transition, and exact old-agent/current-server compatibility before deliberate agent replacement. | Genuine pinned predecessor creates data; current server migrates it with old builders stopped; current API-only builders and the exact old agent complete required operations before agent replacement. |
 
 The final `checks.x86_64-linux` inventory is exactly four TOTAL attributes, with
 the names in the table above. Lower-level verification and developer tools
@@ -81,15 +125,16 @@ coverage is complete. The initial seventeen-definition package relocation is
 superseded: all fifteen public `verify-*` wrappers are removed. Unique assertions
 run in ordinary component tests, direct CI commands and existing isolated-DB
 workflows. Documentation and screenshot tools remain ordinary packages.
-The current wrap-up inventory is Access, Delivery and
-Assurance (three real attributes versus 27 before retirement). Access includes selected bootstrap,
+The current wrap-up inventory is Access, Delivery, Assurance and Upgrade
+(four real attributes versus 27 before retirement). Access includes selected bootstrap,
 session, role-authorization and Admin-form persistence coverage. Delivery contains
 the source/native-evaluation/API-builder/target-agent lifecycle, deployment and
 retained rollback subset. Assurance registers `evidence-remediation-lifecycle`
 with real scanner/evidence/triage/plan/verification subsets. Their exact execution
-records and remaining obligations are in the coverage map. Upgrade is absent
-pending D2; tags or version strings do not select a supported predecessor.
-This is not final four-owner completion. No placeholder owner is permitted.
+records and remaining obligations are in the coverage map. Upgrade registers
+real `version-transition` for approved D2, integrated as `898fdc65` with a worker
+thirteen-case pass. Final integrated same-head/hosted proof remains pending.
+Registration is not final four-owner completion. No placeholder owner is permitted.
 The earlier optional-manual CI transition remains in the execution history;
 it does not describe the current source-retirement policy.
 
@@ -119,8 +164,8 @@ Each check MUST run independently. Checks MAY share immutable Nix inputs, fixtur
 `lib/integration-test/`. Native owner checks call
 `lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }` and
 explicitly register `scenarios` in their own `default.nix`. The normal
-`pkgs.linkFarm` aggregate builds every registered scenario gate. Access, Delivery
-and Assurance are currently discoverable. Compatible behavior modules use the
+`pkgs.linkFarm` aggregate builds every registered scenario gate. Access, Delivery,
+Assurance and Upgrade are currently discoverable. Compatible behavior modules use the
 existing Nix, Python and browser-script composition inside a shared lifecycle;
 tracking tasks do not define files or derivations. Focused execution selects
 `checks.x86_64-linux.<owner>.scenarios.<scenario>`; `.run` is evidence only.
@@ -171,7 +216,7 @@ The table below is the stable ownership map. The per-scenario catalog, authority
 | `assurance.policy` | Assurance | Policy versions, assignments, scope, enforcement/report-only behavior, compliance mappings, STIG, and hardening produce the accepted evidence and admission decisions. |
 | `assurance.remediation` | Assurance | Finding navigation, triage, waivers, and POA&M preserve identity, evidence authority, and accepted remediation continuity. |
 | `assurance.interchange` | Assurance | Supported imports are validated and atomic; actual downloaded exports have valid structure and the expected records, identities, and scope. |
-| `upgrade.continuity` | Upgrade | Supported older data and credentials survive the normal migration/startup path; migrated or in-flight state recovers across the version transition, and the declared client compatibility window remains usable. |
+| `upgrade.continuity` | Upgrade | Genuine pinned predecessor data/credentials/history survive normal migrations; migrated work recovers. Old builders stop before current-server startup; current API-only builders follow readiness. Exact old-agent signed `SystemState` heartbeat and current-server deployment precede deliberate agent replacement with identity/history preserved. No timed expiry. |
 
 When implemented, add an **Authority** link and a **Scenario** file/name reference to each applicable row. Do not mark a row covered until that reference points to an executable case that proves it. Record accepted but unimplemented requirements as coverage gaps. A passing subset does not establish complete coverage of the accepted scope.
 
@@ -245,9 +290,13 @@ from committed-input and publication status. Do not keep claiming that a locally
 proved repair is unimplemented, or call it fully closed before required evidence
 exists. Current-header distinct-CVE semantics follow Systems D3 / §9.2; tab
 CVE/package finding counts and historical inspection have separate scope.
-Owner approval for header, environment optional gates or a mobile close target
-does not authorize unrelated preference fixes, scalable-picker repairs, or
-assertion removal. A new required functional assertion that fails remains visible.
+Earlier header, optional-gate and mobile-close approvals did not authorize
+unrelated repairs. Subsequent explicit owner authority covers the narrow
+preference-queue subscription, catalog search, fixed backdrop and drawer-stacking
+corrections now locally implemented/verified. It does not authorize assertion
+removal or broad visual changes. Required failures remain visible historically;
+normal Access has now passed locally at the dirty source above; final same-head
+all-owner verification and durable submitted-input proof remain required.
 
 Route each follow-up to its functional owner: environment forms, shell/mobile and
 preferences extend Access's existing `lifecycle-local-bootstrap` fragments;
