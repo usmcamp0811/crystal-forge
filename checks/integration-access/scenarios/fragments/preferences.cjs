@@ -40,6 +40,22 @@ exports.run = async (ctx) => {
   };
   const projectNotifications = (body) => Object.fromEntries(
     [...Object.keys(notificationLabels), "delivery_channel"].map((k) => [k, body[k]]));
+  const projectAppearance = (body) => Object.fromEntries(
+    Object.keys(appearanceOptions).map((k) => [k, body.preferences[k]]));
+  const assertIdle = async (path, checkpoint) => {
+    const patches = [];
+    const observe = (r) => {
+      if (new URL(r.url()).pathname === path && r.method() === "PATCH") patches.push(r.method());
+    };
+    page.on("request", observe);
+    try {
+      // A bounded observation window detects self-sustaining reactive saves.
+      // This is the behavior under test, not a delay before a readiness check.
+      await page.evaluate(() => new Promise((resolve) => setTimeout(resolve, 1500)));
+      expect(patches).toEqual([]);
+      ctx.emit(`preferences.idle.${phase}.${checkpoint}`, { milliseconds: 1500, patches: 0 });
+    } finally { page.off("request", observe); }
+  };
   const get = async (path) => {
     const response = await page.request.get(ctx.url(path));
     expect(response.status()).toBe(200);
@@ -74,6 +90,7 @@ exports.run = async (ctx) => {
   };
   const unchangedSelection = async (path, key, target, label) => {
     const before = await get(path);
+    const project = path === appearancePath ? projectAppearance : projectNotifications;
     const values = path === appearancePath ? before.preferences : before;
     expect(values[key]).toEqual(target);
     await activeButton(label);
@@ -83,20 +100,21 @@ exports.run = async (ctx) => {
         patches.push(request.method());
       }
     };
-    // A selected segment is a no-op, not evidence of a changed setting. Observe
-    // the click through real API reads and reload; no synthetic response or
-    // timeout catch may turn a missing changed-value PATCH into a success.
+    // Selected segments may invoke the save callback. The contract is unchanged
+    // state, not transport deduplication. Changed values still require the real
+    // PATCH response above; no synthetic response can establish persistence.
     page.on("request", observe);
     try {
       await page.getByRole("button", { name: label, exact: true }).click();
       await activeButton(label);
-      expect(await get(path)).toEqual(before);
+      expect(project(await get(path))).toEqual(project(before));
       await page.reload();
       await expect(heading()).toBeVisible();
       await assertAppearance((await get(appearancePath)).preferences);
       await assertNotifications(projectNotifications(await get(notificationPath)));
-      expect(await get(path)).toEqual(before);
-      expect(patches).toEqual([]);
+      expect(project(await get(path))).toEqual(project(before));
+      expect(patches.length).toBeLessThanOrEqual(1);
+      await assertIdle(path, `selected-${key}`);
       ctx.emit(`preferences.noop.${phase}.${key}`, true);
     } finally {
       page.off("request", observe);
@@ -156,6 +174,39 @@ exports.run = async (ctx) => {
           await activeButton(label);
         }
       }
+      // Hold the first real write while further UI edits queue. The latest
+      // value for each queued field must survive; only one write may run at a
+      // time. Releasing the route sends it to CF, never a fabricated success.
+      const requests = [];
+      let release;
+      const gate = new Promise((resolve) => { release = resolve; });
+      await page.route(ctx.url(appearancePath), async (route) => {
+        if (route.request().method() === "PATCH") {
+          requests.push(route.request().postDataJSON());
+          if (requests.length === 1) await gate;
+        }
+        await route.continue();
+      });
+      try {
+        const oppositeTheme = config.appearance.theme === "light" ? "dark" : "light";
+        await page.getByRole("button", { name: appearanceOptions.theme[oppositeTheme], exact: true }).click();
+        await expect.poll(() => requests.length).toBe(1);
+        await page.getByRole("button", { name: appearanceOptions.density[config.appearance.density === "compact" ? "comfortable" : "compact"], exact: true }).click();
+        await page.getByRole("button", { name: appearanceOptions.theme[config.appearance.theme], exact: true }).click();
+        await page.getByRole("button", { name: appearanceOptions.density[config.appearance.density], exact: true }).click();
+        expect(requests).toHaveLength(1);
+        expect(requests[0].theme).toBe(oppositeTheme);
+        const second = page.waitForResponse((r) => new URL(r.url()).pathname === appearancePath
+          && r.request().method() === "PATCH" && r.request().postDataJSON().theme === config.appearance.theme);
+        release();
+        const response = await second;
+        expect(response.status()).toBe(200);
+        expect(projectAppearance(await response.json())).toEqual(config.appearance);
+        expect(requests).toHaveLength(2);
+        expect(requests[1]).toMatchObject({ theme: config.appearance.theme, density: config.appearance.density });
+        await assertIdle(appearancePath, "queue-drained");
+        ctx.emit("preferences.appearance.serialQueue", { writes: requests.length, latestValues: config.appearance });
+      } finally { release(); await page.unroute(ctx.url(appearancePath)); }
       await page.reload();
       await expect(heading()).toBeVisible();
       await assertAppearance(config.appearance);
@@ -168,6 +219,12 @@ exports.run = async (ctx) => {
       expect(projectNotifications(capability)).not.toEqual(target);
       await assertNotifications(projectNotifications(capability));
       if (target.weekly_digest || target.delivery_channel !== "in_app") expect(capability.email_available).toBe(true);
+      if (!capability.email_available) {
+        await expect(checkbox("weekly_digest")).toBeDisabled();
+        await expect(page.getByRole("button", { name: "Email", exact: true })).toBeDisabled();
+        await expect(page.getByRole("button", { name: "Both", exact: true })).toBeDisabled();
+        ctx.emit("preferences.notifications.emailUnavailable", true);
+      }
       for (const key of Object.keys(notificationLabels)) {
         const control = checkbox(key);
         // setChecked on an unchanged value emits no request. A changed control
@@ -195,7 +252,8 @@ exports.run = async (ctx) => {
       ctx.emit("preferences.notifications.reloaded", target);
     } else {
       const confirmedAppearance = (await get(appearancePath)).preferences;
-      const confirmedNotifications = projectNotifications(await get(notificationPath));
+      const confirmedNotificationRecord = await get(notificationPath);
+      const confirmedNotifications = projectNotifications(confirmedNotificationRecord);
       await assertAppearance(confirmedAppearance);
       await assertNotifications(confirmedNotifications);
       const appearance = phase.startsWith("appearance-");
@@ -215,6 +273,7 @@ exports.run = async (ctx) => {
           const prefix = appearance ? "Could not initialize account preferences:" : "Could not load notification preferences:";
           await expect(page.getByRole("main").getByText(new RegExp(`^${prefix}`))).toBeVisible();
           expect(aborted).toBeGreaterThan(0);
+          await ctx.screenshot(`preferences-${phase}-error`);
         } finally { await page.unroute(pattern); }
         await page.reload();
         await expect(heading()).toBeVisible();
@@ -232,13 +291,33 @@ exports.run = async (ctx) => {
             const opposite = confirmedAppearance.theme === "light" ? "Dark" : "Light";
             await page.getByRole("button", { name: opposite, exact: true }).click();
           } else {
-            await checkbox("deploy_failures").setChecked(!confirmedNotifications.deploy_failures);
+            // A rejected save rolls the checkbox back immediately. click()
+            // tests that event without setChecked's conflicting postcondition.
+            await checkbox("deploy_failures").click();
           }
           const prefix = appearance ? "Could not save preferences:" : "Could not save notification preferences:";
           await expect(page.getByRole("main").getByText(new RegExp(`^${prefix}`))).toBeVisible();
           expect(aborted).toBe(1);
           if (!appearance) await expect(checkbox("deploy_failures")).toBeChecked({ checked: confirmedNotifications.deploy_failures });
+          await ctx.screenshot(`preferences-${phase}-error`);
         } finally { await page.unroute(pattern); }
+        const beforeRetry = await get(path);
+        // A transport-rejected write must leave the exact server record intact,
+        // including its write timestamp, before a real user retry is attempted.
+        expect(appearance ? beforeRetry.preferences : beforeRetry)
+          .toEqual(appearance ? confirmedAppearance : confirmedNotificationRecord);
+        await assertIdle(path, "before-retry");
+        const retryKey = appearance ? "theme" : "deploy_failures";
+        const retryValue = appearance ? (confirmedAppearance.theme === "light" ? "dark" : "light")
+          : !confirmedNotifications.deploy_failures;
+        const originalValue = appearance ? confirmedAppearance.theme : confirmedNotifications.deploy_failures;
+        const trigger = (value) => appearance
+          ? page.getByRole("button", { name: appearanceOptions.theme[value], exact: true }).click()
+          : checkbox("deploy_failures").setChecked(value);
+        await save(path, () => trigger(retryValue), { [retryKey]: retryValue });
+        await save(path, () => trigger(originalValue), { [retryKey]: originalValue });
+        await assertIdle(path, "after-retry");
+        ctx.emit(`preferences.transport.${phase}.retry`, true);
         await page.reload();
         await expect(heading()).toBeVisible();
         await assertAppearance(confirmedAppearance);

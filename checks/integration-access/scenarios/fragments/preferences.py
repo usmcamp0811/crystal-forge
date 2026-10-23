@@ -49,10 +49,20 @@ def preferences_browser(phase):
 
 
 def preferences_read_only_browser(phase):
-    """Checks that a failed transport or delayed read changes no preference row."""
+    """Checks rejected writes and recovery without changing preference values."""
     before = preferences_snapshot(preferences_a)
     preferences_browser(phase)
-    expect_equal(preferences_snapshot(preferences_a), before,
+    after = preferences_snapshot(preferences_a)
+    if phase.endswith("save-failure"):
+        # The browser checks the exact GET record before retry. Two real retry
+        # writes restore the original values but legitimately advance updated_at.
+        expect_equal(receipts()["preferences.transport." + phase + ".retry"], True,
+                     phase + " real retry completed")
+        table = "appearance" if phase.startswith("appearance-") else "notifications"
+        for snapshot in (before, after):
+            snapshot[table] = [{k: v for k, v in row.items() if k != "updated_at"}
+                               for row in snapshot[table]]
+    expect_equal(after, before,
                  phase + " left all A preference fields unchanged")
     expect_equal(preferences_snapshot(preferences_b), preferences_b_before,
                  phase + " left all B preference fields unchanged")
