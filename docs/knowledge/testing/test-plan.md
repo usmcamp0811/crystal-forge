@@ -295,6 +295,29 @@ denominator succeeds. Coverage percentage remains advisory in the shell and
 JUnit. An incomplete run removes the previous success summary and writes a
 JUnit error instead of publishing an empty successful measurement.
 
+The same `coverage-report` entrypoint runs inside TASK-501's invocation-owned
+PostgreSQL composition. It replaces only the composition's test child through
+the existing process-compose configuration override. The database launcher
+retains port fencing, fresh data/socket paths, role/preload initialization,
+exit-receipt validation, shutdown and cleanup. No development database is used.
+The coverage child enters the prepared offline SQLx shell, sources
+`database-environment.sh`, verifies the actual data directory and privileges,
+and applies migrations before Tarpaulin. The installed launcher closure owns
+the database tools; the existing online SQLx preparation realizes its shell.
+
+Coverage supplies the evaluator-matched Nix CLI used by native tests. Cargo
+build concurrency is two; instrumented libtest concurrency defaults to two
+without changing workspace/all-feature target selection. The original
+Tarpaulin status is retained in `tarpaulin-exit-status` and propagated through
+the database receipt and `database-exit-status`. Report validation failures
+remain nonzero even when Tarpaulin or an overridden child returns zero.
+Interruption stops the database composition and waits for cleanup before the
+entrypoint returns 143. The adjacent coverage tests exercise real database
+startup, migrations, ownership checks, receipt faults and interruption while
+replacing only the instrumenter for controlled report-validation cases.
+Their preparation explicitly realizes the SQLx shell and locked Cargo metadata
+online before the offline cases, including on a cold component-test runner.
+
 **Proposed.** A gate that fails when coverage falls below the targets does not exist. A way to prove that the integration tests cover everything they should is also an open item.
 
 ### Complexity launcher execution
@@ -308,19 +331,30 @@ lint codes, and thresholds are unchanged.
 The launcher parses Cargo JSON diagnostic codes. Repeated source diagnostics
 count once; lint names in diagnostic prose do not count. Each required package
 must emit valid JSON with a compiler artifact and a final successful
-`build-finished` message. A compiler error, failed process, missing manifest,
+`build-finished` message. An unknown requested lint, compiler error, failed process, missing manifest,
 empty or partial stream, failed LOC tool, or empty measured source population
 cannot produce a successful report. Diagnostic artifacts and per-package
 statuses remain available when Clippy fails. Reused output directories cannot
 supply previous successful summaries or appended diagnostics.
 
-The existing JUnit clause marks files over 500 lines as failures. TASK-470
-also records a later decision to defer strict shell enforcement of that clause.
-This policy conflict remains unresolved. When that clause is the only failure,
-the launcher reports `POLICY_BLOCKED` and returns nonzero pending a coordinator
-decision. This behavior does not establish a newly approved strict policy or
-claim that existing source files comply. Selected Clippy violations still fail;
-incomplete analysis reports `INCOMPLETE`.
+MR !335 enforces execution only. The owner decision preserves the strict-gate
+deferral in [TASK-470 commit 83a9234b](https://gitlab.com/crystal-forge/crystal-forge/-/commit/83a9234b7d88e086e34aa49d82580e7e55c09529).
+Completed valid analysis returns zero, including measurements above selected
+Clippy thresholds or the 500-line file threshold. These measurements report
+`COMPLETE_WITH_DEBT` and `MEASURED_DEBT`, not quality compliance. A complete
+measurement with no selected findings reports `COMPLETE` and
+`NO_SELECTED_DEBT`. Incomplete analysis reports `INCOMPLETE` and
+`PARTIAL_MEASUREMENT` and returns nonzero. Every nonzero Cargo/Clippy exit,
+including exit 101, remains an execution failure. No threshold-specific
+nonzero exit is accepted as successful analysis.
+
+`analysis-summary.json` records execution status, debt status, scope, file and
+lexical function-declaration counts, selected finding counts, and threshold
+sources. `complexity-violations.json` retains Clippy diagnostic measurements
+and limits. `file-metrics.json` retains per-file measurements. JUnit exposes
+advisory measurements as `system-out`; it does not emit quality-debt failures
+or skipped tests. Operational failures remain JUnit errors. This policy adds
+no strict mode, baseline, ratchet, or new-violation gate.
 
 Adjacent `packages/coverage/test-report.py` and
 `packages/code-metrics/test-report.py` exercise installed launchers with
@@ -328,7 +362,7 @@ controlled tool responses. They verify execution and report handling without
 compiling application code. They do not prove current application coverage,
 Clippy compliance, or hosted CI success.
 The existing `component-tests` job builds both launchers, resolves their output
-paths with `nix eval`, and runs all 24 cases directly with Nix-provided Python
+paths with `nix eval`, and runs the adjacent cases directly with Nix-provided Python
 and Bash. The fixture invocations set Cargo offline; launcher runtime paths
 supply the remaining tools. No additional flake check owns these regressions.
 

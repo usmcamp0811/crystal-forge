@@ -27,7 +27,7 @@ let
           OUTPUT_DIR=$(realpath -m "''${OUTPUT_DIR:-$PROJECT_ROOT/complexity-report}")
 
           mkdir -p "$OUTPUT_DIR"
-          rm -f "$OUTPUT_DIR"/{index.html,summary.md,junit-report.xml,rust-files.txt,tokei-report.json,file-metrics.json,complexity-violations.txt,complexity-violations.json,clippy-output.txt,clippy-messages.jsonl,clippy-status.json}
+          rm -f "$OUTPUT_DIR"/{index.html,summary.md,junit-report.xml,analysis-summary.json,rust-files.txt,tokei-report.json,file-metrics.json,complexity-violations.txt,complexity-violations.json,clippy-output.txt,clippy-messages.jsonl,clippy-status.json}
           rm -f "$OUTPUT_DIR"/packages-{default,web-ui}.{jsonl,stderr}
           trap 'status=$?; if [[ $status -ne 0 ]]; then rm -f "$OUTPUT_DIR"/{index.html,summary.md}; printf "<testsuites tests=\"1\" errors=\"1\"><testsuite name=\"Complexity analysis\" tests=\"1\" errors=\"1\"><testcase name=\"Required analysis\"><error message=\"Analysis incomplete or failed; see diagnostic artifacts\"/></testcase></testsuite></testsuites>\n" > "$OUTPUT_DIR/junit-report.xml"; fi' EXIT
           export RUSTC="${pkgs.rustc}/bin/rustc"
@@ -107,7 +107,8 @@ let
               ([.[] | select(.reason == "build-finished")] | length == 1) and
               .[-1].reason == "build-finished" and .[-1].success == true and
               any(.[]; .reason == "compiler-artifact") and
-              all(.[]; .reason != "compiler-message" or .message.level != "error")' "$package_log.jsonl" > /dev/null; then
+              all(.[]; .reason != "compiler-message" or
+                (.message.level != "error" and .message.code.code? != "unknown_lints"))' "$package_log.jsonl" > /dev/null; then
               if [[ $status -eq 0 ]]; then status=1; fi
             fi
             if jq -e -s '.' "$package_log.jsonl" > /dev/null; then
@@ -153,11 +154,11 @@ let
           while IFS= read -r file; do
             if [[ -f "$file" ]]; then
               rel_path="''${file#"$PROJECT_ROOT/"}"
-              # Ensure we get numeric values, defaulting to 0
-              total_lines=$(wc -l < "$file" | tr -d '[:space:]') || total_lines=0
-              fn_count=$(grep -c "^\\s*\\(pub\\s\\+\\)\\?\\(async\\s\\+\\)\\?fn\\s" "$file" 2>/dev/null | tr -d '[:space:]') || fn_count=0
-              struct_count=$(grep -c "^\\s*\\(pub\\s\\+\\)\\?struct\\s" "$file" 2>/dev/null | tr -d '[:space:]') || struct_count=0
-              impl_count=$(grep -c "^\\s*impl\\s" "$file" 2>/dev/null | tr -d '[:space:]') || impl_count=0
+              total_lines=$(wc -l < "$file" | tr -d '[:space:]')
+              # grep status 1 means a measured zero. Read/tool errors must fail.
+              fn_count=$(grep -c "^\\s*\\(pub\\s\\+\\)\\?\\(async\\s\\+\\)\\?fn\\s" "$file") || [[ $? -eq 1 ]]
+              struct_count=$(grep -c "^\\s*\\(pub\\s\\+\\)\\?struct\\s" "$file") || [[ $? -eq 1 ]]
+              impl_count=$(grep -c "^\\s*impl\\s" "$file") || [[ $? -eq 1 ]]
               
               # Default empty values to 0
               total_lines=''${total_lines:-0}
@@ -180,6 +181,9 @@ let
                 --argjson impl_blocks "$impl_count" \
                 '{"path":$path,"lines":$lines,"functions":$functions,"structs":$structs,"impl_blocks":$impl_blocks}' \
                 >> "$TEMP_FILES"
+            else
+              echo "Measured source disappeared: $file" >&2
+              exit 1
             fi
           done < "$OUTPUT_DIR/rust-files.txt"
           
@@ -189,14 +193,33 @@ let
           jq -s '{"files":.[0]}' "$TEMP_FILES" > "$OUTPUT_DIR/file-metrics.json"
           rm -f "$TEMP_FILES"
           FILE_FAILURE_COUNT=$(jq '[.files[] | select(.lines > 500)] | length' "$OUTPUT_DIR/file-metrics.json")
-          REPORT_STATUS=PASSED
+          FUNCTION_COUNT=$(jq '[.files[].functions] | add' "$OUTPUT_DIR/file-metrics.json")
+          REPORT_STATUS=COMPLETE
+          DEBT_STATUS=NO_SELECTED_DEBT
           if [[ $ANALYSIS_FAILED -ne 0 ]]; then
             REPORT_STATUS=INCOMPLETE
-          elif [[ $VIOLATION_COUNT -gt 0 ]]; then
-            REPORT_STATUS=FAILED
-          elif [[ $FILE_FAILURE_COUNT -gt 0 ]]; then
-            REPORT_STATUS=POLICY_BLOCKED
+            DEBT_STATUS=PARTIAL_MEASUREMENT
+          elif [[ $VIOLATION_COUNT -gt 0 || $FILE_FAILURE_COUNT -gt 0 ]]; then
+            REPORT_STATUS=COMPLETE_WITH_DEBT
+            DEBT_STATUS=MEASURED_DEBT
           fi
+          # MR !335 owns execution enforcement only. TASK-470 commit 83a9234b
+          # defers strict quality gates; measurements never waive compiler errors.
+          jq -n --arg status "$REPORT_STATUS" --arg debt "$DEBT_STATUS" \
+            --argjson files "$FILE_COUNT" --argjson functions "$FUNCTION_COUNT" \
+            --argjson findings "$VIOLATION_COUNT" --argjson oversized "$FILE_FAILURE_COUNT" \
+            '{analysis_status: $status, debt_status: $debt,
+              enforcement: "execution-only", policy_source: "TASK-470/83a9234b; MR335 owner decision",
+              files: $files, functions: $functions, selected_lint_findings: $findings,
+              files_over_500_lines: $oversized, thresholds_blocking: false,
+              thresholds: {file_lines: 500,
+                clippy: "Pinned Clippy configuration; measured values and limits in complexity-violations.json diagnostics"},
+              scope: {packages: ["packages/default", "packages/web-ui"],
+                targets: "native --all-targets --all-features",
+                selected_codes: ["clippy::cognitive_complexity", "clippy::too_many_arguments",
+                  "clippy::too_many_lines", "clippy::type_complexity",
+                  "clippy::fn_params_excessive_bools", "clippy::vec_box"]}}' \
+            > "$OUTPUT_DIR/analysis-summary.json"
 
           # Generate HTML report
           echo "🎨 Generating HTML report..."
@@ -223,7 +246,10 @@ let
       </head>
       <body>
         <h1>🔍 Code Complexity Report</h1>
-        <p>Analysis status: $REPORT_STATUS. File size violations: $FILE_FAILURE_COUNT.</p>
+        <p>Analysis status: $REPORT_STATUS. Debt status: $DEBT_STATUS.</p>
+        <p>Execution-only enforcement (MR335; TASK-470/83a9234b). Quality thresholds are advisory.</p>
+        <p>$FUNCTION_COUNT function declarations measured. $FILE_FAILURE_COUNT files exceed 500 lines.
+        Clippy measurements and configured limits are in complexity-violations.json.</p>
         <div class="summary">
           <div class="metric-card"><div class="metric-value">$FILE_COUNT</div><div>Rust Files</div></div>
           <div class="metric-card"><div class="metric-value">$TOTAL_LOC</div><div>Lines of Code</div></div>
@@ -261,6 +287,8 @@ let
       | Rust Files | $FILE_COUNT |
       | Lines of Code | $TOTAL_LOC |
       | Complexity Violations | $VIOLATION_COUNT |
+      | Function Declarations | $FUNCTION_COUNT |
+      | Files Over 500 Lines (Advisory) | $FILE_FAILURE_COUNT |
 
       ### 📁 Largest Files (Top 10)
 
@@ -275,19 +303,16 @@ let
           if [[ $ANALYSIS_FAILED -ne 0 ]]; then
             echo "### ❌ Status: INCOMPLETE" >> "$OUTPUT_DIR/summary.md"
             echo "Clippy failed or emitted incomplete output. See clippy-status.json and diagnostic artifacts." >> "$OUTPUT_DIR/summary.md"
-          elif [[ "$REPORT_STATUS" == POLICY_BLOCKED ]]; then
-            echo "### ❌ Status: POLICY_BLOCKED" >> "$OUTPUT_DIR/summary.md"
-            echo "Existing JUnit file-size failures conflict with the historical decision to defer the strict shell gate. Coordinator policy resolution is required; this report cannot establish a passing required check." >> "$OUTPUT_DIR/summary.md"
           elif [[ $VIOLATION_COUNT -eq 0 && $FILE_FAILURE_COUNT -eq 0 ]]; then
             echo "" >> "$OUTPUT_DIR/summary.md"
-            echo "### ✅ Status: PASSED" >> "$OUTPUT_DIR/summary.md"
+            echo "### Status: COMPLETE" >> "$OUTPUT_DIR/summary.md"
             echo "" >> "$OUTPUT_DIR/summary.md"
-            echo "No complexity violations detected." >> "$OUTPUT_DIR/summary.md"
+            echo "Analysis completed with no findings in the selected advisory clauses." >> "$OUTPUT_DIR/summary.md"
           else
             echo "" >> "$OUTPUT_DIR/summary.md"
-            echo "### ❌ Status: FAILED" >> "$OUTPUT_DIR/summary.md"
+            echo "### Status: COMPLETE_WITH_DEBT" >> "$OUTPUT_DIR/summary.md"
             echo "" >> "$OUTPUT_DIR/summary.md"
-            echo "Found $VIOLATION_COUNT complexity violations that need to be addressed." >> "$OUTPUT_DIR/summary.md"
+            echo "Measured $VIOLATION_COUNT selected Clippy findings and $FILE_FAILURE_COUNT files over 500 lines. These measurements are nonblocking under the owner-approved execution-only policy." >> "$OUTPUT_DIR/summary.md"
             echo "" >> "$OUTPUT_DIR/summary.md"
             echo "<details>" >> "$OUTPUT_DIR/summary.md"
             echo "<summary>Click to view violations</summary>" >> "$OUTPUT_DIR/summary.md"
@@ -300,12 +325,14 @@ let
             echo '```' >> "$OUTPUT_DIR/summary.md"
             echo "</details>" >> "$OUTPUT_DIR/summary.md"
           fi
+          echo "Debt status: $DEBT_STATUS. MR335 enforces execution only; TASK-470/83a9234b defers strict quality gates." >> "$OUTPUT_DIR/summary.md"
+          echo "Thresholds: file lines >500; pinned Clippy limits and measured values appear in complexity-violations.json. Source declaration counts are lexical measurements, not a Rust syntax-tree inventory." >> "$OUTPUT_DIR/summary.md"
 
           # Generate JUnit XML report
           echo "🧪 Generating JUnit XML report..."
           
-          # Preserve the existing JUnit 500-line clause. TASK-470 later deferred
-          # its strict shell gate; do not silently decide that policy here.
+          # JUnit errors represent failed/incomplete execution. Advisory quality
+          # measurements remain system-out data, never failures or skipped tests.
           jq -nr --slurpfile files "$OUTPUT_DIR/file-metrics.json" \
             --slurpfile statuses "$OUTPUT_DIR/clippy-status.json" \
             --slurpfile violations "$OUTPUT_DIR/complexity-violations.json" '
@@ -314,18 +341,16 @@ let
             ($files | map(select(.lines > 500)) | length) as $large |
             ($statuses | map(select(.exit_status != 0)) | length) as $errors |
             (($files | length) + ($statuses | length) + 1) as $tests |
-            ($large + (if ($violations | length) > 0 then 1 else 0 end)) as $failures |
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>",
-            "<testsuites name=\"Code Complexity\" tests=\"\($tests)\" failures=\"\($failures)\" errors=\"\($errors)\">",
-            "<testsuite name=\"Complexity Checks\" tests=\"\($tests)\" failures=\"\($failures)\" errors=\"\($errors)\">",
+            "<testsuites name=\"Code Complexity\" tests=\"\($tests)\" failures=\"0\" errors=\"\($errors)\">",
+            "<testsuite name=\"Complexity Checks\" tests=\"\($tests)\" failures=\"0\" errors=\"\($errors)\">",
             ($statuses[] | "<testcase classname=\"clippy\" name=\"\(.package | @html)\">" +
               (if .exit_status != 0 then "<error message=\"Clippy failed or output incomplete\"/>" else "" end) + "</testcase>"),
             "<testcase classname=\"complexity\" name=\"Clippy complexity lints\">" +
-              (if ($violations | length) > 0 then "<failure message=\"\($violations | length) complexity violations\">\($violations | tojson | @html)</failure>" else "" end) + "</testcase>",
+              "<system-out>Advisory selected findings: \($violations | length). \($violations | tojson | @html)</system-out></testcase>",
             ($files[] | "<testcase classname=\"complexity\" name=\"\(.path | @html)\">" +
-              (if .lines > 500 then "<failure message=\"File exceeds 500 lines\"/>" else "" end) + "</testcase>"),
+              "<system-out>Lines: \(.lines); function declarations: \(.functions); advisory file threshold: 500 lines</system-out></testcase>"),
             "</testsuite></testsuites>"' > "$OUTPUT_DIR/junit-report.xml"
-          echo "File size clause: $FILE_FAILURE_COUNT files exceed 500 lines" >> "$OUTPUT_DIR/summary.md"
 
           echo ""
           echo "✅ Complexity report generated!"
@@ -333,19 +358,9 @@ let
           echo "   Markdown Summary: $OUTPUT_DIR/summary.md"
           echo "   JUnit Report: $OUTPUT_DIR/junit-report.xml"
 
-          # Policy failures retain their reports. The EXIT trap is only for
-          # incomplete execution, not valid measurements that fail a clause.
+          # Retain reports from both complete analysis and compiler failures.
           trap - EXIT
           if [[ $ANALYSIS_FAILED -ne 0 ]]; then exit 1; fi
-          if [[ "$REPORT_STATUS" == POLICY_BLOCKED ]]; then
-            echo "File-size policy unresolved: existing JUnit failures cannot establish CI success" >&2
-            exit 1
-          fi
-          if [[ $VIOLATION_COUNT -gt 0 ]]; then
-            echo ""
-            echo "❌ Build failed due to $VIOLATION_COUNT complexity violations"
-            exit 1
-          fi
 
           exit 0
     '';

@@ -2,11 +2,25 @@
 with lib;
 with lib.crystal-forge;
 let
+  databaseLauncher = pkgs.crystal-forge.devScripts.state-machine-test;
+  # This private child replaces only TASK-501's test command. Its existing
+  # launcher owns PostgreSQL, port fencing, shutdown and receipt validation.
+  databaseCommand = pkgs.writeShellScript "coverage-database-command" ''
+    set -euo pipefail
+    : "''${CF_STATE_MACHINE_STATUS_FILE:?Missing invocation status receipt}"
+    status=0
+    nix develop --offline --option substituters "" --option substitute false \
+      --builders "" --option fallback false --option accept-flake-config false \
+      --max-jobs 0 --no-update-lock-file "$PROJECT_ROOT#sqlx" \
+      -c ${pkgs.bash}/bin/bash "$CF_COVERAGE_ENTRYPOINT" --database-child || status=$?
+    printf '%s\n' "$status" > "$CF_STATE_MACHINE_STATUS_FILE"
+    exit "$status"
+  '';
   # Script to run code coverage analysis and generate reports
   coverage-report = pkgs.writeShellScriptBin "coverage-report" ''
         set -euo pipefail
         umask 077
-        export PATH="${lib.makeBinPath (with pkgs; [ cargo-tarpaulin cargo rustc gcc pkg-config coreutils jq bc ])}:$PATH"
+        export PATH="${lib.makeBinPath (with pkgs; [ cargo-tarpaulin cargo rustc gcc pkg-config coreutils jq bc bash git gnugrep gnused util-linux nix-eval-jobs.nix nix-eval-jobs ])}:$PATH"
         export RUSTC="${pkgs.rustc}/bin/rustc"
         export RUSTDOC="${pkgs.rustc}/bin/rustdoc"
         export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
@@ -14,6 +28,9 @@ let
         export OPENSSL_INCLUDE_DIR="${pkgs.openssl.dev}/include"
         export SQLX_OFFLINE=true
         export CARGO_BUILD_JOBS=2
+        # Keep instrumented libtest execution within the same two-core budget.
+        # This changes concurrency only; every original test target remains.
+        export RUST_TEST_THREADS="''${RUST_TEST_THREADS:-2}"
         export CARGO_PROFILE_DEV_DEBUG=0 CARGO_PROFILE_TEST_DEBUG=0
 
         PROJECT_ROOT=$(realpath "''${PROJECT_ROOT:-$(pwd)}")
@@ -22,8 +39,63 @@ let
 
         mkdir -p "$OUTPUT_DIR"
         # A failed invocation must not publish an earlier successful summary.
-        rm -f "$OUTPUT_DIR"/{coverage.json,index.html,summary.md,junit-report.xml}
+        rm -f "$OUTPUT_DIR"/{coverage.json,index.html,summary.md,junit-report.xml,database-exit-status}
+        rm -f "$OUTPUT_DIR/packages/default"/{tarpaulin-report.json,tarpaulin-report.html,tarpaulin.log,tarpaulin-exit-status}
+        rm -f "$OUTPUT_DIR/packages-default-coverage.html"
         trap 'status=$?; if [[ $status -ne 0 ]]; then rm -f "$OUTPUT_DIR"/{coverage.json,index.html,summary.md}; printf "<testsuites tests=\"1\" errors=\"1\"><testsuite name=\"Coverage analysis\" tests=\"1\" errors=\"1\"><testcase name=\"Required analysis\"><error message=\"Coverage analysis incomplete; see tarpaulin.log\"/></testcase></testsuite></testsuites>\n" > "$OUTPUT_DIR/junit-report.xml"; fi' EXIT
+
+        if [[ "''${1:-}" != --database-child ]]; then
+          [[ -f "$PROJECT_ROOT/packages/default/Cargo.toml" ]] || { echo "Missing required workspace manifest" >&2; exit 1; }
+          export PROJECT_ROOT OUTPUT_DIR
+          export CF_COVERAGE_ENTRYPOINT
+          CF_COVERAGE_ENTRYPOINT=$(realpath "$0")
+          # Reuse the same installed-config discovery as TASK-501 fault tests.
+          # Fail if that launcher format changes; never invent a second DB setup.
+          compose=$(grep -oE '/nix/store/[^[:space:]]+/bin/process-compose' ${databaseLauncher}/bin/process-compose)
+          [[ -f "$compose" ]] || { echo "Cannot resolve isolated database compose launcher" >&2; exit 1; }
+          config=$(grep -oE 'PC_CONFIG_FILES=[^[:space:]]+' "$compose")
+          config="''${config#PC_CONFIG_FILES=}"
+          [[ -f "$config" ]] || { echo "Cannot resolve isolated database compose configuration" >&2; exit 1; }
+          jq --arg command "${databaseCommand}" \
+            '.processes["state-machine-tests"].command = $command' \
+            "$config" > "$OUTPUT_DIR/database-compose.json"
+          args=(-f "$OUTPUT_DIR/database-compose.json" -t=false up)
+          # Preserve the existing process-compose override CLI for controlled
+          # setup/receipt/interruption regressions. A zero receipt alone is
+          # insufficient: final coverage artifacts are validated below too.
+          if (( $# > 0 )); then
+            [[ "$1" != -- ]] || shift
+            args=("$@")
+          fi
+          ${databaseLauncher}/bin/process-compose "''${args[@]}" &
+          database_pid=$!
+          stop_database() {
+            trap "" INT TERM
+            if kill -TERM "$database_pid" 2>/dev/null; then :; fi
+            signal_status=0
+            wait "$database_pid" || signal_status=$?
+            printf '%s\n' "$signal_status" > "$OUTPUT_DIR/database-exit-status"
+            exit 143
+          }
+          trap stop_database INT TERM
+          status=0
+          wait "$database_pid" || status=$?
+          trap - INT TERM
+          printf '%s\n' "$status" > "$OUTPUT_DIR/database-exit-status"
+          if (( status != 0 )); then exit "$status"; fi
+          jq -e '.summary.total_lines > 0 and (.packages | length > 0)' "$OUTPUT_DIR/coverage.json" > /dev/null
+          [[ -s "$OUTPUT_DIR/index.html" && -s "$OUTPUT_DIR/summary.md" && -s "$OUTPUT_DIR/junit-report.xml" ]]
+          exit 0
+        fi
+
+        # The SQLx shell exports development defaults. Reset them and verify the
+        # actual invocation data directory, LOGIN/SUPERUSER/CREATEDB and preload
+        # before migrations or instrumented tests can access any database.
+        coverage_target="''${CARGO_TARGET_DIR:-$PROJECT_ROOT/packages/default/target}"
+        source "$PROJECT_ROOT/packages/devScripts/tests/database-environment.sh"
+        export CARGO_TARGET_DIR="$coverage_target"
+        cargo sqlx migrate run --source crates/cf-server/migrations
+        unset -f cargo
 
         echo "📊 Analyzing code coverage..."
         echo "   Project root: $PROJECT_ROOT"
@@ -63,6 +135,7 @@ let
               --workspace \
               --timeout 300 \
               2>&1 | tee "$PKG_OUTPUT/tarpaulin.log"; then
+              printf '0\n' > "$PKG_OUTPUT/tarpaulin-exit-status"
               
               echo "   ✓ Coverage analysis complete for $pkg"
               
@@ -118,8 +191,12 @@ let
                 exit 1
               fi
             else
+              pipeline_status=("''${PIPESTATUS[@]}")
+              status="''${pipeline_status[0]}"
+              printf '%s\n' "$status" > "$PKG_OUTPUT/tarpaulin-exit-status"
+              if (( status == 0 )); then status="''${pipeline_status[1]}"; fi
               echo "   ⚠️ Coverage analysis failed for $pkg (tests may have failed)"
-              exit 1
+              exit "$status"
             fi
           fi
         done

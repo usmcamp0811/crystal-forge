@@ -23,7 +23,7 @@ def diagnostic(code, message, level="warning"):
 
 complete = [{"reason": "compiler-artifact"},
             {"reason": "build-finished", "success": True}]
-lint = diagnostic("clippy::too_many_lines", "too many lines")
+lint = diagnostic("clippy::too_many_lines", "too many lines (101/100)")
 launcher = str(Path(sys.argv[1]).resolve())
 with tempfile.TemporaryDirectory(prefix="metrics-launcher-") as temporary:
     root = Path(temporary)
@@ -50,14 +50,20 @@ export -f cargo
 exec "$FIXTURE_LAUNCHER"
 ''')
     for name, messages, cargo_exit, lines, expected, state in (
-        ("pass", complete, 0, 1, 0, "PASSED"),
+        ("pass", complete, 0, 1, 0, "COMPLETE"),
         ("prose-only", [diagnostic("unused_imports", "clippy::vec_box is prose")] + complete,
-         0, 1, 0, "PASSED"),
-        ("lint", [lint, lint] + complete, 0, 1, 1, "FAILED"),
-        ("file-policy", complete, 0, 501, 1, "POLICY_BLOCKED"),
+         0, 1, 0, "COMPLETE"),
+        ("lint", [lint, lint] + complete, 0, 1, 0, "COMPLETE_WITH_DEBT"),
+        ("file-debt", complete, 0, 501, 0, "COMPLETE_WITH_DEBT"),
+        ("combined-debt", [lint] + complete, 0, 501, 0, "COMPLETE_WITH_DEBT"),
+        ("stale-output", [], 0, 1, 1, "INCOMPLETE"),
         ("compiler", complete, 101, 1, 1, "INCOMPLETE"),
+        ("threshold-denied", [diagnostic("clippy::too_many_lines", "too many lines (101/100)", "error")]
+         + complete, 101, 1, 1, "INCOMPLETE"),
         ("missing-cargo", [], 127, 1, 1, "INCOMPLETE"),
         ("default-denied", [diagnostic("clippy::never_loop", "never loops", "error")]
+         + complete, 0, 1, 1, "INCOMPLETE"),
+        ("unknown-lint", [diagnostic("unknown_lints", "unknown lint: clippy::vec_box")]
          + complete, 0, 1, 1, "INCOMPLETE"),
         ("empty", [], 0, 1, 1, "INCOMPLETE"),
         ("partial", complete[:-1], 0, 1, 1, "INCOMPLETE"),
@@ -86,7 +92,7 @@ exec "$FIXTURE_LAUNCHER"
         else:
             assert all(item["exit_status"] == 0 for item in statuses), name
         violations = json.loads((output / "complexity-violations.json").read_text())
-        assert len(violations) == (1 if name == "lint" else 0), name
+        assert len(violations) == (1 if name in ("lint", "combined-debt", "threshold-denied") else 0), name
         report = ET.parse(output / "junit-report.xml").getroot()
         suite = report.find("testsuite")
         cases = suite.findall("testcase")
@@ -94,6 +100,21 @@ exec "$FIXTURE_LAUNCHER"
             assert int(element.attrib["tests"]) == len(cases), name
             assert int(element.attrib["failures"]) == len(suite.findall("testcase/failure")), name
             assert int(element.attrib["errors"]) == len(suite.findall("testcase/error")), name
+        assert not suite.findall("testcase/failure"), name
+        assert bool(suite.findall("testcase/error")) == (state == "INCOMPLETE"), name
+        measurements = json.loads((output / "analysis-summary.json").read_text())
+        assert measurements["analysis_status"] == state, name
+        assert measurements["thresholds_blocking"] is False, name
+        assert measurements["files"] == 1 and measurements["functions"] == 1, name
+        assert measurements["files_over_500_lines"] == (1 if lines > 500 else 0), name
+        assert measurements["selected_lint_findings"] == len(violations), name
+        assert measurements["thresholds"]["file_lines"] == 500, name
+        if name in ("lint", "combined-debt"):
+            assert "101/100" in violations[0]["message"], name
+            assert "101/100" in "".join(suite.itertext()), name
+        if not expected:
+            assert measurements["debt_status"] == (
+                "MEASURED_DEBT" if state == "COMPLETE_WITH_DEBT" else "NO_SELECTED_DEBT"), name
         assert f"Status: {state}" in (output / "summary.md").read_text(), name
         assert f"Analysis status: {state}" in (output / "index.html").read_text(), name
         print(f"PASS {name}: exit={result.returncode}, status={state}")
@@ -110,5 +131,6 @@ exec "$FIXTURE_LAUNCHER"
         assert not (output / "summary.md").exists(), name
         assert not (output / "index.html").exists(), name
         assert not (output / "clippy-status.json").exists(), name
+        assert not (output / "analysis-summary.json").exists(), name
         assert ET.parse(output / "junit-report.xml").findall(".//error"), name
         print(f"PASS {name}: exit={result.returncode}")
