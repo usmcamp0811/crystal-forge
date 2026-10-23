@@ -5,16 +5,24 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-23 01:49'
+updated_date: '2026-10-23 02:13'
 labels:
   - testing
   - integration
 dependencies:
   - TASK-490.7
 modified_files:
+  - flake.nix
+  - flake.lock
+  - .gitlab-ci.yml
+  - checks/integration-upgrade/default.nix
+  - checks/integration-upgrade/README.md
+  - checks/integration-upgrade/fixtures/released-module.nix
+  - checks/integration-upgrade/fixtures/target.nix
+  - checks/integration-upgrade/fixtures/signed-request.cjs
+  - checks/integration-upgrade/scenarios/version-transition.nix
   - checks/integration-upgrade/scenarios/version-transition.py
   - checks/integration-upgrade/scenarios/version-transition.cjs
-  - checks/integration-upgrade/fixtures/*
 parent_task_id: TASK-490
 priority: high
 type: task
@@ -70,4 +78,10 @@ Earlier records lacked an accepted predecessor/window and proposed24hours; those
 Preflight: dedicated clean worktree/branch TASK-490.23-version-transition created from integration c21a0d512c8c9006c8373c62b48532459c8f6cc4; owner task lock recorded. Current application production source matches the accepted wrap-up baseline, with test-only STIG preparation already present. Main coordinator retains its STIG composition change and other ownership; no resetting/rebasing/overwriting occurred. No main integration worktree is registered. Use only invocation-owned disposable Upgrade VMs/database; existing task preview and persistent developer instances are forbidden targets.
 
 Resumed approved implementation in clean TASK-490.23-version-transition at c21a0d51. Verified canonical lock and local v0.3.1^{commit}=f9dd6b9c79530d3f911203645207bf6251552aba. dev has existing untracked task locks/session notes; no main worktree registered; left those untouched. Added exact HTTPS GitLab predecessor input with its release lock graph; no current input update requested. Genuine predecessor default package evaluates as crystal-forge-0.3.0 (the release source Cargo version, distinct from tag v0.3.1). Online preparation running tmux task49023-prepare, log/status /tmp/opencode/task49023-prepare.{log,status}, local --builders '' --max-jobs 1 --cores 2. No host application stack started. Impact: add upgrade.continuity/version-transition using existing harness, role topology and strict evidence gate; approved authority D2/AC4. Current source/library checks remain coordinator-owned.
+
+Implemented and committed 94bf8a0dbba2d6a685e02f964f73f47d7fb56336 (TASK-490.23: Add exact-release Upgrade transition gate). One native Snowfall owner/scenario, 13 authored mandatory cases, unchanged shared harness and five existing roles. Root input pins exact GitLab predecessor and its release graph; automated comparison confirms every pre-existing lock node and root input mapping is unchanged. CI uses existing integration-owner-build.sh aggregate/evidence mechanism. Owner-local guidance records maintenance, preparation, exact release/Cargo-version distinction, runtime boundaries and failure semantics. No production source changes.
+
+Genuine unmodified predecessor default package preparation PASSED exit 0. Command: nix build --impure --expr '(builtins.getFlake (toString ./.)).inputs.upgrade-predecessor.packages.x86_64-linux.default' --no-link --print-out-paths --builders '' --max-jobs 1 --cores 2 --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false -L. Output /nix/store/jrha7c4i8fbh7wpvhffmwpbznmcrwmb9-crystal-forge-0.3.0. Release library: 454 passed/70 ignored; builder/agent selected binaries: 2+2 passed; integration selections: 4+6 passed/3 ignored; release UI: 64 passed/1 ignored. No skipped build checks or source patches. Log/status /tmp/opencode/task49023-prepare.{log,status}. All 127 released migration files are byte-identical to current files at the relocated cf-server migration path.
+
+Static verification PASSED: normal Upgrade aggregate derivation evaluation; exactly [integration-access,integration-assurance,integration-delivery,integration-upgrade]; Python AST parse; node --check for scenario and signed-request fixture; git diff --check. Runtime is NOT yet verified. First normal owner invocation is in persistent tmux task49023-owner (pane PID 21210; /tmp/opencode/task49023-owner.{log,status}); it started from an earlier dirty fixture snapshot while online closure preparation continued. Exact committed-head normal invocation is serialized behind it in task49023-owner-current (/tmp/opencode/task49023-owner-current.{source,log,status}); it archives first invocation evidence before rerunning the normal aggregate. Both use only this worktree's disposable VM state, no host application ports, local one-job/two-core builds; wrappers wait for coordinator Assurance/other QEMU runs to finish. Current worktree clean. Do not treat authored count or a running preparation as executed/pass count. Keep In Progress and no AC checked until actual results inspected.
 <!-- SECTION:NOTES:END -->
