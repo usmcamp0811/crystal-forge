@@ -372,7 +372,7 @@ state-machine-tests:
           let
             f = builtins.getFlake ("git+file://" + toString ./.);
             p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
-          in p.python3
+          in [ p.python3 p.bash ]
         ' --builders '' --option substituters https://cache.nixos.org \
           --option extra-substituters '' --option accept-flake-config false \
           --max-jobs 1 --cores 2 --command true
@@ -386,7 +386,7 @@ state-machine-tests:
             let
               f = builtins.getFlake ("git+file://" + toString ./.);
               p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
-            in p.python3
+            in [ p.python3 p.bash ]
           ' --command python3 packages/devScripts/tests/database-ci-test.py \
             "database-ci-evidence/$DATABASE_TEST_APP" "$DATABASE_TEST_APP"
       fi
