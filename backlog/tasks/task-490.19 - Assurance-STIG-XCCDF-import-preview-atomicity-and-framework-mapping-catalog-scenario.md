@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-23 16:23'
+updated_date: '2026-10-23 16:31'
 labels:
   - testing
   - integration
@@ -105,4 +105,12 @@ Exact Rust test environment: nix develop --command bash -c with SQLX_OFFLINE=tru
 Database verification used existing devScripts.state-machine-test launcher with a temporary process-compose command selection override, existing database-environment.sh safety/membership guard, repository migrations, no substitutes/fallback, and the same worker compilation directory. Logs: /tmp/opencode/task49019-db-tests.log (retained foreign shared-reimport fixture failure, exit 101) and task49019-db-conflict-tests.log (three remaining exact selections passed, exit 0). Independent XML map/source-byte proof: task49019-source-facts.log. Other logs: task49019-parser-tests.log, task49019-adapter-tests.log, task49019-xccdf-tests.log, task49019-rustdoc.log, task49019-knowledge-final.log. No VM or normal Assurance run was started; coordinator owns that evidence.
 
 Confirmed contract before fixture edit: deployment-policy-checks.md lines 87-94 names config.* canonical; xccdf/importer.rs lines 523-539 explicitly rejects missing config. or cfg.config. in native custom import-plan assertions. Existing native_custom_check_requires_config_binding_and_preserves_assertions and native_custom_check_rejects_non_cfg_expression tests retain the accepted/rejected cases. No contract conflict prevents authoring canonical input.
+
+Committed authorized cfg(test)-only prerequisite correction as d25f6f097cee84bca4d6ed0d411a5d5cbde77442, parent 81ed0959a5752ced983058dcab2abe84f36a48b3. Only shared_native_plan expression in queries/compliance_interchange.rs:4184 changes cfg.config.services.openssh.settings.PermitRootLogin to config.services.openssh.settings.PermitRootLogin. All original idempotency/no-duplicate/immutability assertions and production validators/negative tests are unchanged. Worktree clean.
+
+Fresh isolated cve-test launcher invocation used port 35432, verified owned data directory /tmp/cf-state-machine.8hgVgy and socket directory /tmp/cf-sm-sockets.jcdO7Q. Both were removed by launcher cleanup; occupied 35433 was untouched. Outer and inner Nix commands were offline with substituters/substitute/builders/fallback disabled; Cargo locked/offline; existing database-environment.sh verified DB ownership and exact-test membership.
+
+All four exact DB selections passed with expected=emitted=1 and exit=0 each: queries::compliance_interchange::tests::phase_22_shared_creation_exact_reimport_is_idempotent; queries::framework_requirements::tests::framework_version_release_conflict; queries::framework_requirements::tests::framework_preview_matches_commit_release_digest_semantics; queries::compliance_interchange::tests::cf_native_reimport_reuses_exact_identities. Launcher final test_exit=0 compose_exit=0. Command per selection: cargo test --locked --offline --manifest-path Cargo.toml -p cf-server --lib <exact-name> -- --ignored --exact --test-threads=1. Log /tmp/opencode/task49019-fixture-db-tests.log; temporary selection /tmp/opencode/task49019-fixture-db-selection.json.
+
+Additional targeted verification passed: rustfmt --edition 2024 --check on changed file; importer::tests::native_custom_check_ selection (2 passed including the invalid-expression rejection); git diff checks. Log /tmp/opencode/task49019-fixture-negative-tests.log. Remaining failures in the requested four-DB-test selection: zero. Earlier exit101 is retained as historical evidence of the stale prerequisite and is superseded by this successful execution. Normal Assurance with actual XML inputs remains coordinator-owned and has not been run by this worker.
 <!-- SECTION:NOTES:END -->
