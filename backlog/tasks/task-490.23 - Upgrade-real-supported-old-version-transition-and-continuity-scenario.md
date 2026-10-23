@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-23 08:17'
+updated_date: '2026-10-23 08:22'
 labels:
   - testing
   - integration
@@ -130,4 +130,6 @@ Publication-negative proof completed with actual HTTP500 internal_error/Composit
 The new current operation is actual and complete: receipt currentOperationCompleted=true; running and persistent profile /nix/store/0jwrwvk8nq6a5nj5cgkridj5nqg7p8kf-nixos-system-targetA-test; marker current-7aa638dd-e484-43c4-8a7c-b45349ad7f09; correlated succeeded deployment14ff0463-510b-4139-a764-29ae5d8663af. Original signed observations are verified through SQL identity preservation and normal agent-events API, not falsely promoted into canonical successful deployment events. Current history UI contains genuine current-server deployment success. The prior browser assertion and SQL references to API-only commit_hash/outcome columns were test errors corrected in bc6aa6dc; all thirteen cases remain.
 
 Canonical description/AC review found no requirement for an old completed DEPLOYMENT record: AC2 says representative credentials, registered system/signing identities, completed records and history relationships intact; AC4 specifically guarantees the exact predecessor agent with the current server during rollout. The old commit_sha→old-agent activation promise was added by this test implementation. This is an approved test scope correction, with unchanged predecessor pin/order/policy and no production changes.
+
+Resumed approved D2 baseline correction in existing locked worktree TASK-490.23-version-transition, base HEAD bc6aa6dc. Only Upgrade scenario/README edited. Producer renamed to predecessor-completes-native-build-signed-publication-and-observed-history; genuine output nonce/trusted Nix signature, completed publication IDs/output/destination and signed heartbeat/state relationships now explicitly asserted and preserved across migration. Removed extra old-old manual commit deployment experiment; old-agent/current-server activation/report and all thirteen mandatory cases retained. Historical failed experiment artifacts remain documented. No application/predecessor/shared harness change. Python AST/13 unique cases, both JS syntax checks through nix develop, normal aggregate drv evaluation and git diff --check passed. One normal gate launched in exact tmux task49023-d2-baseline-owner, pane PID28726, task worktree cwd verified. Command sh packages/ci/integration-owner-build.sh integration-upgrade; source HEAD plus full binary diff SHA256 recorded in /tmp/opencode/task49023-d2-baseline-owner.{source,patch}; log/status same prefix. Changes are uncommitted. No other integration invocation observed; host available32GiB before launch. Runtime pending; In Progress, no AC checked.
 <!-- SECTION:NOTES:END -->
