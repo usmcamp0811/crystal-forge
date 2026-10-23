@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-23 05:20'
-updated_date: '2026-10-23 13:04'
+updated_date: '2026-10-23 13:12'
 labels:
   - security
   - nixos
@@ -58,4 +58,6 @@ Before any production implementation, verify the supported credential-placement 
 Owner explicitly authorized the narrow current-module permission correction, runtime-generated inside-state-tree credential reproduction, real activation/cache use/restart regression, external/symlink control and bounded remediation/exposure guidance. No predecessor patch, new secret system, blanket recursive mode/ownership operation, root service, credential relocation as production fix, protocol/DB-policy change or unrelated permissions audit. The outside-directory Upgrade pass is independent evidence, not TASK502 proof.
 
 Preflight: clean dedicated TASK-502-private-file-permissions branch/worktree from reviewed real Upgrade879a7210226ba3cc1851c35f435430fef162865b, preserving its genuine predecessor source and passing 13-case tree. Task lock recorded. Main coordinator worktree retains only its own STIG/analysis changes. Existing task preview/default development databases are forbidden test targets; permission reproduction uses disposable owner VMs and runtime-generated nonproduction keys only.
+
+Resumed clean owner-authorized worktree /home/mcamp/code/crystal-forge/TASK-502-private-file-permissions at 879a7210. Canonical plan/lock retained. Integration impact: extend existing delivery-lifecycle publication/restart coverage with runtime inside-tree private credentials, real activation and service-identity SSH/cache probe; retain all prior assertions. Genuine Upgrade remains independent and predecessor inputs unchanged. Current module also recursively chmod/chowns .cache and .config in both server/builder preStart; these directly related mechanisms must become directory-only to prevent restart from undoing preservation. No browser-visible changes. Normal owner gates will run serially with --max-jobs 1 --cores 2. Dev has only existing untracked owner locks/session notes; no integration changes will be touched. No known cf-it VMs/test-driver invocations were running at initial capacity inspection.
 <!-- SECTION:NOTES:END -->
