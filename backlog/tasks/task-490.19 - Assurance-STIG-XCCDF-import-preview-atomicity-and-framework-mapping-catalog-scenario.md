@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-23 16:20'
+updated_date: '2026-10-23 16:23'
 labels:
   - testing
   - integration
@@ -74,6 +74,8 @@ Focused verification after composition: `nix build .#checks.x86_64-linux.integra
 4. Verify syntax/input facts in the dedicated worker; coordinator composes into the existing Assurance lifecycle and executes its normal owner. Preserve any functional failure and escalate new defects rather than weakening accepted criteria.
 
 Owner-authorized narrow production repair (2026-10-23): preserve the existing benchmark-version regression; populate ParsedRule.version only from direct namespace-qualified Rule/version; protect Benchmark/version from unrelated nested/foreign content. Add focused parser/adapter tests using existing test homes and retain independent real XML facts. Inspect immutable reimport consequences and document the bounded historical-import limitation. Verify focused Rust tests through Nix and relevant reimport tests only through the repository's verified isolated DB launcher. No VM or competing service stack. Commit this repair separately from b9bef89f.
+
+Coordinator-authorized test-prerequisite correction: change only the cfg(test) shared_native_plan expression from legacy cfg.config.* to the documented canonical config.* binding. Keep production validators and all idempotency/immutability/negative-test assertions unchanged. Run the exact foreign shared-reimport test plus the prior three reimport/conflict selections in a fresh invocation-owned cve-test PostgreSQL cluster on 35432; do not touch occupied 35433. Commit separately from 81ed0959.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -101,4 +103,6 @@ Committed narrow repair separately as 81ed0959a5752ced983058dcab2abe84f36a48b3 (
 Exact Rust test environment: nix develop --command bash -c with SQLX_OFFLINE=true CARGO_NET_OFFLINE=true CARGO_TARGET_DIR=/tmp/opencode/task49019-target CARGO_PROFILE_TEST_DEBUG=0 CARGO_PROFILE_DEV_DEBUG=0 CARGO_INCREMENTAL=0; cargo test --locked --offline --manifest-path packages/default/Cargo.toml -p cf-server --lib compliance::xccdf:: -- --test-threads=2 => 297 passed/1 ignored, exit 0. Targeted parser and adapter selections also passed; cargo test with --doc compliance::xccdf::parser::parse_xccdf passed. Initial 120-second cold compilation timed out; subsequent completed checks used the same worker-owned compilation directory, not a global compiled-artifact fallback.
 
 Database verification used existing devScripts.state-machine-test launcher with a temporary process-compose command selection override, existing database-environment.sh safety/membership guard, repository migrations, no substitutes/fallback, and the same worker compilation directory. Logs: /tmp/opencode/task49019-db-tests.log (retained foreign shared-reimport fixture failure, exit 101) and task49019-db-conflict-tests.log (three remaining exact selections passed, exit 0). Independent XML map/source-byte proof: task49019-source-facts.log. Other logs: task49019-parser-tests.log, task49019-adapter-tests.log, task49019-xccdf-tests.log, task49019-rustdoc.log, task49019-knowledge-final.log. No VM or normal Assurance run was started; coordinator owns that evidence.
+
+Confirmed contract before fixture edit: deployment-policy-checks.md lines 87-94 names config.* canonical; xccdf/importer.rs lines 523-539 explicitly rejects missing config. or cfg.config. in native custom import-plan assertions. Existing native_custom_check_requires_config_binding_and_preserves_assertions and native_custom_check_rejects_non_cfg_expression tests retain the accepted/rejected cases. No contract conflict prevents authoring canonical input.
 <!-- SECTION:NOTES:END -->
