@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-22 22:20'
+updated_date: '2026-10-23 15:49'
 labels:
   - testing
   - integration
@@ -72,6 +72,8 @@ Focused verification after composition: `nix build .#checks.x86_64-linux.integra
 2. Implement only named stig-import.py/.cjs and owner-local fixtures: actual preview with no policy/framework writes, real import/version preservation, visible malformed-input rejection and real UI requirement mapping with SQL/reload where approved.
 3. Consume same-scenario controller/Admin helpers; expose typed facts/receipts and browser-phase interfaces to the coordinator. No new scenario/check, seeded outcome, mocked CF success, product fix, shared helper or registration change.
 4. Verify syntax/input facts in the dedicated worker; coordinator composes into the existing Assurance lifecycle and executes its normal owner. Preserve any functional failure and escalate new defects rather than weakening accepted criteria.
+
+Owner-authorized narrow production repair (2026-10-23): preserve the existing benchmark-version regression; populate ParsedRule.version only from direct namespace-qualified Rule/version; protect Benchmark/version from unrelated nested/foreign content. Add focused parser/adapter tests using existing test homes and retain independent real XML facts. Inspect immutable reimport consequences and document the bounded historical-import limitation. Verify focused Rust tests through Nix and relevant reimport tests only through the repository's verified isolated DB launcher. No VM or competing service stack. Commit this repair separately from b9bef89f.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -85,4 +87,6 @@ Current readiness: controller prerequisite bba718be passed. Await selection, fix
 Owner's wrap-up explicitly selects dependency-ready TASK-490 functional work; this controller-only contribution is selected, not blocked by D2 or target-mode coverage. Existing approved preview/import atomicity, input-derived identity and mapping criteria remain unchanged. Use the existing Assurance lifecycle; coordinator retains composition/normal-owner execution and all production files remain read-only for this test contribution.
 
 Preflight: clean dedicated worktree/branch TASK-490.19-stig-import at0666c65e7e4bd424568f0800cdb5781c4d665556, based on current MR integration. Task-owned lock created. Coordinator retains main worktree, preview, composition and all VM ownership. No main integration worktree registered; existing dev untracked operational files and all other ownership remain preserved. Worker may not start a competing stack or VM.
+
+The owner explicitly expands this worker's write scope for the observed 104 null rule.version values: existing xccdf/parser.rs and existing adapter/tests, necessary independent fixture facts, and directly related import knowledge only. Official XML, identity/schema/auth/policy/UI behavior, shared integration composition, coverage-map/contract/verification files remain unchanged. Coordinator owns the normal Assurance run.
 <!-- SECTION:NOTES:END -->
