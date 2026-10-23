@@ -129,11 +129,19 @@ exports.run = async (ctx) => {
       await expect(drawer).toBeVisible();
       const backdrop = page.getByTestId("mobile-drawer-backdrop");
       await expect(backdrop).toBeVisible();
+      await expect(backdrop).toHaveCSS("position", "fixed");
+      await expect(backdrop).toHaveCSS("z-index", "40");
+      await expect.poll(() => backdrop.evaluate((el) => {
+        const r = el.getBoundingClientRect();
+        return r.x === 0 && r.y === 0 && r.width === innerWidth && r.height === innerHeight;
+      })).toBe(true);
       // Click the exposed overlay outside the drawer through normal hit testing.
       const drawerBounds = await drawer.boundingBox();
       const backdropBounds = await backdrop.boundingBox();
       expect(drawerBounds).not.toBeNull();
       expect(backdropBounds).not.toBeNull();
+      expect(drawerBounds.x + drawerBounds.width).toBeLessThan(page.viewportSize().width);
+      await ctx.screenshot("shell-mobile-open-overlay");
       const overlayX = drawerBounds.x + drawerBounds.width
         + (page.viewportSize().width - drawerBounds.x - drawerBounds.width) / 2;
       await backdrop.click({ position: {
@@ -148,6 +156,22 @@ exports.run = async (ctx) => {
       await atPath("/systems");
       await expect(heading("Systems")).toBeVisible();
       await expect(drawer).toHaveCount(0);
+      await expect(backdrop).toHaveCount(0);
+      // Normal page and header clicks must work again after link dismissal.
+      await menu.click();
+      await expect(drawer).toBeVisible();
+      await link(drawer, "/profile").click();
+      await expect(heading("Profile & Preferences")).toBeVisible();
+      await expect(drawer).toHaveCount(0);
+      await expect(backdrop).toHaveCount(0);
+      await menu.click();
+      await drawer.getByRole("button", { name: "Close menu", exact: true }).click();
+      await expect(drawer).toHaveCount(0);
+      await expect(backdrop).toHaveCount(0);
+      await ctx.screenshot("shell-mobile-page-restored");
+      await page.getByRole("main").getByRole("button", { name: "Sign out", exact: true }).click();
+      await expect(page).toHaveURL(ctx.url("/login"));
+      await expect(page.getByRole("button", { name: "Sign In", exact: true })).toBeVisible();
     } else if (phase === "sidebarPersistence") {
       // Normalize only through the UI, preserving the independent context's
       // initial server state until preference bootstrap has completed.
