@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-23 08:11'
+updated_date: '2026-10-23 08:17'
 labels:
   - testing
   - integration
@@ -64,6 +64,8 @@ Run the normal Upgrade aggregate and inspect actual old/current identities, norm
 5. Execute focused/normal Upgrade gates, inspect actual versions/commands/rows/target outcomes and failures, then integrate meaningful owner/CI wiring into MR335. No placeholder, new framework, fifth check, invented window/refusal, or unapproved production fix. Coordinator performs integrated four-owner/lower-level/hosted verification.
 
 User-directed review correction: retain all thirteen cases and real-version operations; replace the invented HTTP-4xx-only expectation with D2's fail-closed authority/no protected mutation contract. Bind the negative request to a real successful current-server deployment and unchanged source inputs, require completed native evaluation, actual nonce-bearing realization, and actual required-publication failure before interpreting any status. Inspect request intent binding plus system/pending/event/target state immediately and after a real signed delivery poll. Record HTTP500 without changing production API behavior. Add metadata-only credential UID/GID/path diagnostics and fail old activation on the observed SHA/store-path rejection rather than extending its timeout.
+
+Coordinator contract correction (current user instruction): D2 AC2 requires real predecessor-created completed records/history, not a completed predecessor-server manual commit deployment. Rename the producer case to assert genuine old native realization, signed publication, completed job/publication relationships and authenticated installed-state observation/history. Remove the old-old manual deployment experiment from the mandatory baseline, not as an expected failure or skip; retain its failed raw artifacts and documented predecessor limitation. Retain all thirteen meaningful cases, the complete same-installation migration/recovery/fencing/publication assertions, and mandatory old-agent→current-server actual activation/report before deliberate agent replacement. Execute exactly one normal Upgrade aggregate after this correction.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -126,4 +128,6 @@ Runtime metadata confirmed, without key contents: old agent effective UID/GID0:0
 Publication-negative proof completed with actual HTTP500 internal_error/Composite deployment authorization failed. Same successful positive-control SystemID cec741e6-760e-4a1e-be4a-3df2450a8d2a; mandatory signed Nix destination1; new valid native candidate a6547db7d1170c1e685fc989acec6bb288acab8e; actual realization /nix/store/8csci5rsnl4wrf2xrycryzgwzb52c9cg-nixos-system-targetA-test followed by genuine post-build signing/publication failure. Required-publication job stayed failed; no completed publication; root absent from cache and target. Request reservation existed and was bound to correct system/commit/action, remained reserved with deployment_id=NULL. Protected system policy/identity/desired target, pending deployment IDs/status/delivered_at, candidate events, running/profile paths and nonce marker were identical before/after and after a real signed agent poll reporting No deployment needed. This independently proves fail-closed authority; HTTP500 alone is not proof or a manufactured production defect.
 
 The new current operation is actual and complete: receipt currentOperationCompleted=true; running and persistent profile /nix/store/0jwrwvk8nq6a5nj5cgkridj5nqg7p8kf-nixos-system-targetA-test; marker current-7aa638dd-e484-43c4-8a7c-b45349ad7f09; correlated succeeded deployment14ff0463-510b-4139-a764-29ae5d8663af. Original signed observations are verified through SQL identity preservation and normal agent-events API, not falsely promoted into canonical successful deployment events. Current history UI contains genuine current-server deployment success. The prior browser assertion and SQL references to API-only commit_hash/outcome columns were test errors corrected in bc6aa6dc; all thirteen cases remain.
+
+Canonical description/AC review found no requirement for an old completed DEPLOYMENT record: AC2 says representative credentials, registered system/signing identities, completed records and history relationships intact; AC4 specifically guarantees the exact predecessor agent with the current server during rollout. The old commit_sha→old-agent activation promise was added by this test implementation. This is an approved test scope correction, with unchanged predecessor pin/order/policy and no production changes.
 <!-- SECTION:NOTES:END -->
