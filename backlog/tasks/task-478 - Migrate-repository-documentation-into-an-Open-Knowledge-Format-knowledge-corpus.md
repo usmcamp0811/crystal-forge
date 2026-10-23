@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - claude-agent
 created_date: '2026-10-04 03:43'
-updated_date: '2026-10-04 18:19'
+updated_date: '2026-10-23 14:32'
 labels:
   - documentation
   - okf
@@ -51,6 +51,16 @@ Continue MR !332 at current branch HEAD 045f4582eb0fdc76e7f8d57d1111be0d212b852e
 <!-- SECTION:NOTES:BEGIN -->
 MR continuation state independently checked. Current HEAD and pipeline SHA: 045f4582eb0fdc76e7f8d57d1111be0d212b852e; source branch TASK-478-okf-knowledge-migration; target dev; merge-base and migration baseline 3b23d36f24fbf9ba05045c43b5325fd000dbd9b2; pinned OKF repo commit ad30107c31c06aec8a7d5636e0d1058118604e6f, SPEC.md blob c06e3eede0c910d0ecf12524c34204156f8795ac. MR !332 discussions endpoint returned []. Current diff worktree was clean at takeover. Original pipeline !2991 SHA 045f4582, status success-with-warnings; web-ui-check failed but allow_failure=true. Existing flake package registered no required check or CI job; default.nix source is `./.` relative to checks/okf-knowledge and is incorrect. Current coverage audit remains whitespace-normalized set membership and is not integrated with the Nix check. Added immutable-baseline inventory tool; 825 Markdown-family source paths and 583 selected image/diagram assets inventoried at baseline 3b23d36f. It currently reports all entries classified; block-preservation and current-file inventory remain to implement. Three disjoint diagram conversion groups created 73 audited Mermaid replacements; scanner currently reports zero candidates, render pending. Full CI/Nix integration and semantic verification remain outstanding.
 <!-- SECTION:NOTES:END -->
+
+## Comments
+
+<!-- COMMENTS:BEGIN -->
+author: @openai
+created: 2026-10-23 14:32
+---
+TASK-502 verification found a pre-existing hard failure in okf-knowledge at clean 879a7210226ba3cc1851c35f435430fef162865b: `meta/migration-manifest: checks/integration-upgrade/README.md has no manifest entry`. Normal `nix build 'git+file:///home/mcamp/code/crystal-forge/TASK-502-private-file-permissions?rev=879a7210226ba3cc1851c35f435430fef162865b#okf-knowledge' -L --builders '' --max-jobs 1 --cores 2` exits 1. All 58 validator unit tests and 215 Mermaid parses pass; the missing entry is the sole reported problem. The TASK-502 corrected tree fails with the same sole problem. Logs: /tmp/opencode/task502-base-knowledge.log and /tmp/opencode/task502-knowledge.log. No manifest/validator changes are included in TASK-502's permission-only repair; please retain this failure until the README classification is resolved in the knowledge migration scope.
+---
+<!-- COMMENTS:END -->
 
 ## Final Summary
 
