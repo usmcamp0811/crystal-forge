@@ -91,8 +91,13 @@ define an agent compatibility expiry. Current recovery uses the existing
 exact-commit re-evaluation and terminal-job retry APIs.
 
 Operator-managed cache credentials use `/var/lib/upgrade-credentials`, outside
-the application's recursive tmpfiles rule. The scenario checks their private
-file modes after activation and uses the same credentials for publication.
+the predecessor's recursive tmpfiles rule. The genuine predecessor module stays
+unchanged. The scenario checks private file modes after activation and uses the
+same credentials for publication. This outside-tree control does not prove the
+current module's inside-tree permission correction. Delivery's existing
+`credential-permissions.py` fragment owns that activation/restart proof. See the
+[operator credential upgrade guidance](../../docs/knowledge/operations/nixos-module-configuration.md#private-credential-permissions-and-upgrades)
+for prevention, inspection, restoration and possible exposure assessment.
 
 Release history consists of observed state rows and administrator audit records;
 the release predates `system_events`. Preserve those original identities and

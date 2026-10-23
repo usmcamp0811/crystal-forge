@@ -99,7 +99,13 @@ with case("api-builders-register-distinct-runtime-credentials"):
     # Both builder publication and the controller's normal background closure
     # publication need real credentials. They share only public trust material.
     for node, name in ((controller, "controller"), (builderA, "builderA"), (builderB, "builderB")):
-        node.succeed("umask 077; ssh-keygen -q -t ed25519 -N '' -f /var/lib/crystal-forge/cache-ssh && "
+        if name == "builderB":
+            node.succeed("install -d -m 0755 /run/cf-it-secrets && "
+                         "ln -s /run/cf-it-secrets/cache-ssh /var/lib/crystal-forge/cache-ssh && "
+                         "ln -s /run/cf-it-secrets/cache-ssh.pub /var/lib/crystal-forge/cache-ssh.pub")
+        key_path = ("/run/cf-it-secrets/cache-ssh" if name == "builderB"
+                    else "/var/lib/crystal-forge/cache-ssh")
+        node.succeed("umask 077; ssh-keygen -q -t ed25519 -N '' -f " + key_path + " && "
                      "nix-store --generate-binary-cache-key " + shlex.quote("delivery-" + name) +
                      " /var/lib/crystal-forge/cache-sign.key /var/lib/crystal-forge/cache-sign.pub && "
                      "chown crystal-forge:crystal-forge /var/lib/crystal-forge/cache-ssh* "
@@ -113,7 +119,9 @@ with case("api-builders-register-distinct-runtime-credentials"):
         # user's normal OpenSSH configuration pins identity and host trust.
         _vm_write(node, "/var/lib/crystal-forge/.ssh/config", "Host services\n"
                   "  User cache\n  IdentityFile /var/lib/crystal-forge/cache-ssh\n"
-                  "  IdentitiesOnly yes\n  BatchMode yes\n  StrictHostKeyChecking yes\n"
+                   "  IdentitiesOnly yes\n  IdentityAgent none\n  BatchMode yes\n"
+                   "  PasswordAuthentication no\n  KbdInteractiveAuthentication no\n"
+                   "  StrictHostKeyChecking yes\n"
                   "  UserKnownHostsFile /var/lib/crystal-forge/cache-known-hosts\n")
         node.succeed("chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.ssh && "
                      "chmod 700 /var/lib/crystal-forge/.ssh && chmod 600 /var/lib/crystal-forge/.ssh/config")

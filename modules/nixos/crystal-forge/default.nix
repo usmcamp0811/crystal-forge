@@ -2236,6 +2236,12 @@ in {
 
     users.groups.crystal-forge = {};
 
+    # SECURITY: Manage only these named directories, never their descendants.
+    # Credentials can have caller-managed ownership and restrictive modes,
+    # including secret-manager symlinks. Recursive Z/chmod/chown would expose
+    # private files and make OpenSSH reject otherwise valid cache identities.
+    # The generated config and default generated keys have explicit file
+    # lifecycles in makeConfigScript; caller-provided keys are not normalized.
     systemd.tmpfiles.rules = [
       "d /var/lib/crystal-forge 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.cache 0755 crystal-forge crystal-forge -"
@@ -2251,7 +2257,6 @@ in {
       "d /var/lib/crystal-forge/.local 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.local/share 0755 crystal-forge crystal-forge -"
       "d /var/cache/crystal-forge/gc-roots 0755 crystal-forge crystal-forge -" # <-- ADD THIS
-      "Z /var/lib/crystal-forge/ 0755 crystal-forge crystal-forge -"
     ] ++ lib.optional cfg.server.enable
       "d ${toString cfg.build.source_archive_root} 0750 crystal-forge crystal-forge -";
 
@@ -2701,12 +2706,8 @@ in {
         ${configScriptBuilder}
         mkdir -p /var/lib/crystal-forge/.config/attic
 
-        # Ensure proper ownership - do this AFTER creating all directories
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.cache
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config
-        # Ensure proper permissions
-        chmod -R 755 /var/lib/crystal-forge/.cache
-        chmod -R 755 /var/lib/crystal-forge/.config
+        # tmpfiles owns directory setup. Preserve descendant credential modes
+        # and ownership, including files managed by an external secret manager.
 
         # Source the attic environment if it exists
         if [ -f ${cfg.env-file} ]; then
@@ -3002,10 +3003,7 @@ in {
         mkdir -p /run/crystal-forge
         ${configScriptServer}
         mkdir -p /var/lib/crystal-forge/.config/attic
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.cache
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config
-        chmod -R 755 /var/lib/crystal-forge/.cache
-        chmod -R 755 /var/lib/crystal-forge/.config
+        # tmpfiles owns directory setup; do not rewrite descendant credentials.
       '';
 
       serviceConfig = {

@@ -2,7 +2,7 @@
 # native evaluation and authorized execution share exact identities through
 # receipts. Publication is a real prerequisite for native builder completion;
 # this scenario also proves manual activation and retained History rollback.
-# Other adapters, activation modes and restart/drift recovery remain open.
+# Other adapters, activation modes and broader restart/drift recovery remain open.
 {harness, owner, name}: let
   inherit (harness) pkgs lib inputs;
   modulePath = inputs.self + "/modules/nixos/crystal-forge";
@@ -133,6 +133,9 @@ in harness.mkScenario {
   nodes = {
     controller = { ... }: {
       imports = [(harness.roles.controller {browser = true;}) prepared];
+      # nixos-test-base disables switching. This lifecycle exercises the real
+      # installed activation path on its existing service nodes.
+      system.switch.enable = true;
       environment.systemPackages = [pkgs.git];
       # The production automatic reserve is 4 GiB, equal to this entire VM.
       # Use its documented fixed-worker budget for one configuration instead.
@@ -164,11 +167,18 @@ in harness.mkScenario {
     };
     builderA = {...}: {
       imports = [(harness.roles.builder {name = "builderA";}) prepared];
+      system.switch.enable = true;
       # Retain native copy diagnostics for this controlled local SSH store.
       # Private keys remain files; no external cache credentials are supplied.
       systemd.services.crystal-forge-builder.environment.RUST_LOG = lib.mkForce "info,cf_builder::derivations::cache=debug";
     };
-    builderB = {...}: {imports = [(harness.roles.builder {name = "builderB";}) prepared];};
+    builderB = {...}: {
+      imports = [(harness.roles.builder {name = "builderB";}) prepared];
+      system.switch.enable = true;
+      # Supported caller-provided SSH path, linked to a runtime secret outside
+      # the state tree. Other publishers retain ordinary inside-tree keys.
+      services.crystal-forge.auth.ssh_key_path = "/var/lib/crystal-forge/cache-ssh";
+    };
     targetA = {...}: {
       imports = [(harness.roles.target {}) offlineNetwork ../fixtures/target-baseline.nix ../fixtures/cold-acquisition.nix];
       # Share immutable runtime prerequisites, not recipes or runtime candidates.
@@ -190,11 +200,14 @@ in harness.mkScenario {
   script = pkgs.writeText "delivery-lifecycle.py" (
      builtins.readFile ./delivery-lifecycle.py + "\n"
      + builtins.readFile ./fragments/source-build.py + "\n"
-      + builtins.readFile ./fragments/publication.py + "\n"
+       + builtins.readFile ./fragments/publication.py + "\n"
       + builtins.readFile ./fragments/cache-acquisition.py + "\n"
      + builtins.readFile ./fragments/network-boundary.py + "\n"
      + builtins.readFile ./fragments/activation.py + "\n"
-     + builtins.readFile ./fragments/recovery.py
+      + builtins.readFile ./fragments/recovery.py + "\n"
+      # Restarts establish new builder sessions. Run after consumers of the
+      # earlier execution-session receipts, retaining those original assertions.
+      + builtins.readFile ./fragments/credential-permissions.py
   );
   browserSpecs = let
     activation = ./fragments/activation.cjs;

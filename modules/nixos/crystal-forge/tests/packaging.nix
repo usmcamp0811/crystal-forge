@@ -153,6 +153,29 @@
   };
   generatedConfigCases = validProxyConfigs
     // lib.mapAttrs (_: host: host.config) evaluatorSystems;
+  # These structural checks guard both permission entry points. Delivery's
+  # real activation/restart case proves file preservation and cache usability.
+  permissionCases = {
+    namedDirectories = lib.all (rule:
+      !(lib.hasInfix "/var/lib/crystal-forge" rule)
+      || lib.hasPrefix "d " rule
+      || rule == "f /var/lib/crystal-forge/config.toml 0600 crystal-forge crystal-forge - -")
+      moduleConfig.systemd.tmpfiles.rules;
+    generatedConfig = lib.elem
+      "f /var/lib/crystal-forge/config.toml 0600 crystal-forge crystal-forge - -"
+      moduleConfig.systemd.tmpfiles.rules;
+    privateSshDirectory = lib.elem
+      "d /var/lib/crystal-forge/.ssh 0700 crystal-forge crystal-forge -"
+      moduleConfig.systemd.tmpfiles.rules;
+    serviceSetup = lib.all (service:
+      service.serviceConfig.User == "crystal-forge"
+      && service.serviceConfig.Group == "crystal-forge"
+      && !(lib.hasInfix "chmod -R" service.preStart)
+      && !(lib.hasInfix "chown -R" service.preStart)) [
+        moduleConfig.systemd.services.crystal-forge-server
+        moduleConfig.systemd.services.crystal-forge-builder
+      ];
+  };
   moduleValidation = assert proxyCases.falseEmpty.failures == [] && proxyCases.falseEmpty.evaluates;
   assert proxyCases.trueEmpty.failures == [proxyAssertionMessage] && !proxyCases.trueEmpty.evaluates;
   assert proxyCases.trueAllowed.failures == [] && proxyCases.trueAllowed.evaluates;
@@ -160,10 +183,12 @@
   assert proxyCases.serverDisabled.failures == [] && proxyCases.serverDisabled.evaluates;
   assert lib.all (valid: valid) (builtins.attrValues evaluatorCases.valid);
   assert lib.all (results: lib.all (valid: !valid) results) (builtins.attrValues evaluatorCases.invalid);
+  assert lib.all (valid: valid) (builtins.attrValues permissionCases);
     ''
       mkdir -p "$out"
       cp ${pkgs.writeText "proxy-assertion-results.json" (builtins.toJSON proxyCases)} "$out/assertions.json"
       cp ${pkgs.writeText "evaluator-option-results.json" (builtins.toJSON evaluatorCases)} "$out/evaluator-options.json"
+      cp ${pkgs.writeText "permission-contract-results.json" (builtins.toJSON permissionCases)} "$out/permissions.json"
       # Intercept only config-copy filesystem operations. Run the generated
       # module script unchanged; never write to the host's /var/lib paths.
       mkdir() { test "$*" = '-p /var/lib/crystal-forge'; }
