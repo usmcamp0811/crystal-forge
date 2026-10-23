@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-23 05:20'
-updated_date: '2026-10-23 13:12'
+updated_date: '2026-10-23 13:47'
 labels:
   - security
   - nixos
@@ -60,4 +60,6 @@ Owner explicitly authorized the narrow current-module permission correction, run
 Preflight: clean dedicated TASK-502-private-file-permissions branch/worktree from reviewed real Upgrade879a7210226ba3cc1851c35f435430fef162865b, preserving its genuine predecessor source and passing 13-case tree. Task lock recorded. Main coordinator worktree retains only its own STIG/analysis changes. Existing task preview/default development databases are forbidden test targets; permission reproduction uses disposable owner VMs and runtime-generated nonproduction keys only.
 
 Resumed clean owner-authorized worktree /home/mcamp/code/crystal-forge/TASK-502-private-file-permissions at 879a7210. Canonical plan/lock retained. Integration impact: extend existing delivery-lifecycle publication/restart coverage with runtime inside-tree private credentials, real activation and service-identity SSH/cache probe; retain all prior assertions. Genuine Upgrade remains independent and predecessor inputs unchanged. Current module also recursively chmod/chowns .cache and .config in both server/builder preStart; these directly related mechanisms must become directory-only to prevent restart from undoing preservation. No browser-visible changes. Normal owner gates will run serially with --max-jobs 1 --cores 2. Dev has only existing untracked owner locks/session notes; no integration changes will be touched. No known cf-it VMs/test-driver invocations were running at initial capacity inspection.
+
+Baseline probe preparation: first two normal Delivery invocations failed before activation because the probe inherited root's PATH and Nix rejected inaccessible /root/.nix-profile/bin/ssh. Those failures are retained, not permission-regression evidence. Explicit guest PATH/HOME corrected the probe. Third normal invocation successfully queried the real published output as UID/GID crystal-forge, then reproduced a directly related restart failure: recursive preStart chown attempts to change a root-owned secret-manager symlink under .config and fails EPERM. /run/current-system/activate alone does not execute tmpfiles in this pinned NixOS. Inspected nixpkgs system/boot/systemd/tmpfiles.nix: systemd-tmpfiles-resetup is the generated switch-to-configuration reactivation unit (ExecStart systemd-tmpfiles --create --remove --exclude-prefix=/dev). Regression now uses real switch-to-configuration test plus explicit reapplication of that generated unit for same-generation repeats. Production module remains unmodified while obtaining the required Z/0755/OpenSSH-failure baseline.
 <!-- SECTION:NOTES:END -->
