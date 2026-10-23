@@ -1,11 +1,11 @@
 ---
 id: TASK-502
 title: Preserve private credential permissions through NixOS activation
-status: To Do
+status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-23 05:20'
-updated_date: '2026-10-23 13:03'
+updated_date: '2026-10-23 13:04'
 labels:
   - security
   - nixos
@@ -36,6 +36,16 @@ Upgrade verification exposed an activation-time credential regression: an operat
 - [ ] #4 Applicable credential-storage and upgrade guidance describes the verified permission contract.
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Reproduce unmodified current generated tmpfiles/activation behavior with a runtime-generated service-owned private cache key inside /var/lib/crystal-forge, recording safe owner/group/mode/content digest and actual isolated SSH/cache failure. Inspect only directly related startup/activation permission mechanisms.
+2. Correct directory management nonrecursively; preserve legitimate private-file owner/group/mode/content and supported external/secret-managed/symlink paths. Keep fresh state/cache/work/log writes and CF-owned generated-key lifecycle intact; no blanket chmod/chown or relocation/root-service workaround.
+3. Extend existing Delivery lifecycle and focused module verification, not a new scenario/check. Prove real service-identity key use before/after actual activation, unrelated-user denial, actual authenticated cache read with fallback disabled, repeated activation/restart, fresh directories and external control, without chmod repair inside the test.
+4. Rerun affected normal Delivery and independent genuine Upgrade owner, inspect exact source/results and safe evidence. Keep failing baseline and no old-source modifications.
+5. Document prevention versus remediation, bounded checks/restoration through existing secret manager, exposure assessment and possible rotation/revocation without asserting compromise or automatically changing identities. Commit narrowly; integrate/hosted verification remains coordinator-owned.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
@@ -46,4 +56,6 @@ The original cache-key observation was an operator-created, crystal-forge-owned 
 Before any production implementation, verify the supported credential-placement contract. The bounded current-production component implicated by the original 0755 observation is modules/nixos/crystal-forge/default.nix tmpfiles permission handling. Any repair authority should be limited to preserving configured private-file ownership/modes through activation plus regression/docs; no old-source backport, protocol change, builder DB exception, or unrelated queue/retry changes are authorized by this discovery.
 
 Owner explicitly authorized the narrow current-module permission correction, runtime-generated inside-state-tree credential reproduction, real activation/cache use/restart regression, external/symlink control and bounded remediation/exposure guidance. No predecessor patch, new secret system, blanket recursive mode/ownership operation, root service, credential relocation as production fix, protocol/DB-policy change or unrelated permissions audit. The outside-directory Upgrade pass is independent evidence, not TASK502 proof.
+
+Preflight: clean dedicated TASK-502-private-file-permissions branch/worktree from reviewed real Upgrade879a7210226ba3cc1851c35f435430fef162865b, preserving its genuine predecessor source and passing 13-case tree. Task lock recorded. Main coordinator worktree retains only its own STIG/analysis changes. Existing task preview/default development databases are forbidden test targets; permission reproduction uses disposable owner VMs and runtime-generated nonproduction keys only.
 <!-- SECTION:NOTES:END -->
