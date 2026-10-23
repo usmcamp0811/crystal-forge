@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-23 05:20'
-updated_date: '2026-10-23 14:32'
+updated_date: '2026-10-23 14:57'
 labels:
   - security
   - nixos
@@ -17,6 +17,19 @@ references:
   - /tmp/opencode/task49023-e61a535a-evidence.tar.gz
   - >-
     /nix/store/0aia91nw74j1fl6cn7k0axb3a9ys06r9-vm-test-run-cf-it-upgrade-version-transition-run/journals
+  - /tmp/opencode/task502-evidence.tar.gz
+  - /tmp/opencode/task502-source-proof.json
+  - /tmp/opencode/task502-compact.json
+modified_files:
+  - modules/nixos/crystal-forge/default.nix
+  - modules/nixos/crystal-forge/tests/packaging.nix
+  - checks/integration-delivery/scenarios/delivery-lifecycle.nix
+  - checks/integration-delivery/scenarios/delivery-lifecycle.py
+  - checks/integration-delivery/scenarios/fragments/credential-permissions.py
+  - checks/integration-upgrade/README.md
+  - docs/knowledge/operations/nixos-module-configuration.md
+  - >-
+    docs/knowledge/security/builder-credential-boundary-key-management-and-audit-logging.md
 priority: high
 type: bug
 ordinal: 553000
@@ -30,10 +43,10 @@ Upgrade verification exposed an activation-time credential regression: an operat
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Existing private cache credentials retain owner-only file permissions and their contents across normal NixOS activation and server or builder restart.
-- [ ] #2 A configured authenticated cache remains usable after activation without an operator manually repairing file permissions.
-- [ ] #3 Focused regression evidence covers restrictive credential files within the service state directory and preserves generated agent or builder key handling.
-- [ ] #4 Applicable credential-storage and upgrade guidance describes the verified permission contract.
+- [x] #1 Existing private cache credentials retain owner-only file permissions and their contents across normal NixOS activation and server or builder restart.
+- [x] #2 A configured authenticated cache remains usable after activation without an operator manually repairing file permissions.
+- [x] #3 Focused regression evidence covers restrictive credential files within the service state directory and preserves generated agent or builder key handling.
+- [x] #4 Applicable credential-storage and upgrade guidance describes the verified permission contract.
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -70,4 +83,10 @@ Implemented current-module-only correction: remove recursive Z rule; remove recu
 Normal fixed Delivery gate passed exit0: 16 passed / 0 failed, all original cases retained; new permission case took 13.2s, total recorded case time 488.9s. Fresh VM/database/runtime keys and authored source nonce 8308f2c0-b9fc-4477-9381-a9b9d8da3767; output /nix/store/di50a223cyfi0xzyzqdbcrfq8adz4awa-nixos-system-targetA-test. Root /tmp/opencode/task502-fixed-delivery-root -> /nix/store/d067bahmrpdgpgg03108x9h20g9v17gz-vm-test-run-cf-it-delivery-delivery-lifecycle-run. Controller/builderA/builderB each UID:GID999:999; two real activation/tmpfiles and service restart cycles each, every cache probe exit0, nobody probes denied, all file/lstat owner/group/mode/SHA256 snapshots unchanged. Includes configured builderB external credential through root-owned symlink, root-owned .config secret-manager control, restrictive .cache/.config files, default generated Git keys and existing registered default builder API keys. Fresh work/tmp/build/cache/config writes and journald writes passed. Controller fixed key digest a878518f665ff4aa35af903d7f6a1da7fc04cb6478a17bf3405c17417050732f retained mode600. Full raw metadata and digest comparison: /tmp/opencode/task502-proof.json; compact summary /tmp/opencode/task502-compact.json.
 
 Focused packaging module evaluation returned true exit0; generated module-only runtime checks exit0. Knowledge validation is a retained hard failure: current corrected tree and explicit clean879a7210 both exit1 solely because checks/integration-upgrade/README.md has no migration manifest entry. Both run58 passing validator unit tests and parse215 Mermaid blocks with0errors. Reported on existing TASK-478 (matching manifest-completeness scope), no validator/manifest edits. Logs/status /tmp/opencode/task502-{module-eval,module-runtime,knowledge,base-knowledge}.*. Independent normal Upgrade gate now running serially after Delivery, using the same corrected tree and genuine unchanged predecessor. No known competing cf-it invocations were running at handoff between owners.
+
+Independent normal Upgrade gate passed exit0: 13 passed / 0 failed, all mandatory cases executed; total recorded case time610.3s. Fresh independent VM/database/runtime invocation, not reuse of the earlier owner result. Root /tmp/opencode/task502-upgrade-root -> /nix/store/6s00bp1z2fkg5cbkv9d089j5nx7cl941-vm-test-run-cf-it-upgrade-version-transition-run. Result records genuine predecessor tagv0.3.1 revisionf9dd6b9c79530d3f911203645207bf6251552aba and its exact package executables (manifest0.3.0), preserved identity/history/credentials, actual old-agent/current-server activation, deliberate agent rollout and fail-closed publication. Immutable input/package closures were reused; runtime evidence for required baseline5, fixed Delivery and Upgrade was freshly executed serially. All owner build commands used normal packages/ci/integration-owner-build.sh with max-jobs1 cores2.
+
+Committed narrow repair as e533859bf222a994d3da431249f452568fab2c5a (`TASK-502: Preserve private credentials through activation`). Dedicated worktree clean after commit. No push/MR/merge/deploy. Post-commit source proof confirms every committed changed file equals the actual fixed Delivery/Upgrade input snapshots; tested source metadata is879a7210-dirty with exact patchSHA256 0d2d916538e073ab814d080c04ad91dc74ead09c410aa652ebeb3d33a7c7e1c4. Baseline production module unchanged; current module blob f2fe2fd34bb599c1d4606edd3b7f34f5dfd1f78e -> 7ebe28020a163a308e524ef83df87b371b2523ee. Flake inputs/lock; production packages/default; Upgrade scenarios and fixtures; shared integration harness all unchanged. Source-documentation diff reviewed: permission invariant and explicit generated-file exceptions documented; operator guidance separates prevention/remediation/exposure assessment, no actual compromise claim or automatic identity/key replacement.
+
+Evidence archive /tmp/opencode/task502-evidence.tar.gz (3266018bytes), SHA256 bb0616c4441621ce6719d95ba91771764f738b3fc0b506dc8acb59271731fcc4. Contains source snapshots/patches, original exit statuses/logs, rooted results/journals/browser evidence, compact metadata/digest proof and earlier failed preparation attempts (separate from required baseline5). No runtime private key files copied; archive rejects private PEM material. /tmp/opencode/task502-archive.json maps all original rooted outputs. Known cf-it test invocations/VMs were absent after completion. Acceptance criteria locally proved; task remains In Progress under no-MR instruction. Remaining verification: retained pre-existing okf-knowledge manifest failure (confirmed cleanbase; TASK-478 comment), coordinator-owned full-flake/all-owner and exact-commit hosted CI. No full-flake/hosted pass is claimed.
 <!-- SECTION:NOTES:END -->
