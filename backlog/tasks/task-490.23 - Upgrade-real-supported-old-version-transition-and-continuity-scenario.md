@@ -1,14 +1,14 @@
 ---
 id: TASK-490.23
 title: 'Upgrade: real supported old-version transition and continuity scenario'
-status: Backlog
-assignee: []
+status: To Do
+assignee:
+  - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-21 08:24'
+updated_date: '2026-10-23 01:40'
 labels:
   - testing
   - integration
-  - blocked-decision
 dependencies:
   - TASK-490.7
 modified_files:
@@ -24,32 +24,36 @@ ordinal: 535000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Owning check: integration-upgrade. Contract: upgrade.continuity. Coordinator owns version-transition.nix, pinned old/current package wiring, shared roles, browserSpecs and explicit native registration. The child owns semantic version-transition.py/.cjs and immutable fixtures. No per-task derivation or cross-scenario mutable state is permitted.
+Owning check: integration-upgrade. Contract: upgrade.continuity. D2 is approved by the owner, not a remaining policy blocker. Predecessor is real Crystal Forge v0.3.1 at f9dd6b9c79530d3f911203645207bf6251552aba; local tag relationship verified. Pin actual source and required inputs, use genuine packages and normal supported configuration. Do not patch predecessor behavior or substitute current code/version strings, synthetic old schema, historical-looking seeded outcomes or another owner's live state.
 
-Current pushed checkpoint is 204a475287b62087e28d2e9e7f1b0ff2631daaf3, plus the continuing Assurance increment. Foundation startup and Rust-test blockers are resolved and are not active dependencies. Real native build/deployment/retained rollback capabilities passed locally at 9f53fade-dirty. Pipeline 2970142621 at clean204a4752 passed Access23 and isolated database525 but failed Delivery test plumbing; it is not a clean hosted rollback pass. Upgrade itself remains unimplemented and unexecuted.
+Approved controlled maintenance sequence: establish the predecessor and representative persisted state through real workflows; stop predecessor server-side writers/builders at the cutover boundary; upgrade builder packages/config but keep current builders stopped; start current server normally against the SAME installation/database, letting normal migrations run; verify readiness then start current API-only builders; exercise old-agent/current-server signed heartbeat/state and one actual ordinary Nix deployment; deliberately upgrade agents preserving registered system/signing identity/history. No concurrent old/new writers, old-builder/current-server window, post-cutover builder DB-credential exception, invented timed expiry or new version-refusal policy.
 
-D2 remains the specific decision gap. Recommended server predecessor: v0.3.1 at f9dd6b9c79530d3f911203645207bf6251552aba. The owner must approve or replace this pin and specify actual agent/builder revisions, operations, compatibility windows, start/expiry/refusal behavior and predecessor in-flight recovery outcomes. The proposal is builders upgraded before server cutover, with no old-builder/current-server window or database credential exception; old v0.3.1 agents may send signed heartbeats and perform the selected supported Nix deployment for 24 hours from successful current-server startup only if approved. This must reconcile AC4, which currently includes old builders. The v0.3.1 builder uses PostgreSQL even in nominal API mode. A tag does not grant a support promise or legacy-DB trust exception.
+Old-agent compatibility is limited to this exact approved pin and selected operations during the operator's agent rollout until its deliberate completion. Record actual executable/version/protocol identities; deployment must not replace the old agent before compatibility proof. Request acceptance is not target activation or reporting proof.
 
-After approval, run the actual predecessor package and its own migrations/API/UI against a fresh Upgrade database. Create identities, credentials, history and in-flight work through real workflows. Stop old writers, start the current package normally against the same PostgreSQL data directory, and let normal migrations run. Verify approved continuity/recovery, mixed-version operations/refusal and one new real operation. No synthetic old schema, truncated migrations, seeded successes, same-version restart substitute or empty owner.
+Preserve completed history/identity relationships and representative credentials. Establish queued/interrupted work through actual predecessor activity with controlled pause/stop/transport interruption. Recover through current execution, retaining logical identity/audit and legitimate successor-attempt relationships. Stale predecessor claims must not commit after replacement ownership; recovered operations must reach intended outcome without duplicate authoritative success or contradictory terminal history. Original evidence remains attributable. Incomplete publication and failed/missing evidence must not become deployment/completion authority. Physical retries need not execute exactly once. No new queue/recovery/compatibility framework.
 
-Use checks/integration-upgrade/scenarios/version-transition.{nix,py,cjs}. Run nix build .#checks.x86_64-linux.integration-upgrade.scenarios.version-transition -L and the normal integration-upgrade aggregate only after meaningful implementation exists. Record exact predecessor/current commits, platform, statuses, execution/reuse and artifacts. D2 blocks only dependent Upgrade cases; independent Assurance continues.
+Use one meaningful native Snowfall integration-upgrade owner with version-transition.{nix,py,cjs}, existing harness/roles/evidence and explicit registration. Preserve installed state across transition. No placeholder or per-criterion VM/check. Coordinator owns package/wiring/composition/CI; semantic cases and necessary immutable fixtures belong under this owner. D2 authorizes test/fixture/wiring implementation, not blanket production fixes. Any discovered compatibility/recovery defect keeps its correct failing assertion and requires applicable separate authority.
+
+Run the normal Upgrade aggregate and inspect actual old/current identities, normal migration, recovery, old-agent observation, deliberate agent upgrade and new current operation. Record exact inputs/commands/platform/exits/names/counts/fresh-or-reused/accessibility. Then integrated four-owner/lower-level/hosted verification is required. MR335 remains draft until all concrete merge blockers are resolved; no merge/deployment outside disposable tests.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The owner decision D2 names supported source release, compatibility window and pinned source
-- [ ] #2 Real old-release data survives in-place current-version migration with identities, credentials and history intact
-- [ ] #3 In-flight work recovers across version transition and one new operation completes
-- [ ] #4 Old agents/builders within the declared compatibility window remain usable
-- [ ] #5 The coordinator composes the fragments into one `version-transition` scenario; no separate derivation per implementation packet, and runtime evidence is recorded
+- [ ] #1 Approved D2 predecessor is v0.3.1 at f9dd6b9c79530d3f911203645207bf6251552aba with real packages, pinned required inputs and the recorded controlled maintenance sequence.
+- [ ] #2 Real predecessor-created data survives normal in-place current-server migration with representative credentials, registered system/signing identities, completed records and history relationships intact.
+- [ ] #3 Real queued/interrupted predecessor activity recovers through current ownership/retry without stale authoritative completion or duplicate authoritative success; incomplete publication remains unauthorized and one new current operation completes.
+- [ ] #4 Builders are upgraded before current-server cutover and held stopped until readiness with no old-builder/current-server operating window or DB-credential exception; the exact predecessor agent supports signed heartbeat/state and one actual ordinary Nix deployment during the operator's rollout, followed by deliberate agent upgrade preserving identity/history, without timed expiry or new version-refusal policy.
+- [ ] #5 Coordinator composes one real version-transition scenario under native integration-upgrade using existing harness/evidence, retains the same installed state, executes the normal owner gate and records exact versions, inputs, commands, outcomes and accessible evidence.
 <!-- AC:END -->
 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-D2 research inspected accepted release/support records and pinned historical builder source. No approved predecessor, client matrix or compatibility window was found. Git tag identity is not support policy. Candidate v0.3.1 resolves to f9dd6b9c79530d3f911203645207bf6251552aba; candidate v0.3.0 resolves to f4a53b850d84dc3f6b36444ec6e0f474d344735c.
+## Approved D2 decision
 
-A compact request proposes v0.3.1, builders upgraded before server cutover without a database-credential exception, and a 24-hour window for selected old-agent heartbeat and Nix deployment operations from successful current-server startup. The owner must approve or replace the pin and define expiry/refusal and in-flight recovery. The proposal must reconcile AC4's old-builder requirement. No compatibility window, Upgrade implementation or VM test has passed.
+Owner explicitly approved v0.3.1@f9dd6b9c79530d3f911203645207bf6251552aba and clarified the complete contract now in this description and amended AC4. `git rev-parse v0.3.1^{commit}` returned that exact commit in the coordinator tree. There is no24-hour assumption and no new version-refusal behavior. A tag alone is not support policy; this owner instruction is the approval. Compatibility/recovery have not been verified yet.
 
-Active guidance uses version-transition.{nix,py,cjs} and the matching focused gate. Foundation startup and earlier Rust-test failures are resolved historical evidence, not active blockers. Independent Assurance execution continued while D2 remained outstanding.
+## Historical proposals
+
+Earlier records lacked an accepted predecessor/window and proposed24hours; those proposals are superseded. v0.3.0@f4a53b850d84dc3f6b36444ec6e0f474d344735c is not selected. Historical old builder DB usage is permitted only inside the genuine predecessor phase, not after current-server cutover. Existing current-version migration rehearsals or restart tests are not genuine Upgrade proof.
 <!-- SECTION:NOTES:END -->
