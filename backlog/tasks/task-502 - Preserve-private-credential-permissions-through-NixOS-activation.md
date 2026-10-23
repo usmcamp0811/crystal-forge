@@ -4,6 +4,7 @@ title: Preserve private credential permissions through NixOS activation
 status: Backlog
 assignee: []
 created_date: '2026-10-23 05:20'
+updated_date: '2026-10-23 07:21'
 labels:
   - security
   - nixos
@@ -33,3 +34,13 @@ Upgrade verification exposed an activation-time credential regression: an operat
 - [ ] #3 Focused regression evidence covers restrictive credential files within the service state directory and preserves generated agent or builder key handling.
 - [ ] #4 Applicable credential-storage and upgrade guidance describes the verified permission contract.
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Review clarification requested during TASK-490.23: this permission observation is NOT the cause of the old-server activation failure. Unmodified f9dd6b9c deploy_system stores a commit SHA in systems.desired_target; its heartbeat handler returns that value unchanged; its root agent rejects it before cache copy with 'This is not a store path'. The same old agent accepts a resolved /nix/store path from the current server and activates successfully. Do not request current-agent or deployment-planner changes to repair this old-pair behavior.
+
+The original cache-key observation was an operator-created, crystal-forge-owned cache SSH identity under /var/lib/crystal-forge/cache-ssh. Both the predecessor and current NixOS module declare a recursive Z /var/lib/crystal-forge/ 0755 crystal-forge crystal-forge rule. The released agent has a separate root-owned /var/lib/crystal-forge-agent state directory (0750), /run/crystal-forge-agent runtime directory (0700), and a caller-supplied client.private_key path. Upgrade's agent key is root-owned at /var/lib/upgrade-identity/agent.key; cache credentials now start in /var/lib/upgrade-credentials and retain mode 0600 without post-activation chmod. New fixture diagnostics record actual effective UID/GID, configured path sources and stat metadata only, not key contents.
+
+Before any production implementation, verify the supported credential-placement contract. The bounded current-production component implicated by the original 0755 observation is modules/nixos/crystal-forge/default.nix tmpfiles permission handling. Any repair authority should be limited to preserving configured private-file ownership/modes through activation plus regression/docs; no old-source backport, protocol change, builder DB exception, or unrelated queue/retry changes are authorized by this discovery.
+<!-- SECTION:NOTES:END -->
