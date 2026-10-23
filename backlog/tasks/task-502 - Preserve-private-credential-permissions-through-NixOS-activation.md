@@ -1,10 +1,11 @@
 ---
 id: TASK-502
 title: Preserve private credential permissions through NixOS activation
-status: Backlog
-assignee: []
+status: To Do
+assignee:
+  - '@openai'
 created_date: '2026-10-23 05:20'
-updated_date: '2026-10-23 07:21'
+updated_date: '2026-10-23 13:03'
 labels:
   - security
   - nixos
@@ -43,4 +44,6 @@ Review clarification requested during TASK-490.23: this permission observation i
 The original cache-key observation was an operator-created, crystal-forge-owned cache SSH identity under /var/lib/crystal-forge/cache-ssh. Both the predecessor and current NixOS module declare a recursive Z /var/lib/crystal-forge/ 0755 crystal-forge crystal-forge rule. The released agent has a separate root-owned /var/lib/crystal-forge-agent state directory (0750), /run/crystal-forge-agent runtime directory (0700), and a caller-supplied client.private_key path. Upgrade's agent key is root-owned at /var/lib/upgrade-identity/agent.key; cache credentials now start in /var/lib/upgrade-credentials and retain mode 0600 without post-activation chmod. New fixture diagnostics record actual effective UID/GID, configured path sources and stat metadata only, not key contents.
 
 Before any production implementation, verify the supported credential-placement contract. The bounded current-production component implicated by the original 0755 observation is modules/nixos/crystal-forge/default.nix tmpfiles permission handling. Any repair authority should be limited to preserving configured private-file ownership/modes through activation plus regression/docs; no old-source backport, protocol change, builder DB exception, or unrelated queue/retry changes are authorized by this discovery.
+
+Owner explicitly authorized the narrow current-module permission correction, runtime-generated inside-state-tree credential reproduction, real activation/cache use/restart regression, external/symlink control and bounded remediation/exposure guidance. No predecessor patch, new secret system, blanket recursive mode/ownership operation, root service, credential relocation as production fix, protocol/DB-policy change or unrelated permissions audit. The outside-directory Upgrade pass is independent evidence, not TASK502 proof.
 <!-- SECTION:NOTES:END -->
