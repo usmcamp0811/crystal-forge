@@ -1,7 +1,7 @@
 ---
 id: TASK-490.23
 title: 'Upgrade: real supported old-version transition and continuity scenario'
-status: To Do
+status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
@@ -46,6 +46,16 @@ Run the normal Upgrade aggregate and inspect actual old/current identities, norm
 - [ ] #5 Coordinator composes one real version-transition scenario under native integration-upgrade using existing harness/evidence, retains the same installed state, executes the normal owner gate and records exact versions, inputs, commands, outcomes and accessible evidence.
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+1. Verify the approved exact predecessor source/tag and normal package/module/configuration interfaces; pin required inputs without modifying predecessor behavior or silently updating current inputs.
+2. Build one real version-transition scenario under the native Upgrade owner and existing harness/evidence. Establish representative persisted state plus queued/interrupted activity through actual predecessor workflows; preserve the same PostgreSQL installation and target identities.
+3. Implement controlled stop/fence boundary, upgraded-but-stopped builders, normal current-server migrations/readiness, then current API-only builders. Verify history/credentials/identity relationships and authoritative recovery, including stale claim/incomplete-publication rejection.
+4. Observe the genuine old agent signed heartbeat/state and actual selected Nix deployment before deliberate agent replacement; upgrade its package preserving signing/system identity and verify a new current operation.
+5. Execute focused/normal Upgrade gates, inspect actual versions/commands/rows/target outcomes and failures, then integrate meaningful owner/CI wiring into MR335. No placeholder, new framework, fifth check, invented window/refusal, or unapproved production fix. Coordinator performs integrated four-owner/lower-level/hosted verification.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
@@ -56,4 +66,6 @@ Owner explicitly approved v0.3.1@f9dd6b9c79530d3f911203645207bf6251552aba and cl
 ## Historical proposals
 
 Earlier records lacked an accepted predecessor/window and proposed24hours; those proposals are superseded. v0.3.0@f4a53b850d84dc3f6b36444ec6e0f474d344735c is not selected. Historical old builder DB usage is permitted only inside the genuine predecessor phase, not after current-server cutover. Existing current-version migration rehearsals or restart tests are not genuine Upgrade proof.
+
+Preflight: dedicated clean worktree/branch TASK-490.23-version-transition created from integration c21a0d512c8c9006c8373c62b48532459c8f6cc4; owner task lock recorded. Current application production source matches the accepted wrap-up baseline, with test-only STIG preparation already present. Main coordinator retains its STIG composition change and other ownership; no resetting/rebasing/overwriting occurred. No main integration worktree is registered. Use only invocation-owned disposable Upgrade VMs/database; existing task preview and persistent developer instances are forbidden targets.
 <!-- SECTION:NOTES:END -->
