@@ -62,6 +62,27 @@ expressions, install modules, or assign a bundle.
 The original package bytes and source provenance are retained. ZIP processing
 selects an XCCDF entry server-side and records the selected entry and hashes.
 
+### Benchmark releases and rule revisions
+
+The parser keeps direct XCCDF `Benchmark/version` and `Rule/version` values
+separate. A rule revision can be a non-numeric string such as `ANIX-00-000010`.
+Nested metadata, foreign-namespace elements, and sibling rules do not supply
+either value. An absent version is `null`; an empty direct version is an empty
+string. DISA requirement metadata retains the rule revision in `metadata.version`.
+The stable requirement key still comes from the DISA control identity, such as
+the enclosing `Group` ID. The rule revision does not replace that key.
+
+The rule-revision parser repair does not change source bytes or their SHA-256.
+It can change newly computed policy, requirement, and framework semantic digests
+because the canonical metadata now contains the source revision instead of `null`.
+The repair does not migrate or backfill existing imports. Exact-artifact
+reimport reuses the original imported records, including any old `null` rule
+revisions. A successful new preview does not mean those stored records changed.
+Importing different bytes for the same existing framework release can report
+`FRAMEWORK_RELEASE_CONFLICT` when the corrected metadata differs from the stored
+canonical content. The importer does not silently rewrite the existing release.
+This repair provides no automatic historical-import correction workflow.
+
 ## Importing CF-XCCDF
 
 CF-native imports reconcile by portable version identity and semantic digest:
