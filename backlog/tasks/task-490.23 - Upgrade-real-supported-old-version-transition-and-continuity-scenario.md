@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-23 01:40'
+updated_date: '2026-10-23 01:49'
 labels:
   - testing
   - integration
@@ -68,4 +68,6 @@ Owner explicitly approved v0.3.1@f9dd6b9c79530d3f911203645207bf6251552aba and cl
 Earlier records lacked an accepted predecessor/window and proposed24hours; those proposals are superseded. v0.3.0@f4a53b850d84dc3f6b36444ec6e0f474d344735c is not selected. Historical old builder DB usage is permitted only inside the genuine predecessor phase, not after current-server cutover. Existing current-version migration rehearsals or restart tests are not genuine Upgrade proof.
 
 Preflight: dedicated clean worktree/branch TASK-490.23-version-transition created from integration c21a0d512c8c9006c8373c62b48532459c8f6cc4; owner task lock recorded. Current application production source matches the accepted wrap-up baseline, with test-only STIG preparation already present. Main coordinator retains its STIG composition change and other ownership; no resetting/rebasing/overwriting occurred. No main integration worktree is registered. Use only invocation-owned disposable Upgrade VMs/database; existing task preview and persistent developer instances are forbidden targets.
+
+Resumed approved implementation in clean TASK-490.23-version-transition at c21a0d51. Verified canonical lock and local v0.3.1^{commit}=f9dd6b9c79530d3f911203645207bf6251552aba. dev has existing untracked task locks/session notes; no main worktree registered; left those untouched. Added exact HTTPS GitLab predecessor input with its release lock graph; no current input update requested. Genuine predecessor default package evaluates as crystal-forge-0.3.0 (the release source Cargo version, distinct from tag v0.3.1). Online preparation running tmux task49023-prepare, log/status /tmp/opencode/task49023-prepare.{log,status}, local --builders '' --max-jobs 1 --cores 2. No host application stack started. Impact: add upgrade.continuity/version-transition using existing harness, role topology and strict evidence gate; approved authority D2/AC4. Current source/library checks remain coordinator-owned.
 <!-- SECTION:NOTES:END -->
