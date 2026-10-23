@@ -12,6 +12,8 @@
 //   create, edit, cancel, duplicate: EnvironmentDraft,
 //   cancelName: string,
 //   optionalPolicy: {id: string(UUID), name: string, policy_type: string},
+//   pickerMinimumAssignablePolicies: number (>=13; seed prerequisite policies
+//     ordered before optionalPolicy, never the resulting environment assignment),
 //   invalidPolicyIds: string(UUID)[] (legacy invariant and absent identity)
 // }; EnvironmentDraft = {name: string, description: string, colorName: string,
 //   color_hex: string (#RRGGBB, uppercase persisted expectation),
@@ -210,12 +212,29 @@ async function assignOptionalEnvironmentPolicy(ctx) {
   // cannot authorize an assignment or turn a legacy built-in into a gate.
   const catalog = await catalogResponse;
   ctx.expect(catalog.status()).toBe(200);
-  const policy = (await catalog.json()).find((p) => p.id === config.optionalPolicy.id);
+  const assignable = (await catalog.json()).filter((p) => p.enabled && p.policy_type !== "require_cf_agent");
+  ctx.expect(config.pickerMinimumAssignablePolicies).toBeGreaterThan(12);
+  ctx.expect(assignable.length).toBeGreaterThanOrEqual(config.pickerMinimumAssignablePolicies);
+  // The independently authored target must be outside the old first-12 window.
+  ctx.expect(assignable.findIndex((p) => p.id === config.optionalPolicy.id)).toBeGreaterThanOrEqual(12);
+  const policy = assignable.find((p) => p.id === config.optionalPolicy.id);
   ctx.expect(policy).toMatchObject({ ...config.optionalPolicy, enabled: true });
   ctx.expect(policy.policy_type).not.toBe("require_cf_agent");
   const modal = await openEdit(ctx, config.create.name);
   await ctx.expect(modal.getByRole("button", { name: "Remove gate policy", exact: true })).toHaveCount(0);
+  const search = modal.getByPlaceholder(/^Search \d+ policies…$/);
+  await search.fill("cf-picker-no-such-policy-4903");
+  await ctx.expect(modal.getByRole("button", { name: config.optionalPolicy.name, exact: true })).toHaveCount(0);
+  await search.fill(config.optionalPolicy.name.toUpperCase());
+  await ctx.expect(modal.getByRole("button", { name: config.optionalPolicy.name, exact: true })).toBeVisible();
+  await ctx.screenshot("environment-form-policy-searched-beyond-twelve");
   await modal.getByRole("button", { name: config.optionalPolicy.name, exact: true }).click();
+  await search.fill("cf-picker-no-such-policy-4903");
+  await ctx.expect(modal.getByRole("button", { name: "Remove gate policy", exact: true }).locator("..")).toHaveText(config.optionalPolicy.name);
+  await search.fill("");
+  await ctx.expect(modal.getByRole("button", { name: config.optionalPolicy.name, exact: true })).toHaveCount(0);
+  ctx.emit("environmentForms.picker", { minimumAssignablePolicies: config.pickerMinimumAssignablePolicies,
+    targetId: config.optionalPolicy.id, beyondTwelve: true, selectionSurvivedSearch: true });
   await saveEnvironment(ctx, "optional", "PATCH", `/api/v1/environments/${ctx.receipts["environmentForms.environmentId"]}`,
     () => modal.getByRole("button", { name: "Save changes", exact: true }).click(), 200, [config.optionalPolicy.id]);
   await ctx.expect(form(ctx, true)).toHaveCount(0);

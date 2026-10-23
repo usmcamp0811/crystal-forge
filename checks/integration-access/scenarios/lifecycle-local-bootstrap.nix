@@ -145,6 +145,7 @@ in
           name = "Custom Check";
           policy_type = "custom_check";
         };
+        pickerMinimumAssignablePolicies = 13;
         invalidPolicyIds = [
           "00000000-0000-0000-0000-000000000001"
           "ffffffff-ffff-4fff-8fff-ffffffffffff"

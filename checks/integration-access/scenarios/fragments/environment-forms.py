@@ -8,6 +8,8 @@
 # DeleteEnvConfirm, AdminView.jsx AdminUserModal, reference source 77251b04.
 # Optional gates: approved EnvironmentsView.jsx at 6e4ea520 allows an empty set.
 # CF-agent enablement remains a global invariant, not an assignable gate.
+# TASK-490.3 authorizes searched selection beyond the former first-12 window.
+# Seed >=12 enabled prerequisite policies ordered before the authored target.
 # Extends access.configuration.admin/resources in lifecycle-local-bootstrap.
 # This fragment does not establish visual parity or unspecified outage states.
 #
@@ -93,6 +95,17 @@ def environment_forms_browser(phase):
 
 
 with case("environment-form-create-persists-exact-fields-and-reloads"):
+    # Unassigned catalog prerequisites discriminate the former first-12 picker.
+    # The browser must still create the environment and its actual assignment.
+    controller.succeed("runuser -u postgres -- psql -X -q -v ON_ERROR_STOP=1 "
+        "-d crystal_forge -c " + shlex.quote("""
+        INSERT INTO deployment_policies (id, name, description, policy_type, config, enabled)
+        SELECT ('49030000-0000-4000-8000-' || lpad(n::text, 12, '0'))::uuid,
+               'Access picker prerequisite ' || lpad(n::text, 2, '0'),
+               'Unassigned catalog prerequisite for searched selection',
+               'custom_check', '{}'::jsonb, true
+        FROM generate_series(1, 12) AS n
+        """))
     names = {environment_forms[key]["name"] for key in ("create", "edit", "cancel")}
     names.add(environment_forms["cancelName"])
     before_environment_rows = environment_forms_rows()
@@ -117,6 +130,16 @@ with case("environment-form-edit-persists-exact-fields-and-reloads"):
         "SELECT id::text AS id, name, policy_type, enabled FROM deployment_policies WHERE id = "
         + environment_forms_literal(environment_forms_optional_policy["id"]) + "::uuid"),
         [dict(environment_forms_optional_policy, enabled=True)], "authored optional gate exists and is enabled")
+    expect(environment_forms["pickerMinimumAssignablePolicies"] > 12,
+           "authored catalog lower bound discriminates the old first-12 restriction")
+    environment_forms_catalog = sql_json(controller,
+        "SELECT id::text AS id FROM deployment_policies "
+        "WHERE enabled AND policy_type <> 'require_cf_agent' "
+        'ORDER BY name COLLATE "C", id')
+    expect(len(environment_forms_catalog) >= environment_forms["pickerMinimumAssignablePolicies"],
+           "independent SQL confirms the authored catalog lower bound")
+    expect([row["id"] for row in environment_forms_catalog].index(environment_forms_optional_policy["id"]) >= 12,
+           "authored target lies beyond the old first-12 window in authoritative SQL order")
     environment_forms_browser("optional")
     environment_forms_assert_current(environment_forms["create"])
     expect_equal(environment_forms_policy_ids(), [{"policy_id": environment_forms_optional_policy["id"]}],
