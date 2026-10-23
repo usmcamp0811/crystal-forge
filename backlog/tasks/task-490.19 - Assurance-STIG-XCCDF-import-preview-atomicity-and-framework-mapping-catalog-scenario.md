@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-23 15:49'
+updated_date: '2026-10-23 16:17'
 labels:
   - testing
   - integration
@@ -89,4 +89,10 @@ Owner's wrap-up explicitly selects dependency-ready TASK-490 functional work; th
 Preflight: clean dedicated worktree/branch TASK-490.19-stig-import at0666c65e7e4bd424568f0800cdb5781c4d665556, based on current MR integration. Task-owned lock created. Coordinator retains main worktree, preview, composition and all VM ownership. No main integration worktree registered; existing dev untracked operational files and all other ownership remain preserved. Worker may not start a competing stack or VM.
 
 The owner explicitly expands this worker's write scope for the observed 104 null rule.version values: existing xccdf/parser.rs and existing adapter/tests, necessary independent fixture facts, and directly related import knowledge only. Official XML, identity/schema/auth/policy/UI behavior, shared integration composition, coverage-map/contract/verification files remain unchanged. Coordinator owns the normal Assurance run.
+
+Narrow parser repair implemented: direct namespace-qualified benchmark/rule version contexts and bounded direct-text capture; missing/empty semantics and source bytes/digest retained. Added default/prefixed namespace, nested/foreign version, multiple/missing/empty revision and text-limit tests; retained benchmark_version_not_clobbered_by_rule_versions unchanged. Added ordinary V1R2 expected map under the existing crate testdata directory, independently extracted/verified with stdlib ElementTree. Existing Assurance facts still require all 104/103 non-null source revisions.
+
+Focused verification: parser 44 passed/1 ignored; adapter 27 passed; complete compliance::xccdf:: selection 297 passed/1 ignored. Knowledge validation passed (192 concepts; 215 Mermaid blocks). Isolated launcher (verified fresh data directory and actual DB role) passed framework_version_release_conflict, framework_preview_matches_commit_release_digest_semantics, and cf_native_reimport_reuses_exact_identities, with expected=emitted=1 per selection and test_exit=compose_exit=0.
+
+Retained failure: existing phase_22_shared_creation_exact_reimport_is_idempotent failed before import at compliance_interchange.rs:4212, IMPORT_NATIVE_CHECK_INVALID (assertion expression must use canonical config binding). Expected=emitted=1; launcher test_exit=compose_exit=101. No unrelated fixture/product repair made. Exact-artifact foreign reimport statically returns original rows before normalization, so old null revisions remain; differing artifact bytes for the same release can conflict on corrected canonical metadata. No historical backfill/migration is introduced. Coordinator retains normal Assurance execution.
 <!-- SECTION:NOTES:END -->
