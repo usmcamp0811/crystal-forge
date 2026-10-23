@@ -472,6 +472,17 @@ SQL
     cargo test --offline --package cf-server --lib \
       queries::environments::tests::db_tests::optional_policy_sets_accept_empty_and_reject_invalid_without_changes \
       -- --ignored --exact --test-threads=1
+    # Rule-version parsing changed persisted framework metadata. These exact
+    # reimport, conflict and digest regressions protect identity immutability.
+    for frameworkRegression in \
+      queries::compliance_interchange::tests::phase_22_shared_creation_exact_reimport_is_idempotent \
+      queries::compliance_interchange::tests::cf_native_reimport_reuses_exact_identities \
+      queries::framework_requirements::tests::framework_version_release_conflict \
+      queries::framework_requirements::tests::framework_preview_matches_commit_release_digest_semantics
+    do
+      cargo test --offline --package cf-server --lib "$frameworkRegression" \
+        -- --ignored --exact --test-threads=1
+    done
 
     cargo test --offline --package cf-server --lib \
       handlers::api::poam::tests::http_requires_session_csrf_and_mutator_role \
