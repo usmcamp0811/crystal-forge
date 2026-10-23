@@ -2982,7 +2982,9 @@ fn EvalDrawerPolicyTab(
         move |(commit_id, live, _generation)| {
             let pinned = pinned_request.clone();
             async move {
-                loop {
+                // Native requests run once; only browsers repeat after the timer.
+                let mut poll_again = true;
+                while poll_again {
                     let result = if let Some(identity) = &pinned {
                         crate::api::client::fetch_eval_attempt_policy_matrix(
                             commit_id,
@@ -3017,8 +3019,7 @@ fn EvalDrawerPolicyTab(
                     // retries even when the endpoint fails immediately.
                     #[cfg(target_arch = "wasm32")]
                     TimeoutFuture::new(5_000).await;
-                    #[cfg(not(target_arch = "wasm32"))]
-                    break;
+                    poll_again = cfg!(target_arch = "wasm32");
                 }
             }
         },
