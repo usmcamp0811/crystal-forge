@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-24 23:04'
+updated_date: '2026-10-24 23:14'
 labels:
   - testing
   - integration
@@ -238,4 +238,6 @@ Normal state-machine verification /tmp/opencode/task490-notification-fixed-state
 Pushed the bounded repair once after45fa3e2f was terminal and local verification passed. Current head9f31386cf217edfc47f2e0106e91578565c22a9c, exactly one automatic MR pipeline2985329024. Initial read-only job audit confirms all ten jobs target that SHA; Access/Delivery running, other checks queued/created. No new-head pass or hosted coverage is claimed. MR description was replaced in place with actual current head/pipeline and the audited predecessor; no historical snapshot accumulation. Existing read-only observer retargeted in cf-mr335-minimized-watch. Working tree clean; preview HTTP200. No merge/deploy.
 
 Scope alignment under the latest explicit owner instruction: old criterion8 exhaustive accepted coverage and criterion11 six-scenario starting plan would otherwise require future OIDC/notification/domain work. They now describe the agreed foundation and retain the actual four real scenarios, interfaces, assertions, resource reporting and future tracking. This does not mark an incomplete workflow passed or waive security/CI integrity. Final conflict-resolved inventory and execution still require new evidence.
+
+Target reconciliation resumed at9f31386c against origin/dev511dcdaf in the existing locked source worktree. Normal target-into-source merge is staged with no unresolved entries. Fifteen backlog conflicts use reviewed current canonical records; source-only future requirements were retained through MCP notes, without completing future tasks. Incoming TASK504 browser runner is byte-identical after moving to packages/docs-site/browser_runner.py; native docs-site.tests.browser preserves its Playwright/browser/fonts, smoke tests, every-diagram assertions and screenshots. docs-pages job is unchanged. Exactly four root checks evaluated successfully. nix build .#docs-site.tests.browser .#okf-knowledge --no-link -L --builders '' --max-jobs1 --cores2 exited0:18 documentation package tests,58 knowledge tests,215 syntax-checked Mermaid blocks/193 concepts,80 published diagrams on41 pages in both themes and mounts, and both browser smoke deployments passed. GitLab CI lint valid=true with no errors or warnings. Focused independent staged review found no P0-P2 defect; runner blob e16dc398a860e1bf0facf63e718ef2d1d520ab73 matches target. Pipeline2985329024 remains running for old9f; no new-head hosted pass claimed. Preview8090 HTTP200 with owned frontend13985/API29729/PG4962 still running. No commit/push/merge/deploy yet.
 <!-- SECTION:NOTES:END -->
