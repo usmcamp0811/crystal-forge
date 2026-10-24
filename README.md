@@ -39,6 +39,10 @@ regulated-environment story is still in progress.
 
 ## Documentation
 
+Read the [documentation site](https://crystal-forge.gitlab.io/crystal-forge/)
+for the knowledge base and generated NixOS module option reference. GitLab Pages
+publishes this site after the documentation checks pass on the default branch.
+
 The project knowledge base is the
 [Open Knowledge Format](https://github.com/GoogleCloudPlatform/open-knowledge-format)
 bundle in [docs/knowledge/](./docs/knowledge/). Start at the
