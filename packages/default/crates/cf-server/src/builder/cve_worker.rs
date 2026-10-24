@@ -2493,6 +2493,33 @@ exec sleep 30
 
     #[tokio::test]
     async fn successful_scanner_persists_redacted_result_failure_stage() {
+        use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
+        use crate::handlers::api::scanning::get_scanning_scan_detail;
+        use crate::models::auth_identity::AuthRole;
+        use crate::queries::auth_identity::{create_user_session, sync_user_role};
+        use axum::body::to_bytes;
+        use axum::extract::{Path, State};
+        use axum::http::{HeaderMap, StatusCode};
+        use axum::response::IntoResponse;
+        use std::sync::Mutex;
+        use tracing::instrument::WithSubscriber;
+
+        struct LogWriter(Arc<Mutex<Vec<u8>>>);
+
+        impl std::io::Write for LogWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0
+                    .lock()
+                    .expect("test log buffer lock")
+                    .extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
         let Some(pool) = db_test_pool().await else {
             return;
         };
@@ -2538,6 +2565,15 @@ exec sleep 30
             calls: Arc::clone(&calls),
         };
 
+        let logs = Arc::new(Mutex::new(Vec::new()));
+        let log_buffer = Arc::clone(&logs);
+        let subscriber = tracing_subscriber::fmt()
+            .with_env_filter("cf_server=trace")
+            .without_time()
+            .with_ansi(false)
+            .with_writer(move || LogWriter(Arc::clone(&log_buffer)))
+            .finish();
+        // Attach the subscriber on each poll, without changing other tests' logs.
         let error = execute_scan_inner_with_nix_program_and_writer(
             &pool,
             &runner,
@@ -2548,10 +2584,28 @@ exec sleep 30
             claim.execution_id,
             std::ffi::OsStr::new("nix"),
         )
+        .with_subscriber(subscriber)
         .await
         .expect_err("result persistence failure should propagate");
         assert_eq!(calls.load(Ordering::SeqCst), 1);
         assert_eq!(error.to_string(), "Database query failed");
+        let (safe_error, truncated) = safe_bounded_error_chain(&error);
+        assert!(safe_error.contains("Database query failed"));
+        assert!(safe_error.contains("[REDACTED]"));
+        assert!(!safe_error.contains("nested-persistence-secret"));
+        assert!(!truncated, "the short nested error should not be truncated");
+
+        let logs = String::from_utf8(logs.lock().expect("test log buffer lock").clone())
+            .expect("worker logs should be UTF-8");
+        assert!(!logs.contains("nested-persistence-secret"));
+        // This persistence-failure branch stores diagnostics and returns the
+        // error without logging it. An empty capture does not prove log redaction.
+        if logs.is_empty() {
+            eprintln!(
+                "No native persistence-branch tracing logs were emitted; \
+                 log non-disclosure coverage is vacuous."
+            );
+        }
 
         let (status, failure): (String, Option<String>) =
             sqlx::query_as("SELECT status, scan_metadata->>'error' FROM cve_scans WHERE id=$1")
@@ -2579,6 +2633,74 @@ exec sleep 30
                 && message.contains("[REDACTED]")
                 && !message.contains("nested-persistence-secret")
         }));
+
+        let suffix = Uuid::new_v4();
+        let user = crate::queries::users::insert_user(
+            &pool,
+            &format!("p-{}@test.invalid", suffix.simple()),
+            Some("Persistence Detail Test"),
+        )
+        .await
+        .expect("scan detail test user should persist");
+        sync_user_role(&pool, user.id, AuthRole::Admin)
+            .await
+            .expect("scan detail test user should have the Admin role");
+        let token = format!("persistence-detail-session-{suffix}");
+        let session = create_user_session(
+            &pool,
+            user.id,
+            hash_token(&token),
+            Utc::now() + chrono::Duration::hours(1),
+            None,
+            None,
+            "local".to_string(),
+        )
+        .await
+        .expect("scan detail test session should persist");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            axum::http::header::COOKIE,
+            format!("{SESSION_COOKIE_NAME}={token}")
+                .parse()
+                .expect("synthetic session cookie should be valid"),
+        );
+        let response = get_scanning_scan_detail(State(pool.clone()), headers, Path(claim.scan_id))
+            .await
+            .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = to_bytes(response.into_body(), 1024 * 1024)
+            .await
+            .expect("scan detail response should fit the test body limit");
+        let detail: serde_json::Value =
+            serde_json::from_slice(&body).expect("scan detail response should be JSON");
+        assert_eq!(detail["scan_id"], claim.scan_id.to_string());
+        assert_eq!(detail["status"], "failed");
+        assert_eq!(detail["failure"].as_str(), Some(failure.as_str()));
+        let events = detail["events"]
+            .as_array()
+            .expect("scan detail should expose diagnostic events");
+        assert!(events.iter().any(|event| {
+            event["event_type"] == "result_persistence_failed"
+                && event["message"].as_str().is_some_and(|message| {
+                    message.contains("Database query failed") && message.contains("[REDACTED]")
+                })
+        }));
+        let api_json = serde_json::to_string(&detail).expect("scan detail should serialize");
+        assert!(api_json.contains("[REDACTED]"));
+        assert!(!api_json.contains("nested-persistence-secret"));
+        assert!(!api_json.contains(&token));
+
+        sqlx::query("DELETE FROM user_sessions WHERE id=$1 AND user_id=$2")
+            .bind(session.id)
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .expect("owned scan detail session cleanup should succeed");
+        sqlx::query("DELETE FROM users WHERE id=$1")
+            .bind(user.id)
+            .execute(&pool)
+            .await
+            .expect("owned scan detail user and role cleanup should succeed");
 
         sqlx::query("DELETE FROM cve_scans WHERE id=$1")
             .bind(claim.scan_id)
