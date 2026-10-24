@@ -1,0 +1,42 @@
+---
+id: TASK-470.1
+title: >-
+  Make optional Attic metrics service compatible with protected systemd
+  credentials
+status: Backlog
+assignee: []
+created_date: '2026-10-12 01:02'
+updated_date: '2026-10-12 14:28'
+labels: []
+dependencies: []
+references:
+  - modules/nixos/attic-metrics/default.nix
+  - packages/attic-metrics/attic_metrics.py
+  - checks/attic-metrics/README.md
+parent_task_id: TASK-470
+priority: high
+type: bug
+ordinal: 504000
+---
+
+## Description
+
+<!-- SECTION:DESCRIPTION:BEGIN -->
+The TASK-470 native Attic inventory fixture reproduced optional-module startup failure on the locked systemd 260.2 environment. Under the module sandbox both LoadCredential copies were regular and correctly owned but had group/other permission bits; cf-attic-metrics rejected them and never opened its listener. The focused API gate uses the user-authorized standalone invocation with service-owned mode-0600 files. Operators need the optional module to start without weakening credential protection. The user prohibited provider/module edits in the delegated check work.
+<!-- SECTION:DESCRIPTION:END -->
+
+## Acceptance Criteria
+<!-- AC:BEGIN -->
+- [ ] #1 The optional module starts the packaged adapter with protected runtime credentials on the locked systemd environment
+- [ ] #2 Credential ownership and isolation remain enforced and unsafe public files or symlinks remain rejected
+- [ ] #3 An isolated native VM regression exercises optional-module startup and authenticated inventory without printing secrets
+- [ ] #4 Operator documentation accurately describes the supported credential delivery and protection contract
+<!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+User-approved correction implemented within parent TASK-470 provider scope: optional module now creates DynamicUser-owned RuntimeDirectory=cf-attic-metrics with mode0700. Two unprivileged ExecStartPre coreutils install -m0600 commands copy read-only LoadCredential originals into /run/cf-attic-metrics/{database-uri,tokens}; ExecStart reads the private copies. README documents fresh copies on startup/restart and runtime-directory removal on stop. protected_read and adapter/test code unchanged. Locked-nixpkgs NixOS module probe passed exit0 with assertions for runtime directory/mode, both copy commands, runtime credential paths, DynamicUser and ProtectSystem=strict; default remains disabled and firewall ports empty. Actual VM service-owner/credential-permission/startup/authenticated-inventory proof is pending with native-check agent. Parent owns closure/archive after that proof; no host services or commits.
+
+Resolved within the authorized parent TASK-470 implementation. Final native optional-module gate passed exit 0: DynamicUser nonroot UID; runtime directory 0700; both credential copies 0600 owned by the service UID; protected root-owned originals unchanged; restart refreshes token/scopes; stop removes runtime credentials. Later final contract gate also passed with native Team+1 and 32/1024-byte tokens. No general credential-file checks or database privileges were relaxed. This tracking item duplicates the parent implementation and will be archived rather than treated as separate sprint work.
+<!-- SECTION:NOTES:END -->

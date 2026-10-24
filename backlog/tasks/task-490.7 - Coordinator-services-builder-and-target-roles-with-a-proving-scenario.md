@@ -1,11 +1,11 @@
 ---
 id: TASK-490.7
 title: 'Coordinator: services, builder, and target roles with a proving scenario'
-status: In Progress
+status: Review
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-20 05:24'
+updated_date: '2026-10-20 05:55'
 labels:
   - testing
   - integration
@@ -18,6 +18,8 @@ references:
   - modules/nixos/crystal-forge/default.nix
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335'
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2964502717'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2966113736'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17305508230'
 modified_files:
   - lib/integration-test/roles.nix
   - checks/integration-delivery/default.nix
@@ -123,6 +125,10 @@ Updated README, coverage map and current verification/selection counts (286 igno
 Original verified local increment committed/pushed as3db47c8953e3cf1f29473be7595a660d69e6a988, with productionfix separately attributable tod11de059 (original5c8f5ee8). Exact clean-commit hostedpipeline2965867360 passed all8jobs; downloadedAccess23/Delivery10artifacts matchsourceRevision and database517/0/0across229summaries. These hostedresults are notlateractivationverification.
 
 AC8 now has actual deployment change evidence in connected local3db47c89-dirty run: originalstate1/H1,2 -> CF-managedgeneration1/state2/H6,7 -> distinctCF-managedgeneration2/state3/H9,10. No duplicatefullstates/comparisonerrors; exactregisteredUUIDf1addf9f-3f84-4b8b-9598-c244d29ae307, running/profile/marker/request/historyandbrowserreloadverified. Latestownerexit1 overall13passed1failed solelymandatoryrollbackeligibility TASK499; no rollbackcompletion. Artifact /nix/store/mrs8rm4yvf5lk9vklqs01qvmzp1zl9n7-vm-test-run-cf-it-delivery-delivery-lifecycle-run. Alltenpreviouscasesinclsignaturenegative/positiveandcontrolleddualstackegresspassedagain. Broaderparentnotcomplete; keepInProgresswhilecurrentrequiredgatefailed.
+
+Own role/build/signature/network/heartbeat findings are now all executed on clean committed hosted inputdf11c8005de5ab7088015757dafc7fa7602da188. Move this initial-proof task to Review independently of future child completion, as explicitly required by owner. MR335 remains draft/nonmergeable: the mandatory rollback case owned by .15 still fails TASK499. Do not reinterpret the parent/currentowneraggregate as passed. Pipeline2966113736 Deliveryjob17305508230 executed14cases:13passed androllbackeligibilityfailed; exactresult/buildlog downloaded. Accessjob17305508229 passed23/23. Latestoverallpipeline stillrunningDBatpoll; notgreen.
+
+Clean hosted target9d011241-e6c7-4ed3-bf59-ef76fb590be9: state1/H1,2 -> gen1/state2/H10,11 with deployment1fdbbce4-23db-497d-9fe2-43acf451a0dc -> gen2/state3/H13,14 deployment04c786fa-d7d8-48e2-b68d-4f59b0a12afa. Both actualrunning/profilemarkersandUIhistoryreloadverified. Original controlleddualstacknegativeegresscase and receiverenforcedsignaturecase passedagain, preservingCFsigningseparateclaim. Initial task scope now reviewable; parent/.14/.15/Assurance/Upgrade incomplete. Currentlocalbranchcleanandpusheddf11c800; no newproductionrepair.
 <!-- SECTION:NOTES:END -->
 
 ## Comments

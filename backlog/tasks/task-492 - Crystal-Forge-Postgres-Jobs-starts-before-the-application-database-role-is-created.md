@@ -6,15 +6,17 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-18 03:24'
-updated_date: '2026-10-18 03:24'
+updated_date: '2026-10-18 13:45'
 labels:
   - bug
   - nixos
   - postgresql
   - startup-order
+dependencies: []
 references:
   - modules/nixos/crystal-forge/default.nix
-  - /nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/crystal-forge.journal
+  - >-
+    /nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/crystal-forge.journal
 priority: medium
 type: bug
 ordinal: 543000
@@ -28,11 +30,15 @@ A fresh NixOS Access VM starts `crystal-forge-postgres-jobs.service` after `post
 Observed during the real Access VM at tested revision `b1095c8f2bb2db16d79a2980bb4cd8dd0ce09d56`, command `nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`. Evidence is `/nix/store/xxvi4m1s6a7ajm4al64sqqb7qvhhidjz-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/crystal-forge.journal`: jobs service attempted connection before role creation; later setup logged CREATE ROLE. Source is `modules/nixos/crystal-forge/default.nix` systemd service `crystal-forge-postgres-jobs` around lines 2542-2577, which orders only after PostgreSQL. Expected: the one-shot job does not run before its configured role/database setup is complete and exits successfully on fresh boot. Actual: it fails once with role missing. Verify that any ordering/retry fix preserves exactly-once/at-least-once semantics for the job scripts before implementation.
 <!-- SECTION:DESCRIPTION:END -->
 
-Rebase rerun evidence: the same first-boot ordering failure occurred at rebased source `bba718befbc183863781656df2df272e5f735d5` in `/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/crystal-forge.journal`. The Access gate still passes; this issue remains a separate Backlog defect outside TASK-490.25/.26.
-
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
 - [ ] #1 A fresh NixOS boot does not run the Postgres jobs before its configured database role is available
 - [ ] #2 The Postgres jobs service completes successfully after normal module database setup
 - [ ] #3 The fix preserves the job runner's intended execution behavior without silently dropping or duplicating jobs
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+The same one-shot role-setup failure was observed again in the rebased Access VM at `bba718befbc183863781656df2df272e5f735d5a`: `/nix/store/riky1mm0nn185wb26abw7zzshnbml0fp-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run/journals/controller/crystal-forge.journal`. The Access gate still passes because the normal setup creates the role immediately afterward; no repair is in TASK-490 scope.
+<!-- SECTION:NOTES:END -->

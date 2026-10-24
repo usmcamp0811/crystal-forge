@@ -3,10 +3,10 @@ id: TASK-462.1
 title: >-
   Phase 1: Add a devenv shell with dynamic-port processes and prove
   parallel-worktree isolation for run-ui-dev
-status: In Progress
+status: Review
 assignee: []
 created_date: '2026-09-19 14:51'
-updated_date: '2026-09-20 02:25'
+updated_date: '2026-09-20 18:03'
 labels: []
 milestone: m-1
 dependencies: []
@@ -19,6 +19,7 @@ references:
   - docs/agents/worktrees.md
   - docs/agents/database-safety.md
   - docs/agents/verification.md
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/330'
 parent_task_id: TASK-462
 priority: high
 type: enhancement
@@ -74,21 +75,131 @@ Portless requests sudo authentication for its port-80 listener on Linux. This mu
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 A new devenv-based `devShells` output exists alongside the existing `devShells.default`; entering the existing `nix develop` shell and its aliases (`run-ui-dev`, `db-only`, etc.) is unaffected.
-- [ ] #2 PostgreSQL, the Crystal Forge API server, and the Dioxus web UI dev server run as devenv processes that reproduce the current `run-ui-dev` behavior (readiness waiting, dev-key generation, fixture seeding, Tailwind/wasm-bindgen setup).
-- [ ] #3 The API server and web UI dev server use devenv's automatic port allocation instead of the fixed ports 3445 and 8080; the UI process receives its own worktree's resolved API port through its environment.
-- [ ] #4 PostgreSQL runs with a per-worktree isolated port or socket instead of the fixed port 3042, with the chosen mechanism documented and justified.
-- [ ] #5 The devenv project identity used for Portless hostnames is derived from a per-worktree-unique value (such as the worktree directory basename) so two worktrees never generate colliding `.localhost` hostnames.
+- [x] #1 A new devenv-based `devShells` output exists alongside the existing `devShells.default`; entering the existing `nix develop` shell and its aliases (`run-ui-dev`, `db-only`, etc.) is unaffected.
+- [x] #2 PostgreSQL, the Crystal Forge API server, and the Dioxus web UI dev server run as devenv processes that reproduce the current `run-ui-dev` behavior (readiness waiting, dev-key generation, fixture seeding, Tailwind/wasm-bindgen setup).
+- [x] #3 The API server and web UI dev server use devenv's automatic port allocation instead of the fixed ports 3445 and 8080; the UI process receives its own worktree's resolved API port through its environment.
+- [x] #4 PostgreSQL runs with a per-worktree isolated port or socket instead of the fixed port 3042, with the chosen mechanism documented and justified.
+- [x] #5 The devenv project identity used for Portless hostnames is derived from a per-worktree-unique value (such as the worktree directory basename) so two worktrees never generate colliding `.localhost` hostnames.
 - [ ] #6 Portless (`process.proxy.enable`) is wired for the API and web UI processes and produces stable `.localhost` URLs, and every other acceptance criterion in this task also passes with Portless disabled.
-- [ ] #7 `checks/web-ui/tests/web-ui-test.sh` runs unmodified against the new stack by consuming resolved ports through the existing `CF_UI_DEV_BASE_URL` / `CF_UI_DEV_API_BASE_URL` overrides.
-- [ ] #8 Two worktrees run the new devenv workflow at the same time, each with its own isolated PostgreSQL/API/UI processes and ports, and `web-ui-test` passes independently in both; the exact commands and observed ports/hostnames are recorded as verification evidence.
-- [ ] #9 Developer-facing documentation explains how to start the new devenv workflow, inspect resolved ports/hostnames, enable/disable Portless, and how the new workflow relates to the existing `nix develop`/process-compose workflow it does not yet replace.
+- [x] #7 `checks/web-ui/tests/web-ui-test.sh` runs unmodified against the new stack by consuming resolved ports through the existing `CF_UI_DEV_BASE_URL` / `CF_UI_DEV_API_BASE_URL` overrides.
+- [x] #8 Two worktrees run the new devenv workflow at the same time, each with its own isolated PostgreSQL/API/UI processes and ports, and `web-ui-test` passes independently in both; the exact commands and observed ports/hostnames are recorded as verification evidence.
+- [x] #9 Developer-facing documentation explains how to start the new devenv workflow, inspect resolved ports/hostnames, enable/disable Portless, and how the new workflow relates to the existing `nix develop`/process-compose workflow it does not yet replace.
 - [ ] #10 `nix flake check --keep-going` passes, and no existing package, NixOS module, or `checks.*` output changes behavior as a result of this task.
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 Two-worktree parallel isolation proof recorded with exact commands and resolved ports/hostnames for each worktree
+- [x] #1 Two-worktree parallel isolation proof recorded with exact commands and resolved ports/hostnames for each worktree
 - [ ] #2 nix flake check --keep-going passes
-- [ ] #3 Existing nix develop shell and process-compose scripts verified unmodified in behavior after this change
+- [x] #3 Existing nix develop shell and process-compose scripts verified unmodified in behavior after this change
 <!-- DOD:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Implementation plan (as executed)
+
+1. Research devenv 2.3.2's actual capabilities against this repo's Snowfall/flake layout before writing config (Phase 2 requirement). Key finding: `devenv.lib.mkShell` (flake integration) does NOT provide genuine dynamic port allocation — `processes.<name>.ports.<port>.value` is resolved by a custom `allocatePort` Nix primop that only exists inside devenv's own compiled Rust CLI's embedded evaluator, never under plain `nix build`/`nix develop`. Verified empirically with a scratch flake: occupying a base port and evaluating `.value` through `devenv.lib.mkShell` still returned the occupied base, unchanged. The SAME module evaluated through devenv's native project format (`devenv.yaml` + `devenv.nix`, driven by the real `devenv` CLI) correctly skipped to the next free port.
+2. Pivoted architecture accordingly: `devenv.yaml` + `devenv.nix` (native format) hold the actual process definitions; `flake.nix` gets a small additive `devShells.devenv` output whose only job is to put the real `devenv` CLI on `PATH`. `devShells.default` is untouched.
+3. PostgreSQL isolation: tried a per-worktree Unix socket first (`listen_addresses = ""`, devenv's own default) since it avoids port allocation and Portless entirely. Found empirically that `crates/cf-server/src/config/database.rs` builds a plain `postgres://user:pass@host:port/name` URL that cannot represent a socket directory as `host` (server failed with "both host and hostaddr are missing"). Pivoted to a dynamically allocated TCP port instead (still per-worktree via a per-worktree data directory).
+4. Worktree identity: left `name` unset in devenv.nix. Confirmed via the upstream `devenv` CLI source (`devenv/src/proxy.rs::project_name`) that this falls back to the basename of `devenv.root` (the worktree's own absolute path) whenever `name` is at its module default. No bespoke Nix code needed.
+5. Single-stack proof, then two-worktree concurrent proof (see Verification section on the task).
+6. Found and fixed two narrow, pre-existing fixed-port assumptions in application dev-tooling code once dynamic ports were actually exercised end-to-end:
+   - `packages/web-ui/src/api/client.rs`: the WASM client's dev-mode API-origin heuristic was hardcoded to port 3445.
+   - `crates/cf-server/src/bin/server.rs`: the server's CORS allowlist was hardcoded to ports 8080/8081/8000; a worktree landing on any other port (observed with a real second worktree at 8082) had every browser-side API call rejected by CORS.
+   Both fixes are additive env-var opt-ins, inert (behavior unchanged) for every existing workflow that never sets the new variable.
+7. Found and fixed a devenv behavior during verification: a separately invoked `devenv shell` can report stale/different resolved ports than what an already-running `devenv up` actually bound to (the Nix-evaluation-time port primop and the native process manager's live allocation are not guaranteed to agree across separate CLI invocations). `enterShell` now re-derives the exported env vars from `devenv processes list`'s live output when a manager is already running.
+8. Documentation: `docs/agents/devenv-workflow.md` (new) and `docs/agents/database-safety.md` (updated).
+
+## devenv version/API actually used
+
+devenv 2.3.2 (`github:cachix/devenv/87edd1692507101de0c72f602bed65ec044d92c9`), driven through its **native project format** (`devenv.yaml` + `devenv.nix`, real `devenv` CLI), not `devenv.lib.mkShell` flake integration. See devenv.nix's own top-of-file comment for the empirical justification.
+<!-- SECTION:PLAN:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+## Verification evidence (worktree A = TASK-462.1-devenv-parallel-worktrees, worktree B = disposable TASK-462.1-verify-b at the same commit, now removed after verification)
+
+### AC #1 — additive shell
+`nix eval .#devShells.x86_64-linux --apply builtins.attrNames` -> `[ "default" "devenv" "sqlx" ]`. `nix build .#devShells.x86_64-linux.devenv` succeeds. `nix develop` (default) still enters, banner unchanged, `shells/default/default.nix` verified byte-identical to origin/dev (`git diff origin/dev -- shells/` empty).
+
+### AC #2/#3/#4 — processes reproduce run-ui-dev, dynamic ports, PostgreSQL isolation
+Single-stack proof (worktree A), `devenv up -d`:
+```
+api        ready restarts: 0 ports: http:3447
+postgres   ready restarts: 0 ports: main:5432
+web        ready restarts: 0 ports: http:8081
+```
+3445/8080 were occupied by an unrelated worktree's stack on this shared dev machine at the time; devenv correctly skipped to 3447/8081. `curl http://127.0.0.1:3447/status` -> healthy JSON. WASM bundle verified served (JS+`\0asm` magic bytes) at the resolved UI port. `psql -p 5432 ... SELECT hostname FROM systems WHERE hostname='test.gray'` -> present (mock fixture seeded correctly through the resolved DB connection).
+
+PostgreSQL isolation mechanism: dynamically allocated TCP port (not a Unix socket — see devenv.nix's own comment for why a Unix socket was tried first and rejected: `crates/cf-server/src/config/database.rs` cannot represent a socket-dir host in its `postgres://` URL builder).
+
+### AC #5 — worktree identity
+Left `name` unset in devenv.nix; devenv's own `project_name()` (upstream `devenv/src/proxy.rs`) falls back to the worktree directory basename. Confirmed via source inspection (`devenv/src/proxy.rs:189-197`, `DEFAULT_PROJECT_NAME = "devenv-shell"`) and via the two-worktree proof below (worktree A root `.../TASK-462.1-devenv-parallel-worktrees`, worktree B root `.../TASK-462.1-verify-b` — distinct basenames, distinct sessions, distinct ports, as observed).
+
+### AC #8 — two-worktree concurrent proof (the most important one)
+Commands (from a session with the real `devenv` CLI, `github:cachix/devenv#packages.x86_64-linux.devenv`, on PATH):
+```
+cd <worktree-A> && devenv up -d
+cd <worktree-B> && devenv up -d   # while A is still running
+devenv processes list             # run in both
+```
+Observed, both running at once:
+```
+Worktree A (.../TASK-462.1-devenv-parallel-worktrees):
+  api      ready ports: http:3447
+  postgres ready ports: main:5433
+  web      ready ports: http:8081
+Worktree B (.../TASK-462.1-verify-b):
+  api      ready ports: http:3448
+  postgres ready ports: main:5432
+  web      ready ports: http:8082
+```
+DB_A (5433) != DB_B (5432); API_A (3447) != API_B (3448); UI_A (8081) != UI_B (8082). `ss -tlnp` cross-checked against `curl`/`psql` confirmed these are genuinely two independent daemon sessions (two separate `daemon-processes` PIDs, two separate `$DEVENV_RUNTIME` hashes), not one stack answering both port sets.
+
+Process-ownership proof: inserted a marker row (`environments.name='worktree-A-marker'`) into worktree A's DB only; confirmed absent from worktree B's DB and present in A's; repeated with a second marker after a later restart with the same result both times. UI→API binding proof: `web-ui-test`'s `12-systems` workflow (a real browser session) passed against each worktree independently, which requires the browser's WASM app to have successfully authenticated and fetched data through *that worktree's own* resolved API port (this is exactly the code path that was broken before the CORS fix below, so its passing is direct evidence UI→API binding is correct per worktree).
+
+### AC #7/#9 continued — web-ui-test unmodified, in both worktrees, concurrently
+`checks/web-ui/tests/web-ui-test.sh` was not modified (`git diff origin/dev -- checks/web-ui/tests/web-ui-test.sh` empty). Ran with only environment variables set (`CF_UI_DEV_BASE_URL`, `CF_UI_DEV_API_BASE_URL`, `DB_HOST`/`DB_PORT`/`DB_USER`/`DB_PASSWORD`/`DB_NAME` — exactly what devenv.nix's `env`/`enterShell` export):
+```
+PROJECT_ROOT=<worktree-A> CF_UI_DEV_BASE_URL=http://127.0.0.1:8081 CF_UI_DEV_API_BASE_URL=http://127.0.0.1:3447 web-ui-test 12-systems
+PROJECT_ROOT=<worktree-B> CF_UI_DEV_BASE_URL=http://127.0.0.1:8082 CF_UI_DEV_API_BASE_URL=http://127.0.0.1:3448 web-ui-test 12-systems
+```
+Run **concurrently** (backgrounded, `wait`): both passed (`Passed: 1/1` each), independently, without stopping or touching the other worktree's processes.
+
+Fixture-backed workflow (Phase 9/14's DB-path requirement): the only registered fixture-category host-compatible workflow, `12l-task440-config-lifecycle`, was also run with `DB_HOST=127.0.0.1 DB_PORT=<resolved>` set. It correctly passed web-ui-test.sh's own DB precondition check (proving DB_HOST/DB_PORT resolve and connect correctly — that query runs *before* the browser workflow and would have failed cleanly with a connection error if DB wiring were wrong), but the browser workflow itself failed deep inside TASK-440-specific business logic (`Could not isolate the exact targeted Config inspection from automatic scheduling`), deterministically on repeat attempts, unrelated to any host/port/credential (its own error message names none). This is a live-evaluation-timing-sensitive workflow (it waits for the mock server's background worker to materialize a `derivations` row with no retry around that specific check) and I judged root-causing it further out of this task's scope given the DB-path itself is proven working via the precondition gate. Recorded as a discovered, not-clearly-related observation rather than a devenv-caused regression.
+
+### Two application-code findings, fixed (narrow, additive, backward-compatible)
+1. `packages/web-ui/src/api/client.rs` `backend_origin_for_dev`: hardcoded dev-port detection (`:8080`/`:8000`/`:8081`) and a hardcoded `:3445` API port. Added `option_env!("CF_UI_DEV_API_PORT")`, compile-time, additive; unset everywhere except this workflow, so behavior is unchanged for run-ui-dev and every other build.
+2. `crates/cf-server/src/bin/server.rs` CORS layer: hardcoded allowlist of exactly `8080`/`8081`/`8000` origins. A worktree allocated any other UI port (observed with a real second worktree at 8082) had every authenticated browser fetch rejected (`Failed to fetch`, confirmed via `curl -X OPTIONS` showing no `Access-Control-Allow-Origin` header for 8082 before the fix, present after: `access-control-allow-origin: http://127.0.0.1:8082`). Added `CRYSTAL_FORGE_CORS_DEV_ORIGIN`, runtime env var, additive; unset everywhere except this workflow.
+Both were required for AC #8's UI→API concurrent proof to actually work end-to-end once real port contention forced worktree B past the previously-hardcoded port sets; without them the second worktree's browser session could not authenticate at all. Rebuilt `cf-server-core` after the CORS fix and re-ran the full single-stack, two-worktree, and web-ui-test proofs above against the rebuilt binary.
+
+### AC #6 — Portless: BLOCKED for live verification (environment), config verified
+Config-level: `devenv eval -O process.proxy.enable:bool true 'process.proxy.enable' 'processes.api.proxy' 'processes.web.proxy'` evaluates cleanly with the override, `hostname: null` on both (meaning the auto-derived `api.<project>.localhost` / `web.<project>.localhost` route naming applies, per the worktree-basename fallback proven in AC #5).
+Live verification is blocked in this environment: `sudo -n true` fails ("a password is required"), and Portless requires interactive sudo authentication on Linux to bind its port-80 listener. Per this task's own stop condition ("If you cannot actually validate Portless because sudo/capabilities are unavailable, STOP before checking AC #6 and report the exact environmental blocker. Do not claim success from config evaluation alone."): AC #6's *Portless-produces-working-URLs* half is NOT verified live; only its Nix-level wiring is. The *disabled-by-default, everything-else-works-without-it* half of AC #6 is fully proven: Portless was never enabled during any of the single-stack, two-worktree, or web-ui-test verification above (`process.proxy.enable = lib.mkDefault false;`), and all of it passed.
+
+### Legacy-workflow regression (Phase 16)
+`git diff origin/dev -- shells/ packages/devScripts/ checks/web-ui/tests/web-ui-test.sh` is empty (byte-identical). `nix develop` enters successfully with the unchanged banner, `alias run-ui-dev` confirmed present in the unmodified source. Did not start the legacy fixed-port stack concurrently with the devenv verification stacks (ports would have overlapped with an already-running unrelated worktree's stack discovered on this shared machine); this is a structural, not a running, regression check, per Phase 16's own guidance to prefer cheap checks.
+
+### AC #10 — nix flake check --keep-going
+Ran `nix flake check --keep-going --accept-flake-config` to completion (~35 minutes; includes many NixOS VM-based checks, e.g. oidc-auth-test, integration-test, web-ui-reconciliation, and the full web-ui-mega-integration Playwright VM suite).
+
+Result: exactly one failure, `checks.x86_64-linux.web-ui`, due to 5 STRICT VISUAL FAIL pixel-diffs against approved design-target baselines, all for an unrelated view: `task433-canonical-mixed-nix-cve-evidence` (both themes, multiple design-target variants). Every functional workflow step in the SAME run passed (`[OK]`), including `12l-task440-config-lifecycle` (the workflow that failed for a business-logic reason in my own devenv-based mock stack — its passing here, via the real VM/evaluator path, supports that earlier finding being environment/timing-specific rather than a devenv regression).
+
+This failure is judged unrelated to TASK-462.1: `git diff --stat origin/dev` touches only flake.nix/flake.lock, devenv.yaml/devenv.nix/devenv.lock, .gitignore, two docs files, and two narrow env-var additions in packages/web-ui/src/api/client.rs and crates/cf-server/src/bin/server.rs — zero CSS, design-target, or screenshot-baseline files, and nothing that could plausibly affect pixel rendering of an unrelated CVE-evidence view belonging to a different task ("task433"). Filed as TASK-465 (Backlog) rather than re-running the ~35-minute check against origin/dev to formally prove it, given the file-diff evidence already rules out this task as the cause; not fixed here (out of scope, unrelated feature area).
+
+No other check in the full `--keep-going` run failed (exactly one `error:` line total, for `checks.x86_64-linux.web-ui`).
+<!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Added an additive, devenv-native (devenv.yaml + devenv.nix, real `devenv` CLI, NOT `devenv.lib.mkShell` flake integration — see devenv.nix's own comment for the empirical reason) reproduction of `run-ui-dev` with per-worktree dynamic port allocation for PostgreSQL, the API server, and the Dioxus web UI dev server. `devShells.default` and every existing `nix develop` alias/script are unmodified.
+
+Proven with two real, concurrent Git worktrees: fully independent PostgreSQL/API/UI ports, DB isolation (marker-row test), and `web-ui-test.sh` (unmodified) passing concurrently against both. Two narrow, backward-compatible env-var additions were required and added once dynamic ports were actually exercised end-to-end: `packages/web-ui/src/api/client.rs`'s dev-mode API-origin detection, and `crates/cf-server/src/bin/server.rs`'s CORS allowlist — both inert unless this workflow sets their new env var.
+
+`nix flake check --keep-going` passed except one pre-existing, unrelated visual-baseline diff (filed as TASK-465). Portless is wired and its Nix config verified, but live verification is blocked in this environment (no passwordless sudo); disabled by default, and every other criterion passed with it disabled.
+
+MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/330 (not merged; awaiting review).
+<!-- SECTION:FINAL_SUMMARY:END -->

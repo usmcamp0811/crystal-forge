@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:35'
-updated_date: '2026-10-19 02:12'
+updated_date: '2026-10-23 21:02'
 labels:
   - testing
   - integration
@@ -58,6 +58,12 @@ Use existing case/expect/receipt/http/sql_json/run_browser helpers, same-scenari
 
 <!-- SECTION:PLAN:BEGIN -->
 Latest owner selects next runnable product coverage progress. Implement bounded accepted Admin form success subset after existing16Access cases: production UI user creation, role edit/reload, disable/login401 and cancel no mutation; classification/retry settings saves/reload if feasible. Use design identities not already created in .2, same-scenario receipts, independent browser login and DB before/after. No new VM/owner and no production changes. Do not claim complete .3: environment CRUD and specific unresolved failed-save/presentation states remain separate outstanding cases. Coordinator owns facts/composition/registration; fragment writer owns admin-forms.py/.cjs only. Execute actual normal Access CI path and preserve accurate failed assertion if a product defect emerges. TASK-490.7 remains next Delivery roles/proving work after this bounded controller progress; no blanket D1 blocker.
+
+Owner's wrap-up selects dependency-ready accepted functional work. Extend only environment-forms.py/.cjs in the existing coordinator lifecycle with real Admin UI create/edit/delete, cancel and duplicate validation, explicit nonempty account-environment membership and independent SQL/reload checks. Preserve Admin23 and actor state; no product or design changes. Deferred visual states belong in the canonical punch list, not fabricated assertions. Coordinator composes and executes the normal Access owner after compatible shell/preferences work.
+
+Owner explicitly authorized the substantiated environment-default correctness repair in this current worktree/MR. Confirm actual POST201 then PATCH/policies500 and disabled legacy UUID against authoritative data and approved EnvironmentsView new draft at6e4ea520. New drafts must have zero optional gates; global CF-agent invariant remains enforced separately. Preserve existing edit assignments, validate explicit stale/disabled/nonassignable selection against authoritative assignable policies with established validation response/no assignment side effects; do not silently discard it. No schema/policy redesign or generic multi-request transaction/recovery framework. Keep the partial-save boundary explicit. Add focused tests and existing Access regressions for exact request, one persisted environment, metadata/optional assignments, reload/reopen, valid optional assignment and invariant enforcement. Verify owned previews before production UI edits, then normal Access owner and before/after evidence; commit separately from mobile/header/501.
+
+Owner explicitly authorized the confirmed environment policy picker correction: filter the loaded authoritative assignable catalog with the entered search and remove the arbitrary first-12 reachability restriction. Preserve selected IDs, authoritative validation, and loading/empty/error behavior. Add existing Access lifecycle assertions for a match beyond row12 and exact persisted selection; no API/schema or policy redesign. Coordinator applies in existing locked integration worktree/MR335.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -79,4 +85,6 @@ LOCK: openai on sledge in /home/mcamp/code/crystal-forge/TASK-490.1-integration-
 
 ## Historical
 Earlier records at81d65be7 proved ten bootstrap/session cases, not forms, and task was then Backlog. .25/.26 prerequisites were integrated; selected role denials later produced sixteen cases at8a857bc8. Those readiness statements are superseded by this executed bounded slice.
+
+Authorized policy picker correction is implemented locally in environment_form_modal.rs with controlled case-insensitive search over the full authoritative catalog, selected IDs retained and no first-12 limit. Worker focused tests passed3 filter regressions/24environment tests; real populated preview158catalog selected RequirePackages atzero-based29, PATCH200 exactUUID/reload/reopen/metadataedit and independentSQL passed (/tmp/opencode/cf-policy-picker-handoff.md). Normal Access uses its existing authored CustomCheck UUID...0003 plus12 unassigned custom_check catalog prerequisites named Access picker prerequisite01..12 before form creation; minassignable13 and independentSQL/browserorder assertions distinguish the old restriction without seeding a successful environment or assignment. This preserves the existing target and all six original form cases. Normal owner currently running, not passed. Preview ready http://127.0.0.1:8090/environments on sledge, same ownedAPI3490/PG5490; final durableMR and same-head proof pending.
 <!-- SECTION:NOTES:END -->

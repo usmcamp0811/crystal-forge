@@ -3,11 +3,11 @@ id: TASK-496
 title: >-
   Periodic agent heartbeats fall back to full states after a database comparison
   error
-status: In Progress
+status: Review
 assignee:
   - '@openai'
 created_date: '2026-10-19 05:37'
-updated_date: '2026-10-20 05:23'
+updated_date: '2026-10-20 06:04'
 labels: []
 dependencies: []
 references:
@@ -15,6 +15,9 @@ references:
   - packages/default/crates/cf-server/src/queries/system_states.rs
   - checks/integration-delivery/scenarios/delivery-lifecycle.py
   - /tmp/opencode/delivery-local-run6.log
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17305508230'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17303956151'
 priority: medium
 type: bug
 ordinal: 547000
@@ -54,4 +57,8 @@ Separately attributable product repair: original5c8f5ee8 in TASK-496-heartbeat-c
 Changed-state acceptance now has real-agent evidence, not only a fabricated signed-handler payload: normal Delivery CI command executed in 3db47c89-dirty connected worktree on x86_64-linux. Initial running state1 has heartbeats1,2. Production UI deployed authored commit e5c115237b3d026f65dbfe74a86331e820a36c78; actual running/profile generation1 output /nix/store/wii9frwfwvkrl26a80kwizd3yrgq7q0l-nixos-system-targetA-test produced exactly one new full state2 and heartbeats6,7. Second real CF-authored/evaluated/built/published/UI-deployed revision9d79b584629e73ccdee7806d04d2d46217759581 activated generation2 output /nix/store/cz8flym2r8cxn39k1xwfj6m6244cpdld-nixos-system-targetA-test; exactly one new full state3, heartbeats9,10. Registered systemf1addf9f-3f84-4b8b-9598-c244d29ae307. No direct state writes, fake report, stopped agent, duplicate unchanged full states or comparison errors.
 
 Evidence /nix/store/mrs8rm4yvf5lk9vklqs01qvmzp1zl9n7-vm-test-run-cf-it-delivery-delivery-lifecycle-run/result.json and browser/journals. OverallDelivery remainsFAILED13passed/1failed at mandatory retained rollback eligibility (TASK499); this is independent of the now-executed changed-state classification. Keep task In Progress pending integrated publication/hosted handoff; do not mark Done. Rollback acceptance and parent overhaul are not satisfied by this task.
+
+Changed-state acceptance is now also executed on clean hosted committed inputdf11c800, not merely dirtylocal assertions. DownloadedDeliveryjob17305508230 result/buildlog: initialstate1/H1,2; actualCFgeneration1/state2/H10,11; actualsecondCFgeneration2/state3/H13,14; exactlyonefullstatepertransition, same registeredtarget, no comparisonerror. UIoperations, coldcandidateacquisition, realagentactivationandhistoryreloadpassed. AllfourTASK496criteria satisfied; move narrowproducttasktoReview underdraftMR335, notDone. Productrepairremainsd11de059(original5c8f5ee8); nootherrepairimplemented. DB517/0/0andnormalcomponentchecks passed exactclean3db47c89 withidenticalRustinputs; currentdf11componentjobalsopassed. OverallconnectedDeliverystillfailsmandatoryrollbackTASK499, unrelatedtoheartbeatfix; no rollback or parentcompletionclaim.
+
+Final clean-head df11c800 hosted state-machinejob17305508234 nowPASSED:517tests,0failed,0ignored,229summaries; rawtrace downloadedandinspected. Currentcomponentjobalsopassed. Pipeline2966113736 FAILED solelyrequiredDeliveryrollbackauthoritycaseTASK499; complexity/coverage skipped. NarrowTASK496Review statusisbackedbycurrentclean-hosted changedstateandDB evidence, notoldgreenpipelineorunchangedsubset.
 <!-- SECTION:NOTES:END -->
