@@ -270,7 +270,7 @@ and tool tests directly; the owner job builds registered VM scenario gates.
 nix run .#coverage.coverage-report
 ```
 
-The GitLab job `coverage-check` runs this command on merge requests, keeps `coverage-report/` as an artifact, and posts the summary to the merge request. The command reports coverage. It does not enforce the numeric targets above.
+The GitLab job `coverage-check` runs this command on merge requests and exposes `coverage-report/` as an artifact. It does not automatically post an MR comment. The command reports coverage; it does not enforce the numeric targets above.
 
 The launcher executes the pinned `cargo-tarpaulin` binary with the pinned
 Cargo and Rust compiler. Native OpenSSL development inputs and `pkg-config`

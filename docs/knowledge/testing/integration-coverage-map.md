@@ -17,8 +17,41 @@ generated:
 
 ## Current status
 
+The requested [pipeline 2985072087](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2985072087)
+at `45fa3e2f` is **terminal failed**. Downloaded, source-matching owner artifacts
+passed Access **37/37**, Delivery **16/16**, Assurance **54/54 records / 48 names**,
+and Upgrade **13/13**. Component tests, CVE **31/31**, and dashboard **4/4** passed.
+State-machine job `17440920199` emitted exactly 277 expected names across 28
+selections, then propagated 101 for
+`user_notifications_materialize_event_after_user_creation_before_api_touch`.
+Coverage and complexity were **skipped**, not failed or measured. The earlier
+local full LLVM report is not hosted evidence or a numeric release gate.
+
+The minimization audit retained all four owners and required assertions. Only
+the two unreferenced hidden MR-comment templates and their unused variable were
+removed; parsed remaining YAML definitions are unchanged. The notification
+failure reproduced with 37 active users and the target at initialization rank
+34, beyond the documented 32-user pass. The bounded test-only repair uses the
+existing SQLx isolated-database pattern for that test and the sibling
+prohibited-email-policy test, which made the same one-pass assumption. Their
+bodies and assertions remain unchanged. The normal state-machine entry now
+passes: **553 expected/emitted tests across 243 selections**, zero failures,
+including both migration rehearsals. PostgreSQL stopped and both invocation
+paths were removed. No producer behavior, retry, sleep, expected count, check,
+wrapper, VM, or framework changed. Evidence is
+`/tmp/opencode/task490-minimization-state-proof.json`; the preceding failed
+reproductions remain recorded, not relabeled as successes.
+
+The branch separately advanced to governance-only `717a951c`; it adds the
+AGENTS.md simplicity rules without changing the implementation or CI. Follow
+MR335 and TASK-490.24 for publication and subsequent pipeline status. The
+canonical UI punch list remains unchanged. The whole-row disposition audit
+below preserves all named passing subsets and the accepted functional gaps.
+
+### Historical hosted checkpoint at `2b69a488`
+
 Draft [MR335](https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335)
-targets `dev`. Current pushed source is `2b69a488`.
+targets `dev`. At that checkpoint the pushed source was `2b69a488`.
 [Pipeline 2983775656](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2983775656)
 is **terminal failed**: coverage failed; all four owners passed. Downloaded structured artifacts
 verify all four exact-source owners: Access **37/37** (retry `17434078207`),
@@ -1295,6 +1328,36 @@ Status values:
 | `failing` | An executed correct assertion fails at a recorded revision; link its defect and evidence. Historical failures remain in the execution record. |
 | `blocked: <decision ID>` | Only the stated case cannot receive an independent expectation until that exact decision or design state is supplied. Other cases in the family proceed. |
 | `out of scope` | A named unsupported, developer-only, or retired behavior has no product integration obligation under the accepted contract. |
+
+### Minimization review: disposition of all 79 workflow rows
+
+These are workflow rows, not 79 check definitions or a completeness percentage.
+The primary whole-row disposition is:
+
+- **Covered by an existing integration owner (6):** Access covers
+  `local-bootstrap`, `sessions`, and the expressly selected `authorization`
+  contract. Upgrade covers `persisted-transition`, `mixed-version`, and
+  `transition-recovery` within approved D2 only.
+- **Blocked by a documented decision (5):** `environment-scope` (D1-scope),
+  `registration-closed` (D1-registration), `webhook-and-csrf-policy` (D4),
+  `native-reconciliation-details` (D5), and `auth-visual` (D6).
+- **Required but incomplete at the stated whole-row scope (68):** every other
+  identifier in the twelve family tables. Preserve the named passing owner and
+  lower-level subsets; incomplete does not mean untested. D3 blocks only the
+  unspecified presentation/retention subcase inside `failed-save-states`, not
+  independent failed-write safety.
+- **Unit-test-only complete rows (0):** these rows require multi-layer behavior.
+  Existing unit, schema, and isolated-database tests cover internal parts and
+  remain necessary; do not relabel them as complete end-to-end workflows.
+- **Entire workflow rows deferred (0):** accepted visual differences remain
+  case-local in the canonical UI punch list. The separate TASK-503 deferral is
+  not a waiver of deployment or recovery contracts.
+
+This assigns every existing row a disposition without adding a second catalog.
+It does not turn an unassigned discovery variant into a new release gate.
+Accepted requirements retain their exact scope. The historical 11/59/9 catalog
+summary below is not the current whole-row audit. Do not add a check, VM,
+wrapper, or framework per row, or delete a tested subset to shorten this map.
 
 ## Authority and case-local decisions
 

@@ -18,7 +18,15 @@ generated:
 **Status:** Adopted by the owner on 2026-10-17 through TASK-490. The maintenance
 rules below are in force. `implementation_status: partial` describes coverage,
 not the rules. Draft [MR335](https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335)
-targets `dev`. Current pushed source is `2b69a488`.
+targets `dev`. Current execution evidence and remaining gaps are kept in the
+[coverage map](integration-coverage-map.md#current-status). The requested
+`45fa3e2f` pipeline finished with four passing owners and one failed existing
+notification database test; coverage and complexity were skipped. The bounded
+fixture repair does not change these maintenance rules or add a numeric gate.
+
+### Historical hosted checkpoint at `2b69a488`
+
+At that checkpoint the pushed source was `2b69a488`.
 [Pipeline 2983775656](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2983775656)
 is **terminal failed**: coverage failed; all four owners passed. Exact-source structured
 artifacts verify all four owners: Access retry `17434078207` **37/37**, Delivery
@@ -369,6 +377,21 @@ Before changing browser-visible behavior, record the exact approved reference: c
 If an approved domain requirement has no corresponding design state, identify the file/component, condition, missing fact or interaction, and affected acceptance case. Mark that dependent UI case **Blocked: design gap**. Continue independent authorized work. Do not invent a UI element, edit the design to match the application, hide the fact, or present an unknown result as success. This follows CF's existing Systems design authority rule.
 
 Keep this maintenance contract outside the design handoff directory. The design handoff can be replaced during a design update. Link to the approved reference rather than duplicating its complete contents here.
+
+## Reporting is not an additional product check
+
+Full-workspace Tarpaulin reporting is not an acceptance requirement of the
+four-owner integration architecture, and no line-coverage percentage is a
+release floor. Coverage and complexity jobs already existed at baseline
+`5ae7feab`. The later requested full-run verification does not authorize a new
+coverage-backend project, threshold ratchet, or tests-of-tests framework.
+
+Required Rust/database assertions and Clippy checks must remain executed with
+truthful failure propagation. Completed complexity/size debt is advisory. An
+enabled reporter must not publish success from failed, missing, malformed, or
+stale output. Do not delete a reporting execution on the assumption that all
+its tests run elsewhere: some live-database regressions currently have no other
+automatic execution owner. Prove assertion ownership before removing duplication.
 
 ## 3. Minimal coverage catalog
 
