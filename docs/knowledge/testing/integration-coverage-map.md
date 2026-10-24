@@ -285,10 +285,181 @@ Final-head actual coverage remains required. Complete measured debt
 remains nonblocking under the existing execution-only policy; no strict gate was
 introduced.
 
-Preview: **ready** (owner-reported), live `http://127.0.0.1:8090/`, task API
-port `26799`, frontend `13985`, task PostgreSQL `4962`, owned by task `5490`.
-The tested backend package includes the repair. UI code is unchanged; this
-preview does not establish final-head CI or merge readiness.
+### Historical restricted LLVM investigation at `3e8152b1`
+
+The five bounded follow-ups are committed locally through `3e8152b1`; they
+have not been pushed. The pinned tools are Tarpaulin **0.37.2**, Rust/Cargo
+**1.95.0**, and rustc LLVM **21.1.8**. Tarpaulin's LLVM backend reads profiles
+through `llvm_profparser`; this investigation did not add external LLVM tools.
+At that revision the CI entry still selected the default ptrace backend.
+
+A temporary engine-only configuration exercised the installed coverage launcher
+under `NoNewPrivileges=yes` and additional syscall denials. Both `ptrace` and
+`personality` witnesses returned `EPERM`. No runner privilege, seccomp policy,
+test filter, feature selection, or repository coverage configuration changed.
+The first invocation failed offline dependency preflight before database startup.
+Separate online preparation populated the missing locked Cargo dependencies;
+the second invocation remained offline.
+
+The small two-crate LLVM fixture produced valid JSON/HTML and measured **11/12
+lines**. Optional-feature, expected-panic, and same-executable child coverage
+were observed. A real deliberate test failure also passed through the installed
+launcher: Tarpaulin, database receipt, composition, and systemd each returned
+**1**; JUnit reported an error and no success summary survived. All **16**
+existing launcher controls passed, including missing/malformed JSON, missing
+HTML, wrong schema, stale-success removal, receipt faults, and interruption.
+These controls are not product coverage.
+
+The real workspace/all-feature invocation compiled all six workspace crates and
+executed **24 top-level test binaries** before failing. In those binaries,
+**1,932 declared nonignored names** were emitted, plus one independently observed
+nested self-exec repetition. The server summary was **1,836 passed / two failed /
+785 ignored**. The failures were:
+
+- `builder::cve_worker::tests::successful_scanner_persists_redacted_result_failure_stage`:
+  a synthetic nested bearer value remained in persisted failure text.
+- `queries::cve_scans_tests::save_scan_results_sets_fleet_relevant_since_atomically_with_cve_attention`:
+  `fleet_relevant_since` remained null. This also has historical non-LLVM
+  evidence in TASK-467; its cause was not yet classified at this checkpoint.
+
+Tarpaulin and the database composition returned **1**. No valid product coverage
+percentage or complete workspace execution is established. Remaining test
+binaries were not proved by this failed invocation. The main PostgreSQL process
+logged shutdown; database data was removed, but read-only nested Nix-store
+fixtures prevented removal of the entire invocation root. Do not report complete
+path cleanup for this run or change credential permissions to erase that residue.
+
+Evidence remains local under `/tmp/opencode/`: `tarpaulin-llvm-smoke/`,
+`task490-llvm-whole-v2.{log,status}`, `task490-llvm-whole-audit.json`,
+`task490-llvm-fixture-fault-sigrim4a/`, and
+`task490-llvm-launcher-controls-58vj5gza/`. The full run took **13 minutes
+40 seconds**, with a reported **17.6 GiB** memory peak. Hosted reproduction
+remains unverified; no new pipeline was launched.
+
+LLVM compiler instrumentation and ptrace observation have different line and
+hit semantics. There is no successful ptrace baseline for a numerical
+equivalence claim. Normal unwind and self-exec fixture results do not prove
+profile preservation after raw `_exit`, abort, or fatal signals. The bounded
+resolution below supersedes the earlier unclassified assertion causes. Only a
+valid product report permits publication and the next exact-head hosted audit.
+Runner-security relaxation is not authorized.
+
+### Historical local blocker run at `3e8152b1-dirty`: full coverage failed
+
+This section records the first local run after the redaction, fleet-fixture,
+and private-store corrections. The stale-recovery failure below is resolved by
+the [later local checkpoint](#local-full-llvm-coverage-checkpoint-at-3e8152b1-dirty).
+
+- **Credential redaction was a deterministic product defect.** The nested
+  error formatter emits `Database query failed: Authorization: Bearer …`.
+  Inline assignment redaction consumed the scheme but left the credential.
+  Native reproduction returned 101 without coverage. The narrow fix redacts
+  the full remaining Authorization value on that line, as for standalone
+  headers. The original nested fixture remains. Native checks cover the
+  in-memory safe error chain, persisted failure/events, and a real authenticated
+  scan-detail handler response. The persistence-failure branch emits no failure
+  log; empty capture is not claimed as proof of active log redaction.
+- **Fleet relevance was a fixture-precondition defect.** The test lacked
+  registered flake/commit identity and a consistent running report/output.
+  TASK-467's old non-LLVM failure reproduced natively with exit 101. The repair
+  establishes Current authority before real scan creation/save. Production
+  reconciliation stays inside its existing transaction. The original timestamp
+  and occurrence assertions remain, with exact authority and matching episode
+  timestamps added. Cleanup uses owned identifiers, not an `env-%` deletion.
+- **Private-store cleanup was a fixture lifecycle defect.** Three tests relied
+  on `TempDir::drop`, which ignored removal failures for Nix's read-only store
+  directories. A test-local lifecycle function catches panics, runs Nix-managed
+  GC against only its newly allocated private store, checks status and explicit
+  directory close, then resumes the original panic. GC is bounded and reaped.
+  Success, returned error, caught panic, live `0555` modes, and real nonzero GC
+  status have regressions. No chmod, privileged deletion, default-store GC, or
+  historical-residue cleanup occurs. GC progress stays out of the machine-checked
+  libtest result stream; stderr and checked failure status remain available.
+
+Native verification passed **29 executions across eight selections** in the
+declared order: redaction 14, persistence/API 1, fleet relevance 1, neighboring
+query regressions 8, and cleanup 5. The normal CVE entry passed **31 tests**.
+Pinned Clippy 0.1.95 passed workspace/all-features/all-targets with the required
+`never_loop` lint; changed Rust formatting passed. The installed LLVM launcher
+also passed all **16 existing controls**. These are not product coverage.
+
+The full offline entry selected LLVM with the unchanged six-crate workspace,
+all features, default Tests selection, and two test threads. Additional
+`ptrace`/`personality` denials and `NoNewPrivileges` remained in effect. Both
+requested regressions and cleanup regressions passed under instrumentation.
+However, `stale_recovery_uses_execution_start_not_queue_time` failed at
+`cve_scans.rs:5324`: the global recovered count was **3**, expected **0**.
+The server summary was **1,840 passed / one failed / 785 ignored**. This test
+passed in the normal CVE entry. Shared-database interference is a diagnostic
+candidate, not an established root cause or a reason to weaken the assertion.
+No unrelated recovery change or blind retry was made.
+
+The entry, Tarpaulin receipt, and database receipt returned **1** after 15 minutes
+29 seconds; reported memory peak was **16.7 GiB**. Fifteen test binaries launched,
+not the complete intended inventory. Their top-level summaries total **2,055
+passed / one failed / 802 ignored**, plus one separate nested self-exec pass.
+JUnit reports an error; success JSON,
+index, and summary are absent. No valid product coverage percentage exists.
+PostgreSQL PID `4437` logged shutdown and is absent; both invocation paths were
+removed, including all newly created private-store fixtures.
+
+Evidence: `/tmp/opencode/task490-blocker-native-{red,green4}.{log,status}`,
+`task490-blockers-{cve-normal,clippy,llvm-launcher-controls}.{log,status}`, and
+`task490-llvm-fixed-v1.{log,status,metadata.json,failure-audit.json}`. The audit
+confirms the tested code hashes still match. At that checkpoint the recovery
+assertion failure blocked publication and complete workspace measurement.
+
+### Local full LLVM coverage checkpoint at `3e8152b1-dirty`
+
+**Stale-recovery cause.** The smallest unchanged native selection reproduced the
+count of 3 with two test threads. `stale_recovery_processes_bounded_batches`
+inserts legacy in-progress rows before it assigns live-owner execution tokens.
+The execution-age test's global recovery observed that intermediate fixture
+state: two distinct revocations plus one additional legacy finalization. Its own
+freshly claimed row stayed in progress, fresh, and unrevoked. With one thread,
+the predecessor cleaned up first and both tests passed. The failed LLVM run
+removed its database, so its historical row UUIDs are unavailable; the recorded
+UUIDs are reproduction identities. A second proven overlap made
+`fleet_enqueue_creates_pending_rows_and_skips_active_scans` observe the cadence
+test's fleet fixture: the smallest three-test selection passed with one thread
+and failed with two.
+
+Only these two affected tests now create a unique SQLx database, apply the
+existing migrations, and drop that database. Production recovery queries,
+fencing, normal test selection, missing-environment guards, and every expected
+count (recovery 0/1/1) are unchanged. The native `cve_scans` module passes at
+two threads: **17 passed / 0 failed / 11 ignored**. The normal CVE entry passed
+again. Evidence: `/tmp/opencode/task490-a-{recovery,fleet}-evidence.json`.
+
+The outer coverage `nix run` no longer passes `--offline`; the
+[test plan](test-plan.md#coverage-verification) records the rationale and the
+retained acquisition controls.
+
+The full local entry then **passed with exit 0** under the same additional
+`ptrace`/`personality` denials and `NoNewPrivileges`. Cargo metadata independently
+selects **40 test targets** for the six-crate workspace with all features and
+Tarpaulin's default Tests selection; all **40 launched and completed**, with no
+missing or extra target. Totals: **2,378 passed / 0 failed / 830 ignored**, plus
+one nested self-exec repetition. Measured line coverage is **33,115 / 83,641
+(39.59%)** across all six crates. Tarpaulin also lists 44 generated dependency
+metadata files with zero coverable lines; they do not affect either total.
+JSON, HTML, `coverage.json`, `index.html`, `summary.md`, JUnit, and both exit
+receipts are valid. PostgreSQL logged shutdown and is absent; both invocation
+paths were removed. LLVM and ptrace line semantics differ; this percentage is
+not comparable with earlier ptrace numbers.
+
+Evidence: `/tmp/opencode/task490-llvm-fixed-v2.{log,status,metadata.json,audit.json}`
+and `/tmp/opencode/task490-intended-inventory.proof.json`. The audit confirms the
+tested code hashes. This is local proof; exact-head hosted coverage is pending.
+
+Preview: **ready**, `http://127.0.0.1:8090/`. The normal checked backend build
+completed with exit 0 (`1,841 passed / 785 ignored`, including the nested
+Authorization regression). Only the task API was replaced: PID `29729` on port
+`3490`, frontend PID `13985`, task PostgreSQL PID `4962` on port `5490`. A
+browser check passed login and read-only compliance preview requests with no
+import writes. The earlier 600-second tool timeout was not a build result. UI
+code is unchanged; the preview does not establish final-head CI or merge
+readiness.
 
 ### Remaining blockers and scope
 
@@ -310,9 +481,10 @@ preview does not establish final-head CI or merge readiness.
 - A new cross-user stale-response browser race is unverified. Fresh independent
   per-user context proof passed; source guards remain. Those facts do not prove
   the cross-user response race.
-- All four registered owners passed at pushed `2b69a488`. Final submitted
-  dirty-follow-up verification, valid measured coverage and complete accepted
-  obligations remain pending. Continue using the existing map items for real
+- All four registered owners passed at pushed `2b69a488`. A valid local
+  full-workspace coverage report now exists at `3e8152b1-dirty`; exact-head
+  hosted verification, hosted coverage, and complete accepted obligations
+  remain pending. Continue using the existing map items for real
   notification delivery, OIDC, Delivery variants and Assurance batch/other gaps.
   The canonical UI punch list and its authority references remain in force.
 - Accepted gaps remain incomplete: .2 D1 scope/registration; .3 D3 failed-save

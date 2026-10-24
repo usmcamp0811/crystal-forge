@@ -156,9 +156,13 @@ tested package prefix `67q9…coverage-report`. Only dependencies changed; no te
 skip, Cargo selection or quality-enforcement change is included. This is local
 launcher proof, not actual measurement or resolution of all previous coverage
 failures. The owner also reports **eight native report tests passed**. These and
-the 16 launcher controls do not resolve the hosted ASLR/EPERM restriction in job
-`17433925120` or establish valid measured coverage. Final-head actual coverage
-remains required. The execution-only policy
+the 16 launcher controls did not resolve the hosted ASLR/EPERM restriction in job
+`17433925120`. The launcher now selects Tarpaulin's LLVM engine, which needs no
+ptrace or personality change. A later local full entry passed: 40/40 intended
+test targets, 2,378 passed / 0 failed / 830 ignored, and 33,115 / 83,641 lines
+(39.59%) across all six crates. See the
+[local coverage checkpoint](integration-coverage-map.md#local-full-llvm-coverage-checkpoint-at-3e8152b1-dirty).
+Exact-head hosted coverage remains required. The execution-only policy
 still makes complete measured debt nonblocking; no strict quality gate is added.
 
 TASK-503 remains Backlog: controller `issued_at` versus an agent timestamp
