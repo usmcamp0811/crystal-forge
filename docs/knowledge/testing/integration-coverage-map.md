@@ -18,24 +18,62 @@ generated:
 ## Current status
 
 Draft [MR335](https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335)
-targets `dev`. This audit covers pushed source
-`642db0ec5f0facb24bb4cd5a3ff00690b44280d6`, not subsequent commits.
-Exact-head [pipeline 2983100226](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2983100226)
-is **terminal failed**: Access 37/37, Delivery 16/16 and Upgrade 13/13 passed;
-Assurance recorded 50 passed / one failed case records (45 distinct names).
-The terminal audit and scope block on new product repairs are recorded in
-canonical TASK-490.24. [Audited hosted evidence](#current-repair-evidence-and-publication-gaps)
-now proves the selected Access repairs, Current header/mounted recovery,
-credential preservation and D2 transition at that remote head. It does not close
-full parity or final same-head all-owner acceptance.
+targets `dev`. Current pushed source is `2b69a488`.
+[Pipeline 2983775656](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2983775656)
+is **terminal failed**: coverage failed; all four owners passed. Downloaded structured artifacts
+verify all four exact-source owners: Access **37/37** (retry `17434078207`),
+Delivery **16/16** (`17433925112`), Upgrade **13/13** (`17433925114`) and Assurance
+**54 passed case records / 48 distinct names** (job `17433925113`). The Assurance
+proof includes actual 104-rule V1R1 / 103-rule V1R2 browser imports, source hashes,
+full immutable V1R1 rows, framework lineage and manual `supports` / partial mapping
+through POST 201, SQL, API and fresh reload. Local audit inputs are
+`/tmp/opencode/pipeline-2983775656/17433925112.zip` and
+`/tmp/opencode/pipeline-2983775656/hosted-stig-proof.json`.
 
-Subsequent commit `32d1b88d` adds four framework reimport/conflict
-regressions to normal CI. All four passed against an isolated local database;
-`/tmp/opencode/task490-framework-enrolled.{log,status}` retain that local proof.
-They have no hosted proof. Coverage and complexity were skipped after Assurance
-failed; there are no measurements from this pipeline. A real valid coverage
-percentage remains unproved. The earlier real coverage test failure and segfault
-remain failures, not 0% or a pass. Execution-only analysis policy makes complete
+Initial Access job `17433925111` aborted before proof with
+`Job failed (system failure): aborted: terminated`; automatic retry
+`17434078207` passed through real execution, without a product fix. All four
+owner artifacts were downloaded and source-verified; cached `<job-id>.zip` files
+and summary JSON are under `/tmp/opencode/pipeline-2983775656/`.
+CVE `17433925116` executed **30 tests / 27 selections**, and dashboard
+`17433925117` executed **4 tests / 2 selections**. Each passed eight root-runner
+controls with expected exits: initialization 1, child failure 73, empty selection
+1, unrelated positive 1, missing completion 1, malformed completion 1,
+receipt-over-compose 73 and interruption 143. PostgreSQL child UID was 65534;
+normal test/compose exits were 0. `hosted-database-proof.json` in that audit
+directory retains the actual results. The new local 31st CVE regression is not
+hosted proof. State/database `17433925118` passed **534 tests / 246 selections**,
+expected = emitted 534, with every selection exit 0 and migration-rehearsal phase
+exit 0. Component `17433925115` passed: native summaries record 101 passed / one
+ignored, 1,836 passed / 784 ignored, three separate one-pass summaries and four
+zero-test summaries, all with zero failures. Its 33 launcher fixture outcomes
+are not a distinct-test total; the audit does not verify 58 knowledge-validator
+tests for this job. `current-lower-jobs-proof.json` retains these counts.
+
+Complexity `17433925119` **succeeded**, exit 0, with `COMPLETE_WITH_DEBT` /
+`MEASURED_DEBT`: 577 files, 11,436 functions, 747 selected lint findings and 210
+files over 500 lines. Both package analyses exited 0; JUnit has zero errors and
+failures. `hosted-complexity-proof.json` records the native all-target/all-feature
+scope for `packages/default` and `packages/web-ui`. The execution-only policy
+makes this complete measured debt nonblocking.
+
+Coverage `17433925120` **failed**, exit 1. In `17433925120.trace`, lines
+1381–1384 record `ASLR disable failed: EPERM: Operation not permitted`, then
+`Unexpected signal when starting test`; test and compose exits are both 1.
+This runner restriction produced no valid measured coverage, not 0% or a pass.
+The terminal source/job audit is
+`/tmp/opencode/pipeline-2983775656/terminal-audit.json`, at exact SHA
+`2b69a488771affc4019981a2a3f610f2a1185079`. The full
+[`642db0ec` audit](#current-repair-evidence-and-publication-gaps) remains historical
+evidence at its own source, not proof for `2b69a488`.
+
+The [follow-up checkpoint](#latest-local-correction-and-hosted-checkpoint) records
+uncommitted owner-authorized CVE supervision and test corrections after `2b69a488`.
+Their evidence remains `2b69a488-dirty`, not published or future-commit CI proof.
+Final submitted-input verification, valid measured coverage and complete accepted
+obligations remain pending; passing registered subsets do not establish merge
+readiness. The earlier real coverage test failure and segfault remain failures,
+not 0% or a pass. Execution-only analysis policy makes complete
 measured complexity/file-size debt nonblocking; missing tools, failed preparation
 or compilation, crashes/timeouts and invalid or incomplete reports still block.
 
@@ -59,6 +97,11 @@ and historical Access failures are not UI debt.
 Historical chip and failed Findings repairs are closed and regression-protected.
 
 ### Current repair evidence and publication gaps
+
+The following full audit is historical: pipeline `2983100226` at
+`642db0ec5f0facb24bb4cd5a3ff00690b44280d6` was terminal failed. It does not describe
+the terminal failed `2b69a488` pipeline. Canonical TASK-490.24 retains that audit and its
+scope decisions; later narrow repairs have explicit owner authorization.
 
 | Scope | Actual evidence and limit | Integrated disposition |
 | --- | --- | --- |
@@ -88,7 +131,7 @@ interruption 143. Controlled faults are launcher proof, not product cases.
 
 ### Latest local correction and hosted checkpoint
 
-The normal Assurance command
+The earlier normal Assurance command
 `nix develop --command sh packages/ci/integration-owner-build.sh integration-assurance`
 exited **0** at `11ec75f3d5e0778747a33a5020747d284fead6da-dirty`:
 **54 passed case records / 48 distinct names**, fresh driver 295.54 seconds.
@@ -108,11 +151,12 @@ Real-preview proof and verified before/after PNG uploads with bounded receipts
 are linked in [MR335 note 4080983319](https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335#note_4080983319).
 No visual approval is implied.
 
-Local prerequisites: parser 297 passed / one ignored; broader preview 22 passed /
+Historical local prerequisites: parser 297 passed / one ignored; broader preview 22 passed /
 one unchanged failure, `preview_accepts_nixos_stig_structure`, expecting absent
-`inferred_assertions`. That failure is not waived. Embedded server package core
+`inferred_assertions`. The corrected expectation and its authority are recorded
+below; the earlier failed run remains a failure. Embedded server package core
 passed 1,838 / 784 ignored, plus one isolated case. The four new exact API tests
-are enrolled in normal state CI; they have no new hosted proof.
+were enrolled in normal state CI at that checkpoint.
 
 Test-only compatibility corrections use auth source `local` instead of `test`
 under valid migration 0226, compact generated-ID receipts while retaining full
@@ -124,7 +168,7 @@ Earlier failed runs remain failures: v1 `4zncnb…` recorded 52 passed / one fai
 (duplicate bundle name, HTTP 500); v3 `pj73fn…` recorded three passed / one failed
 (bootstrap network-inventory race). The exact v3 delta was not recorded.
 
-Latest hosted [pipeline 2983606845](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2983606845)
+Historical hosted [pipeline 2983606845](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2983606845)
 at clean `11ec75f3` still tests earlier code, before these dirty corrections.
 [Assurance 17432893316](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17432893316)
 repeats 50 passed / one failed at unsupported preview 200.
@@ -133,18 +177,126 @@ failed the real test
 `services::cve_scans::tests::immediate_scan_renews_ownership_reuses_active_and_cancels_on_revocation`:
 the five-second wait for `completed` timed out; exit 101 propagated.
 One unchanged local isolated diagnostic with read-only lock sampling passed one
-test in 0.36 seconds. It does not explain away the hosted failure. No production
-CVE supervisor change or timeout increase is included. Final submitted same-head
+test in 0.36 seconds. It does not explain away the hosted failure. At that
+checkpoint no production CVE supervisor change was included. The subsequent
+authorized causal repair and source-specific proof follow. Final submitted-head
 four-owner, lower-level database and real analysis verification remains required.
 The fully audited `642db0ec` table above remains historical proof at its source.
 
+#### Uncommitted follow-up after `2b69a488`
+
+The controlled original-test PostgreSQL row-gate reproduction at
+`/tmp/opencode/task490-cve-lock-cycle-proof3-final-proof.json` proves an application
+circular wait after the external gate's COMMIT was acknowledged. Completion was
+`idle in transaction`, waiting on `ClientRead`, with `blocked_by: []` for 201
+samples from 0.976 to 5.891 seconds; the heartbeat query was blocked by completion.
+The unchanged original five-second test failed with exit 101. Initialization and
+cleanup exited 0; root-runner initialization was not the cause. The historical
+`11ec75f3` hosted trace is consistent with this diagnosis but captured no actual
+locks. It does not prove a measured historical interleaving or resource exclusion.
+
+The smallest owner-authorized service repair places the tick and bounded
+10-second heartbeat query inside the select branch future, rather than awaiting
+the query in the selected branch body. Execution continues to be polled while
+the heartbeat waits. Biased selection polls execution first; cancellation/drop
+precedes advisory unlock. Predicates, intervals and existing test deadlines are
+unchanged. A deterministic SQLx isolation regression records the actual blocked
+chain both before and after: RED exit 101 before the repair, GREEN exit 0 after.
+The original test and wait helpers are byte-identical to `c2f3ae..`.
+
+The actual normal isolated CVE CI entry passed **31/31 across 28 selections**:
+all original 30 tests plus the new explicitly selected ignored regression.
+Test and compose exits were 0. Evidence is
+`/tmp/opencode/task490-cve-normal-fixed.{log,status}` and
+`/tmp/opencode/task490-current-suite-proof.json`. The regression uses the existing
+`packages/devScripts/default.nix` entry, without a new check or framework.
+
+The remaining preview failure was a wrong proxy-field-absence expectation.
+Approved `6e4ea520:ImportStigModal.jsx` lines 102–110, 143–145 and 664–692, explicit
+TASK-426 user authorization `85801d3a`, and creation `0adb3642` require reviewable
+typed preview inference. TASK-412's prohibition on automatic foreign-import
+promotion remains intact. The test-only correction independently authors the
+firewall boolean, option path, expression and description; requires a foreign
+document and `is_native: false`; and compares full import/queue SQL snapshots,
+excluding authentication setup from the before/after boundary. All existing ZIP,
+full-fix, check and provenance assertions remain. The focused real HTTP test
+passed once and the full preview prefix passed **23/23**, exit 0. A temporary
+helper error `42P01` was corrected to current `commits`/`derivations` tables;
+no schema changed. Evidence:
+`/tmp/opencode/task490-preview-inference-corrected-tables.{log,status}`.
+Normal state CI selects the entire 23-test prefix once in place of four exact
+selections, removing duplicate work without skipping tests.
+
+The live official V1R1 preview returned 200 through the real API: foreign rule
+`SV-268078r1039122`, group `V-268078`, native false and the exact typed firewall
+suggestion. No import request was made for this probe. `UnsupportedPackage` 422
+and zero-rule 200 remain verified. The durable
+[safe JSON proof archive](https://gitlab.com/-/project/70402481/uploads/d2d63eadda6c52be92c0a72b66256568/mr335-cve-supervision-preview-evidence.tar.gz)
+contains controlled proof3, red/green proof, normal CVE 31 and preview 23 results,
+source hashes, cleanup and actual preview response. It contains no journals,
+traces or credentials and retains `2b69a488-dirty` source identity.
+
+After the Rust fixes, but **before the latest triage phase extension**, normal
+local Assurance passed **54 records / 48 names**, fresh driver 274.30 seconds,
+at `2b69a488-dirty`. Evidence:
+`/tmp/opencode/task490-supervision-assurance.{log,status}` and immutable output
+`/nix/store/b1qmkdh4ilwxncn4g6ndh7w7sfyknh93-vm-test-run-cf-it-assurance-evidence-remediation-lifecycle-run`.
+That is the preceding Rust-fix-only checkpoint, not proof of the latest inputs.
+The completed read-boundary v2 run exited **0**:
+`/tmp/opencode/task490-final-assurance-read-boundary-v2.status`.
+Normal Assurance passed **54 case records / 48 names**, driver **247.73 seconds**,
+at `2b69a488-dirty`, including the CVE/preview fixes and two independent browser
+reopen phases. Current exported
+`integration-evidence/integration-assurance/evidence-remediation-lifecycle/{result,meta}.json`
+and immutable output
+`/nix/store/0p9ym3bbvfva1nsr8b0kygwgzaf8mkj2-vm-test-run-cf-it-assurance-evidence-remediation-lifecycle-run`
+retain that proof. Separate creation/reopen-1/reopen-2 aliases in the same
+scenario's existing CJS enable full nine-table SQL comparisons before/after
+**each** read and complete cross-phase API comparisons held in Python memory.
+Receipts `assurance.remediation.reopenComplete.1/2` and
+`assurance.remediation.reopenSqlUnchanged.1/2` are actually true. All original
+assertions, both 104/103 STIG imports, full V1R1 preservation and mapping reload
+still pass.
+
+The first read-boundary attempt, immutable output prefix `774n60…`, remains a
+failure: **18 passed / one failed**, because the fresh reopen context reloaded
+Dashboard without the resource protocol. V2 uses explicit exact-System navigation
+and new Request-linked JSON capture. It retains source-UI reload testing and
+adds no retry, sleep waiver or assertion relaxation. The historical lack of SQL
+reopen proof remains recorded below; this local run now closes that selected read
+gap. No new actor, scenario, producer, batch or fleet coverage is claimed.
+
+The minimal local coverage execution-dependency repair declares
+`pkgs.check-jsonschema` and `pkgs.libxml2` in the coverage package PATH. Retained
+older `NotFound` sites are `tests/register_oscal_snapshot` lines 36–41 and
+`oscal_poam_export` lines 30–35 for `check-jsonschema`; XML validation also needs
+`xmllint`. The installed coverage PATH did not own these tools. All **16 existing
+coverage-launcher controls passed**, exit 0, with fresh real PostgreSQL; tests
+verify declared Nix-store binary paths and versions and retain every original
+status/report guard. Evidence:
+`/tmp/opencode/task490-coverage-schema-tools-tests.{log,status}`; tested package
+prefix `67q9…coverage-report`. Only the two dependencies were added: no test skip,
+Cargo selection change or quality-enforcement change. This local launcher proof
+is not an actual coverage measurement or resolution of every earlier coverage
+failure. The owner also reports **eight native report tests passed**; these and
+the 16 launcher controls validate the local repair, not coverage execution on the
+hosted runner. They do not resolve the ASLR/EPERM restriction in job `17433925120`.
+Final-head actual coverage remains required. Complete measured debt
+remains nonblocking under the existing execution-only policy; no strict gate was
+introduced.
+
+Preview: **ready** (owner-reported), live `http://127.0.0.1:8090/`, task API
+port `26799`, frontend `13985`, task PostgreSQL `4962`, owned by task `5490`.
+The tested backend package includes the repair. UI code is unchanged; this
+preview does not establish final-head CI or merge readiness.
+
 ### Remaining blockers and scope
 
-- The owner-approved API preview rejection of `UnsupportedPackage` is locally
-  verified by focused HTTP tests, real preview and the normal Assurance owner
-  above. The browser assertion and parser class contract remain intact. Hosted
-  verification of the pending correction remains required; the earlier hosted
-  preview-200 failures remain failures.
+- The owner-approved API preview rejection of `UnsupportedPackage` now has
+  exact-source hosted Assurance proof at `2b69a488`, plus the local follow-up
+  evidence above. The browser assertion and parser class contract remain intact.
+  Earlier hosted preview-200 failures remain failures. Follow-up dirty inputs
+  still require submitted-head verification.
 - TASK-503 remains Backlog: controller `issued_at` versus an agent timestamp
   10 seconds behind caused the prior dirty local Assurance 12-pass/one-failure
   run. Hosted success does not repair this latent clock-domain defect. The owner
@@ -158,10 +310,16 @@ The fully audited `642db0ec` table above remains historical proof at its source.
 - A new cross-user stale-response browser race is unverified. Fresh independent
   per-user context proof passed; source guards remain. Those facts do not prove
   the cross-user response race.
-- Final submitted same-head all-owner success, real coverage and complete accepted
-  obligations remain blocked. Continue using the existing map items for real
+- All four registered owners passed at pushed `2b69a488`. Final submitted
+  dirty-follow-up verification, valid measured coverage and complete accepted
+  obligations remain pending. Continue using the existing map items for real
   notification delivery, OIDC, Delivery variants and Assurance batch/other gaps.
   The canonical UI punch list and its authority references remain in force.
+- Accepted gaps remain incomplete: .2 D1 scope/registration; .3 D3 failed-save
+  states; .5 notification and .6 OIDC with missing existing prerequisites;
+  .8–.15 Delivery variants; .17–.18 hardening/policy; .20 batch/fleet;
+  .27/.28 waiver/acceptance; .22 exports; and .29 reopen/recurrence. The triage
+  read-boundary extension does not close any broader obligation in these groups.
 
 The [wrap-up evidence bundle](https://gitlab.com/-/project/70402481/uploads/299c2d993d7ce0f585efe4a93b405490/mr335-truthful-ci-and-functional-repairs.tar.gz)
 provides durable local proof for the earlier repairs, not the new dirty corrections:
@@ -174,7 +332,8 @@ focused API/SQL receipts; `expanded-access/` contains the 31-pass/one-failure ru
 No traces, journals or session headers are uploaded. Local handoff paths identify
 supplementary inputs, not the sole evidence. Dirty results retain their original
 source identities and are not relabeled after commit. The newer job archives
-above supply hosted proof at `642db0ec`; final submitted-head all-owner success
+above supply hosted proof at `642db0ec`; the terminal audit now proves all four
+registered owners at `2b69a488`. Final submitted dirty-follow-up verification
 remains required.
 
 Historical launcher checkpoints remain distinct. TASK-501 integrated
@@ -220,7 +379,8 @@ Build prerequisites validated native UI 774 passed / one ignored and server
 package 1,838 passed / 780 ignored, plus one isolated configuration-fixture case.
 These are prerequisite results, not final four-owner, hosted or complete-coverage
 proof. The later hosted Access archive supplies durable submitted-input evidence;
-final same-head all-owner success and complete accepted coverage remain required. No new
+all four registered owners later passed at `2b69a488`. Final submitted dirty-follow-up
+verification and complete accepted coverage remain required. No new
 visual approval is claimed; `implementation_status` remains `partial`.
 
 ### Historical hosted baseline: `dbf50b47`
@@ -376,11 +536,12 @@ separate valid-CSRF Admin request without POA&M metadata returns
 scan seal and all observations. This is not SQL before/after proof of browser
 reopen, successful batch application, or unselected-finding isolation.
 
-Preview: ready (owner-reported), production `http://127.0.0.1:8090/`, API
+Historical preview checkpoint: production `http://127.0.0.1:8090/`, API
 `http://127.0.0.1:3490/`, isolated task PostgreSQL port `5490`, design
 `http://127.0.0.1:39997/crystal-forge.html`. Existing supervisors are
-`cf-assurance-production-start` and `cf-assurance-design`; backend freshness
-remains with the coordinator. Stock fixtures have no scans or historical
+`cf-assurance-production-start` and `cf-assurance-design`. Current preview ports
+and backend status are recorded in the follow-up checkpoint above. Stock fixtures
+at this historical checkpoint had no scans or historical
 selections, so they cannot demonstrate the populated repairs. No scan results
 were seeded. Genuine before evidence remains dark-theme `9f53fade-dirty` VM
 captures; new reference captures cover both themes. Live empty-state captures
@@ -1603,7 +1764,7 @@ Authority: A-contract, TASK-490.18/.19 and approved A-design states. Draft Compl
 | `assignment-resolution` | Environment/system assignments with include/exclude/override inputs → preview, commit/update/remove, effective-policy read | Preview writes none; stored scope/version and approved precedence produce independently authored effective policy set; environment and host do not silently exchange identity. | Assignment/version/membership DB, independent expected set, enforcement result. | .18; `planned`; draft-only precedence conflicts require case-specific clause review. |
 | `enforce-report-only` | Real passing/failing input and Enforce/ReportOnly assignments → evaluate and request deploy | Enforce failure blocks admission; ReportOnly records same technical outcome without blocking; missing/failed evidence follows accepted policy, not success default. | Evaluation decision/results, deployment admission records and actual target non/activation. | .18; `planned`. |
 | `policy-kinds` | Authored native/expression/package/CVE/agent/approval/time-window/canary conditions → evaluate supported policy configuration | Each supported execution boundary gets real positive/negative input; technical result and gate meaning remain separate; no parser-only proof of execution. | Independent Nix/target facts, policy evidence/result DB, gate/rollout observer. | .18 broad boundary; per-kind execution matrix **unassigned**; `planned`. |
-| `framework-catalog` | Imported STIG/framework release → list versions, search requirements/children/mapped policies, bundle coverage | Authored external rule/requirement identities and hierarchy survive; mappings distinguish policy evidence from framework coverage; search/filter scope does not drop version identity. | Independently parsed source catalog, framework/requirement/mapping DB, browser. | .19; **locally verified subset, hosted pending** at `11ec75f3-dirty`: 104-rule V1R1 / 103-rule V1R2 source versions, immutable full V1R1 rows, framework lineage and manual `supports` / partial mapping through POST 201, SQL, API and fresh browser reload. Extra framework/coverage bindings remain **unassigned**, `planned`. |
+| `framework-catalog` | Imported STIG/framework release → list versions, search requirements/children/mapped policies, bundle coverage | Authored external rule/requirement identities and hierarchy survive; mappings distinguish policy evidence from framework coverage; search/filter scope does not drop version identity. | Independently parsed source catalog, framework/requirement/mapping DB, browser. | .19; **Integration-covered subset at `2b69a488`**, hosted Assurance `17433925113`: actual 104-rule V1R1 / 103-rule V1R2 imports and source hashes, immutable full V1R1 rows, framework lineage and manual `supports` / partial mapping through POST 201, SQL, API and fresh browser reload. Extra framework/coverage bindings remain **unassigned**, `planned`. |
 | `mapping-recovery` | Operator/Admin with exact requirement version and unresolved historic release → mapping CRUD, Admin recovery | Only intended mapping/version changes; failed/mismatched source recovery leaves unresolved version honest; startup can continue without inventing missing source digest/evidence. | Requirement mappings/version/digest rows, source file digest and recovery result. | **Unassigned** .19-adjacent; `planned`. |
 
 ### 10. `assurance.remediation` — triage, risk and POA&M continuity
@@ -1612,7 +1773,7 @@ Authority: A-continuity (including Section 32), A-contract, TASK-490.20/.21/.27/
 
 | Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Tracking / status |
 | --- | --- | --- | --- | --- |
-| `triage` | Authorized Operator, Viewer/nonmember and real finding → system/fleet single/batch triage and justification/revoke | Exact canonical CVE/package/system or environment scope, actor and justification persist; denied/stale mutation changes none; batch applies only intended compatible findings. | Stable finding/disposition/history/audit and immutable observation rows; browser selection. | .20; `planned`. |
+| `triage` | Authorized Operator, Viewer/nonmember and real finding → system/fleet single/batch triage and justification/revoke | Exact canonical CVE/package/system or environment scope, actor and justification persist; denied/stale mutation changes none; batch applies only intended compatible findings. | Stable finding/disposition/history/audit and immutable observation rows; browser selection. | .20; **locally verified read-boundary subset**: normal Assurance v2 at `2b69a488-dirty`, 54 records / 48 names, driver 247.73 s, exit 0. Two independent browser reopen phases passed full nine-table SQL before/after each read and complete cross-phase API comparison in Python memory; `assurance.remediation.reopenComplete.1/2` and `assurance.remediation.reopenSqlUnchanged.1/2` are true. First attempt `774n60…` remains 18 passed / one failed; see the latest checkpoint for the test-protocol correction and immutable v2 proof. Batch/fleet, unselected isolation and remaining variants stay `planned`; no complete .20 claim. |
 | `finding-waiver` | Real policy failure plus authorized requester/approver → request/list/detail/decide waiver | Source-owned waiver lifecycle/authority retained; acceptance does not make technical evidence pass or remediate target; scope and observation/policy version stay exact. | Waiver/finding/version/audit records and unchanged target/scanner evidence. | .27; `planned`; no global authority blocker. |
 | `acceptance-register` | Policy waiver and CVE accepted risk visible in register → filter/open/review/renew | Typed source ID and source revision retained; renewal is audited new review with server-clock 90-day deadline and preserves required origin/scope; forbidden source state cannot renew. | Source waiver/disposition records, successor/audit links and browser reload. | .28; `planned`, A-continuity Section 32 is authority. |
 | `acceptance-conversion` | Selected acceptance plus current real finding → convert, duplicate retry, concurrent conflict | Atomic source-authorized plan creation/compatible reuse and selected acceptance replacement; rollback on failure; one replacement event; other host/environment decisions unchanged. Never browser revoke-then-create. | Transactional source/plan/link/audit before/after, concurrent request results. | .28; `planned`. |
@@ -1627,7 +1788,7 @@ Authority: A-contract and TASK-490.19/.22; A-continuity for source identity/scop
 
 | Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Tracking / status |
 | --- | --- | --- | --- | --- |
-| `stig-import` | Authorized user with DISA Anduril XCCDF XML/ZIP → preview/import; malformed/oversize/invalid payload | Preview writes nothing; authored rule identities/count from independent parser persist only after valid import; rejected import is atomic; role/body limits apply before protected writes. | External source parser/schema plus framework/bundle/policy DB before/after and browser import state. | .19; **locally verified subset, hosted pending**: normal Assurance 54 records / 48 names at `11ec75f3-dirty`, including both actual 104/103 imports and mapping; see latest checkpoint. Hosted `642db0ec` and `11ec75f3` preview-200 failures remain historical failures. Four framework reimport/conflict regressions and four new exact API tests passed locally and are normal-CI enrolled; new hosted proof remains pending. |
+| `stig-import` | Authorized user with DISA Anduril XCCDF XML/ZIP → preview/import; malformed/oversize/invalid payload | Preview writes nothing; authored rule identities/count from independent parser persist only after valid import; rejected import is atomic; role/body limits apply before protected writes. | External source parser/schema plus framework/bundle/policy DB before/after and browser import state. | .19; **Integration-covered subset at `2b69a488`**: hosted Assurance `17433925113`, 54 records / 48 names, both actual 104/103 imports, source hashes, full V1R1 rows, lineage and mapping. Hosted `642db0ec` and `11ec75f3` preview-200 failures remain historical. Four framework reimport/conflict regressions retain their local isolated-DB proof and normal-CI enrollment. Follow-up typed preview-inference correction passed focused real HTTP and full 23/23 prefix at `2b69a488-dirty`; full import/queue SQL snapshots, foreign/native distinction, old ZIP/full-fix/check/provenance assertions and UnsupportedPackage 422 / zero-rule 200 checks remain. Final submitted-head verification and remaining variants are pending. |
 | `policy-interchange` | Real authored policy/version set → export/download, preview/import into isolated receiver state | Download parses independently; selected semantic records/scope round-trip; validation error leaves receiver unchanged; imported trust cannot be inferred from file presence. | Parsed payload/schema, source/receiver DB and actual browser download. | .22; `planned` for accepted round-trip subset. |
 | `native-reconciliation-details` | CF-native identities/digests with exact match, lineage/version conflict or unverified signature → preview/import | Exact draft-only reconciliation/trust conflict outcomes require approval; existing implementation/tests cannot select expectation. | Independent source digest/identity comparison, receiver DB transaction results. | .22; `blocked: D5-interchange` only for these details. |
 | `server-exports` | Real scoped plans/acceptances/CVEs/bundles/assignments/policies → register CSV/XLSX/OSCAL JSON/XML, POA&M/acceptance CSV/XLSX, CVE CSV, XCCDF and policy exports | Independent parsers/schema validate actual files; exact authored records/IDs/scope and source versions included; hidden/unselected data omitted; export does not mutate domain records. | Downloaded bytes parsed externally, source-selection DB and no-write observation. | .22; `planned`. |
@@ -1635,7 +1796,7 @@ Authority: A-contract and TASK-490.19/.22; A-continuity for source identity/scop
 
 ### 12. `upgrade.continuity` — version transition and compatibility
 
-Authority: A-contract/TASK-490.23 and approved D2 above. Sources: S-router startup/migrations, `packages/default/crates/cf-server/migrations/`, S-wire, S-agent/S-builder, retained generation/snapshot/evidence DB mechanisms. Owner/scenario: **Upgrade/U**, real `checks/integration-upgrade/scenarios/version-transition` integrated as `898fdc65`. Thirteen cases passed hosted at `642db0ec`; job 17431358126 and archive above. Final all-owner success remains blocked.
+Authority: A-contract/TASK-490.23 and approved D2 above. Sources: S-router startup/migrations, `packages/default/crates/cf-server/migrations/`, S-wire, S-agent/S-builder, retained generation/snapshot/evidence DB mechanisms. Owner/scenario: **Upgrade/U**, real `checks/integration-upgrade/scenarios/version-transition` integrated as `898fdc65`. Thirteen cases passed hosted at `642db0ec`; job 17431358126 and archive above. All four registered owners also passed at `2b69a488`, including Upgrade job `17433925114`. Final submitted dirty-follow-up verification, valid measured coverage and complete accepted obligations remain pending.
 
 | Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Tracking / status |
 | --- | --- | --- | --- | --- |
@@ -1753,7 +1914,9 @@ preference baselines, then failed changed-Light PATCH waiting. Focused optional
 gate and mobile close-target repairs did not prove later phases. The subsequent
 four authorized corrections now have focused, local normal-owner and hosted
 37/37 proof at `642db0ec`; their historical failures remain above. The linked
-Access archive supplies durable proof; final all-owner success remains blocked. Tracking: TASK-490.3/.4 and the
+Access archive supplies durable proof. All four registered owners passed at
+`2b69a488`; final submitted dirty-follow-up verification and complete accepted
+coverage remain pending. Tracking: TASK-490.3/.4 and the
 existing TASK-339.1 environment editor. These workflows have no Delivery-role
 dependency. D3 blocks only the unspecified failed-save/presentation states.
 The `590ee94c` 23-case pass remains historical evidence, not current readiness.
