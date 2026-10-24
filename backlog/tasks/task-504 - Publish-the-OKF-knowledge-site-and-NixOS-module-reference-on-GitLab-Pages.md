@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-24 14:34'
-updated_date: '2026-10-24 18:25'
+updated_date: '2026-10-24 18:35'
 labels:
   - documentation
   - okf
@@ -56,7 +56,7 @@ Users need a browsable published Crystal Forge knowledge base and a reference fo
 - [x] #2 The site includes a build-generated reference for the exported Crystal Forge NixOS module options, including service options and STIG controls/presets, with documented reference limitations.
 - [x] #3 Knowledge links, images, and Mermaid diagrams work in the published site; references to repository files outside the published corpus have an explicit usable destination.
 - [x] #4 The repository provides a reproducible Nix site build and a persistent local preview with documented build and review instructions.
-- [ ] #5 GitLab CI publishes the generated static site through GitLab Pages from the default branch without publishing unrelated repository data.
+- [x] #5 GitLab CI publishes the generated static site through GitLab Pages from the default branch without publishing unrelated repository data.
 - [x] #6 The main README links to the intended GitLab Pages site, and knowledge guidance explains publication, generated options, and local verification without claiming an unverified deployment.
 - [ ] #7 Automated checks cover generated option coverage, representative knowledge content and implementation-status labels, internal links/assets, and deployment-prefix-safe navigation; applicable Nix and browser checks are recorded with actual results.
 - [x] #8 The documentation site closely matches Crystal Forge's visual identity, including its purple accent, dark/light surface colors, typography, navigation, and accessible responsive controls; the user may review the theme through the persistent preview.
@@ -112,4 +112,14 @@ Opened Draft MR !337 targeting dev: https://gitlab.com/crystal-forge/crystal-for
 Re-ran `nix build .#docs-site .#checks.x86_64-linux.docs-site .#checks.x86_64-linux.okf-knowledge -L --no-link --print-out-paths --builders '' --max-jobs 1 --cores 2` at published commit: exit 0 (site/browser paths unchanged, knowledge validation rebuilt and passed). Preview remains ready http://127.0.0.1:8754/ on sledge, task504-docs PID 27024. Retain In Progress and lock because broad flake verification is incomplete; MR is Draft, not review-ready.
 
 Hosted CI for MR !337 at cec36be8: pipeline 2984763764 first failed only on flake-check [niks3-cache] (job 17440274978): VM test action timeout after 120s, in code untouched by this MR (docs-site-check and all other flake-check jobs passed). Retried that single job (17440381716): success. complexity-check and coverage-check, previously skipped, then ran and passed. Pipeline status success; GitLab detailed_merge_status mergeable. No CI configuration was changed and no jobs were made optional. web-ui-check is the repository's pre-existing allow_failure job (canceled). MR description updated to match. Merge not performed; user authorization required. AC5 (real Pages deployment) remains unverified until after merge to dev; AC7 hosted flake-check matrix green, full local `nix flake check` still not completed.
+
+MR !337 merged into dev at 2026-10-24T18:30:12Z (merge commit 511dcdaf942d82e7bf3f0e2346b2ffb1678f286d). Post-merge dev pipeline 2984996246 ran docs-site-check and docs-pages, both success; docs-pages uploaded 351 files from public/.
+
+User reported Pages 404. Root cause: the project's Pages feature was disabled (GET /projects/70402481 pages_access_level=disabled), so the successful docs-pages job produced no served deployment; crystal-forge.gitlab.io/crystal-forge/ only redirected to the Pages auth flow and ended at sign-in/404. Not a defect in the CI job or the site build.
+
+Fix (project setting, user chose 'Enabled'): PUT projects/70402481 pages_access_level=enabled (repo is public, so the site is public; no content beyond the public repo's docs/knowledge). Retried docs-pages job 17440494144 -> new job 17440536085: success. No repository change or commit was needed.
+
+Verified live after retry: https://crystal-forge.gitlab.io/crystal-forge/ redirects (1 hop) to the unique domain https://crystal-forge-5a3b7d.gitlab.io/ and returns 200. Home, search, options index (263 options from 31 exported modules), a service option page, a knowledge page, and all assets (css, js, theme, mermaid, search index, logo) return 200. This verifies AC5 (Pages publication from the default branch). The browser-level theme/Mermaid behavior was verified earlier against the same immutable build, not re-run against the hosted URL.
+
+Open items: documentation-site.md still says to confirm the actual Pages URL; it could now record the verified unique domain (needs a follow-up commit/MR, not done). Full local `nix flake check --keep-going` never completed (hosted flake-check matrix on the MR was green). Task left In Progress: Done also requires removing the task worktree, which would also stop the preview server; awaiting user decision.
 <!-- SECTION:NOTES:END -->
