@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-24 02:21'
+updated_date: '2026-10-24 02:42'
 labels:
   - testing
   - integration
@@ -82,6 +82,8 @@ Owner explicitly approves the narrow non-XCCDF preview production correction: re
 Focused approved API regression first reproduced preview200/import422 before correction;4newrealHTTPtests now pass, parser297pass1ignored. Broaderexistingpreviewtests19failedbeforeHTTP because admin_session_token fixture passes auth_source='test', rejected by unchangedmigration0226 CHECK allowedunknown/dev/local/oidc. Routine test-prerequisite correction: change only that existing shared fixture argument to supported 'local', preserving all sessions/roles/assertions and productionconstraints; rerun fullpreview_ selection and enlist fournewexactAPItests in existingnormalisolateddatabaseCI. This is not a productionauthchange or newscenario.
 
 NormalcorrectedAssurance dirtyrun passed52records thenfailed beforeV1R2browser launch: VM /bin/bash 'Argument list too long' exit126 writing receipts-in.json. V1R1.identities alone contains72416bytes duplicate requirement titles/policy names alreadyindependentlyasserted inPython, pushingtotalbase64argumentbeyondkernelbound. Keep entire first/second local identity rows, full source-derived metadata assertions and completeSQL immutable-row before/after comparisons unchanged. Narrowtransportrepair: publish frameworkIDs and generated requirement/policy-version IDsets only in .identities receipts (noCJSconsumerrequiresduplicate titles); returnfullPythonvalue unchanged forlineage/mappingassertions. No driver/sharedhelper/framework/VMchange, no testskip, no productchange. RerunnormalAssurance retaining exit126artifact4zncnb406nhflsf5fmm2dkdjhbpk2swv.
+
+Assurancev2 compactreceiptcorrectedhandoff,52passesthenV1R2import500. ExactcontrollerSQLerrorcompliance_bundles_name_key: bothcreate-alluploadsuseidenticaldefaultBenchmarktitle Anduril NixOS Security Technical Implementation Guide. Existingcommitcreatesnewbundlelineage requiringuniquename; taskrequiresrelease/frameworkcontinuitynotduplicatebundlecreation. Routine authored-inputfix: distinctfacts.bundleName perrelease, fill existingBundle nameUIcontrolbeforecreateall, assertSQLpersistedexactname. KeepOfficialXMLbytes/rules/sourcefacts/frameworklineage/versionrowsandcompleteimmutabilityassertions unchanged. No productionduplicatehandling/schema/UIchange; retain31k4ixqaw...failedartifact and rerunnormalowner.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
