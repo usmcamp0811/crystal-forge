@@ -759,6 +759,10 @@ let
           --lib services::cve_scans::tests::immediate_scan_renews_ownership_reuses_active_and_cancels_on_revocation
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib services::cve_scans::tests::immediate_scan_completion_progresses_while_heartbeat_waits_on_row_lock \
+          -- --ignored --exact --test-threads=1
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
           --lib queries::cve_scans::tests::get_targets_needing_cve_rescan_selects_stale_scan
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \

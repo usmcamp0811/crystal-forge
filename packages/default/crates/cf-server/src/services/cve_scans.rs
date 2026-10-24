@@ -271,13 +271,18 @@ where
         let mut execution = Box::pin(execution);
         let start = tokio::time::Instant::now() + heartbeat_interval;
         let mut heartbeat = tokio::time::interval_at(start, heartbeat_interval);
+        // CONCURRENCY: Completion must keep polling while a heartbeat waits:
+        // its transaction may hold the scan row lock that the heartbeat needs.
+        // Bound the query to 10 seconds so a hung database cannot stall
+        // revocation detection forever.
         const HEARTBEAT_QUERY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
         let outcome = loop {
             tokio::select! {
                 biased;
                 result = &mut execution => break ImmediateScanOutcome::Completed(result),
-                _ = heartbeat.tick() => {
-                    match tokio::time::timeout(
+                heartbeat_result = async {
+                    heartbeat.tick().await;
+                    tokio::time::timeout(
                         HEARTBEAT_QUERY_TIMEOUT,
                         heartbeat_cve_scan_execution(
                             &spawn_pool,
@@ -286,7 +291,8 @@ where
                         ),
                     )
                     .await
-                    {
+                } => {
+                    match heartbeat_result {
                         Ok(Ok(true)) => {}
                         Ok(Ok(false)) => {
                             // Cancel the scanner before this loop exits; the
@@ -469,6 +475,140 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("timed out waiting for immediate scan status {expected}"));
+    }
+
+    /// Proves that a heartbeat waiting on completion's row lock does not stop
+    /// the supervisor from polling completion through its transaction commit.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated database"]
+    async fn immediate_scan_completion_progresses_while_heartbeat_waits_on_row_lock(pool: PgPool) {
+        use crate::queries::cve_scans::execution_lock_is_held;
+
+        let derivation = insert_derivation(
+            &pool,
+            None,
+            &format!("immediate-completion-lock-{}", Uuid::new_v4().simple()),
+            "nixos",
+        )
+        .await
+        .expect("completion regression derivation should be inserted");
+
+        // CONCURRENCY: SQLx gives this test its own migrated database. The gate
+        // delays only this derivation's completion UPDATE after it locks the
+        // scan row, so the heartbeat must wait on that completion transaction.
+        sqlx::raw_sql(
+            r#"
+            CREATE TABLE immediate_completion_gate (derivation_id integer PRIMARY KEY);
+            CREATE FUNCTION gate_immediate_completion() RETURNS trigger
+            LANGUAGE plpgsql AS $$
+            BEGIN
+                IF NEW.status = 'completed' THEN
+                    PERFORM 1 FROM immediate_completion_gate
+                    WHERE derivation_id = NEW.derivation_id FOR UPDATE;
+                END IF;
+                RETURN NEW;
+            END;
+            $$;
+            CREATE TRIGGER immediate_completion_gate AFTER UPDATE ON cve_scans
+            FOR EACH ROW EXECUTE FUNCTION gate_immediate_completion();
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("isolated completion gate should be installed");
+        sqlx::query("INSERT INTO immediate_completion_gate VALUES ($1)")
+            .bind(derivation.id)
+            .execute(&pool)
+            .await
+            .expect("completion gate should target this derivation");
+        let runner = BlockingRunner {
+            calls: Arc::new(AtomicUsize::new(0)),
+            active: Arc::new(AtomicUsize::new(0)),
+            max_active: Arc::new(AtomicUsize::new(0)),
+            cancelled: Arc::new(AtomicUsize::new(0)),
+            release: Arc::new(Semaphore::new(0)),
+        };
+        let scan_runner = runner.clone();
+        let scan_id = trigger_immediate_cve_scan_with_runner(
+            pool.clone(),
+            derivation.id,
+            Some("test".to_string()),
+            move || scan_runner,
+            std::time::Duration::from_millis(50),
+            None,
+        )
+        .await
+        .expect("completion regression scan should start");
+        wait_for_counter(&runner.calls, 1, "completion regression runner").await;
+        let execution_id: Uuid = sqlx::query_scalar(
+            "SELECT (scan_metadata ->> 'execution_id')::uuid FROM cve_scans WHERE id = $1",
+        )
+        .bind(scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("execution owner should resolve");
+        assert!(execution_lock_is_held(&pool, execution_id).await.unwrap());
+
+        let mut gate = pool.begin().await.expect("gate transaction should begin");
+        let coordinator_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *gate)
+            .await
+            .expect("gate coordinator PID should resolve");
+        sqlx::query("SELECT 1 FROM immediate_completion_gate WHERE derivation_id = $1 FOR UPDATE")
+            .bind(derivation.id)
+            .execute(&mut *gate)
+            .await
+            .expect("coordinator should lock the completion gate");
+        runner.release.add_permits(1);
+
+        // Observe both real PostgreSQL waits before releasing the gate. A
+        // timer delay alone cannot prove that the heartbeat entered its query.
+        let (completion_pid, heartbeat_pid): (i32, i32) =
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                loop {
+                    let chain = sqlx::query_as(
+                        r#"
+                        SELECT completion.pid, heartbeat.pid
+                        FROM pg_stat_activity completion
+                        JOIN pg_stat_activity heartbeat
+                          ON completion.pid = ANY(pg_blocking_pids(heartbeat.pid))
+                        WHERE $1 = ANY(pg_blocking_pids(completion.pid))
+                          AND completion.datname = current_database()
+                          AND heartbeat.datname = current_database()
+                        "#,
+                    )
+                    .bind(coordinator_pid)
+                    .fetch_optional(&pool)
+                    .await
+                    .expect("completion and heartbeat blocking chain should be queryable");
+                    if let Some(chain) = chain {
+                        break chain;
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("heartbeat must block on completion while completion blocks on the gate");
+        gate.commit().await.expect("completion gate should commit");
+        eprintln!(
+            "completion gate committed: coordinator={coordinator_pid} completion={completion_pid} heartbeat={heartbeat_pid}"
+        );
+        wait_for_status(&pool, scan_id, "completed").await;
+        assert_eq!(runner.calls.load(Ordering::SeqCst), 1);
+        assert_eq!(runner.max_active.load(Ordering::SeqCst), 1);
+        assert_eq!(runner.active.load(Ordering::SeqCst), 0);
+        assert_eq!(runner.cancelled.load(Ordering::SeqCst), 0);
+
+        // A committed terminal row can be visible before the supervisor has
+        // finished releasing its session lock. Observe release without assuming
+        // that visibility and lock cleanup occur in the same scheduler poll.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while execution_lock_is_held(&pool, execution_id).await.unwrap() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("completed execution should release its advisory lock");
     }
 
     #[tokio::test]
