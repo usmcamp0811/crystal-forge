@@ -484,6 +484,19 @@ SQL
         -- --ignored --exact --test-threads=1
     done
 
+    # Real HTTP preview controls keep document-class rejection distinct from
+    # parser diagnostics, supported namespaces and zero-rule Benchmarks.
+    for previewRegression in \
+      preview_rejects_unsupported_document_class_consistently_with_import \
+      preview_preserves_supported_namespaces_and_embedded_benchmark \
+      preview_preserves_zero_rule_benchmarks \
+      preview_preserves_malformed_xml_and_empty_file_errors
+    do
+      cargo test --offline --package cf-server --lib \
+        "handlers::api::compliance::tests::$previewRegression" \
+        -- --ignored --exact --test-threads=1
+    done
+
     cargo test --offline --package cf-server --lib \
       handlers::api::poam::tests::http_requires_session_csrf_and_mutator_role \
       -- --ignored --test-threads=1

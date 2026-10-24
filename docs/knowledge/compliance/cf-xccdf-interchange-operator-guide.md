@@ -61,6 +61,14 @@ expressions, install modules, or assign a bundle.
 
 The original package bytes and source provenance are retained. ZIP processing
 selects an XCCDF entry server-side and records the selected entry and hashes.
+Preview rejects parsed `UnsupportedPackage` documents, including non-XCCDF XML
+and a `Benchmark` in an unsupported namespace, with HTTP 422 and
+`IMPORT_DOCUMENT_CLASS_UNSUPPORTED`, consistent with committed import. Preview
+still returns HTTP 200 for supported XCCDF 1.1 and 1.2 Benchmarks with zero rules;
+zero rules alone do not make a document unsupported. Blocking XML diagnostics
+retain HTTP 422 with diagnostic codes. Malformed multipart uploads and empty
+files retain HTTP 400; unsupported file types retain HTTP 415. Preview does not
+persist import records.
 
 ### Benchmark releases and rule revisions
 
