@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-24 03:33'
+updated_date: '2026-10-24 03:58'
 labels:
   - testing
   - integration
@@ -86,6 +86,8 @@ NormalcorrectedAssurance dirtyrun passed52records thenfailed beforeV1R2browser l
 Assurancev2 compactreceiptcorrectedhandoff,52passesthenV1R2import500. ExactcontrollerSQLerrorcompliance_bundles_name_key: bothcreate-alluploadsuseidenticaldefaultBenchmarktitle Anduril NixOS Security Technical Implementation Guide. Existingcommitcreatesnewbundlelineage requiringuniquename; taskrequiresrelease/frameworkcontinuitynotduplicatebundlecreation. Routine authored-inputfix: distinctfacts.bundleName perrelease, fill existingBundle nameUIcontrolbeforecreateall, assertSQLpersistedexactname. KeepOfficialXMLbytes/rules/sourcefacts/frameworklineage/versionrowsandcompleteimmutabilityassertions unchanged. No productionduplicatehandling/schema/UIchange; retain31k4ixqaw...failedartifact and rerunnormalowner.
 
 Read-only preflight of remainingmappingbrowserstep found /policies hard-coded but Route::PoliciesView is /deployment-policies (routes.rs95); no /policies aliasexists. Correct only testnavigation toacceptedexistingroute, preserving exactpolicyUUID, policyVersionUUID, frameworkversion andmappingassertions. CurrentAssurancev3usesitsfrozensnapshot; do notalterrunningVMorclaimnewrouteexecuteduntilsubsequentnormalrun.
+
+Current owner specifically requests resolve remaining22/23preview failure usingacceptedcontract. Read-onlyresearch verifiesapproved6e4ea520 ImportStigModal explicitly offers inferredreviewableassertions, TASK426 creation0adb3642 andauthorization85801d3a require structuredpreview->refinementpreservation, while earlierTASK412 prohibitsautomaticforeignimport promotion. Fieldabsence is an invalid execution proxy. Correctonlypreview_accepts_nixos_stig_structure regression: independently authoredfirewalltypedBoolean/path/expression/description expectedsuggestion, is_nativefalse/documentclassforeign, completeimport-ownedDBrow snapshotsunchanged plus no queued evaluation change. PreserveallZIP/provenance/fullfix/checkcontent assertions, parser/productioninference and importedtrust/enablementsemantics. Keep no-automatic-promotion requirements; runfocusedpreview and existingAssuranceowner. No broadparserchange/waiver/designrewrite.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
