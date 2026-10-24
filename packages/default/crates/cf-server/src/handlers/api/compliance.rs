@@ -11566,6 +11566,60 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         buf
     }
 
+    // Compares full import-owned rows and work queues, not just row counts:
+    // review suggestions must not persist, promote policies, or enqueue work.
+    // Hash artifact bytes with their size to keep the snapshot bounded. Exclude
+    // session activity and unrelated audit events from this no-write boundary.
+    async fn preview_import_snapshot(pool: &PgPool) -> serde_json::Value {
+        let tables = [
+            "deployment_policies",
+            "deployment_policy_versions",
+            "compliance_bundles",
+            "compliance_bundle_versions",
+            "compliance_bundle_version_policies",
+            "compliance_bundle_environments",
+            "compliance_frameworks",
+            "compliance_framework_versions",
+            "compliance_requirements",
+            "compliance_requirement_versions",
+            "policy_requirement_mappings",
+            "compliance_bundle_version_requirements",
+            "compliance_source_object_mappings",
+            "commits",
+            "derivations",
+            "evaluation_attempts",
+            "build_jobs",
+            "build_reservations",
+        ];
+        let mut selects: Vec<String> = tables
+            .iter()
+            .map(|table| {
+                format!("SELECT '{table}' AS table_name, to_jsonb(t) AS row FROM {table} t")
+            })
+            .collect();
+        selects.push(
+            "SELECT 'compliance_source_artifacts', (to_jsonb(t)-'content') || \
+             jsonb_build_object('content_sha256', encode(sha256(content),'hex'), \
+             'content_size', octet_length(content)) FROM compliance_source_artifacts t"
+                .to_owned(),
+        );
+        selects.push(
+            "SELECT 'admin_audit_events', to_jsonb(t) FROM admin_audit_events t \
+             WHERE action='xccdf_imported'"
+                .to_owned(),
+        );
+        // One statement gives every protected table the same MVCC snapshot.
+        let query = format!(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(snapshot) ORDER BY table_name, row::text), \
+             '[]'::jsonb) FROM ({}) snapshot",
+            selects.join(" UNION ALL ")
+        );
+        sqlx::query_scalar(&query)
+            .fetch_one(pool)
+            .await
+            .expect("snapshot preview import and queue boundary")
+    }
+
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn preview_accepts_nixos_stig_structure() {
@@ -11582,7 +11636,7 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
 
         let pool = test_pool_from_env().await;
         let token = admin_session_token(&pool).await;
-        let base = spawn_preview_server(pool).await;
+        let base = spawn_preview_server(pool.clone()).await;
 
         let zip_bytes = if let Ok(path) = std::env::var("NIXOS_STIG_ZIP") {
             std::fs::read(&path).expect("NIXOS_STIG_ZIP path should be readable")
@@ -11600,6 +11654,8 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         push_file_field(&mut body, "file", zip_name, &zip_bytes);
         finish_multipart(&mut body);
 
+        // Authentication setup is outside the preview's no-write boundary.
+        let before = preview_import_snapshot(&pool).await;
         let response = post_multipart(&base, &token, body).await;
         assert_eq!(
             response.status().as_u16(),
@@ -11608,6 +11664,11 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         );
 
         let json: serde_json::Value = response.json().await.expect("json body");
+        assert_eq!(
+            preview_import_snapshot(&pool).await,
+            before,
+            "preview must preserve all import-owned rows and evaluation/build queues"
+        );
 
         // Document detected as foreign XCCDF (no CF extension elements).
         assert_eq!(json["document_class"], "foreignxccdf");
@@ -11702,9 +11763,28 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
                 "V-268078 check-content must contain firewall check text"
             );
 
-            assert!(
-                rule.get("inferred_assertions").is_none(),
-                "foreign preview must not turn fix prose into executable assertions"
+            // TASK-426 and the approved ImportStigModal permit reviewable
+            // suggestions, not automatic native trust or execution. The row
+            // snapshot above protects that no-promotion boundary.
+            assert_eq!(rule["is_native"], false);
+            let expected = serde_json::json!([{
+                "option_path": "networking.firewall.enable",
+                "expected_value": {"type": "boolean", "value": true},
+                "nix_expression": "config.networking.firewall.enable == true",
+                "description": "NixOS option networking.firewall.enable must be true"
+            }]);
+            assert_eq!(
+                rule["inferred_assertions"], expected,
+                "foreign firewall fix text should yield the exact reviewable suggestion"
+            );
+            eprintln!(
+                "preview firewall observation: {}",
+                serde_json::json!({
+                    "document_class": json["document_class"],
+                    "is_native": rule["is_native"],
+                    "inferred_assertions": rule["inferred_assertions"],
+                    "import_and_queue_rows_unchanged": true
+                })
             );
         } else {
             // When using the minimal fixture (no real ZIP), V-268078 is in the fixture

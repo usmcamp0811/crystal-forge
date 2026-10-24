@@ -59,6 +59,11 @@ turned into invented Nix expressions. Imported content starts as draft,
 disabled, untrusted, and unassigned. Import does not activate policies, evaluate
 expressions, install modules, or assign a bundle.
 
+Preview can translate supported literal NixOS option assignments in fix text
+into typed suggestions for review and refinement. Suggestion presence does not
+classify a foreign document as CF-native or grant trusted or enabled status.
+Preview does not persist import records or enqueue evaluation or build work.
+
 The original package bytes and source provenance are retained. ZIP processing
 selects an XCCDF entry server-side and records the selected entry and hashes.
 Preview rejects parsed `UnsupportedPackage` documents, including non-XCCDF XML
