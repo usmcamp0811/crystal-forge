@@ -17,7 +17,48 @@ generated:
 
 **Status:** Adopted by the owner on 2026-10-17 through TASK-490. The maintenance
 rules below are in force. `implementation_status: partial` describes coverage,
-not the rules. The wrap-up follows baseline `77251b04` in the existing MR.
+not the rules. Draft [MR335](https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335)
+targets `dev`. The audit covers pushed source
+`642db0ec5f0facb24bb4cd5a3ff00690b44280d6`, not subsequent commits.
+Exact-head [pipeline 2983100226](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2983100226)
+is terminal failed. Access passed 37/37 (driver 243.65 s), Delivery 16/16
+(816.06 s) and Upgrade 13/13 (814.02 s). Assurance has 50 passed / one failed
+records, 45 distinct names: non-XCCDF preview returned 200 instead of 422.
+Header/mounted recovery and the original 47 records passed before that failure;
+three STIG cases passed, but successful 103/104 import/framework mapping was
+not reached. Canonical TASK-490.24 records the terminal audit and scope block
+on new product repairs. The [linked job/artifact ledger](integration-coverage-map.md#current-repair-evidence-and-publication-gaps)
+records source-verified structured results, hosted launcher faults, database and
+component execution. Coverage and complexity were skipped; no measurements were
+produced. The earlier real coverage test failure and segfault remain unresolved,
+not 0% or passing coverage.
+
+Subsequent commit `32d1b88d` enrolls four framework reimport/conflict
+regressions in normal CI. All four passed against an isolated local database
+(`/tmp/opencode/task490-framework-enrolled.{log,status}`), not hosted CI.
+Final same-head all-owner success and complete accepted coverage remain blocked.
+The approved `6e4ea520` design and canonical UI punch list authority are unchanged.
+
+Non-XCCDF preview class rejection is the smallest proposed API repair and needs
+new approval. TASK-490.19 remains product-read-only except the direct Rule-version
+repair. Import `check_document_class` rejects `UnsupportedPackage` with 422 before
+writes by source inspection; the failed preview assertion prevented import
+execution. Preserve the parser class contract; do not substitute a parser guard
+or zero-rule rejection. Hosted component tests passed Rule-version metadata,
+parser and adapter-independent mapping assertions, not the unreached browser
+import. TASK-503 remains Backlog: controller `issued_at` versus an agent timestamp
+10 seconds behind caused the prior dirty local Assurance 12-pass/one-failure run.
+Hosted success does not repair the latent defect; attribution needs a new decision,
+not permission loosening. A cross-user stale-response browser race remains
+unverified despite passing fresh per-user contexts and retained source guards.
+The [remaining blockers](integration-coverage-map.md#remaining-blockers-and-scope)
+link these limits to existing coverage items, including real notification delivery,
+OIDC, Delivery variants and Assurance batch obligations.
+
+### Historical local repair checkpoint
+
+The following checkpoint preceded the hosted audit above. Wrap-up followed
+baseline `77251b04` in the existing MR.
 TASK-501's three commits are integrated; local root/nonroot CVE 30/dashboard 4
 and the final 32-case launcher matrix have execution evidence. Current-header
 repair passed dirty normal Assurance 47 case records / 41 names (264.00 s),
@@ -53,30 +94,31 @@ and artifact
 `/nix/store/rd3cyx0chwkf8cjrsbjfmjl1jk8xr7kb-vm-test-run-cf-it-access-lifecycle-local-bootstrap-run`.
 Native UI 774 passed / one ignored and server package 1,838 passed / 780 ignored
 (plus one isolated configuration-fixture case) validated build prerequisites.
-These are not final four-owner, hosted or complete-coverage results. The repairs
-are locally normal-owner passed, not closed; durable MR publication and final
-submitted same-head all-owner verification remain pending. No new visual approval
-is claimed. The approved `6e4ea520` design is unchanged.
+These were prerequisite and local results. Later hosted proof is recorded above;
+the historical failures and dirty source identities remain unchanged. No new
+visual approval is claimed. The approved `6e4ea520` design is unchanged.
 Analysis follows explicit owner-approved execution-only enforcement: complete
 measured complexity/file-size debt is nonblocking. Missing tools, failed
 compilation/preparation, crashes/timeouts and incomplete, malformed, stale or
 wrong-scope reports block. No real valid coverage percentage is proved. Native
 two-site `never_loop` corrections passed 72 evaluation tests and pinned Clippy
 locally, not final metrics execution. Hosted `0666c65e` pipeline `2978488031`
-failed CVE/dashboard because Bash was missing; `8459a039` fixes the declaration
-but has no new hosted proof. TASK-502 `8024bfa4` locally fixes recursive private
-permissions, not final hosted proof. The
+failed CVE/dashboard because Bash was missing; `8459a039` fixes the declaration.
+The later exact-head audit proves real CVE/dashboard execution and TASK-502
+credential preservation through two activation/restart cycles. The
 [current evidence ledger](integration-coverage-map.md#current-repair-evidence-and-publication-gaps)
 records source limits and durable uploads; the nine-green `dbf50b47` pipeline
 includes false-green database/analysis jobs and is historical evidence only.
+
+### Registered owners and review scope
 
 The harness exists under
 `lib/integration-test/`; Access, Delivery, Assurance and Upgrade are registered
 real owners and run automatically in GitLab. D2 is approved for genuine `v0.3.1`
 at `f9dd6b9c79530d3f911203645207bf6251552aba`. Upgrade is integrated as `898fdc65`;
-the worker's thirteen-case pass is local evidence, with final integrated same-head
-and hosted proof pending. Stop old builders; install current packages held
-stopped; start/migrate the current server normally; then start current API-only
+the thirteen-case transition now has hosted proof at `642db0ec`. Stop old builders;
+install current packages held stopped; start/migrate the current server normally;
+then start current API-only
 builders. The exact old agent must prove signed full `SystemState` heartbeat and
 current-server deployment before deliberate replacement, preserving identity and
 history. No 24-hour expiry or old-builder/current-server window is approved.
@@ -91,7 +133,7 @@ Documentation-only changes do not require another VM run.
 
 **Current review list:** [Deferred UI design-parity punch list](integration-coverage-map.md#deferred-ui-design-parity-punch-list).
 The owner's explicit docs-only coordinator instruction accepts deferral of
-verified remaining visual parity only; TASK-490.24 notes will record that
+verified remaining visual parity only; canonical TASK-490.24 records that
 instruction. The list distinguishes accepted presentation follow-ups, unresolved
 product blockers, unverified contracts/evidence and closed protected repairs.
 Semantic, security and functional integration requirements remain mandatory.
@@ -132,8 +174,8 @@ the source/native-evaluation/API-builder/target-agent lifecycle, deployment and
 retained rollback subset. Assurance registers `evidence-remediation-lifecycle`
 with real scanner/evidence/triage/plan/verification subsets. Their exact execution
 records and remaining obligations are in the coverage map. Upgrade registers
-real `version-transition` for approved D2, integrated as `898fdc65` with a worker
-thirteen-case pass. Final integrated same-head/hosted proof remains pending.
+real `version-transition` for approved D2, integrated as `898fdc65`; its thirteen
+cases passed hosted at `642db0ec`. Final all-owner success remains blocked.
 Registration is not final four-owner completion. No placeholder owner is permitted.
 The earlier optional-manual CI transition remains in the execution history;
 it does not describe the current source-retirement policy.
@@ -293,10 +335,10 @@ CVE/package finding counts and historical inspection have separate scope.
 Earlier header, optional-gate and mobile-close approvals did not authorize
 unrelated repairs. Subsequent explicit owner authority covers the narrow
 preference-queue subscription, catalog search, fixed backdrop and drawer-stacking
-corrections now locally implemented/verified. It does not authorize assertion
+corrections now locally and hosted verified at the recorded revisions. It does not authorize assertion
 removal or broad visual changes. Required failures remain visible historically;
-normal Access has now passed locally at the dirty source above; final same-head
-all-owner verification and durable submitted-input proof remain required.
+normal Access has passed locally and hosted at `642db0ec`; final submitted
+same-head all-owner success and complete accepted coverage remain required.
 
 Route each follow-up to its functional owner: environment forms, shell/mobile and
 preferences extend Access's existing `lifecycle-local-bootstrap` fragments;

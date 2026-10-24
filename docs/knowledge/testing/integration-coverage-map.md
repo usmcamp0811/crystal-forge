@@ -17,62 +17,95 @@ generated:
 
 ## Current status
 
-Wrap-up implementation follows baseline `77251b04`. TASK-501 is integrated as
-`16409b1e`, `856dc7db`, `77251b04`: actual
-root/nonroot CVE 30 and dashboard 4 passed; the final launcher matrix passed
-32 controlled fault cases. The latest membership correction reran normal root
-30/4; nonroot normal 30/4 belongs to the preceding fixture checkpoint.
-Current-header repair `d422cfca` is **locally verified**: normal dirty Assurance
-passed 47 case records / 41 distinct names, driver 264.00 seconds. Full expanded
-Access has a **local normal-owner pass**, not final closure: the historical `0b17e4bb-dirty` run passed the original 23,
-all six environment cases, and preference A/B baselines, then failed the changed-Light
-PATCH wait: 31 passed records, one failed, driver 97.93 seconds. Environment repair
-`fd4c8196` therefore has normal-owner case proof, not a passing full owner. Mobile
-repair `66dd27aa` supplied focused close-control proof. Four subsequently authorized
-corrections are implemented in dirty local inputs: preference-queue subscription,
-catalog search, fixed mobile backdrop and drawer stacking. Focused real-preview
-checks pass. The subsequent normal Access run passed 37 case records / 37 names
-at `a03bb8e30033ef172ceea5d84f890e417e84945b-dirty`, driver 120.05 seconds.
-Durable MR publication and final same-head all-owner/hosted verification remain pending.
-Analysis uses the owner's explicit execution-only policy: complete measured
-complexity/file-size debt is nonblocking; missing tools, compile/preparation
-failure, crashes/timeouts and incomplete, malformed, stale or wrong-scope reports
-block. A real valid coverage percentage is not yet proved. Native `never_loop`
-corrections passed 72 evaluation tests and pinned Clippy locally; this is not final
-metrics execution. [Evidence and publication gaps](#current-repair-evidence-and-publication-gaps)
-separate these local results from the historical nine-green pipeline.
+Draft [MR335](https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335)
+targets `dev`. This audit covers pushed source
+`642db0ec5f0facb24bb4cd5a3ff00690b44280d6`, not subsequent commits.
+Exact-head [pipeline 2983100226](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2983100226)
+is **terminal failed**: Access 37/37, Delivery 16/16 and Upgrade 13/13 passed;
+Assurance recorded 50 passed / one failed case records (45 distinct names).
+The terminal audit and scope block on new product repairs are recorded in
+canonical TASK-490.24. [Audited hosted evidence](#current-repair-evidence-and-publication-gaps)
+now proves the selected Access repairs, Current header/mounted recovery,
+credential preservation and D2 transition at that remote head. It does not close
+full parity or final same-head all-owner acceptance.
+
+Subsequent commit `32d1b88d` adds four framework reimport/conflict
+regressions to normal CI. All four passed against an isolated local database;
+`/tmp/opencode/task490-framework-enrolled.{log,status}` retain that local proof.
+They have no hosted proof. Coverage and complexity were skipped after Assurance
+failed; there are no measurements from this pipeline. A real valid coverage
+percentage remains unproved. The earlier real coverage test failure and segfault
+remain failures, not 0% or a pass. Execution-only analysis policy makes complete
+measured complexity/file-size debt nonblocking; missing tools, failed preparation
+or compilation, crashes/timeouts and invalid or incomplete reports still block.
 
 Four real native owners are registered: Access, Delivery, Assurance and Upgrade.
 D2 is approved with genuine `v0.3.1`, source
 `f9dd6b9c79530d3f911203645207bf6251552aba`. Upgrade is integrated as `898fdc65`;
-the worker reported thirteen passing cases, not final integrated same-head or
-hosted proof. Stop old builders; install current packages with builders held
-stopped; start the current server with normal migrations; then start current
+the hosted owner now proves thirteen passing cases. Stop old builders; install
+current packages with builders held stopped; start the current server with normal
+migrations; then start current
 API-only builders. The exact old agent must prove signed `SystemState` heartbeat
 and current-server deployment before deliberate replacement, preserving identity
 and history. There is no 24-hour expiry or old-builder/current-server window.
-TASK-502 `8024bfa4` corrects recursive private-credential permissions locally;
-its local proof is not final hosted proof.
+TASK-502 `8024bfa4` corrects recursive private-credential permissions; hosted
+Delivery proves preservation through two real activation/restart cycles.
 
 **Review next:** [Deferred UI design-parity punch list](#deferred-ui-design-parity-punch-list).
 The owner accepts deferral of verified remaining visual differences only.
 Semantic/security and functional integration obligations remain required.
-The header defect is repaired locally with committed-input proof/publication
-pending; missing required interactions and historical Access failures are not UI debt.
+The header repair has hosted committed-input proof; missing required interactions
+and historical Access failures are not UI debt.
 Historical chip and failed Findings repairs are closed and regression-protected.
 
 ### Current repair evidence and publication gaps
 
 | Scope | Actual evidence and limit | Integrated disposition |
 | --- | --- | --- |
-| TASK-501, integrated commits above | Worker handoffs `task501-fixture-handoff.md` and `task501-membership-handoff.md` under `/tmp/opencode/`: original 30/4 names/modes passed root and nonroot after fixture repair; final guard compares native selected/executed name multisets, including ignored/expected-panic handling. Final root/nonroot matrix is 16+16 controlled cases, with exact main-postmaster shutdown and removed data/socket paths, 28 live PID identities and eight rejected log mutations. Controlled launcher cases are not product integration tests. | Durable MR archive of named normal results, invocation/cleanup proof and 32-case matrix, with integrated source mapping. Current-head hosted CVE/dashboard execution is pending; historical false greens below are not this proof. |
-| Current header, `77251b04-dirty` | Owner-authorized narrow repair; normal Assurance exit 0, 47/41, driver 264.00 s. Exact-source API, target/agent and browser evidence agree. Mounted A recovers B after one paired detail/Current read per selection, without document reload. Original chip/failed-Findings, permissions, stale-response and recovery assertions pass. | Commit `d422cfca`; wrap-up archive below includes exact identity proof and `browser/deploy-second/cve-mounted-activation-{before-current-refresh,current-recovered}.png` (Admin, dark, 1440×900). Hosted submitted-input result pending. |
-| Expanded Access | Historical `j7kdmhw3104nzld4iqrx44al1prda5fc` identifies `0b17e4bb-dirty`: original 23, six environment cases and A/B baselines passed; appearance failed at the real changed-value PATCH wait, exit 1. After four authorized dirty corrections, normal Access passed 37/37 at `a03bb8e30033ef172ceea5d84f890e417e84945b-dirty`, driver 120.05 s; exact command and retained intervening failure below. | Locally normal-owner passed, not closed. Preserve `expanded-access/` and receipt-collision failures. Final same-head all-owner/hosted verification and durable MR publication remain pending. |
-| Environment optional gates and picker | Earlier zero-gate/assignment/edit/denial proof remains. Normal Access proves searched Custom Check selection beyond twelve using twelve unassigned prerequisite policies, exact persistence and metadata-edit retention. Separate preview proof reaches Require Packages at index 29 in the real 158-policy catalog; `/tmp/opencode/cf-policy-picker-handoff.md` records that proof and 24 passing environment unit tests. | Normal Access passed locally. Final SHA and durable images/HTTP+SQL receipts remain pending. Preserve the original unreachable-policy failure and keep the 158-policy preview distinct from normal-owner proof. |
-| Mobile backdrop and drawer | Historical `/tmp/opencode/cf-mobile-after.json` retains the 375×0 static-backdrop failure. Authorized dirty fixed-position/stacking corrections passed normal click close, backdrop, reopen, link/page interaction and keyboard in focused run11 and now normal Access. Earlier run9/run10 drawer-under-backdrop failures remain retained. | Locally normal-owner passed, not closed. Final SHA and durable comparison/images remain pending. No visual-deferral waiver. |
-| Analysis launchers | Explicit runtime/offline settings and report validation are implemented; 24 controlled launcher fixtures plus CI-policy tests were reported passing. Owner-approved execution-only enforcement makes complete measured threshold debt nonblocking, while tools, compilation/preparation, crashes/timeouts and incomplete/malformed/stale/wrong-scope reports block. Native two-site `never_loop` repair passed 72 evaluation tests and pinned Clippy locally. | Final real complete analysis reports/exit statuses and durable publication pending. No real valid coverage percentage is proved; launcher fixtures and targeted Clippy are not final metrics evidence. |
-| Upgrade and credential permissions | Real `version-transition` registered; `898fdc65` integrates the worker's thirteen-case pass. TASK-502 `8024bfa4` locally fixes recursive private permissions. | Final integrated same-head owners and hosted proof pending; neither local result completes TASK-490.24. |
-| Hosted `0666c65e` | Pipeline [2978488031](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2978488031) failed CVE/dashboard execution because Bash was missing. `8459a039` declares Bash for those regressions. | The fix has no new hosted proof yet. Preserve both this failure and older false-green outcomes below. |
+| Access [17429864146](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17429864146) / [artifacts](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17429864146/artifacts/browse/) | Fresh 37 passed / 37 names; driver 243.65 s. Environment optional gates and searched beyond-twelve persistence, changed preferences with independent A/B reload, failure/Retry/idle phases, mobile backdrop/drawer and keyboard pass. | Hosted proof at `642db0ec`; historical changed-Light, receipt-collision and mobile failures remain below. The separate 158-policy preview is not normal-owner proof. |
+| Delivery [17430441512](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17430441512) / [artifacts](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17430441512/artifacts/browse/) | 16 passed / 16 names; driver 816.06 s. Real credential preservation through two activation/restart cycles, plus build/publication/deployment/rollback. | Hosted TASK-502 proof; selected Delivery coverage, not all remaining variants. |
+| Assurance [17430452260](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17430452260) / [artifacts](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17430452260/artifacts/browse/) | 50 passed / one failed records, 45 names: original 47 passes / 41 names, then three STIG passes (initial facts, preview/cancel of 104 source versions, truncated payload 422/no changes). Non-XCCDF preview returned 200, expected 422. Header and mounted recovery passed before failure. | Failed owner. Successful 103/104 STIG import/framework mapping was not reached. Import-side class rejection is source-confirmed, not executed by the failed browser case. |
+| Upgrade [17431358126](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17431358126) / [artifacts](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17431358126/artifacts/browse/) | 13 passed / 13 names; driver 814.02 s. Genuine D2 ordering, migrations, recovery and exact old-agent/current-server deployment before deliberate replacement. | Hosted transition proof, not full four-owner completion. |
+| CVE [17429864151](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17429864151) / [artifacts](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17429864151/artifacts/browse/) | Normal 27 selections, expected = emitted 30 tests; eight controlled launcher faults. | Actual hosted execution supersedes the Bash failure and false greens for this head. |
+| Dashboard retry [17431546780](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17431546780) / [artifacts](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17431546780/artifacts/browse/) | Normal two selections, four tests; same eight controlled launcher faults. | Sixteen hosted fault cases across these two jobs; do not relabel the separate local 32-case root/nonroot matrix as hosted. |
+| Database [17429864153](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17429864153) | 238 selections, 526 emitted tests; expected outcomes agree, all selection exits 0; both populated migration rehearsals pass. | Hosted lower-level proof, not browser integration coverage. |
+| Component [17429864150](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17429864150) | 1,836 server core passes / 780 ignored; 44 parser passes plus adapter-independent 103 mapping and benchmark guard, including Rule-version metadata assertions; 58 knowledge-validator tests; 16 coverage-launcher and 17 complexity-launcher fixture outcomes in the trace. | Fixture suite counts are not a combined distinct-test count. Hosted component proof does not prove successful STIG browser import or real analysis measurements. |
+| [Coverage 17429864155](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17429864155), [complexity 17429864154](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17429864154) | Both skipped after Assurance failure. | No hosted measurements; earlier real coverage failure/segfault remains unresolved. |
+
+All audited artifacts identify source `642db0ec5f0facb24bb4cd5a3ff00690b44280d6`.
+The audit at `/tmp/opencode/pipeline-2983100226/exact-head-job-audit.json`
+verified downloaded ZIP results and source identities. Assurance and Upgrade
+top-level traces hit the 4 MB limit; their structured artifacts are authoritative.
+Retried infrastructure-aborted attempts are not product failures. Existing job
+archives above provide durable evidence without new uploads.
+
+Both hosted database launchers ran with invoking UID 0 and PostgreSQL child UID
+65534. Their `database-ci-evidence/<launcher>/results.json` records exact main-PID
+shutdown and removed data/socket paths. Each eight-fault matrix records exit
+codes: initialization 1, child failure 73, empty selection 1, unrelated positive
+1, missing completion 1, malformed completion 1, receipt-over-compose 73 and
+interruption 143. Controlled faults are launcher proof, not product cases.
+
+### Remaining blockers and scope
+
+- Non-XCCDF preview accepts an `UnsupportedPackage` document with 200. Source
+  confirms import `check_document_class` rejects it with 422 before writes;
+  import was not executed because the preview assertion failed. The smallest
+  proposed repair is API preview class rejection and requires new approval:
+  TASK-490.19 is product-read-only except the direct Rule-version repair. Keep
+  the parser class contract intact; neither a parser guard nor zero-rule
+  rejection is the proposed repair.
+- TASK-503 remains Backlog: controller `issued_at` versus an agent timestamp
+  10 seconds behind caused the prior dirty local Assurance 12-pass/one-failure
+  run. Hosted success does not repair this latent clock-domain defect. Await a
+  new attribution decision; do not loosen permissions.
+- A new cross-user stale-response browser race is unverified. Fresh independent
+  per-user context proof passed; source guards remain. Those facts do not prove
+  the cross-user response race.
+- Final submitted same-head all-owner success, real coverage and complete accepted
+  obligations remain blocked. Continue using the existing map items for real
+  notification delivery, OIDC, Delivery variants and Assurance batch/other gaps.
+  The canonical UI punch list and its authority references remain in force.
 
 The [wrap-up evidence bundle](https://gitlab.com/-/project/70402481/uploads/299c2d993d7ce0f585efe4a93b405490/mr335-truthful-ci-and-functional-repairs.tar.gz)
 provides durable local proof for the earlier repairs, not the new dirty corrections:
@@ -84,10 +117,22 @@ focused API/SQL receipts; `expanded-access/` contains the 31-pass/one-failure ru
 `mobile/` and `receipts/cf-mobile-*.json` retain real geometry and failures.
 No traces, journals or session headers are uploaded. Local handoff paths identify
 supplementary inputs, not the sole evidence. Dirty results retain their original
-source identities and are not relabeled after commit. Current submitted-head
-hosted verification remains required.
+source identities and are not relabeled after commit. The newer job archives
+above supply hosted proof at `642db0ec`; final submitted-head all-owner success
+remains required.
 
-### Normal Access correction run: local pass, publication pending
+Historical launcher checkpoints remain distinct. TASK-501 integrated
+`16409b1e`, `856dc7db` and `77251b04`: local root/nonroot CVE 30/dashboard 4
+passed after fixture repair; the latest membership correction reran root 30/4.
+Nonroot normal 30/4 belongs to the preceding checkpoint. The local final matrix
+passed 16+16 controlled cases, retained 28 live PID identities and rejected eight
+log mutations, with main-postmaster shutdown and removed data/socket paths.
+Hosted [pipeline 2978488031](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2978488031)
+at `0666c65e` then failed CVE/dashboard execution because Bash was missing.
+`8459a039` declared Bash; the later `642db0ec` audit above supplies hosted proof
+without rewriting that failure or the older false-green outcomes.
+
+### Historical normal Access correction run: local pass
 
 The actual command was:
 
@@ -118,8 +163,8 @@ change. This failure and the earlier changed-Light failure remain historical evi
 Build prerequisites validated native UI 774 passed / one ignored and server
 package 1,838 passed / 780 ignored, plus one isolated configuration-fixture case.
 These are prerequisite results, not final four-owner, hosted or complete-coverage
-proof. Local normal Access success does not close the punch-list entries before
-durable MR evidence and final submitted same-head all-owner verification. No new
+proof. The later hosted Access archive supplies durable submitted-input evidence;
+final same-head all-owner success and complete accepted coverage remain required. No new
 visual approval is claimed; `implementation_status` remains `partial`.
 
 ### Historical hosted baseline: `dbf50b47`
@@ -461,7 +506,7 @@ framework, baseline, mock backend data or placeholder image is introduced here.
 
 #### Functional obligations, local repairs and unverified candidates
 
-**`assurance.inventory.header-meaning` — Current header repaired locally.**
+**`assurance.inventory.header-meaning` — Current header repaired, hosted proof.**
 
 - State/actor: Admin/Viewer, running affected A, clean B built but undeployed,
   then actual B activation; missing/error/historical/stale reads. Approved
@@ -478,9 +523,8 @@ framework, baseline, mock backend data or placeholder image is introduced here.
   stays unavailable. Coordinated detail/Current refresh preserves generation and
   request fences and recovers mounted A to B without a polling/retry loop.
 - Category: merged concepts, metadata. Original impact: high semantic defect.
-  **Repair status: locally verified and committed as `d422cfca`; W supplies
-  durable before/after and identity proof. Hosted submitted-input verification
-  remains pending (`unverified` for that claim).**
+  **Repair status: committed as `d422cfca`, locally and hosted verified at
+  `642db0ec`; W supplies durable before/after and identity proof.**
   This is no longer listed as an unrepaired header blocker or UI deferral.
 - Evidence: original durable C `browser/cve/cve-current-vulnerable.png`,
   `browser/cve-missing/cve-never-scanned-not-clean.png` and
@@ -490,9 +534,9 @@ framework, baseline, mock backend data or placeholder image is introduced here.
   predates the repair. P2 handoff records normal dirty Assurance 47/41, driver
   264.00 s, and exact target/agent/browser receipts. Mounted proof selects B then
   Current with request sequence `detail,current,detail,current`, same document.
-  New dark 1440×900 whole-region images and proof archive await upload; see the
-  [publication ledger](#current-repair-evidence-and-publication-gaps). Local paths
-  do not establish durable handoff.
+  Hosted job 17430452260 retains header and mounted activation images/results
+  in its linked archive; see the [publication ledger](#current-repair-evidence-and-publication-gaps).
+  Those assertions passed before the separate STIG failure.
 - AC/regression: retain distinct-ID versus finding-unit checks, A despite B's
   build, actual B after activation, unavailable/failed/loading and historical
   independence, stale-response fencing and mounted recovery. Existing Assurance
@@ -651,13 +695,13 @@ framework, baseline, mock backend data or placeholder image is introduced here.
 These entries belong to `integration-access`, existing
 `checks/integration-access/scenarios/lifecycle-local-bootstrap`.
 `Access fragments/` below means `checks/integration-access/scenarios/fragments/`.
-The retained expanded owner failed; the subsequent normal owner passed locally
-with 37/37 at the dirty source recorded above. That result is distinct from the historical
+The retained expanded owner failed; subsequent normal owners passed locally
+and hosted with 37/37 at their recorded sources. Those results are distinct from the historical
 [23-case Access job](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17354378645).
-New local artifacts await durable upload; the previous MR Assurance bundles do
-not prove these Access states.
+The Access job 17429864146 archive supplies durable hosted browser and persistence
+receipts; the previous MR Assurance bundles do not prove these Access states.
 
-**`access.environments.optional-gates` — Narrow gate repair, normal owner passed locally.**
+**`access.environments.optional-gates` — Narrow gate repair, normal owner passed hosted.**
 
 - State/actor: real Admin, new zero-gate environment, selected enabled Custom Check,
   then metadata edit/reopen; invalid built-in/missing policy IDs. Approved
@@ -670,13 +714,13 @@ not prove these Access states.
   Category: interaction, metadata. Original impact: high functional failure.
   Repair is **committed as `fd4c8196` with all six normal-owner environment cases
   passing in the recorded 31-pass/one-failure run** and the subsequent 37/37
-  normal Access pass. Final submitted-input verification/publication remains
-  `unverified`, not visual deferral.
+  normal Access pass. Hosted Access at `642db0ec` now proves this selected subset;
+  this is not visual deferral or complete environment parity.
 - Evidence: `cf-environment-handoff.md` and
   `cf-environment-preview-verified/{result.json,created-zero-gates.png,edited-preserved-gate.png}`
   under `/tmp/opencode/`, Admin, 1440×900; theme not independently recorded by
   this documentation audit. Exact environment UUID and POST/PATCH/SQL receipts
-  are retained. Durable upload is pending, not replaced by temporary paths.
+  are retained. The linked hosted Access archive now provides durable normal-owner proof.
 - AC/regression: run the normal Access owner with zero-gate create, nonempty
   assignment/edit preservation, invalid-policy no-write, membership restoration,
   cancel/duplicate/delete and reload. Retain the original 23. Existing
@@ -684,7 +728,7 @@ not prove these Access states.
   and [TASK-339.1][task-environment-product] **In Progress**. The multi-request
   workflow does not claim that metadata POST rolls back on a later policy error.
 
-**`access.environments.policy-picker-search` — Search repaired locally.**
+**`access.environments.policy-picker-search` — Search repaired, hosted proof.**
 
 - State/actor: Admin, populated catalog of 158 assignable policies, editing gate
   selection. Approved `77251b04:EnvironmentsView.jsx::GatePolicyPicker`, lines
@@ -694,19 +738,18 @@ not prove these Access states.
   `components/environments/environment_form_modal.rs` filters the full catalog
   by trimmed, case-insensitive name without changing selected IDs or validation.
 - Category: interaction, missing section. Impact: high required functional
-  accessibility gap. **Locally normal-owner passed; not closed.** Normal
-  Access passed at the recorded dirty source; final submitted-input and
-  durable MR proof remain `unverified`, not UI debt.
+  accessibility gap. **Normal-owner passed locally and hosted at `642db0ec`.**
+  The selected searched-persistence contract is proved, not broad picker parity.
 - Evidence: environment worker's retained failed picker probe and source above;
   later Custom Check success proves only a visible selection. Admin desktop
-  probe 1440×900; no durable comparable picker image/theme record published yet.
+  probe 1440×900; the later Access archive retains the normal-owner browser evidence.
   `/tmp/opencode/cf-policy-picker-evidence/result.json` now proves real searched
   selection of the exact target at zero-based index 29 of 158, persistence and
   metadata-edit retention. The handoff records 24 passing environment unit tests.
   The normal owner separately proves target Custom Check beyond twelve with
   twelve unassigned prerequisite policies, searched selection and exact retained
   assignment. Preserve the failed probe and separate 158-policy preview proof;
-  durable upload remains pending.
+  the linked hosted Access archive supplies durable normal-owner proof.
 - AC/regression: reach an authored enabled policy beyond the initial twelve by
   actual search, select it, save/reopen and prove exact rows; preserve selected
   values and invalid-policy denials. Extend `Access fragments/environment-forms.{py,cjs}`
@@ -714,7 +757,7 @@ not prove these Access states.
   [TASK-490.3][task-environment-tests] **In Progress** are existing matching homes;
   no new family or unrelated repair is authorized by this doc entry.
 
-**`access.shell.mobile-dismissal` — Backdrop and drawer repaired locally.**
+**`access.shell.mobile-dismissal` — Backdrop and drawer repaired, hosted proof.**
 
 - State/actor: authenticated Admin, open mobile navigation at 375×812.
   TASK-490.4's accepted shell interaction and the owner's narrow close-target
@@ -729,15 +772,15 @@ not prove these Access states.
   drawer-above-backdrop stacking. Close, exposed-backdrop dismissal, reopen,
   link dismissal, restored page interaction and keyboard now pass after full
   frontend rebuild. Category: interaction. Original impact: high functional
-  blocker. **Locally normal-owner passed; not closed.** Final submitted-input
-  and durable MR proof remain `unverified`.
+  blocker. **Normal-owner passed locally and hosted at `642db0ec`.** Broad narrow
+  visual parity remains unverified under the reference limit above.
 - Evidence: local `cf-mobile-after.json`, `cf-mobile-after.png` and
   `cf-mobile-after-backdrop-failure.png` under `/tmp/opencode/`, dark 375×812;
   retain the original failure. `/tmp/opencode/cf-shell-preference-repair/run11/result.json`
   records passing mobile/keyboard phases; run9/run10 retain the intervening
   drawer-under-backdrop failure. Run11 is focused preview; the subsequent 37/37
   normal owner additionally retains passing mobile and keyboard receipts.
-  Durable archive/image and final repair SHA remain pending. Desktop reference at 1440×900 does
+  Hosted Access archives these phases at `642db0ec`. Desktop reference at 1440×900 does
   not prove narrow parity. No sensitive-data or domain proof is inferred.
 - AC/regression: preserve close target, real close and link dismissal; require
   visible viewport-covering backdrop and a real exposed-overlay click to dismiss
@@ -746,7 +789,7 @@ not prove these Access states.
   `shell-navigation.py` case in full Access. [TASK-490.4][task-shell-preferences]
   **In Progress**; do not remove the assertion or defer it as appearance debt.
 
-**`access.preferences.changed-theme-persistence` — Queue subscription repaired locally.**
+**`access.preferences.changed-theme-persistence` — Queue subscription repaired, hosted proof.**
 
 - State/actor: independent Admin user A and Operator user B; both baseline UI/API
   reads and reloads pass. Approved `77251b04:ProfileView.jsx::ProfileView`,
@@ -761,12 +804,13 @@ not prove these Access states.
   now pass in focused real-preview and normal-owner execution. Already-selected segments require
   correct state, not an unsupported zero-PATCH transport guarantee.
 - Category: interaction. Impact: high functional integration blocker.
-  **Locally normal-owner passed; not closed.** Final submitted-input and durable
-  MR proof remain `unverified`, not visual debt.
+  **Normal-owner passed locally and hosted at `642db0ec`.** Fresh independent A/B
+  contexts prove persistence/isolation; the new cross-user stale-response race
+  remains unverified. Retain source guards; this is not visual debt.
 - Evidence: failed owner output `ri6pa2gcpmfxm4kdn6kkgbakbdz1l7vy`,
   `browser/preferences-appearance/{result.json,failure.png,trace.zip}`, source
   `77251b04-dirty`, desktop 1440×900, initial dark profile; target Light is the
-  action, not a claimed final saved theme. Durable failure upload pending.
+  action, not a claimed final saved theme. This remains historical failure evidence.
   The historical 23-case job contains no changed-preference proof. Focused runs
   under `/tmp/opencode/cf-shell-preference-repair/` retain later request/reload
   proof and unchanged second-user SQL rows. Independent second-user sign-in was
@@ -776,7 +820,7 @@ not prove these Access states.
 - AC/regression: distinguish already-selected settings from changed values, retain
   the real changed-value PATCH expectation, independently read/reload A and check B
   unchanged. Retain the now-passing normal-owner notification/error/loading phases;
-  final same-head verification and durable publication remain required. Existing `Access fragments/preferences.{py,cjs}`
+  final all-owner success remains required. Durable hosted proof is linked above. Existing `Access fragments/preferences.{py,cjs}`
   in the same lifecycle; [TASK-490.4][task-shell-preferences] **In Progress**.
 
 #### Closed and protected regressions
@@ -875,7 +919,7 @@ The owner's explicit TASK-490.2 selections authorize the five session cases and 
 | --- | --- | --- |
 | D1-scope | Select the cross-environment endpoint/method and accepted visibility/mutation rule, including hidden-versus-absent response. The environment handler currently filters membership and returns non-enumerating 404 for a hidden detail; that is evidence, not the owner's selection for TASK-490.2. | Selected admin denials, forms, and already-approved system/CVE non-disclosure checks. |
 | D1-registration | With an existing user and `allow_registration = false`, specify registration denial/status and whether first-admin bootstrap is the sole exception. | Fresh bootstrap and ordinary login/session cases. |
-| D2-upgrade — approved | Genuine `v0.3.1` at `f9dd6b9c79530d3f911203645207bf6251552aba`; stop old builders, install current packages held stopped, migrate/start current server normally, then start current API-only builders. Exact old-agent signed `SystemState` heartbeat and current-server deployment precede deliberate replacement with identity/history preserved. No timed expiry or old-builder/current-server window. | Real Upgrade `version-transition` is registered and integrated as `898fdc65`; worker thirteen-case pass is local evidence, final integrated same-head/hosted proof pending. |
+| D2-upgrade — approved | Genuine `v0.3.1` at `f9dd6b9c79530d3f911203645207bf6251552aba`; stop old builders, install current packages held stopped, migrate/start current server normally, then start current API-only builders. Exact old-agent signed `SystemState` heartbeat and current-server deployment precede deliberate replacement with identity/history preserved. No timed expiry or old-builder/current-server window. | Real Upgrade `version-transition`, integrated as `898fdc65`, passed thirteen cases hosted at `642db0ec`; job 17431358126 and archive above. |
 | D3-form-state | Identify approved `AdminView.jsx` / `EnvironmentsView.jsx` state for real failed-save draft retention and any missing fresh-empty, pending, or disabled-save state. | TASK-490.3 accepted success, cancel, duplicate validation, reload and disabled-account login cases. |
 | D4-auth-transport | For `POST /webhook`, specify whether unsigned public ingress is accepted or requires authenticated origin, and the rejection/no-enqueue outcome. Separately, specify missing/mismatched-CSRF outcomes for cookie-authenticated `POST /api/v1/admin/users`, `PATCH/DELETE /api/v1/admin/users/:id`, `PUT /api/v1/admin/{classification-config,automatic-retry-policy}`, and `POST /api/v1/environments`, `PATCH/DELETE /api/v1/environments/:id`; these handlers do not call the shared CSRF guard. Do not infer universal 401/403/CSRF policy from routing. | Valid-CSRF role denials already proved; authenticated form success; selected session CSRF cases; builder signatures/job authorization. |
 | D5-interchange | Approve the exact draft CF-XCCDF portable identity/digest/trust reconciliation rules and policy-interchange conflict outcomes before making those draft-only details release gates. | Accepted STIG preview/import atomicity, authored rule identities, schema validation, download content/scope. |
@@ -1404,7 +1448,7 @@ Authority: A-contract, TASK-490.3/.4/.5, A-design `AdminView.jsx`, `Environments
 | `admin-settings` | Admin → save classification and automatic retry policy; inspect runtime/config health and audit | Authored settings survive read/reload; retry values configure future decisions rather than retroactively rewriting evidence; audit identifies real actor. Runtime diagnostics expose no secrets. | Settings/audit DB and generated runtime config; browser/server responses. | .3; **integration-covered subset**: retry-policy save, classification enable/marking save and reload at `c254b1c5`. Future retry effects, diagnostics and audit remain `planned` (some tracking selections **unassigned**). |
 | `resources` | Admin, initially empty environments → create/edit/duplicate/cancel/delete; try deleting used environment | Authored metadata survives reload; duplicate creates no extra row; cancel preserves rows; used-resource deletion preserves references. | Environments, dependent systems/bindings and reload. | .3; **integration-covered subset**: six environment cases in local normal Access 37/37 at `a03bb8e3-dirty`, including optional gates and searched beyond-twelve assignment. Used-resource guard remains **unassigned**, `planned`. |
 | `resource-form-bindings` | Authorized user → flake, system, builder and cache add/edit/deactivate/delete/key/environment forms | Each distinct resource binds its own identity/permission; save persists only authored fields, cancel changes none, credentials remain redacted. Provider/build/deploy effects are proved by Delivery. | Respective resource, credential and assignment tables; independent reload. | **Unassigned**: .3 explicitly excludes these forms; intended L extensions; `planned`. |
-| `preferences` | Two users → initialize/patch profile, theme/layout and notification choices; reload each | Preferences are per-user, durable and do not overwrite the other user's values. | `user_preferences`, notification-preference rows and independent browser contexts. | .4; **Integration-covered** selected appearance/notification settings: five grouped cases in local normal Access 37/37 at `a03bb8e3-dirty`, real A/B sign-in/read/reload, unchanged B and failure/loading/Retry/idle receipts. Event delivery/lifecycle remains separate. Final publication/same-head verification pending. |
+| `preferences` | Two users → initialize/patch profile, theme/layout and notification choices; reload each | Preferences are per-user, durable and do not overwrite the other user's values. | `user_preferences`, notification-preference rows and independent browser contexts. | .4; **Integration-covered** selected appearance/notification settings: five grouped cases in local Access 37/37 and hosted 37/37 at `642db0ec`, real A/B sign-in/read/reload, unchanged B and failure/loading/Retry/idle receipts. Event delivery/lifecycle and the new cross-user stale-response browser race remain unverified. |
 | `notifications` | Real event plus two users/channels → receive, read one/all, dismiss one/all; email enabled/disabled/retry | Only eligible recipients receive event; lifecycle mutations affect own records; disabled email sends none; enabled email reaches receiver without changing domain event identity. | Notification/outbox/preference DB, receiver requests and browser reload. | .5, N; retry/recipient variants need explicit tracking detail; `planned`, .7/event prerequisite. |
 | `setup-and-oidc-admin` | Admin after bootstrap → setup progress/dismiss/agent acknowledgement and mapping CRUD | Progress reflects actual configured prerequisites; dismissal/acknowledgement persist per accepted scope; mappings alter only intended future identity assignments. | Setup/mapping/audit records, subsequent OIDC login in O. | .6 mapping execution; setup UI/API **unassigned**; `planned`. |
 | `failed-save-states` | Admin with unsaved draft → bounded real server outage or pending request | Exact designed draft/empty/pending/disabled-save expectation required; DB remains unchanged for a failed write. | DB before/after, browser draft, restored service and reload. | .3; `blocked: D3-form-state` only for unspecified presentation/retention states. |
@@ -1527,7 +1571,7 @@ Authority: A-contract and TASK-490.19/.22; A-continuity for source identity/scop
 
 | Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Tracking / status |
 | --- | --- | --- | --- | --- |
-| `stig-import` | Authorized user with DISA Anduril XCCDF XML/ZIP → preview/import; malformed/oversize/invalid payload | Preview writes nothing; authored rule identities/count from independent parser persist only after valid import; rejected import is atomic; role/body limits apply before protected writes. | External source parser/schema plus framework/bundle/policy DB before/after and browser import state. | .19; `planned`. |
+| `stig-import` | Authorized user with DISA Anduril XCCDF XML/ZIP → preview/import; malformed/oversize/invalid payload | Preview writes nothing; authored rule identities/count from independent parser persist only after valid import; rejected import is atomic; role/body limits apply before protected writes. | External source parser/schema plus framework/bundle/policy DB before/after and browser import state. | .19; **failing** hosted at `642db0ec`: non-XCCDF preview 200, expected 422. Initial facts, 104-source-version preview/cancel and truncated 422/no-change passed. Successful 103/104 import/framework mapping not reached; see remaining blockers. Four framework reimport/conflict regressions passed locally; normal-CI enrollment in `32d1b88d` has no hosted result at this checkpoint. |
 | `policy-interchange` | Real authored policy/version set → export/download, preview/import into isolated receiver state | Download parses independently; selected semantic records/scope round-trip; validation error leaves receiver unchanged; imported trust cannot be inferred from file presence. | Parsed payload/schema, source/receiver DB and actual browser download. | .22; `planned` for accepted round-trip subset. |
 | `native-reconciliation-details` | CF-native identities/digests with exact match, lineage/version conflict or unverified signature → preview/import | Exact draft-only reconciliation/trust conflict outcomes require approval; existing implementation/tests cannot select expectation. | Independent source digest/identity comparison, receiver DB transaction results. | .22; `blocked: D5-interchange` only for these details. |
 | `server-exports` | Real scoped plans/acceptances/CVEs/bundles/assignments/policies → register CSV/XLSX/OSCAL JSON/XML, POA&M/acceptance CSV/XLSX, CVE CSV, XCCDF and policy exports | Independent parsers/schema validate actual files; exact authored records/IDs/scope and source versions included; hidden/unselected data omitted; export does not mutate domain records. | Downloaded bytes parsed externally, source-selection DB and no-write observation. | .22; `planned`. |
@@ -1535,13 +1579,13 @@ Authority: A-contract and TASK-490.19/.22; A-continuity for source identity/scop
 
 ### 12. `upgrade.continuity` — version transition and compatibility
 
-Authority: A-contract/TASK-490.23 and approved D2 above. Sources: S-router startup/migrations, `packages/default/crates/cf-server/migrations/`, S-wire, S-agent/S-builder, retained generation/snapshot/evidence DB mechanisms. Owner/scenario: **Upgrade/U**, real `checks/integration-upgrade/scenarios/version-transition` integrated as `898fdc65`. Worker thirteen-case pass is local evidence; final integrated same-head/hosted proof remains pending.
+Authority: A-contract/TASK-490.23 and approved D2 above. Sources: S-router startup/migrations, `packages/default/crates/cf-server/migrations/`, S-wire, S-agent/S-builder, retained generation/snapshot/evidence DB mechanisms. Owner/scenario: **Upgrade/U**, real `checks/integration-upgrade/scenarios/version-transition` integrated as `898fdc65`. Thirteen cases passed hosted at `642db0ec`; job 17431358126 and archive above. Final all-owner success remains blocked.
 
 | Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Tracking / status |
 | --- | --- | --- | --- | --- |
-| `persisted-transition` | Genuine pinned predecessor creates data/credentials/history → current package normal startup/migrations | Original IDs, usable credentials, history and evidence relationships survive; a new real operation succeeds; no synthetic old-schema/current-seed substitute. | Old/new DB reads, migration set, real sign-in/new operation and preserved evidence. | .23; locally implemented/worker verified; final same-head/hosted pending. |
-| `mixed-version` | Old builders stop and upgrade held stopped → current server migration → current API-only builders; exact old agent remains until deliberate replacement | No old-builder/current-server overlap or database exception. Old-agent signed full `SystemState` heartbeat and real current-server deployment work before replacement; identity/history survive. No timed expiry. | Genuine package/executable identities, signed wire reports, job/target/store and DB state. | .23; locally implemented/worker verified; final same-head/hosted pending. |
-| `transition-recovery` | Old-version in-flight work and completed history → migrate/restart/recover | Recovery preserves logical work and history with one authoritative success; physical execution may repeat. Migration failure cannot be reported as successful upgrade. | Old/current processes, leases/attempts/history, target identity and stale-completion denial. | .23; locally implemented/worker verified; final same-head/hosted pending; same-version recovery remains .15. |
+| `persisted-transition` | Genuine pinned predecessor creates data/credentials/history → current package normal startup/migrations | Original IDs, usable credentials, history and evidence relationships survive; a new real operation succeeds; no synthetic old-schema/current-seed substitute. | Old/new DB reads, migration set, real sign-in/new operation and preserved evidence. | .23; **Integration-covered** selected D2 transition hosted at `642db0ec`, job 17431358126. |
+| `mixed-version` | Old builders stop and upgrade held stopped → current server migration → current API-only builders; exact old agent remains until deliberate replacement | No old-builder/current-server overlap or database exception. Old-agent signed full `SystemState` heartbeat and real current-server deployment work before replacement; identity/history survive. No timed expiry. | Genuine package/executable identities, signed wire reports, job/target/store and DB state. | .23; **Integration-covered** selected D2 ordering/old-agent deployment hosted at `642db0ec`, job 17431358126. |
+| `transition-recovery` | Old-version in-flight work and completed history → migrate/restart/recover | Recovery preserves logical work and history with one authoritative success; physical execution may repeat. Migration failure cannot be reported as successful upgrade. | Old/current processes, leases/attempts/history, target identity and stale-completion denial. | .23; **Integration-covered** selected recovery hosted at `642db0ec`, job 17431358126; same-version recovery variants remain .15. |
 
 ### Browser routes, forms, drawers and navigation bindings
 
@@ -1651,9 +1695,9 @@ fragments are integrated in L; normal Access passed locally with 37 records / 37
 names at `a03bb8e30033ef172ceea5d84f890e417e84945b-dirty`. The retained expanded run passed the original 23 and A/B
 preference baselines, then failed changed-Light PATCH waiting. Focused optional
 gate and mobile close-target repairs did not prove later phases. The subsequent
-four authorized dirty corrections now have focused and normal-owner proof; their
-historical failures remain above. Durable MR publication and final submitted
-same-head all-owner/hosted verification remain pending. Tracking: TASK-490.3/.4 and the
+four authorized corrections now have focused, local normal-owner and hosted
+37/37 proof at `642db0ec`; their historical failures remain above. The linked
+Access archive supplies durable proof; final all-owner success remains blocked. Tracking: TASK-490.3/.4 and the
 existing TASK-339.1 environment editor. These workflows have no Delivery-role
 dependency. D3 blocks only the unspecified failed-save/presentation states.
 The `590ee94c` 23-case pass remains historical evidence, not current readiness.
@@ -1740,7 +1784,7 @@ with `false` is not completion. No placeholders may fill missing names.
 | `checks/builder-cve-contract`, `oscal-export`, `xccdf-schema`, `stig` | Contracts/unit | consolidated | Direct module boolean evaluations, ordinary OSCAL fixture check phase and actual installed XCCDF writer/schema command. [Exact homes](flake-checks.md#current-inventory-and-commands); no A integration proof. |
 | `checks/test-keys` | Unused placeholders | removed | No executable consumers; not a coverage obligation. |
 | Legacy browser XCCDF XML V1R1 and V1R2 | Immutable fixtures | relocated | `checks/integration-assurance/fixtures/xccdf/`; fixtures are not proof of XCCDF coverage. The real Assurance owner registers its evidence/remediation lifecycle separately. |
-| CI `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | DB-backed Rust | existing DB mechanisms; consolidated selections | Historical consolidation retained 286 unique ignored-library selections, fourteen targets/231 cases and both migration rehearsals; removed six ignored duplicates, 94 normal-library duplicates and two CVE `composite_policy` executions. Later baseline hosted state-machine execution passed 525 at `dbf50b47`; dedicated CVE/dashboard jobs were false green. Integrated TASK-501 now has actual local root/nonroot 30/4 plus final 32 controlled launcher cases; exact current-head hosted proof remains pending. See current evidence ledger for membership/shutdown scope. |
+| CI `cve-processing-test`, `dashboard-visibility-tests`, `state-machine-tests` | DB-backed Rust | existing DB mechanisms; consolidated selections | Historical consolidation retained 286 unique ignored-library selections, fourteen targets/231 cases and both migration rehearsals; removed six ignored duplicates, 94 normal-library duplicates and two CVE `composite_policy` executions. Historical `dbf50b47` CVE/dashboard statuses were false green. At hosted `642db0ec`, CVE runs 27 selections/30 tests, dashboard two/four, plus sixteen controlled faults total; database runs 238 selections/526 tests and both populated migration rehearsals. Local root/nonroot 32-fault proof remains separate. See current evidence ledger for jobs and exact shutdown/path-removal receipts. |
 | CI `legacy-flake-check`, `web-ui-check`, `web-ui-baseline-candidates` | Legacy/manual jobs | removed | Sources and candidate-baseline workflow retired; no replacement pass claimed. |
 | CI `web-ui-screenshots-mr-comment` | Reporter | already removed in early transition | No replacement comment bot. Access exports its own evidence. |
 
