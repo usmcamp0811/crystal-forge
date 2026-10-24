@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-24 14:34'
-updated_date: '2026-10-24 15:22'
+updated_date: '2026-10-24 15:33'
 labels:
   - documentation
   - okf
@@ -14,6 +14,7 @@ dependencies: []
 references:
   - 'https://gitlab.com/usmcamp0811/dotfiles'
   - 'https://gitlab.com/crystal-forge/crystal-forge'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/337'
 documentation:
   - docs/knowledge/index.md
   - docs/knowledge/operations/nixos-module-configuration.md
@@ -103,4 +104,10 @@ Broad `nix flake check --keep-going > /tmp/opencode/task504-flake-check.log 2>&1
 Preview ready: http://127.0.0.1:8754/ on sledge. tmux task504-docs pane PID 27024 owns current static HTTP server; launcher /tmp/opencode/task504-site/bin/docs-site 8754 serves final immutable /nix/store/r5p394q082q87r59p5d1sqnmza8l9rx8-docs-site-1/share/docs-site. HTTP home and knowledge/meta/documentation-site.html both 200. Review Knowledge, NixOS options, Search, Light theme, and mobile Browse docs. Static data only; no backend, login or database. Logs in tmux pane; no application session touched. Forward with ssh -L 8754:127.0.0.1:8754 sledge if needed.
 
 All 19 intended files are staged to support Git-backed Nix builds. No commit, push, MR, or deployment performed. Task remains In Progress, lock retained, preview left running.
+
+User requested commit, push and MR. Committed 19 intended site files, then rebased the unpublished single implementation commit onto fetched origin/dev to exclude inherited unrelated local backlog-only commits. Published commit cec36be8fcac72ff5d517cdb913a7ddd54eda65a on origin/TASK-504-okf-site. Worktree clean. No integration worktree changes discarded or pushed.
+
+Opened Draft MR !337 targeting dev: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/337 . Includes uploaded dark/light screenshots from static-site Nix browser check, preview instructions, verification outcomes and outstanding full-flake/deployment gates. MR API verified opened=true, draft=true, exact SHA cec36be8. Pipeline 2984763764 was running when checked: https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2984763764 . No CI success claimed.
+
+Re-ran `nix build .#docs-site .#checks.x86_64-linux.docs-site .#checks.x86_64-linux.okf-knowledge -L --no-link --print-out-paths --builders '' --max-jobs 1 --cores 2` at published commit: exit 0 (site/browser paths unchanged, knowledge validation rebuilt and passed). Preview remains ready http://127.0.0.1:8754/ on sledge, task504-docs PID 27024. Retain In Progress and lock because broad flake verification is incomplete; MR is Draft, not review-ready.
 <!-- SECTION:NOTES:END -->
