@@ -191,7 +191,13 @@ with case("target-registers-and-reports-real-agent-state"):
     mapping = sql_json(controller, "SELECT flake_id, system_configuration_name FROM systems WHERE id="
                        + literal(target["id"]) + "::uuid")
     expect_equal(mapping, [{"flake_id": receipts()["delivery.flakeId"],
-                            "system_configuration_name": FACTS["target"]}], "registered target/source mapping")
+                             "system_configuration_name": FACTS["target"]}], "registered target/source mapping")
+    # Startup inventory must not race the VM's DHCP configuration: an address
+    # or gateway change legitimately creates a new full state instead of the
+    # two unchanged heartbeats that this case must prove against its first S1.
+    targetA.wait_until_succeeds(
+        "ip -4 -o address show dev eth0 scope global | grep -q ' inet ' && "
+        "ip -4 route show default dev eth0 | grep -q '^default '", timeout=60)
     targetA.succeed("systemctl start crystal-forge-agent.service")
     targetA.wait_for_unit("crystal-forge-agent.service")
     actual_running = targetA.succeed("readlink -f /run/current-system").strip()

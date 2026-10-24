@@ -110,6 +110,7 @@ async function importRelease(ctx, release) {
   await ctx.step(`${release} real browser file import`, async () => {
     await signIn(ctx);
     const f = await preview(ctx, release);
+    await ctx.page.getByText("Bundle name", { exact: true }).locator("..").getByRole("textbox").fill(f.bundleName);
     const [response] = await Promise.all([
       responseFor(ctx, "import"),
       ctx.page.getByRole("button", { name: "Skip & create all", exact: true }).click(),
@@ -170,7 +171,7 @@ exports.invalidNonXccdf = ctx => rejectInvalid(ctx, "non-xccdf");
 
 async function openMappedPolicy(ctx, reload = false) {
   const t = ctx.receipts["assurance.stig.mappingTarget"];
-  await ctx.page.goto(ctx.url("/policies"));
+  await ctx.page.goto(ctx.url("/deployment-policies"));
   if (reload) await ctx.page.reload();
   await ctx.page.getByRole("tab", { name: /^Security controls/ }).click();
   await ctx.page.getByRole("combobox").filter({ has: ctx.page.getByRole("option", {

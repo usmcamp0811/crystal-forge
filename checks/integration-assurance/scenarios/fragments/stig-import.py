@@ -104,10 +104,20 @@ def _stig_release_rows(release):
     stored_bundle = sql_json(controller, "SELECT bundle_id, source_artifact_id FROM "
                             "compliance_bundle_versions WHERE id=" + bundle)
     expect_equal(stored_bundle, [{"bundle_id": result["bundle_id"],
-                                 "source_artifact_id": result["source_artifact_id"]}], "bundle source provenance")
+                                  "source_artifact_id": result["source_artifact_id"]}], "bundle source provenance")
+    expect_equal(sql_json(controller, "SELECT name FROM compliance_bundles WHERE id=" +
+                          literal(result["bundle_id"]) + "::uuid"), [{"name": f["bundleName"]}],
+                 "browser-authored release bundle name persists exactly")
     value = {"frameworkId": version["framework_id"], "frameworkVersionId": version["id"],
-             "requirements": requirements, "policies": policies}
-    receipt("assurance.stig." + release + ".identities", value)
+              "requirements": requirements, "policies": policies}
+    # Browser handoff needs generated identities, not duplicate titles and
+    # metadata. Keep the complete rows locally for all lineage/mapping checks;
+    # serializing both releases' rows would exceed the VM shell argument limit.
+    receipt("assurance.stig." + release + ".identities", {
+        "frameworkId": version["framework_id"], "frameworkVersionId": version["id"],
+        "requirementVersionIds": [row["id"] for row in requirements],
+        "policyVersionIds": [row["policy_version_id"] for row in policies],
+    })
     return value
 
 

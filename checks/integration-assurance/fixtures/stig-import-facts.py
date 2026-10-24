@@ -59,6 +59,9 @@ def build_facts(directory: Path, controller_directory: str = "/etc/cf-it/stig") 
         controller_directory) for release in ("V1R1", "V1R2")}
     for release, facts in releases.items():
         assert facts["release"] == release
+        # Each create-all action creates a new bundle lineage. Its authored
+        # name must be distinct even when the source benchmark title is shared.
+        facts["bundleName"] = "Assurance STIG " + release
     first, second = (releases[r] for r in ("V1R1", "V1R2"))
     assert first["sha256"] != second["sha256"]
     by_key = {r["stableKey"]: r for r in second["rules"]}
