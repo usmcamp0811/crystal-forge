@@ -307,8 +307,14 @@ the database tools; the existing online SQLx preparation realizes its shell.
 
 Coverage supplies the evaluator-matched Nix CLI used by native tests. Cargo
 build concurrency is two; instrumented libtest concurrency defaults to two
-without changing workspace/all-feature target selection. The original
-Tarpaulin status is retained in `tarpaulin-exit-status` and propagated through
+without changing workspace/all-feature target selection. The launcher closure
+also supplies `check-jsonschema` and `xmllint`: OSCAL integration
+tests invoke both against the repository's schemas. These tools must not depend
+on an ambient developer or runner PATH. Controlled launcher tests check their
+store paths and executable versions; native schema validation remains separate
+from measured coverage.
+
+The original Tarpaulin status is retained in `tarpaulin-exit-status` and propagated through
 the database receipt and `database-exit-status`. Report validation failures
 remain nonzero even when Tarpaulin or an overridden child returns zero.
 Interruption stops the database composition and waits for cleanup before the

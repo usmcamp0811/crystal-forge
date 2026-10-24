@@ -63,6 +63,10 @@ cargo-tarpaulin() {
     [[ "$DATABASE_URL" == postgresql://crystal_forge@127.0.0.1:35433/crystal_forge ]] || return 96
     [[ "$(psql -XAt -c 'SHOW data_directory')" == "$CF_STATE_MACHINE_DATA_DIR" ]] || return 97
     [[ "$(psql -XAt -c 'SHOW shared_preload_libraries')" == pg_stat_statements ]] || return 98
+    [[ "$(command -v check-jsonschema)" == /nix/store/*/bin/check-jsonschema ]] || return 99
+    [[ "$(command -v xmllint)" == /nix/store/*/bin/xmllint ]] || return 100
+    check-jsonschema --version >/dev/null || return 101
+    xmllint --version >/dev/null 2>&1 || return 102
     if [[ "$FIXTURE_MODE" == interruption ]]; then
         touch "$FIXTURE_READY"
         sleep 120

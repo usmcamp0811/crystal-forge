@@ -20,7 +20,9 @@ let
   coverage-report = pkgs.writeShellScriptBin "coverage-report" ''
         set -euo pipefail
         umask 077
-        export PATH="${lib.makeBinPath (with pkgs; [ cargo-tarpaulin cargo rustc gcc pkg-config coreutils jq bc bash git gnugrep gnused util-linux nix-eval-jobs.nix nix-eval-jobs ])}:$PATH"
+        # Integration targets validate their real OSCAL output with these
+        # schema tools; instrumentation must not depend on the host's PATH.
+        export PATH="${lib.makeBinPath (with pkgs; [ cargo-tarpaulin cargo rustc gcc pkg-config coreutils jq bc bash git gnugrep gnused util-linux nix-eval-jobs.nix nix-eval-jobs check-jsonschema libxml2 ])}:$PATH"
         export RUSTC="${pkgs.rustc}/bin/rustc"
         export RUSTDOC="${pkgs.rustc}/bin/rustdoc"
         export PKG_CONFIG_PATH="${pkgs.openssl.dev}/lib/pkgconfig''${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
