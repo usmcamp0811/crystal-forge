@@ -4,6 +4,7 @@ title: Deployment completion must not depend on agent clock agreement with the s
 status: Backlog
 assignee: []
 created_date: '2026-10-23 23:31'
+updated_date: '2026-10-24 01:26'
 labels:
   - bug
   - deployment
@@ -39,3 +40,9 @@ Changing which reports may complete a deployment changes deployment attribution 
 - [ ] #6 Delivery, Assurance and Upgrade owner deployment observations pass without timing or clock workarounds in the scenarios
 - [ ] #7 Affected knowledge documentation describes the clock-domain rule
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Owner explicitly defers TASK-503 in Backlog, separate from MR335. Preserve issue-time attribution, exact-target, expiry, supersession and stale-report protections; no receipt-time rule or test clock workaround. Operational risk: an agent can actually activate the selected output while its lagging report timestamp prevents completion of the durable deployment row. Server receipt time alone could wrongly attribute a delayed pre-issuance report to a later issued deployment, so the existing protections are not silently sufficient evidence of activation causality. Future work needs an explicit contract distinguishing report generation, receipt, issuance, target identity and actual activation. Preserve failed local Assurance artifact2rpai6p3 and source comparison; hosted success does not eliminate the risk. This deferral does not block independent TASK490 verification unless existing acceptance criteria explicitly require the skewed-clock behavior. No merge/deploy permission.
+<!-- SECTION:NOTES:END -->
