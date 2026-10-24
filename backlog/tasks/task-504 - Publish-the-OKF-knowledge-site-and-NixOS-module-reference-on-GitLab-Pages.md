@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-24 14:34'
-updated_date: '2026-10-24 14:47'
+updated_date: '2026-10-24 15:14'
 labels:
   - documentation
   - okf
@@ -63,4 +63,10 @@ User approved promoting TASK-504 and implementing from dev while preserving exis
 Sprint readiness: Goal is one published static knowledge/options site. Non-goals: application/Dioxus, database, module behavior, whole-dotfiles dependency, and corpus reorganization. Boundaries: source-controlled knowledge remains canonical; schema-only option evaluation; no real host or secrets; static-only preview with no backend/database. Impact: docs-site package/check, flake export, GitLab CI, README, knowledge guidance. Risk: medium (module laziness, links, Mermaid rendering, Pages URL). No external task dependencies; existing corpus is already in dev. Verification: focused renderer/options tests, Nix site and knowledge builds, browser smoke/prefix checks, and nix flake check --keep-going (report actual blockers).
 
 Renderer and options slices implemented by delegated agents. Options report 31 module exports and 263 options; targeted package build succeeded before final integration. Owner must reverify integrated source and browser. Preview server task504-docs currently serves task worktree at 127.0.0.1:8754; not yet publishing rendered site.
+
+User explicitly authorized the dotfiles renderer adaptation under Crystal Forge's AGPLv3 license with attribution. Package provenance notice updated accordingly.
+
+GitLab public project API confirms default_branch=dev. Pages and documentation check rules use CI_DEFAULT_BRANCH instead of assuming main. Intended conventional project Pages URL is https://crystal-forge.gitlab.io/crystal-forge/; deployed Pages URL remains unverified.
+
+Browser subagent verified root and /project/site/ navigation, both themes, mobile controls, search, options, and all 80 published Mermaid diagrams on 41 pages in both themes at both mounts (320 renders). Artifacts from that intermediate build: /nix/store/716rr1afx82gx93z0xpl13gsiin5yn34-crystal-forge-docs-site-browser/screenshots. Final integrated source still requires rerun.
 <!-- SECTION:NOTES:END -->
