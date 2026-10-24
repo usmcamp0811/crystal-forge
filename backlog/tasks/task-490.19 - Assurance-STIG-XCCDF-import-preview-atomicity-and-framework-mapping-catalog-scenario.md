@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-24 01:55'
+updated_date: '2026-10-24 02:21'
 labels:
   - testing
   - integration
@@ -80,6 +80,8 @@ Coordinator-authorized test-prerequisite correction: change only the cfg(test) s
 Owner explicitly approves the narrow non-XCCDF preview production correction: return422 for UnsupportedPackage at the existing preview API boundary, consistent with committed import; preserve parser classification, valid supported namespaces, zero-rule Benchmarks and other error classifications. Confirm actual parse/package/error flow; add focused real API regressions for unsupported/supported/zero-rule/other failures and preview/import consistency without weakening the existing browser422assertion. Reuse current isolated DB tools and existing test homes; no schema/check/wrapper/scenario/framework change. Coordinator uses existing locked TASK4901 worktree/MR335 and task-owned preview. Run focused tests, restart only task backend when rebuilt, then normal Assurance into successful V1R1/V1R2 import and mapping; commit/push separately and inspect exact resulting hosted inputs. Running pipeline2983606845 must not be duplicated. Correction is not blanket Assurance completion or merge/deploy authorization.
 
 Focused approved API regression first reproduced preview200/import422 before correction;4newrealHTTPtests now pass, parser297pass1ignored. Broaderexistingpreviewtests19failedbeforeHTTP because admin_session_token fixture passes auth_source='test', rejected by unchangedmigration0226 CHECK allowedunknown/dev/local/oidc. Routine test-prerequisite correction: change only that existing shared fixture argument to supported 'local', preserving all sessions/roles/assertions and productionconstraints; rerun fullpreview_ selection and enlist fournewexactAPItests in existingnormalisolateddatabaseCI. This is not a productionauthchange or newscenario.
+
+NormalcorrectedAssurance dirtyrun passed52records thenfailed beforeV1R2browser launch: VM /bin/bash 'Argument list too long' exit126 writing receipts-in.json. V1R1.identities alone contains72416bytes duplicate requirement titles/policy names alreadyindependentlyasserted inPython, pushingtotalbase64argumentbeyondkernelbound. Keep entire first/second local identity rows, full source-derived metadata assertions and completeSQL immutable-row before/after comparisons unchanged. Narrowtransportrepair: publish frameworkIDs and generated requirement/policy-version IDsets only in .identities receipts (noCJSconsumerrequiresduplicate titles); returnfullPythonvalue unchanged forlineage/mappingassertions. No driver/sharedhelper/framework/VMchange, no testskip, no productchange. RerunnormalAssurance retaining exit126artifact4zncnb406nhflsf5fmm2dkdjhbpk2swv.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
