@@ -11,6 +11,7 @@ tags:
 
 | Original | Destination | Action | Coverage |
 | --- | --- | --- | --- |
+| `packages/docs-site/README.md` | New TASK-504 renderer contract and attribution retained in place; see [documentation publication](../documentation-site.md). Not a migrated baseline source. | retained | complete |
 | `docs/test_plan.md` | [testing/test-plan.md](../../testing/test-plan.md) | moved | complete |
 | `docs/testing-prefetch.md` | [testing/offline-flake-prefetch.md](../../testing/offline-flake-prefetch.md) | moved | complete |
 | `docs/web-ui-check.md` | [testing/web-ui-check.md](../../testing/web-ui-check.md) | moved | complete |

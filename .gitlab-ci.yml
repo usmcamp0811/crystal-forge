@@ -2,11 +2,49 @@ stages:
   - check
   - metrics
   - coverage
+  - deploy
   - bump
 
 variables:
   # GitLab API for posting MR comments
   GITLAB_API_URL: "${CI_API_V4_URL}"
+
+# This static browser gate does not need the Dioxus application or a database.
+docs-site-check:
+  stage: check
+  tags:
+    - nix
+  script:
+    - nix build .#checks.x86_64-linux.docs-site -L --out-link docs-site-check-result --builders '' --max-jobs 1 --cores 2
+    - nix build .#docs-site -L --out-link docs-site-result --builders '' --max-jobs 1 --cores 2
+    - mkdir -p public docs-site-screenshots
+    - cp -rL docs-site-result/share/docs-site/. public/
+    - cp -rL docs-site-check-result/screenshots/. docs-site-screenshots/
+  artifacts:
+    expire_in: 30 days
+    paths:
+      - public/
+      - docs-site-screenshots/
+    expose_as: "Documentation Site"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+
+docs-pages:
+  stage: deploy
+  tags:
+    - nix
+  dependencies:
+    - docs-site-check
+  script:
+    - test -s public/index.html
+  pages:
+    publish: public
+  artifacts:
+    paths:
+      - public/
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
 
 # Post coverage report as MR comment
 .coverage-mr-comment:
