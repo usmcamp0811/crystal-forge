@@ -1,6 +1,10 @@
 # Definitions only. Concatenate after the same-run cve.py and Delivery setup.
 # Call assurance_triage_create() after vulnerable Current, BEFORE corrected
-# build. Register triage.cjs's run export as browserSpecs."triage-create".
+# build. Register triage.cjs's run export as browserSpecs."triage-create",
+# "triage-reopen-first", and "triage-reopen-second". Create returns first;
+# Python selects reopenRequest.1/2 and requires reopenComplete.1/2 in order.
+# Each reopen/cancel has its own before/after nine-table SQL boundary in memory.
+# Only the last phase emits browserReopenedPoamDetail for the SQL cross-check.
 # Required facts.remediation: title, initialPlan, updatedPlan, note, milestone,
 # targetDate (2027-02-01). Title is the UI-generated host patch title, not a
 # triage input. The browser emits assurance.remediation.{poamId,triageRequest}.
@@ -16,7 +20,8 @@ def _assurance_remediation_snapshot():
 
     Session access timestamps and independent agent/scanner reports are not
     remediation mutations. The owner must serialize other remediation writers
-    while a denial or invalid-payload probe runs in this fresh scenario database.
+    while a reopen/cancel, denial, or invalid-payload probe runs in this fresh
+    scenario database.
     """
     tables = ("poams", "poam_cve_findings", "poam_cve_finding_links",
               "cve_system_dispositions", "cve_environment_dispositions",
@@ -30,10 +35,12 @@ def assurance_triage_create():
     """Creates a real host schedule through System CVEs and snapshots its baseline.
 
     Requires vulnerable Current and delivery.adminId from this invocation.
-    Checks browser reopen/cancel through API detail comparisons, then verifies
-    authored SQL baseline invariants. The browser sequence has no SQL snapshot
-    boundary after its first create. Runs the independent Admin invalid-payload
-    probe before returning the production-created POA&M ID. No case runs on load.
+    Checks each browser reopen/cancel through full API detail comparisons and
+    an independent nine-table SQL before/after boundary after creation. Keeps
+    snapshots in Python memory and verifies authored SQL baseline invariants
+    after both phases. Serialize other remediation writers during the phases.
+    Runs the independent Admin invalid-payload probe before returning the
+    production-created POA&M ID. No case runs on load.
     """
     from datetime import datetime
 
@@ -47,6 +54,27 @@ def assurance_triage_create():
             " AND canonical_package_name=" + literal(f["package"]))
         expect_equal(existing, [], "fresh authored finding has no legacy remediation seed")
         run_browser(controller, "triage-create")
+        # Keep cross-phase API comparisons in Python too, rather than adding
+        # duplicate full detail objects to every later browser handoff.
+        poam_path = "/api/v1/poams/" + receipts()["assurance.remediation.poamId"]
+        triage_path = _assurance_triage_path() + "?package=" + f["package"]
+        status, before_poam = http(controller, "GET", poam_path, session="delivery-admin")
+        expect_equal(status, 200, "created plan readable before reopen")
+        status, before_triage = http(controller, "GET", triage_path, session="delivery-admin")
+        expect_equal(status, 200, "created schedule readable before reopen")
+        for phase, spec in ((1, "triage-reopen-first"), (2, "triage-reopen-second")):
+            before_reopen = _assurance_remediation_snapshot()
+            receipt("assurance.remediation.reopenRequest." + str(phase), True)
+            run_browser(controller, spec)
+            expect_equal(receipts()["assurance.remediation.reopenComplete." + str(phase)], True,
+                         "browser completed reopen/cancel phase " + str(phase))
+            for path, detail in ((poam_path, before_poam), (triage_path, before_triage)):
+                status, after_detail = http(controller, "GET", path, session="delivery-admin")
+                expect_equal(status, 200, "exact detail readable after reopen/cancel")
+                expect_equal(after_detail, detail, "full API detail remains unchanged across reopen phases")
+            expect_equal(_assurance_remediation_snapshot(), before_reopen,
+                         "reopen/cancel phase " + str(phase) + " preserves all nine remediation tables")
+            receipt("assurance.remediation.reopenSqlUnchanged." + str(phase), True)
         r = receipts()
         poam_id = r["assurance.remediation.poamId"]
         status, triage = http(controller, "GET", _assurance_triage_path() +
@@ -114,7 +142,8 @@ def assurance_triage_admin_invalid_host_schedule(session="delivery-admin"):
     Called by triage_create after its SQL identity/baseline checks, before any
     downstream plan maintenance or corrected deployment. Uses an authenticated
     Admin and valid CSRF. The nine-table SQL comparison belongs only to this
-    invalid request and subsequent read, not the earlier browser reopen.
+    invalid request and subsequent read; each earlier browser reopen has its own
+    separate nine-table boundary.
     """
     with case("triage-admin-invalid-host-schedule-preserves-existing-remediation"):
         r = receipts()

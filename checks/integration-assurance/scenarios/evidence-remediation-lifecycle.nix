@@ -130,6 +130,8 @@ in harness.mkScenario {
     cve-retry = wrapper "retry"; cve-read-error = wrapper "readError";
     cve-viewer = wrapper "viewer";
     triage-create = ./fragments/triage.cjs;
+    triage-reopen-first = ./fragments/triage.cjs;
+    triage-reopen-second = ./fragments/triage.cjs;
     poam-maintain = ./fragments/poam-plan.cjs;
     poam-verify-close = ./fragments/verification.cjs;
     stig-preview-v1r1 = stigWrapper "previewV1R1";

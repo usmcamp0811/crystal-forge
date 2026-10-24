@@ -1,5 +1,10 @@
-// browserSpecs["triage-create"] = this module. Requires the same-run vulnerable
-// Current receipts and authored facts.remediation. No response is intercepted.
+// Register triage-create, triage-reopen-first, and triage-reopen-second to run.
+// Requires same-run vulnerable Current receipts and authored facts.remediation.
+// Create returns before any reopen. Python selects each subsequent phase with
+// assurance.remediation.reopenRequest.1/2=true, in order, after a SQL snapshot.
+// Each phase emits reopenComplete.1/2=true after one reopen/cancel; only phase 2
+// emits browserReopenedPoamDetail. Fresh contexts read their own API baselines.
+// No response is intercepted. Serialize other remediation writers throughout.
 "use strict";
 
 exports.run = async (ctx) => {
@@ -9,7 +14,18 @@ exports.run = async (ctx) => {
   const plan = facts.remediation;
   const triagePath = `/api/v1/systems/${system}/cves/${f.cveId}/triage`;
   const inventoryPath = `/api/v1/systems/${system}/cve-inventory-page`;
-  let poamId;
+  const pending = [1, 2].filter((phase) =>
+    r[`assurance.remediation.reopenRequest.${phase}`] === true &&
+    r[`assurance.remediation.reopenComplete.${phase}`] !== true);
+  expect(pending.length).toBeLessThanOrEqual(1);
+  const reopen = pending[0];
+  let poamId = r["assurance.remediation.poamId"];
+  if (reopen) {
+    expect(typeof poamId).toBe("string");
+    if (reopen === 2) expect(r["assurance.remediation.reopenComplete.1"]).toBe(true);
+  } else {
+    expect(poamId).toBeUndefined();
+  }
   await ctx.step("administrator signs in to this Assurance database", async () => {
     await page.goto(ctx.url("/login"));
     await page.getByPlaceholder("Enter your username", { exact: true }).fill(facts.admin.username);
@@ -20,14 +36,22 @@ exports.run = async (ctx) => {
     const coach = page.getByRole("button", { name: "Close Crystal Forge Coach", exact: true });
     if (await coach.isVisible()) await coach.click();
   });
-  const inventoryRead = () => page.waitForResponse((response) => {
-    const url = new URL(response.url());
-    return response.request().method() === "GET" && url.pathname === inventoryPath &&
-      (url.searchParams.get("target") || "current") === "current";
-  });
+  const inventoryRead = async () => {
+    // Observe a new request on this exact System view, not an older response
+    // whose document can disappear during the navigation or reload below.
+    const request = await page.waitForRequest((request) => {
+      const url = new URL(request.url());
+      return request.method() === "GET" && url.pathname === inventoryPath &&
+        new URL(page.url()).pathname === `/systems/${system}` &&
+        (url.searchParams.get("target") || "current") === "current";
+    });
+    const response = await request.response();
+    expect(response).not.toBeNull();
+    return { status: response.status(), body: await response.json() };
+  };
   const assertInventory = async (response) => {
-    expect(response.status()).toBe(200);
-    const inventory = await response.json();
+    expect(response.status).toBe(200);
+    const inventory = response.body;
     expect(inventory.system_id).toBe(system);
     expect(inventory.source.scan_id).toBe(r["assurance.vulnerable.scanId"]);
     expect(inventory.running_target.derivation_id).toBe(r["assurance.vulnerable.derivationId"]);
@@ -36,7 +60,7 @@ exports.run = async (ctx) => {
     expect(inventory.vulnerabilities.map((v) => [v.cve_id, v.canonical_package_name]))
       .toEqual([[f.cveId, f.package]]);
   };
-  await ctx.step("Schedule patch uses the actual host finding and typed administrator", async () => {
+  if (!reopen) await ctx.step("Schedule patch uses the actual host finding and typed administrator", async () => {
     const [inventory] = await Promise.all([
       inventoryRead(), page.goto(ctx.url(`/systems/${system}?tab=cves`)),
     ]);
@@ -93,9 +117,9 @@ exports.run = async (ctx) => {
     ctx.emit("assurance.remediation.poamId", result.poam_id);
     ctx.emit("assurance.remediation.triageRequest", request);
   });
-  // The first create legitimately writes. Capture only after it completes;
-  // these authenticated API reads prove exposed detail/baseline preservation,
-  // not a before/after SQL snapshot of the browser's reopen sequence.
+  if (!reopen) return;
+  // Python brackets this entire authenticated read phase with nine-table SQL
+  // snapshots. The create is already complete and is outside that boundary.
   const readPoam = async () => {
     const response = await ctx.context.request.get(ctx.url(`/api/v1/poams/${poamId}`));
     expect(response.status()).toBe(200);
@@ -112,6 +136,9 @@ exports.run = async (ctx) => {
   expect(finding.baseline_target_store_path).toBe(r["assurance.vulnerable.outputPath"]);
   expect(finding.baseline_occurrence_derivation_path).toBe(r["assurance.vulnerable.packageDerivationPath"]);
   expect(finding.baseline_observed_package_version).toBe(f.vulnerableVersion);
+  const triageResponse = await ctx.context.request.get(ctx.url(`${triagePath}?package=${encodeURIComponent(f.package)}`));
+  expect(triageResponse.status()).toBe(200);
+  const firstDetail = await triageResponse.json();
   const writes = [];
   const monitorWrite = (request) => {
     const path = new URL(request.url()).pathname;
@@ -125,6 +152,13 @@ exports.run = async (ctx) => {
     }
   };
   page.on("request", monitorWrite);
+  await ctx.step("independent context reaches the exact scheduled System CVEs", async () => {
+    const [inventory] = await Promise.all([
+      inventoryRead(), page.goto(ctx.url(`/systems/${system}?tab=cves`)),
+    ]);
+    await assertInventory(inventory);
+    await expect(page.getByTestId("system-detail")).toBeVisible();
+  });
   await ctx.step("host schedule survives System CVEs reload", async () => {
     await page.goto(ctx.url(`/systems/${system}?tab=cves`));
     const [inventory] = await Promise.all([inventoryRead(), page.reload()]);
@@ -134,8 +168,7 @@ exports.run = async (ctx) => {
     await ctx.screenshot("triage-host-scheduled-reloaded");
   });
   await ctx.step("reopening and cancelling the exact host schedule preserves hydrated metadata", async () => {
-    let firstDetail;
-    for (let read = 0; read < 2; read += 1) {
+    for (const read of [reopen - 1]) {
       const row = page.getByTestId("system-detail").getByRole("row").filter({ hasText: f.cveId });
       await expect(row).toHaveCount(1);
       await expect(row.getByTestId("system-cve-triage-state")).toHaveText("Scheduled");
@@ -164,8 +197,7 @@ exports.run = async (ctx) => {
       expect(detail.host_disposition.poam.assignee.kind).toBe("user");
       expect(detail.host_disposition.poam.assignee.user_id).toBe(r["delivery.adminId"]);
       expect(detail.effective_disposition).toEqual(detail.host_disposition);
-      if (read === 0) firstDetail = detail;
-      else expect(detail).toEqual(firstDetail);
+      expect(detail).toEqual(firstDetail);
       const dialog = page.getByRole("dialog", { name: `Triage ${f.cveId} ${f.package}`, exact: true });
       await expect(dialog.getByTestId("cve-triage-scope-host")).toHaveAttribute("aria-checked", "true");
       await expect(dialog.getByTestId("cve-triage-scope-host"))
@@ -186,7 +218,10 @@ exports.run = async (ctx) => {
     }
     expect(await readPoam()).toEqual(beforeReopen);
     expect(writes).toEqual([]);
-    ctx.emit("assurance.remediation.browserReopenedPoamDetail", beforeReopen);
+    if (reopen === 2) {
+      ctx.emit("assurance.remediation.browserReopenedPoamDetail", beforeReopen);
+    }
+    ctx.emit(`assurance.remediation.reopenComplete.${reopen}`, true);
   });
   page.off("request", monitorWrite);
 };
