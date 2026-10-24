@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:39'
-updated_date: '2026-10-24 21:34'
+updated_date: '2026-10-24 22:09'
 labels:
   - testing
   - integration
@@ -140,6 +140,8 @@ Latest owner continuation explicitly authorizes the stale-recovery blocker, a bo
 Latest owner requests a strict minimization audit before further implementation. Freeze application/test infrastructure while pipeline2985072087 for45fa3e2f finishes; no duplicate pipeline or speculative fixes. Audit original four-owner contract, parent/coordinator acceptance and baseline5ae7feab CI to distinguish mandatory end-to-end obligations, ordinary Rust/Clippy execution, reporting jobs and advisory metrics. Review all79 existing workflow rows with an honest whole-row disposition; preserve named covered subsets and case-local decisions, and do not equate line coverage with workflow completeness. Preserve canonical UI parity deferrals without fixing visuals. Identify safe duplicate/dead removal only after proving that required assertions still execute. Refresh MR335 with one concise current description and canonical links, not nested historical snapshots. After the audit, perform only evidence-backed bounded cleanup; no new checks, wrappers, VMs, frameworks or test-infrastructure project.
 
 The requested45fa3e2f pipeline is terminal failed. All four owner artifacts passed (37/16/54 records48names/13), component passed, CVE31/dashboard4 passed with exact membership and controlled failure evidence. State-machine job17440920199 failed one existing ignored notification regression, exiting101 after277 expected/emitted names across28 selections; coverage and complexity were skipped, not failed. Bounded approved-scope repair only: inspect and reproduce user_notifications_materialize_event_after_user_creation_before_api_touch, observe the existing bounded producer's32-user/eight-event preconditions using temporary safe test diagnostics, and if shared fixture population is the cause use the adjacent existing SQLx test isolation pattern. Preserve the original assertion and producer behavior; no retries, sleeps, new wrapper, framework, feature, or notification end-to-end project. Verify the affected existing module and ordinary state-machine entry before publishing any repair. The minimization audit is otherwise complete: keep four owners/ordinary tests/Clippy and necessary false-green safeguards; only dead hidden MR-comment templates and accumulated MR prose are currently proved removable without losing assertions.
+
+The minimal isolated notification test passed in the normal state-machine run, and its entire25-test module passed. The next existing six-test email module then exposed the same clean-global-scheduler precondition in prohibited_policy_producer_materializes_in_app_without_email_delivery: one global bounded pass followed by a required own-user row returned RowNotFound; its five peer tests passed. Apply the same existing SQLx migration/pool annotation only to this affected policy test, preserving its body and no-email assertions. This is the same demonstrated fixture-state class, not a production-policy change. No new helper, selector, wrapper, framework, retries or broadened notification project. Re-run the existing normal state-machine entry; stop rather than widening if an unrelated failure appears.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
