@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-24 01:22'
+updated_date: '2026-10-24 01:26'
 labels:
   - testing
   - integration
@@ -76,6 +76,8 @@ Focused verification after composition: `nix build .#checks.x86_64-linux.integra
 Owner-authorized narrow production repair (2026-10-23): preserve the existing benchmark-version regression; populate ParsedRule.version only from direct namespace-qualified Rule/version; protect Benchmark/version from unrelated nested/foreign content. Add focused parser/adapter tests using existing test homes and retain independent real XML facts. Inspect immutable reimport consequences and document the bounded historical-import limitation. Verify focused Rust tests through Nix and relevant reimport tests only through the repository's verified isolated DB launcher. No VM or competing service stack. Commit this repair separately from b9bef89f.
 
 Coordinator-authorized test-prerequisite correction: change only the cfg(test) shared_native_plan expression from legacy cfg.config.* to the documented canonical config.* binding. Keep production validators and all idempotency/immutability/negative-test assertions unchanged. Run the exact foreign shared-reimport test plus the prior three reimport/conflict selections in a fresh invocation-owned cve-test PostgreSQL cluster on 35432; do not touch occupied 35433. Commit separately from 81ed0959.
+
+Owner explicitly approves the narrow non-XCCDF preview production correction: return422 for UnsupportedPackage at the existing preview API boundary, consistent with committed import; preserve parser classification, valid supported namespaces, zero-rule Benchmarks and other error classifications. Confirm actual parse/package/error flow; add focused real API regressions for unsupported/supported/zero-rule/other failures and preview/import consistency without weakening the existing browser422assertion. Reuse current isolated DB tools and existing test homes; no schema/check/wrapper/scenario/framework change. Coordinator uses existing locked TASK4901 worktree/MR335 and task-owned preview. Run focused tests, restart only task backend when rebuilt, then normal Assurance into successful V1R1/V1R2 import and mapping; commit/push separately and inspect exact resulting hosted inputs. Running pipeline2983606845 must not be duplicated. Correction is not blanket Assurance completion or merge/deploy authorization.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
