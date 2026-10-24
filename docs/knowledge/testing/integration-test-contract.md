@@ -39,17 +39,54 @@ regressions in normal CI. All four passed against an isolated local database
 Final same-head all-owner success and complete accepted coverage remain blocked.
 The approved `6e4ea520` design and canonical UI punch list authority are unchanged.
 
-Non-XCCDF preview class rejection is the smallest proposed API repair and needs
-new approval. TASK-490.19 remains product-read-only except the direct Rule-version
-repair. Import `check_document_class` rejects `UnsupportedPackage` with 422 before
-writes by source inspection; the failed preview assertion prevented import
-execution. Preserve the parser class contract; do not substitute a parser guard
-or zero-rule rejection. Hosted component tests passed Rule-version metadata,
-parser and adapter-independent mapping assertions, not the unreached browser
-import. TASK-503 remains Backlog: controller `issued_at` versus an agent timestamp
+The owner-approved narrow TASK-490.19 API preview rejection of
+`UnsupportedPackage` now has local proof. Four focused real HTTP tests verify
+both endpoints' 422 error and preserve supported-namespace and zero-rule 200
+outcomes; they are enrolled in normal state CI without new hosted proof.
+The parser class contract remains intact. Corrected normal Assurance exited 0:
+**54 passed case records / 48 distinct names**, fresh driver 295.54 seconds at
+`11ec75f3d5e0778747a33a5020747d284fead6da-dirty`. Actual command:
+`nix develop --command sh packages/ci/integration-owner-build.sh integration-assurance`.
+Exported `integration-evidence/integration-assurance/evidence-remediation-lifecycle/{result,meta}.json`,
+immutable output
+`/nix/store/qi8w39pz5cp4n7rfkba671113is86zh9-vm-test-run-cf-it-assurance-evidence-remediation-lifecycle-run`
+and `/tmp/opencode/task49019-preview-assurance-v4.{log,status}` retain local proof.
+Both actual browser imports returned 201: 104-rule V1R1 and 103-rule V1R2.
+SQL source-version, full immutable V1R1-row and framework-lineage checks passed;
+manual `supports` / partial mapping passed POST 201, SQL, API and fresh browser
+reload. [MR335 note 4080983319](https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335#note_4080983319)
+links real-preview proof, verified before/after PNG uploads and bounded receipts.
+These dirty-input results do not establish hosted or future-commit proof or
+visual approval.
+
+Local parser tests passed 297 / one ignored. Broader preview recorded 22 passed /
+one unchanged, unwaived `preview_accepts_nixos_stig_structure` failure expecting
+absent `inferred_assertions`. Embedded server package core passed 1,838 / 784
+ignored, plus one isolated case. The [latest checkpoint](integration-coverage-map.md#latest-local-correction-and-hosted-checkpoint)
+preserves test-only auth/migration, receipt, unique-name, route and network-readiness
+corrections and three failed predecessor runs without weakening SQL or S1 checks.
+
+Latest hosted [pipeline 2983606845](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2983606845)
+at clean `11ec75f3` still tests earlier code. Assurance job `17432893316`
+repeats 50 passed / one failed at unsupported preview 200. CVE job `17432893319`
+failed real test
+`services::cve_scans::tests::immediate_scan_renews_ownership_reuses_active_and_cancels_on_revocation`
+at the five-second `completed` wait; exit 101 propagated. One unchanged isolated
+local diagnostic with read-only lock sampling passed in 0.36 seconds; it does
+not explain away that hosted failure. No production CVE supervisor change or
+timeout increase is included. Final same-head four-owner, lower-level database
+and real analysis proof remains required. The `642db0ec` audit above remains
+historical proof at its exact source.
+
+TASK-503 remains Backlog: controller `issued_at` versus an agent timestamp
 10 seconds behind caused the prior dirty local Assurance 12-pass/one-failure run.
-Hosted success does not repair the latent defect; attribution needs a new decision,
-not permission loosening. A cross-user stale-response browser race remains
+Hosted success does not repair the latent defect. The owner explicitly defers
+TASK-503 outside MR335, preserving issue-time attribution, exact-target, expiry,
+supersession and stale-report protections. Receipt time alone cannot prove
+activation causality and could misattribute delayed pre-issuance reports;
+future work needs an explicit causal attribution contract, not a clock workaround.
+The separate risk does not block independent TASK-490 verification unless an
+existing acceptance criterion requires skew tolerance. A cross-user stale-response browser race remains
 unverified despite passing fresh per-user contexts and retained source guards.
 The [remaining blockers](integration-coverage-map.md#remaining-blockers-and-scope)
 link these limits to existing coverage items, including real notification delivery,

@@ -86,19 +86,75 @@ codes: initialization 1, child failure 73, empty selection 1, unrelated positive
 1, missing completion 1, malformed completion 1, receipt-over-compose 73 and
 interruption 143. Controlled faults are launcher proof, not product cases.
 
+### Latest local correction and hosted checkpoint
+
+The normal Assurance command
+`nix develop --command sh packages/ci/integration-owner-build.sh integration-assurance`
+exited **0** at `11ec75f3d5e0778747a33a5020747d284fead6da-dirty`:
+**54 passed case records / 48 distinct names**, fresh driver 295.54 seconds.
+Exported `integration-evidence/integration-assurance/evidence-remediation-lifecycle/{result,meta}.json`
+and immutable output
+`/nix/store/qi8w39pz5cp4n7rfkba671113is86zh9-vm-test-run-cf-it-assurance-evidence-remediation-lifecycle-run`
+retain that source; logs/status are
+`/tmp/opencode/task49019-preview-assurance-v4.{log,status}`.
+This is local dirty-input proof, not hosted or future-commit proof.
+
+Both 104-rule V1R1 and 103-rule V1R2 actual browser imports returned 201.
+SQL verified source versions, complete immutable V1R1 rows and framework lineage.
+Manual `supports` / partial mapping passed POST 201, SQL, API and fresh browser
+reload checks. Four focused real HTTP tests verify `UnsupportedPackage` 422 at
+both API boundaries and preserve supported-namespace and zero-rule 200 outcomes.
+Real-preview proof and verified before/after PNG uploads with bounded receipts
+are linked in [MR335 note 4080983319](https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335#note_4080983319).
+No visual approval is implied.
+
+Local prerequisites: parser 297 passed / one ignored; broader preview 22 passed /
+one unchanged failure, `preview_accepts_nixos_stig_structure`, expecting absent
+`inferred_assertions`. That failure is not waived. Embedded server package core
+passed 1,838 / 784 ignored, plus one isolated case. The four new exact API tests
+are enrolled in normal state CI; they have no new hosted proof.
+
+Test-only compatibility corrections use auth source `local` instead of `test`
+under valid migration 0226, compact generated-ID receipts while retaining full
+Python/SQL checks, authored unique bundle names, the `/deployment-policies`
+route, and global IPv4/default-route readiness before agent startup. S1 retains
+two real heartbeats, exactly one full state and existing assertion timeouts.
+Earlier failed runs remain failures: v1 `4zncnb…` recorded 52 passed / one failed
+(argument limit, exit 126); v2 `31k4ix…` recorded 52 passed / one failed
+(duplicate bundle name, HTTP 500); v3 `pj73fn…` recorded three passed / one failed
+(bootstrap network-inventory race). The exact v3 delta was not recorded.
+
+Latest hosted [pipeline 2983606845](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2983606845)
+at clean `11ec75f3` still tests earlier code, before these dirty corrections.
+[Assurance 17432893316](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17432893316)
+repeats 50 passed / one failed at unsupported preview 200.
+[CVE 17432893319](https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17432893319)
+failed the real test
+`services::cve_scans::tests::immediate_scan_renews_ownership_reuses_active_and_cancels_on_revocation`:
+the five-second wait for `completed` timed out; exit 101 propagated.
+One unchanged local isolated diagnostic with read-only lock sampling passed one
+test in 0.36 seconds. It does not explain away the hosted failure. No production
+CVE supervisor change or timeout increase is included. Final submitted same-head
+four-owner, lower-level database and real analysis verification remains required.
+The fully audited `642db0ec` table above remains historical proof at its source.
+
 ### Remaining blockers and scope
 
-- Non-XCCDF preview accepts an `UnsupportedPackage` document with 200. Source
-  confirms import `check_document_class` rejects it with 422 before writes;
-  import was not executed because the preview assertion failed. The smallest
-  proposed repair is API preview class rejection and requires new approval:
-  TASK-490.19 is product-read-only except the direct Rule-version repair. Keep
-  the parser class contract intact; neither a parser guard nor zero-rule
-  rejection is the proposed repair.
+- The owner-approved API preview rejection of `UnsupportedPackage` is locally
+  verified by focused HTTP tests, real preview and the normal Assurance owner
+  above. The browser assertion and parser class contract remain intact. Hosted
+  verification of the pending correction remains required; the earlier hosted
+  preview-200 failures remain failures.
 - TASK-503 remains Backlog: controller `issued_at` versus an agent timestamp
   10 seconds behind caused the prior dirty local Assurance 12-pass/one-failure
-  run. Hosted success does not repair this latent clock-domain defect. Await a
-  new attribution decision; do not loosen permissions.
+  run. Hosted success does not repair this latent clock-domain defect. The owner
+  explicitly defers TASK-503 outside MR335: preserve issue-time attribution,
+  exact-target, expiry, supersession and stale-report protections. Receipt time
+  alone cannot distinguish delayed pre-issuance reports from deployment-caused
+  activation. Future work needs an attribution contract separating report
+  generation, receipt, issuance, target identity and actual activation. Do not
+  add a clock workaround. This separate risk does not block independent TASK-490
+  verification unless an existing acceptance criterion requires skew tolerance.
 - A new cross-user stale-response browser race is unverified. Fresh independent
   per-user context proof passed; source guards remain. Those facts do not prove
   the cross-user response race.
@@ -1547,7 +1603,7 @@ Authority: A-contract, TASK-490.18/.19 and approved A-design states. Draft Compl
 | `assignment-resolution` | Environment/system assignments with include/exclude/override inputs → preview, commit/update/remove, effective-policy read | Preview writes none; stored scope/version and approved precedence produce independently authored effective policy set; environment and host do not silently exchange identity. | Assignment/version/membership DB, independent expected set, enforcement result. | .18; `planned`; draft-only precedence conflicts require case-specific clause review. |
 | `enforce-report-only` | Real passing/failing input and Enforce/ReportOnly assignments → evaluate and request deploy | Enforce failure blocks admission; ReportOnly records same technical outcome without blocking; missing/failed evidence follows accepted policy, not success default. | Evaluation decision/results, deployment admission records and actual target non/activation. | .18; `planned`. |
 | `policy-kinds` | Authored native/expression/package/CVE/agent/approval/time-window/canary conditions → evaluate supported policy configuration | Each supported execution boundary gets real positive/negative input; technical result and gate meaning remain separate; no parser-only proof of execution. | Independent Nix/target facts, policy evidence/result DB, gate/rollout observer. | .18 broad boundary; per-kind execution matrix **unassigned**; `planned`. |
-| `framework-catalog` | Imported STIG/framework release → list versions, search requirements/children/mapped policies, bundle coverage | Authored external rule/requirement identities and hierarchy survive; mappings distinguish policy evidence from framework coverage; search/filter scope does not drop version identity. | Independently parsed source catalog, framework/requirement/mapping DB, browser. | .19 catalog; extra framework/coverage bindings **unassigned**; `planned`. |
+| `framework-catalog` | Imported STIG/framework release → list versions, search requirements/children/mapped policies, bundle coverage | Authored external rule/requirement identities and hierarchy survive; mappings distinguish policy evidence from framework coverage; search/filter scope does not drop version identity. | Independently parsed source catalog, framework/requirement/mapping DB, browser. | .19; **locally verified subset, hosted pending** at `11ec75f3-dirty`: 104-rule V1R1 / 103-rule V1R2 source versions, immutable full V1R1 rows, framework lineage and manual `supports` / partial mapping through POST 201, SQL, API and fresh browser reload. Extra framework/coverage bindings remain **unassigned**, `planned`. |
 | `mapping-recovery` | Operator/Admin with exact requirement version and unresolved historic release → mapping CRUD, Admin recovery | Only intended mapping/version changes; failed/mismatched source recovery leaves unresolved version honest; startup can continue without inventing missing source digest/evidence. | Requirement mappings/version/digest rows, source file digest and recovery result. | **Unassigned** .19-adjacent; `planned`. |
 
 ### 10. `assurance.remediation` — triage, risk and POA&M continuity
@@ -1571,7 +1627,7 @@ Authority: A-contract and TASK-490.19/.22; A-continuity for source identity/scop
 
 | Obligation | Actor / initial state → action | Independent expected result | Authoritative observation | Tracking / status |
 | --- | --- | --- | --- | --- |
-| `stig-import` | Authorized user with DISA Anduril XCCDF XML/ZIP → preview/import; malformed/oversize/invalid payload | Preview writes nothing; authored rule identities/count from independent parser persist only after valid import; rejected import is atomic; role/body limits apply before protected writes. | External source parser/schema plus framework/bundle/policy DB before/after and browser import state. | .19; **failing** hosted at `642db0ec`: non-XCCDF preview 200, expected 422. Initial facts, 104-source-version preview/cancel and truncated 422/no-change passed. Successful 103/104 import/framework mapping not reached; see remaining blockers. Four framework reimport/conflict regressions passed locally; normal-CI enrollment in `32d1b88d` has no hosted result at this checkpoint. |
+| `stig-import` | Authorized user with DISA Anduril XCCDF XML/ZIP → preview/import; malformed/oversize/invalid payload | Preview writes nothing; authored rule identities/count from independent parser persist only after valid import; rejected import is atomic; role/body limits apply before protected writes. | External source parser/schema plus framework/bundle/policy DB before/after and browser import state. | .19; **locally verified subset, hosted pending**: normal Assurance 54 records / 48 names at `11ec75f3-dirty`, including both actual 104/103 imports and mapping; see latest checkpoint. Hosted `642db0ec` and `11ec75f3` preview-200 failures remain historical failures. Four framework reimport/conflict regressions and four new exact API tests passed locally and are normal-CI enrolled; new hosted proof remains pending. |
 | `policy-interchange` | Real authored policy/version set → export/download, preview/import into isolated receiver state | Download parses independently; selected semantic records/scope round-trip; validation error leaves receiver unchanged; imported trust cannot be inferred from file presence. | Parsed payload/schema, source/receiver DB and actual browser download. | .22; `planned` for accepted round-trip subset. |
 | `native-reconciliation-details` | CF-native identities/digests with exact match, lineage/version conflict or unverified signature → preview/import | Exact draft-only reconciliation/trust conflict outcomes require approval; existing implementation/tests cannot select expectation. | Independent source digest/identity comparison, receiver DB transaction results. | .22; `blocked: D5-interchange` only for these details. |
 | `server-exports` | Real scoped plans/acceptances/CVEs/bundles/assignments/policies → register CSV/XLSX/OSCAL JSON/XML, POA&M/acceptance CSV/XLSX, CVE CSV, XCCDF and policy exports | Independent parsers/schema validate actual files; exact authored records/IDs/scope and source versions included; hidden/unselected data omitted; export does not mutate domain records. | Downloaded bytes parsed externally, source-selection DB and no-write observation. | .22; `planned`. |
