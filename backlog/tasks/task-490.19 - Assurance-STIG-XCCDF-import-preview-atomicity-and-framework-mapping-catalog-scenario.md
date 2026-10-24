@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-23 16:31'
+updated_date: '2026-10-24 01:22'
 labels:
   - testing
   - integration
@@ -113,4 +113,8 @@ Fresh isolated cve-test launcher invocation used port 35432, verified owned data
 All four exact DB selections passed with expected=emitted=1 and exit=0 each: queries::compliance_interchange::tests::phase_22_shared_creation_exact_reimport_is_idempotent; queries::framework_requirements::tests::framework_version_release_conflict; queries::framework_requirements::tests::framework_preview_matches_commit_release_digest_semantics; queries::compliance_interchange::tests::cf_native_reimport_reuses_exact_identities. Launcher final test_exit=0 compose_exit=0. Command per selection: cargo test --locked --offline --manifest-path Cargo.toml -p cf-server --lib <exact-name> -- --ignored --exact --test-threads=1. Log /tmp/opencode/task49019-fixture-db-tests.log; temporary selection /tmp/opencode/task49019-fixture-db-selection.json.
 
 Additional targeted verification passed: rustfmt --edition 2024 --check on changed file; importer::tests::native_custom_check_ selection (2 passed including the invalid-expression rejection); git diff checks. Log /tmp/opencode/task49019-fixture-negative-tests.log. Remaining failures in the requested four-DB-test selection: zero. Earlier exit101 is retained as historical evidence of the stale prerequisite and is superseded by this successful execution. Normal Assurance with actual XML inputs remains coordinator-owned and has not been run by this worker.
+
+Hosted Assurance exact642db0ec pipeline2983100226 job17430452260 is terminal failed:50passed/1failed case records45distinctnames. Original47pass/41names retained; STIG source prerequisites,104rule-version preview/cancel no writes, and truncated422/no-partialrows passed; nonXCCDF preview returned200 expected422. Successful V1R1/V1R2 import and framework mapping were not reached. Downloaded structured result is authoritative because top-leveltrace hit4MBlimit. Componentjob17429864150 independently passed44parser tests plus benchmark-not-clobbered, direct-rule-version metadata/stable-key and independent103-rule-map tests.
+Read-only source diagnosis: existing parser classifies absentBenchmark as UnsupportedPackage without a blocking diagnostic; preview checks blocking errors but not that class. Actual import calls check_document_class and rejects UnsupportedPackage422 before commit; import denial here is source-confirmed, not reached by failed browsercase. This predates d58a3125 and is not a Rule/version regression. Keep parserclassification/zero-ruleBenchmark/prefixnamespace contracts; proposed narrowfix is APIpreview UnsupportedPackage rejection, not parserrootrewrite/zero-rule rejection. Current task permits only earlier directversion productrepair; new preview-boundary repair awaits owner scope approval. Preserve422assertion and immutableOfficialXML.
+Commit32d1b88d enrolls four exact existing framework reimport/conflict/digest regressions in normal state-machine CI. Fresh local isolatedDB invocation /tmp/opencode/task490-framework-enrolled.{log,status} passed4expected=emitted1 selections, test_exit=compose_exit0; data/socket paths removed. Shellsyntax andShellCheck errorspassed; new enrollment not yet hosted. No newcheck/scenario/DBframework.
 <!-- SECTION:NOTES:END -->
