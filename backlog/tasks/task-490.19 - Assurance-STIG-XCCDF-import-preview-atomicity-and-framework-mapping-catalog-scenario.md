@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-24 02:42'
+updated_date: '2026-10-24 02:50'
 labels:
   - testing
   - integration
@@ -84,6 +84,8 @@ Focused approved API regression first reproduced preview200/import422 before cor
 NormalcorrectedAssurance dirtyrun passed52records thenfailed beforeV1R2browser launch: VM /bin/bash 'Argument list too long' exit126 writing receipts-in.json. V1R1.identities alone contains72416bytes duplicate requirement titles/policy names alreadyindependentlyasserted inPython, pushingtotalbase64argumentbeyondkernelbound. Keep entire first/second local identity rows, full source-derived metadata assertions and completeSQL immutable-row before/after comparisons unchanged. Narrowtransportrepair: publish frameworkIDs and generated requirement/policy-version IDsets only in .identities receipts (noCJSconsumerrequiresduplicate titles); returnfullPythonvalue unchanged forlineage/mappingassertions. No driver/sharedhelper/framework/VMchange, no testskip, no productchange. RerunnormalAssurance retaining exit126artifact4zncnb406nhflsf5fmm2dkdjhbpk2swv.
 
 Assurancev2 compactreceiptcorrectedhandoff,52passesthenV1R2import500. ExactcontrollerSQLerrorcompliance_bundles_name_key: bothcreate-alluploadsuseidenticaldefaultBenchmarktitle Anduril NixOS Security Technical Implementation Guide. Existingcommitcreatesnewbundlelineage requiringuniquename; taskrequiresrelease/frameworkcontinuitynotduplicatebundlecreation. Routine authored-inputfix: distinctfacts.bundleName perrelease, fill existingBundle nameUIcontrolbeforecreateall, assertSQLpersistedexactname. KeepOfficialXMLbytes/rules/sourcefacts/frameworklineage/versionrowsandcompleteimmutabilityassertions unchanged. No productionduplicatehandling/schema/UIchange; retain31k4ixqaw...failedartifact and rerunnormalowner.
+
+Read-only preflight of remainingmappingbrowserstep found /policies hard-coded but Route::PoliciesView is /deployment-policies (routes.rs95); no /policies aliasexists. Correct only testnavigation toacceptedexistingroute, preserving exactpolicyUUID, policyVersionUUID, frameworkversion andmappingassertions. CurrentAssurancev3usesitsfrozensnapshot; do notalterrunningVMorclaimnewrouteexecuteduntilsubsequentnormalrun.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
