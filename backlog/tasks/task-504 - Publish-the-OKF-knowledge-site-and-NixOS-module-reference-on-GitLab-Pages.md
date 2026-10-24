@@ -1,9 +1,10 @@
 ---
 id: TASK-504
 title: Publish the OKF knowledge site and NixOS module reference on GitLab Pages
-status: Backlog
+status: To Do
 assignee: []
 created_date: '2026-10-24 14:34'
+updated_date: '2026-10-24 14:38'
 labels:
   - documentation
   - okf
