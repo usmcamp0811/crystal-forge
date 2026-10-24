@@ -1429,7 +1429,7 @@ async fn save_scan_results_for_owner(
     let pkg_vulns: Vec<PkgVuln> = unique_pkg_vulns.into_values().collect();
 
     // Collect critical CVE IDs before the transaction so we can open attention
-    // occurrences after the commit.  A CVE is considered critical when its CVSS
+    // occurrences before the commit. A CVE is considered critical when its CVSS
     // v3 base score is >= 9.0.
     let critical_cve_ids: Vec<String> = cve_map
         .iter()
@@ -4588,9 +4588,30 @@ mod tests {
         let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
             return;
         };
-        let pool = PgPool::connect(&database_url)
+        let admin_pool = PgPool::connect(&database_url)
             .await
             .expect("dedicated CVE test database should be reachable");
+        // CONCURRENCY: Fleet selection and enqueue intentionally cover every
+        // active system. Other tests assemble eligible fleet fixtures in several
+        // statements, so their intermediate generations must not enter this
+        // test's exact target, enqueue, or queue-claim counts.
+        let database_name = format!("cve_fleet_enqueue_{}", Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+            .execute(&admin_pool)
+            .await
+            .expect("fleet-enqueue test database should be created");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_with(
+                (*admin_pool.connect_options())
+                    .clone()
+                    .database(&database_name),
+            )
+            .await
+            .expect("fleet-enqueue test database should connect");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("fleet-enqueue test database should migrate");
         let already_active = setup_fleet_fixture(&pool).await;
         let available = setup_fleet_fixture(&pool).await;
 
@@ -4663,6 +4684,12 @@ mod tests {
             .expect("unrelated derivation should be deleted");
         already_active.cleanup(&pool).await;
         available.cleanup(&pool).await;
+        pool.close().await;
+        sqlx::query(&format!("DROP DATABASE \"{database_name}\""))
+            .execute(&admin_pool)
+            .await
+            .expect("fleet-enqueue test database should be dropped");
+        admin_pool.close().await;
     }
 
     /// Exact enqueue and terminal completion serialize on the derivation writer
@@ -5281,9 +5308,31 @@ mod tests {
         let Ok(database_url) = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL") else {
             return;
         };
-        let pool = PgPool::connect(&database_url)
+        let admin_pool = PgPool::connect(&database_url)
             .await
             .expect("dedicated CVE test database should be reachable");
+        // CONCURRENCY: Recovery intentionally scans the whole database. Other
+        // tests create stale executions, including legacy rows before assigning
+        // their live-owner tokens. Those rows must not enter this test's exact
+        // recovery counts. Keep this test selected normally and isolate its
+        // database instead of narrowing the production recovery query.
+        let database_name = format!("cve_execution_age_{}", Uuid::new_v4().simple());
+        sqlx::query(&format!("CREATE DATABASE \"{database_name}\""))
+            .execute(&admin_pool)
+            .await
+            .expect("execution-age test database should be created");
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .connect_with(
+                (*admin_pool.connect_options())
+                    .clone()
+                    .database(&database_name),
+            )
+            .await
+            .expect("execution-age test database should connect");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("execution-age test database should migrate");
         let derivation = insert_derivation(
             &pool,
             None,
@@ -5393,6 +5442,12 @@ mod tests {
             .execute(&pool)
             .await
             .expect("stale-claim derivation should be deleted");
+        pool.close().await;
+        sqlx::query(&format!("DROP DATABASE \"{database_name}\""))
+            .execute(&admin_pool)
+            .await
+            .expect("execution-age test database should be dropped");
+        admin_pool.close().await;
     }
 
     /// A recovery pass moves lock-confirmed owners out of the stale front set
