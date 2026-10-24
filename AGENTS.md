@@ -58,6 +58,45 @@ Preserve these boundaries:
 
 Avoid arbitrary abstractions. Introduce a trait, shared component, or new layer only when it expresses a real boundary, enables needed testing, or matches an established repository pattern. Do not refactor solely to satisfy a line-count target.
 
+## Simplicity and minimal implementation
+
+Simplicity is a primary design requirement. Agents MUST implement the least complex complete solution that meets the acceptance criteria. Correctness, security, data integrity, and required behavior take priority. Unnecessary complexity is a defect, even when the implementation works.
+
+### Implementation rules
+
+- **Prefer the simplest working solution.** Reuse existing code, tools, patterns, and infrastructure before introducing new mechanisms.
+- **Minimize changes.** Change only what the task requires. Do not refactor unrelated code or expand the task to solve hypothetical problems.
+- **Do not overengineer.** Do not add frameworks, abstraction layers, wrappers, factories, adapters, state machines, orchestration, or configuration options without a concrete requirement.
+- **Do not design for hypothetical futures.** Solve the current problem. Do not add extensibility, compatibility paths, fallback mechanisms, or generalized infrastructure for scenarios that the task does not require.
+- **Prefer deletion over addition.** Remove obsolete or redundant code when it is safe and within scope. Do not preserve complexity only because it already exists.
+- **Use native capabilities.** Prefer existing Rust, Nix, SQL, and repository mechanisms over custom implementations or new dependencies.
+- **Keep verification proportional.** Test observable behavior, contracts, and meaningful failure cases. Do not create tests of tests, checks of checks, redundant verification layers, or custom test infrastructure when existing checks provide sufficient evidence.
+- **Avoid speculative defensive code.** Add retries, recovery paths, synchronization, caching, and fallback behavior only when a requirement or demonstrated failure justifies them.
+- **Do not redesign for a local fix.** If a small change solves the problem, do not replace it with a generalized architecture.
+- **Challenge existing complexity.** When a task exposes unnecessary machinery, simplify it within the authorized scope instead of extending it.
+- **Stop when the task is complete.** After the acceptance criteria are met and required verification passes, do not invent more improvements, edge cases, infrastructure, or follow-up work.
+
+### Complexity justification
+
+Before introducing a significant abstraction, dependency, service, verification layer, or architectural component, an agent MUST be able to answer:
+
+1. Which acceptance criterion or demonstrated failure requires this complexity?
+2. Why is a simpler implementation insufficient?
+3. Can existing repository mechanisms solve the problem?
+4. What would fail if this additional component did not exist?
+
+If there is no concrete justification, the agent MUST use the simpler approach.
+
+Do not create a formal complexity assessment, scoring framework, approval process, or additional document to enforce these questions. Apply them directly during implementation and review.
+
+### Review standard
+
+Reviewers MUST treat unnecessary complexity as a maintainability defect. A technically correct implementation can still require revision when a simpler solution meets the same requirements with less code, fewer dependencies, fewer moving parts, and less maintenance.
+
+Minimal does not mean incomplete. Do not remove necessary correctness checks, security controls, required documentation, or regression coverage in the name of simplicity.
+
+**The objective is the least complex complete solution, not the most comprehensive system an agent can imagine.**
+
 ## Backlog workflow
 
 Use the Backlog.md MCP integration when available; otherwise use the repository-provided Backlog CLI from `nix develop`. See [docs/agent/backlog-workflow.md](docs/agent/backlog-workflow.md).
@@ -295,6 +334,7 @@ documentation validation through Nix:
 ```bash
 nix build .#okf-knowledge -L
 ```
+
 #### Technical writing standard
 
 Technical prose MUST follow ASD-STE100 principles to the extent that they are compatible with exact software terminology.
