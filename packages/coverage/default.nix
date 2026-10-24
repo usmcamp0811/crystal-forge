@@ -130,6 +130,7 @@ let
             # Run tarpaulin with JSON and HTML output
             echo "   Running cargo tarpaulin..."
             if cargo-tarpaulin tarpaulin \
+              --engine llvm \
               --out Html \
               --out Json \
               --output-dir "$PKG_OUTPUT" \

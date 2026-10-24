@@ -287,6 +287,17 @@ enabled with one job and two cores for analysis fixtures. Missing prepared
 dependencies fail instead of causing an online retry. This is enforced tool
 offline policy, not proof of a network namespace or firewall boundary.
 
+The outer coverage `nix run` does not use `--offline`. Empty substituters,
+disabled substitution, empty builders, and disabled fallback already enforce
+the required binary-cache and remote-builder restrictions. Nix's `--offline`
+also changes fetch-cache freshness; it is not a general network prohibition.
+Preparation must supply the pinned flake inputs and required closures before
+analysis. Removing the outer flag does not authorize fetching a missing input
+during a required-offline test. Missing preparation remains a failure.
+The nested SQLx-shell and database prerequisite checks retain `--offline`,
+`CARGO_NET_OFFLINE=true`, and `SQLX_OFFLINE=true`. These invocation-local
+requirements do not change the normal Nix configuration for developer builds.
+
 Required execution failures return nonzero. These include a missing workspace
 manifest, a failed analysis, missing JSON or HTML, malformed JSON, inconsistent
 counts, and zero coverable lines. The JSON denominator is Tarpaulin's
@@ -313,6 +324,15 @@ tests invoke both against the repository's schemas. These tools must not depend
 on an ambient developer or runner PATH. Controlled launcher tests check their
 store paths and executable versions; native schema validation remains separate
 from measured coverage.
+
+The launcher selects Tarpaulin's LLVM engine. The pinned Tarpaulin 0.37.2 and
+Rust/Cargo 1.95.0 toolchain uses compiler instrumentation and runtime profiles,
+without ptrace or an ASLR personality change. The workspace contains
+`cf-protocol`, `cf-config`, `cf-agent`, `cf-builder`, `cf-keygen`, and `cf-server`;
+the separate Web UI workspace is not part of this report. The existing default
+test target selection and all-feature scope remain unchanged. LLVM and ptrace
+have different line and hit semantics; their percentages are not interchangeable.
+A smoke report does not establish complete product-workspace execution.
 
 The original Tarpaulin status is retained in `tarpaulin-exit-status` and propagated through
 the database receipt and `database-exit-status`. Report validation failures

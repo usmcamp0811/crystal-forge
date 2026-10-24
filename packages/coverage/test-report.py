@@ -54,7 +54,7 @@ with tempfile.TemporaryDirectory(prefix="coverage-launcher-") as temporary:
     wrapper = root / "run.sh"
     wrapper.write_text('''set -euo pipefail
 cargo-tarpaulin() {
-    [[ "$*" == 'tarpaulin --out Html --out Json --output-dir '* ]] || return 90
+    [[ "$*" == 'tarpaulin --engine llvm --out Html --out Json --output-dir '* ]] || return 90
     [[ "$*" == *' --all-features --workspace --timeout 300' ]] || return 91
     [[ "$SQLX_OFFLINE" == true && "$CARGO_NET_OFFLINE" == true && "$CARGO_BUILD_JOBS" == 2 ]] || return 92
     [[ "$RUSTC" == /nix/store/*/bin/rustc && -x "$RUSTC" && -x "$RUSTDOC" ]] || return 93

@@ -80,7 +80,9 @@ coverage-check:
       max-jobs = 1
       cores = 2
       "
-      nix run --offline --option substituters '' --option substitute false \
+      # Preparation above resolves the required inputs. Explicit settings, not
+      # --offline, enforce the binary-cache and remote-builder restrictions.
+      nix run --option substituters '' --option substitute false \
         --builders '' --option fallback false --option accept-flake-config false \
         --max-jobs 1 --cores 2 .#coverage.coverage-report
   artifacts:
