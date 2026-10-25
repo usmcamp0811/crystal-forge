@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai
 created_date: '2026-10-25 01:12'
-updated_date: '2026-10-25 03:22'
+updated_date: '2026-10-25 03:43'
 labels:
   - ci
   - coverage
@@ -13,6 +13,25 @@ labels:
 dependencies: []
 references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/338'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2985720111'
+modified_files:
+  - .gitlab-ci.yml
+  - docs/agents/verification.md
+  - docs/knowledge/testing/flake-checks.md
+  - docs/knowledge/testing/integration-test-contract.md
+  - docs/knowledge/testing/test-plan.md
+  - packages/ci/test_public_cache_build.py
+  - packages/coverage/default.nix
+  - packages/coverage/instrument.sh
+  - packages/coverage/report.sh
+  - packages/coverage/test-report.py
+  - packages/default/default.nix
+  - packages/default/crates/cf-server/tests/oscal_poam_export.rs
+  - packages/default/crates/cf-server/tests/register_oscal_snapshot.rs
+  - packages/devScripts/default.nix
+  - packages/devScripts/tests/database-environment.sh
+  - packages/devScripts/tests/database-regressions.sh
 priority: high
 type: chore
 ordinal: 556000
@@ -21,7 +40,7 @@ ordinal: 556000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-The coverage job repeats workspace tests and implements a second database/test lifecycle solely to measure coverage. Replace that duplication with optional measurement of existing normal test workflows. Audit and preserve tests that currently execute only under Tarpaulin before deleting its orchestration. Keep this narrowly scoped follow-up separate from MR335 and do not delay or modify its merge verification. Target dev after MR335; no deployment, release, or follow-up merge is authorized.
+Simplify coverage by measuring existing component and isolated database tests instead of running an independent Tarpaulin/database workflow. Preserve required tests and failure propagation. The owner's latest instruction requires delivering these changes on the existing MR !335, not a separate follow-up MR. MR !338 is superseded and must close after the changes are verified on !335. No MR merge, deployment, or release is authorized by this relocation.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
@@ -33,17 +52,18 @@ The coverage job repeats workspace tests and implements a second database/test l
 - [x] #5 Independent Tarpaulin execution and obsolete coverage-only database supervision, receipts, launcher tests and redundant reports are deleted after equivalent ownership is verified
 - [x] #6 The four native integration owners remain unchanged and no new flake check, VM, framework, registry or service is added; no coverage threshold is introduced
 - [ ] #7 Affected normal/instrumented builds, database paths, cleanup, failure propagation, report scope, configuration and documentation are verified with before/after job/dependency/code-removal evidence
-- [ ] #8 Open one separate follow-up MR targeting dev; do not merge it without separate authorization
+- [ ] #8 Publish the coverage simplification on existing MR !335 and close superseded MR !338 without merging either MR
 <!-- AC:END -->
 
 ## Implementation Plan
 
 <!-- SECTION:PLAN:BEGIN -->
-1. Preserve MR335 untouched; use separate TASK505 worktree based on its bb50aaea pending head, retarget/reconcile to dev after335. Audit manifests, actual selection scripts and retained40-target evidence before deletion. Identified gaps:41 cf-protocol tests, five nonignored integration targets(21 tests),12 nonignored liveDB library tests; ignored targets were previously unexecuted and are not automatically adopted.
-2. Assign protocol and three pure export integration targets to existing core component check with explicit schema tools/paths. Assign the two migration integration targets to existing state-machine selection; add12 missing genuine liveDB cases to existing CVE owner. Preserve all bodies/assertions, existing environments, guards and cleanup. Do not introduce new test owners/jobs.
-3. Add a small shared native instrumentation/export hook reused by opt-in component derivation variants and the existing database environment. Compile with instrument-coverage and common source remapping; isolate instrumented Cargo targets. Export profiles and coverage-bearing executable objects outside disposable DB directories. Ordinary production/default dev definitions remain uninstrumented; toolchain matches pinned rustc LLVM. Enabled CI selects instrumented variants in the same component job, never a separate test runner.
-4. Replace packages/coverage with an artifact-only native llvm-profdata merge/llvm-cov report collector. One report/percentage, no Cargo, migrations, database lifecycle, custom HTML/Markdown/JUnit or Tarpaulin. Remove coverage-only launcher controls and obsolete wiring. Coverage-enabled test failures remain owner failures; missing/invalid measurement produces an explicit tool failure, no arbitrary percentage gate. Optional collector job runs only when CF_COVERAGE=1 and consumes normal job artifacts.
-5. Verify baseline and changed actual selections/counts, normal disabled ownership, instrumented same owners and portable report validity/failure behavior, normal production drv flags/identity, database cleanup, CI lint/four root checks/full-flake, documentation and deleted-line/dependency/job comparisons. Preserve normal offline test boundaries and no global offline policy. Commit/push one narrow follow-up and open MR to dev, dependent on335 if still unmerged; no merge/deploy.
+Owner-directed delivery correction: use the existing clean TASK-490.1-integration-foundation worktree and MR !335 source branch. Preserve all implemented coverage code and verification evidence from commit67c7d5ee; no redesign or test changes.
+1. Verify !335 remains open and its local/remote source is clean atbb50aaea; verify67c7d5ee is a direct descendant containing only the already-reviewed TASK505 change.
+2. Fast-forward the !335 source branch to that commit without force push or rewriting history. Correct this task's current delivery metadata through MCP and carry the corrected record onto the source branch in a metadata-only commit.
+3. Verify the application/CI/docs code matches67c7d5ee exactly and only task metadata differs. Push once to the existing !335 source branch and verify GitLab reports the new head.
+4. Update !335's current description with the coverage implementation and unchanged verification limits. Close !338 as superseded only after !335 contains the changes. Preserve branches, worktrees, preview and data.
+5. Inspect the automatic !335 pipeline. Do not merge either MR or claim pending hosted checks/artifact transport passed.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
@@ -103,4 +123,9 @@ Historical attempts are retained in logs: a ShellCheck runtime-source diagnostic
 Next: commit the frozen task scope, push its separate branch, open a Draft follow-up MR targeting dev with !335 dependency explicit, and inspect its actual pipeline. No merge, deployment, release, branch deletion, or worktree removal is authorized.
 
 Final consumer audit found packages/ci/test_public_cache_build.py still assumed a single component command and the old coverage preparation/test runner. Updated that existing probe only: all five normal and optional component routes retain exact cache/resource/redaction assertions; injected failures at every loop position propagate immediately. Deleted obsolete coverage preparation expectations; complexity fault controls remain. The full existing routing test passed (exit 0), including genuine Nix fixture fallback; log /tmp/opencode/task505-ci-routing-1.log. No new test framework or collector launcher self-test was added. Final GitLab CI lint is valid with no errors or warnings. Current collector, knowledge validation and all three launcher package builds passed again.
+
+Committed and pushed 67c7d5eefffdf1e16479b9949b1b6a7510ee266b on TASK-505-native-coverage. Opened Draft MR !338 targeting dev: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/338. Its dependency on unmerged !335 is explicit; the own delta is one commit/17 files above bb50aaea, while GitLab's target comparison temporarily includes the parent's commits. No auto-merge is enabled, and no merge/deployment/release occurred. Worktree is clean.
+The single automatic committed-head pipeline is 2985720111. Its actual job inventory contains exactly 10 jobs, all with commit 67c7d5ee; coverage-check is absent with collection disabled. Docs and Access were running, other check jobs pending, complexity created at observation. No duplicate pipeline or retry was launched. Read-only observer task505-hosted-watch uses the existing parameterized evidence collector and retains /tmp/opencode/pipeline-2985720111/. AC7 remains open for final-head hosted evidence and optional profile-artifact transport; task remains In Progress with its lock, not Review/Done. Do not copy these execution-only notes into another source commit merely to refresh status.
+
+OWNER CORRECTION: coverage must be delivered on existing MR !335. This supersedes the earlier separate-follow-up instruction, MR !338 delivery plan, and prior source-location lock. LOCK TRANSFER: openai coordinator in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation on branch TASK-490.1-integration-foundation for relocation/publishing only. Both local and remote source are clean atbb50aaea; !335 is open and !338 is open/Draft at67c7d5ee. Preserve implemented code, move it to !335 without force push, update delivery metadata and close !338 after verifying transfer. No MR merge is authorized.
 <!-- SECTION:NOTES:END -->
