@@ -185,6 +185,29 @@ let
 
   craneLib = inputs.crane.mkLib pkgs;
 
+  # Coverage is an opt-in variant of the same build/check phases, never a
+  # dependency of installed components. Passthru does not change the normal
+  # derivation. Profiles and unstripped coverage objects are explicit outputs.
+  withCoverage = drv: drv.overrideAttrs (old: {
+    passthru = (old.passthru or { }) // {
+      coverage = drv.overrideAttrs (attrs: {
+        outputs = [ "out" "profile" ];
+        nativeBuildInputs = (attrs.nativeBuildInputs or [ ]) ++ [
+          pkgs.rustc.llvmPackages.llvm pkgs.findutils pkgs.gnugrep
+        ];
+        preBuild = (attrs.preBuild or "") + ''
+          export CF_COVERAGE_DIR="$profile"
+          export CF_LLVM_BIN="${pkgs.rustc.llvmPackages.llvm}/bin"
+          source ${../coverage/instrument.sh}
+          coverage_start "$PWD"
+        '';
+        postCheck = (if (attrs.postCheck or null) == null then "" else attrs.postCheck) + ''
+          coverage_export "''${CARGO_TARGET_DIR:-target}" "$profile"
+        '';
+      });
+    };
+  });
+
   # ─────────────────────────────────────────────────────────────────────────
   # Server derivations
   #
@@ -195,8 +218,9 @@ let
   #   cf-server-drv       embedded UI, depends on the web-ui build
   #
   # INVARIANT: production compilation differs only by the embedded-ui Cargo
-  # feature and CRYSTAL_FORGE_UI_DIST. Core additionally owns cf-config library
-  # and real Nix protocol checks so those checks do not repeat for embedded UI.
+  # feature and CRYSTAL_FORGE_UI_DIST. Core additionally owns foundational
+  # library, pure export integration, and real Nix protocol checks so those
+  # checks do not repeat for embedded UI.
   #
   # Why the split exists: CRYSTAL_FORGE_UI_DIST makes the web-ui derivation a
   # Nix input of the server. Without the split, editing a Dioxus source file
@@ -296,10 +320,15 @@ let
       cargoExtraArgs = "--locked --package cf-server${cargoFeatureArg}";
       cargoBuildExtraArgs = serverCargoBuildExtraArgs;
       # Cargo does not run dependency tests for --package cf-server. Core owns
-      # the foundational config tests, including all 13 CA parser tests, once.
-      cargoTestExtraArgs = "--lib --bins" + lib.optionalString (!embedUi) " --package cf-config";
+      # the foundational config/protocol tests and pure export targets once.
+      cargoTestExtraArgs = "--lib --bins" + lib.optionalString (!embedUi) (lib.concatStringsSep " " [
+        " --package cf-config --package cf-protocol"
+        "--test oscal_poam_export"
+        "--test register_oscal_snapshot"
+        "--test register_tabular_export"
+      ]);
       nativeBuildInputs = serverCommonArgs.nativeBuildInputs
-        ++ lib.optionals (!embedUi) [ pkgs.jq pkgs.nix-eval-jobs.nix pkgs.nix-eval-jobs pkgs.go pkgs.openssl ];
+        ++ lib.optionals (!embedUi) [ pkgs.jq pkgs.nix-eval-jobs.nix pkgs.nix-eval-jobs pkgs.go pkgs.openssl pkgs.check-jsonschema pkgs.libxml2 ];
       # Keep fixtures inside independent subshells: their HOME, NIX_CONFIG,
       # working files and shell functions must not leak into other checks.
       postCheck = if embedUi then null else ''
@@ -357,6 +386,9 @@ let
     }
     // lib.optionalAttrs (!embedUi) {
       CF_TEST_GENERATED_DEPLOYMENT_CONFIG = generatedDeploymentConfig;
+      # Filtered Cargo sources omit repository-root schemas. Pass the schema
+      # directory explicitly to the runtime validators without widening src.
+      CF_TEST_OSCAL_SCHEMAS = ../../schemas/oscal-1.1.2;
     });
 
   # Production server. Ships the embedded web UI.
@@ -570,14 +602,12 @@ in crystal-forge // {
   # checks, and test helpers must reference these directly rather than the
   # `crystal-forge`, `server`, or `agent` aggregates above, so that a component
   # closure contains only what that consumer runs.
-  inherit
-    cf-server-drv
-    cf-server-core-drv
-    cf-agent-drv
-    cf-builder-drv
-    cf-keygen-drv
-    serverCargoArtifacts
-    ;
+  inherit serverCargoArtifacts;
+  cf-server-drv = withCoverage cf-server-drv;
+  cf-server-core-drv = withCoverage cf-server-core-drv;
+  cf-agent-drv = withCoverage cf-agent-drv;
+  cf-builder-drv = withCoverage cf-builder-drv;
+  cf-keygen-drv = withCoverage cf-keygen-drv;
   # Expose component-specific source hashes for verification
   agentSrcHash = agentSrcHash;
   serverSrcHash = serverSrcHash;

@@ -678,12 +678,22 @@ let
 
   runStateMachineTests = pkgs.writeShellApplication {
     name = "run-state-machine-tests";
-    runtimeInputs = with pkgs; [ bash nix coreutils ];
+    runtimeInputs = with pkgs; [ bash nix coreutils findutils gnugrep ];
     text = ''
       set -euo pipefail
 
       export PROJECT_ROOT="''${PROJECT_ROOT:-$PWD}"
       : "''${CF_STATE_MACHINE_STATUS_FILE:?Use the isolated state-machine-test launcher}"
+      if [[ -n "''${CF_COVERAGE_DIR:-}" ]]; then
+        # The existing launcher owns TMPDIR and cleans it after export. Fresh
+        # objects prevent old Cargo targets from widening this run's report.
+        export CARGO_TARGET_DIR="$TMPDIR/coverage-target"
+        if [[ -e "$CF_COVERAGE_DIR" ]]; then
+          echo 'COVERAGE_TOOL_ERROR: choose a fresh profile directory' >&2
+          printf '65\n' > "$CF_STATE_MACHINE_STATUS_FILE"
+          exit 65
+        fi
+      fi
       status=0
       case "''${CF_DATABASE_TEST_SUITE:-state-machine}" in
         cve) ${lib.getExe runCveProcessingTest} || status=$? ;;
@@ -694,6 +704,12 @@ let
           ;;
         *) echo "Unknown database test suite" >&2; status=1 ;;
       esac
+      if [[ "$status" == 0 && -n "''${CF_COVERAGE_DIR:-}" ]]; then
+        # The optional hook is supplied by the verified runtime checkout.
+        # shellcheck source=/dev/null
+        source "$PROJECT_ROOT/packages/coverage/instrument.sh"
+        coverage_export "$CARGO_TARGET_DIR" "$CF_COVERAGE_DIR" || status=$?
+      fi
       printf '%s\n' "$status" > "$CF_STATE_MACHINE_STATUS_FILE"
       exit "$status"
     '';
@@ -756,7 +772,19 @@ let
           --lib builder::cve_worker::tests::policy_scan_heartbeat_prevents_recovery_and_ownership_loss_cancels_execution
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib builder::cve_worker::tests::local_failure_persists_redacted_stderr_without_double_counting_attempt \
+          -- --exact --test-threads=1
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib builder::cve_worker::tests::successful_scanner_persists_redacted_result_failure_stage \
+          -- --exact --test-threads=1
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
           --lib services::cve_scans::tests::immediate_scan_renews_ownership_reuses_active_and_cancels_on_revocation
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib services::cve_scans::tests::immediate_scan_holds_execution_lock_until_terminal_release \
+          -- --exact --test-threads=1
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           -p cf-server --lib services::cve_scans::tests::immediate_scan_completion_progresses_while_heartbeat_waits_on_row_lock \
@@ -796,6 +824,14 @@ let
           --lib queries::cve_scans::tests::execution_requeue_is_owner_guarded_and_reclaim_rotates_token
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib queries::cve_scans::tests::exact_enqueue_serializes_with_concurrent_completion \
+          -- --exact --test-threads=1
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib queries::cve_scans::tests::execution_lock_detects_real_acquire_and_confirmed_release \
+          -- --exact --test-threads=1
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
           --lib builder::cve_worker::tests::disabled_queued_claim_is_requeued_then_executed_once
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
@@ -814,7 +850,8 @@ let
           --lib queries::cve_scan_leases::tests::remote_lease_claim_heartbeat_validation_and_clean_completion
         DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
-          --lib queries::cve_scans_tests::create_cve_scan_reuses_existing_active_scan
+          -p cf-server --lib queries::cve_scans_tests:: \
+          -- --test-threads=1
         DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib queries::scanning_tests::scan_queue_normalizes_never_scanned_derivation \

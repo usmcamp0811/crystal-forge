@@ -23,8 +23,12 @@ fn validate(json: &str, xml: &str) {
     let dir = tempfile::tempdir().unwrap();
     let json_path = dir.path().join("plan.json");
     let xml_path = dir.path().join("plan.xml");
-    let schemas =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../schemas/oscal-1.1.2");
+    // Nix supplies schemas separately from its filtered Cargo source tree.
+    let schemas = std::env::var_os("CF_TEST_OSCAL_SCHEMAS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../schemas/oscal-1.1.2")
+        });
     std::fs::write(&json_path, json).unwrap();
     std::fs::write(&xml_path, xml).unwrap();
     let json_check = std::process::Command::new("check-jsonschema")

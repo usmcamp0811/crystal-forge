@@ -1,6 +1,6 @@
 """Checks scoped CI routing, real Nix policy, and fixture source realization.
 
-Run with `nix develop -c python3 packages/ci/test_public_cache_build.py`.
+Run with the pinned nixpkgs Python environment including PyYAML.
 The proxy delegates configuration queries to real Nix and records build argv.
 Synthetic unavailable caches must be removed even when inherited through both
 base and extra settings. A fresh instance of the integration test-flake builder
@@ -164,17 +164,60 @@ cores = 4
         assert "127.0.0.1" not in result.stdout + result.stderr
         return result
 
+    components = ["cf-server-core-drv", "cf-server-drv", "cf-agent-drv",
+                  "cf-builder-drv", "cf-keygen-drv"]
+    # Execute the real default CI loop. Append records so every component's
+    # policy and failure propagation are checked, including early loop exits.
+    record = directory / "components.jsonl"
+    for failed_component in [-1, *range(len(components))]:
+        record.unlink(missing_ok=True)
+        result = subprocess.run(
+            ["sh", "-euc", new["component-tests"]["script"][0]], cwd=ROOT,
+            env=dict(env, CF_COVERAGE="0", METRICS_RECORD=str(record),
+                     METRICS_FAIL_AT=str(failed_component)),
+            capture_output=True, text=True,
+        )
+        assert result.returncode == (0 if failed_component < 0 else 23), failed_component
+        assert "private-marker" not in result.stdout + result.stderr
+        assert "127.0.0.1" not in result.stdout + result.stderr
+        recorded = [json.loads(line) for line in record.read_text().splitlines()]
+        expected = (components if failed_component < 0
+                    else components[:failed_component + 1])
+        assert [entry["argv"] for entry in recorded] == [
+            ["build", *POLICY, f".#default.{component}", "-L", "--show-trace",
+             *LOCAL_EXECUTION] for component in expected
+        ]
+        assert result.stdout.count("InheritedInternalCache=true") == len(expected)
+        for entry in recorded:
+            settings = entry["settings"]
+            assert settings["substituters"] == ["https://cache.nixos.org"]
+            assert settings["accept-flake-config"] is False
+            assert settings["fallback"] is True
+            assert not settings["builders"]
+            assert settings["builders-use-substitutes"] is True
+            assert str(settings["max-jobs"]) == "1" and settings["cores"] == 2
+        print(f"PASS component loop: fault={failed_component}, "
+              f"propagated exit={result.returncode}, builds={len(recorded)}")
+
+    # Optional variants use the same wrapper. Probe their argv without copying
+    # profile artifacts or executing component test bodies in this routing test.
     component_builds = [
-        ([".#default.cf-server-core-drv"], True),
+        ([f".#default.{component}.coverage"], True) for component in components
+    ] + [
         ([".#nixos-options-metadata", ".#oscal-fixture", ".#okf-knowledge",
           ".#xccdf-1-2-schemas"], False),
     ]
-    for route, (installables, scoped) in zip(new["component-tests"]["script"], component_builds):
-        result = subprocess.run(["sh", "-euc", route], cwd=ROOT,
-                                env=env, capture_output=True, text=True)
+    for installables, scoped in component_builds:
+        arguments = [*installables, "-L", "--show-trace", *LOCAL_EXECUTION]
+        if scoped:
+            result = run(arguments)
+            assert run(arguments, BUILD_EXIT="17").returncode == 17, installables
+        else:
+            result = subprocess.run(
+                ["sh", "-euc", new["component-tests"]["script"][1]], cwd=ROOT,
+                env=env, capture_output=True, text=True)
         assert result.returncode == 0, installables
         recorded = json.loads((directory / "argv").read_text())
-        arguments = [*installables, "-L", "--show-trace", *LOCAL_EXECUTION]
         assert recorded == ["build", *(POLICY if scoped else []), *arguments], installables
         assert result.stdout.count("InheritedInternalCache=") == int(scoped), installables
         # Query real Nix with the recorded build's exact configuration flags.
@@ -188,7 +231,7 @@ cores = 4
             expected = {"builders": b"\n", "max-jobs": b"1\n", "cores": b"2\n"}.get(
                 setting, inherited_controls[setting])
             assert effective == expected, (installables, setting)
-    # Metrics preparation may acquire dependencies. Only the final analysis
+    # Complexity preparation may acquire dependencies. Only the final analysis
     # phase is offline. Execute the actual YAML script through the same probe;
     # this checks orchestration and real CLI policy, not application analysis.
     online = [
@@ -207,7 +250,6 @@ cores = 4
     for job, installable, manifests in (
         ("complexity-check", ".#code-metrics.complexity-report",
          ["packages/default/Cargo.toml", "packages/web-ui/Cargo.toml"]),
-        ("coverage-check", ".#coverage.coverage-report", ["packages/default/Cargo.toml"]),
     ):
         script = new[job]["script"]
         assert len(script) == len(manifests) + 2, job

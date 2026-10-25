@@ -197,12 +197,16 @@ the removed wrappers with another registry or aggregation framework.
 
 The explicit `component-tests` job in `.gitlab-ci.yml` runs these commands on
 merge requests and `main`. Ordinary core tests own nonignored server library/bin
-tests and all thirteen unchanged `cf-config` CA library tests. Core `postCheck`
+tests, all thirteen unchanged `cf-config` CA library tests, 41 `cf-protocol`
+tests and the three pure export targets (13 tests). Core supplies
+`check-jsonschema`, `xmllint` and `CF_TEST_OSCAL_SCHEMAS` explicitly. Core `postCheck`
 owns real Nix inspection, observation, snapshot isolation, source parity and
 Go/Rust CA dataset comparison. These checks do not repeat in the embedded build.
 
 ```bash
-sh packages/ci/public-cache-build.sh .#default.cf-server-core-drv -L --show-trace --builders '' --max-jobs 1 --cores 2
+for component in cf-server-core-drv cf-server-drv cf-agent-drv cf-builder-drv cf-keygen-drv; do
+  sh packages/ci/public-cache-build.sh ".#default.$component" -L --show-trace --builders '' --max-jobs 1 --cores 2
+done
 nix build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge .#xccdf-1-2-schemas -L --show-trace --builders '' --max-jobs 1 --cores 2
 
 for suite in builder-cve stig packaging; do
@@ -291,16 +295,22 @@ uses 35433, and dashboard uses 35434. An occupied port fails; an existing server
 is never reused. The SQLx shell verifies the actual data
 directory, role privileges (`LOGIN SUPERUSER CREATEDB`) and `pg_stat_statements`
 preload, and exports both database URLs inside the SQLx shell. All selections
-share `target/database-tests`. The state-machine selection preserves both
-populated migration rehearsals, its ignored library regressions, and fourteen
-integration targets. Its current execution count requires a fresh normal run.
+share `target/database-tests` by default. The state-machine selection preserves both
+populated migration rehearsals, its ignored library regressions, and the
+previously selected integration targets, and adopts the two migration targets
+listed in the [catalog](../knowledge/testing/flake-checks.md#optional-measurement-and-adopted-test-ownership).
+The normal TASK-505 run passed 561 expected/emitted tests across 245 selections,
+including the eight tests in the two adopted migration targets.
 The library selections include two TASK-496 heartbeat/state-decoding regressions.
 Six repeated ignored selections and 94 nonignored library selections were
 removed; normal package tests own the latter. Two repeated `composite_policy`
 executions were removed from the CVE job because the full target owns them.
-The CVE and dashboard jobs remain separate. CVE retains 27 workspace `--lib`
-filters: 24 nonignored filters select 27 tests, and three `--ignored` filters
-select one test each. Dashboard retains two `cf-server --lib --ignored`
+The CVE and dashboard jobs remain separate. CVE retains its historical
+27-filter/30-test selection plus MR335's ignored isolation regression. TASK-505
+adds 12 live-database tests through five exact selections and the seven-test
+`queries::cve_scans_tests::` prefix. These serialized selections require a live
+database even when coverage is off. The historical counts are not results for
+the expanded workflow. Dashboard retains two `cf-server --lib --ignored`
 visibility prefixes, each selecting two tests. Both dashboard groups execute
 even when one fails; any failure makes the job fail. These selections are not
 fully subsumed by the consolidated state-machine runner. The dashboard query
@@ -328,6 +338,130 @@ compilation, or a reused build as passing test execution.
 
 See the [component ownership table](../knowledge/testing/flake-checks.md#current-inventory-and-commands)
 for the exact source homes and the task notes for the assertion audit.
+
+### Optional native coverage
+
+Coverage is off by default. In CI, `CF_COVERAGE=1` makes the existing component
+and three database jobs produce native LLVM bundles. It does not create a test
+owner or change the four integration checks. The optional `coverage-check` job
+consumes those artifacts only. MR configuration has 10 jobs by default and 11
+with measurement enabled, compared with 11 before TASK-505.
+
+For components, select the explicit variant; the environment variable alone
+does not instrument an ordinary `nix build`:
+
+```bash
+nix build .#default.cf-keygen-drv.coverage.profile --no-link -L
+nix eval --raw .#default.cf-keygen-drv.coverage.profile.outPath
+```
+
+Use the same `.coverage.profile` suffix for `cf-server-core-drv`, `cf-server-drv`,
+`cf-agent-drv` and `cf-builder-drv`. Each variant uses the same build/check phases
+as its normal owner. The separate `profile` output contains `profile.profdata`
+and coverage-bearing executable `objects/`. Normal installed component variants
+and ordinary developer builds remain uninstrumented.
+CI also runs installed XCCDF schema validation against the instrumented core
+output and merges its extra raw profiles into the core native bundle.
+
+For a database owner, prepare its launcher, SQLx shell and locked Cargo inputs
+as above. Also prepare the pinned collector/tools before offline execution:
+
+```bash
+nix build .#coverage .#coverage.llvm --no-link -L
+```
+
+Then run the existing isolated entry from the repository root. Choose a fresh
+absolute artifact directory outside the invocation's disposable PostgreSQL and
+temporary directories; the launcher rejects an existing directory. The example
+assumes `coverage-artifacts/state-machine-test` does not yet exist:
+
+```bash
+export CF_LLVM_BIN="$(nix eval --raw .#coverage.llvm.outPath)/bin"
+export CF_COVERAGE_DIR="$PWD/coverage-artifacts/state-machine-test"
+DATABASE_TEST_APP=state-machine-test
+CARGO_NET_OFFLINE=true SQLX_OFFLINE=true \
+nix run --offline --option substituters '' --option substitute false \
+  --option builders '' --option fallback false \
+  --option accept-flake-config false --max-jobs 0 --no-update-lock-file \
+  ".#devScripts.$DATABASE_TEST_APP" -- -t=false up
+unset CF_COVERAGE_DIR CF_LLVM_BIN
+```
+
+For `cve-test` or `dashboard-visibility-test`, change both the app and bundle
+directory. The direct hook is enabled by `CF_COVERAGE_DIR`; CI sets that variable
+only when `CF_COVERAGE=1`. The hook compiles into
+the launcher's fresh `$TMPDIR/coverage-target`, separate from the normal
+`target/database-tests` cache. This prevents stale objects from a previous run
+from entering the report. Data-directory/privilege checks, migrations, Cargo
+membership guards, completion receipts and cleanup remain in the same isolated
+lifecycle. Profiles and executable objects survive outside disposable storage.
+A failed Cargo selection fails its owner. Export runs after successful tests;
+missing profiles/objects or LLVM failures return tooling status 65 rather than
+claiming successful measurement.
+
+From the repository root, collect explicit bundles from the same source/run:
+
+```bash
+nix run .#coverage -- coverage-report \
+  "$(nix eval --raw .#default.cf-keygen-drv.coverage.profile.outPath)"
+```
+
+The first argument is `OUTPUT_DIRECTORY` (`coverage-report` here), followed by
+one or more `PRODUCER_BUNDLE` paths. CI passes all component and database bundles.
+The collector runs no Cargo, tests, migrations or PostgreSQL. Pinned
+`llvm-profdata` merges profiles into `coverage.profdata`; `llvm-cov report`
+writes the sole presentation, `report.txt`. Authored `.rs` files under
+`packages/default/crates`, including authored tests, examples and build code,
+define source scope;
+dependencies, generated files and the separate Web UI workspace are excluded.
+Remapped source paths allow
+component and database bundles to merge. No coverage minimum is enforced.
+Missing/invalid bundles, invalid LLVM data or a zero line denominator fail with
+status 65. A zero numerator with a positive denominator succeeds. The collector
+removes an earlier `report.txt` before processing so it cannot present stale
+success after an input failure.
+
+**TASK-505 local checkpoint (coordinator-reported):**
+
+| Execution | Result |
+| --- | --- |
+| Normal components | Core, agent, builder, keygen and embedded server builds all exited 0. Core ran separately from the other four builds. |
+| Normal core selection | 1,996 passed: server library 1,839, config 101, protocol 41, worker 1, pure exports 13 and warm `postCheck` 1. The nested raw-fork result is not counted again. |
+| Normal database entries | CVE 43 expected/emitted across 33 selections; state-machine 561/245; dashboard 4/2. All passed. State-machine includes the eight adopted migration tests. |
+| Existing CVE/dashboard fault guards | All 16 controls passed with the expected failure statuses and cleanup. These are launcher controls, not product tests. |
+| Instrumented components | All five passed: core, embedded server, agent, builder and keygen. |
+| Instrumented database entries | All three passed with identical normal counts: CVE 43/33 selections, state-machine 561/245 and dashboard 4/2. Exact expected/emitted membership matched; all had zero failed and zero ignored tests. |
+| Instrumented database cleanup | PostgreSQL PIDs 13573, 13691 and 23377 were dead. Invocation roots, sockets and fresh `$TMPDIR/coverage-target` directories were removed; external profiles remained. |
+| Installed native collector | Ran once over all eight bundles, including CI-schema-merged core. Lines: 232,639 total / 87,806 missed, 62.26%; regions: 295,137 / 112,033 missed, 62.04%; functions: 16,301 / 5,746 missed, 64.75%. |
+| Full flake check | `nix flake check --keep-going` exited 0; `/tmp/opencode/task505-flake.status` contains `0`. The four root checks remain unchanged. |
+
+The combined measurement covers mapped authored backend `.rs` files, including
+tests, examples and build code. It is not whole-product coverage and is not
+comparable with historical Tarpaulin source/test semantics. LLVM's warning that
+2,400 functions have mismatched data remains visible. A bounded core probe found
+dependency-hash-zero records; no scoped CF-authored mismatch was found in the
+inspected records. This is not an exhaustive mismatch diagnosis. No warning
+suppression or custom LLVM format is adopted.
+
+The core ELF bundle is approximately 931 MB (approximately 303 MB with ordinary
+ZIP compression). Producers retain full coverage-bearing ELF files; LLVM object
+extraction is not implemented. GitLab hosted profile upload is unverified, and
+the new TASK-505 MR is not yet open. Local execution does not establish hosted
+artifact acceptance. Product policy, APIs and schema are unchanged; SQLx metadata
+refresh is not applicable. Required complexity/Clippy checks remain unchanged.
+
+Earlier tiny native libtest controls proved hook/export handling, collection
+without rerunning tests, invalid-input rejection and test/tool status distinctions.
+Their percentages are synthetic. A real keygen bundle's 0/72-line report was
+accepted, and its ordinary derivation was verified uninstrumented. Evidence is
+under `/tmp/opencode/task505-native-hook-evidence`, summarized in
+`/tmp/opencode/task505-native-hook-summary.md`.
+
+The former Tarpaulin 40-target / 2,378-passed / 830-ignored run remains historical
+evidence, not a new measurement. The 27 ignored tests across eight previously
+skipped targets remain disabled; running the entire ignored inventory is not
+required. Scoped package replacement counts are in the
+[catalog](../knowledge/testing/flake-checks.md#optional-measurement-and-adopted-test-ownership).
 
 ### Database CI failure-path regression
 

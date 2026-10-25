@@ -438,7 +438,7 @@ SQL
 
     echo "=== Critical cf-server integration targets ==="
     beginPhase critical-integration-targets
-    # Preserve all eleven targets and Cargo's failure propagation. Separate
+    # Preserve the existing targets and Cargo's failure propagation. Separate
     # compilation/linking from execution to identify a silent boundary.
     for testTarget in \
       assignment_semantics \
@@ -446,9 +446,11 @@ SQL
       composite_policy \
       evidence_for_ato \
       framework_version_id_lifecycle \
+      hardening_admission_migration_upgrade \
       policy_counts_defect \
       policy_editor_phase2 \
       poam_workflows \
+      risk_acceptance_0298_upgrade \
       task433_assignment_visibility \
       task433_csrf \
       time_window_policy_test

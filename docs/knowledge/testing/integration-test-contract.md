@@ -152,7 +152,7 @@ historical; the selected read gap is now locally proved. No new actor, scenario,
 producer, batch or fleet result is claimed. The task-owned preview is owner-reported ready
 at `http://127.0.0.1:8090/` with the repaired backend; UI code is unchanged.
 
-The local minimal coverage execution-dependency repair declares
+The historical MR335 coverage execution-dependency repair declared
 `pkgs.check-jsonschema` and `pkgs.libxml2` in the coverage package PATH. Retained
 older `NotFound` sites are `tests/register_oscal_snapshot` lines 36–41 and
 `oscal_poam_export` lines 30–35; XML validation also requires `xmllint`. The
@@ -165,12 +165,14 @@ skip, Cargo selection or quality-enforcement change is included. This is local
 launcher proof, not actual measurement or resolution of all previous coverage
 failures. The owner also reports **eight native report tests passed**. These and
 the 16 launcher controls did not resolve the hosted ASLR/EPERM restriction in job
-`17433925120`. The launcher now selects Tarpaulin's LLVM engine, which needs no
+`17433925120`. That launcher then selected Tarpaulin's LLVM engine, which needs no
 ptrace or personality change. A later local full entry passed: 40/40 intended
 test targets, 2,378 passed / 0 failed / 830 ignored, and 33,115 / 83,641 lines
 (39.59%) across all six crates. See the
 [local coverage checkpoint](integration-coverage-map.md#local-full-llvm-coverage-checkpoint-at-3e8152b1-dirty).
-Exact-head hosted coverage remains required. The execution-only policy
+This is superseded Tarpaulin evidence, not a TASK-505 native measurement. Current
+measurement uses existing test owners and an optional artifact-only collector
+as specified below. The execution-only policy
 still makes complete measured debt nonblocking; no strict quality gate is added.
 
 TASK-503 remains Backlog: controller `issued_at` versus an agent timestamp
@@ -380,18 +382,34 @@ Keep this maintenance contract outside the design handoff directory. The design 
 
 ## Reporting is not an additional product check
 
-Full-workspace Tarpaulin reporting is not an acceptance requirement of the
-four-owner integration architecture, and no line-coverage percentage is a
-release floor. Coverage and complexity jobs already existed at baseline
-`5ae7feab`. The later requested full-run verification does not authorize a new
-coverage-backend project, threshold ratchet, or tests-of-tests framework.
+Coverage measurement is not an additional test owner or an acceptance
+requirement of the four-owner integration architecture. No line-coverage
+percentage is a release floor. Coverage and complexity jobs already existed at
+baseline `5ae7feab`. TASK-505 replaces the separate Tarpaulin execution with
+optional native LLVM instrumentation in existing component and isolated-database
+jobs, default off and enabled in CI by `CF_COVERAGE=1`. Their tests, assertions
+and isolation remain owned by those jobs. Normal production variants remain
+uninstrumented. No new flake check, VM or test framework is introduced.
 
 Required Rust/database assertions and Clippy checks must remain executed with
 truthful failure propagation. Completed complexity/size debt is advisory. An
 enabled reporter must not publish success from failed, missing, malformed, or
-stale output. Do not delete a reporting execution on the assumption that all
-its tests run elsewhere: some live-database regressions currently have no other
-automatic execution owner. Prove assertion ownership before removing duplication.
+stale output. The artifact-only `.#coverage` collector MUST consume explicit
+producer bundles and MUST NOT run tests or create a database. It merges profiles
+and emits one native LLVM text report for authored backend Rust sources, without
+a minimum percentage. Invalid or missing measurement is a tooling failure, not
+successful 0% coverage. Zero covered lines with a positive denominator is valid.
+
+Prove assertion ownership before removing duplicated execution. The
+[catalog](flake-checks.md#optional-measurement-and-adopted-test-ownership) records
+TASK-505's adopted normal execution owners. Previously skipped ignored targets
+remain disabled; the entire ignored inventory is not a new execution obligation.
+The [verification guide](../../agents/verification.md#optional-native-coverage)
+owns operational commands, execution proof, warnings and artifact/publication
+limits. Measurement covers mapped authored backend code, including tests,
+examples and build code, not the whole product. Historical Tarpaulin checkpoints
+retain their provenance and are not comparable native measurements. TASK-505
+does not change mandatory complexity/Clippy checks, product policy, APIs or schema.
 
 ## 3. Minimal coverage catalog
 

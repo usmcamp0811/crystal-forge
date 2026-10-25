@@ -107,14 +107,16 @@ component homes. This table documents ownership; it is not an execution registry
 
 The four evaluator fragments run once in the normal core server build, not in
 the embedded build. Existing Rust test definitions remain. Core explicitly
-selects `--package cf-config` as well as `--package cf-server --lib --bins`;
-selecting only `cf-server` did not run dependency-library CA tests. The separate
+selects `--package cf-config` and `--package cf-protocol` as well as
+`--package cf-server --lib --bins` and the three pure export targets described
+below; selecting only `cf-server` did not run dependency-library tests. The separate
 CA runner and fixture derivations are removed. Dataset comparison reduces Go
 invocations from nine to three and OpenSSL parses from 1,758 to 879 without
 removing the cross-language identity assertions.
 
 One explicit `component-tests` CI job replaces the six-entry
-`package-verification` matrix. It builds core, metadata, OSCAL and documentation,
+`package-verification` matrix. It builds core, embedded server, agent, builder,
+keygen, metadata, OSCAL and documentation,
 then runs module evaluations, discovery, installed-wrapper/schema tests and
 developer-tool selftests directly. See [.gitlab-ci.yml](../../../.gitlab-ci.yml)
 and the [verification guide](../../agents/verification.md#consolidated-component-verification)
@@ -128,15 +130,17 @@ temporary data and short socket directories, `LOGIN SUPERUSER CREATEDB`, and
 `pg_stat_statements` preload. PostgreSQL children alone drop privileges on root
 runners. The SQLx shell verifies data-directory ownership before migrations and
 exports both `DATABASE_URL` and `CRYSTAL_FORGE_TEST_DATABASE_URL`; all selections
-share `target/database-tests`. The state-machine source retains its selected
-ignored library regressions and fourteen integration targets. Its current
-execution count requires a fresh normal run. Two library selections cover TASK-496
+share `target/database-tests` by default. The state-machine source retains its selected
+ignored library regressions and explicit integration targets. The TASK-505 normal
+run passed 561 expected/emitted tests across 245 selections. Two library selections cover TASK-496
 heartbeat/state decoding. Six repeated ignored selections and
 94 nonignored library selections are removed; normal package `--lib --bins`
 owns the latter. The whole `composite_policy` target owns two tests removed from
 the CVE job. Both populated migration rehearsals and exact missing-test guards
-remain. CVE retains its 27 workspace library filters, selecting 27 nonignored
-and three ignored tests. Dashboard retains both ignored visibility prefixes,
+remain. CVE retains the earlier selections, including the MR335 isolation
+regression, and adds the TASK-505 live-database selections below. Historical
+27-filter/30-test counts do not describe the expanded selection.
+Dashboard retains both ignored visibility prefixes,
 selecting four tests. The dashboard query prefix owns
 `visibility_scope_handles_ambiguous_systems_cache_pushes_and_eval_attempts`;
 TASK-501 removes that one duplicate from the consolidated runner. The other
@@ -214,9 +218,9 @@ Handwritten XCCDF examples are retired static examples, not production test
 evidence. The direct schema command validates actual writer output and all five
 CF extension node types with non-vacuous extraction. Rust tests retain custom
 check and structural semantics; this does not prove XSD validity of every
-custom-check variant. Full current core/database verification and newly composed
-Admin-form execution require their own successful results; the recorded sixteen
-Access cases remain the only executed integration proof.
+custom-check variant. The TASK-505 checkpoint below records current normal
+core/database results. This retirement record does not establish new Admin-form
+integration evidence; its sixteen Access cases belong to an earlier checkpoint.
 
 The nine legacy integration suite directories are retired. CI jobs
 `legacy-flake-check`, `web-ui-check`, and `web-ui-baseline-candidates` are
@@ -225,6 +229,37 @@ Both XCCDF XML revisions live in `checks/integration-assurance/fixtures/xccdf/`.
 Unused `test-keys` placeholders are removed. These actions do not establish
 replacement integration coverage or turn legacy implementation details into
 mandatory requirements.
+
+### Optional measurement and adopted test ownership
+
+TASK-505 assigns previously missing normal execution to existing owners:
+
+| Adopted tests | Existing owner and source selection |
+| --- | --- |
+| 41 `cf-protocol` tests | Core component's explicit `--package cf-protocol` selection in [default.nix](../../../packages/default/default.nix) |
+| Three pure export targets, 13 tests | Core selects `oscal_poam_export`, `register_oscal_snapshot` and `register_tabular_export`; `check-jsonschema`, `xmllint` and `CF_TEST_OSCAL_SCHEMAS` supply explicit schema validation tools and source |
+| Two migration targets, 8 tests | State-machine selects `hardening_admission_migration_upgrade` and `risk_acceptance_0298_upgrade` in [database-regressions.sh](../../../packages/devScripts/tests/database-regressions.sh) |
+| 12 live-database library tests | CVE in [default.nix](../../../packages/devScripts/default.nix) adds five exact names (two worker, one immediate-scan and two query tests) plus the seven-test `queries::cve_scans_tests::` module prefix, serialized with `--test-threads=1` |
+
+These selections apply with coverage disabled. The 27 ignored tests across eight
+previously skipped targets remain disabled; no entire-ignored-inventory run is
+required. Assertions remain with their component/database owners, not with the
+collector. Normal and instrumented runs passed; detailed proof and commands are
+in the [verification guide](../../agents/verification.md#optional-native-coverage).
+
+| TASK-505 comparison | Before | After |
+| --- | --- | --- |
+| Measurement | Separate Tarpaulin test/database execution | Default-off `CF_COVERAGE=1` instrumentation in existing component/DB jobs; artifact-only collector |
+| MR jobs | 11 | 10 default / 11 with collection enabled |
+| Root integration checks | Four owners | Same four owners and scenarios |
+| Coverage package/selftest | 562 lines | 101 lines; net 461 removed |
+| Collector runtime closure | 223 entries | 22; no Cargo, rustc, Tarpaulin, PostgreSQL or process-compose |
+
+These are scoped counts, not repository-wide totals. The guide records native
+report scope, schema-profile merging, cleanup, visible warnings, full-ELF size
+and unverified hosted upload. Normal production variants remain uninstrumented.
+Superseded Tarpaulin evidence retains its provenance in the
+[coverage map](integration-coverage-map.md#local-full-llvm-coverage-checkpoint-at-3e8152b1-dirty).
 
 ## Historical catalog (before source retirement)
 

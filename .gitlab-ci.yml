@@ -47,44 +47,35 @@ coverage-check:
   tags:
     - nix
   before_script:
+    # Retain repository authentication for flake input resolution. Collection
+    # itself never builds or runs product tests.
     - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
     - echo "login gitlab-ci-token" >> ~/.netrc
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
+  needs:
+    - component-tests
+    - state-machine-tests
+    - cve-processing-test
+    - dashboard-visibility-tests
   script:
-    # Preparation is online. Analysis below cannot acquire missing dependencies.
-    - nix build .#coverage.coverage-report --no-link --option substitute true --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2
-    - nix develop .#sqlx --option substitute true --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2 -c env CARGO_NET_OFFLINE=false cargo fetch --locked --manifest-path packages/default/Cargo.toml
-    - |
-      export CARGO_NET_OFFLINE=true
-      export SQLX_OFFLINE=true
-      export NIX_CONFIG="${NIX_CONFIG:-}
-      substituters =
-      extra-substituters =
-      substitute = false
-      builders =
-      builders-use-substitutes = false
-      fallback = false
-      accept-flake-config = false
-      max-jobs = 1
-      cores = 2
-      "
-      # Preparation above resolves the required inputs. Explicit settings, not
-      # --offline, enforce the binary-cache and remote-builder restrictions.
-      nix run --option substituters '' --option substitute false \
-        --builders '' --option fallback false --option accept-flake-config false \
-        --max-jobs 1 --cores 2 .#coverage.coverage-report
+    # This job reads artifacts only. All test failures belong to their producers.
+    - >-
+      nix run .#coverage -- coverage-report
+      coverage-artifacts/component-cf-server-core-drv
+      coverage-artifacts/component-cf-server-drv
+      coverage-artifacts/component-cf-agent-drv
+      coverage-artifacts/component-cf-builder-drv
+      coverage-artifacts/component-cf-keygen-drv
+      coverage-artifacts/state-machine-test
+      coverage-artifacts/cve-test
+      coverage-artifacts/dashboard-visibility-test
   artifacts:
-    when: always
     expire_in: 30 days
     paths:
-      - coverage-report/
-    expose_as: "Code Coverage Report"
-    reports:
-      junit: coverage-report/junit-report.xml
-  only:
-    - merge_requests
-    - main
+      - coverage-report/report.txt
+  rules:
+    - if: '$CF_COVERAGE == "1" && ($CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_BRANCH == "main")'
 
 complexity-check:
   stage: metrics
@@ -225,9 +216,18 @@ component-tests:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - sh packages/ci/public-cache-build.sh .#default.cf-server-core-drv -L --show-trace --builders '' --max-jobs 1 --cores 2
+    - |
+      for component in cf-server-core-drv cf-server-drv cf-agent-drv cf-builder-drv cf-keygen-drv; do
+        target=".#default.$component"
+        if [ "${CF_COVERAGE:-0}" = 1 ]; then target="$target.coverage"; fi
+        sh packages/ci/public-cache-build.sh "$target" -L --show-trace --builders '' --max-jobs 1 --cores 2
+        if [ "${CF_COVERAGE:-0}" = 1 ]; then
+          mkdir -p coverage-artifacts
+          cp -rL --no-preserve=mode "$(nix eval --raw "$target.profile.outPath")" "coverage-artifacts/component-$component"
+        fi
+      done
     - nix build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge .#xccdf-1-2-schemas -L --show-trace --builders '' --max-jobs 1 --cores 2
-    - nix build .#coverage.coverage-report .#code-metrics.complexity-report --no-link --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2
+    - nix build .#code-metrics.complexity-report --no-link --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2
     - |
       for suite in builder-cve stig packaging; do
         nix eval --impure --json --expr "
@@ -254,20 +254,36 @@ component-tests:
       ' --builders '' --max-jobs 1 --cores 2 --command bash -euo pipefail -c '
         bash modules/nixos/crystal-forge/tests/discovery.sh
         bash modules/nixos/crystal-forge/tests/packaging.sh
-        core=$(nix eval --raw .#default.cf-server-core-drv.outPath)
+        core_target=.#default.cf-server-core-drv
+        if [ "${CF_COVERAGE:-0}" = 1 ]; then core_target="$core_target.coverage"; fi
+        core=$(nix eval --raw "$core_target.outPath")
         xccdf_schemas=$(nix eval --raw .#xccdf-1-2-schemas.outPath)
+        if [ "${CF_COVERAGE:-0}" = 1 ]; then
+          export LLVM_PROFILE_FILE="$PWD/coverage-artifacts/schema-raw/%m-%p.profraw"
+          mkdir -p coverage-artifacts/schema-raw
+        fi
         bash packages/default/crates/cf-server/tests/xccdf-schema.sh \
           "$core" "$xccdf_schemas" "$PWD/schemas/cf-xccdf-1/cf-xccdf-1.xsd"
+        if [ "${CF_COVERAGE:-0}" = 1 ]; then
+          llvm_bin="$(nix eval --raw .#coverage.llvm.outPath)/bin"
+          profile=coverage-artifacts/component-cf-server-core-drv/profile.profdata
+          "$llvm_bin/llvm-profdata" merge -sparse "$profile" coverage-artifacts/schema-raw/*.profraw -o "$profile.tmp"
+          mv "$profile.tmp" "$profile"
+          rm -r coverage-artifacts/schema-raw
+          unset LLVM_PROFILE_FILE
+        fi
         unset DB_HOST DB_PORT DB_USER DB_NAME
         bash packages/devScripts/db-usability-check-test.sh packages/devScripts/db-usability-check.sh
         bash packages/devScripts/db-only-start-test.sh packages/devScripts/db-only-start.sh
         bash packages/devScripts/web-ui/tests/web-ui-test-runner-test.sh \
           packages/devScripts/web-ui/tests/web-ui-test.sh packages/devScripts/web-ui/coverage-manifest.json
-        coverage=$(nix eval --raw .#coverage.coverage-report.outPath)
         complexity=$(nix eval --raw .#code-metrics.complexity-report.outPath)
-        CARGO_NET_OFFLINE=true python3 packages/coverage/test-report.py "$coverage/bin/coverage-report"
         CARGO_NET_OFFLINE=true python3 packages/code-metrics/test-report.py "$complexity/bin/complexity-report"
       '
+  artifacts:
+    when: always
+    paths:
+      - coverage-artifacts/
   only:
     - merge_requests
     - main
@@ -285,6 +301,7 @@ cve-processing-test:
     expire_in: 30 days
     paths:
       - database-ci-evidence/
+      - coverage-artifacts/
 
 # Runs the dashboard aggregate visibility regressions (queries::dashboard::tests::visibility_
 # and handlers::api::dashboard::tests::visibility_, all #[ignore]-marked) via the
@@ -310,6 +327,10 @@ state-machine-tests:
   script:
     # Preparation may acquire missing closures and Cargo sources. Execution below
     # must fail on missing prerequisites instead of fetching them during tests.
+    - |
+      if [ "${CF_COVERAGE:-0}" = 1 ]; then
+        nix build .#coverage --no-link --builders '' --max-jobs 1 --cores 2
+      fi
     - nix build ".#devScripts.${DATABASE_TEST_APP:-state-machine-test}" --no-link --builders '' --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --max-jobs 1 --cores 2
     - nix develop .#sqlx --builders '' --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --max-jobs 1 --cores 2 -c cargo fetch --locked --manifest-path packages/default/Cargo.toml
     - |
@@ -338,10 +359,18 @@ state-machine-tests:
       fi
     - |
       export CARGO_NET_OFFLINE=true SQLX_OFFLINE=true
+      if [ "${CF_COVERAGE:-0}" = 1 ]; then
+        export CF_LLVM_BIN="$(nix eval --raw .#coverage.llvm.outPath)/bin"
+        export CF_COVERAGE_DIR="$PWD/coverage-artifacts/${DATABASE_TEST_APP:-state-machine-test}"
+      fi
       nix run --offline --option substituters '' --option substitute false \
         --option builders '' --option fallback false \
         --option accept-flake-config false --max-jobs 0 --no-update-lock-file \
         ".#devScripts.${DATABASE_TEST_APP:-state-machine-test}" -- -t=false up
+  artifacts:
+    when: always
+    paths:
+      - coverage-artifacts/
   only:
     - merge_requests
     - main

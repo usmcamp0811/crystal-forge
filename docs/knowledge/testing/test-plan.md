@@ -197,8 +197,9 @@ def test_deployment_behind(cf_client, clean_test_data):
 ### Local Development
 
 ```bash
-# PostgreSQL-backed Rust regression tests
-nix build .#checks.x86_64-linux.server-regressions
+# PostgreSQL-backed Rust regressions: prepare inputs first, then use the
+# isolated entry documented in docs/agents/verification.md.
+nix run .#devScripts.state-machine-test -- -t=false up
 
 # Database tests only
 nix develop
@@ -212,7 +213,7 @@ nix flake check
 
 ### CI Pipeline
 
-CI runs one explicit `component-tests` job and the `integration-access` owner job
+CI runs one explicit `component-tests` job and all four integration owner jobs
 for merge requests and `main`. TASK-490.24 retires
 the nine legacy suites and removes `legacy-flake-check`, `web-ui-check`, and
 `web-ui-baseline-candidates` with explicit owner approval before replacement
@@ -222,15 +223,15 @@ The three process-compose database Rust jobs remain. The existing state-machine
 workflow owns consolidated regressions with one fresh temporary PostgreSQL
 cluster; exact duplicate selections are removed. Full run status remains
 separate from the source audit.
-Access and Delivery exist with behavior-oriented shared lifecycles (two total
-checks versus 27 previously). The coverage map records exact executed subsets;
-neither owner is complete, and Assurance and Upgrade remain absent.
-The final target is exactly four total check names and complete accepted
-coverage, without placeholders. See [Crystal Forge flake checks](flake-checks.md) and
+Access, Delivery, Assurance and Upgrade are registered (four total checks versus
+27 previously). The coverage map records exact executed subsets and remaining
+accepted obligations. Registration does not prove complete coverage.
+See [Crystal Forge flake checks](flake-checks.md) and
 [Web UI check runbook](web-ui-check.md) for the current matrix and browser test
 workflow. CI job configuration is not a test level: component CI builds core,
-metadata, OSCAL and docs, then runs module, discovery, installed-wrapper/schema
-and tool tests directly; the owner job builds registered VM scenario gates.
+embedded server, agent, builder, keygen, metadata, OSCAL and docs, then runs
+module, discovery, installed-wrapper/schema and tool tests directly. The four
+owner jobs build registered VM scenario gates.
 
 ### Test Markers
 
@@ -264,87 +265,30 @@ and tool tests directly; the owner job builds registered VM scenario gates.
 
 ### Coverage Verification
 
-**Current workflow.** The repository owns one coverage command. It runs `cargo tarpaulin` over the `packages/default` workspace and writes HTML and JSON reports plus a summary:
+Coverage is optional measurement of existing component and isolated-database
+tests, default off and enabled in CI by `CF_COVERAGE=1`. Enabled and disabled
+runs use the same owner selections, assertions and lifecycle. Normal production
+derivations and ordinary developer builds remain uninstrumented. The
+artifact-only collector merges producer bundles into one native LLVM text report;
+it never runs tests or creates a database.
 
-```bash
-nix run .#coverage.coverage-report
-```
+The report measures mapped authored `.rs` files under `packages/default/crates`,
+including tests, examples and build code. It excludes dependencies, generated
+files and the separate Web UI workspace; it is not whole-product coverage.
+Percentages are advisory, with no minimum. Missing or invalid measurement fails;
+zero covered lines with a positive denominator is valid. Test failures remain
+failures of their owning jobs.
 
-The GitLab job `coverage-check` runs this command on merge requests and exposes `coverage-report/` as an artifact. It does not automatically post an MR comment. The command reports coverage; it does not enforce the numeric targets above.
+The [ownership catalog](flake-checks.md#optional-measurement-and-adopted-test-ownership)
+records adopted tests and previously skipped ignored targets. The
+[verification guide](../../agents/verification.md#optional-native-coverage) is the
+operational reference for commands, isolation, failure handling, local execution
+proof, LLVM warnings, artifact sizes and hosted-upload limits.
 
-The launcher executes the pinned `cargo-tarpaulin` binary with the pinned
-Cargo and Rust compiler. Native OpenSSL development inputs and `pkg-config`
-are supplied. SQLx uses checked-in offline metadata. Cargo uses two build
-jobs and preserves any caller-declared offline policy; the launcher does not
-fetch dependencies as a recovery step.
-
-The `coverage-check` and `complexity-check` CI jobs first build their launcher
-and run explicit online `cargo fetch --locked` preparation. Complexity prepares
-both selected workspaces. Their analysis phases set `CARGO_NET_OFFLINE=true`
-and `SQLX_OFFLINE=true`. Outer and nested Nix disable substitution, remote
-builders, fallback, and flake-provided configuration. Local Nix builds remain
-enabled with one job and two cores for analysis fixtures. Missing prepared
-dependencies fail instead of causing an online retry. This is enforced tool
-offline policy, not proof of a network namespace or firewall boundary.
-
-The outer coverage `nix run` does not use `--offline`. Empty substituters,
-disabled substitution, empty builders, and disabled fallback already enforce
-the required binary-cache and remote-builder restrictions. Nix's `--offline`
-also changes fetch-cache freshness; it is not a general network prohibition.
-Preparation must supply the pinned flake inputs and required closures before
-analysis. Removing the outer flag does not authorize fetching a missing input
-during a required-offline test. Missing preparation remains a failure.
-The nested SQLx-shell and database prerequisite checks retain `--offline`,
-`CARGO_NET_OFFLINE=true`, and `SQLX_OFFLINE=true`. These invocation-local
-requirements do not change the normal Nix configuration for developer builds.
-
-Required execution failures return nonzero. These include a missing workspace
-manifest, a failed analysis, missing JSON or HTML, malformed JSON, inconsistent
-counts, and zero coverable lines. The JSON denominator is Tarpaulin's
-`coverable` field. A valid measurement of zero covered lines out of a positive
-denominator succeeds. Coverage percentage remains advisory in the shell and
-JUnit. An incomplete run removes the previous success summary and writes a
-JUnit error instead of publishing an empty successful measurement.
-
-The same `coverage-report` entrypoint runs inside TASK-501's invocation-owned
-PostgreSQL composition. It replaces only the composition's test child through
-the existing process-compose configuration override. The database launcher
-retains port fencing, fresh data/socket paths, role/preload initialization,
-exit-receipt validation, shutdown and cleanup. No development database is used.
-The coverage child enters the prepared offline SQLx shell, sources
-`database-environment.sh`, verifies the actual data directory and privileges,
-and applies migrations before Tarpaulin. The installed launcher closure owns
-the database tools; the existing online SQLx preparation realizes its shell.
-
-Coverage supplies the evaluator-matched Nix CLI used by native tests. Cargo
-build concurrency is two; instrumented libtest concurrency defaults to two
-without changing workspace/all-feature target selection. The launcher closure
-also supplies `check-jsonschema` and `xmllint`: OSCAL integration
-tests invoke both against the repository's schemas. These tools must not depend
-on an ambient developer or runner PATH. Controlled launcher tests check their
-store paths and executable versions; native schema validation remains separate
-from measured coverage.
-
-The launcher selects Tarpaulin's LLVM engine. The pinned Tarpaulin 0.37.2 and
-Rust/Cargo 1.95.0 toolchain uses compiler instrumentation and runtime profiles,
-without ptrace or an ASLR personality change. The workspace contains
-`cf-protocol`, `cf-config`, `cf-agent`, `cf-builder`, `cf-keygen`, and `cf-server`;
-the separate Web UI workspace is not part of this report. The existing default
-test target selection and all-feature scope remain unchanged. LLVM and ptrace
-have different line and hit semantics; their percentages are not interchangeable.
-A smoke report does not establish complete product-workspace execution.
-
-The original Tarpaulin status is retained in `tarpaulin-exit-status` and propagated through
-the database receipt and `database-exit-status`. Report validation failures
-remain nonzero even when Tarpaulin or an overridden child returns zero.
-Interruption stops the database composition and waits for cleanup before the
-entrypoint returns 143. The adjacent coverage tests exercise real database
-startup, migrations, ownership checks, receipt faults and interruption while
-replacing only the instrumenter for controlled report-validation cases.
-Their preparation explicitly realizes the SQLx shell and locked Cargo metadata
-online before the offline cases, including on a cold component-test runner.
-
-**Proposed.** A gate that fails when coverage falls below the targets does not exist. A way to prove that the integration tests cover everything they should is also an open item.
+MR335's separate Tarpaulin database/report launcher is superseded. Its retained
+[historical checkpoint](integration-coverage-map.md#local-full-llvm-coverage-checkpoint-at-3e8152b1-dirty)
+is not a native-collector measurement; differing source/test semantics prevent
+percentage comparisons.
 
 ### Complexity launcher execution
 
@@ -382,13 +326,12 @@ advisory measurements as `system-out`; it does not emit quality-debt failures
 or skipped tests. Operational failures remain JUnit errors. This policy adds
 no strict mode, baseline, ratchet, or new-violation gate.
 
-Adjacent `packages/coverage/test-report.py` and
-`packages/code-metrics/test-report.py` exercise installed launchers with
-controlled tool responses. They verify execution and report handling without
+The adjacent cases in `packages/code-metrics/test-report.py` exercise the installed
+launcher with controlled tool responses. They verify execution and report handling without
 compiling application code. They do not prove current application coverage,
 Clippy compliance, or hosted CI success.
-The existing `component-tests` job builds both launchers, resolves their output
-paths with `nix eval`, and runs the adjacent cases directly with Nix-provided Python
+The existing `component-tests` job builds the complexity launcher, resolves its output
+path with `nix eval`, and runs the adjacent cases directly with Nix-provided Python
 and Bash. The fixture invocations set Cargo offline; launcher runtime paths
 supply the remaining tools. No additional flake check owns these regressions.
 
@@ -470,7 +413,7 @@ def test_sql_injection_prevention(cf_client):
 ### Test Results Location
 
 - **HTML Reports**: `test-results/report.html`
-- **Coverage Reports**: `test-results/coverage/`
+- **Coverage report**: `coverage-report/report.txt` (optional native collector)
 - **VM Test Logs**: `.nixos-test-history`
 
 ## Test Maintenance

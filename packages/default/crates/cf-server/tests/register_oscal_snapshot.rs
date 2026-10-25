@@ -29,8 +29,12 @@ fn validate(output: &oscal_poam_export::Encodings) {
     let dir = tempfile::tempdir().unwrap();
     let json_path = dir.path().join("export.json");
     let xml_path = dir.path().join("export.xml");
-    let schemas =
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../schemas/oscal-1.1.2");
+    // Nix supplies schemas separately from its filtered Cargo source tree.
+    let schemas = std::env::var_os("CF_TEST_OSCAL_SCHEMAS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../../schemas/oscal-1.1.2")
+        });
     std::fs::write(&json_path, &output.json).unwrap();
     std::fs::write(&xml_path, &output.xml).unwrap();
     let json = std::process::Command::new("check-jsonschema")

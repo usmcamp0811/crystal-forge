@@ -40,6 +40,11 @@ export SQLX_OFFLINE=true CARGO_NET_OFFLINE=true
 export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$PROJECT_ROOT/packages/default/target/database-tests}"
 cd "$PROJECT_ROOT/packages/default"
 
+if [[ -n "${CF_COVERAGE_DIR:-}" ]]; then
+  source "$PROJECT_ROOT/packages/coverage/instrument.sh"
+  coverage_start "$PWD"
+fi
+
 # Bind execution to libtest's selected names, not just a positive result count.
 # Listing uses the same Cargo targets/filters and libtest options, and never
 # executes test bodies. Default --list includes ignored tests: subtract the
