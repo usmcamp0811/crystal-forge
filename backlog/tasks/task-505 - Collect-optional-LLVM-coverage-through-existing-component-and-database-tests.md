@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai
 created_date: '2026-10-25 01:12'
-updated_date: '2026-10-25 03:18'
+updated_date: '2026-10-25 03:22'
 labels:
   - ci
   - coverage
@@ -101,4 +101,6 @@ Full ELF coverage objects are retained. The core bundle is about 931 MB, or 303 
 Historical attempts are retained in logs: a ShellCheck runtime-source diagnostic was corrected; collector positional-object/path mapping mistakes were corrected; an absent XCCDF schema output was realized before a successful rerun; a 200-second foreground build wait timed out while the persistent build continued and later passed. Optional ELF-layout experiments did not change repository code; one unsupported layout variant crashed LLVM and was not adopted.
 
 Next: commit the frozen task scope, push its separate branch, open a Draft follow-up MR targeting dev with !335 dependency explicit, and inspect its actual pipeline. No merge, deployment, release, branch deletion, or worktree removal is authorized.
+
+Final consumer audit found packages/ci/test_public_cache_build.py still assumed a single component command and the old coverage preparation/test runner. Updated that existing probe only: all five normal and optional component routes retain exact cache/resource/redaction assertions; injected failures at every loop position propagate immediately. Deleted obsolete coverage preparation expectations; complexity fault controls remain. The full existing routing test passed (exit 0), including genuine Nix fixture fallback; log /tmp/opencode/task505-ci-routing-1.log. No new test framework or collector launcher self-test was added. Final GitLab CI lint is valid with no errors or warnings. Current collector, knowledge validation and all three launcher package builds passed again.
 <!-- SECTION:NOTES:END -->
