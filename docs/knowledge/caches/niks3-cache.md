@@ -1,11 +1,13 @@
 ---
 type: Operator Guide
 title: Niks3 Cache Operator Guide
-description: Describes Niks3 write and read authentication, deployment gates, credential testing, and operator verification.
+description: Describes Niks3 write and read authentication, signing-key trust, deployment gates, credential testing, failed-copy troubleshooting, and operator verification.
 tags:
   - crystal-forge
   - caches
   - niks3
+  - signing-keys
+  - troubleshooting
 implementation_status: implemented
 ---
 
@@ -26,7 +28,7 @@ Create or edit a destination as an administrator in **Caches**, or through
 | --- | --- |
 | `niks3_server_url` | HTTPS write API base URL used by `niks3 push`. |
 | `push_to` | HTTPS Nix read/substituter URL. Despite its legacy name, this is not the Niks3 write URL. |
-| `niks3_public_keys` | Nonempty list of trusted Nix signing public keys; supports multiple keys. |
+| `niks3_public_keys` | Nonempty list of trusted Nix signing **public** keys; supports multiple keys. At least one must be the public half of the key Niks3 signs with. A well-formed key from another key pair is accepted at Save and fails at deployment. See [Signing keys and trust](#signing-keys-and-trust). |
 | `niks3_write_auth_mode` | `token` or `mtls`, selected explicitly. |
 | `niks3_auth_token` | Required for static-token writes. No write certificate, key, or custom CA is allowed in this mode. |
 | `niks3_write_client_cert`, `niks3_write_client_key` | PEM contents required for mTLS writes. No write token is allowed in this mode. |
@@ -515,6 +517,64 @@ credentials and multiple trusted keys, with signatures enabled and child-local
 CA configuration. Materializing an output does not prove a successful deployment
 switch or vulnerability analysis.
 
+## Signing keys and trust
+
+A Niks3 destination has two endpoints with different jobs.
+
+- The **write API** (`niks3_server_url`) receives uploads from `niks3 push`.
+  Niks3 holds the signing **private** key and signs each path. Crystal Forge
+  never receives that private key.
+- The **read endpoint** (`push_to`) serves `.narinfo` and NAR files to Nix. Each
+  `.narinfo` carries a `Sig: <key-name>:<signature>` line made by the private key.
+
+`niks3_public_keys` holds the Nix **public** keys that agents trust. The agent
+passes them to `nix copy` as `extra-trusted-public-keys` and sets
+`require-sigs true`. Nix accepts a path only when a signature on it verifies
+against one of these keys.
+
+The private key and the public key are one pair. A public key can have a correct
+name, correct Base64, and 32 bytes, and still belong to a different pair. Nix then
+finds no matching signature and rejects the path with
+`lacks a signature by a trusted key`. Format validation cannot detect this
+difference.
+
+These successes do **not** show that the configured key is correct:
+
+- mTLS or Basic authentication proves the agent may read. It does not involve
+  the signing key.
+- TLS trust (the read CA) proves the agent reached the right server. It does not
+  involve the signing key.
+- `/nix-cache-info`, a `.narinfo` response, and `nix path-info --store` read
+  metadata. Nix verifies signatures only when it imports a path, as in `nix copy`.
+
+CF reports three separate assertions. Do not read one as another.
+
+| Assertion | Checked by | Result | Does not establish |
+| --- | --- | --- | --- |
+| Key **format** is valid | Save and Discover, using `validate_nix_public_key`: nonempty name, colon, standard Base64, 32 decoded bytes | Save is rejected, or the key is accepted | That Niks3 uses the key |
+| Configured key **matches an advertised key** | The All test compares `niks3_public_keys` with `public_keys` from `GET /api/cache-config`. Discover in Edit does the same comparison in the browser. | `signing_keys_valid` is `true` or `false`. A mismatch returns `signing_key_mismatch`: *Configured signing public key does not match the signing keys advertised by Niks3.* | That any artifact signature is valid |
+| **Artifact signature** is verified | Nix, during `nix copy` with `require-sigs true` (agent deployment and CVE materialization) | The copy succeeds, or fails with a signature reason | Nothing further. This is the only cryptographic check. |
+
+`signing_keys_found` means discovery returned well-formed keys. It does not
+compare them with your configuration.
+
+Match rules and limits:
+
+- One overlap is enough. The All test passes when at least one configured key is
+  advertised. It does not prove that every configured key is advertised. Extra
+  retained keys are harmless, which is why [key rotation](#secret-storage-and-rotation)
+  can keep an old key while stored outputs still carry its signature.
+- The Read test and the Write test do not obtain the configured comparison.
+  `signing_keys_valid` stays `null`, and the UI shows **Untested**. Key presence
+  is never reported as a match.
+- Save makes no network request. A wrong key is therefore accepted at Save. Run
+  the All test or Discover after you enter or change a key.
+- The comparison trusts the advertised list from the write API URL you
+  configured. It cannot detect a proxy that advertises different keys than the
+  read endpoint actually signs with. Step 4 of the
+  [troubleshooting sequence](#troubleshooting-a-failed-agent-cache-copy) compares
+  the key name in a real `.narinfo`.
+
 ## Discovery and connection testing
 
 Admin `POST /api/caches/niks3/discover` (also under `/api/v1`) accepts a URL-only
@@ -556,8 +616,14 @@ POST success stops the probe without retrying or issuing a valid upload request.
 
 Read scope checks only the configured read endpoint with Public, Basic, or mTLS
 identity. An explicit Niks3 read CA replaces ambient roots, matching native read
-trust; absent custom trust retains system roots. All scope additionally checks
-discovery consistency. Invalid nonempty Bearer header material fails before DNS
+trust; absent custom trust retains system roots. Read scope cannot compare signing
+keys, because the read endpoint does not advertise them. It reports
+`signing_keys_valid: null` (**Untested**) even when keys are configured. All scope
+additionally checks discovery consistency: the discovered read URL must equal the
+configured URL, and at least one configured key must be advertised by Niks3.
+Otherwise it fails with `signing_key_mismatch`. A mismatch does not skip write
+authentication; each plane still contributes its own evidence.
+Invalid nonempty Bearer header material fails before DNS
 or requests. All-scope missing credentials retain full configuration-validation
 failure. One eight-second deadline bounds preparation, requests and response
 consumption; each protected response is bounded to 64 KiB.
@@ -585,6 +651,9 @@ The Niks3 editor compares actual editable values and canonical environment IDs
 against an immutable initial draft. Navigation, Test, catalogue refresh and
 Discovery observations do not mark it dirty. Discovery only proposes settings;
 **Apply discovered settings** explicitly edits the read URL and signing keys.
+When keys are configured and none is advertised, Discover states that the
+configured key does not match the keys Niks3 advertises. It never replaces the
+configured keys automatically.
 Stored credentials remain server-side. Same-mode selection is a no-op, and
 per-plane input generations discard stale test or discovery completions.
 
@@ -837,6 +906,107 @@ request. The operator must migrate to a credential-free URL and supported access
 configuration before testing. Crystal Forge does not automatically migrate or
 replay these query credentials; removing them from the displayed URL is not a
 storage migration.
+
+## Troubleshooting a failed agent cache copy
+
+An older agent logs only `Authenticated cache copy failed with status exit
+status: 1`. That text does not identify the cause. A current agent adds one fixed
+reason to the failure, for example:
+
+```text
+Authenticated cache copy failed (signature verification failed: the path is not
+signed by a configured trusted signing key (check the cache signing public key));
+exit status: 1
+```
+
+The agent keeps at most the last 64 KiB of Nix stderr in memory and maps it to
+one reason. It never logs or reports the Nix text, because that text can contain
+cache URLs and credential file paths. Output that matches no known pattern gives
+`Nix failed for an unrecognized reason; details are redacted`. Timeout,
+cancellation, `require-sigs`, and credential cleanup are unchanged.
+
+| Reason | Meaning | Check first |
+| --- | --- | --- |
+| signature verification failed | The download worked. No signature on the path verifies against a configured public key. | Step 5 |
+| TLS verification of the cache server certificate failed | The agent does not trust the server certificate. | The read CA on the destination (step 3) |
+| the cache rejected or could not use the client certificate | mTLS authentication failed. | The read client certificate and key (step 3) |
+| the cache denied read authorization (HTTP 401 or 403) | The cache refused the read identity. | The Basic or mTLS identity (step 3) |
+| the store path or its NAR is missing from the cache | The metadata or NAR is absent at the read endpoint. | Steps 2 and 4 |
+| Nix failed for an unrecognized reason | No known pattern matched. | Run the whole sequence |
+
+Diagnostic sequence. Run the `curl` and `nix` commands from an administrator
+workstation. Do not install credentials on the agent. Replace each `<placeholder>`
+with your value, keep client keys in mode `0600`, and delete the files afterward.
+
+1. **Confirm cache selection.** In **Caches**, the Niks3 destination must be
+   enabled and assigned to the host's environment, or have no environment
+   restriction. The agent receives its cache from the heartbeat response. It does
+   not read a cache from NixOS configuration.
+2. **Confirm the exact path is published.** The publication must be `completed`
+   for the same path and the same destination. A completed row does not prove
+   the remote objects still exist.
+
+   ```sql
+   SELECT id, cache_destination_id, status, store_path
+   FROM cache_push_jobs
+   WHERE store_path = '/nix/store/<hash>-<name>';
+   ```
+
+3. **Verify read authentication and TLS trust.**
+
+   ```bash
+   curl --fail --cacert <read-ca.pem> \
+     --cert <client.crt> --key <client.key> \
+     https://<read-host>/nix-cache-info
+   ```
+
+   Expect `StoreDir: /nix/store`. Omit `--cert` and `--key` for a Public read.
+4. **Verify the `.narinfo` and read its signing key name.**
+
+   ```bash
+   curl --fail --cacert <read-ca.pem> --cert <client.crt> --key <client.key> \
+     https://<read-host>/<store-hash>.narinfo | grep '^Sig:'
+   ```
+
+   The name before the colon in each `Sig:` line identifies the key that signed
+   the path. A configured key with a different name cannot verify it.
+5. **Compare configured keys with the keys Niks3 advertises.**
+
+   ```bash
+   curl --fail https://<write-host>/api/cache-config | jq -r '.public_keys[]'
+   ```
+
+   Add `--cacert`, `--cert`, and `--key` if the write endpoint uses a private CA
+   or requires mTLS. At least one line must equal a key in **Caches > Trust**,
+   character for character. The **All** test and **Discover** make the same
+   comparison and report `signing_key_mismatch`.
+6. **Confirm the real download with signatures enforced.** Use a scratch store,
+   and keep signature verification on:
+
+   ```bash
+   nix --extra-experimental-features nix-command copy \
+     --from 'https://<read-host>/?tls-certificate=<client.crt>&tls-private-key=<client.key>' \
+     --to 'local?root=/tmp/cf-verify' \
+     --option ssl-cert-file <read-ca.pem> \
+     --option require-sigs true \
+     --option extra-trusted-public-keys '<configured-public-key>' \
+     /nix/store/<hash>-<name>
+   ```
+
+   `lacks a signature by a trusted key` confirms a key problem. Success with
+   the key from step 5, but failure with the configured key, identifies the
+   wrong configured key.
+7. **Correct the key in CF and retry.** In **Caches > Trust**, add the advertised
+   key and Save. Keep an older key only while stored outputs still carry its
+   signature (see [rotation](#secret-storage-and-rotation)). The agent retries the
+   desired target on following heartbeats. No agent restart and no NixOS change
+   is needed.
+
+Do not disable signature verification (`require-sigs false`). Do not add the
+cache URL, client credentials, signing keys, or the read CA to the NixOS
+configuration of an agent. Crystal Forge delivers the cache and its credentials
+to the agent for each operation, and a host-level workaround would hide the
+actual configuration error.
 
 ## Local verification
 

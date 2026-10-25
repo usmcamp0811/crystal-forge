@@ -269,6 +269,13 @@ impl PlaneOwner {
     }
 }
 
+// A mismatch means keys are configured and none is advertised by Niks3. Partial
+// overlap is not a mismatch: rotation keeps retired keys that Niks3 no longer
+// advertises. Empty configured trust is unset, not mismatched.
+fn signing_keys_mismatch(configured: &[String], advertised: &[String]) -> bool {
+    !configured.is_empty() && !configured.iter().any(|key| advertised.contains(key))
+}
+
 // Observation never mutates editable values or rebases the initial snapshot.
 // A matching response needs no proposal, including equivalent trimmed inputs.
 fn discovery_proposal(
@@ -1094,9 +1101,15 @@ pub(super) fn Niks3DestinationForm(
                             pending.set(None);
                             discovery_note.set(Some("Discovery response ignored because read settings changed. Discover again to review current settings.".into()));
                         } else {
+                            let mismatch = signing_keys_mismatch(
+                                &form().request().niks3_public_keys,
+                                &value.public_keys,
+                            );
                             let proposal =
                                 discovery_proposal(&form(), value, operation, read_stamp);
-                            discovery_note.set(Some(if proposal.is_some() {
+                            discovery_note.set(Some(if mismatch {
+                                "Configured signing public key does not match the signing keys advertised by Niks3. Review the advertised keys, then apply them explicitly. Draft settings are unchanged; nothing has been saved."
+                            } else if proposal.is_some() {
                                 "Discovery successful. Review the proposed read URL and signing keys, then apply them explicitly. Draft settings are unchanged; nothing has been saved."
                             } else {
                                 "Discovery successful. Public metadata matches the current read settings. Draft settings are unchanged; no write permission was tested."
@@ -1226,9 +1239,9 @@ pub(super) fn Niks3DestinationForm(
                             if form().read_mode == "basic" { p { class: "help", "Basic values remain outside URLs and global configuration. Native consumers use protected authority-bound mode-0600 netrc files. Basic reads use system CA trust." } }
                             div { class: "n3-plane", div { class: "n3-plane-head", strong { "Read endpoint" } button { class: "btn btn-ghost focus-ring xs", disabled: !https(&form().read_url), onclick: move |_| test.call(Niks3ProbeScope::Read), if busy() == Some("read-test") { "Testing…" } else { "Test read endpoint" } } }
                                 Evidence { label: "Read access", value: read_result().and_then(|r| r.read_access_valid), running: busy() == Some("read-test") }
-                                Evidence { label: "Signing keys", value: read_result().and_then(|r| r.signing_keys_valid), running: busy() == Some("read-test") }
+                                Evidence { label: "Signing key match", value: read_result().and_then(|r| r.signing_keys_valid), running: busy() == Some("read-test") }
                             }
-                            p { class: "help", "Signing-key evidence validates metadata configuration, not an artifact signature. Nix consumers enforce the selected signature policy when pulling paths." }
+                            p { class: "help", "The read endpoint does not advertise signing keys, so this test cannot show that your configured key is the one Niks3 signs with. Use Discover on the Write / API section or the All test to compare. A key can be well formed and still wrong. Artifact signatures are verified only by Nix when it pulls a path." }
                         }
                         if section() == "trust" {
                             div { class: "pe-sec-head", h3 { "Trust" } p { "Signing keys are independent of Basic or mTLS network authentication." } }
@@ -1496,6 +1509,35 @@ mod tests {
             public_keys: vec!["fixture:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into()],
             oidc_audience: None,
         }
+    }
+
+    #[test]
+    fn signing_key_mismatch_requires_configured_keys_with_no_advertised_overlap() {
+        let advertised = public_metadata().public_keys;
+        let wrong = format!("wrong:{}Q=", "A".repeat(42));
+        // A well-formed but unrelated key is the incident case.
+        assert!(valid_signing_key(&wrong));
+        assert!(signing_keys_mismatch(&[wrong.clone()], &advertised));
+        // One matching key is enough, so a retained rotation key is not flagged.
+        assert!(!signing_keys_mismatch(
+            &[wrong, advertised[0].clone()],
+            &advertised
+        ));
+        assert!(!signing_keys_mismatch(&advertised, &advertised));
+        // Unset trust is incomplete configuration, not a mismatch.
+        assert!(!signing_keys_mismatch(&[], &advertised));
+    }
+
+    #[test]
+    fn read_test_signing_key_evidence_is_untested_not_verified() {
+        // The server leaves this field null in Read scope; it must not render
+        // as Verified.
+        let read: crate::api::models::CacheCredentialTestResult = serde_json::from_value(
+            serde_json::json!({"ok": true, "message": "", "probe_scope": "read",
+                "read_access_valid": true}),
+        )
+        .unwrap();
+        assert_eq!(evidence_text(read.signing_keys_valid, false), "Untested");
     }
 
     #[test]

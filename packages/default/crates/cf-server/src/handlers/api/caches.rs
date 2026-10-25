@@ -117,6 +117,10 @@ fn diagnostic(code: &str) -> ProbeDiagnostic {
             "invalid_niks3_metadata",
             "The endpoint returned invalid or inconsistent Niks3 metadata.",
         ),
+        "signing_key_mismatch" => (
+            "signing_key_mismatch",
+            "Configured signing public key does not match the signing keys advertised by Niks3.",
+        ),
         "target_policy_rejected" => (
             "target_policy_rejected",
             "The target is not permitted by the cache probe policy.",
@@ -237,10 +241,12 @@ fn static_probe_diagnostic(message: &str) -> ProbeDiagnostic {
         | "Cache metadata exceeds 64 KiB"
         | "Invalid nix-cache-info response"
         | "Invalid nix-cache-info response: expected StoreDir: /nix/store"
-        | "Advertised signing keys do not match configured trust"
         | "Discovered substituter URL does not match the configured read URL" => {
             "invalid_niks3_metadata"
         }
+        // A well-formed key that Niks3 does not advertise is a distinct,
+        // actionable operator error, not malformed metadata.
+        "Advertised signing keys do not match configured trust" => "signing_key_mismatch",
         other => other,
     };
     diagnostic(code)
@@ -733,6 +739,13 @@ struct Niks3ConnectionTestResult {
     // is a separate operation; the legacy write_auth_valid aliases this field.
     write_authorization_valid: Option<bool>,
     read_access_valid: Option<bool>,
+    // Three separate assertions exist and only the second is reported here:
+    // 1. Key format validity is checked at Save and by discovery.
+    // 2. Correspondence: `Some(true)` only when a configured key equals a key
+    //    Niks3 advertises (All scope); `Some(false)` when none does; `None`
+    //    when no advertised keys were obtained (Read and Write scope).
+    // 3. Artifact signature verification happens only when Nix pulls a path.
+    // Key presence alone must never produce `Some(true)`.
     signing_keys_valid: Option<bool>,
 }
 
@@ -1468,7 +1481,9 @@ async fn run_niks3_read_test(
         }
         stages.read_endpoint_reachable = true;
         stages.read_access_valid = Some(true);
-        stages.signing_keys_valid = (!create.niks3_public_keys.is_empty()).then_some(true);
+        // The read endpoint does not advertise signing keys, so this probe
+        // cannot establish that configured keys correspond to Niks3. Leave
+        // `signing_keys_valid` as None; presence is not evidence.
         Ok(())
     }
     .await;
@@ -1481,7 +1496,7 @@ async fn run_niks3_read_test(
         message: hint.map(|hint| hint.message.into()).unwrap_or_else(|| if create.niks3_public_keys.is_empty() {
             "Read access and /nix/store metadata verified. Signing keys: Unattempted. Artifact signatures and write authorization: Untested.".into()
         } else {
-            "Read access and /nix/store metadata verified. Configured signing key format checked; artifact signatures and write authorization: Untested.".into()
+            "Read access and /nix/store metadata verified. Signing key format was checked at Save; whether it matches the keys Niks3 advertises is Not verified by this test (run the All test or Discover). Artifact signatures and write authorization: Untested.".into()
         }), tested_url: None, niks3: Some(CacheProbeDetails::Niks3(stages)) })
 }
 

@@ -127,6 +127,7 @@ async fn ca_diagnostics_are_typed_static_and_field_scoped() {
         "dns_or_connection_failed",
         "http_response_failed",
         "invalid_niks3_metadata",
+        "signing_key_mismatch",
         "target_policy_rejected",
         "probe_timeout",
         "probe_failed",

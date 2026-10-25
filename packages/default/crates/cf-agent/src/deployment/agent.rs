@@ -887,9 +887,75 @@ fn clone_runtime_cache(cache: &RuntimeCacheConfig) -> RuntimeCacheConfig {
     }
 }
 
+/// Bounds the Nix stderr tail kept to classify one failed authenticated read.
+const READ_DIAGNOSTIC_TAIL_BYTES: usize = 64 * 1024;
+
+/// Maps private Nix stderr to a fixed category for logs and failure reports.
+///
+/// SECURITY: Nix stderr can contain cache URLs, credential file paths and
+/// provider response text. Only the returned static string may leave this
+/// function. The input is never echoed, so unrecognized output stays redacted.
+/// The cache server controls some of this text, so a category is a diagnostic
+/// hint and never an authorization decision.
+///
+/// Order matters: a signature failure is reported before any transport
+/// category, because the transfer succeeded and only trust failed.
+fn classify_read_failure(stderr: &[u8]) -> &'static str {
+    let text = String::from_utf8_lossy(stderr).to_ascii_lowercase();
+    let has = |needles: &[&str]| needles.iter().any(|needle| text.contains(needle));
+    if has(&["lacks a signature", "lacks a valid signature"]) {
+        "signature verification failed: the path is not signed by a configured trusted \
+         signing key (check the cache signing public key)"
+    } else if has(&[
+        "certificate required",
+        "bad certificate",
+        "problem with the local ssl certificate",
+        "could not load pem client certificate",
+    ]) {
+        "the cache rejected or could not use the client certificate (check the mTLS \
+         credentials)"
+    } else if has(&[
+        "ssl peer certificate",
+        "ssl certificate problem",
+        "unable to get local issuer certificate",
+    ]) {
+        "TLS verification of the cache server certificate failed (check the cache CA)"
+    } else if has(&["http error 401", "http error 403"]) {
+        "the cache denied read authorization (HTTP 401 or 403)"
+    } else if has(&["http error 404", "does not exist in binary cache"]) {
+        "the store path or its NAR is missing from the cache"
+    } else {
+        "Nix failed for an unrecognized reason; details are redacted"
+    }
+}
+
+/// Drains child stderr concurrently and returns only its last bytes.
+///
+/// CONCURRENCY: Draining prevents a full pipe from stalling Nix. The tail is
+/// bounded by [`READ_DIAGNOSTIC_TAIL_BYTES`] regardless of output volume.
+fn capture_stderr_tail(
+    mut stderr: tokio::process::ChildStderr,
+) -> tokio::task::JoinHandle<Vec<u8>> {
+    tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        let mut tail = Vec::new();
+        let mut chunk = [0u8; 8192];
+        while let Ok(read) = stderr.read(&mut chunk).await {
+            if read == 0 {
+                break;
+            }
+            tail.extend_from_slice(&chunk[..read]);
+            if tail.len() > READ_DIAGNOSTIC_TAIL_BYTES {
+                tail.drain(..tail.len() - READ_DIAGNOSTIC_TAIL_BYTES);
+            }
+        }
+        tail
+    })
+}
+
 // CONCURRENCY: The detached task owns read credentials until child exit or
-// timeout kill/reap, even when the deployment future is dropped. Child output
-// is discarded because TLS diagnostics may contain private configuration.
+// timeout kill/reap, even when the deployment future is dropped. Child stderr
+// is captured only for classification; see `classify_read_failure`.
 async fn copy_authenticated_cache(
     cache: RuntimeCacheConfig,
     store_path: String,
@@ -943,25 +1009,47 @@ async fn copy_authenticated_cache(
         let mut child = command
             .kill_on_drop(true)
             .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
             .spawn()
             .context("Failed to spawn authenticated cache copy")?;
+        let mut stderr = capture_stderr_tail(
+            child
+                .stderr
+                .take()
+                .context("Failed to capture authenticated cache copy diagnostics")?,
+        );
         let result = match tokio::time::timeout(timeout, child.wait()).await {
             Ok(Ok(status)) => {
                 if status.success() {
+                    stderr.abort();
                     Ok(())
                 } else {
-                    anyhow::bail!("Authenticated cache copy failed with status {status}")
+                    // A descendant can keep the pipe open; never wait unbounded,
+                    // and stop the drain task instead of detaching it.
+                    let tail = match tokio::time::timeout(Duration::from_secs(2), &mut stderr).await
+                    {
+                        Ok(Ok(tail)) => tail,
+                        _ => {
+                            stderr.abort();
+                            Vec::new()
+                        }
+                    };
+                    Err(anyhow::anyhow!(
+                        "Authenticated cache copy failed ({}); {status}",
+                        classify_read_failure(&tail)
+                    ))
                 }
             }
             Ok(Err(error)) => {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
+                stderr.abort();
                 Err(error).context("Failed to wait for authenticated cache copy")
             }
             Err(_) => {
                 let _ = child.kill().await;
                 let _ = child.wait().await;
+                stderr.abort();
                 anyhow::bail!("Authenticated cache copy timed out");
             }
         };
@@ -1284,6 +1372,8 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
         .to_string();
         assert!(!error.contains("read-key"));
         assert!(!error.contains("write-token"));
+        // Unrecognized output stays redacted behind a generic category.
+        assert!(error.contains("unrecognized reason; details are redacted"));
         let directory = std::fs::read_to_string(fixture.0.join("credentials")).unwrap();
         assert!(!std::path::Path::new(&directory).exists());
         let mut insecure = cache(true);
@@ -1298,6 +1388,92 @@ test -z "${AWS_SECRET_ACCESS_KEY:-}"
             )
             .await
             .is_err()
+        );
+    }
+
+    // Reproduces the incident shape: transport and authentication succeed, then
+    // Nix rejects the path because it is signed by a key CF does not trust. The
+    // fake echoes private values, and 300 KB of earlier output exceeds both the
+    // pipe buffer and the retained tail.
+    #[tokio::test]
+    async fn niks3_signature_failure_is_named_without_echoing_nix_output() {
+        let fixture = Fixture::new(&format!(
+            "{PRIVATE_SCRIPT}\n\
+             head -c 300000 /dev/zero | tr '\\0' x >&2\n\
+             printf '\\nerror: unable to download %s: secret-provider-body\\n' \"$3\" >&2\n\
+             printf \"error: cannot add path '/nix/store/secret-name' because it lacks a signature by a trusted key\\n\" >&2\n\
+             exit 1\n"
+        ));
+        let error = copy_authenticated_cache(
+            cache(true),
+            "/nix/store/output".into(),
+            false,
+            Duration::from_secs(10),
+            fixture.program(),
+        )
+        .await
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("signature verification failed"));
+        assert!(error.contains("signing public key"));
+        for private in [
+            "secret-provider-body",
+            "secret-name",
+            "tls-private-key",
+            "tls-certificate",
+            "client-key",
+            "read.example",
+            "cf-cache-",
+        ] {
+            assert!(!error.contains(private), "{private} leaked into: {error}");
+        }
+        let directory = std::fs::read_to_string(fixture.0.join("credentials")).unwrap();
+        assert!(!std::path::Path::new(&directory).exists());
+    }
+
+    #[test]
+    fn read_failures_map_nix_diagnostics_to_fixed_categories() {
+        // The first four messages were captured from Nix 2.34.8 against a
+        // private-CA, client-certificate-required cache. HTTP status texts
+        // follow Nix's `HTTP error <code>` format.
+        for (stderr, expected) in [
+            (
+                "error: cannot add path '/nix/store/x' because it lacks a signature by a trusted key",
+                "signature verification failed",
+            ),
+            (
+                "error: unable to download 'https://c/nix-cache-info': SSL peer certificate or SSH remote key was not OK (60) SSL certificate OpenSSL verify result: self-signed certificate in certificate chain (19)",
+                "TLS verification of the cache server certificate failed",
+            ),
+            (
+                "error: unable to download 'https://c/nar/x.nar.xz': Failure when receiving data from the peer (56) OpenSSL SSL_read: error:0A00045C:SSL routines::tlsv13 alert certificate required",
+                "rejected or could not use the client certificate",
+            ),
+            (
+                "error: experimental Nix feature 'nix-command' is disabled",
+                "unrecognized reason; details are redacted",
+            ),
+            (
+                "error: unable to download 'https://c/x.narinfo': HTTP error 403",
+                "denied read authorization",
+            ),
+            (
+                "error: unable to download 'https://c/nar/x.nar.xz': HTTP error 404",
+                "missing from the cache",
+            ),
+            ("", "unrecognized reason; details are redacted"),
+        ] {
+            assert!(
+                classify_read_failure(stderr.as_bytes()).contains(expected),
+                "{stderr}"
+            );
+        }
+        // A signature failure wins over transport text in the same output.
+        assert!(
+            classify_read_failure(
+                b"warning: HTTP error 404\nerror: path lacks a signature by a trusted key"
+            )
+            .contains("signature verification failed")
         );
     }
 
