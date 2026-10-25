@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai
 created_date: '2026-10-25 01:12'
-updated_date: '2026-10-25 03:22'
+updated_date: '2026-10-25 03:28'
 labels:
   - ci
   - coverage
@@ -13,6 +13,25 @@ labels:
 dependencies: []
 references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/338'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2985720111'
+modified_files:
+  - .gitlab-ci.yml
+  - docs/agents/verification.md
+  - docs/knowledge/testing/flake-checks.md
+  - docs/knowledge/testing/integration-test-contract.md
+  - docs/knowledge/testing/test-plan.md
+  - packages/ci/test_public_cache_build.py
+  - packages/coverage/default.nix
+  - packages/coverage/instrument.sh
+  - packages/coverage/report.sh
+  - packages/coverage/test-report.py
+  - packages/default/default.nix
+  - packages/default/crates/cf-server/tests/oscal_poam_export.rs
+  - packages/default/crates/cf-server/tests/register_oscal_snapshot.rs
+  - packages/devScripts/default.nix
+  - packages/devScripts/tests/database-environment.sh
+  - packages/devScripts/tests/database-regressions.sh
 priority: high
 type: chore
 ordinal: 556000
@@ -33,7 +52,7 @@ The coverage job repeats workspace tests and implements a second database/test l
 - [x] #5 Independent Tarpaulin execution and obsolete coverage-only database supervision, receipts, launcher tests and redundant reports are deleted after equivalent ownership is verified
 - [x] #6 The four native integration owners remain unchanged and no new flake check, VM, framework, registry or service is added; no coverage threshold is introduced
 - [ ] #7 Affected normal/instrumented builds, database paths, cleanup, failure propagation, report scope, configuration and documentation are verified with before/after job/dependency/code-removal evidence
-- [ ] #8 Open one separate follow-up MR targeting dev; do not merge it without separate authorization
+- [x] #8 Open one separate follow-up MR targeting dev; do not merge it without separate authorization
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -103,4 +122,7 @@ Historical attempts are retained in logs: a ShellCheck runtime-source diagnostic
 Next: commit the frozen task scope, push its separate branch, open a Draft follow-up MR targeting dev with !335 dependency explicit, and inspect its actual pipeline. No merge, deployment, release, branch deletion, or worktree removal is authorized.
 
 Final consumer audit found packages/ci/test_public_cache_build.py still assumed a single component command and the old coverage preparation/test runner. Updated that existing probe only: all five normal and optional component routes retain exact cache/resource/redaction assertions; injected failures at every loop position propagate immediately. Deleted obsolete coverage preparation expectations; complexity fault controls remain. The full existing routing test passed (exit 0), including genuine Nix fixture fallback; log /tmp/opencode/task505-ci-routing-1.log. No new test framework or collector launcher self-test was added. Final GitLab CI lint is valid with no errors or warnings. Current collector, knowledge validation and all three launcher package builds passed again.
+
+Committed and pushed 67c7d5eefffdf1e16479b9949b1b6a7510ee266b on TASK-505-native-coverage. Opened Draft MR !338 targeting dev: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/338. Its dependency on unmerged !335 is explicit; the own delta is one commit/17 files above bb50aaea, while GitLab's target comparison temporarily includes the parent's commits. No auto-merge is enabled, and no merge/deployment/release occurred. Worktree is clean.
+The single automatic committed-head pipeline is 2985720111. Its actual job inventory contains exactly 10 jobs, all with commit 67c7d5ee; coverage-check is absent with collection disabled. Docs and Access were running, other check jobs pending, complexity created at observation. No duplicate pipeline or retry was launched. Read-only observer task505-hosted-watch uses the existing parameterized evidence collector and retains /tmp/opencode/pipeline-2985720111/. AC7 remains open for final-head hosted evidence and optional profile-artifact transport; task remains In Progress with its lock, not Review/Done. Do not copy these execution-only notes into another source commit merely to refresh status.
 <!-- SECTION:NOTES:END -->
