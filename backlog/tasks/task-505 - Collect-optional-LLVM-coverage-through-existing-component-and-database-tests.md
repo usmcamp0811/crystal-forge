@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai
 created_date: '2026-10-25 01:12'
-updated_date: '2026-10-25 03:43'
+updated_date: '2026-10-25 03:47'
 labels:
   - ci
   - coverage
@@ -15,6 +15,7 @@ references:
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/335'
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/338'
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2985720111'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2985800248'
 modified_files:
   - .gitlab-ci.yml
   - docs/agents/verification.md
@@ -52,7 +53,7 @@ Simplify coverage by measuring existing component and isolated database tests in
 - [x] #5 Independent Tarpaulin execution and obsolete coverage-only database supervision, receipts, launcher tests and redundant reports are deleted after equivalent ownership is verified
 - [x] #6 The four native integration owners remain unchanged and no new flake check, VM, framework, registry or service is added; no coverage threshold is introduced
 - [ ] #7 Affected normal/instrumented builds, database paths, cleanup, failure propagation, report scope, configuration and documentation are verified with before/after job/dependency/code-removal evidence
-- [ ] #8 Publish the coverage simplification on existing MR !335 and close superseded MR !338 without merging either MR
+- [x] #8 Publish the coverage simplification on existing MR !335 and close superseded MR !338 without merging either MR
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -128,4 +129,6 @@ Committed and pushed 67c7d5eefffdf1e16479b9949b1b6a7510ee266b on TASK-505-native
 The single automatic committed-head pipeline is 2985720111. Its actual job inventory contains exactly 10 jobs, all with commit 67c7d5ee; coverage-check is absent with collection disabled. Docs and Access were running, other check jobs pending, complexity created at observation. No duplicate pipeline or retry was launched. Read-only observer task505-hosted-watch uses the existing parameterized evidence collector and retains /tmp/opencode/pipeline-2985720111/. AC7 remains open for final-head hosted evidence and optional profile-artifact transport; task remains In Progress with its lock, not Review/Done. Do not copy these execution-only notes into another source commit merely to refresh status.
 
 OWNER CORRECTION: coverage must be delivered on existing MR !335. This supersedes the earlier separate-follow-up instruction, MR !338 delivery plan, and prior source-location lock. LOCK TRANSFER: openai coordinator in /home/mcamp/code/crystal-forge/TASK-490.1-integration-foundation on branch TASK-490.1-integration-foundation for relocation/publishing only. Both local and remote source are clean atbb50aaea; !335 is open and !338 is open/Draft at67c7d5ee. Preserve implemented code, move it to !335 without force push, update delivery metadata and close !338 after verifying transfer. No MR merge is authorized.
+
+Relocation verified and published: MR !335 is open at a3051cbc58b857291c0251c91f1789199c6c998a and contains original coverage commit67c7d5ee by fast-forward, plus a task-metadata-only delivery correction. git diff67c7d5ee excluding TASK505 metadata is empty; implementation/CI/documentation bytes are unchanged. Normal push succeeded without force, and the source worktree is clean. Updated !335's existing description with current coverage implementation/evidence/limits. MR !338 is now closed, not merged; its branch/worktree remain. Neither MR has a merge commit. The automatic !335 pipeline2985800248 matches a3051cbc and is pending. No duplicate pipeline, deployment or release was initiated. AC8 is verified; AC7 remains open for hosted evidence and profile-artifact transport.
 <!-- SECTION:NOTES:END -->
