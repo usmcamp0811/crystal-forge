@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - openai
 created_date: '2026-10-25 01:12'
-updated_date: '2026-10-25 03:17'
+updated_date: '2026-10-25 03:18'
 labels:
   - ci
   - coverage
@@ -49,19 +49,56 @@ The coverage job repeats workspace tests and implements a second database/test l
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Sprint selection is explicit in the owner's implementation request. Risk: medium/high CI false-green or missing-test risk; changes affect Nix packaging, CI, database test selection and coverage documentation, not product APIs/schema/UI. Non-goals: MR335 redesign/merge interference, production instrumentation, new database lifecycle/framework, coverage floor, owner VM changes, deployment/release. Verify actual before/after selections/counts, normal coverage-disabled builds and DB jobs, optional instrumented execution and native LLVM report, test/tool failure distinctions, cleanup, dependency/job/deleted-line comparison, four-check inventory, CI lint and full flake validation. Implementation base must contain MR335; while it is unmerged use its clean bb50aaea head in a separate branch and mark the follow-up dependent on335 before review. No other active TASK505 lock exists. Integration dev has only the previously reported untracked lock files and session-ses_f927.md; leave untouched. No main integration worktree exists.
+LOCK: openai on local host in /home/mcamp/code/crystal-forge/TASK-505-native-coverage.
 
-LOCK: openai on local host in /home/mcamp/code/crystal-forge/TASK-505-native-coverage. Dedicated clean branch TASK-505-native-coverage created from pending MR335 bb50aaea; remote dev remains511dcdaf. MR335 is open/non-Draft with ci_still_running, no conflicts; leave its source, processes and pipeline untouched. This follow-up targets dev after335 and must not merge automatically.
+## Scope and preflight
 
-Audit completed read-only against40-target historical Tarpaulin scope. Missing genuine normal ownership:41 protocol tests; five nonignored integration targets21tests (3pure export targets13 adopted by core;2migration targets8 adopted by state);12 nonignored liveDB tests adopted by CVE. Eight entirely ignored targets/27tests were not executed by Tarpaulin and remain not automatically enabled. Core/embedded builds intentionally have different feature ownership; their pre-existing overlapping unit tests are not newly invented coverage obligations.
-Implementation in separate TASK505 worktree: small shared optional instrument/export functions; native llvm-profdata/llvm-cov text collector (no Cargo or DB), default-off CF_COVERAGE job rule; same component and DB owners produce explicit profiles/objects. Pinned rustc1.95/LLVM21.1.8. Normal production has no instrumentation/profile output (keygen actual drv/build proven); opt-in keygen native bundle produced valid0/72line measurement. Tiny native pass/fail fixtures preserve libtest101 independent of successful/failed export; collector never executes fixtures. Missing/corrupt profiles/objects/bundles return65 and remove stale report. This is tooling proof, not full product coverage.
-Normal core build has executed protocol41, pureexport3+5+5 and ordinary core/config tests successfully in its logs; terminal build status still being checked. Normal CVE entry passed43 expected/emitted across33 selections with coverage disabled,0failed; owned PG24106 stopped and both directories removed. State normal is running and dashboard queued, tmux task505-db-normal. Normal/instrumented component builds running task505-components; core normal task505-core-normal. Newhooks initially failed SC1091 during launcher build; documented runtime source directive corrected it and all three launcher builds then passed. Collector initial smoke exposed positional binary/path mapping mistakes; fixed and realkeygenreport/nativefixturecontrols now pass. GitLab CI lint valid/no errors/warnings; knowledge validation58tests/215Mermaid/193concepts passed. No product assertion weakening, new DB lifecycle or owner VM changes; no commit/push/follow-up MR yet.
+- Branch: TASK-505-native-coverage. Base: MR !335 head bb50aaead49f2e91833db0e2b5283da1cbca0c24. Target: dev after !335.
+- Risk: medium-high. Missing test ownership or false-green measurement is the main risk. Product APIs, schema, authorization, deployment behavior, and the four integration definitions are not changed.
+- The dev worktree has pre-existing untracked locks and session-ses_f927.md. These files remain untouched. No main integration worktree exists. The new worktree was clean before implementation.
+- MR !335 remains separate. A read-only check found pipeline 2985383461 failed only coverage-check job 17442644001. No !335 source, gate, status, merge, preview, or process was changed.
 
-Verification milestones: all normal component builds passed (core separately, then embedded/agent/builder/keygen); all normal DB owners passed with coverage disabled: CVE43/33 selections, state561/245, dashboard4/2, exact expected/emitted equality and0failures. All owned normal PG PIDs and data/socket dirs cleaned. Instrumented component variants now all pass (core, embedded, agent, builder, keygen); keygen final helper variant was rebuilt successfully. Instrumented CVE passed same43/33 and retained76objects/profile4,684,456bytes after its owned PG/target dirs were removed. Instrumented state and dashboard/final flake check still pending.
-Actual XCCDF-extra CI path verified: schema fixture/5CFextension payloads/OpenSCAP passed, fresh raw13,623,328bytes merged into writable copied corebundle; fixture main0->1, linecoverage0->95.52%, core-only total32.58->32.62% withsame213116line denominator. Collector consumesall5componentbundles+CVE successfully and emits nativepartial report37.44% (226686lines/141823missed); notfinalall-ownermeasurement and notcomparablehistoricalTarpaulin. Standard LLVM warnings remain visible: a bounded corediagnostic identified dependency mappings requestinghash0 while profile has nonzerohash; no inspected CF-authored mismatch. No warning suppression, customLLVMformat or engine project was added. A nativeELFsection-extraction experiment preservedmetrics but remainedlarge and one optionalLLVMlayoutflag crashed; no extraction/flag adopted. Full ELFobjects retained; corebundle~931MB (~303MBordinaryZIP). Actual GitLab profile-artifact upload remains unverified.
-Runtime closure proof: collector223->22storepaths; Cargo/rustc/Tarpaulin/PostgreSQL/process-compose present in predecessor and absent from newcollector. Exactlyfourrootchecks before/after, protected checks/lib/modules/shells/flake files unchanged; package-input changes intentionally alterderivations. Focusednativehookfaults and16normalDBCIguards passed. Optional DB target uses existing fresh TMPDIR cleanup, notpersistentdatabase-coverage cache (earlierplanwording superseded). Foregrounddeduplicated corebuildwait hit200s clienttimeout once; persistent buildcontinued andlateractualcommandpassed, not a product-testfailure. Schema firstattempt lackedrealizedschemaoutput; preparedexistingderivation thenrealschemacheckpassed. Evidence /tmp/opencode/task505-*. No MR335/source/process changes, no follow-up commit/push/MR yet.
+## Ownership audit and implementation
 
-Final local verification completed: all5normal and all5instrumentedcomponentvariants pass; normal/instrumented DBcounts match exactly (CVE43/33,state561/245,dashboard4/2),0failures/membership mismatches. All6ordinary/instrumentedclusterscleaned;instrumentedtargetsremoved, externalprofilesretained. Eight-bundleinstallednativecollector exit0:232639authoredbackend mappedlines,87806missed,62.26%linecoverage;includesmappedtests/examples/buildsources,notwholeproduct/notcomparableTarpaulin. NativeLLVMwarning2400mismatchedfunctionrecordsremainsvisible,not suppressed. Fullflake runexit0 anchoredtolocalbb50-dirtysnapshot: actualfourreceipts Access37/Delivery16/Assurance54records48names/Upgrade13,allpassed,errornull; actualruntimes133.80/536.48/274.37/617.17s. Currentdocs/CI-onlyandoptionalprofiling-wrapperfinishchangesfollowthatrun; donotrelabelearlierVMreceiptsasfinalcommittedSHA. NormalruntimeRustrelevantcode/ownerdefinitionsareunchangedbythosefollow-ups;currentnormal/instrumentedproducerpathsandCI lint/docsvalidatedseparately. CurrentownerdifferingoutPathsmeanfull-byteidenticalsnapshotisnotclaimed.
-Coveragepackage562->101lines(net461removed); runtimeclosure223->22, noneCargo/rustc/Tarpaulin/PG/process-composeincollector. DefaultMRjobselection11->10,11withopt-inartifactcollector; no extraowner/VM/check/framework. Primaryoperationalguidanceconsolidatedinverificationguide,duplicatecoverageprosereduced80lines. AllnormalRust/dbtestbodies/assertionsretained;onlytwoexporttestschemahelpersacceptdeclaredNixschemapath. SQLxmetadatarefreshnotapplicable(noquery/schemachanges). Nativecore-schemafixture/profilemergeactualproofpassed;16existingDBfailurecontrolsandnativehookfaultfixturespassed.
-MR335read-onlycheck: stillopened/non-Draftatbb50aaea;pipeline2985383461failedonlycoverage-check17442644001. Donotchangeitsbranch/gates/mergeprocessforthisfollow-up. Thisbranchremainsstackedon335andwilltargetdevasrequested,withdependencyexplicit. No actualGitLabprofile-artifactuploadhasbeenverified(corebundle~931MB/ordinaryZIP~303MB); CI-headandhostedtransportverificationremainopenunderAC7. No merge/deploy/releaseauthorized. Next:freezecommit,pushseparatebranch,openDraftfollow-upMR,inspectitsactualpipeline.
+Former Tarpaulin execution had gaps in normal ownership: 41 protocol tests; three pure export targets with 13 tests; two migration targets with eight tests; and 12 live-database library tests. Core now owns protocol and pure exports. State-machine owns the two migration targets. CVE owns the 12 live-database cases. Assertions remain unchanged. Two test-only schema helpers accept an explicit Nix schema directory with the original repository-relative fallback.
+
+Eight entirely ignored targets contained 27 tests that Tarpaulin did not execute. This task does not enable that previously skipped inventory or claim those bodies passed.
+
+Optional component variants reuse the existing build/check phases. The database hook uses the existing launcher's fresh TMPDIR/coverage-target and exports before existing cleanup. Normal production derivations remain uninstrumented; agent, builder, and keygen normal derivation paths match the base. The collector uses only native LLVM tools and shell utilities. It never runs Cargo, tests, migrations, or PostgreSQL. CF_COVERAGE=1 enables CI collection; no percentage threshold exists.
+
+## Verified locally
+
+| Database owner | Normal | Instrumented | Selections in each run |
+| --- | --- | --- | --- |
+| CVE | 43 passed | 43 passed | 33 |
+| State-machine | 561 passed | 561 passed | 245 |
+| Dashboard | 4 passed | 4 passed | 2 |
+
+Every run had zero failures and exact expected/emitted membership. All six clusters stopped and removed their owned data/socket directories. Instrumented Cargo targets were removed; profiles and objects survived in external bundles. All five normal component builds and all five instrumented variants passed. Core includes the additional protocol and export selections.
+
+- All 16 existing CVE/dashboard CI fault controls passed with verified cleanup. Native temporary fixtures proved test exit 101 remains authoritative, tooling failure returns 65, collection does not rerun tests, corrupt/missing inputs cannot publish report.txt, and real keygen zero coverage (0/72 lines) is valid.
+- The real XCCDF schema fixture, five CF extension payload checks, and OpenSCAP validation passed. Its raw profile merged into a writable core bundle. Fixture main execution count changed from 0 to 1; fixture line coverage changed from 0% to 95.52%.
+- The installed collector consumed all eight producer bundles once: 232639 mapped authored backend lines, 87806 missed, 62.26% native line coverage. Scope includes mapped tests/examples/build sources. This is not whole-product coverage or a value comparable with the historical Tarpaulin percentage.
+- Knowledge validation passed 58 tests, 215 Mermaid blocks, and 193 concepts. Rust formatting, scoped diff checks, launcher builds, and GitLab CI lint passed.
+- Full flake check exited 0 for the recorded bb50aaea-dirty snapshot. Actual receipts: Access 37; Delivery 16; Assurance 54 records/48 names; Upgrade 13. All passed with error=null. Driver runtimes: 133.80/536.48/274.37/617.17 seconds. These are not final committed-head receipts. Later documentation, CI-only, and optional profiling-wrapper changes were checked separately. Current owner outPaths differ, so byte-identical snapshot equivalence is not claimed.
+
+Evidence is retained under /tmp/opencode/task505-*, including final-report/report.txt, final-collector.log/status, DB normal/instrumented logs and cleanup receipts, core-schema verification, native-hook fault evidence, dependency-summary.json, and flake.log/status.
+
+## Before and after
+
+- Coverage package: 562 to 101 lines; 461 net lines removed.
+- Collector runtime closure: 223 to 22 store paths. Cargo, rustc, Tarpaulin, PostgreSQL, and process-compose are absent from the new collector.
+- MR job selection: 11 before; 10 by default; 11 with optional artifact-only collection.
+- Four root integration checks remain. checks/, lib/, modules/, shells/, flake.nix, and flake.lock have no task changes. No new check, VM, test owner, registry, or service was added.
+- Required offline database execution remains. No global offline setting was introduced. SQLx metadata preparation is not applicable because no queries or schema changed.
+
+## Limits and remaining verification
+
+LLVM emits a visible warning about 2400 mismatched function records in the combined report. A bounded core diagnostic identified dependency mappings requesting hash zero; no inspected CF-authored mismatch was found. This does not prove every combined mapping is correct. No warning suppression, custom LLVM format, or extraction scheme was adopted.
+
+Full ELF coverage objects are retained. The core bundle is about 931 MB, or 303 MB with ordinary ZIP deflation. Actual GitLab profile-artifact upload and the new committed-head pipeline remain unverified under AC7. Keep the follow-up Draft until its dependency and required verification are resolved. Do not use local coverage to waive a failing normal job or !335's gates.
+
+Historical attempts are retained in logs: a ShellCheck runtime-source diagnostic was corrected; collector positional-object/path mapping mistakes were corrected; an absent XCCDF schema output was realized before a successful rerun; a 200-second foreground build wait timed out while the persistent build continued and later passed. Optional ELF-layout experiments did not change repository code; one unsupported layout variant crashed LLVM and was not adopted.
+
+Next: commit the frozen task scope, push its separate branch, open a Draft follow-up MR targeting dev with !335 dependency explicit, and inspect its actual pipeline. No merge, deployment, release, branch deletion, or worktree removal is authorized.
 <!-- SECTION:NOTES:END -->
