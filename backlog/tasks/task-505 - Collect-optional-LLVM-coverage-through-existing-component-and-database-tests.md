@@ -1,7 +1,7 @@
 ---
 id: TASK-505
 title: Collect optional LLVM coverage through existing component and database tests
-status: To Do
+status: In Progress
 assignee:
   - openai
 created_date: '2026-10-25 01:12'
@@ -40,4 +40,6 @@ The coverage job repeats workspace tests and implements a second database/test l
 
 <!-- SECTION:NOTES:BEGIN -->
 Sprint selection is explicit in the owner's implementation request. Risk: medium/high CI false-green or missing-test risk; changes affect Nix packaging, CI, database test selection and coverage documentation, not product APIs/schema/UI. Non-goals: MR335 redesign/merge interference, production instrumentation, new database lifecycle/framework, coverage floor, owner VM changes, deployment/release. Verify actual before/after selections/counts, normal coverage-disabled builds and DB jobs, optional instrumented execution and native LLVM report, test/tool failure distinctions, cleanup, dependency/job/deleted-line comparison, four-check inventory, CI lint and full flake validation. Implementation base must contain MR335; while it is unmerged use its clean bb50aaea head in a separate branch and mark the follow-up dependent on335 before review. No other active TASK505 lock exists. Integration dev has only the previously reported untracked lock files and session-ses_f927.md; leave untouched. No main integration worktree exists.
+
+LOCK: openai on local host in /home/mcamp/code/crystal-forge/TASK-505-native-coverage. Dedicated clean branch TASK-505-native-coverage created from pending MR335 bb50aaea; remote dev remains511dcdaf. MR335 is open/non-Draft with ci_still_running, no conflicts; leave its source, processes and pipeline untouched. This follow-up targets dev after335 and must not merge automatically.
 <!-- SECTION:NOTES:END -->
