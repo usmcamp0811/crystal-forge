@@ -49,6 +49,11 @@ pub const FLAKE_OUTPUT_CONTENT_BYTES_LIMIT: usize = 8 * 1024 * 1024;
 pub const FLAKE_OUTPUT_RESPONSE_BYTES_LIMIT: usize = 2 * 1024 * 1024;
 /// Time after terminal completion during which agent ingestion can retain a deployment artifact.
 pub const DEPLOYMENT_ARTIFACT_INGESTION_WINDOW_HOURS: i64 = 24;
+/// Maximum newest-first reciprocal requests or generations in one statement.
+///
+/// Matches the 100-row maintenance page so historical requests cannot cause
+/// unbounded per-request retention statements under the global writer lock.
+pub(crate) const RECIPROCAL_SNAPSHOT_BATCH_LIMIT: i64 = 100;
 /// Stable error marker returned when a supplied flake-output token is stale or malformed.
 pub const FLAKE_OUTPUT_SNAPSHOT_CHANGED: &str = "flake output snapshot changed";
 
@@ -1010,11 +1015,11 @@ async fn persist_available_snapshot_with_content_limit_tx(
         JOIN LATERAL (
           SELECT pending.requested_commit_id, pending.requested_derivation_id,
                  pending.evaluation_snapshot_id, pending.issued_at,
-                 pending.status, pending.completed_at
+                  pending.status, pending.completed_at,
+                  pending.evaluation_snapshot_binding_expected
           FROM pending_system_deployments pending
           WHERE pending.system_id = s.id
             AND pending.target_store_path = ss.store_path
-            AND pending.evaluation_snapshot_binding_expected
             AND pending.issued_at <= ss.timestamp
           ORDER BY pending.issued_at DESC, pending.id DESC
           LIMIT 1
@@ -1029,6 +1034,7 @@ async fn persist_available_snapshot_with_content_limit_tx(
           AND ss.store_path IS NOT NULL
           AND deployment.requested_commit_id = $2
           AND deployment.evaluation_snapshot_id = $1
+          AND deployment.evaluation_snapshot_binding_expected
           AND (
               deployment.status IN ('pending', 'succeeded')
               OR (deployment.status = 'expired'
@@ -1071,6 +1077,154 @@ async fn advance_snapshot_selection_tx(
     .execute(&mut **tx)
     .await?;
     Ok(())
+}
+
+/// Publishes bounded Native identity from the successful producer transaction.
+///
+/// Callers hold snapshot -> active owner locks and have persisted the actual
+/// successful derivation. Missing output, excluded gates, path conflicts, or
+/// incomplete identities publish nothing. No Nix evaluation or Config traversal
+/// occurs. Certification, selector advance, and reciprocal binding are atomic.
+/// Native publication precedes request issuance: real insertion time, captured
+/// after the writer lock, must not exceed the request's immutable `issued_at`.
+/// Older unbound requests and observations never acquire a later certificate.
+/// Reciprocal work selects at most [`RECIPROCAL_SNAPSHOT_BATCH_LIMIT`] requests.
+///
+/// # Errors
+/// Returns ownership, serialization, certification, or database errors. The
+/// caller must roll back the transaction on error.
+pub(crate) async fn persist_native_deployment_identity_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+    expected_attempt: i32,
+    derivation_id: i32,
+    result: &crate::models::evaluate_with_policies::SuccessfulSystemResult,
+) -> Result<Option<Uuid>> {
+    use crate::models::evaluation_snapshots::NativeDeploymentIdentity;
+    let attempt_id =
+        super::evaluation_native_outcomes::lock_native_owner_tx(tx, commit_id, expected_attempt)
+            .await?;
+    let commit_sha: Option<String> = sqlx::query_scalar(
+        r#"SELECT c.git_commit_hash FROM commits c
+        JOIN derivations d ON d.commit_id = c.id AND d.id = $2
+        WHERE c.id = $1 AND c.git_commit_hash ~ '^([0-9a-fA-F]{40}|[0-9a-fA-F]{64})$'
+          AND d.derivation_name = $3 AND d.derivation_type = 'nixos'
+          AND d.derivation_path = $4 AND d.expected_store_path = $5
+          AND COALESCE(d.store_path,d.expected_store_path) = $5
+          AND d.derivation_path ~ '^/nix/store/[^/[:space:]]+\.drv$'
+          AND d.expected_store_path ~ '^/nix/store/[^/[:space:]]+$'
+          AND d.cf_agent_enabled AND d.policy_requirements_met"#,
+    )
+    .bind(commit_id)
+    .bind(derivation_id)
+    .bind(&result.system_name)
+    .bind(&result.drv_path)
+    .bind(&result.expected_store_path)
+    .fetch_optional(&mut **tx)
+    .await?;
+    let Some(commit_sha) = commit_sha else {
+        return Ok(None);
+    };
+    let Some(expected_store_path) = result.expected_store_path.as_ref() else {
+        return Ok(None);
+    };
+    let identity = serde_json::to_value(NativeDeploymentIdentity {
+        attempt_id,
+        attempt_number: expected_attempt,
+        commit_sha,
+        derivation_id,
+        drv_path: result.drv_path.clone(),
+        expected_store_path: expected_store_path.clone(),
+    })?;
+    // Identical active-owner replays preserve the artifact already selected.
+    if selected_native_deployment_identity_tx(tx, commit_id, &result.system_name, expected_attempt)
+        .await?
+    {
+        return Ok(sqlx::query_scalar("SELECT current_snapshot_id FROM evaluation_snapshot_selections WHERE commit_id=$1 AND configuration_name=$2")
+            .bind(commit_id).bind(&result.system_name).fetch_optional(&mut **tx).await?);
+    }
+    let snapshot_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO evaluation_snapshots (commit_id,configuration_name,schema_version,lifecycle,
+             deployment_identity,content_bytes,created_at,completed_at)
+         VALUES ($1,$2,3,'available',$3,octet_length($3::jsonb::text),clock_timestamp(),clock_timestamp()) RETURNING id",
+    )
+    .bind(commit_id)
+    .bind(&result.system_name)
+    .bind(identity)
+    .fetch_one(&mut **tx)
+    .await?;
+    sqlx::query("UPDATE evaluation_snapshots SET integrity_version=3 WHERE id=$1")
+        .bind(snapshot_id)
+        .execute(&mut **tx)
+        .await?;
+    advance_snapshot_selection_tx(tx, commit_id, &result.system_name, snapshot_id).await?;
+    // SECURITY: NOW() is transaction start, possibly before lock acquisition.
+    // Native publication uses the real insertion clock after the writer lock.
+    // An older unbound request cannot acquire a later attempt's certificate.
+    // V1's deliberate deployment-before-publication behavior stays separate.
+    let deployments: Vec<Uuid> = sqlx::query_scalar(
+        "WITH candidates AS (
+         SELECT pending.id FROM pending_system_deployments pending
+         JOIN systems system ON system.id=pending.system_id
+         JOIN evaluation_snapshots artifact ON artifact.id=$1
+         WHERE system.flake_id=(SELECT flake_id FROM commits WHERE id=$2)
+           AND COALESCE(NULLIF(btrim(system.system_configuration_name),''),system.hostname)=$3
+           AND pending.requested_commit_id=$2 AND pending.requested_derivation_id=$4
+           AND pending.target_store_path=$5 AND pending.evaluation_snapshot_binding_expected
+           AND pending.evaluation_snapshot_id IS NULL
+           AND artifact.created_at<=pending.issued_at
+           AND (pending.status IN ('pending','succeeded') OR (pending.status='expired'
+               AND pending.completed_at > NOW()-INTERVAL '24 hours'))
+         ORDER BY pending.issued_at DESC,pending.id DESC LIMIT $6
+         FOR UPDATE OF pending
+         ) UPDATE pending_system_deployments pending SET evaluation_snapshot_id=$1
+         FROM candidates WHERE pending.id=candidates.id
+         RETURNING pending.id",
+    )
+    .bind(snapshot_id)
+    .bind(commit_id)
+    .bind(&result.system_name)
+    .bind(derivation_id)
+    .bind(expected_store_path)
+    .bind(RECIPROCAL_SNAPSHOT_BATCH_LIMIT)
+    .fetch_all(&mut **tx)
+    .await?;
+    for deployment_id in deployments {
+        retain_bound_deployment_observations_tx(tx, deployment_id).await?;
+    }
+    Ok(Some(snapshot_id))
+}
+
+/// Reports whether this exact attempt already selected certified Native identity.
+///
+/// Finalizers use this guard only for proven successful configurations. Failed
+/// configurations still publish their failure selector; retries cannot preserve
+/// an older attempt's manifest through this guard.
+///
+/// # Errors
+/// Returns a database error when the exact selector cannot be inspected.
+pub(crate) async fn selected_native_deployment_identity_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    commit_id: i32,
+    configuration_name: &str,
+    expected_attempt: i32,
+) -> Result<bool> {
+    Ok(sqlx::query_scalar(
+        "SELECT EXISTS (SELECT 1 FROM evaluation_snapshot_selections selection
+         JOIN evaluation_snapshots s ON s.id=selection.current_snapshot_id
+         JOIN derivations d ON d.commit_id=s.commit_id AND d.derivation_name=s.configuration_name
+         WHERE selection.commit_id=$1 AND selection.configuration_name=$2
+           AND s.schema_version=3 AND s.integrity_version=3
+           AND s.deployment_identity->>'attempt_number'=$3::integer::text
+           AND d.policy_results->>'evaluation_attempt'=$3::integer::text
+           AND NOT COALESCE((d.policy_results->>'evaluation_failure')::boolean,false)
+           AND evaluation_deployment_artifact_matches(s.id,d.id,true))",
+    )
+    .bind(commit_id)
+    .bind(configuration_name)
+    .bind(expected_attempt)
+    .fetch_one(&mut **tx)
+    .await?)
 }
 
 async fn advance_config_snapshot_selection_v2_tx(
@@ -1351,6 +1505,11 @@ pub(crate) async fn persist_unavailable_flake_output_snapshot_tx(
 /// are eligible. An expired deployment remains eligible until 24 hours after
 /// completion. Failed and superseded deployments are never eligible. The
 /// deployment must have been issued no later than `observed_at`.
+/// Certified V1 inventory and schema-3 Native deployment identity are distinct
+/// supported types. Schema 3 must match the exact live derivation and output;
+/// Inspector V2 is never deployment authority.
+/// A schema-3 artifact must already exist when the request is issued. V1 retains
+/// its legacy deployment-before-publication behavior.
 ///
 /// # Errors
 ///
@@ -1383,13 +1542,12 @@ pub async fn retain_generation_snapshot_tx(
         FROM systems s
         JOIN LATERAL (
           SELECT pending.requested_commit_id, pending.requested_derivation_id,
-                  pending.evaluation_snapshot_id, pending.status,
-                  pending.completed_at
+                   pending.evaluation_snapshot_id, pending.status,
+                   pending.completed_at, pending.evaluation_snapshot_binding_expected,
+                   pending.issued_at
           FROM pending_system_deployments pending
           WHERE pending.system_id = s.id
             AND pending.target_store_path = $3
-            AND pending.requested_commit_id IS NOT NULL
-            AND pending.evaluation_snapshot_binding_expected
             AND pending.issued_at <= $4
           ORDER BY pending.issued_at DESC, pending.id DESC
           LIMIT 1
@@ -1398,6 +1556,7 @@ pub async fn retain_generation_snapshot_tx(
           ON d.id = deployment.requested_derivation_id
          AND d.derivation_type = 'nixos'
          AND d.commit_id = deployment.requested_commit_id
+         AND d.commit_id IN (SELECT id FROM commits WHERE flake_id=s.flake_id)
          AND d.derivation_name = COALESCE(
              NULLIF(btrim(s.system_configuration_name), ''), s.hostname
          )
@@ -1406,8 +1565,10 @@ pub async fn retain_generation_snapshot_tx(
          AND es.commit_id = d.commit_id
          AND es.configuration_name = d.derivation_name
          AND es.lifecycle = 'available'
-         AND es.integrity_version = 1
+         AND evaluation_deployment_artifact_matches(es.id, d.id)
+         AND (es.schema_version<>3 OR es.created_at<=deployment.issued_at)
         WHERE s.hostname = $1
+          AND deployment.evaluation_snapshot_binding_expected
           AND (
               deployment.status IN ('pending', 'succeeded')
               OR (deployment.status = 'expired'
@@ -1431,6 +1592,12 @@ pub async fn retain_generation_snapshot_tx(
 /// This reciprocal path closes the race where heartbeat ingestion commits
 /// before deployment creation. The deployment must already contain an exact
 /// commit and available artifact binding.
+/// A newer same-path request issued before the observation blocks this older
+/// binding, even if the newer request has failed or lacks certified identity.
+/// Each call inserts at most [`RECIPROCAL_SNAPSHOT_BATCH_LIMIT`] missing
+/// generations, ordered by observation timestamp and row ID, newest first.
+/// Repeated calls skip retained rows and can make
+/// progress through older observations. Ordinary ingestion remains single-row.
 ///
 /// # Errors
 ///
@@ -1441,13 +1608,12 @@ pub(crate) async fn retain_bound_deployment_observations_tx(
 ) -> Result<u64> {
     let inserted = sqlx::query(
         r#"
-        INSERT INTO evaluation_generation_snapshots (
-            system_id, generation, snapshot_id, derivation_id, commit_id,
-            source_store_path, configuration_name
-        )
+        WITH candidates AS (
         SELECT DISTINCT ON (pending.system_id, state.generation)
-               pending.system_id, state.generation, artifact.id, derivation.id,
-               derivation.commit_id, state.store_path, derivation.derivation_name
+               pending.system_id, state.generation, artifact.id AS snapshot_id,
+               derivation.id AS derivation_id,derivation.commit_id,
+               state.store_path,derivation.derivation_name,state.timestamp AS observed_at,
+               state.id AS observed_state_id
         FROM pending_system_deployments pending
         JOIN systems system ON system.id = pending.system_id
         JOIN system_states state
@@ -1468,19 +1634,42 @@ pub(crate) async fn retain_bound_deployment_observations_tx(
          AND artifact.commit_id = derivation.commit_id
          AND artifact.configuration_name = derivation.derivation_name
          AND artifact.lifecycle = 'available'
-         AND artifact.integrity_version = 1
-        WHERE pending.id = $1
-          AND pending.evaluation_snapshot_binding_expected
+          AND evaluation_deployment_artifact_matches(artifact.id, derivation.id)
+          AND (artifact.schema_version<>3 OR artifact.created_at<=pending.issued_at)
+          AND derivation.commit_id IN (SELECT id FROM commits WHERE flake_id=system.flake_id)
+         WHERE pending.id = $1
+           AND pending.evaluation_snapshot_binding_expected
+            AND NOT EXISTS (
+               SELECT 1 FROM pending_system_deployments newer
+               WHERE newer.system_id=pending.system_id
+                 AND newer.target_store_path=state.store_path
+                 AND newer.issued_at<=state.timestamp
+                 AND (newer.issued_at,newer.id)>(pending.issued_at,pending.id)
+            )
+           AND NOT EXISTS (
+               SELECT 1 FROM evaluation_generation_snapshots retained
+               WHERE retained.system_id=pending.system_id AND retained.generation=state.generation
+           )
           AND (
               pending.status IN ('pending', 'succeeded')
               OR (pending.status = 'expired'
                   AND pending.completed_at > NOW() - INTERVAL '24 hours')
           )
-        ORDER BY pending.system_id, state.generation, state.timestamp
+        ORDER BY pending.system_id, state.generation, state.timestamp DESC,state.id DESC
+        )
+        INSERT INTO evaluation_generation_snapshots (
+            system_id,generation,snapshot_id,derivation_id,commit_id,
+            source_store_path,configuration_name
+        )
+        SELECT system_id,generation,snapshot_id,derivation_id,commit_id,
+               store_path,derivation_name FROM candidates
+        ORDER BY observed_at DESC,observed_state_id DESC,generation DESC
+        LIMIT $2
         ON CONFLICT (system_id, generation) DO NOTHING
         "#,
     )
     .bind(deployment_id)
+    .bind(RECIPROCAL_SNAPSHOT_BATCH_LIMIT)
     .execute(&mut **tx)
     .await?;
     Ok(inserted.rows_affected())
@@ -1499,18 +1688,18 @@ pub(crate) async fn retain_bound_deployment_observations_tx(
 ///
 /// # Authority
 ///
-/// The repair requires exactly one distinct eligible deployment binding that
-/// proves system, generation, store path, requested NixOS derivation, requested
-/// commit, evaluation artifact, and configuration identity together. Bindings
-/// that agree on every one of those identities collapse to one candidate.
-/// Two or more distinct identities, including one store path reached from more
-/// than one commit, insert nothing. A store path is never used alone to choose
-/// a commit.
+/// The newest same-path request issued before the observation is authoritative.
+/// The ordinary retention resolver ranks that request before validating its
+/// system, flake, configuration, commit, derivation, artifact, output, native
+/// publication time, and status together. Missing or mismatched newest evidence
+/// cannot be repaired from an older request, even when both statuses are eligible.
 ///
 /// Eligible deployments are `pending`, `succeeded`, or `expired` within
 /// [`DEPLOYMENT_ARTIFACT_INGESTION_WINDOW_HOURS`] of completion, exactly as
 /// ordinary retention defines eligibility. `failed` and `superseded`
 /// deployments never grant authority.
+/// The newest same-path request must itself have complete certified lineage and
+/// an eligible status. A missing or contradictory tuple blocks older work.
 ///
 /// # Concurrency
 ///
@@ -1534,82 +1723,25 @@ pub(crate) async fn reconcile_current_generation_retention_tx(
     tx: &mut Transaction<'_, Postgres>,
     system_id: Uuid,
 ) -> Result<bool> {
-    let inserted = sqlx::query(
-        r#"
-        WITH observed AS (
-            SELECT system.id AS system_id,
-                   COALESCE(
-                       NULLIF(btrim(system.system_configuration_name), ''), system.hostname
-                   ) AS configuration_name,
-                   state.generation, state.store_path, state.timestamp
-            FROM systems system
-            JOIN LATERAL (
-                SELECT candidate.generation, candidate.store_path, candidate.timestamp,
-                       candidate.generation_matches_current_store_path
-                FROM system_states candidate
-                WHERE candidate.hostname = system.hostname
-                ORDER BY candidate.timestamp DESC, candidate.id DESC
-                LIMIT 1
-            ) state ON true
-            WHERE system.id = $1
-              AND state.generation IS NOT NULL
-              AND state.store_path IS NOT NULL
-              AND btrim(state.store_path) <> ''
-              AND state.timestamp IS NOT NULL
-              AND state.generation_matches_current_store_path
-              AND NOT EXISTS (
-                  SELECT 1 FROM evaluation_generation_snapshots retained
-                  WHERE retained.system_id = system.id
-                    AND retained.generation = state.generation
-              )
-        ), authoritative AS (
-            SELECT DISTINCT
-                   observed.system_id, observed.generation, observed.store_path,
-                   artifact.id AS snapshot_id, derivation.id AS derivation_id,
-                   derivation.commit_id, derivation.derivation_name
-            FROM observed
-            JOIN pending_system_deployments pending
-              ON pending.system_id = observed.system_id
-             AND pending.target_store_path = observed.store_path
-             AND pending.evaluation_snapshot_binding_expected
-             AND pending.requested_commit_id IS NOT NULL
-             AND pending.requested_derivation_id IS NOT NULL
-             AND pending.evaluation_snapshot_id IS NOT NULL
-             AND pending.issued_at <= observed.timestamp
-             AND (
-                 pending.status IN ('pending', 'succeeded')
-                 OR (pending.status = 'expired'
-                     AND pending.completed_at > NOW() - INTERVAL '24 hours')
-             )
-            JOIN derivations derivation
-              ON derivation.id = pending.requested_derivation_id
-             AND derivation.commit_id = pending.requested_commit_id
-             AND derivation.derivation_type = 'nixos'
-             AND derivation.derivation_name = observed.configuration_name
-             AND COALESCE(derivation.store_path, derivation.expected_store_path)
-                 = observed.store_path
-            JOIN evaluation_snapshots artifact
-              ON artifact.id = pending.evaluation_snapshot_id
-             AND artifact.commit_id = derivation.commit_id
-             AND artifact.configuration_name = derivation.derivation_name
-             AND artifact.lifecycle = 'available'
-             AND artifact.integrity_version = 1
-        )
-        INSERT INTO evaluation_generation_snapshots (
-            system_id, generation, snapshot_id, derivation_id, commit_id,
-            source_store_path, configuration_name
-        )
-        SELECT system_id, generation, snapshot_id, derivation_id, commit_id,
-               store_path, derivation_name
-        FROM authoritative
-        WHERE (SELECT COUNT(*) FROM authoritative) = 1
-        ON CONFLICT (system_id, generation) DO NOTHING
-        "#,
+    let observed = sqlx::query_as::<_, (String, i32, String, DateTime<Utc>)>(
+        "SELECT system.hostname,state.generation,state.store_path,state.timestamp
+         FROM systems system JOIN LATERAL (
+             SELECT candidate.* FROM system_states candidate
+             WHERE candidate.hostname=system.hostname
+             ORDER BY candidate.timestamp DESC,candidate.id DESC LIMIT 1
+         ) state ON true WHERE system.id=$1 AND state.generation IS NOT NULL
+           AND state.store_path IS NOT NULL AND btrim(state.store_path)<>''
+           AND state.timestamp IS NOT NULL AND state.generation_matches_current_store_path",
     )
     .bind(system_id)
-    .execute(&mut **tx)
+    .fetch_optional(&mut **tx)
     .await?;
-    Ok(inserted.rows_affected() == 1)
+    let Some((hostname, generation, path, observed_at)) = observed else {
+        return Ok(false);
+    };
+    // SECURITY: Reuse the exact newest-request resolver. A separate search over
+    // older eligible requests would bypass incomplete newest request identity.
+    retain_generation_snapshot_tx(tx, &hostname, Some(generation), Some(&path), observed_at).await
 }
 
 /// Retains a uniquely reconciled external activation against its real artifact.
@@ -1617,13 +1749,15 @@ pub(crate) async fn reconcile_current_generation_retention_tx(
 /// This server-owned path starts from the latest agent observation. It requires
 /// an explicit generation/store match, exactly one NixOS derivation in the
 /// registered flake and effective configuration, the currently selected
-/// certified available V1 artifact for that derivation's commit/configuration,
+/// certified V1 or schema-3 deployment artifact for the exact live derivation,
 /// and a completed schema-1 scan for the same derivation. The artifact must
 /// have completed before the observation. Archived commits remain readable
 /// as provisional mapped evidence but do not establish a new retained binding:
 /// archive state removes them from the active source registry. A behind-head
 /// commit that is still active remains eligible. An external activation never
 /// creates a `pending_system_deployments` row; `binding_origin` retains that fact.
+/// Any same-path CF request issued before the observation excludes this external
+/// path. Missing CF lineage cannot be replaced with external reconciliation.
 ///
 /// # Concurrency
 ///
@@ -1663,6 +1797,12 @@ pub(crate) async fn reconcile_external_observed_generation_tx(
               AND state.timestamp IS NOT NULL
               AND state.generation_matches_current_store_path IS TRUE
               AND NOT EXISTS (
+                  SELECT 1 FROM pending_system_deployments pending
+                  WHERE pending.system_id=system.id
+                    AND pending.target_store_path=state.store_path
+                    AND pending.issued_at<=state.timestamp
+              )
+              AND NOT EXISTS (
                   SELECT 1 FROM evaluation_generation_snapshots retained
                   WHERE retained.system_id=system.id
                     AND retained.generation=state.generation
@@ -1687,9 +1827,10 @@ pub(crate) async fn reconcile_external_observed_generation_tx(
              AND artifact.commit_id=matching.commit_id
              AND artifact.configuration_name=matching.configuration_name
              AND artifact.lifecycle='available'
-             AND artifact.schema_version=1 AND artifact.integrity_version=1
+             AND evaluation_deployment_artifact_matches(artifact.id,matching.derivation_id,true)
              AND artifact.completed_at IS NOT NULL
-             AND artifact.completed_at<=matching.timestamp
+              AND artifact.completed_at<=matching.timestamp
+              AND (artifact.schema_version<>3 OR artifact.created_at<=matching.timestamp)
             WHERE (SELECT COUNT(*) FROM matching)=1
               AND matching.source_archived=false
               AND EXISTS (
@@ -1722,12 +1863,14 @@ pub(crate) async fn reconcile_external_observed_generation_tx(
 /// when the observed system identity is known. The ordinary retention path runs
 /// first and keeps its exact semantics. When it retains nothing, the bounded
 /// `reconcile_current_generation_retention_tx` repair runs against the same
-/// transaction. It recovers an observation whose authoritative deployment
-/// binding was not the newest deployment for the observed store path. If that
+/// transaction. It validates the latest persisted observation through the same
+/// complete newest-request resolver as ordinary ingestion. If that
 /// repair retains nothing, external reconciliation checks the latest reported
 /// generation against the uniquely scoped derivation, certified selected
 /// artifact and completed schema-1 scan. Neither fallback fabricates a CF
 /// deployment or changes an existing immutable binding.
+/// An incomplete, mismatched, or ineligible newest request blocks older work;
+/// external reconciliation requires no same-path CF request before observation.
 ///
 /// The repair reads the latest persisted observation. Callers MUST insert the
 /// observation before calling this function.
@@ -1923,8 +2066,9 @@ pub async fn select_commit_snapshot(
         )
         SELECT es.id, c.git_commit_hash,
                CASE
-               WHEN es.lifecycle = 'available' AND es.schema_version = 1
-                    AND es.integrity_version = 1 THEN 'available'
+                WHEN es.lifecycle = 'available' AND es.schema_version = 1
+                     AND es.integrity_version = 1 THEN 'available'
+                WHEN es.schema_version = 3 THEN 'unavailable'
                WHEN c.evaluation_status = 'pending'
                     AND active_attempt.status = 'queued' THEN 'queued'
                WHEN c.evaluation_status IN ('in_progress', 'cancelling')
@@ -1932,7 +2076,9 @@ pub async fn select_commit_snapshot(
                WHEN es.lifecycle = 'available' THEN 'unavailable'
                ELSE es.lifecycle END AS lifecycle,
                CASE
-               WHEN c.evaluation_status IN ('pending', 'in_progress', 'cancelling')
+                WHEN es.schema_version = 3
+                THEN 'Config inventory is unavailable for deployment identity'
+                WHEN c.evaluation_status IN ('pending', 'in_progress', 'cancelling')
                   AND (es.lifecycle <> 'available' OR es.schema_version <> 1
                     OR es.integrity_version <> 1) THEN NULL
                WHEN es.lifecycle = 'available' AND (es.schema_version <> 1
@@ -2927,7 +3073,9 @@ pub async fn select_generation_snapshot(
                     THEN 'unavailable' ELSE es.lifecycle END AS lifecycle,
                CASE WHEN es.lifecycle = 'available' AND (es.schema_version <> 1
                     OR es.integrity_version <> 1)
-                    THEN 'Snapshot data is unavailable or corrupt' ELSE es.error END AS error,
+                    THEN CASE WHEN es.schema_version = 3
+                         THEN 'Config inventory is unavailable for deployment identity'
+                         ELSE 'Snapshot data is unavailable or corrupt' END ELSE es.error END AS error,
                 previous.snapshot_id AS baseline_id,
                 previous_commit.git_commit_hash AS baseline_revision,
                 previous.generation AS baseline_generation,
@@ -6168,6 +6316,942 @@ mod tests {
         .expect("system insert should succeed")
     }
 
+    async fn native_identity_context(
+        pool: &PgPool,
+        mode: crate::queries::evaluation_inventory::InventoryExecutionMode,
+    ) -> (System, Commit, String) {
+        use crate::queries::evaluation_inventory::persist_inventory;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let repo = format!("https://example.test/native-identity-{suffix}.git");
+        let flake = insert_flake(pool, &suffix, &repo, "main", "cf_systems_only")
+            .await
+            .unwrap();
+        let system = insert_test_system(pool, flake.id, &suffix).await;
+        let commit = insert_test_commit(pool, &repo, &format!("{suffix}12345678")).await;
+        sqlx::query("UPDATE commits SET evaluation_status='in_progress',evaluation_attempt_count=1,cancellation_requested=false WHERE id=$1")
+            .bind(commit.id).execute(pool).await.unwrap();
+        sqlx::query("UPDATE evaluation_attempts SET status='in_progress',attempt_number=1,started_at=NOW() WHERE commit_id=$1")
+            .bind(commit.id).execute(pool).await.unwrap();
+        persist_inventory(pool, commit.id, 1, &["host".into()], &["host".into()], mode)
+            .await
+            .unwrap();
+        (system, commit, suffix)
+    }
+
+    async fn native_identity_fixture(pool: &PgPool) -> (System, Commit, i32, Uuid) {
+        use crate::models::deployment_policies::PolicyCheckResult;
+        use crate::models::evaluate_with_policies::{
+            SuccessfulSystemResult, persist_evaluated_system,
+        };
+        let (system, commit, suffix) = native_identity_context(
+            pool,
+            crate::queries::evaluation_inventory::InventoryExecutionMode::Native,
+        )
+        .await;
+        let repo = format!("https://example.test/native-identity-{suffix}.git");
+        let result = SuccessfulSystemResult {
+            system_name: "host".into(),
+            derivation_target: format!("{repo}#nixosConfigurations.host"),
+            drv_path: format!("/nix/store/{suffix}-native.drv"),
+            expected_store_path: Some(format!("/nix/store/{suffix}-native")),
+            cf_agent_enabled: Some(true),
+            build_eligible: true,
+        };
+        let check = PolicyCheckResult::from_assigned(
+            "host".into(),
+            &serde_json::json!({"cfAgentEnabled":true}),
+            &[],
+        )
+        .unwrap();
+        persist_evaluated_system(pool, commit.id, 1, &result, &check, &[])
+            .await
+            .unwrap();
+        let (drv, snapshot): (i32,Uuid) = sqlx::query_as("SELECT d.id,s.current_snapshot_id FROM derivations d JOIN evaluation_snapshot_selections s ON s.commit_id=d.commit_id AND s.configuration_name=d.derivation_name WHERE d.commit_id=$1")
+            .bind(commit.id).fetch_one(pool).await.unwrap();
+        (system, commit, drv, snapshot)
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn review_native_backfill_is_bounded_newest_first_and_releases_terminal_bindings(
+        pool: PgPool,
+    ) {
+        let (system, commit, drv, artifact) = native_identity_fixture(&pool).await;
+        let output: String =
+            sqlx::query_scalar("SELECT expected_store_path FROM derivations WHERE id=$1")
+                .bind(drv)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let request:Uuid=sqlx::query_scalar("INSERT INTO pending_system_deployments(system_id,target_store_path,requested_commit_id,requested_derivation_id,evaluation_snapshot_id,status,source) VALUES ($1,$2,$3,$4,$5,'succeeded','bounded') RETURNING id")
+            .bind(system.id).bind(&output).bind(commit.id).bind(drv).bind(artifact).fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO system_states(hostname,change_reason,generation,store_path,generation_matches_current_store_path,timestamp) SELECT $1,'state_delta',n,$2,true,NOW() FROM generate_series(1,205) n")
+            .bind(&system.hostname).bind(&output).execute(&pool).await.unwrap();
+        // A rollback can make a smaller profile generation the newest report.
+        // Equal timestamps use row identity, not the profile generation ID.
+        sqlx::query("INSERT INTO system_states(hostname,change_reason,generation,store_path,generation_matches_current_store_path,timestamp) VALUES ($1,'state_delta',1,$2,true,(SELECT MAX(timestamp) FROM system_states WHERE hostname=$1))")
+            .bind(&system.hostname).bind(&output).execute(&pool).await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        lock_snapshot_writer_tx(&mut tx).await.unwrap();
+        assert_eq!(
+            retain_bound_deployment_observations_tx(&mut tx, request)
+                .await
+                .unwrap(),
+            100
+        );
+        assert_eq!(sqlx::query_as::<_,(i32,i32)>("SELECT MIN(generation),MAX(generation) FROM evaluation_generation_snapshots WHERE system_id=$1").bind(system.id).fetch_one(&mut *tx).await.unwrap(),(1,205));
+        let observed:DateTime<Utc>=sqlx::query_scalar("INSERT INTO system_states(hostname,change_reason,generation,store_path,generation_matches_current_store_path) VALUES ($1,'state_delta',206,$2,true) RETURNING timestamp").bind(&system.hostname).bind(&output).fetch_one(&mut *tx).await.unwrap();
+        assert!(
+            retain_observed_generation_snapshot_tx(
+                &mut tx,
+                &system.hostname,
+                Some(system.id),
+                Some(206),
+                Some(&output),
+                observed
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            retain_bound_deployment_observations_tx(&mut tx, request)
+                .await
+                .unwrap(),
+            100
+        );
+        assert_eq!(
+            retain_bound_deployment_observations_tx(&mut tx, request)
+                .await
+                .unwrap(),
+            5
+        );
+        assert_eq!(
+            retain_bound_deployment_observations_tx(&mut tx, request)
+                .await
+                .unwrap(),
+            0
+        );
+        tx.commit().await.unwrap();
+        // Simulate terminal-age boundaries without changing immutable native
+        // publication time. Retained generations continue to protect history.
+        for (source, age) in [("old", "25 hours"), ("recent", "23 hours")] {
+            sqlx::query("INSERT INTO pending_system_deployments(system_id,target_store_path,requested_commit_id,requested_derivation_id,evaluation_snapshot_id,status,source,completed_at) VALUES ($1,$2,$3,$4,$5,'failed',$6,NOW()-$7::interval)")
+                .bind(system.id).bind(&output).bind(commit.id).bind(drv).bind(artifact).bind(source).bind(age).execute(&pool).await.unwrap();
+        }
+        let gc = reclaim_orphaned_snapshot_content(&pool).await.unwrap();
+        assert_eq!(gc.deployment_binding_rows, 1);
+        let bindings:Vec<(String,Option<Uuid>,Option<i32>)>=sqlx::query_as("SELECT source,evaluation_snapshot_id,requested_derivation_id FROM pending_system_deployments WHERE system_id=$1 AND source IN ('old','recent') ORDER BY source").bind(system.id).fetch_all(&pool).await.unwrap();
+        assert_eq!(
+            bindings,
+            vec![
+                ("old".into(), None, None),
+                ("recent".into(), Some(artifact), Some(drv))
+            ]
+        );
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM evaluation_generation_snapshots WHERE system_id=$1 AND snapshot_id=$2").bind(system.id).bind(artifact).fetch_one(&pool).await.unwrap(),206);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn review_native_publication_never_binds_prior_attempt_history(pool: PgPool) {
+        use crate::models::deployment_policies::PolicyCheckResult;
+        use crate::models::evaluate_with_policies::{
+            SuccessfulSystemResult, persist_evaluated_system,
+        };
+        use crate::queries::evaluation_inventory::{InventoryExecutionMode, persist_inventory};
+        let (system, commit, drv, first) = native_identity_fixture(&pool).await;
+        let (path, output): (String, String) = sqlx::query_as(
+            "SELECT derivation_path,expected_store_path FROM derivations WHERE id=$1",
+        )
+        .bind(drv)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let old:Uuid=sqlx::query_scalar("INSERT INTO pending_system_deployments(system_id,target_store_path,requested_commit_id,requested_derivation_id,status,source,completed_at) VALUES ($1,$2,$3,$4,'succeeded','prior-attempt',NOW()) RETURNING id")
+            .bind(system.id).bind(&output).bind(commit.id).bind(drv).fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO system_states(hostname,change_reason,generation,store_path,generation_matches_current_store_path) VALUES ($1,'state_delta',1,$2,true)").bind(&system.hostname).bind(&output).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE evaluation_attempts SET status='failed' WHERE commit_id=$1")
+            .bind(commit.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE commits SET evaluation_attempt_count=2 WHERE id=$1")
+            .bind(commit.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO evaluation_attempts(commit_id,attempt_number,status,started_at) VALUES ($1,2,'in_progress',NOW())").bind(commit.id).execute(&pool).await.unwrap();
+        persist_inventory(
+            &pool,
+            commit.id,
+            2,
+            &["host".into()],
+            &["host".into()],
+            InventoryExecutionMode::Native,
+        )
+        .await
+        .unwrap();
+        let result = SuccessfulSystemResult {
+            system_name: "host".into(),
+            derivation_target: "native#host".into(),
+            drv_path: path,
+            expected_store_path: Some(output.clone()),
+            cf_agent_enabled: Some(true),
+            build_eligible: true,
+        };
+        let check = PolicyCheckResult::from_assigned(
+            "host".into(),
+            &serde_json::json!({"cfAgentEnabled":true}),
+            &[],
+        )
+        .unwrap();
+        persist_evaluated_system(&pool, commit.id, 2, &result, &check, &[])
+            .await
+            .unwrap();
+        let second:Uuid=sqlx::query_scalar("SELECT current_snapshot_id FROM evaluation_snapshot_selections WHERE commit_id=$1 AND configuration_name='host'").bind(commit.id).fetch_one(&pool).await.unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<Uuid>>(
+                "SELECT evaluation_snapshot_id FROM pending_system_deployments WHERE id=$1"
+            )
+            .bind(old)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            None,
+            "later attempt must not certify an older unbound request"
+        );
+        assert!(
+            select_generation_snapshot(&pool, system.id, 1)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        let old_observed: DateTime<Utc> = sqlx::query_scalar(
+            "SELECT timestamp FROM system_states WHERE hostname=$1 AND generation=1",
+        )
+        .bind(&system.hostname)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut rejected = pool.begin().await.unwrap();
+        assert!(
+            !retain_observed_generation_snapshot_tx(
+                &mut rejected,
+                &system.hostname,
+                Some(system.id),
+                Some(1),
+                Some(&output),
+                old_observed
+            )
+            .await
+            .unwrap()
+        );
+        rejected.commit().await.unwrap();
+        // A same-attempt lost acknowledgement reuses its certificate. A new
+        // request captures that UUID and can retain only its later observation.
+        let request:Uuid=sqlx::query_scalar("INSERT INTO pending_system_deployments(system_id,target_store_path,requested_commit_id,requested_derivation_id,evaluation_snapshot_id,status,source) VALUES ($1,$2,$3,$4,$5,'pending','same-attempt') RETURNING id")
+            .bind(system.id).bind(&output).bind(commit.id).bind(drv).bind(second).fetch_one(&pool).await.unwrap();
+        persist_evaluated_system(&pool, commit.id, 2, &result, &check, &[])
+            .await
+            .unwrap();
+        assert_eq!(sqlx::query_scalar::<_,Uuid>("SELECT current_snapshot_id FROM evaluation_snapshot_selections WHERE commit_id=$1 AND configuration_name='host'").bind(commit.id).fetch_one(&pool).await.unwrap(),second);
+        let mut tx = pool.begin().await.unwrap();
+        let observed:DateTime<Utc>=sqlx::query_scalar("INSERT INTO system_states(hostname,change_reason,generation,store_path,generation_matches_current_store_path) VALUES ($1,'state_delta',2,$2,true) RETURNING timestamp").bind(&system.hostname).bind(&output).fetch_one(&mut *tx).await.unwrap();
+        assert!(
+            retain_observed_generation_snapshot_tx(
+                &mut tx,
+                &system.hostname,
+                Some(system.id),
+                Some(2),
+                Some(&output),
+                observed
+            )
+            .await
+            .unwrap()
+        );
+        tx.commit().await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,Uuid>("SELECT snapshot_id FROM evaluation_generation_snapshots WHERE system_id=$1 AND generation=2").bind(system.id).fetch_one(&pool).await.unwrap(),second);
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<Uuid>>(
+                "SELECT evaluation_snapshot_id FROM pending_system_deployments WHERE id=$1"
+            )
+            .bind(request)
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            Some(second)
+        );
+        assert!(
+            select_generation_snapshot(&pool, system.id, 1)
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn review_ingestion_refuses_newer_incomplete_or_mismatched_request(pool: PgPool) {
+        for (case, status, wrong) in [
+            (0, "pending", false),
+            (1, "succeeded", false),
+            (2, "pending", true),
+            (3, "succeeded", true),
+        ] {
+            let suffix = Uuid::new_v4().simple().to_string();
+            let repo = format!("https://example.test/newest-{suffix}.git");
+            let flake = insert_flake(&pool, &suffix, &repo, "main", "cf_systems_only")
+                .await
+                .unwrap();
+            let system = insert_test_system(&pool, flake.id, &suffix).await;
+            let commit = insert_test_commit(&pool, &repo, &format!("{suffix}12345678")).await;
+            let drv = insert_derivation(&pool, Some(&commit), "host", "nixos")
+                .await
+                .unwrap();
+            let output = format!("/nix/store/{suffix}-same");
+            sqlx::query("UPDATE derivations SET store_path=$2,expected_store_path=$2 WHERE id=$1")
+                .bind(drv.id)
+                .bind(&output)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let artifact = persist_test_snapshot(&pool, &commit, "A").await;
+            let scan:Uuid=sqlx::query_scalar("INSERT INTO cve_scans(derivation_id,scanner_name,status) VALUES ($1,'review','in_progress') RETURNING id").bind(drv.id).fetch_one(&pool).await.unwrap();
+            sqlx::query("UPDATE cve_scans SET status='completed',completed_at=NOW(),evidence_schema_version=1 WHERE id=$1").bind(scan).execute(&pool).await.unwrap();
+            let older:Uuid=sqlx::query_scalar("INSERT INTO pending_system_deployments(system_id,target_store_path,requested_commit_id,requested_derivation_id,evaluation_snapshot_id,status,source,issued_at) VALUES ($1,$2,$3,$4,$5,'succeeded','A',NOW()-INTERVAL '2 minutes') RETURNING id")
+                .bind(system.id).bind(&output).bind(commit.id).bind(drv.id).bind(artifact).fetch_one(&pool).await.unwrap();
+            let other = insert_derivation(&pool, Some(&commit), "other", "nixos")
+                .await
+                .unwrap();
+            sqlx::query("UPDATE derivations SET store_path=$2,expected_store_path=$2 WHERE id=$1")
+                .bind(other.id)
+                .bind(&output)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("INSERT INTO pending_system_deployments(system_id,target_store_path,requested_commit_id,requested_derivation_id,evaluation_snapshot_id,status,source,issued_at) VALUES ($1,$2,$3,$4,$5,$6,'B',NOW()-INTERVAL '1 minute')")
+                .bind(system.id).bind(&output).bind(commit.id).bind(if wrong {other.id}else{drv.id}).bind(wrong.then_some(artifact)).bind(status).execute(&pool).await.unwrap();
+            let mut tx = pool.begin().await.unwrap();
+            let observed:DateTime<Utc>=sqlx::query_scalar("INSERT INTO system_states(hostname,change_reason,generation,store_path,generation_matches_current_store_path) VALUES ($1,'state_delta',$2,$3,true) RETURNING timestamp")
+                .bind(&system.hostname).bind(case+1).bind(&output).fetch_one(&mut *tx).await.unwrap();
+            assert!(
+                !retain_observed_generation_snapshot_tx(
+                    &mut tx,
+                    &system.hostname,
+                    Some(system.id),
+                    Some(case + 1),
+                    Some(&output),
+                    observed
+                )
+                .await
+                .unwrap(),
+                "newest {status} incomplete/mismatched B must block A"
+            );
+            assert!(
+                !reconcile_current_generation_retention_tx(&mut tx, system.id)
+                    .await
+                    .unwrap()
+            );
+            assert!(
+                !reconcile_external_observed_generation_tx(&mut tx, system.id)
+                    .await
+                    .unwrap(),
+                "CF request B cannot be relabeled as an external activation of A"
+            );
+            assert_eq!(
+                retain_bound_deployment_observations_tx(&mut tx, older)
+                    .await
+                    .unwrap(),
+                0
+            );
+            tx.commit().await.unwrap();
+            assert!(
+                select_generation_snapshot(&pool, system.id, case + 1)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn ingestion_wrapper_refuses_newer_failed_or_superseded_same_path(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let repo = format!("https://example.test/ingestion-negative-{suffix}.git");
+        let flake = insert_flake(&pool, &suffix, &repo, "main", "cf_systems_only")
+            .await
+            .unwrap();
+        let commit = insert_test_commit(&pool, &repo, &"a".repeat(40)).await;
+        let system = insert_test_system(&pool, flake.id, &suffix).await;
+        let drv = insert_derivation(&pool, Some(&commit), "host", "nixos")
+            .await
+            .unwrap();
+        let output = format!("/nix/store/{suffix}-output");
+        sqlx::query("UPDATE derivations SET store_path=$2,expected_store_path=$2 WHERE id=$1")
+            .bind(drv.id)
+            .bind(&output)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let snapshot = persist_test_snapshot(&pool, &commit, "legacy").await;
+        sqlx::query("INSERT INTO pending_system_deployments(system_id,target_store_path,requested_commit_id,requested_derivation_id,evaluation_snapshot_id,status,source,issued_at) VALUES ($1,$2,$3,$4,$5,'succeeded','older',NOW()-INTERVAL '2 minutes')")
+            .bind(system.id).bind(&output).bind(commit.id).bind(drv.id).bind(snapshot).execute(&pool).await.unwrap();
+        let newer: Uuid=sqlx::query_scalar("INSERT INTO pending_system_deployments(system_id,target_store_path,requested_commit_id,requested_derivation_id,status,source,issued_at,completed_at) VALUES ($1,$2,$3,$4,'failed','newer',NOW()-INTERVAL '1 minute',NOW()) RETURNING id")
+            .bind(system.id).bind(&output).bind(commit.id).bind(drv.id).fetch_one(&pool).await.unwrap();
+        for (generation, status) in [(1, "failed"), (2, "superseded")] {
+            sqlx::query("UPDATE pending_system_deployments SET status=$2 WHERE id=$1")
+                .bind(newer)
+                .bind(status)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let mut tx = pool.begin().await.unwrap();
+            let observed: DateTime<Utc>=sqlx::query_scalar("INSERT INTO system_states(hostname,change_reason,store_path,generation,generation_matches_current_store_path) VALUES ($1,'state_delta',$2,$3,true) RETURNING timestamp")
+                .bind(&system.hostname).bind(&output).bind(generation).fetch_one(&mut *tx).await.unwrap();
+            assert!(
+                !retain_observed_generation_snapshot_tx(
+                    &mut tx,
+                    &system.hostname,
+                    Some(system.id),
+                    Some(generation),
+                    Some(&output),
+                    observed
+                )
+                .await
+                .unwrap(),
+                "ingestion fell back through newer {status} request"
+            );
+            tx.commit().await.unwrap();
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn native_identity_producer_binding_retention_rollback_and_config_unavailability(
+        pool: PgPool,
+    ) {
+        use crate::models::evaluate_with_policies::{
+            EvaluationPlan, SuccessfulSystemResult, finalize_evaluation_attempt,
+        };
+        use crate::queries::systems::{
+            resolve_retained_generation_deployment_target,
+            update_system_desired_target_with_identity,
+        };
+        let (system, commit, drv, snapshot) = native_identity_fixture(&pool).await;
+        let output: String =
+            sqlx::query_scalar("SELECT expected_store_path FROM derivations WHERE id=$1")
+                .bind(drv)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let drv_path: String =
+            sqlx::query_scalar("SELECT derivation_path FROM derivations WHERE id=$1")
+                .bind(drv)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let plan = EvaluationPlan {
+            results: vec![],
+            policy_checks: vec![],
+            successful_systems: vec![SuccessfulSystemResult {
+                system_name: "host".into(),
+                derivation_target: "native#nixosConfigurations.host".into(),
+                drv_path,
+                expected_store_path: Some(output.clone()),
+                cf_agent_enabled: Some(true),
+                build_eligible: true,
+            }],
+            confirmed_failures: vec![],
+            evaluation_snapshots: std::collections::HashMap::new(),
+            snapshot_capture_failures: std::collections::HashMap::from([(
+                "host".into(),
+                "Config inventory was not captured".into(),
+            )]),
+            flake_output_snapshot: None,
+            had_system_eval_errors: false,
+            force_build_job_insert_failure: false,
+        };
+        finalize_evaluation_attempt(&pool, commit.id, 1, &plan)
+            .await
+            .unwrap();
+        assert_eq!(sqlx::query_scalar::<_,Uuid>("SELECT current_snapshot_id FROM evaluation_snapshot_selections WHERE commit_id=$1 AND configuration_name='host'").bind(commit.id).fetch_one(&pool).await.unwrap(),snapshot);
+        sqlx::query("UPDATE derivations SET store_path=expected_store_path WHERE id=$1")
+            .bind(drv)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO cache_push_jobs(derivation_id,status,completed_at,cache_destination,store_path) VALUES ($1,'completed',NOW(),'native-identity-test',$2)")
+            .bind(drv).bind(&output).execute(&pool).await.unwrap();
+        update_system_desired_target_with_identity(
+            &pool,
+            system.id,
+            &commit.git_commit_hash,
+            "native-identity-test",
+            "native-identity-test",
+        )
+        .await
+        .unwrap();
+        let bound: Option<Uuid> = sqlx::query_scalar("SELECT evaluation_snapshot_id FROM pending_system_deployments WHERE system_id=$1 ORDER BY issued_at DESC LIMIT 1")
+            .bind(system.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(bound, Some(snapshot));
+        let mut tx = pool.begin().await.unwrap();
+        let observed: DateTime<Utc> = sqlx::query_scalar("INSERT INTO system_states(hostname,change_reason,generation,store_path,generation_matches_current_store_path) VALUES ($1,'state_delta',1,$2,true) RETURNING timestamp")
+            .bind(&system.hostname).bind(&output).fetch_one(&mut *tx).await.unwrap();
+        assert!(
+            retain_observed_generation_snapshot_tx(
+                &mut tx,
+                &system.hostname,
+                Some(system.id),
+                Some(1),
+                Some(&output),
+                observed
+            )
+            .await
+            .unwrap()
+        );
+        tx.commit().await.unwrap();
+        let target = resolve_retained_generation_deployment_target(
+            &pool,
+            system.id,
+            None,
+            Some(1),
+            Some(&output),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(target.evaluation_snapshot_id, snapshot);
+        assert_eq!(target.derivation_id, drv);
+        let generations = crate::queries::system_states::fetch_system_generations(&pool, system.id)
+            .await
+            .unwrap();
+        assert!(generations[0].rollback_eligible);
+        assert!(
+            resolve_retained_generation_deployment_target(
+                &pool,
+                Uuid::new_v4(),
+                None,
+                Some(1),
+                Some(&output)
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            resolve_retained_generation_deployment_target(
+                &pool,
+                system.id,
+                None,
+                None,
+                Some(&output)
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        let selected = select_generation_snapshot(&pool, system.id, 1)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(selected.lifecycle, SnapshotLifecycle::Unavailable);
+        assert!(selected.baseline_id.is_none());
+        let artifact_before: Value =
+            sqlx::query_scalar("SELECT to_jsonb(s) FROM evaluation_snapshots s WHERE id=$1")
+                .bind(snapshot)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let page = query_options_page(
+            &pool,
+            system.id,
+            &selected,
+            None,
+            "",
+            EvaluatedOptionFilter::Changed,
+            10,
+            0,
+        )
+        .await
+        .unwrap();
+        assert_eq!(page.lifecycle, SnapshotLifecycle::Unavailable);
+        assert_eq!(
+            page.option_inventory_state,
+            OptionInventoryState::Unavailable
+        );
+        assert!(!page.comparison_available);
+        assert!(page.options.is_empty());
+        assert!(matches!(
+            get_config_summary_v2(&pool, system.id, &commit.git_commit_hash)
+                .await
+                .unwrap(),
+            ConfigSummaryQueryV2::NoSnapshot
+        ));
+        assert_eq!(
+            artifact_before,
+            sqlx::query_scalar::<_, Value>(
+                "SELECT to_jsonb(s) FROM evaluation_snapshots s WHERE id=$1"
+            )
+            .bind(snapshot)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        );
+        assert!(!snapshot_is_usable(&pool, snapshot).await.unwrap());
+        // Finalization's missing-inventory guard is attempt-exact.
+        let mut tx = pool.begin().await.unwrap();
+        assert!(
+            selected_native_deployment_identity_tx(&mut tx, commit.id, "host", 1)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !selected_native_deployment_identity_tx(&mut tx, commit.id, "host", 2)
+                .await
+                .unwrap()
+        );
+        tx.rollback().await.unwrap();
+        persist_test_snapshot(&pool, &commit, "replacement").await;
+        let retained =
+            resolve_retained_generation_deployment_target(&pool, system.id, None, Some(1), None)
+                .await
+                .unwrap()
+                .unwrap();
+        assert_eq!(retained.evaluation_snapshot_id, snapshot);
+        assert!(sqlx::query("UPDATE evaluation_snapshots SET deployment_identity=deployment_identity || '{\"attempt_number\":2}'::jsonb WHERE id=$1").bind(snapshot).execute(&pool).await.is_err());
+        assert!(
+            sqlx::query(
+                "UPDATE evaluation_generation_snapshots SET snapshot_id=$2 WHERE system_id=$1"
+            )
+            .bind(system.id)
+            .bind(Uuid::new_v4())
+            .execute(&pool)
+            .await
+            .is_err()
+        );
+        let gc = reclaim_orphaned_snapshot_content(&pool).await.unwrap();
+        assert_eq!(gc.deployment_binding_rows, 0);
+        assert!(
+            sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM evaluation_snapshots WHERE id=$1)"
+            )
+            .bind(snapshot)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn native_identity_excluded_incomplete_and_mock_producers_mint_no_authority(
+        pool: PgPool,
+    ) {
+        use crate::models::deployment_policies::PolicyCheckResult;
+        use crate::models::evaluate_with_policies::{
+            SuccessfulSystemResult, persist_evaluated_system,
+        };
+        use crate::queries::evaluation_inventory::InventoryExecutionMode;
+        for (case, eligible, output, mode) in [
+            (
+                2,
+                false,
+                Some("/nix/store/excluded"),
+                InventoryExecutionMode::Native,
+            ),
+            (3, true, None, InventoryExecutionMode::Native),
+            (
+                4,
+                true,
+                Some("/nix/store/mock"),
+                InventoryExecutionMode::Mock,
+            ),
+        ] {
+            let (_, commit, _) = native_identity_context(&pool, mode).await;
+            let result = SuccessfulSystemResult {
+                system_name: "host".into(),
+                derivation_target: "native#nixosConfigurations.host".into(),
+                drv_path: format!("/nix/store/native-negative-{case}.drv"),
+                expected_store_path: output.map(str::to_string),
+                cf_agent_enabled: Some(true),
+                build_eligible: eligible,
+            };
+            let check = PolicyCheckResult::from_assigned(
+                "host".into(),
+                &serde_json::json!({"cfAgentEnabled":true}),
+                &[],
+            )
+            .unwrap();
+            let persisted =
+                persist_evaluated_system(&pool, commit.id, 1, &result, &check, &[]).await;
+            if matches!(mode, InventoryExecutionMode::Mock) {
+                assert!(persisted.is_err());
+            } else {
+                persisted.unwrap();
+            }
+            assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM evaluation_snapshots WHERE commit_id=$1 AND schema_version=3").bind(commit.id).fetch_one(&pool).await.unwrap(),0);
+            assert!(
+                !sqlx::query_scalar::<_, bool>(
+                    "SELECT EXISTS(SELECT 1 FROM evaluation_snapshot_selections WHERE commit_id=$1)"
+                )
+                .bind(commit.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            );
+            // The evaluator serializes active commits globally. End this
+            // isolated case before claiming the next fresh Native/Mock owner.
+            sqlx::query("UPDATE evaluation_attempts SET status='failed' WHERE commit_id=$1")
+                .bind(commit.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("UPDATE commits SET evaluation_status='failed' WHERE id=$1")
+                .bind(commit.id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
+
+    #[sqlx::test(migrations = false)]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn native_identity_upgrade_preserves_legacy_rows_without_recertification(pool: PgPool) {
+        let all = sqlx::migrate!("./migrations");
+        let prefix = sqlx::migrate::Migrator {
+            migrations: std::borrow::Cow::Owned(
+                all.iter().filter(|m| m.version < 310).cloned().collect(),
+            ),
+            ..sqlx::migrate::Migrator::DEFAULT
+        };
+        prefix.run(&pool).await.unwrap();
+        let flake: i32=sqlx::query_scalar("INSERT INTO flakes(name,repo_url) VALUES ('upgrade','https://example.test/upgrade.git') RETURNING id").fetch_one(&pool).await.unwrap();
+        let commit: i32=sqlx::query_scalar("INSERT INTO commits(flake_id,git_commit_hash,commit_timestamp) VALUES ($1,$2,NOW()) RETURNING id").bind(flake).bind("a".repeat(40)).fetch_one(&pool).await.unwrap();
+        let legacy_commit = get_commit_by_hash(&pool, &"a".repeat(40)).await.unwrap();
+        persist_test_snapshot(&pool, &legacy_commit, "populated legacy V1").await;
+        let carrier = insert_derivation(&pool, Some(&legacy_commit), "certified-v2", "nixos")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE derivations SET derivation_path='/nix/store/carrier.drv' WHERE id=$1")
+            .bind(carrier.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        persist_config_artifact_v2_tx(
+            &mut tx,
+            commit,
+            "certified-v2",
+            v2_artifact(vec![v2_option(
+                &["services", "legacy"],
+                "populated legacy V2",
+            )]),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM evaluation_snapshots WHERE schema_version=integrity_version AND option_count>0").fetch_one(&pool).await.unwrap(),2);
+        for (name, version, lifecycle) in [
+            ("certified", 1, "available"),
+            ("uncertified", 1, "available"),
+            ("inspector", 2, "unavailable"),
+        ] {
+            let id: Uuid=sqlx::query_scalar("INSERT INTO evaluation_snapshots(commit_id,configuration_name,schema_version,lifecycle) VALUES ($1,$2,$3,$4) RETURNING id")
+                .bind(commit).bind(name).bind(version).bind(lifecycle).fetch_one(&pool).await.unwrap();
+            if name == "certified" {
+                sqlx::query("UPDATE evaluation_snapshots SET integrity_version=1 WHERE id=$1")
+                    .bind(id)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+            }
+            let selector = if version == 1 {
+                "INSERT INTO evaluation_snapshot_selections(commit_id,configuration_name,current_snapshot_id) VALUES ($1,$2,$3)"
+            } else {
+                "INSERT INTO config_snapshot_selections(commit_id,configuration_name,current_snapshot_id) VALUES ($1,$2,$3)"
+            };
+            sqlx::query(selector)
+                .bind(commit)
+                .bind(name)
+                .bind(id)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+        let before: Value = sqlx::query_scalar(
+            "SELECT jsonb_agg(to_jsonb(s) ORDER BY id) FROM evaluation_snapshots s",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let selectors: Vec<Uuid>=sqlx::query_scalar("SELECT current_snapshot_id FROM evaluation_snapshot_selections UNION ALL SELECT current_snapshot_id FROM config_snapshot_selections ORDER BY 1").fetch_all(&pool).await.unwrap();
+        let corpus:Value=sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(item) ORDER BY snapshot_id,option_path) FROM evaluation_snapshot_options item").fetch_one(&pool).await.unwrap();
+        let contents:Value=sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(content) ORDER BY digest) FROM evaluation_option_contents content").fetch_one(&pool).await.unwrap();
+        all.run(&pool).await.unwrap();
+        let after: Value=sqlx::query_scalar("SELECT jsonb_agg(to_jsonb(s)-'deployment_identity' ORDER BY id) FROM evaluation_snapshots s").fetch_one(&pool).await.unwrap();
+        assert_eq!(before, after);
+        assert_eq!(corpus,sqlx::query_scalar::<_,Value>("SELECT jsonb_agg(to_jsonb(item) ORDER BY snapshot_id,option_path) FROM evaluation_snapshot_options item").fetch_one(&pool).await.unwrap());
+        assert_eq!(contents,sqlx::query_scalar::<_,Value>("SELECT jsonb_agg(to_jsonb(content) ORDER BY digest) FROM evaluation_option_contents content").fetch_one(&pool).await.unwrap());
+        assert_eq!(selectors,sqlx::query_scalar::<_,Uuid>("SELECT current_snapshot_id FROM evaluation_snapshot_selections UNION ALL SELECT current_snapshot_id FROM config_snapshot_selections ORDER BY 1").fetch_all(&pool).await.unwrap());
+        assert_eq!(sqlx::query_scalar::<_,i64>("SELECT COUNT(*) FROM evaluation_snapshots WHERE schema_version=3 OR integrity_version=3 OR deployment_identity IS NOT NULL").fetch_one(&pool).await.unwrap(),0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn native_identity_certification_and_exact_live_lineage_fail_closed(pool: PgPool) {
+        let (system, commit, drv, snapshot) = native_identity_fixture(&pool).await;
+        let identity: Value =
+            sqlx::query_scalar("SELECT deployment_identity FROM evaluation_snapshots WHERE id=$1")
+                .bind(snapshot)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let mut inspector = v2_artifact(vec![v2_option(&["services", "test"], "value")]);
+        inspector.carrier_drv_path = identity["drv_path"].as_str().unwrap().into();
+        let mut tx = pool.begin().await.unwrap();
+        let v2 = persist_config_artifact_v2_tx(&mut tx, commit.id, "host", inspector)
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        assert!(
+            !sqlx::query_scalar::<_, bool>("SELECT evaluation_deployment_artifact_matches($1,$2)")
+                .bind(v2)
+                .bind(drv)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        );
+        for (field, value) in [
+            ("attempt_number", serde_json::json!(2)),
+            ("attempt_id", serde_json::json!(Uuid::new_v4())),
+            ("commit_sha", serde_json::json!("f".repeat(40))),
+            ("derivation_id", serde_json::json!(drv + 1000)),
+            ("drv_path", serde_json::json!("/nix/store/different.drv")),
+            (
+                "expected_store_path",
+                serde_json::json!("/nix/store/different"),
+            ),
+            ("unexpected", serde_json::json!(true)),
+        ] {
+            let mut malformed = identity.clone();
+            malformed[field] = value;
+            let mut tx = pool.begin().await.unwrap();
+            let id: Uuid=sqlx::query_scalar("INSERT INTO evaluation_snapshots(commit_id,configuration_name,schema_version,lifecycle,deployment_identity) VALUES ($1,'host',3,'available',$2) RETURNING id")
+                .bind(commit.id).bind(malformed).fetch_one(&mut *tx).await.unwrap();
+            assert!(
+                !sqlx::query_scalar::<_, bool>(
+                    "SELECT evaluation_deployment_artifact_matches($1,$2)"
+                )
+                .bind(id)
+                .bind(drv)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap()
+            );
+            assert!(
+                sqlx::query("UPDATE evaluation_snapshots SET integrity_version=3 WHERE id=$1")
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await
+                    .is_err(),
+                "accepted malformed {field}"
+            );
+            tx.rollback().await.unwrap();
+        }
+        // Exact matching rejects another commit/derivation even for the same output.
+        let other_commit = insert_test_commit(
+            &pool,
+            &format!(
+                "https://example.test/native-identity-{}.git",
+                system.hostname.trim_start_matches("host-")
+            ),
+            &"e".repeat(40),
+        )
+        .await;
+        let other = insert_derivation(&pool, Some(&other_commit), "host", "nixos")
+            .await
+            .unwrap();
+        sqlx::query("UPDATE derivations SET expected_store_path=$2 WHERE id=$1")
+            .bind(other.id)
+            .bind(identity["expected_store_path"].as_str())
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            !sqlx::query_scalar::<_, bool>("SELECT evaluation_deployment_artifact_matches($1,$2)")
+                .bind(snapshot)
+                .bind(other.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        );
+        // A structurally valid but uncertified manifest is never authority.
+        // Once the owner fails, its identical historical identity cannot be
+        // certified by a later caller.
+        let mut failed_tx = pool.begin().await.unwrap();
+        let uncertified: Uuid=sqlx::query_scalar("INSERT INTO evaluation_snapshots(commit_id,configuration_name,schema_version,lifecycle,deployment_identity) VALUES ($1,'host',3,'available',$2) RETURNING id")
+            .bind(commit.id).bind(&identity).fetch_one(&mut *failed_tx).await.unwrap();
+        assert!(
+            !sqlx::query_scalar::<_, bool>("SELECT evaluation_deployment_artifact_matches($1,$2)")
+                .bind(uncertified)
+                .bind(drv)
+                .fetch_one(&mut *failed_tx)
+                .await
+                .unwrap()
+        );
+        sqlx::query("UPDATE evaluation_attempts SET status='failed' WHERE commit_id=$1")
+            .bind(commit.id)
+            .execute(&mut *failed_tx)
+            .await
+            .unwrap();
+        assert!(
+            sqlx::query("UPDATE evaluation_snapshots SET integrity_version=3 WHERE id=$1")
+                .bind(uncertified)
+                .execute(&mut *failed_tx)
+                .await
+                .is_err()
+        );
+        failed_tx.rollback().await.unwrap();
+        sqlx::query("UPDATE commits SET evaluation_attempt_count=2 WHERE id=$1")
+            .bind(commit.id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            !sqlx::query_scalar::<_, bool>(
+                "SELECT evaluation_deployment_artifact_matches($1,$2,true)"
+            )
+            .bind(snapshot)
+            .bind(drv)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        );
+        assert!(
+            sqlx::query_scalar::<_, bool>("SELECT evaluation_deployment_artifact_matches($1,$2)")
+                .bind(snapshot)
+                .bind(drv)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        );
+        assert!(sqlx::query("INSERT INTO config_snapshot_selections(commit_id,configuration_name,current_snapshot_id) VALUES ($1,'host',$2)").bind(commit.id).bind(snapshot).execute(&pool).await.is_err());
+        persist_test_snapshot(&pool, &commit, "replacement").await;
+        let gc = reclaim_orphaned_snapshot_content(&pool).await.unwrap();
+        assert!(gc.artifact_rows >= 1);
+        assert!(
+            !sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM evaluation_snapshots WHERE id=$1)"
+            )
+            .bind(snapshot)
+            .fetch_one(&pool)
+            .await
+            .unwrap()
+        );
+    }
+
     #[sqlx::test]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
     async fn snapshot_gc_reclaims_unreferenced_exact_cve_scan_with_parent_derivation(pool: PgPool) {
@@ -8562,6 +9646,23 @@ mod tests {
             .commit()
             .await
             .expect("direct no-fallback transaction should commit");
+        let mut ingestion_tx = pool.begin().await.unwrap();
+        sqlx::query("UPDATE system_states SET generation_matches_current_store_path=true WHERE hostname=$1 AND generation=5")
+            .bind(&hostname).execute(&mut *ingestion_tx).await.unwrap();
+        assert!(
+            !retain_observed_generation_snapshot_tx(
+                &mut ingestion_tx,
+                &hostname,
+                Some(system.id),
+                Some(5),
+                Some(&store_path),
+                blocked_observed_at,
+            )
+            .await
+            .unwrap(),
+            "ingestion repair must not bypass the newest superseded request"
+        );
+        ingestion_tx.commit().await.unwrap();
         assert!(
             select_generation_snapshot(&pool, system.id, 6)
                 .await

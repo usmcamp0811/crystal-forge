@@ -5,7 +5,7 @@ status: Review
 assignee:
   - claude-opus-5-5
 created_date: '2026-10-17 17:21'
-updated_date: '2026-10-17 18:37'
+updated_date: '2026-10-24 23:10'
 labels:
   - testing
   - build-blocker
@@ -75,4 +75,6 @@ One non-gating diagnostic attempt, `nix develop -c bash -c 'SQLX_OFFLINE=true ca
 MR !336 is open from TASK-491-isolate-fork-fixture to dev. Commit af39284bdf16d56402f01a64c916f17948e43b02 contains the test-only isolation fix. Task moved to Review after both acceptance criteria passed. Removing the TASK-491 lock for review; no merge or deployment is authorized or performed.
 
 Command-record correction: the pre-fix targeted command actually executed was `nix develop -c bash -c 'SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib niks3_ > /tmp/opencode/task491-targeted-before.log 2>&1; printf "exit=%s\\n" "$?"'` (exit 0, 87 passed, 31 ignored). An earlier appended summary placed `SQLX_OFFLINE=true` before `nix develop`; that spelling was not the literal executed command. MR !336 is open at https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/336; GitLab reported its head pipeline pending at handoff. TASK-491 lock removed for Review. No merge or deploy.
+
+Merge reconciliation clarification: LOCK retired for Review. Earlier LOCK text records historical implementation ownership, not an active lock. Preserve the qualified package and focused test results and the separately recorded non-gating database-less diagnostic failure; this record does not establish integration-owner success or merged completion.
 <!-- SECTION:NOTES:END -->

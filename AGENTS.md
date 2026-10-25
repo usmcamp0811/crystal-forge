@@ -58,6 +58,45 @@ Preserve these boundaries:
 
 Avoid arbitrary abstractions. Introduce a trait, shared component, or new layer only when it expresses a real boundary, enables needed testing, or matches an established repository pattern. Do not refactor solely to satisfy a line-count target.
 
+## Simplicity and minimal implementation
+
+Simplicity is a primary design requirement. Agents MUST implement the least complex complete solution that meets the acceptance criteria. Correctness, security, data integrity, and required behavior take priority. Unnecessary complexity is a defect, even when the implementation works.
+
+### Implementation rules
+
+- **Prefer the simplest working solution.** Reuse existing code, tools, patterns, and infrastructure before introducing new mechanisms.
+- **Minimize changes.** Change only what the task requires. Do not refactor unrelated code or expand the task to solve hypothetical problems.
+- **Do not overengineer.** Do not add frameworks, abstraction layers, wrappers, factories, adapters, state machines, orchestration, or configuration options without a concrete requirement.
+- **Do not design for hypothetical futures.** Solve the current problem. Do not add extensibility, compatibility paths, fallback mechanisms, or generalized infrastructure for scenarios that the task does not require.
+- **Prefer deletion over addition.** Remove obsolete or redundant code when it is safe and within scope. Do not preserve complexity only because it already exists.
+- **Use native capabilities.** Prefer existing Rust, Nix, SQL, and repository mechanisms over custom implementations or new dependencies.
+- **Keep verification proportional.** Test observable behavior, contracts, and meaningful failure cases. Do not create tests of tests, checks of checks, redundant verification layers, or custom test infrastructure when existing checks provide sufficient evidence.
+- **Avoid speculative defensive code.** Add retries, recovery paths, synchronization, caching, and fallback behavior only when a requirement or demonstrated failure justifies them.
+- **Do not redesign for a local fix.** If a small change solves the problem, do not replace it with a generalized architecture.
+- **Challenge existing complexity.** When a task exposes unnecessary machinery, simplify it within the authorized scope instead of extending it.
+- **Stop when the task is complete.** After the acceptance criteria are met and required verification passes, do not invent more improvements, edge cases, infrastructure, or follow-up work.
+
+### Complexity justification
+
+Before introducing a significant abstraction, dependency, service, verification layer, or architectural component, an agent MUST be able to answer:
+
+1. Which acceptance criterion or demonstrated failure requires this complexity?
+2. Why is a simpler implementation insufficient?
+3. Can existing repository mechanisms solve the problem?
+4. What would fail if this additional component did not exist?
+
+If there is no concrete justification, the agent MUST use the simpler approach.
+
+Do not create a formal complexity assessment, scoring framework, approval process, or additional document to enforce these questions. Apply them directly during implementation and review.
+
+### Review standard
+
+Reviewers MUST treat unnecessary complexity as a maintainability defect. A technically correct implementation can still require revision when a simpler solution meets the same requirements with less code, fewer dependencies, fewer moving parts, and less maintenance.
+
+Minimal does not mean incomplete. Do not remove necessary correctness checks, security controls, required documentation, or regression coverage in the name of simplicity.
+
+**The objective is the least complex complete solution, not the most comprehensive system an agent can imagine.**
+
 ## Backlog workflow
 
 Use the Backlog.md MCP integration when available; otherwise use the repository-provided Backlog CLI from `nix develop`. See [docs/agent/backlog-workflow.md](docs/agent/backlog-workflow.md).
@@ -293,7 +332,9 @@ For changes that affect `docs/knowledge/`, run the repository-owned
 documentation validation through Nix:
 
 ```bash
-nix build .#checks.x86_64-linux.okf-knowledge -L
+nix build .#okf-knowledge -L
+```
+
 #### Technical writing standard
 
 Technical prose MUST follow ASD-STE100 principles to the extent that they are compatible with exact software terminology.
@@ -352,7 +393,7 @@ If the repository already provides documentation lints or rustdoc checks, run th
 - Extract nontrivial state transitions and test them independently when practical.
 - Keep client DTOs aligned with the server contract, but do not duplicate server types when the UI intentionally needs a different representation.
 - Preserve loading, empty, error, authorization, and stale-data behavior when changing views.
-- A user-visible UI change must be exercised by the authoritative `web-ui` check and represented by an MR screenshot. Add a behavioral assertion when practical.
+- A user-visible UI change must be exercised by its owning integration scenario and represented by an MR screenshot. See "Integration test maintenance" below.
 
 ### Database and SQLx
 
@@ -367,9 +408,87 @@ See [docs/agent/database-safety.md](docs/agent/database-safety.md).
 
 Choose the smallest set of commands that proves the acceptance criteria and protects affected interfaces. Prefer targeted checks during implementation and broader checks before review when risk warrants them.
 
-The persistent preview is the early UI feedback loop. Do not run the full `web-ui` VM suite or `nix flake check` merely to start or refresh it. Use focused checks during implementation. Required authoritative browser checks and MR screenshots remain final-review requirements; exact-head CI may provide that evidence when the task permits it. A preview screenshot is not evidence that the authoritative check passed.
+The persistent preview is the early UI feedback loop. Do not run a full integration owner or `nix flake check` merely to start or refresh it. Use focused checks during implementation. Required owning integration results and MR screenshots remain final-review requirements; exact-head CI may provide that evidence when the task permits it. A preview screenshot is not evidence that an integration check passed.
 
-Use the exact package manifests and flake attributes applicable to the change. The baseline command matrix is in [docs/agent/verification.md](docs/agent/verification.md).
+Use the exact package manifests and flake attributes applicable to the change. The baseline command matrix is in [docs/agents/verification.md](docs/agents/verification.md).
+
+### Integration test maintenance
+
+Read `docs/knowledge/testing/integration-test-contract.md` before changing
+an integration contract, browser-visible behavior, integration tests,
+fixtures, or visual baselines. Owners, scenarios, status, and legacy
+retirement are in `docs/knowledge/testing/integration-coverage-map.md`.
+
+The integration owners are `integration-access`, `integration-delivery`,
+`integration-assurance`, and `integration-upgrade`. Extend the smallest
+existing owning scenario first. Add a scenario only for a distinct
+unproved behavior or state. A new feature, page, component, or regression
+does not authorize a new top-level flake check.
+
+Before editing acceptance expectations, record the approved requirement
+or design revision, affected consumers, owning scenario, and assertion
+disposition in the task/MR impact record. Use the approved design as the
+UI reference. Keep data meaning, identity, permissions, persistence, and
+evidence rules aligned with the accepted domain contract.
+
+Update implementation, affected contract links, fixtures, assertions,
+and approved visual targets together. Retain valid assertions; replace
+or remove obsolete assertions only with an approved requirement reason.
+Do not use current application output to approve its own expected result.
+
+Every user-visible change must be exercised by its owning integration
+check and have the required design comparison and MR images. Use focused
+local checks during implementation, then obtain results for affected
+owners at the review revision. Report failed, blocked, skipped,
+and unverified cases explicitly. A preview is not proof that a check passed.
+
+All four integration owners are currently discoverable. Their
+behavior-oriented scenarios use explicit owner-local registration. The
+`checks/integration-access/default.nix` explicitly registers scenarios; the
+normal check uses `pkgs.linkFarm` to build every registered scenario gate.
+Run a focused gate with
+`nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`;
+append `.run` to the scenario attribute for evidence only. Meaningful WIP
+checks may be discoverable without a completeness flag. Record missing
+obligations in the coverage map. Implemented integration owners run
+automatically in GitLab. TASK-490.24 explicitly
+authorizes legacy source retirement before replacement coverage is complete.
+The nine legacy suites and their manual jobs are retired; missing accepted
+obligations remain gaps. Unique lower-level assertions run in ordinary component
+builds, explicit `component-tests` CI commands, and the existing isolated
+`devScripts.state-machine-test` workflow. All fifteen public `verify-*` wrappers
+are removed; do not recreate them or add a registry or aggregation framework.
+Core-only evaluator and CA checks must not repeat in the embedded build.
+Developer tools remain package/app outputs. Use the source/command mapping in
+`docs/knowledge/testing/flake-checks.md` and `docs/agents/verification.md`.
+The current inventory is four total checks (formerly 27), not proof of
+complete accepted coverage. Final `checks.x86_64-linux` MUST contain exactly
+`integration-access`, `integration-assurance`, `integration-delivery`, and
+`integration-upgrade`, with no additional checks or placeholders. Verify the
+final names with `nix eval --json .#checks.x86_64-linux --apply builtins.attrNames`.
+
+Shared helpers live in `lib/integration-test/`. Native Snowfall checks call:
+
+```nix
+lib.crystal-forge.makeIntegrationTestHarness {
+  inherit pkgs inputs;
+}
+```
+
+An implementation packet does not automatically receive a NixOS test
+derivation. Compatible case fragments use the existing Nix, Python, and browser
+script structure; the coordinator composes them into the owning scenario and
+registers that scenario. Each separately built scenario still runs in its own
+fresh VM and database. Later cases inside one scenario MAY use real records and
+identities created by earlier cases through the receipt mechanism. Never reuse
+runtime state from another scenario derivation. Keep owner scenarios, fixtures,
+and assets beneath `checks/integration-<owner>/`. Future Delivery, Assurance,
+and Upgrade owners follow this layout; do not create placeholder `default.nix`
+files or add custom discovery.
+
+Changing the four-check inventory requires an explicit owner-approved
+decision under the integration contract. Cite an approval already present
+in the active task; do not ask for the same approval again.
 
 Run `nix flake check --keep-going` when the task requires it or the change affects flakes, NixOS modules, development shells, packaging, CI/release behavior, or cross-package interfaces that targeted checks cannot adequately prove. Do not run it mechanically for every edit.
 
@@ -418,4 +537,3 @@ Be precise and concise. Distinguish among:
 For browser-visible work, include `Preview: ready | rebuilding | blocked | stopped` in meaningful progress reports and handoff. When ready, include the URL and review path. State when the browser still shows the last successful build. Preview health does not change the backlog task status or establish merge readiness.
 
 Never fabricate command output, test results, task state, commits, pushes, MR state, or screenshots.
-```

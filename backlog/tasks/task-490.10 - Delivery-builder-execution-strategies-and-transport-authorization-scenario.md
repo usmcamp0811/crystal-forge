@@ -4,7 +4,7 @@ title: 'Delivery: builder execution strategies and transport authorization scena
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:37'
-updated_date: '2026-10-18 03:26'
+updated_date: '2026-10-24 23:07'
 labels:
   - testing
   - integration
@@ -46,4 +46,6 @@ Requires TASK-490.7 real builder roles, production code dependencies, accepted a
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction: native owner-local paths, shared lib/integration-test and explicit coordinator registration. Foundation commit unresolved; two existing Rust package tests block foundation; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
+
+Merge reconciliation retains source-packet transport constraints for future acceptance: SourceReEvaluateVerified uses ServerBundledArchive only; both derivation and source-archive downloads require server-issued job authorization; wrong-key or revoked-session completion is rejected without job mutation. Scheduling/cancellation and cache publication remain separately scoped. Preserve canonical same-lifecycle fragments, independent builder identity/stores, absent-before/exact-output checks and Builds UI binding. No future criterion is completed by this metadata resolution.
 <!-- SECTION:NOTES:END -->

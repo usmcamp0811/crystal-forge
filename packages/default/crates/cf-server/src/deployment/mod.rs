@@ -280,7 +280,7 @@ impl DeploymentPolicyManager {
                    JOIN evaluation_snapshots snapshot ON snapshot.id = selection.current_snapshot_id
                    WHERE selection.commit_id = derivation.commit_id
                      AND selection.configuration_name = derivation.derivation_name
-                     AND snapshot.lifecycle = 'available' AND snapshot.integrity_version = 1
+                      AND evaluation_deployment_artifact_matches(snapshot.id, derivation.id, true)
                    LIMIT 1
                 ) selected ON TRUE
                 CROSS JOIN LATERAL (

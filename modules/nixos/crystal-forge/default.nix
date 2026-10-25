@@ -831,12 +831,15 @@ in {
         type = lib.types.bool;
         default = false;
         description = lib.mdDoc ''
-          Build in offline mode (no network access).
+          Disable substitutes, remote builders and substitution fallback during
+          Nix realization. Overrides use_substitutes and inherited acquisition
+          settings. Uses options supported by nix-store and the modern Nix CLI.
 
-          When true, Nix will not attempt to download anything. Useful
-          for air-gapped environments or testing.
-
-          **Note**: Requires all sources to be pre-fetched or in store.
+          Required sources must already be available locally. Missing inputs
+          cannot be obtained from substitutes or remote builders. This option
+          is not an OS network firewall: isolate fixed-output derivations at
+          the host boundary when a complete network prohibition is required.
+          Builder API communication and cache publication are not disabled.
         '';
       };
 
@@ -1438,7 +1441,13 @@ in {
       deployment_poll_interval = lib.mkOption {
         type = lib.types.str;
         default = "15m";
-        description = "Interval between deployment polling checks";
+        description = lib.mdDoc ''
+          Interval between deployment polling checks, as a human duration such
+          as "15m" or "1h 30m". The duration must resolve to nonnegative whole
+          seconds. The agent also accepts integer seconds in TOML for deployed
+          configuration compatibility and serializes this interval as integer
+          seconds. Invalid, overflowing, and fractional-second values are rejected.
+        '';
       };
       post_agent_start_deployment_delay = lib.mkOption {
         type = lib.types.ints.unsigned;
@@ -2227,6 +2236,12 @@ in {
 
     users.groups.crystal-forge = {};
 
+    # SECURITY: Manage only these named directories, never their descendants.
+    # Credentials can have caller-managed ownership and restrictive modes,
+    # including secret-manager symlinks. Recursive Z/chmod/chown would expose
+    # private files and make OpenSSH reject otherwise valid cache identities.
+    # The generated config and default generated keys have explicit file
+    # lifecycles in makeConfigScript; caller-provided keys are not normalized.
     systemd.tmpfiles.rules = [
       "d /var/lib/crystal-forge 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.cache 0755 crystal-forge crystal-forge -"
@@ -2242,7 +2257,6 @@ in {
       "d /var/lib/crystal-forge/.local 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.local/share 0755 crystal-forge crystal-forge -"
       "d /var/cache/crystal-forge/gc-roots 0755 crystal-forge crystal-forge -" # <-- ADD THIS
-      "Z /var/lib/crystal-forge/ 0755 crystal-forge crystal-forge -"
     ] ++ lib.optional cfg.server.enable
       "d ${toString cfg.build.source_archive_root} 0750 crystal-forge crystal-forge -";
 
@@ -2692,12 +2706,8 @@ in {
         ${configScriptBuilder}
         mkdir -p /var/lib/crystal-forge/.config/attic
 
-        # Ensure proper ownership - do this AFTER creating all directories
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.cache
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config
-        # Ensure proper permissions
-        chmod -R 755 /var/lib/crystal-forge/.cache
-        chmod -R 755 /var/lib/crystal-forge/.config
+        # tmpfiles owns directory setup. Preserve descendant credential modes
+        # and ownership, including files managed by an external secret manager.
 
         # Source the attic environment if it exists
         if [ -f ${cfg.env-file} ]; then
@@ -2926,6 +2936,9 @@ in {
         {
           # Core runtime
           RUST_LOG = cfg.log_level;
+          # Keep this in both supported modes: cf-config uses it when loading
+          # `server.auth_mode`, and several auth route gates read it directly.
+          AUTH_MODE = cfg.server.auth_mode;
           TZDIR = "${pkgs.tzdata}/share/zoneinfo";
           LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";
 
@@ -2953,7 +2966,6 @@ in {
           NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
         }
         // lib.optionalAttrs (cfg.server.auth_mode == "oidc") ({
-            AUTH_MODE = "oidc";
             CRYSTAL_FORGE_OIDC_ISSUER_URL = cfg.server.oidc.issuerUrl;
             CRYSTAL_FORGE_OIDC_CLIENT_ID = cfg.server.oidc.clientId;
             CRYSTAL_FORGE_OIDC_REDIRECT_URI = cfg.server.oidc.redirectUri;
@@ -2991,10 +3003,7 @@ in {
         mkdir -p /run/crystal-forge
         ${configScriptServer}
         mkdir -p /var/lib/crystal-forge/.config/attic
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.cache
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config
-        chmod -R 755 /var/lib/crystal-forge/.cache
-        chmod -R 755 /var/lib/crystal-forge/.config
+        # tmpfiles owns directory setup; do not rewrite descendant credentials.
       '';
 
       serviceConfig = {

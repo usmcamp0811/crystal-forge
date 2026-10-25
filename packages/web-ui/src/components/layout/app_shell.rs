@@ -433,6 +433,13 @@ pub fn AppShell() -> Element {
             return;
         }
 
+        // Subscribe to queued edits before taking ownership. A write alone does
+        // not subscribe this effect, so an idle worker would miss later edits.
+        // Leave an empty queue untouched to avoid scheduling an idle save loop.
+        if preference_save_pending.read().is_none() {
+            return;
+        }
+
         let Some(update) = preference_save_pending.write().take() else {
             return;
         };

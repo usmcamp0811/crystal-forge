@@ -118,6 +118,36 @@ An environment is a **logical grouping** for systems:
 1. **Filtering:** See only prod systems in dashboard
 2. **RBAC:** Users can be restricted to specific environments
 
+### Optional gate assignments and save boundaries
+
+The approved `EnvironmentsView.jsx` new draft at design revision `6e4ea520`
+starts with zero optional gate policies. Create accepts that empty set. The
+mandatory CF-agent enablement check is a server-owned global invariant. It is
+not an optional environment assignment. The disabled historical
+`require_cf_agent` policy must not be selected by a default UUID or display name.
+
+The picker uses enabled, assignable records from the policy API. Before Create
+or Edit writes metadata, the UI reads that catalog again and validates every
+explicitly selected ID. A failed catalog read or a stale, disabled, missing, or
+nonassignable selection keeps the draft open and starts no metadata write.
+Validation does not silently discard selections. Edit retains the environment's
+exact existing assignment IDs until the user changes them.
+
+The server revalidates the complete requested set in the assignment transaction.
+`PATCH /api/v1/environments/:id/policies` accepts an empty set. An invalid set
+returns HTTP 400 with `validation_error` and
+`One or more selected policies are invalid`. Rejection leaves the full previous
+assignment set unchanged. This check also covers catalog changes after the UI's
+validation read.
+
+Metadata, optional gates, and compliance assignments use separate requests.
+A successful metadata POST or PATCH is already committed when a later
+assignment request fails. The UI reports that partial save and keeps the modal
+open; it does not claim that assignment rollback undid the metadata write.
+The modal closes only after all required save requests succeed. Generic
+partial-save recovery and retry-safe reconciliation remain tracked by
+TASK-440.4.
+
 ### Data Flow
 
 ```mermaid

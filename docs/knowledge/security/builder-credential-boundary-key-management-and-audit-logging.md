@@ -81,6 +81,14 @@ not log tokens, private keys, signed URLs, raw headers, or request bodies.
 - Never committed to version control
 - Rotate by generating a new keypair and updating via `PUT /api/v1/builders/:id/public-key`
 
+The NixOS module normalizes only its default generated builder key when
+`build.api_key_file` is null. Caller-provided paths retain their provisioning
+contract. Directory setup does not recursively rewrite credential files during
+activation or startup. See [Private credential permissions and upgrades](../operations/nixos-module-configuration.md#private-credential-permissions-and-upgrades)
+for the storage contract, bounded inspection and restoration of files affected
+by older recursive rules, and the separate exposure assessment. Restoring a
+mode is not proof that a key was never read.
+
 **Public Keys**:
 - Stored in database (updatable via API)
 - Used only to verify Ed25519 request signatures

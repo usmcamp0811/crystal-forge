@@ -45,6 +45,32 @@ The generation-list response exposes the retained UUID and `rollback_eligible`.
 Clients MUST offer rollback only when eligibility is true. `store_path` remains
 optional in the rollback request and does not replace retained identity.
 
+Certified schema-3 Native deployment identity and legacy certified V1 can
+authorize retention and rollback. V2 Inspector artifacts cannot authorize either
+operation. Each consumer validates the artifact type and joins the exact live
+commit, configuration, derivation row, `.drv`, and output for schema 3. New
+PRIMARY deployment bindings also require the current attempt number. Retained
+bindings use their frozen attempt identity after the selector advances. They do
+not require a historical attempt to remain active. No migration synthesizes
+authority for historical deployments.
+
+A Native certificate must exist before its deployment request is issued.
+The producer records `created_at` with `clock_timestamp()` after acquiring the
+snapshot-writer lock. Transaction-start `NOW()` cannot prove publication order.
+Native reciprocal binding requires `artifact.created_at <= request.issued_at`,
+and retention requires the same ordering before the observation. A later native
+attempt cannot certify an older unbound request or generation, even when commit,
+derivation, and output are identical. A same-attempt lost acknowledgement reuses
+the original artifact UUID. Legacy V1 retains its deployment-before-publication
+contract.
+
+All CF retention paths rank the newest same-path request before validating the
+complete immutable tuple. A newer pending or succeeded request with missing or
+mismatched lineage blocks an older certified request. Status is not identity
+proof. Repair uses the ordinary exact-request resolver. External reconciliation
+requires no same-path CF request issued before the observation; missing CF
+lineage cannot be relabeled as an external activation.
+
 Flake timeline snapshots remain attached to their commit records. A branch
 rewrite does not reinterpret an old full SHA as a new revision. Rewrite
 acceptance archives every old-lineage commit before it removes unretained
@@ -73,7 +99,10 @@ commit first. Only bounded maintenance releases an eligible terminal identity;
 an `ON DELETE` action never decides eligibility. Other commit snapshots follow
 commit timeline retention.
 
-Missing, corrupt, or schema-incompatible content is reported as unavailable.
+Missing, corrupt, or schema-incompatible Config content is reported as unavailable.
+Schema-3 deployment identity remains eligible for rollback without Config
+inventory. Config reads do not treat its zero option counter as a complete empty
+inventory and do not compare it with another generation.
 Migration and successful snapshot finalization recursively validate every
 persisted safe-value and provenance variant before setting the artifact's
 immutable integrity marker. Option references and content cannot change after

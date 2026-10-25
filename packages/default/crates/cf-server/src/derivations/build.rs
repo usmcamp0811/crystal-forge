@@ -247,7 +247,13 @@ impl Derivation {
         }
     }
 
-    /// Sign a store path recursively with streaming output
+    /// Signs the source output closure with the configured publication key.
+    ///
+    /// This does not update warm destination metadata. Publication must also
+    /// complete [`CacheConfig::signature_commands`] after transfer.
+    ///
+    /// # Errors
+    /// Returns an error if the output path is missing or source signing fails.
     pub async fn sign(&self, cache_config: &CacheConfig) -> Result<()> {
         let store_path = self
             .store_path

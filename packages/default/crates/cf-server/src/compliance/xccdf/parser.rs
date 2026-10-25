@@ -86,6 +86,16 @@ enum ParseControl {
     Abort,
 }
 
+/// Tracks only the ancestry needed to bind direct XCCDF version text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VersionContext {
+    Benchmark,
+    Rule,
+    BenchmarkVersion,
+    RuleVersion,
+    Other,
+}
+
 // ── Attribute parsing ─────────────────────────────────────────────────────────
 
 /// Parse all attributes of an element in a single pass, enforcing the per-element
@@ -183,7 +193,32 @@ fn parse_check_boolean(
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
-/// Parse a raw byte slice as XCCDF/XML with security limits applied.
+/// Parses XCCDF/XML bytes with namespace-aware fields and security limits.
+///
+/// Binds benchmark releases and rule revisions only to their direct XCCDF
+/// `version` children. An absent version remains `None`; an empty direct
+/// version remains `Some("")`. Retains the original bytes and their SHA-256.
+///
+/// # Errors
+///
+/// Returns an error when the input exceeds the XML byte limit. XML syntax and
+/// security failures are blocking diagnostics in [`ParsedXccdf::errors`].
+///
+/// # Examples
+///
+/// ```
+/// use crystal_forge::compliance::interchange::InterchangeLimits;
+/// use crystal_forge::compliance::xccdf::parser::parse_xccdf;
+///
+/// let xml = br#"<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="b">
+///   <version>1</version>
+///   <Rule id="r"><version>ANIX-00-000010</version></Rule>
+/// </Benchmark>"#;
+/// let parsed = parse_xccdf(xml, None, &InterchangeLimits::default())?;
+/// assert!(parsed.errors.is_empty());
+/// assert_eq!(parsed.rules[0].version.as_deref(), Some("ANIX-00-000010"));
+/// # Ok::<(), anyhow::Error>(())
+/// ```
 pub fn parse_xccdf(
     bytes: &[u8],
     filename: Option<&str>,
@@ -392,6 +427,12 @@ struct ParserState {
 
     // Parsing state.
     current_text: String,
+    // INVARIANT: Every start/empty event pushes one context and every end pops
+    // it. Existing XML depth limits bound this stack. Only direct text in a
+    // qualified Benchmark/version or Rule/version contributes to version_text;
+    // nested metadata and foreign elements cannot supply a version value.
+    version_context: Vec<VersionContext>,
+    version_text: String,
     current_rule: Option<ParsedRule>,
     current_profile: Option<ParsedProfile>,
     current_group: Option<ParsedGroup>,
@@ -443,6 +484,8 @@ impl ParserState {
             saw_unknown_cf_content: false,
             detected_xccdf_version: None,
             current_text: String::new(),
+            version_context: Vec::new(),
+            version_text: String::new(),
             current_rule: None,
             current_profile: None,
             current_group: None,
@@ -472,6 +515,25 @@ impl ParserState {
                 return ParseControl::Abort;
             }
         };
+
+        let context = match (namespace, local_name, self.version_context.last()) {
+            (ElementNamespace::Xccdf, b"Benchmark", _) => VersionContext::Benchmark,
+            (ElementNamespace::Xccdf, b"Rule", _) => VersionContext::Rule,
+            (ElementNamespace::Xccdf, b"version", Some(VersionContext::Benchmark)) => {
+                VersionContext::BenchmarkVersion
+            }
+            (ElementNamespace::Xccdf, b"version", Some(VersionContext::Rule)) => {
+                VersionContext::RuleVersion
+            }
+            _ => VersionContext::Other,
+        };
+        if matches!(
+            context,
+            VersionContext::BenchmarkVersion | VersionContext::RuleVersion
+        ) {
+            self.version_text.clear();
+        }
+        self.version_context.push(context);
 
         // Warn when the root element looks like XCCDF but is not bound to the
         // XCCDF namespace.
@@ -790,6 +852,7 @@ impl ParserState {
     }
 
     fn handle_end(&mut self, namespace: ElementNamespace, local_name: &[u8]) -> ParseControl {
+        let version_context = self.version_context.pop();
         match (namespace, local_name) {
             (ElementNamespace::Xccdf, b"title") => {
                 if let Some(ref mut bm) = self.benchmark {
@@ -818,16 +881,20 @@ impl ParserState {
                 }
             }
             (ElementNamespace::Xccdf, b"version") => {
-                // Only the benchmark-level <version> is authoritative. DISA STIG
-                // rules each carry their own <version> (e.g. "ANIX-00-001670")
-                // which must never clobber the benchmark release version.
-                if let Some(ref mut bm) = self.benchmark {
-                    if self.current_rule.is_none()
-                        && self.current_group.is_none()
-                        && self.current_profile.is_none()
-                    {
-                        bm.version = Some(self.current_text.clone());
+                // Benchmark release and rule revision are separate source facts.
+                // Empty direct elements remain Some(""); absent ones remain None.
+                match version_context {
+                    Some(VersionContext::BenchmarkVersion) => {
+                        if let Some(ref mut bm) = self.benchmark {
+                            bm.version = Some(self.version_text.clone());
+                        }
                     }
+                    Some(VersionContext::RuleVersion) => {
+                        if let Some(ref mut rule) = self.current_rule {
+                            rule.version = Some(self.version_text.clone());
+                        }
+                    }
+                    _ => {}
                 }
             }
             (ElementNamespace::Xccdf, b"plain-text") => {
@@ -1070,18 +1137,30 @@ impl ParserState {
     }
 
     fn handle_text(&mut self, text: &str) -> ParseControl {
-        if self.current_text.len() + text.len() > self.limits.max_text_node_bytes {
+        let is_version_text = matches!(
+            self.version_context.last(),
+            Some(VersionContext::BenchmarkVersion | VersionContext::RuleVersion)
+        );
+        let accumulated = if is_version_text {
+            self.current_text.len().max(self.version_text.len())
+        } else {
+            self.current_text.len()
+        };
+        if accumulated + text.len() > self.limits.max_text_node_bytes {
             self.errors.push(Diagnostic::error(
                 "TEXT_TOO_LARGE",
                 &format!(
                     "Cumulative text {} exceeds maximum of {} bytes",
-                    self.current_text.len() + text.len(),
+                    accumulated + text.len(),
                     self.limits.max_text_node_bytes
                 ),
             ));
             return ParseControl::Abort;
         }
         self.current_text.push_str(text);
+        if is_version_text {
+            self.version_text.push_str(text);
+        }
 
         // Pass ident text.
         if let Some(ref mut ident) = self.current_ident {
@@ -1494,6 +1573,114 @@ mod tests {
         assert_eq!(parsed.errors.len(), 0);
         assert_eq!(parsed.rules.len(), 1);
         assert_eq!(parsed.rules[0].id, "xccdf_org.crystalforge_rule_test");
+    }
+
+    #[test]
+    fn versions_use_only_direct_xccdf_children() {
+        for (namespace, prefix) in [(XCCDF_1_1_NAMESPACE, ""), (XCCDF_NAMESPACE, "x:")] {
+            let xml = format!(
+                r#"<{p}Benchmark xmlns="{ns}" xmlns:x="{ns}" xmlns:f="urn:foreign" id="versions">
+  <{p}version>release-alpha</{p}version>
+  <{p}metadata><{p}version>nested-benchmark</{p}version></{p}metadata>
+  <f:container><{p}version>foreign-container</{p}version></f:container>
+  <f:version>foreign-benchmark</f:version><version xmlns="">unbound</version>
+  <{p}Group id="V-1">
+    <{p}Rule id="first"><{p}version>ANIX-00-000010</{p}version>
+      <{p}metadata><{p}version>nested-rule</{p}version></{p}metadata>
+      <f:container><{p}version>foreign-container</{p}version></f:container>
+      <f:version>foreign-rule</f:version><version xmlns="">unbound</version>
+    </{p}Rule>
+    <{p}Rule id="missing"><{p}metadata><{p}version>not-direct</{p}version></{p}metadata></{p}Rule>
+    <{p}Rule id="second"><{p}version>revision.beta-2</{p}version></{p}Rule>
+    <{p}Rule id="empty"><{p}version/></{p}Rule>
+    <{p}Rule id="explicit-empty"><{p}version></{p}version></{p}Rule>
+    <{p}Rule id="last"/>
+  </{p}Group>
+  <{p}metadata><{p}version>late-nested-benchmark</{p}version></{p}metadata>
+</{p}Benchmark>"#,
+                p = prefix,
+                ns = namespace,
+            );
+            let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default())
+                .expect("version fixture parses");
+            assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+            assert_eq!(
+                parsed
+                    .benchmark
+                    .as_ref()
+                    .and_then(|bm| bm.version.as_deref()),
+                Some("release-alpha")
+            );
+            let versions: Vec<_> = parsed
+                .rules
+                .iter()
+                .map(|rule| (rule.id.as_str(), rule.version.as_deref()))
+                .collect();
+            assert_eq!(
+                versions,
+                vec![
+                    ("first", Some("ANIX-00-000010")),
+                    ("missing", None),
+                    ("second", Some("revision.beta-2")),
+                    ("empty", Some("")),
+                    ("explicit-empty", Some("")),
+                    ("last", None),
+                ]
+            );
+            assert_eq!(parsed.source_bytes, xml.as_bytes());
+            assert_eq!(
+                parsed.source_sha256,
+                hex::encode(Sha256::digest(xml.as_bytes()))
+            );
+        }
+    }
+
+    #[test]
+    fn missing_and_empty_benchmark_versions_do_not_inherit_rule_versions() {
+        for (version_xml, expected) in [
+            ("", None),
+            ("<version/>", Some("")),
+            ("<version></version>", Some("")),
+        ] {
+            let xml = format!(
+                r#"<Benchmark xmlns="{XCCDF_NAMESPACE}" id="b">
+                {version_xml}<metadata><version>nested</version></metadata>
+                <Rule id="r"><version>ANIX-00-000010</version></Rule></Benchmark>"#
+            );
+            let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
+            assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+            assert_eq!(parsed.benchmark.unwrap().version.as_deref(), expected);
+            assert_eq!(parsed.rules[0].version.as_deref(), Some("ANIX-00-000010"));
+        }
+    }
+
+    #[test]
+    fn nested_version_content_cannot_replace_direct_text_or_bypass_text_limit() {
+        let xml = format!(
+            r#"<Benchmark xmlns="{XCCDF_NAMESPACE}" xmlns:f="urn:foreign" id="b">
+            <version>release-<f:version>ignore</f:version>alpha</version>
+            <Rule id="r"><version>rule-<metadata><version>ignore</version></metadata>beta</version></Rule>
+            </Benchmark>"#
+        );
+        let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert_eq!(
+            parsed.benchmark.unwrap().version.as_deref(),
+            Some("release-alpha")
+        );
+        assert_eq!(parsed.rules[0].version.as_deref(), Some("rule-beta"));
+
+        let limits = InterchangeLimits {
+            max_text_node_bytes: 10,
+            ..InterchangeLimits::default()
+        };
+        let limited = parse_xccdf(xml.as_bytes(), None, &limits).unwrap();
+        assert!(
+            limited
+                .errors
+                .iter()
+                .any(|e| e.code == "TEXT_TOO_LARGE" && e.blocking)
+        );
     }
 
     #[test]

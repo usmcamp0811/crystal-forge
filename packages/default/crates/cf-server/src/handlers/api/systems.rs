@@ -2091,7 +2091,7 @@ pub async fn save_system_cve_justification(
                ON artifact.id=retained.snapshot_id
               AND artifact.commit_id=retained.commit_id
               AND artifact.configuration_name=retained.configuration_name
-              AND artifact.lifecycle='available' AND artifact.integrity_version=1
+              AND evaluation_deployment_artifact_matches(artifact.id,retained.derivation_id)
              JOIN derivations derivation
                ON derivation.id=retained.derivation_id
               AND derivation.commit_id=retained.commit_id

@@ -926,12 +926,32 @@ async fn mark_commit_evaluation_failed_with_retained_plan(
             .await?;
         }
         for (name, reason) in &plan.snapshot_capture_failures {
+            if crate::queries::evaluation_snapshots::selected_native_deployment_identity_tx(
+                &mut tx,
+                commit_id,
+                name,
+                expected_attempt,
+            )
+            .await?
+            {
+                continue;
+            }
             crate::queries::evaluation_snapshots::persist_unavailable_snapshot_deferred_tx(
                 &mut tx, commit_id, name, reason,
             )
             .await?;
         }
         for name in &completed_configurations {
+            if crate::queries::evaluation_snapshots::selected_native_deployment_identity_tx(
+                &mut tx,
+                commit_id,
+                name,
+                expected_attempt,
+            )
+            .await?
+            {
+                continue;
+            }
             if !plan.evaluation_snapshots.contains_key(name)
                 && !plan.snapshot_capture_failures.contains_key(name)
             {

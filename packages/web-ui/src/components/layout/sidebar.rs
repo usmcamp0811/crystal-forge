@@ -639,18 +639,21 @@ pub fn MobileDrawer() -> Element {
     }
 
     rsx! {
-        // Backdrop overlay
+        // Preserve the intended viewport overlay even when the packaged utility
+        // sheet omits fixed/inset-0. The drawer remains above it at z-index 50.
         div {
             "data-testid": "mobile-drawer-backdrop",
             class: "cf-mobile-overlay fixed inset-0 bg-black/50 z-40",
+            style: "position: fixed; inset: 0; z-index: 40;",
             onclick: move |_| is_mobile_drawer_open.set(false),
         }
 
-        // Drawer
+        // Keep the drawer positioned above the viewport backdrop independently
+        // of the omitted positioning and stacking utility classes.
         nav {
             "data-testid": "mobile-drawer",
             class: "cf-mobile-drawer fixed left-0 top-0 bottom-0 w-64 {theme::surface::SIDEBAR_BG} z-50 flex flex-col transform transition-transform duration-300",
-            style: "border-right: 1px solid var(--cf-card-border);",
+            style: "position: fixed; left: 0; top: 0; bottom: 0; z-index: 50; border-right: 1px solid var(--cf-card-border);",
 
             // Header with close button
             div {
@@ -671,11 +674,16 @@ pub fn MobileDrawer() -> Element {
                 }
                 button {
                     "data-testid": "mobile-drawer-close",
-                    class: "p-2 rounded-lg {theme::interactive::HOVER_BG} {theme::text::SECONDARY}",
+                    // The packaged utility sheet omits p-2 and w-6/h-6.
+                    // Preserve their intended padding and icon size locally so
+                    // this icon-only close control retains its hit area.
+                    class: "rounded-lg {theme::interactive::HOVER_BG} {theme::text::SECONDARY}",
+                    style: "padding: calc(var(--spacing) * 2);",
                     onclick: move |_| is_mobile_drawer_open.set(false),
                     "aria-label": "Close menu",
                     svg {
-                        class: "w-6 h-6",
+                        width: "24",
+                        height: "24",
                         fill: "none",
                         stroke: "currentColor",
                         stroke_width: "2",

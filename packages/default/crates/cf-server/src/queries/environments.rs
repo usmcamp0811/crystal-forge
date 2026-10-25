@@ -946,8 +946,31 @@ pub async fn get_environment_with_policies(
     }
 }
 
-/// Set the required policies for an environment (the baseline).
-/// This replaces all existing environment policies with the new set.
+/// Identifies a rejected optional environment-policy selection.
+///
+/// At least one requested policy is missing, disabled, or the nonassignable
+/// CF-agent invariant. The assignment transaction has made no changes.
+#[derive(Debug)]
+pub struct InvalidEnvironmentPolicySelection;
+
+impl std::fmt::Display for InvalidEnvironmentPolicySelection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("One or more selected policies are invalid")
+    }
+}
+
+impl std::error::Error for InvalidEnvironmentPolicySelection {}
+
+/// Replaces an environment's optional gate policies with the requested set.
+///
+/// An empty set removes optional assignments. CF-agent enablement is a global
+/// invariant and does not depend on these assignments. Validation and replacement
+/// share one transaction; a rejected set preserves every previous assignment.
+/// This transaction does not include an earlier environment metadata request.
+///
+/// # Errors
+/// Returns [`InvalidEnvironmentPolicySelection`] for missing, disabled, or
+/// nonassignable IDs. Returns a database error if validation or replacement fails.
 pub async fn set_environment_required_policies(
     pool: &PgPool,
     environment_id: Uuid,
@@ -984,10 +1007,7 @@ pub async fn set_environment_required_policies(
 
     if valid_count != unique_ids.len() as i64 {
         tx.rollback().await?;
-        anyhow::bail!(
-            "One or more policies do not exist, are disabled, \
-             or cannot be assigned (require_cf_agent is a built-in invariant)"
-        );
+        return Err(InvalidEnvironmentPolicySelection.into());
     }
 
     // Atomically replace: delete existing, then insert the validated set.
@@ -1364,6 +1384,71 @@ mod tests {
                 .expect("a policy without a current version must remain in the catalog");
             assert_eq!(listed.mapped_requirement_count, 0);
             assert_eq!(listed.bundle_usage_count, 0);
+        }
+
+        #[sqlx::test]
+        #[ignore = "requires live database connection"]
+        async fn optional_policy_sets_accept_empty_and_reject_invalid_without_changes(
+            pool: PgPool,
+        ) {
+            let env =
+                insert_environment(&pool, "optional-gates", "manual", true, true, false).await;
+            let optional = Uuid::from_u128(2);
+            let builtin = Uuid::from_u128(1);
+            let disabled = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO deployment_policies (id, name, policy_type, config, enabled) \
+                 VALUES ($1, 'disabled-optional-probe', 'custom_check', \
+                 '{\"expression\":\"true\",\"strict\":false}'::jsonb, false)",
+            )
+            .bind(disabled)
+            .execute(&pool)
+            .await
+            .expect("disabled prerequisite is not a successful assignment seed");
+            assert!(
+                set_environment_required_policies(&pool, env.id, &[], None)
+                    .await
+                    .expect("zero optional gates are valid")
+                    .is_empty()
+            );
+            assert_eq!(
+                set_environment_required_policies(&pool, env.id, &[optional], None)
+                    .await
+                    .expect("enabled assignable policy"),
+                vec![optional]
+            );
+            let before: serde_json::Value = sqlx::query_scalar(
+                "SELECT jsonb_agg(to_jsonb(ep) ORDER BY policy_id) FROM environment_policies ep WHERE environment_id = $1",
+            )
+            .bind(env.id)
+            .fetch_one(&pool)
+            .await
+            .expect("assignment snapshot");
+            for invalid in [builtin, disabled, Uuid::new_v4()] {
+                let err =
+                    set_environment_required_policies(&pool, env.id, &[optional, invalid], None)
+                        .await
+                        .expect_err("invalid selection must not be silently discarded");
+                assert!(err.is::<InvalidEnvironmentPolicySelection>());
+                let after: serde_json::Value = sqlx::query_scalar(
+                    "SELECT jsonb_agg(to_jsonb(ep) ORDER BY policy_id) FROM environment_policies ep WHERE environment_id = $1",
+                )
+                .bind(env.id)
+                .fetch_one(&pool)
+                .await
+                .expect("unchanged assignment snapshot");
+                assert_eq!(after, before);
+            }
+            assert_eq!(
+                sqlx::query_scalar::<_, bool>(
+                    "SELECT enabled FROM deployment_policies WHERE id = $1"
+                )
+                .bind(builtin)
+                .fetch_one(&pool)
+                .await
+                .expect("legacy invariant policy"),
+                false
+            );
         }
 
         #[sqlx::test]

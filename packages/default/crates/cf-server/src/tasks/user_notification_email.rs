@@ -911,10 +911,10 @@ mod tests {
         }
     }
 
-    #[tokio::test]
-    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
-    async fn prohibited_policy_producer_materializes_in_app_without_email_delivery() {
-        let pool = test_pool().await;
+    // This checks email policy, not progress through another fixture's backlog.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires repository-provided isolated PostgreSQL"]
+    async fn prohibited_policy_producer_materializes_in_app_without_email_delivery(pool: PgPool) {
         let user_id = Uuid::new_v4();
         let occurrence_id = Uuid::new_v4();
         sqlx::query(

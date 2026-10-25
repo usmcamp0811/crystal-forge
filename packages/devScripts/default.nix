@@ -5,6 +5,7 @@ let
   namespace = "crystal-forge";
   db_port = 3042;
   cve_test_db_port = 35432;
+  state_machine_test_db_port = 35433;
   db_password = "password";
   cf_port = 3445;
   oidc_port = 38080;
@@ -644,7 +645,7 @@ let
     text = ''
       export NODE_PATH="${pkgs.playwright-test}/lib/node_modules"
       export PLAYWRIGHT_BROWSERS_PATH="${pkgs.playwright-driver.browsers}"
-      exec ${pkgs.bash}/bin/bash ${../../checks/web-ui/tests/web-ui-test.sh} "$@"
+      exec ${pkgs.bash}/bin/bash ${./web-ui/tests/web-ui-test.sh} "$@"
     '';
   };
 
@@ -669,83 +670,91 @@ let
     '';
   };
 
+  # --offline alone does not disable configured remote builders. Pass these
+  # settings at both Nix entry points; preparation is a separate online step.
+  # Disable ordinary local closure builds here too. Do not export max-jobs=0:
+  # the Rust contracts must still build their local Nix fixture derivations.
+  stateMachineOfflineArgs = "--offline --option substituters '' --option substitute false --option builders '' --option fallback false --option accept-flake-config false --max-jobs 0 --no-update-lock-file";
+
   runStateMachineTests = pkgs.writeShellApplication {
     name = "run-state-machine-tests";
-    runtimeInputs = with pkgs; [ nix coreutils ];
+    runtimeInputs = with pkgs; [ bash nix coreutils findutils gnugrep ];
     text = ''
       set -euo pipefail
 
-      REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
-      DB_URL="postgresql://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge"
-
-      nix develop "$REPO_ROOT#sqlx" -c bash -euo pipefail -c "
-        cd \"$REPO_ROOT/packages/default\"
-        DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source crates/cf-server/migrations
-        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
-          cargo test --manifest-path Cargo.toml \
-          -p cf-server --lib queries::commits::tests \
-          -- --ignored --test-threads=1
-        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
-          cargo test --manifest-path Cargo.toml \
-          -p cf-server --lib queries::derivations::tests \
-          -- --ignored --test-threads=1
-        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
-          cargo test --manifest-path Cargo.toml \
-          -p cf-server --lib models::evaluate_with_policies::tests::finalize_attempt_ \
-          -- --ignored --test-threads=1
-        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
-          cargo test --manifest-path Cargo.toml \
-          -p cf-server --lib models::evaluate_with_policies::tests::finalize_system_ \
-          -- --ignored --test-threads=1
-        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
-          cargo test --manifest-path Cargo.toml \
-          -p cf-server --lib models::evaluate_with_policies::tests::system_build_ordering_persist_then_root_then_activate \
-          -- --ignored --test-threads=1
-        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
-          cargo test --manifest-path Cargo.toml \
-          -p cf-server --lib models::evaluate_with_policies::tests::migration_0184_ \
-          -- --ignored --test-threads=1
-      "
+      export PROJECT_ROOT="''${PROJECT_ROOT:-$PWD}"
+      : "''${CF_STATE_MACHINE_STATUS_FILE:?Use the isolated state-machine-test launcher}"
+      if [[ -n "''${CF_COVERAGE_DIR:-}" ]]; then
+        # The existing launcher owns TMPDIR and cleans it after export. Fresh
+        # objects prevent old Cargo targets from widening this run's report.
+        export CARGO_TARGET_DIR="$TMPDIR/coverage-target"
+        if [[ -e "$CF_COVERAGE_DIR" ]]; then
+          echo 'COVERAGE_TOOL_ERROR: choose a fresh profile directory' >&2
+          printf '65\n' > "$CF_STATE_MACHINE_STATUS_FILE"
+          exit 65
+        fi
+      fi
+      status=0
+      case "''${CF_DATABASE_TEST_SUITE:-state-machine}" in
+        cve) ${lib.getExe runCveProcessingTest} || status=$? ;;
+        dashboard) ${lib.getExe runDashboardVisibilityTests} || status=$? ;;
+        state-machine)
+          nix develop ${stateMachineOfflineArgs} "$PROJECT_ROOT#sqlx" \
+            -c ${pkgs.bash}/bin/bash ${./tests/state-machine-tests.sh} || status=$?
+          ;;
+        *) echo "Unknown database test suite" >&2; status=1 ;;
+      esac
+      if [[ "$status" == 0 && -n "''${CF_COVERAGE_DIR:-}" ]]; then
+        # The optional hook is supplied by the verified runtime checkout.
+        # shellcheck source=/dev/null
+        source "$PROJECT_ROOT/packages/coverage/instrument.sh"
+        coverage_export "$CARGO_TARGET_DIR" "$CF_COVERAGE_DIR" || status=$?
+      fi
+      printf '%s\n' "$status" > "$CF_STATE_MACHINE_STATUS_FILE"
+      exit "$status"
     '';
   };
 
   runDashboardVisibilityTests = pkgs.writeShellApplication {
     name = "run-dashboard-visibility-tests";
-    runtimeInputs = with pkgs; [ nix coreutils ];
+    runtimeInputs = with pkgs; [ bash nix coreutils ];
     text = ''
       set -euo pipefail
 
       REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
-      DB_URL="postgresql://crystal_forge:${db_password}@127.0.0.1:${toString db_port}/crystal_forge"
-
-      nix develop "$REPO_ROOT#sqlx" -c bash -euo pipefail -c "
-        cd \"$REPO_ROOT/packages/default\"
-        DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source crates/cf-server/migrations
-        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+      nix develop ${stateMachineOfflineArgs} "$REPO_ROOT#sqlx" -c ${pkgs.bash}/bin/bash -euo pipefail -c "
+        source \"$REPO_ROOT/packages/devScripts/tests/database-environment.sh\"
+        DB_URL=\"\$DATABASE_URL\"
+        cargo sqlx migrate run --source crates/cf-server/migrations
+        # Exercise both visibility groups while preserving any failed status.
+        status=0
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"\$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           -p cf-server --lib queries::dashboard::tests::visibility_ \
-          -- --ignored --test-threads=1
-        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          -- --ignored --test-threads=1 || status=\$?
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"\$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           -p cf-server --lib handlers::api::dashboard::tests::visibility_ \
-          -- --ignored --test-threads=1
+          -- --ignored --test-threads=1 || status=\$?
+        exit \"\$status\"
       "
     '';
   };
 
   runCveProcessingTest = pkgs.writeShellApplication {
     name = "run-cve-processing-test";
-    runtimeInputs = with pkgs; [ nix coreutils ];
+    runtimeInputs = with pkgs; [ bash nix coreutils ];
     text = ''
       set -euo pipefail
 
       REPO_ROOT="''${PROJECT_ROOT:-$PWD}"
-      DB_URL="''${CRYSTAL_FORGE_CVE_TEST_DATABASE_URL:?Set CRYSTAL_FORGE_CVE_TEST_DATABASE_URL to a dedicated CVE test database}"
-
-      nix develop "$REPO_ROOT#sqlx" -c bash -euo pipefail -c "
-        cd \"$REPO_ROOT/packages/default\"
-        export DATABASE_URL=\"$DB_URL\"
-        DATABASE_URL=\"$DB_URL\" cargo sqlx migrate run --source crates/cf-server/migrations
+      : "''${CF_STATE_MACHINE_DATA_DIR:?Use the isolated cve-test launcher}"
+      DB_URL="postgresql://crystal_forge@127.0.0.1:''${CF_STATE_MACHINE_PORT:?Missing isolated port}/crystal_forge"
+      # The nested shell resets development URLs and verifies cluster ownership.
+      # Keep the declared workspace --lib selections and libtest modes below.
+      nix develop ${stateMachineOfflineArgs} "$REPO_ROOT#sqlx" -c ${pkgs.bash}/bin/bash -euo pipefail -c "
+        source \"$REPO_ROOT/packages/devScripts/tests/database-environment.sh\"
+        cargo sqlx migrate run --source crates/cf-server/migrations
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib builder::cve_worker::tests::scan_cycle_processes_target_with_fake_runner
@@ -763,7 +772,23 @@ let
           --lib builder::cve_worker::tests::policy_scan_heartbeat_prevents_recovery_and_ownership_loss_cancels_execution
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib builder::cve_worker::tests::local_failure_persists_redacted_stderr_without_double_counting_attempt \
+          -- --exact --test-threads=1
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib builder::cve_worker::tests::successful_scanner_persists_redacted_result_failure_stage \
+          -- --exact --test-threads=1
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
           --lib services::cve_scans::tests::immediate_scan_renews_ownership_reuses_active_and_cancels_on_revocation
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib services::cve_scans::tests::immediate_scan_holds_execution_lock_until_terminal_release \
+          -- --exact --test-threads=1
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib services::cve_scans::tests::immediate_scan_completion_progresses_while_heartbeat_waits_on_row_lock \
+          -- --ignored --exact --test-threads=1
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib queries::cve_scans::tests::get_targets_needing_cve_rescan_selects_stale_scan
@@ -799,6 +824,14 @@ let
           --lib queries::cve_scans::tests::execution_requeue_is_owner_guarded_and_reclaim_rotates_token
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib queries::cve_scans::tests::exact_enqueue_serializes_with_concurrent_completion \
+          -- --exact --test-threads=1
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
+          -p cf-server --lib queries::cve_scans::tests::execution_lock_detects_real_acquire_and_confirmed_release \
+          -- --exact --test-threads=1
+        CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
+          cargo test --manifest-path Cargo.toml \
           --lib builder::cve_worker::tests::disabled_queued_claim_is_requeued_then_executed_once
         CRYSTAL_FORGE_TEST_DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
@@ -817,7 +850,8 @@ let
           --lib queries::cve_scan_leases::tests::remote_lease_claim_heartbeat_validation_and_clean_completion
         DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
-          --lib queries::cve_scans_tests::create_cve_scan_reuses_existing_active_scan
+          -p cf-server --lib queries::cve_scans_tests:: \
+          -- --test-threads=1
         DATABASE_URL=\"$DB_URL\" \
           cargo test --manifest-path Cargo.toml \
           --lib queries::scanning_tests::scan_queue_normalizes_never_scanned_derivation \
@@ -830,12 +864,6 @@ let
           cargo test --manifest-path Cargo.toml \
           --lib queries::scanning_tests::schedule_policy_round_trips \
           -- --ignored
-        DATABASE_URL=\"$DB_URL\" \
-          cargo test --manifest-path Cargo.toml \
-          --test composite_policy scan_result_persistence_locks_poam_before_the_scan_row
-        DATABASE_URL=\"$DB_URL\" \
-          cargo test --manifest-path Cargo.toml \
-          --test composite_policy stale_finalization_locks_poam_before_the_scan_row
       "
     '';
   };
@@ -1371,41 +1399,62 @@ let
     };
   };
 
-  cve-test-module = {
-    services.postgres."db" = {
-      port = mkForce cve_test_db_port;
-      dataDir = mkForce "./data/cve-test-db";
-      initialScript.before = mkForce ''
-        CREATE USER crystal_forge CREATEDB LOGIN;
-        CREATE DATABASE crystal_forge OWNER crystal_forge;
-        GRANT ALL PRIVILEGES ON DATABASE crystal_forge TO crystal_forge;
-      '';
-    };
-    settings.processes.cve-processing-test = {
-      inherit namespace;
-      command = runCveProcessingTest;
-      availability.exit_on_end = true;
-      depends_on."db".condition = "process_healthy";
-      environment.CRYSTAL_FORGE_CVE_TEST_DATABASE_URL =
-        "postgresql://crystal_forge:${db_password}@127.0.0.1:${
-          toString cve_test_db_port
-        }/crystal_forge";
-    };
+  # CI can launch process-compose as root, but PostgreSQL must never run as
+  # root. Drop only its initialization/server children; Cargo and evidence
+  # retain the invoking user's permissions and compilation cache.
+  stateMachinePostgresCommand = process: let
+    # services-flake exposes each original process as a module (including its
+    # namespace defaults), not as the merged process-compose configuration.
+    command = (lib.evalModules {
+      modules = [
+        { _module.freeformType = lib.types.attrsOf lib.types.anything; }
+        process
+      ];
+    }).config.command;
+  in pkgs.writeShellApplication {
+    name = "state-machine-postgres";
+    runtimeInputs = [ pkgs.util-linux ];
+    text = ''
+      if (( EUID == 0 )); then
+        : "''${CF_STATE_MACHINE_POSTGRES_UID:?Missing isolated PostgreSQL owner}"
+        : "''${CF_STATE_MACHINE_POSTGRES_GID:?Missing isolated PostgreSQL group}"
+        printf 'Database PostgreSQL child: invoking_uid=%s child_uid=%s child_gid=%s\n' \
+          "$EUID" "$CF_STATE_MACHINE_POSTGRES_UID" "$CF_STATE_MACHINE_POSTGRES_GID"
+        exec setpriv --reuid="$CF_STATE_MACHINE_POSTGRES_UID" \
+          --regid="$CF_STATE_MACHINE_POSTGRES_GID" --clear-groups \
+          --no-new-privs ${lib.getExe command} "$@"
+      fi
+      printf 'Database PostgreSQL child: invoking_uid=%s child_uid=%s\n' "$EUID" "$EUID"
+      exec ${lib.getExe command} "$@"
+    '';
   };
 
-  state-machine-test-module = {
+  state-machine-test-module = { suite ? "state-machine", port ? state_machine_test_db_port }: { config, ... }: {
+    # The launcher enters a fresh temporary directory before process-compose.
+    # Never reuse the development database path or port for these regressions.
+    services.postgres."db" = {
+      port = mkForce port;
+      listen_addresses = mkForce "127.0.0.1";
+      dataDir = mkForce "./data/state-machine-db";
+      # services-flake expands this at runtime. Keep initialization sockets
+      # in the launcher's short disposable socket path, including root CI.
+      socketDir = "$CF_STATE_MACHINE_SOCKET_DIR";
+      superuser = "postgres";
+      createDatabase = false;
+      settings.shared_preload_libraries = "pg_stat_statements";
+      initialScript.before = mkForce ''
+        CREATE USER crystal_forge LOGIN SUPERUSER CREATEDB;
+        CREATE DATABASE crystal_forge OWNER crystal_forge;
+      '';
+    };
+    settings.processes.db-init.command = mkForce (stateMachinePostgresCommand
+      config.services.postgres.db.outputs.settings.processes.db-init);
+    settings.processes.db.command = mkForce (stateMachinePostgresCommand
+      config.services.postgres.db.outputs.settings.processes.db);
     settings.processes.state-machine-tests = {
       inherit namespace;
       command = runStateMachineTests;
-      availability.exit_on_end = true;
-      depends_on."db".condition = "process_healthy";
-    };
-  };
-
-  dashboard-visibility-test-module = {
-    settings.processes.dashboard-visibility-tests = {
-      inherit namespace;
-      command = runDashboardVisibilityTests;
+      environment.CF_DATABASE_TEST_SUITE = suite;
       availability.exit_on_end = true;
       depends_on."db".condition = "process_healthy";
     };
@@ -1447,7 +1496,7 @@ let
     modules = [
       inputs.services-flake.processComposeModules.default
       db-core-module
-      cve-test-module
+      (state-machine-test-module { suite = "cve"; port = cve_test_db_port; })
     ];
   };
 
@@ -1455,7 +1504,7 @@ let
     modules = [
       inputs.services-flake.processComposeModules.default
       db-core-module
-      state-machine-test-module
+      (state-machine-test-module {})
     ];
   };
 
@@ -1463,7 +1512,7 @@ let
     modules = [
       inputs.services-flake.processComposeModules.default
       db-core-module
-      dashboard-visibility-test-module
+      (state-machine-test-module { suite = "dashboard"; port = 35434; })
     ];
   };
 
@@ -1476,13 +1525,45 @@ let
       server-oidc-module
     ];
   };
+
+  # Preserve the existing app and its process-compose CLI. The private launcher
+  # owns cleanup and refuses an occupied dedicated port before initialization.
+  isolatedDatabaseTest = compose: port: pkgs.writeShellApplication {
+    name = "process-compose";
+    meta.description =
+      "Runs selected database contracts in a fresh disposable PostgreSQL cluster";
+    runtimeInputs = with pkgs; [ bash nix coreutils postgresql util-linux ];
+    text = ''
+      export PROJECT_ROOT="''${PROJECT_ROOT:-$PWD}"
+      export CARGO_NET_OFFLINE=true SQLX_OFFLINE=true
+      # Descendant Nix commands inherit the same policy. Explicit CLI settings
+      # also prevent a caller's NIX_CONFIG from enabling remote acquisition.
+      export NIX_CONFIG="''${NIX_CONFIG:-}
+      substituters =
+      substitute = false
+      builders =
+      fallback = false
+      accept-flake-config = false
+      "
+      if ! nix develop ${stateMachineOfflineArgs} "$PROJECT_ROOT#sqlx" \
+        -c cargo metadata --locked --offline --format-version 1 \
+        --manifest-path "$PROJECT_ROOT/packages/default/Cargo.toml" >/dev/null; then
+        echo "State-machine offline prerequisite failure: SQLx shell closure or locked Cargo dependencies unavailable (see Nix/Cargo error above)." >&2
+        echo "Prepare separately: nix build .#devScripts.state-machine-test; nix develop .#sqlx -c cargo fetch --locked --manifest-path packages/default/Cargo.toml" >&2
+        exit 1
+      fi
+      export CF_STATE_MACHINE_PORT=${toString port}
+      exec ${pkgs.bash}/bin/bash ${./tests/state-machine-environment.sh} \
+        ${compose.config.outputs.package}/bin/process-compose "$@"
+    '';
+  };
 in full-stack.config.outputs.package // {
   inherit runServer runAgent runBuilder simulatePush startBuilderApi
     runUiDev runUiFrontend webUiTest runCveProcessingTest bootstrapDevBuilder
     envExports;
-  cve-test = cveTest.config.outputs.package;
-  state-machine-test = stateMachineTest.config.outputs.package;
-  dashboard-visibility-test = dashboardVisibilityTest.config.outputs.package;
+  cve-test = isolatedDatabaseTest cveTest cve_test_db_port;
+  state-machine-test = isolatedDatabaseTest stateMachineTest state_machine_test_db_port;
+  dashboard-visibility-test = isolatedDatabaseTest dashboardVisibilityTest 35434;
   db-only = dbOnly.config.outputs.package;
   server-only = server-only.config.outputs.package;
   server-stack-mock = server-stack-mock.config.outputs.package;

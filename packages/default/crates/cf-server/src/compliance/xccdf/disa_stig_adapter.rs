@@ -1176,6 +1176,62 @@ mod tests {
         let identity = identify_framework(&parsed).expect("identity");
         assert_eq!(identity.canonical_release_key, "V1R2");
     }
+
+    #[test]
+    fn parsed_rule_version_flows_to_metadata_without_changing_stable_key() {
+        use crate::compliance::interchange::InterchangeLimits;
+        use crate::compliance::xccdf::parser::parse_xccdf;
+
+        let xml = r#"<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.1" id="Anduril_NixOS_STIG">
+          <version>1</version><plain-text id="release-info">Release: 2</plain-text>
+          <Group id="V-268078"><Rule id="SV-268078r1130947_rule">
+            <version>ANIX-00-000010</version>
+          </Rule></Group>
+          <Group id="V-268079"><Rule id="SV-268079r1130948_rule"/></Group>
+        </Benchmark>"#;
+        let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        assert_eq!(
+            parsed.benchmark.as_ref().unwrap().version.as_deref(),
+            Some("1")
+        );
+        let canonical = canonical_requirements_for_framework(&parsed);
+        assert_eq!(canonical[0].canonical_requirement_key, "V-268078");
+        assert_eq!(canonical[0].external_id, "SV-268078r1130947_rule");
+        assert_eq!(canonical[0].metadata["version"], "ANIX-00-000010");
+        assert_eq!(canonical[1].canonical_requirement_key, "V-268079");
+        assert!(canonical[1].metadata["version"].is_null());
+    }
+
+    #[test]
+    fn real_anduril_rule_versions_match_independent_xml_map() {
+        // Expected IDs and direct version text were extracted with Python's
+        // namespace-aware ElementTree from the unchanged packaged V1R2 XML.
+        // Regenerate/verify the JSON from that input, never from parse_xccdf.
+        let expected: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../testdata/xccdf/anduril-v1r2-rule-versions.json"
+        ))
+        .unwrap();
+        let parsed = real_anduril_v1r2();
+        assert_eq!(parsed.source_sha256, expected["source_sha256"]);
+        let actual: serde_json::Map<String, serde_json::Value> = parsed
+            .rules
+            .iter()
+            .map(|rule| (rule.id.clone(), serde_json::json!(rule.version)))
+            .collect();
+        assert_eq!(actual.len(), 103);
+        assert_eq!(serde_json::Value::Object(actual), expected["rule_versions"]);
+        for rule in &parsed.rules {
+            assert_eq!(
+                canonical_key_for_rule(rule),
+                rule.group_id.as_deref().unwrap()
+            );
+            assert_eq!(
+                requirement_metadata(rule)["version"],
+                expected["rule_versions"][&rule.id]
+            );
+        }
+    }
 }
 
 // Helper to make `StandardIdentifier` usable as a str in maps.

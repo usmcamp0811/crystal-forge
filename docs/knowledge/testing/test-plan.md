@@ -197,8 +197,9 @@ def test_deployment_behind(cf_client, clean_test_data):
 ### Local Development
 
 ```bash
-# PostgreSQL-backed Rust regression tests
-nix build .#checks.x86_64-linux.server-regressions
+# PostgreSQL-backed Rust regressions: prepare inputs first, then use the
+# isolated entry documented in docs/agents/verification.md.
+nix run .#devScripts.state-machine-test -- -t=false up
 
 # Database tests only
 nix develop
@@ -212,12 +213,25 @@ nix flake check
 
 ### CI Pipeline
 
-CI runs the `flake-check` matrix for merge requests and the configured
-integration branch. It also defines a separate `web-ui-check` job with
-`allow_failure: true`. See [Crystal Forge flake checks](flake-checks.md) and
+CI runs one explicit `component-tests` job and all four integration owner jobs
+for merge requests and `main`. TASK-490.24 retires
+the nine legacy suites and removes `legacy-flake-check`, `web-ui-check`, and
+`web-ui-baseline-candidates` with explicit owner approval before replacement
+coverage is complete. All fifteen public verification wrappers are removed;
+ordinary component builds and direct CI commands own their unique assertions.
+The three process-compose database Rust jobs remain. The existing state-machine
+workflow owns consolidated regressions with one fresh temporary PostgreSQL
+cluster; exact duplicate selections are removed. Full run status remains
+separate from the source audit.
+Access, Delivery, Assurance and Upgrade are registered (four total checks versus
+27 previously). The coverage map records exact executed subsets and remaining
+accepted obligations. Registration does not prove complete coverage.
+See [Crystal Forge flake checks](flake-checks.md) and
 [Web UI check runbook](web-ui-check.md) for the current matrix and browser test
-workflow. CI job configuration is not a test level: the matrix combines
-package builds and NixOS VM checks.
+workflow. CI job configuration is not a test level: component CI builds core,
+embedded server, agent, builder, keygen, metadata, OSCAL and docs, then runs
+module, discovery, installed-wrapper/schema and tool tests directly. The four
+owner jobs build registered VM scenario gates.
 
 ### Test Markers
 
@@ -251,15 +265,75 @@ package builds and NixOS VM checks.
 
 ### Coverage Verification
 
-**Current workflow.** The repository owns one coverage command. It runs `cargo tarpaulin` over the `packages/default` workspace and writes HTML and JSON reports plus a summary:
+Coverage is optional measurement of existing component and isolated-database
+tests, default off and enabled in CI by `CF_COVERAGE=1`. Enabled and disabled
+runs use the same owner selections, assertions and lifecycle. Normal production
+derivations and ordinary developer builds remain uninstrumented. The
+artifact-only collector merges producer bundles into one native LLVM text report;
+it never runs tests or creates a database.
 
-```bash
-nix run .#coverage.coverage-report
-```
+The report measures mapped authored `.rs` files under `packages/default/crates`,
+including tests, examples and build code. It excludes dependencies, generated
+files and the separate Web UI workspace; it is not whole-product coverage.
+Percentages are advisory, with no minimum. Missing or invalid measurement fails;
+zero covered lines with a positive denominator is valid. Test failures remain
+failures of their owning jobs.
 
-The GitLab job `coverage-check` runs this command on merge requests, keeps `coverage-report/` as an artifact, and posts the summary to the merge request. The command reports coverage. It does not enforce the numeric targets above.
+The [ownership catalog](flake-checks.md#optional-measurement-and-adopted-test-ownership)
+records adopted tests and previously skipped ignored targets. The
+[verification guide](../../agents/verification.md#optional-native-coverage) is the
+operational reference for commands, isolation, failure handling, local execution
+proof, LLVM warnings, artifact sizes and hosted-upload limits.
 
-**Proposed.** A gate that fails when coverage falls below the targets does not exist. A way to prove that the integration tests cover everything they should is also an open item.
+MR335's separate Tarpaulin database/report launcher is superseded. Its retained
+[historical checkpoint](integration-coverage-map.md#local-full-llvm-coverage-checkpoint-at-3e8152b1-dirty)
+is not a native-collector measurement; differing source/test semantics prevent
+percentage comparisons.
+
+### Complexity launcher execution
+
+`nix run .#code-metrics.complexity-report` retains native all-target,
+all-feature Clippy analysis for `packages/default` and `packages/web-ui`.
+It supplies the pinned compiler, native OpenSSL inputs, offline SQLx metadata,
+source UI assets for embedding, and two Cargo build jobs. Source selections,
+lint codes, and thresholds are unchanged.
+
+The launcher parses Cargo JSON diagnostic codes. Repeated source diagnostics
+count once; lint names in diagnostic prose do not count. Each required package
+must emit valid JSON with a compiler artifact and a final successful
+`build-finished` message. An unknown requested lint, compiler error, failed process, missing manifest,
+empty or partial stream, failed LOC tool, or empty measured source population
+cannot produce a successful report. Diagnostic artifacts and per-package
+statuses remain available when Clippy fails. Reused output directories cannot
+supply previous successful summaries or appended diagnostics.
+
+MR !335 enforces execution only. The owner decision preserves the strict-gate
+deferral in [TASK-470 commit 83a9234b](https://gitlab.com/crystal-forge/crystal-forge/-/commit/83a9234b7d88e086e34aa49d82580e7e55c09529).
+Completed valid analysis returns zero, including measurements above selected
+Clippy thresholds or the 500-line file threshold. These measurements report
+`COMPLETE_WITH_DEBT` and `MEASURED_DEBT`, not quality compliance. A complete
+measurement with no selected findings reports `COMPLETE` and
+`NO_SELECTED_DEBT`. Incomplete analysis reports `INCOMPLETE` and
+`PARTIAL_MEASUREMENT` and returns nonzero. Every nonzero Cargo/Clippy exit,
+including exit 101, remains an execution failure. No threshold-specific
+nonzero exit is accepted as successful analysis.
+
+`analysis-summary.json` records execution status, debt status, scope, file and
+lexical function-declaration counts, selected finding counts, and threshold
+sources. `complexity-violations.json` retains Clippy diagnostic measurements
+and limits. `file-metrics.json` retains per-file measurements. JUnit exposes
+advisory measurements as `system-out`; it does not emit quality-debt failures
+or skipped tests. Operational failures remain JUnit errors. This policy adds
+no strict mode, baseline, ratchet, or new-violation gate.
+
+The adjacent cases in `packages/code-metrics/test-report.py` exercise the installed
+launcher with controlled tool responses. They verify execution and report handling without
+compiling application code. They do not prove current application coverage,
+Clippy compliance, or hosted CI success.
+The existing `component-tests` job builds the complexity launcher, resolves its output
+path with `nix eval`, and runs the adjacent cases directly with Nix-provided Python
+and Bash. The fixture invocations set Cargo offline; launcher runtime paths
+supply the remaining tools. No additional flake check owns these regressions.
 
 ## Test Documentation
 
@@ -339,7 +413,7 @@ def test_sql_injection_prevention(cf_client):
 ### Test Results Location
 
 - **HTML Reports**: `test-results/report.html`
-- **Coverage Reports**: `test-results/coverage/`
+- **Coverage report**: `coverage-report/report.txt` (optional native collector)
 - **VM Test Logs**: `.nixos-test-history`
 
 ## Test Maintenance

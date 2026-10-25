@@ -111,7 +111,9 @@ pub(super) fn RetainedAttemptDrawer(
     let _resource = use_resource(move || {
         let request = request.clone();
         async move {
-            loop {
+            // Native requests run once; only browsers repeat after the timer.
+            let mut poll_again = true;
+            while poll_again {
                 let result = crate::api::client::fetch_eval_attempt_policy_matrix(
                     request.commit_id,
                     request.attempt_id,
@@ -132,8 +134,7 @@ pub(super) fn RetainedAttemptDrawer(
                 }
                 #[cfg(target_arch = "wasm32")]
                 gloo_timers::future::TimeoutFuture::new(5_000).await;
-                #[cfg(not(target_arch = "wasm32"))]
-                break;
+                poll_again = cfg!(target_arch = "wasm32");
             }
         }
     });

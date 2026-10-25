@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:38'
-updated_date: '2026-10-21 15:37'
+updated_date: '2026-10-24 05:18'
 labels:
   - testing
   - integration
@@ -55,6 +55,10 @@ Verification: run the existing evidence-remediation-lifecycle gate through norma
 User selected a bounded real host-triage contribution in the continuing Assurance lifecycle (2026-10-21), in the existing coordinator worktree/branch under explicit shared composition authority. Real vulnerable builder scan and deployed Current have now executed at 9f53fade-dirty. Add only triage.py/.cjs: actual System CVEs Schedule patch, exact host/CVE/package/source identity, persisted disposition and browser reload; scoped Viewer write rejected without row changes. Reuse fresh same-scenario receipts. Batch/fleet selected-set isolation remains open; no waiver/acceptance or product changes. Coordinator owns composition/registration. Verify via normal Assurance owner and retained browser/SQL evidence.
 
 After the two authorized TASK-490.16 presentation repairs passed the normal Assurance owner locally at clean pushed5ef2d0b0, resume a bounded test-only increment in existing triage.py/.cjs. Extend the actual scheduled-host journey with editor reopen/hydration/cancel and repeated read checks; assert no extra write and unchanged protected remediation/baseline snapshots. Add authorized Admin invalid host schedule payload without POA&M:400invalid_poam_payload and no side effects with valid CSRF. Use existing real same-run finding/actor/source receipts and do not change fixture facts, APIs, product UI, composition or check inventory. Fleet/batch successful selected-set isolation remains open because the current authored set has one pair and System CVEs batch controls have a separate design gap. Coordinator owns verification/publication through the same normal Assurance lifecycle.
+
+Latestownerrequiresfinishauthorizedcoverage, andexistingacceptedreopen/cancelincrement explicitlyrequiresunchangedprotectedSQLsnapshot. Closeonlythisknownproofgap now: split existingcreate versus two existingreopen/cancel browserphases, returningtoPython aftercreate and eachreopen/cancel so fullnine-table remediation snapshots comparebefore/after eachread action. Preserveevery existinghydration/API/baseline/actor/finding/link assertion; fullsnapshotvaluesstayPythonmemory, notlargecontextreceipts. CoordinatoraddscompatiblebrowserSpecsaliasesinexistingAssurancelifecycle (no newwrapperfiles, VMscenario, check, actor orproducer); workerowns onlytriage.py/cjs. Keepbatch/fleet/unselectedset gap explicit; no product/UIchange. Originalcurrent2b54hostedAssurancepassed; newincrementrequiresnewnormalownerandfinalhostedproof, not relabeledoldrun.
+
+Firstintegratedread-boundaryrun18pass1fail: freshreopencontextsignedintoDashboard but retainedoldpage.reload()assumedcreatecontextalreadyonSystems; selectedresponsebodylostacrossnavigation(Protocol Network.getResponseBody). Correcttestsetupbyexplicitexact-SystemCVEsnavigationbeforeoriginalreload. Tieinventory observationtonewrequesteventandconsumeJSONimmediately, preservingactualHTTP200/exactsystem/scan/derivation/current/read-only/finding assertions. Keeporiginalreload/Scheduled/UIhydration/no-write/fullSQL/APIchecks; no retries/sleeps/statuswaivers/productchanges. Retain774n60...artifactthenrunnormalowneragain.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes

@@ -29,9 +29,10 @@ use crate::auth::models::Role;
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::models::auth_identity::AuthRole;
 use crate::queries::environments::{
-    count_systems_in_environment, create_environment as create_environment_row, delete_environment,
-    find_environment_for_user, get_environment_required_policy_ids, get_environment_with_policies,
-    list_deployment_policies, list_environment_policy_map_for_user, list_environments_for_user,
+    InvalidEnvironmentPolicySelection, count_systems_in_environment,
+    create_environment as create_environment_row, delete_environment, find_environment_for_user,
+    get_environment_required_policy_ids, get_environment_with_policies, list_deployment_policies,
+    list_environment_policy_map_for_user, list_environments_for_user,
     set_environment_required_policies, update_environment_metadata,
 };
 
@@ -384,6 +385,11 @@ pub async fn list_environment_policy_map_handler(
 /// Updates environment required policies (the baseline). Admin role required.
 /// Environment policies serve as the baseline for all systems in that environment.
 /// Systems can add more policies on top, but cannot remove the baseline.
+///
+/// An empty set removes optional gate assignments, not the global CF-agent
+/// invariant. Missing, disabled, and nonassignable IDs return HTTP 400 with
+/// `validation_error`; the complete prior assignment set remains unchanged.
+/// A rejected assignment request does not roll back earlier metadata requests.
 pub async fn update_environment_policies_handler(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -432,7 +438,7 @@ pub async fn update_environment_policies_handler(
                 }
                 Err(e) => {
                     tracing::error!("Failed to update environment policies: {}", e);
-                    if is_foreign_key_violation(&e) {
+                    if e.is::<InvalidEnvironmentPolicySelection>() || is_foreign_key_violation(&e) {
                         bad_request("One or more selected policies are invalid")
                     } else {
                         internal_error("Failed to update environment policies")

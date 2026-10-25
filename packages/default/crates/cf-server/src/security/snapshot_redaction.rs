@@ -381,7 +381,14 @@ fn redact_assignment(input: &str) -> Option<(usize, String)> {
     let after_separator = &input[value_start..];
     let value_whitespace = after_separator.len() - after_separator.trim_start().len();
     let value_index = value_start + value_whitespace;
-    let value_len = secret_value_len(&input[value_index..]);
+    // SECURITY: An inline Authorization header can contain a scheme followed
+    // by credentials. Redact its whole remaining line, as for a standalone
+    // header; consuming only the scheme would leave the credential visible.
+    let value_len = if input[..key_end].eq_ignore_ascii_case("authorization") {
+        input.len() - value_index
+    } else {
+        secret_value_len(&input[value_index..])
+    };
     if value_len == 0 {
         return None;
     }
@@ -611,6 +618,22 @@ mod tests {
         );
         assert!(!redacted.contains("top-secret"));
         assert!(!redacted.contains("two words"));
+    }
+
+    #[test]
+    fn redacts_inline_authorization_in_nested_error_chains() {
+        for value in [
+            "Bearer nested-persistence-secret",
+            "Basic synthetic-base64-credential",
+            "Digest username=synthetic-user, response=synthetic-response",
+        ] {
+            let error = anyhow::anyhow!("Authorization: {value}").context("Database query failed");
+            let text = format!("Scan result persistence failed: {error:#}\nSafe next line");
+            assert_eq!(
+                redact_text(&text),
+                "Scan result persistence failed: Database query failed: Authorization: [REDACTED]\nSafe next line"
+            );
+        }
     }
 
     #[test]

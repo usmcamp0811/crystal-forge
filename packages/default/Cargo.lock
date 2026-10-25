@@ -488,6 +488,7 @@ dependencies = [
  "humantime-serde",
  "num_cpus",
  "openssl",
+ "percent-encoding",
  "serde",
  "serde_json",
  "tempfile",

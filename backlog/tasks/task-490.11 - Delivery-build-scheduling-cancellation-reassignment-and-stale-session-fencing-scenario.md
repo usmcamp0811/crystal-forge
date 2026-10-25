@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:37'
-updated_date: '2026-10-18 03:26'
+updated_date: '2026-10-24 23:07'
 labels:
   - testing
   - integration
@@ -47,4 +47,6 @@ Requires TASK-490.7/.10 code and roles plus passing foundation/.25/.26. Writable
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction: owner-local scenario/fixture paths and explicit coordinator registration. Foundation dependency commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
+
+Merge reconciliation retains source-packet future failure-injection specificity: stop/kill builderA via the existing unit_stopped/unit_killed helpers, expire its lease and reassign to builderB, then prove returning stale builderA cannot complete or publish. Notification task .5 may reuse immutable failing-build fixture definitions only and must create its own event in its own scenario. Preserve canonical cancellation/retry/log and same-run identity boundaries. No future case is claimed executed.
 <!-- SECTION:NOTES:END -->

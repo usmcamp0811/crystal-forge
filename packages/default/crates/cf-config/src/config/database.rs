@@ -1,3 +1,4 @@
+use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
 use serde::Deserialize;
 /// PostgreSQL database connection configuration.
 ///
@@ -26,11 +27,29 @@ impl DatabaseConfig {
             name: "crystal_forge".to_string(),
         }
     }
-    /// Returns a PostgreSQL connection string.
+    /// Returns a PostgreSQL connection string for TCP hosts or Unix sockets.
+    ///
+    /// The field values are percent-encoded so reserved URI characters and
+    /// spaces retain their values in both `tokio_postgres` and SQLx parsers.
+    /// A host beginning with `/` is encoded as the URI authority host. Both
+    /// PostgreSQL clients interpret that decoded path as a Unix socket
+    /// directory. Keep this representation shared because connection
+    /// validation and the SQLx pool consume the same string.
     pub fn to_url(&self) -> String {
+        let encode = |value: &str| utf8_percent_encode(value, NON_ALPHANUMERIC).to_string();
+        let host = if self.host.starts_with('/') {
+            encode(&self.host)
+        } else {
+            self.host.clone()
+        };
+
         format!(
             "postgres://{}:{}@{}:{}/{}",
-            self.user, self.password, self.host, self.port, self.name
+            encode(&self.user),
+            encode(&self.password),
+            host,
+            self.port,
+            encode(&self.name)
         )
     }
 }
