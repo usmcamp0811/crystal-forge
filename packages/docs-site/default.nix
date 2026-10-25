@@ -34,6 +34,7 @@ let
     ];
   };
   tests = pkgs.runCommand "docs-site-tests" {
+    passthru.browser = import ./browser.nix { inherit pkgs site; };
     nativeBuildInputs = [ python ];
     DOCS_OPTIONS_JSON = "${options.optionsJSON}/share/doc/nixos/options.json";
     DOCS_OPTIONS_BUNDLE = options;
@@ -42,8 +43,7 @@ let
     python -m unittest discover -s ${scripts} -p 'test_*.py' -v
     touch "$out"
   '';
-in
-pkgs.stdenvNoCC.mkDerivation {
+  site = pkgs.stdenvNoCC.mkDerivation {
   pname = "docs-site";
   version = "1";
   dontUnpack = true;
@@ -70,4 +70,6 @@ pkgs.stdenvNoCC.mkDerivation {
     mainProgram = "docs-site";
     platforms = lib.platforms.all;
   };
-}
+  };
+in
+site

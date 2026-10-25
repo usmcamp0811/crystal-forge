@@ -14,6 +14,30 @@ use crate::security::snapshot_redaction::{
     REDACTED_VALUE, redact_evaluation_error, redact_option_value, redact_text,
 };
 
+/// Records bounded schema-3 Native deployment identity without Config inventory.
+///
+/// The enclosing immutable snapshot owns commit/configuration identity. Only the
+/// successful active Native producer can certify this manifest against its
+/// actual persisted derivation. It makes no option or comparison completeness
+/// claim. Historical identity remains readable after runnable rows are reclaimed;
+/// deployment and rollback still require exact live lineage joins.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct NativeDeploymentIdentity {
+    /// Exact Native evaluation attempt UUID.
+    pub(crate) attempt_id: Uuid,
+    /// Commit-local attempt number, never inferred from later retries.
+    pub(crate) attempt_number: i32,
+    /// Full evaluated Git commit SHA.
+    pub(crate) commit_sha: String,
+    /// Actual persisted NixOS derivation row.
+    pub(crate) derivation_id: i32,
+    /// Evaluated `.drv` path belonging to that row.
+    pub(crate) drv_path: String,
+    /// Exact evaluator output expected from that derivation.
+    pub(crate) expected_store_path: String,
+}
+
 /// Identifies the durable lifecycle exposed by a snapshot API.
 ///
 /// For schema-V2 Config data, active states describe the exact Config Inspector

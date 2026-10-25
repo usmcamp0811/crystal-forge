@@ -1,7 +1,7 @@
 ---
 type: Testing Guide
 title: Crystal Forge flake checks catalog
-description: "Catalogs the current Nix flake-check matrix, standalone Web UI job, documentation and schema checks, and the cf-test-suite scenario runner; states what each verifies, how to run it, and where its README lives."
+description: "Catalogs integration owners, consolidated component verification, and historical retired suites, preserving provenance and distinguishing execution evidence from coverage gaps."
 tags:
   - crystal-forge
   - testing
@@ -59,10 +59,220 @@ sources:
 
 # Crystal Forge flake checks catalog
 
-This concept is a catalog and pointer record. Each check keeps its own
-`README.md` next to its `default.nix`. Those README files are the
-authoritative text and stay in place, because each check and package uses its
-README as its ecosystem entry point. This catalog records, for each README, what
+## Current inventory and commands
+
+TASK-490.24 authorizes source retirement before four-owner completion. The
+current `checks.x86_64-linux` inventory contains `integration-access`,
+`integration-assurance`, `integration-delivery` and `integration-upgrade`
+(four total attributes, previously 27). Access's bootstrap,
+session, authorization and Admin-form subset does not complete Access. Delivery
+has a real source/evaluation/build/agent lifecycle, not complete Delivery coverage.
+Assurance registers the real evidence/remediation lifecycle. Upgrade registers
+the approved predecessor transition. No placeholders are registered. Local
+execution records and remaining same-head/hosted obligations are in the coverage
+map; four registered owners do not establish complete accepted coverage.
+
+The final inventory must contain exactly four TOTAL names. Verify the full set:
+
+```bash
+nix eval --json .#checks.x86_64-linux --apply builtins.attrNames
+nix eval --json .#checks.x86_64-linux --apply 'c: builtins.attrNames c == [ "integration-access" "integration-assurance" "integration-delivery" "integration-upgrade" ]'
+```
+
+Final acceptance requires `true`, complete accepted coverage, and passing real
+aggregates. See the [contract](integration-test-contract.md) and
+[retirement map](integration-coverage-map.md#legacy-retirement-map).
+
+The initial one-for-one package relocation is superseded. All fifteen public
+`verify-*` definitions are removed. Unique assertions use the following existing
+component homes. This table documents ownership; it is not an execution registry.
+
+| Former verification name | Current source and primary execution |
+| --- | --- |
+| `config-inspector` | [config-inspection.nix](../../../packages/default/crates/cf-server/tests/nix/config-inspection.nix), normal core server `postCheck` |
+| `config-observer` | [config-observation.nix](../../../packages/default/crates/cf-server/tests/nix/config-observation.nix), normal core server `postCheck` |
+| `evaluator-snapshot-isolation` | [primary-isolation.nix](../../../packages/default/crates/cf-server/tests/nix/primary-isolation.nix), normal core server `postCheck` |
+| `verified-source-evaluator-parity` | [source-parity.nix](../../../packages/default/crates/cf-server/tests/nix/source-parity.nix), normal core server `postCheck`, with its locked verified-source fixture |
+| `niks3-ca-bundle` | All thirteen unchanged `cf-config` library tests in the normal core build; [compatibility.nix](../../../packages/default/crates/cf-config/test-support/ca-bundle/compatibility.nix) compares Go/Rust full-DER identities on three datasets in core `postCheck` |
+| `server-regressions` | Existing `devScripts.state-machine-test`; [database-regressions.sh](../../../packages/devScripts/tests/database-regressions.sh) and [state-machine-tests.sh](../../../packages/devScripts/tests/state-machine-tests.sh) |
+| `builder-cve-contract` | [builder-cve.nix](../../../modules/nixos/crystal-forge/tests/builder-cve.nix), explicit boolean Nix evaluation |
+| `stig` | [stig.nix](../../../modules/nixos/crystal-forge/tests/stig.nix), explicit boolean Nix evaluation |
+| `builder-evaluator-packaging` | [packaging.nix](../../../modules/nixos/crystal-forge/tests/packaging.nix), pure module evaluation; [packaging.sh](../../../modules/nixos/crystal-forge/tests/packaging.sh), installed-wrapper and generated-service probes |
+| `nixos-discovery-reliability` | [discovery.sh](../../../modules/nixos/crystal-forge/tests/discovery.sh) and [discovery.py](../../../modules/nixos/crystal-forge/tests/discovery.py), direct runtime test with independent temporary Nix stores |
+| `nixos-options-metadata` | Ordinary [nixos-options-metadata](../../../packages/nixos-options-metadata/default.nix) assertions and `postCheck` |
+| `oscal-export` | Ordinary [oscal-fixture](../../../packages/oscal-fixture/default.nix) check phase, validating the NIST AR/AP/SSP chain with [validate.py](../../../packages/oscal-fixture/validate.py) |
+| `run-ui-dev-db-check` | Existing [DB usability selftest](../../../packages/devScripts/db-usability-check-test.sh) and [DB start selftest](../../../packages/devScripts/db-only-start-test.sh), direct CI commands under `nix develop` |
+| `web-ui-test-runner` | Existing [host runner selftest](../../../packages/devScripts/web-ui/tests/web-ui-test-runner-test.sh), direct CI command under `nix develop` |
+| `xccdf-schema` | [xccdf-schema.sh](../../../packages/default/crates/cf-server/tests/xccdf-schema.sh), installed real exporter fixture XML, CF extensions, and OpenSCAP validation in direct component CI |
+
+The four evaluator fragments run once in the normal core server build, not in
+the embedded build. Existing Rust test definitions remain. Core explicitly
+selects `--package cf-config` and `--package cf-protocol` as well as
+`--package cf-server --lib --bins` and the three pure export targets described
+below; selecting only `cf-server` did not run dependency-library tests. The separate
+CA runner and fixture derivations are removed. Dataset comparison reduces Go
+invocations from nine to three and OpenSSL parses from 1,758 to 879 without
+removing the cross-language identity assertions.
+
+One explicit `component-tests` CI job replaces the six-entry
+`package-verification` matrix. It builds core, embedded server, agent, builder,
+keygen, metadata, OSCAL and documentation,
+then runs module evaluations, discovery, installed-wrapper/schema tests and
+developer-tool selftests directly. See [.gitlab-ci.yml](../../../.gitlab-ci.yml)
+and the [verification guide](../../agents/verification.md#consolidated-component-verification)
+for commands. `.#okf-knowledge` and `.#ui-screenshots` remain ordinary packages;
+mocked screenshots provide design feedback, not semantic proof.
+
+The three database jobs remain. Their existing apps share the state-machine
+invocation-owned launcher and PostgreSQL module. CVE uses port 35432,
+state-machine uses 35433, and dashboard uses 35434. Each invocation has fresh
+temporary data and short socket directories, `LOGIN SUPERUSER CREATEDB`, and
+`pg_stat_statements` preload. PostgreSQL children alone drop privileges on root
+runners. The SQLx shell verifies data-directory ownership before migrations and
+exports both `DATABASE_URL` and `CRYSTAL_FORGE_TEST_DATABASE_URL`; all selections
+share `target/database-tests` by default. The state-machine source retains its selected
+ignored library regressions and explicit integration targets. The TASK-505 normal
+run passed 561 expected/emitted tests across 245 selections. Two library selections cover TASK-496
+heartbeat/state decoding. Six repeated ignored selections and
+94 nonignored library selections are removed; normal package `--lib --bins`
+owns the latter. The whole `composite_policy` target owns two tests removed from
+the CVE job. Both populated migration rehearsals and exact missing-test guards
+remain. CVE retains the earlier selections, including the MR335 isolation
+regression, and adds the TASK-505 live-database selections below. Historical
+27-filter/30-test counts do not describe the expanded selection.
+Dashboard retains both ignored visibility prefixes,
+selecting four tests. The dashboard query prefix owns
+`visibility_scope_handles_ambiguous_systems_cache_pushes_and_eval_attempts`;
+TASK-501 removes that one duplicate from the consolidated runner. The other
+dedicated selections do not overlap its database selections. Neither dedicated
+job is fully subsumed, so both remain. Dashboard runs both groups and retains
+any failure.
+
+All three apps preserve the actual Cargo status and bind actual emitted native
+libtest names to the listed executable selection. The guard preserves Cargo
+targets/filters and libtest ignored/exact options, subtracts ignored-only names
+from default listings, rejects empty executable selections, and compares name
+multisets and result counts. Listing does not execute test bodies. Unrelated
+positive results with the same count fail; no static registry is used.
+The launcher rejects absent/invalid completion receipts even if process-compose
+returns zero. Cleanup waits for PostgreSQL before removing invocation storage
+and preserves earlier errors. CI prepares closures/Cargo sources explicitly;
+outer execution, nested SQLx shells, and descendant Nix commands disable remote
+builders, substitution and fetch fallback. See the
+[database commands and failure-path regression](../../agents/verification.md#database-ci-failure-path-regression).
+The dedicated jobs run the direct Python regression with temporary fault
+configurations and retain `database-ci-evidence/`. That controlled evidence does
+not count as product-test execution or add a flake check.
+
+Initial TASK-501 local execution at `dbf50b47` plus the runner changes exposed failing
+assertions: CVE returned 101 after one passing and one failing test; normal
+dashboard execution returned 101 with three passing and one failing test on
+both root/nonroot paths. The failing tests are
+`recorded_derivation_path_restores_when_output_deriver_is_unknown` and
+`visibility_deployment_status_preserves_ahead_as_up_to_date`. Rust code and
+assertions were unchanged at the runner-only checkpoint `ee32c209`. Separate selection diagnostics and controlled
+failure-path checks must not be reported as a passing full CVE/dashboard job.
+Selection inventory is not execution evidence. The task notes retain exact
+names, counts, statuses, source and raw evidence locations.
+
+The authorized follow-up corrects only four `cfg(test)` fixtures under the
+existing source contracts: one eligible destination for legacy cache
+materialization, an authoritative successful post-build job, complete retention
+of the known authorized diagnostic-event baseline after stale completion, and
+a same-flake deployable target for ahead classification. The expired-lease
+denial now compares every persisted event field before/after the rejected call;
+it does not assume that the earlier valid `scanner_started` event disappeared.
+Production logic and original semantic/side-effect denial assertions are
+preserved. Test names and runner selections are unchanged.
+
+Normal prepared offline CVE/dashboard entries now executed successfully on both
+root-namespace and nonroot paths: CVE 30 passed/0 failed/0 ignored, dashboard
+4 passed/0 failed/0 ignored, each exit 0. Every output name and per-selection
+mode/count matched the existing inventory, including the three explicitly
+enabled ignored CVE tests. This is local normal-entry evidence, distinct from
+the earlier failing checkpoint and its separate selector diagnostics. See the
+[fixture follow-up record](../../agents/verification.md#authorized-fixture-follow-up-to-ee32c209)
+for source pins, retained failed environmental attempt, raw logs, formatting
+limitations and remaining coordinator-owned verification.
+
+The subsequent review correction strengthens the existing CI regression's
+cleanup evidence: nonempty reported data/socket sets, actual `[db]` postmaster
+PID and socket identity, same-PID final shutdown, and `/proc` starttime/death
+corroboration where readable. Temporary `db-init` shutdown is not accepted.
+The repeated root/nonroot matrix passed 32 controlled process cases, including
+unrelated positive names, and rejected eight mutated evidence fixtures missing
+the main shutdown or path report. Normal root CVE/dashboard entries passed
+30/4 unchanged test names with runtime membership checks. Focused broad mixed
+library/expected-panic/exact ignored integration checks also passed; the full
+state-machine run remains unverified locally. See the
+[runtime evidence record](../../agents/verification.md#runtime-membership-and-main-server-evidence-follow-up).
+
+Removed verification derivations total eighteen: fifteen public roots, the
+nested module-validation derivation, and the CA fixture and runner. Twenty-two
+expression helpers and six fixture generators remain unique component inputs,
+not gates. The measured recursive derivation union for core plus the former
+five-package slice fell from 5,428 to 4,432 (996 fewer). This is a dependency-DAG
+measurement, not a measured runtime improvement.
+
+Handwritten XCCDF examples are retired static examples, not production test
+evidence. The direct schema command validates actual writer output and all five
+CF extension node types with non-vacuous extraction. Rust tests retain custom
+check and structural semantics; this does not prove XSD validity of every
+custom-check variant. The TASK-505 checkpoint below records current normal
+core/database results. This retirement record does not establish new Admin-form
+integration evidence; its sixteen Access cases belong to an earlier checkpoint.
+
+The nine legacy integration suite directories are retired. CI jobs
+`legacy-flake-check`, `web-ui-check`, and `web-ui-baseline-candidates` are
+removed. Useful browser developer assets live in `packages/devScripts/web-ui/`.
+Both XCCDF XML revisions live in `checks/integration-assurance/fixtures/xccdf/`.
+Unused `test-keys` placeholders are removed. These actions do not establish
+replacement integration coverage or turn legacy implementation details into
+mandatory requirements.
+
+### Optional measurement and adopted test ownership
+
+TASK-505 assigns previously missing normal execution to existing owners:
+
+| Adopted tests | Existing owner and source selection |
+| --- | --- |
+| 41 `cf-protocol` tests | Core component's explicit `--package cf-protocol` selection in [default.nix](../../../packages/default/default.nix) |
+| Three pure export targets, 13 tests | Core selects `oscal_poam_export`, `register_oscal_snapshot` and `register_tabular_export`; `check-jsonschema`, `xmllint` and `CF_TEST_OSCAL_SCHEMAS` supply explicit schema validation tools and source |
+| Two migration targets, 8 tests | State-machine selects `hardening_admission_migration_upgrade` and `risk_acceptance_0298_upgrade` in [database-regressions.sh](../../../packages/devScripts/tests/database-regressions.sh) |
+| 12 live-database library tests | CVE in [default.nix](../../../packages/devScripts/default.nix) adds five exact names (two worker, one immediate-scan and two query tests) plus the seven-test `queries::cve_scans_tests::` module prefix, serialized with `--test-threads=1` |
+
+These selections apply with coverage disabled. The 27 ignored tests across eight
+previously skipped targets remain disabled; no entire-ignored-inventory run is
+required. Assertions remain with their component/database owners, not with the
+collector. Normal and instrumented runs passed; detailed proof and commands are
+in the [verification guide](../../agents/verification.md#optional-native-coverage).
+
+| TASK-505 comparison | Before | After |
+| --- | --- | --- |
+| Measurement | Separate Tarpaulin test/database execution | Default-off `CF_COVERAGE=1` instrumentation in existing component/DB jobs; artifact-only collector |
+| MR jobs | 11 | 10 default / 11 with collection enabled |
+| Root integration checks | Four owners | Same four owners and scenarios |
+| Coverage package/selftest | 562 lines | 101 lines; net 461 removed |
+| Collector runtime closure | 223 entries | 22; no Cargo, rustc, Tarpaulin, PostgreSQL or process-compose |
+
+These are scoped counts, not repository-wide totals. The guide records native
+report scope, schema-profile merging, cleanup, visible warnings, full-ELF size
+and unverified hosted upload. Normal production variants remain uninstrumented.
+Superseded Tarpaulin evidence retains its provenance in the
+[coverage map](integration-coverage-map.md#local-full-llvm-coverage-checkpoint-at-3e8152b1-dirty).
+
+## Historical catalog (before source retirement)
+
+The remainder preserves the migration-base catalog and subsequent historical
+scope notes. Old `checks` commands, CI memberships, paths and baseline procedures
+below describe retired or relocated implementations and are not current run
+instructions. Use the component table above for retained verification. Historical
+README links for retired suites resolve to the last retained source revision;
+successor source links identify the consolidated implementation.
+
+This concept was a catalog and pointer record. Each check kept its own
+`README.md` next to its `default.nix`. The removed READMEs remain historical
+provenance; current execution ownership is defined above. This catalog records what
 the check verifies, how to run it, and where the README lives. The summaries
 come from reading each README together with the matching `default.nix` at the
 migration base commit. The TASK-470 packaging and Niks3 sections and cache
@@ -71,35 +281,97 @@ not files or behavior present at the original migration base `3b23d36f`.
 
 Every check below runs with
 `nix build .#checks.x86_64-linux.<name> --print-build-logs`, unless the section
-says otherwise. For the web UI check in depth, see the
+says otherwise.
+
+The integration layer is being replaced by four owners (`integration-access`,
+`integration-delivery`, `integration-assurance`, `integration-upgrade`) under
+the [integration test maintenance contract](integration-test-contract.md). Only
+`integration-access` is currently discoverable. Its coordinator-owned
+`checks/integration-access/default.nix` explicitly registers scenarios, and its
+normal `pkgs.linkFarm` check builds every registered scenario gate. Meaningful
+WIP checks may be discoverable without a completeness flag; missing obligations
+remain in the [coverage map](integration-coverage-map.md), which also
+gives each legacy check below its retirement disposition. For the web UI check in depth, see the
 [Web UI check runbook](web-ui-check.md). For the overall test strategy, see the
 [Crystal Forge testing plan](test-plan.md).
 
+Shared helpers live in `lib/integration-test/`; native Snowfall checks call
+`lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }`. A
+packet does not automatically get a NixOS derivation. Compatible packet cases
+are fragments composed and registered by the coordinator using the existing
+Nix/Python/browser-script structure. A separately built scenario gets a fresh
+VM/database; same-scenario cases may use receipts from earlier real workflows.
+Future Delivery, Assurance, and Upgrade scenarios, fixtures, and assets belong
+beneath `checks/integration-{delivery,assurance,upgrade}/`. Do not create
+placeholder `default.nix` files or custom discovery.
+
+GitLab runs each implemented owner automatically: the `integration-access`
+job builds the normal owner aggregate and is required on merge requests and
+`main`. The retiring legacy integration checks stay defined and playable as
+optional manual jobs: `integration`, `oidc-auth`, `niks3-cache`,
+`niks3-write-probe`, `niks3-ui`, `attic-metrics`, and `attic-publication` run
+as `legacy-flake-check: [<name>]`, and `web-ui` runs as `web-ui-check`. Removing a legacy
+check from automatic CI does not mark its obligations covered. Delete its
+definition and fixtures after passing replacement coverage is recorded, or
+after an explicit decision removes the underlying requirement. The
+[coverage map](integration-coverage-map.md#current-gitlab-selection) lists the
+automatic coverage gaps.
+
+Run the focused Access gate with
+`nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`.
+Append `.run` to the scenario attribute for evidence only. The historical
+scenario at `fc930335878279ac426510359c039dfd8961dc13` failed before
+migrations/browser/auth. TASK-490.25/.26 repairs are integrated. After rebase on
+`origin/dev` `5ae7feab`, the latest focused scenario passed ten cases at
+`81d65be745cc9f9777d368900d01fe0f207cb052`: five unchanged bootstrap cases
+and five owner-selected session/CSRF/sign-out cases. The command
+`nix build .#checks.x86_64-linux.integration-access -L` also passed, reusing
+that run. This verifies bootstrap and the selected session proof, not full
+Access coverage or the other owners. The same VM journal records unrelated
+TASK-492. See the
+[foundation execution record](integration-coverage-map.md#foundation-execution-record)
+for the generated configuration, exact output path, expected/actual result,
+and task links. TASK-491's package test prerequisite is resolved. The CI job
+script `sh packages/ci/integration-owner-build.sh integration-access` also
+executed the VM and passed the same ten cases at
+`2c494ac4bf8cc7155899723ee69fcf879ac49248`, and all 16 cases (adding six
+Operator/Viewer authorization cases) at `8a857bc872cf331a19036b97a93f2b7741e9728b`;
+it exports real evidence files to `integration-evidence/integration-access/`,
+including after a failed build, and keeps the build status if collection fails.
+The former retain-until-cutover instruction is superseded by the authorized
+source retirement. This historical result does not restore a legacy gate.
+
 ## Summary
+
+Only Access and Delivery are current integration checks. The other rows retain
+historical suite inventories or identify current lower-level/tool successors;
+they are not additional flake check attributes.
 
 | Check | Boots a VM | Covers | README |
 | --- | --- | --- | --- |
-| `integration` | Yes (server and git server) | Server, database, and Grafana dashboard behavior through the `cf_test` pytest markers `database`, `dashboard`, and `server` | [README](../../../checks/integration/README.md) |
-| `oidc-auth` | Yes (Keycloak and server) | OIDC login path against a real Keycloak realm | [README](../../../checks/oidc-auth/README.md) |
-| `web-ui` | Yes (server, agent, builder, git server) | Production embedded-UI server through a real browser | [README](../../../checks/web-ui/README.md) |
-| `web-ui-reconciliation` | Yes (nginx only) | One STIG import reconciliation workflow with mocked API routes | [README](../../../checks/web-ui-reconciliation/README.md) |
-| `web-ui-test-runner` | No | The `web-ui-test` wrapper script logic | [README](../../../checks/web-ui-test-runner/README.md) |
-| `ui-screenshots` | No | Fixture-driven screenshots of every view in two themes | [README](../../../checks/ui-screenshots/README.md) |
-| `server-regressions` | No | PostgreSQL-backed Rust regression tests and a migration upgrade rehearsal | [README](../../../checks/server-regressions/README.md) |
-| `builder-evaluator-packaging` | No | Evaluator-bound Nix/Niks3 wrappers, service PATH, proxy assertions, and generated configuration | [README](../../../checks/builder-evaluator-packaging/README.md) |
-| `niks3-cache` | Yes (cache, server, builder, agent) | Real cache publication, proxy claims, capability gates, agent pulls, and local CVE materialization | [README](../../../checks/niks3-cache/README.md) |
+| `integration-access` | Yes (one shared controller; automatic and required) | Bootstrap/migrations, local sign-in/reload, sessions/CSRF/sign-out, selected Admin-only role denials and Admin form persistence. Remaining environment, registration and other Access obligations stay gaps. | [Coverage map](integration-coverage-map.md) |
+| `integration-delivery` | Yes (one five-role lifecycle; automatic and required) | Authored source/native evaluation, exact derivation/attempt, two API-only builder sessions, cold real Nix output, signed local publication and target-agent reporting. Remaining Delivery obligations stay gaps. | [README](../../../checks/integration-delivery/README.md) |
+| `integration` | Yes (server and git server) | Server, database, and Grafana dashboard behavior through the `cf_test` pytest markers `database`, `dashboard`, and `server` | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/integration/README.md) |
+| `oidc-auth` | Yes (Keycloak and server) | OIDC login path against a real Keycloak realm | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/oidc-auth/README.md) |
+| `web-ui` | Yes (server, agent, builder, git server) | Production embedded-UI server through a real browser | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/web-ui/README.md) |
+| `web-ui-reconciliation` | Yes (nginx only) | One STIG import reconciliation workflow with mocked API routes | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/web-ui-reconciliation/README.md) |
+| `web-ui-test-runner` | No | The `web-ui-test` wrapper script logic | [Successor selftest](../../../packages/devScripts/web-ui/tests/web-ui-test-runner-test.sh) |
+| `ui-screenshots` | No | Fixture-driven screenshots of every view in two themes | [README](../../../packages/ui-screenshots/README.md) |
+| `server-regressions` | No | PostgreSQL-backed Rust regression tests and a migration upgrade rehearsal | [Successor runner](../../../packages/devScripts/tests/database-regressions.sh) |
+| `builder-evaluator-packaging` | No | Evaluator-bound Nix/Niks3 wrappers, service PATH, proxy assertions, and generated configuration | [Successor runtime probes](../../../modules/nixos/crystal-forge/tests/packaging.sh) |
+| `niks3-cache` | Yes (cache, server, builder, agent) | Real cache publication, proxy claims, capability gates, agent pulls, and local CVE materialization | [Historical README](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/niks3-cache/README.md) |
 | `okf-knowledge` | No | OKF structural validation, checker unit tests, exact diagram audit, and a pinned Mermaid syntax parse of every diagram (no browser render; `nix run .#okf-mermaid-renderer` renders SVG manually) | — |
-| `oscal-export` | No | OSCAL 1.1.2 schema validation of fixture output | [README](../../../checks/oscal-export/README.md) |
-| `xccdf-schema` | No | XCCDF 1.2 and `cf-xccdf-1` schema validation | [README](../../../checks/xccdf-schema/README.md) |
-| `stig` | No | `mkStigModule` override and merge semantics | [README](../../../checks/stig/README.md) |
-| `nixos-options-metadata` | No | Extracted NixOS option type metadata | [README](../../../checks/nixos-options-metadata/README.md) |
-| `run-ui-dev-db-check` | No | `run-ui-dev` database probe and start scripts | [README](../../../checks/run-ui-dev-db-check/README.md) |
+| `oscal-export` | No | OSCAL 1.1.2 schema validation of fixture output | [Successor validator](../../../packages/oscal-fixture/validate.py) |
+| `xccdf-schema` | No | XCCDF 1.2 and `cf-xccdf-1` schema validation | [Successor script](../../../packages/default/crates/cf-server/tests/xccdf-schema.sh) |
+| `stig` | No | `mkStigModule` override and merge semantics | [Successor assertions](../../../modules/nixos/crystal-forge/tests/stig.nix) |
+| `nixos-options-metadata` | No | Extracted NixOS option type metadata | [Successor package tests](../../../packages/nixos-options-metadata/default.nix) |
+| `run-ui-dev-db-check` | No | `run-ui-dev` database probe and start scripts | [Successor selftest](../../../packages/devScripts/db-usability-check-test.sh) |
 
 ## Server and database checks
 
 ### `integration`
 
-README: [checks/integration/README.md](../../../checks/integration/README.md).
+Historical README: [checks/integration/README.md](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/integration/README.md).
 
 - **What it verifies.** The check boots a NixOS VM with the Crystal Forge
   server, its embedded PostgreSQL database, an agent, and Grafana, plus a
@@ -115,11 +387,13 @@ README: [checks/integration/README.md](../../../checks/integration/README.md).
   does not exercise OIDC.
 - **Run it.** `nix build .#checks.x86_64-linux.integration --print-build-logs`.
   The global timeout in `default.nix` is 1200 seconds.
-- **CI.** Listed in the `.gitlab-ci.yml` `flake-check` matrix.
+- **CI.** Optional manual `legacy-flake-check: [integration]` job
+  (`allow_failure: true`) in `.gitlab-ci.yml`. It does not run automatically.
+  Its obligations are not covered by `integration-access`.
 
 ### `oidc-auth`
 
-README: [checks/oidc-auth/README.md](../../../checks/oidc-auth/README.md).
+Historical README: [checks/oidc-auth/README.md](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/oidc-auth/README.md).
 
 - **What it verifies.** The check boots a Keycloak VM with an imported
   `crystal-forge` realm and a Crystal Forge server VM with
@@ -134,11 +408,13 @@ README: [checks/oidc-auth/README.md](../../../checks/oidc-auth/README.md).
   `checks/oidc-auth/realm-crystal-forge.json`.
 - **Run it.** `nix build .#checks.x86_64-linux.oidc-auth --print-build-logs`.
   The global timeout in `default.nix` is 600 seconds.
-- **CI.** Listed in the `.gitlab-ci.yml` `flake-check` matrix.
+- **CI.** Optional manual `legacy-flake-check: [oidc-auth]` job
+  (`allow_failure: true`) in `.gitlab-ci.yml`. It does not run automatically.
+  Its obligations are not covered by `integration-access`.
 
 ### `server-regressions`
 
-README: [checks/server-regressions/README.md](../../../checks/server-regressions/README.md).
+Current successor: [consolidated database runner](../../../packages/devScripts/tests/database-regressions.sh). The description below records the historical package/check, not the current launcher or test counts.
 
 - **What it verifies.** The check builds `cf-server` test targets with
   `buildRustPackage` and runs them against a disposable PostgreSQL instance from
@@ -162,7 +438,7 @@ README: [checks/server-regressions/README.md](../../../checks/server-regressions
   directly, check independent `enc:v1` compatibility, exact Test/Cancel snapshots,
   raw credential retention on unrelated Save, and pre-probe NULL/empty refusal.
   Synthetic Rust tokens do not prove native Bearer authentication. The separate
-  [native browser fixture](../../../checks/web-ui/README.md#existing-legacy-attic-rows)
+   [historical native browser fixture](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/web-ui/README.md#existing-legacy-attic-rows)
   requires real private Attic metadata reads for plaintext/historical rows and
   zero provider requests for the NULL row. Neither catalog membership nor this
   scope description establishes a pass for the current revision.
@@ -243,13 +519,13 @@ exact-test guard. Progress adds no heartbeat, command-argument dump, environment
 dump, or `--nocapture`. Earlier aggregate compilation output did not identify a
 hung target or the cause of a remote failure; these boundaries aid future diagnosis.
 
-For the three matrix entries `server-regressions`, `niks3-cache`, and
+For the checks `server-regressions`, `niks3-cache`, and
 `builder-evaluator-packaging`, current CI invokes
 `bash packages/ci/public-cache-build.sh` before the normal build attribute.
-The full `web-ui-check` and optional manual `web-ui-baseline-candidates` jobs use
-the same wrapper; the full browser job remains `allow_failure: true`, and the
-candidate job remains manual and optional. Other matrix entries keep their
-existing commands. This is command-local policy, not removal of organization
+The `integration-access` job, the full `web-ui-check` job, and the
+`web-ui-baseline-candidates` job use the same wrapper. The full browser job and
+the candidate job are manual and optional (`allow_failure: true`).
+Other matrix entries keep their existing commands. This is command-local policy, not removal of organization
 caches from global configuration or a change to the application's Attic access.
 The wrapper validates public-only substituters, empty extra substituters, and
 rejection of flake-supplied cache settings. It bounds connection attempts to
@@ -263,7 +539,7 @@ baseline action is implied by this catalog entry.
 
 ### `builder-evaluator-packaging`
 
-README: [checks/builder-evaluator-packaging/README.md](../../../checks/builder-evaluator-packaging/README.md).
+Current successors: [module assertions](../../../modules/nixos/crystal-forge/tests/packaging.nix) and [installed runtime probes](../../../modules/nixos/crystal-forge/tests/packaging.sh). The root and nested module-validation derivations described below are removed.
 
 - **What it verifies.** Sandbox probes check component/public wrappers and service
   PATH for the exact evaluator Nix and evaluator-bound Niks3 1.6.0. The dependent
@@ -279,7 +555,7 @@ README: [checks/builder-evaluator-packaging/README.md](../../../checks/builder-e
 
 ### `niks3-cache`
 
-README: [checks/niks3-cache/README.md](../../../checks/niks3-cache/README.md).
+Historical README: [checks/niks3-cache/README.md](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/niks3-cache/README.md).
 
 - **What it verifies.** Four isolated VMs exercise five token/mTLS write and
   public/private read variants with real remote builds, signed destination-bound
@@ -299,9 +575,12 @@ README: [checks/niks3-cache/README.md](../../../checks/niks3-cache/README.md).
    certificate and log-audit limits and the
    [completion API](../api/builder-job-lifecycle-api.md#post-apiv1buildersidjobsjob_idcomplete)
    for guarded HTTP 200/202 receipts and bounded callback recovery.
-- **CI.** Blocking `flake-check: [niks3-cache]` matrix job on merge requests and
-  `main`, using the `nix` runner tag in `.gitlab-ci.yml`; its runner must supply KVM.
-  Matrix membership establishes neither check's pass for a particular commit.
+- **CI.** Optional manual `legacy-flake-check: [niks3-cache]` job
+  (`allow_failure: true`) on merge requests and `main`, using the `nix` runner
+  tag in `.gitlab-ci.yml`; its runner must supply KVM. It was a blocking
+  `flake-check` matrix job before the TASK-490.24 early transition. A manual
+  job establishes no pass for a particular commit, and its obligations are not
+  covered by `integration-access`.
 
 ## Web UI checks
 
@@ -317,7 +596,7 @@ remains pending owner evidence. No current-head CI pass is established here.
 
 ### `web-ui`
 
-README: [checks/web-ui/README.md](../../../checks/web-ui/README.md). The
+Historical README: [checks/web-ui/README.md](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/web-ui/README.md). The
 procedural guide is the [Web UI check runbook](web-ui-check.md).
 
 - **What it verifies.** This is the authoritative pre-merge gate for the web UI.
@@ -341,18 +620,22 @@ procedural guide is the [Web UI check runbook](web-ui-check.md).
   (interactive only; boots Attic and S3 cache VMs and runs legacy pytest
   phases).
 - **CI.** The check runs through the separate `web-ui-check` job. That job is
-  currently `allow_failure: true`.
+  an optional manual job with `allow_failure: true`; it does not run
+  automatically. The automatic `web-ui-screenshots-mr-comment` reporter was
+  removed. Its obligations are not covered by `integration-access`.
 
 `checks/web-ui/default.nix` sets `globalTimeout = 3000` and
 `playwrightResultTimeout ? 2700`. `.gitlab-ci.yml` runs the Web UI check as a
-separate `web-ui-check` job with `allow_failure: true`. The `flake-check`
-matrix includes `integration`, `oidc-auth`, `run-ui-dev-db-check`,
-`server-regressions`, `niks3-cache`, `builder-evaluator-packaging`,
-`web-ui-test-runner`, and `okf-knowledge`.
+separate manual `web-ui-check` job with `allow_failure: true`. The automatic
+`flake-check` matrix is `run-ui-dev-db-check`, `server-regressions`,
+`nixos-discovery-reliability`, `builder-evaluator-packaging`,
+`web-ui-test-runner`, and `okf-knowledge`. The manual `legacy-flake-check`
+matrix is `integration`, `oidc-auth`, `niks3-cache`, `niks3-write-probe`,
+`niks3-ui`, `attic-metrics`, and `attic-publication`.
 
 ### `web-ui/baselines`
 
-README: [checks/web-ui/baselines/README.md](../../../checks/web-ui/baselines/README.md).
+Historical README: [checks/web-ui/baselines/README.md](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/web-ui/baselines/README.md).
 
 This directory holds reviewed visual baselines for `strict` manifest steps. It
 is not a check. Generate captures through the `web-ui` check and approve them
@@ -363,7 +646,7 @@ export-test screenshots to this directory. The approval procedure is in the
 
 ### `web-ui-reconciliation`
 
-README: [checks/web-ui-reconciliation/README.md](../../../checks/web-ui-reconciliation/README.md).
+Historical README: [checks/web-ui-reconciliation/README.md](https://gitlab.com/crystal-forge/crystal-forge/-/blob/5fa1f4fa/checks/web-ui-reconciliation/README.md).
 
 - **What it verifies.** One VM runs nginx and serves only the static production
   web UI build, with no server, database, or backend. The check asserts that
@@ -383,7 +666,7 @@ README: [checks/web-ui-reconciliation/README.md](../../../checks/web-ui-reconcil
 
 ### `web-ui-test-runner`
 
-README: [checks/web-ui-test-runner/README.md](../../../checks/web-ui-test-runner/README.md).
+Current successor: [direct host runner selftest](../../../packages/devScripts/web-ui/tests/web-ui-test-runner-test.sh).
 
 - **What it verifies.** The check tests the host-side `web-ui-test` wrapper
   (`checks/web-ui/tests/web-ui-test.sh`) with
@@ -398,7 +681,7 @@ README: [checks/web-ui-test-runner/README.md](../../../checks/web-ui-test-runner
 
 ### `ui-screenshots`
 
-README: [checks/ui-screenshots/README.md](../../../checks/ui-screenshots/README.md).
+README: [packages/ui-screenshots/README.md](../../../packages/ui-screenshots/README.md).
 
 - **What it verifies.** `capture.js` drives Playwright against the served
   production WASM bundle, intercepts every `/api/v1/` call with JSON built from
@@ -421,7 +704,7 @@ data this check reads.
 
 ### `oscal-export`
 
-README: [checks/oscal-export/README.md](../../../checks/oscal-export/README.md).
+Current successor: [ordinary OSCAL fixture package](../../../packages/oscal-fixture/default.nix) with its [schema-chain validator](../../../packages/oscal-fixture/validate.py).
 
 - **What it verifies.** `crystal-forge-oscal-fixture` produces a deterministic
   OSCAL Assessment Results document. `validate.py` validates that document and
@@ -435,7 +718,7 @@ README: [checks/oscal-export/README.md](../../../checks/oscal-export/README.md).
 
 ### `xccdf-schema`
 
-README: [checks/xccdf-schema/README.md](../../../checks/xccdf-schema/README.md).
+Current successor: [installed writer schema validation](../../../packages/default/crates/cf-server/tests/xccdf-schema.sh). Hand-authored XML below is historical static-example validation, not current production-test evidence or proof of all export variants.
 
 - **What it verifies.** The check validates the vendored XCCDF 1.2 schema and
   the repository's `cf-xccdf-1` extension schema (`schemas/cf-xccdf-1/`). It uses
@@ -452,7 +735,7 @@ README: [checks/xccdf-schema/README.md](../../../checks/xccdf-schema/README.md).
 
 ### `stig`
 
-README: [checks/stig/README.md](../../../checks/stig/README.md).
+Current successor: [eleven pure module assertion groups](../../../modules/nixos/crystal-forge/tests/stig.nix), evaluated directly without a derivation.
 
 - **What it verifies.** A pure Nix evaluation tests
   `lib.crystal-forge.mkStigModule`, the helper that sets NixOS option values at a
@@ -475,7 +758,7 @@ README: [checks/stig/README.md](../../../checks/stig/README.md).
 
 ### `nixos-options-metadata`
 
-README: [checks/nixos-options-metadata/README.md](../../../checks/nixos-options-metadata/README.md).
+Current successor: [ordinary metadata package assertions and postCheck](../../../packages/nixos-options-metadata/default.nix).
 
 - **What it verifies.** A pure Nix evaluation over the `nixos-options-metadata`
   package asserts that the metadata list is sorted by option path, that five
@@ -494,7 +777,7 @@ README: [checks/nixos-options-metadata/README.md](../../../checks/nixos-options-
 
 ### `run-ui-dev-db-check`
 
-README: [checks/run-ui-dev-db-check/README.md](../../../checks/run-ui-dev-db-check/README.md).
+Current successors: [DB usability selftest](../../../packages/devScripts/db-usability-check-test.sh) and [DB start selftest](../../../packages/devScripts/db-only-start-test.sh), invoked directly under `nix develop`.
 
 - **What it verifies.** The check runs two bash tests against the real scripts
   in `packages/devScripts/`. `db-usability-check.sh` must tell apart a

@@ -212,6 +212,7 @@ pub use remove_environment_dialog::RemoveEnvironmentDialog;
 
 // Re-export helper functions
 pub use add_environment_form::validate_environment;
+pub use add_environment_form::validate_optional_policy_ids;
 
 /// Get the default required policy ID (Crystal Forge Agent).
 pub fn required_agent_policy_id(policy_library: &[PolicyOption]) -> Uuid {

@@ -629,6 +629,179 @@ mod tests {
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires verified isolated database and database creation privileges"]
+    async fn signed_heartbeat_classification_preserves_exact_state_lineage(pool: PgPool) {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        use ed25519_dalek::Signer;
+
+        async fn send(
+            state: &CFState,
+            key: &ed25519_dalek::SigningKey,
+            payload: &crate::models::system_states::SystemState,
+            expected_id: Uuid,
+        ) {
+            let body = Bytes::from(serde_json::to_vec(payload).unwrap());
+            let mut headers = HeaderMap::new();
+            headers.insert("x-key-id", payload.hostname.parse().unwrap());
+            headers.insert(
+                "x-signature",
+                STANDARD.encode(key.sign(&body).to_bytes()).parse().unwrap(),
+            );
+            let verified = authenticate_agent_request(&headers, body.clone(), &state.pool)
+                .await
+                .unwrap();
+            assert_eq!(verified.system.id, expected_id);
+            assert_eq!(verified.system.hostname, payload.hostname);
+            let response = log(
+                State(state.clone()),
+                State(state.pool.clone()),
+                None,
+                headers,
+                body,
+            )
+            .await;
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+
+        async fn states(pool: &PgPool, system_id: Uuid) -> Vec<(i32, Option<i32>, Option<String>)> {
+            sqlx::query_as(
+                "SELECT ss.id, ss.generation, ss.store_path FROM system_states ss
+                 JOIN systems s ON s.hostname = ss.hostname WHERE s.id = $1 ORDER BY ss.id",
+            )
+            .bind(system_id)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+        }
+
+        async fn heartbeats(pool: &PgPool, system_id: Uuid) -> Vec<(i64, i32)> {
+            sqlx::query_as(
+                "SELECT h.id, h.system_state_id FROM agent_heartbeats h
+                 JOIN system_states ss ON ss.id = h.system_state_id
+                 JOIN systems s ON s.hostname = ss.hostname WHERE s.id = $1 ORDER BY h.id",
+            )
+            .bind(system_id)
+            .fetch_all(pool)
+            .await
+            .unwrap()
+        }
+
+        let (key, verifying) = crate::test_utils::crypto::generate_keypair();
+        let (foreign_key, foreign_verifying) = crate::test_utils::crypto::generate_keypair();
+        let mut ids = Vec::new();
+        for (hostname, public_key) in [
+            ("classification-target", verifying),
+            ("classification-foreign", foreign_verifying),
+        ] {
+            let id: Uuid = sqlx::query_scalar(
+                "INSERT INTO systems (hostname, public_key, derivation, deployment_policy)
+                 VALUES ($1, $2, '', 'manual') RETURNING id",
+            )
+            .bind(hostname)
+            .bind(STANDARD.encode(public_key.to_bytes()))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            ids.push(id);
+        }
+        let (target_id, foreign_id) = (ids[0], ids[1]);
+        let state = CFState::new(
+            pool.clone(),
+            crate::config::ServerConfig::default(),
+            std::sync::Arc::new(crate::queue::QueueNotifier::new()),
+            crate::server::jobs::BackgroundJobRegistry::new(),
+        );
+        let mut payload = crate::test_utils::builders::SystemStateBuilder::new()
+            .hostname("classification-target")
+            .store_path("/nix/store/classification-s1")
+            .build();
+        payload.generation = Some(101);
+        payload.boot_id = Some("boot-session-one".into());
+        payload.change_reason = "startup".into();
+        send(&state, &key, &payload, target_id).await;
+        let s1 = states(&pool, target_id).await;
+        assert_eq!(s1.len(), 1);
+        assert_eq!(s1[0].1, Some(101));
+        assert_eq!(s1[0].2, payload.store_path);
+        assert!(heartbeats(&pool, target_id).await.is_empty());
+
+        // A newer foreign state must never become this target's baseline.
+        payload.hostname = "classification-foreign".into();
+        send(&state, &foreign_key, &payload, foreign_id).await;
+        let foreign_states = states(&pool, foreign_id).await;
+        assert_eq!(foreign_states.len(), 1);
+        payload.hostname = "classification-target".into();
+        payload.change_reason = "heartbeat".into();
+        for uptime in [200, 300] {
+            payload.uptime_secs = Some(uptime);
+            payload.timestamp = Some(chrono::Utc::now());
+            send(&state, &key, &payload, target_id).await;
+        }
+        assert_eq!(states(&pool, target_id).await, s1);
+        let h12 = heartbeats(&pool, target_id).await;
+        assert_eq!(h12.len(), 2);
+        assert_ne!(h12[0].0, h12[1].0);
+        assert!(h12.iter().all(|(_, state_id)| *state_id == s1[0].0));
+
+        // Change a compared store path with its generation. This does not
+        // change the existing policy for generation-only differences.
+        payload.store_path = Some("/nix/store/classification-s2".into());
+        payload.generation = Some(102);
+        payload.kernel = Some("classification-kernel-two".into());
+        send(&state, &key, &payload, target_id).await;
+        let s12 = states(&pool, target_id).await;
+        assert_eq!(s12.len(), 2);
+        assert_eq!(s12[0], s1[0]);
+        assert_ne!(s12[1].0, s1[0].0);
+        assert_eq!(s12[1].1, Some(102));
+        assert_eq!(s12[1].2, payload.store_path);
+        assert_eq!(heartbeats(&pool, target_id).await, h12);
+        send(&state, &key, &payload, target_id).await;
+        assert_eq!(states(&pool, target_id).await, s12);
+        let h123 = heartbeats(&pool, target_id).await;
+        assert_eq!(h123.len(), 3);
+        assert_eq!(&h123[..2], h12.as_slice());
+        assert_eq!(h123[2].1, s12[1].0);
+        assert_eq!(states(&pool, foreign_id).await, foreign_states);
+        assert!(heartbeats(&pool, foreign_id).await.is_empty());
+
+        let baseline: Option<String> =
+            sqlx::query_scalar("SELECT boot_id FROM systems WHERE id = $1")
+                .bind(target_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(baseline, payload.boot_id);
+        // A changed systems.boot_id still overrides equivalent-state
+        // classification and forces a full reboot row.
+        payload.boot_id = Some("boot-session-two".into());
+        send(&state, &key, &payload, target_id).await;
+        let reboot: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT ss.change_reason, ss.restart_type, s.boot_id FROM system_states ss
+             JOIN systems s ON s.hostname = ss.hostname WHERE s.id = $1 ORDER BY ss.id DESC LIMIT 1",
+        ).bind(target_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            reboot,
+            (
+                "startup".into(),
+                Some("system_reboot".into()),
+                payload.boot_id.clone()
+            )
+        );
+        assert_eq!(states(&pool, target_id).await.len(), 3);
+        assert_eq!(heartbeats(&pool, target_id).await, h123);
+
+        pool.close().await;
+        assert!(
+            matches!(
+                AgentHeartbeat::from_system_state_if_heartbeat(&payload, &pool).await,
+                Err(crate::models::agent_heartbeats::StateChangeRequired::DatabaseError)
+            ),
+            "real database errors must still require a full state report"
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified isolated database and database creation privileges"]
     async fn niks3_signed_handler_preserves_pending_deployment_and_delivers_only_selected_reads(
         pool: PgPool,
     ) {

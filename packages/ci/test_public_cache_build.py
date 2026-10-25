@@ -1,13 +1,12 @@
 """Checks scoped CI routing, real Nix policy, and fixture source realization.
 
-Run with `nix develop -c python3 packages/ci/test_public_cache_build.py`.
+Run with the pinned nixpkgs Python environment including PyYAML.
 The proxy delegates configuration queries to real Nix and records build argv.
 Synthetic unavailable caches must be removed even when inherited through both
 base and extra settings. A fresh instance of the integration test-flake builder
 proves source realization without running a VM gate. No runner settings are printed.
 """
 
-import copy
 import json
 import os
 from pathlib import Path
@@ -33,42 +32,11 @@ POLICY = [
 ]
 LOCAL_EXECUTION = ["--builders", "", "--max-jobs", "1", "--cores", "2"]
 
-old = yaml.safe_load(subprocess.check_output(
-    ["git", "show", "HEAD:.gitlab-ci.yml"], cwd=ROOT, text=True))
 new = yaml.safe_load((ROOT / ".gitlab-ci.yml").read_text())
-LOCAL_CHECKS = set(new["flake-check"]["parallel"]["matrix"][0]["CHECK_NAME"])
-changed = {"flake-check", "web-ui-check", "web-ui-baseline-candidates",
-           "complexity-check", "coverage-check"}
-assert old.keys() == new.keys()
-for job in old:
-    if job not in changed:
-        assert old[job] == new[job], job
-    else:
-        expected = copy.deepcopy({k: v for k, v in old[job].items() if k != "script"})
-        if job == "flake-check":
-            # TASK-470 and TASK-484 add blocking provider and discovery gates.
-            # Preserve every other matrix entry and unrelated job metadata.
-            names = expected["parallel"]["matrix"][0]["CHECK_NAME"]
-            if "nixos-discovery-reliability" not in names:
-                names.insert(names.index("server-regressions") + 1, "nixos-discovery-reliability")
-            if "attic-metrics" not in names:
-                names.insert(names.index("niks3-cache") + 1, "attic-metrics")
-            if "attic-publication" not in names:
-                names.insert(names.index("attic-metrics") + 1, "attic-publication")
-            if "niks3-write-probe" not in names:
-                names.insert(names.index("niks3-cache") + 1, "niks3-write-probe")
-            if "niks3-ui" not in names:
-                names.insert(names.index("niks3-write-probe") + 1, "niks3-ui")
-        assert expected == {
-            k: v for k, v in new[job].items() if k != "script"}, job
-        expected_scripts = copy.deepcopy(old[job]["script"][1:])
-        if job == "flake-check":
-            # Only the new shipped-UI alias also exports the existing artifacts.
-            # The replacement is idempotent after the CI source is committed.
-            expected_scripts[1] = expected_scripts[1].replace(
-                'if [ "$CHECK_NAME" = "web-ui" ]; then',
-                'if [ "$CHECK_NAME" = "web-ui" ] || [ "$CHECK_NAME" = "niks3-ui" ]; then')
-        assert expected_scripts == new[job]["script"][1:], job
+# Source retirement removes the legacy jobs, not their accepted replacement
+# obligations. Only integration owners belong in the flake check namespace.
+assert not {"flake-check", "legacy-flake-check", "web-ui-check",
+            "web-ui-baseline-candidates", "package-verification"}.intersection(new)
 
 with tempfile.TemporaryDirectory(prefix="cf-ci-policy-") as temporary:
     directory = Path(temporary)
@@ -110,6 +78,51 @@ if os.environ.get('OLD_CLI'):
                       'substituters-extra = https://unknown.invalid/private-marker'])
         print('\\n'.join(lines))
         sys.exit(0)
+if os.environ.get('METRICS_RECORD') and sys.argv[1] in ('build', 'develop', 'run'):
+    # Record only allowlisted effective settings. The real CLI receives the
+    # invocation's actual policy flags and inherited offline-phase environment.
+    controls = []
+    arguments = sys.argv[2:]
+    index = 0
+    while index < len(arguments):
+        argument = arguments[index]
+        if argument == '--option':
+            controls.extend(arguments[index:index + 3])
+            index += 3
+        elif argument in ('--builders', '--max-jobs', '--cores'):
+            controls.extend(arguments[index:index + 2])
+            index += 2
+        elif argument == '--offline':
+            controls.append(argument)
+            index += 1
+        elif argument == '-c':
+            break
+        else:
+            index += 1
+    effective = json.loads(subprocess.check_output(
+        [os.environ['REAL_NIX'], *controls, 'config', 'show', '--json'], text=True))
+    settings = {key: effective[key]['value'] for key in (
+        'substituters', 'substitute', 'builders', 'builders-use-substitutes',
+        'fallback', 'accept-flake-config', 'max-jobs', 'cores')}
+    nested_settings = None
+    if sys.argv[1] == 'run':
+        nested = json.loads(subprocess.check_output(
+            [os.environ['REAL_NIX'], 'config', 'show', '--json'], text=True))
+        nested_settings = {key: nested[key]['value'] for key in settings}
+    record = os.environ['METRICS_RECORD']
+    try:
+        with open(record) as previous:
+            invocation = sum(1 for _ in previous)
+    except FileNotFoundError:
+        invocation = 0
+    with open(record, 'a') as output:
+        output.write(json.dumps(dict(argv=sys.argv[1:], settings=settings,
+                                    nested_settings=nested_settings,
+                                    cargo_offline=os.environ.get('CARGO_NET_OFFLINE'),
+                                    sqlx_offline=os.environ.get('SQLX_OFFLINE'))) + '\\n')
+    if sys.argv[1] == 'run':
+        sys.exit(int(os.environ.get('RUN_EXIT', '0')))
+    sys.exit(23 if invocation == int(os.environ.get('METRICS_FAIL_AT', '-1')) else 0)
 if sys.argv[1] in ('build', 'run'):
     with open(os.environ['ARGV_RECORD'], 'w') as record:
         json.dump(sys.argv[1:], record)
@@ -151,86 +164,158 @@ cores = 4
         assert "127.0.0.1" not in result.stdout + result.stderr
         return result
 
-    route = new["flake-check"]["script"][0]
-    for name in new["flake-check"]["parallel"]["matrix"][0]["CHECK_NAME"]:
-        result = subprocess.run(["sh", "-euc", route], cwd=ROOT,
-                                env=dict(env, CHECK_NAME=name), capture_output=True, text=True)
-        assert result.returncode == 0, name
+    components = ["cf-server-core-drv", "cf-server-drv", "cf-agent-drv",
+                  "cf-builder-drv", "cf-keygen-drv"]
+    # Execute the real default CI loop. Append records so every component's
+    # policy and failure propagation are checked, including early loop exits.
+    record = directory / "components.jsonl"
+    for failed_component in [-1, *range(len(components))]:
+        record.unlink(missing_ok=True)
+        result = subprocess.run(
+            ["sh", "-euc", new["component-tests"]["script"][0]], cwd=ROOT,
+            env=dict(env, CF_COVERAGE="0", METRICS_RECORD=str(record),
+                     METRICS_FAIL_AT=str(failed_component)),
+            capture_output=True, text=True,
+        )
+        assert result.returncode == (0 if failed_component < 0 else 23), failed_component
+        assert "private-marker" not in result.stdout + result.stderr
+        assert "127.0.0.1" not in result.stdout + result.stderr
+        recorded = [json.loads(line) for line in record.read_text().splitlines()]
+        expected = (components if failed_component < 0
+                    else components[:failed_component + 1])
+        assert [entry["argv"] for entry in recorded] == [
+            ["build", *POLICY, f".#default.{component}", "-L", "--show-trace",
+             *LOCAL_EXECUTION] for component in expected
+        ]
+        assert result.stdout.count("InheritedInternalCache=true") == len(expected)
+        for entry in recorded:
+            settings = entry["settings"]
+            assert settings["substituters"] == ["https://cache.nixos.org"]
+            assert settings["accept-flake-config"] is False
+            assert settings["fallback"] is True
+            assert not settings["builders"]
+            assert settings["builders-use-substitutes"] is True
+            assert str(settings["max-jobs"]) == "1" and settings["cores"] == 2
+        print(f"PASS component loop: fault={failed_component}, "
+              f"propagated exit={result.returncode}, builds={len(recorded)}")
+
+    # Optional variants use the same wrapper. Probe their argv without copying
+    # profile artifacts or executing component test bodies in this routing test.
+    component_builds = [
+        ([f".#default.{component}.coverage"], True) for component in components
+    ] + [
+        ([".#nixos-options-metadata", ".#oscal-fixture", ".#okf-knowledge",
+          ".#xccdf-1-2-schemas"], False),
+    ]
+    for installables, scoped in component_builds:
+        arguments = [*installables, "-L", "--show-trace", *LOCAL_EXECUTION]
+        if scoped:
+            result = run(arguments)
+            assert run(arguments, BUILD_EXIT="17").returncode == 17, installables
+        else:
+            result = subprocess.run(
+                ["sh", "-euc", new["component-tests"]["script"][1]], cwd=ROOT,
+                env=env, capture_output=True, text=True)
+        assert result.returncode == 0, installables
         recorded = json.loads((directory / "argv").read_text())
-        arguments = [f".#checks.x86_64-linux.{name}", "-L", "--show-trace"]
-        local = name in LOCAL_CHECKS
-        if local:
-            arguments.extend(LOCAL_EXECUTION)
-        scoped = name in {"integration", "oidc-auth", "server-regressions", "niks3-cache", "niks3-write-probe", "niks3-ui",
-                          "nixos-discovery-reliability", "attic-metrics", "attic-publication",
-                          "builder-evaluator-packaging"}
-        assert recorded == ["build", *(POLICY if scoped else []), *arguments], name
-        assert result.stdout.count("InheritedInternalCache=") == int(scoped), name
+        assert recorded == ["build", *(POLICY if scoped else []), *arguments], installables
+        assert result.stdout.count("InheritedInternalCache=") == int(scoped), installables
         # Query real Nix with the recorded build's exact configuration flags.
         # Compare private inherited values in memory; never print those values.
         controls = recorded[1:]
         controls = [arg for arg in controls if arg not in
-                    {arguments[0], "-L", "--show-trace"}]
+                    {*installables, "-L", "--show-trace"}]
         for setting in inherited_controls:
             effective = subprocess.check_output(
                 [real_nix, *controls, "config", "show", setting], env=env)
-            expected = ({"builders": b"\n", "max-jobs": b"1\n", "cores": b"2\n"}
-                        .get(setting, inherited_controls[setting]) if local
-                        else inherited_controls[setting])
-            assert effective == expected, (name, setting)
-    for job in ("web-ui-check", "web-ui-baseline-candidates"):
-        result = subprocess.run(["sh", "-euc", new[job]["script"][0]], cwd=ROOT,
-                                env=env, capture_output=True, text=True)
-        assert result.returncode == 0, job
-        impure = ["--impure"] if job.endswith("candidates") else []
-        local = LOCAL_EXECUTION if job == "web-ui-check" else []
-        assert json.loads((directory / "argv").read_text()) == [
-            "build", *POLICY, *impure, ".#checks.x86_64-linux.web-ui", "-L", "--show-trace", *local]
-        assert result.stdout.count("InheritedInternalCache=true") == 1
-        for setting, inherited in inherited_controls.items():
-            effective = subprocess.check_output(
-                [real_nix, *POLICY, *local, "config", "show", setting], env=env)
-            expected = ({"builders": b"\n", "max-jobs": b"1\n", "cores": b"2\n"}
-                        .get(setting, inherited) if local else inherited)
-            assert effective == expected, (job, setting)
-    for job, installable in (("complexity-check", ".#code-metrics.complexity-report"),
-                             ("coverage-check", ".#coverage.coverage-report")):
-        script = new[job]["script"]
-        assert len(script) == 1, job
-        result = subprocess.run(["sh", "-euc", script[0]], cwd=ROOT,
-                                env=env, capture_output=True, text=True)
-        assert result.returncode == 0, job
-        recorded = json.loads((directory / "argv").read_text())
-        assert recorded == ["run", installable, *LOCAL_EXECUTION], job
-        assert "private-marker" not in result.stdout + result.stderr
-        for setting in inherited_controls:
-            effective = subprocess.check_output(
-                [real_nix, *LOCAL_EXECUTION, "config", "show", setting], env=env)
             expected = {"builders": b"\n", "max-jobs": b"1\n", "cores": b"2\n"}.get(
                 setting, inherited_controls[setting])
-            assert effective == expected, (job, setting)
-        failed = subprocess.run(["sh", "-euc", script[0]], cwd=ROOT,
-                                env=dict(env, RUN_EXIT="17"), capture_output=True, text=True)
-        assert failed.returncode == 17, job
+            assert effective == expected, (installables, setting)
+    # Complexity preparation may acquire dependencies. Only the final analysis
+    # phase is offline. Execute the actual YAML script through the same probe;
+    # this checks orchestration and real CLI policy, not application analysis.
+    online = [
+        "--option", "substitute", "true",
+        "--option", "substituters", "https://cache.nixos.org",
+        "--option", "extra-substituters", "",
+        "--option", "accept-flake-config", "false", *LOCAL_EXECUTION,
+    ]
+    offline = [
+        "--offline", "--option", "substituters", "",
+        "--option", "substitute", "false", "--builders", "",
+        "--option", "fallback", "false",
+        "--option", "accept-flake-config", "false",
+        "--max-jobs", "1", "--cores", "2",
+    ]
+    for job, installable, manifests in (
+        ("complexity-check", ".#code-metrics.complexity-report",
+         ["packages/default/Cargo.toml", "packages/web-ui/Cargo.toml"]),
+    ):
+        script = new[job]["script"]
+        assert len(script) == len(manifests) + 2, job
+        expected_preparation = [["build", installable, "--no-link", *online]] + [
+            ["develop", ".#sqlx", *online, "-c", "env", "CARGO_NET_OFFLINE=false",
+             "cargo", "fetch", "--locked", "--manifest-path", manifest]
+            for manifest in manifests
+        ]
+        expected_run = ["run", *offline, installable]
+        record = directory / "metrics.jsonl"
+        cases = [(0, -1), (17, -1)] + [
+            (23, index) for index in range(len(expected_preparation))
+        ]
+        for expected_status, failed_preparation in cases:
+            record.unlink(missing_ok=True)
+            result = subprocess.run(
+                ["sh", "-euc", "\n".join(script)], cwd=ROOT,
+                env=dict(env, METRICS_RECORD=str(record),
+                         METRICS_FAIL_AT=str(failed_preparation),
+                         RUN_EXIT="17" if expected_status == 17 else "0"),
+                capture_output=True, text=True,
+            )
+            assert result.returncode == expected_status, (job, expected_status)
+            assert "private-marker" not in result.stdout + result.stderr
+            assert "127.0.0.1" not in result.stdout + result.stderr
+            recorded = [json.loads(line) for line in record.read_text().splitlines()]
+            expected = (expected_preparation[:failed_preparation + 1]
+                        if failed_preparation >= 0 else [*expected_preparation, expected_run])
+            assert [entry["argv"] for entry in recorded] == expected, job
+            for entry in recorded:
+                settings = entry["settings"]
+                assert not settings["builders"], job
+                assert str(settings["max-jobs"]) == "1" and settings["cores"] == 2, job
+                assert settings["accept-flake-config"] is False, job
+                if entry["argv"][0] == "run":
+                    assert entry["nested_settings"] == settings, job
+                    assert entry["cargo_offline"] == "true", job
+                    assert entry["sqlx_offline"] == "true", job
+                    assert settings["substituters"] == [], job
+                    for key in ("substitute", "builders-use-substitutes", "fallback"):
+                        assert settings[key] is False, (job, key)
+                else:
+                    assert settings["substituters"] == ["https://cache.nixos.org"], job
+                    assert settings["substitute"] is True, job
+            print(f"PASS {job}: preparation fault={failed_preparation}, "
+                  f"propagated exit={result.returncode}, "
+                  f"analysis started={failed_preparation < 0}")
     configured = run(["--check-config"])
     assert configured.returncode == 0
     for setting in ("require-sigs=true", "fallback=true"):
         assert f"Effective {setting}" in configured.stdout
     (directory / "argv").unlink()
-    assert run([".#checks.x86_64-linux.niks3-cache"], BAD_EFFECTIVE="1").returncode == 1
+    assert run([".#checks.x86_64-linux.integration-access"], BAD_EFFECTIVE="1").returncode == 1
     assert not (directory / "argv").exists()
-    assert run([".#checks.x86_64-linux.niks3-cache"], BUILD_EXIT="17").returncode == 17
+    assert run([".#checks.x86_64-linux.integration-access"], BUILD_EXIT="17").returncode == 17
     # An old CLI rejects config show but supports legacy show-config. Exercise
     # real legacy configuration parsing, including the exact same build argv.
-    result = run([".#checks.x86_64-linux.builder-evaluator-packaging", "-L"], OLD_CLI="1")
+    result = run([".#default.cf-server-core-drv", "-L"], OLD_CLI="1")
     assert result.returncode == 0
     assert result.stdout.count("InheritedInternalCache=true") == 1
     assert json.loads((directory / "argv").read_text()) == [
-        "build", *POLICY, ".#checks.x86_64-linux.builder-evaluator-packaging", "-L"]
+        "build", *POLICY, ".#default.cf-server-core-drv", "-L"]
     assert run(["--check-config"], OLD_CLI="1").returncode == 0
     for mode in ("missing", "empty", "duplicate", "conflict", "malformed", "unsupported"):
         (directory / "argv").unlink(missing_ok=True)
-        assert run([".#checks.x86_64-linux.niks3-cache"],
+        assert run([".#checks.x86_64-linux.integration-access"],
                    OLD_CLI="1", LEGACY_MODE=mode).returncode == 1, mode
         assert not (directory / "argv").exists(), mode
 
@@ -272,7 +357,7 @@ cores = 4
     assert "Effective fallback=true" in built.stdout
 
 print("PASS: modern/legacy Nix policy, inherited builder controls equal=true, "
-      "all matrix and web-ui-check local execution cases equal=true, "
-      "manual baseline inherited controls equal=true, scoped argv, secret redaction, "
+      "component build local execution cases equal=true, "
+      "scoped argv, secret redaction, "
       "missing/empty/duplicate/conflicting/unsupported settings, exit status, "
       "real integration fixture source build with signatures and fallback enabled")

@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<inventory xmlns="urn:assurance:inventory" id="not-an-xccdf-benchmark">
+  <title>Valid XML is not necessarily XCCDF</title>
+  <Rule id="SV-900003r1_rule"><title>This is not an XCCDF rule</title></Rule>
+</inventory>

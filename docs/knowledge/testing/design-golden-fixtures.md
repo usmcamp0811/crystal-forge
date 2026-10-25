@@ -56,9 +56,9 @@ Status: implemented, with stale counts in the README text.
   `packages/default/crates/cf-server/src/fixtures/mod.rs` consume it when
   `FIXTURE_JSON_PATH` is set. See the
   [fixture seeding developer guide](fixture-seeding.md).
-- `checks/ui-screenshots/default.nix` and `checks/ui-screenshots/routes.js`
+- `packages/ui-screenshots/default.nix` and `packages/ui-screenshots/routes.js`
   read the JSON. See the [flake checks catalog](flake-checks.md).
-- `checks/web-ui/design-parity/generate-design-targets.js`,
+- `packages/devScripts/web-ui/design-parity/generate-design-targets.js`,
   `apps/generate-design-targets/default.nix`, `devenv.nix`, and
   `packages/devScripts/default.nix` also reference the file.
 

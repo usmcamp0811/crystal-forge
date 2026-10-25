@@ -1,0 +1,9 @@
+{
+  "scannerVersion": "vulnix 1.12.4",
+  "package": "cf-assurance-demo",
+  "vulnerableVersion": "1.0",
+  "correctedVersion": "2.0",
+  "cveId": "CVE-2026-49001",
+  "cvssV3": 9.8,
+  "description": "Authored Assurance fixture: cf-assurance-demo 1.0 is vulnerable; 2.0 is corrected."
+}

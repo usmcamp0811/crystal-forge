@@ -2,6 +2,9 @@
   description = "Simple flake exporting a Rust package";
 
   inputs = {
+    # Approved D2 predecessor. Keep its own locked toolchain and dependencies;
+    # following current inputs would no longer exercise the released packages.
+    upgrade-predecessor.url = "git+https://gitlab.com/crystal-forge/crystal-forge.git?rev=f9dd6b9c79530d3f911203645207bf6251552aba";
     nixpkgs.url = "github:nixos/nixpkgs/release-26.05";
     flake-utils.url = "github:numtide/flake-utils";
     process-compose-flake.url = "github:Platonic-Systems/process-compose-flake";
@@ -65,14 +68,14 @@
         };
 
         # nix build .#ui-screenshots  → ./result/<view>--<theme>.png (Dioxus UI, fixture-driven)
-        packages.ui-screenshots = import ./checks/ui-screenshots/default.nix {
+        packages.ui-screenshots = import ./packages/ui-screenshots/default.nix {
           lib = channels.nixpkgs.lib;
           pkgs = channels.nixpkgs;
           inherit inputs;
         };
 
         # nix build .#okf-knowledge  → validates docs/knowledge/ OKF bundle
-        packages.okf-knowledge = import ./checks/okf-knowledge/default.nix {
+        packages.okf-knowledge = import ./packages/okf-knowledge/default.nix {
           lib = channels.nixpkgs.lib;
           pkgs = channels.nixpkgs;
           inherit inputs;
@@ -85,7 +88,7 @@
           name = "okf-mermaid-renderer";
           runtimeInputs = [ channels.nixpkgs.python3 channels.nixpkgs.mermaid-cli ];
           text = ''
-            exec python3 ${./checks/okf-knowledge/render_mermaid.py} \
+            exec python3 ${./packages/okf-knowledge/render_mermaid.py} \
               --repo-root "$PWD" --renderer mmdc "$@"
           '';
           meta.mainProgram = "okf-mermaid-renderer";

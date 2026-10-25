@@ -4865,10 +4865,37 @@ async fn compute_foreign_stig_reconciliation(
     })))
 }
 
-/// `POST /api/v1/compliance/xccdf/preview`
+/// Returns a classified XCCDF preview without durable writes.
 ///
-/// Accepts multipart XML upload, parses XCCDF 1.2 and CF-XCCDF content,
-/// classifies the document, and returns typed metadata without durable writes.
+/// Handles `POST /api/v1/compliance/xccdf/preview` for an authenticated
+/// administrator. Accepts one XML or supported ZIP upload in the `file`
+/// multipart field. HTTP 200 includes metadata and rule summaries; supported
+/// XCCDF 1.1 and 1.2 Benchmarks can have zero rules.
+///
+/// # Errors
+///
+/// Returns HTTP 403 for missing administrator authorization, 400 for malformed
+/// multipart fields or an empty file, 413 for upload limits, and 415 for an
+/// unsupported file type or content/extension mismatch. Blocking XML/package
+/// diagnostics retain HTTP 422 with diagnostic codes. A parsed
+/// [`UnsupportedPackage`](crate::compliance::xccdf::models::DocumentClass::UnsupportedPackage)
+/// returns HTTP 422 with `IMPORT_DOCUMENT_CLASS_UNSUPPORTED`, as committed
+/// import does. CF-native validation failures also return HTTP 422.
+/// Reconciliation failures return HTTP 500.
+///
+/// # Examples
+///
+/// An administrator can upload this XML as `file` with filename `empty.xml`:
+///
+/// ```xml
+/// <Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="empty">
+///   <title>Empty benchmark</title>
+/// </Benchmark>
+/// ```
+///
+/// The response is HTTP 200 with `document_class: "foreignxccdf"` and
+/// `rule_count: 0`. Replacing the XML with `<inventory/>` returns HTTP 422
+/// with `error: "IMPORT_DOCUMENT_CLASS_UNSUPPORTED"`.
 pub async fn xccdf_preview(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -4917,6 +4944,24 @@ pub async fn xccdf_preview(
                     "code": w.code, "summary": w.summary,
                 })).collect::<Vec<_>>(),
             })),
+        )
+            .into_response();
+    }
+
+    // Preserve the other preview classes and their diagnostics. Only this
+    // class needs the committed-import gate before reconciliation.
+    if matches!(
+        parsed.class,
+        crate::compliance::xccdf::models::DocumentClass::UnsupportedPackage
+    ) && let Some(error) = check_document_class(&parsed)
+    {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ApiError {
+                error: error.code.into(),
+                message: error.message,
+                details: None,
+            }),
         )
             .into_response();
     }
@@ -8468,20 +8513,23 @@ mod tests {
             Utc::now() + chrono::Duration::hours(1),
             Some("test-agent".to_string()),
             Some("127.0.0.1".to_string()),
-            "test".to_string(),
+            "local".to_string(),
         )
         .await
         .expect("create_user_session should succeed");
         token
     }
 
-    /// Serve the preview route exactly as production wires it, including the
-    /// route-level body limit layer, and return the base URL.
+    /// Serves preview and import with their production route-level body limits.
     async fn spawn_preview_server(pool: PgPool) -> String {
         let app = Router::new()
             .route(
                 "/api/v1/compliance/xccdf/preview",
                 post(xccdf_preview).layer(DefaultBodyLimit::max(MAX_XCCDF_MULTIPART_BYTES)),
+            )
+            .route(
+                "/api/v1/compliance/xccdf/import",
+                post(xccdf_import).layer(DefaultBodyLimit::max(MAX_XCCDF_MULTIPART_BYTES)),
             )
             .with_state(pool);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -8815,6 +8863,142 @@ mod tests {
 
         let response = post_multipart(&base, &token, body).await;
         assert_eq!(response.status().as_u16(), 415);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_rejects_unsupported_document_class_consistently_with_import() {
+        use sha2::{Digest, Sha256};
+
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_preview_server(pool).await;
+        let csrf = format!("xccdf-class-csrf-{}", Uuid::new_v4().simple());
+        for xml in [
+            r#"<inventory xmlns="urn:assurance:inventory"><foreignRule id="not-xccdf"/></inventory>"#,
+            r#"<Benchmark xmlns="urn:wrong:xccdf" id="wrong"><Rule id="foreign-rule"/></Benchmark>"#,
+        ] {
+            let mut body = Vec::new();
+            push_file_field(&mut body, "file", "unsupported.xml", xml.as_bytes());
+            finish_multipart(&mut body);
+            let preview = post_multipart(&base, &token, body).await;
+            let preview_status = preview.status();
+            let preview_json: serde_json::Value = preview.json().await.expect("preview JSON");
+
+            // A matching digest and a well-formed plan must reach the real
+            // import class gate, rather than fail an earlier input check.
+            let plan = serde_json::json!({
+                "expected_sha256": hex::encode(Sha256::digest(xml.as_bytes())),
+                "selected_rule_ids": [],
+                "rule_actions": [],
+                "bundle": {"name": "Unsupported input", "framework": "test", "version": "1"}
+            });
+            let mut body = Vec::new();
+            push_file_field(&mut body, "file", "unsupported.xml", xml.as_bytes());
+            push_text_field(
+                &mut body,
+                "plan",
+                &serde_json::to_vec(&plan).expect("plan JSON"),
+            );
+            finish_multipart(&mut body);
+            let import = reqwest::Client::new()
+                .post(format!("{base}/api/v1/compliance/xccdf/import"))
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={BOUNDARY}"),
+                )
+                .header(
+                    "cookie",
+                    format!("{SESSION_COOKIE_NAME}={token}; {CSRF_COOKIE_NAME}={csrf}"),
+                )
+                .header(CSRF_HEADER_NAME.as_str(), &csrf)
+                .body(body)
+                .send()
+                .await
+                .expect("import request completes");
+            assert_eq!(import.status().as_u16(), 422);
+            let import_json: serde_json::Value = import.json().await.expect("import JSON");
+            assert_eq!(import_json["error"], "IMPORT_DOCUMENT_CLASS_UNSUPPORTED");
+            assert_eq!(preview_status.as_u16(), 422, "unsupported XML: {xml}");
+            assert_eq!(preview_json, import_json);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_preserves_supported_namespaces_and_embedded_benchmark() {
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_preview_server(pool).await;
+        for xml in [
+            minimal_xccdf().to_string(),
+            minimal_xccdf().replace("xccdf/1.2", "xccdf/1.1"),
+            r#"<x:Benchmark xmlns:x="http://checklists.nist.gov/xccdf/1.2" id="prefixed"><x:title>Prefixed</x:title><x:Rule id="xccdf_org.crystalforge_rule_test"><x:title>Test Rule</x:title></x:Rule></x:Benchmark>"#.to_string(),
+            format!("<inventory>{}</inventory>", minimal_xccdf().split_once("?>").expect("XML declaration").1),
+        ] {
+            let mut body = Vec::new();
+            push_file_field(&mut body, "file", "supported.xml", xml.as_bytes());
+            finish_multipart(&mut body);
+            let response = post_multipart(&base, &token, body).await;
+            assert_eq!(response.status().as_u16(), 200, "supported XML: {xml}");
+            let json: serde_json::Value = response.json().await.expect("preview JSON");
+            assert_eq!(json["document_class"], "foreignxccdf");
+            assert_eq!(json["rule_count"], 1);
+            assert_eq!(json["rules"][0]["id"], "xccdf_org.crystalforge_rule_test");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_preserves_zero_rule_benchmarks() {
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_preview_server(pool).await;
+        for namespace in [
+            "http://checklists.nist.gov/xccdf/1.1",
+            "http://checklists.nist.gov/xccdf/1.2",
+        ] {
+            let xml = format!(
+                r#"<Benchmark xmlns="{namespace}" id="empty"><title>Empty</title></Benchmark>"#
+            );
+            let mut body = Vec::new();
+            push_file_field(&mut body, "file", "empty-benchmark.xml", xml.as_bytes());
+            finish_multipart(&mut body);
+            let response = post_multipart(&base, &token, body).await;
+            assert_eq!(response.status().as_u16(), 200);
+            let json: serde_json::Value = response.json().await.expect("preview JSON");
+            assert_eq!(json["document_class"], "foreignxccdf");
+            assert_eq!(json["rule_count"], 0);
+            assert_eq!(json["rules"], serde_json::json!([]));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_preserves_malformed_xml_and_empty_file_errors() {
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_preview_server(pool).await;
+        for (xml, status) in [("<Benchmark><Rule></Benchmark>", 422), ("", 400)] {
+            let mut body = Vec::new();
+            push_file_field(&mut body, "file", "test.xml", xml.as_bytes());
+            finish_multipart(&mut body);
+            let response = post_multipart(&base, &token, body).await;
+            assert_eq!(response.status().as_u16(), status);
+            let json: serde_json::Value = response.json().await.expect("error JSON");
+            if status == 422 {
+                assert_eq!(json["error"], "XCCDF validation failed");
+                assert!(
+                    json["errors"]
+                        .as_array()
+                        .expect("errors")
+                        .iter()
+                        .any(|e| e["blocking"] == true)
+                );
+            } else {
+                assert_eq!(json["error"], "Bad Request");
+            }
+        }
     }
 
     #[tokio::test]
@@ -11382,6 +11566,60 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         buf
     }
 
+    // Compares full import-owned rows and work queues, not just row counts:
+    // review suggestions must not persist, promote policies, or enqueue work.
+    // Hash artifact bytes with their size to keep the snapshot bounded. Exclude
+    // session activity and unrelated audit events from this no-write boundary.
+    async fn preview_import_snapshot(pool: &PgPool) -> serde_json::Value {
+        let tables = [
+            "deployment_policies",
+            "deployment_policy_versions",
+            "compliance_bundles",
+            "compliance_bundle_versions",
+            "compliance_bundle_version_policies",
+            "compliance_bundle_environments",
+            "compliance_frameworks",
+            "compliance_framework_versions",
+            "compliance_requirements",
+            "compliance_requirement_versions",
+            "policy_requirement_mappings",
+            "compliance_bundle_version_requirements",
+            "compliance_source_object_mappings",
+            "commits",
+            "derivations",
+            "evaluation_attempts",
+            "build_jobs",
+            "build_reservations",
+        ];
+        let mut selects: Vec<String> = tables
+            .iter()
+            .map(|table| {
+                format!("SELECT '{table}' AS table_name, to_jsonb(t) AS row FROM {table} t")
+            })
+            .collect();
+        selects.push(
+            "SELECT 'compliance_source_artifacts', (to_jsonb(t)-'content') || \
+             jsonb_build_object('content_sha256', encode(sha256(content),'hex'), \
+             'content_size', octet_length(content)) FROM compliance_source_artifacts t"
+                .to_owned(),
+        );
+        selects.push(
+            "SELECT 'admin_audit_events', to_jsonb(t) FROM admin_audit_events t \
+             WHERE action='xccdf_imported'"
+                .to_owned(),
+        );
+        // One statement gives every protected table the same MVCC snapshot.
+        let query = format!(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(snapshot) ORDER BY table_name, row::text), \
+             '[]'::jsonb) FROM ({}) snapshot",
+            selects.join(" UNION ALL ")
+        );
+        sqlx::query_scalar(&query)
+            .fetch_one(pool)
+            .await
+            .expect("snapshot preview import and queue boundary")
+    }
+
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn preview_accepts_nixos_stig_structure() {
@@ -11398,7 +11636,7 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
 
         let pool = test_pool_from_env().await;
         let token = admin_session_token(&pool).await;
-        let base = spawn_preview_server(pool).await;
+        let base = spawn_preview_server(pool.clone()).await;
 
         let zip_bytes = if let Ok(path) = std::env::var("NIXOS_STIG_ZIP") {
             std::fs::read(&path).expect("NIXOS_STIG_ZIP path should be readable")
@@ -11416,6 +11654,8 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         push_file_field(&mut body, "file", zip_name, &zip_bytes);
         finish_multipart(&mut body);
 
+        // Authentication setup is outside the preview's no-write boundary.
+        let before = preview_import_snapshot(&pool).await;
         let response = post_multipart(&base, &token, body).await;
         assert_eq!(
             response.status().as_u16(),
@@ -11424,6 +11664,11 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         );
 
         let json: serde_json::Value = response.json().await.expect("json body");
+        assert_eq!(
+            preview_import_snapshot(&pool).await,
+            before,
+            "preview must preserve all import-owned rows and evaluation/build queues"
+        );
 
         // Document detected as foreign XCCDF (no CF extension elements).
         assert_eq!(json["document_class"], "foreignxccdf");
@@ -11518,9 +11763,28 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
                 "V-268078 check-content must contain firewall check text"
             );
 
-            assert!(
-                rule.get("inferred_assertions").is_none(),
-                "foreign preview must not turn fix prose into executable assertions"
+            // TASK-426 and the approved ImportStigModal permit reviewable
+            // suggestions, not automatic native trust or execution. The row
+            // snapshot above protects that no-promotion boundary.
+            assert_eq!(rule["is_native"], false);
+            let expected = serde_json::json!([{
+                "option_path": "networking.firewall.enable",
+                "expected_value": {"type": "boolean", "value": true},
+                "nix_expression": "config.networking.firewall.enable == true",
+                "description": "NixOS option networking.firewall.enable must be true"
+            }]);
+            assert_eq!(
+                rule["inferred_assertions"], expected,
+                "foreign firewall fix text should yield the exact reviewable suggestion"
+            );
+            eprintln!(
+                "preview firewall observation: {}",
+                serde_json::json!({
+                    "document_class": json["document_class"],
+                    "is_native": rule["is_native"],
+                    "inferred_assertions": rule["inferred_assertions"],
+                    "import_and_queue_rows_unchanged": true
+                })
             );
         } else {
             // When using the minimal fixture (no real ZIP), V-268078 is in the fixture

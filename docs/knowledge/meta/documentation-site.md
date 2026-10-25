@@ -73,7 +73,7 @@ option metadata catalog.
 ## Verification
 
 ```bash
-nix build .#checks.x86_64-linux.docs-site -L
+nix build .#docs-site.tests.browser -L
 nix build .#checks.x86_64-linux.okf-knowledge -L
 ```
 

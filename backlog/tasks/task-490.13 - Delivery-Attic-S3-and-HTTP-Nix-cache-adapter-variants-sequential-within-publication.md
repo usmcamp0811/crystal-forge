@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:37'
-updated_date: '2026-10-18 03:26'
+updated_date: '2026-10-24 23:10'
 labels:
   - testing
   - integration
@@ -48,4 +48,6 @@ Requires TASK-490.7/.10/.12 service/credential code prerequisites and passing fo
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction: native owner-local paths/commands and explicit coordinator registration. Foundation commit unresolved; two existing Rust package tests block foundation; no VM execution. Backlog, not ready. Future packet needs actual dependency commit(s) and verified commands before To Do. No Luna delegation or executed slice is claimed.
+
+Merge reconciliation preserves source-packet adapter requirements: execute Attic, S3 and HTTP/Nix sequentially within the existing Delivery lifecycle; prove Attic JWT scope negatives and named-cache Test behavior; HTTP/Nix provides public read without a write path. Assert fresh-output absence at each destination before the relevant operation. Metrics internals remain outside integration scope. Do not duplicate the full evaluate/build/retrieve lifecycle per adapter. Canonical fragment ownership and same-run receipt boundaries remain authoritative. This metadata reconciliation does not claim execution or completion.
 <!-- SECTION:NOTES:END -->

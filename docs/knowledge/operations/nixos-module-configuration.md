@@ -94,6 +94,69 @@ sources:
 }
 ```
 
+## Private credential permissions and upgrades
+
+The current module manages named state, work and cache directories without
+recursive permission or ownership changes. NixOS activation and server or
+builder startup preserve the owner, group, mode and contents of existing
+caller-provided files under `/var/lib/crystal-forge`, including `.cache` and
+`.config`. Directory modes do not define private-file modes. Provision private
+SSH keys for the service identity with mode `0600`. Keep every parent directory
+traversable by that identity.
+
+Configured external paths and symlinks remain supported. Their existing secret
+manager or operator owns provisioning, access permissions and replacement. Do
+not put private key contents in Nix expressions, the Nix store, logs or review
+artifacts. Keep SSH host verification and cache signature verification enabled.
+
+The module still owns these explicit file lifecycles:
+
+- It regenerates `config.toml` with mode `0600`.
+- With `auth.ssh_key_path = null`, it creates the default Git SSH key if absent
+  and restricts the writable default private key to mode `0600`.
+- With `build.api_key_file = null`, it creates the default builder API key if
+  absent and sets its owner to `crystal-forge` and mode to `0600`. It retains
+  existing key contents. It manages the corresponding public key separately.
+- It does not normalize caller-provided SSH, builder API or agent private keys.
+  The root agent uses its configured key and separate agent state directory.
+
+### Upgrade: prevent recurrence and inspect affected files
+
+Earlier modules used a recursive `Z /var/lib/crystal-forge/ 0755` tmpfiles rule.
+Server and builder startup also recursively changed `.cache` and `.config`.
+Those operations could widen private-file modes, change ownership and make
+OpenSSH refuse a valid key. The current correction prevents those operations;
+it cannot infer or restore the intended metadata of arbitrary affected files.
+An older generation can still apply its old rules if activated again.
+
+Use a bounded credential inventory from the host configuration and the existing
+secret manager. For each configured credential, inspect the path, symlink target,
+owner, group and mode. For example, run these commands with permission to inspect
+the one selected path; do not print the file contents:
+
+```sh
+stat -c '%n %u:%g %a %F' /var/lib/crystal-forge/cache-ssh
+stat -Lc '%n %u:%g %a %F' /var/lib/crystal-forge/cache-ssh
+readlink /var/lib/crystal-forge/cache-ssh
+```
+
+`readlink` returns nonzero for a regular file. Compare the metadata with the
+credential's provisioning contract. If the file was affected, restore the
+intended owner and permissions through the existing secret manager or its
+documented operator procedure after installing the corrected module. Do not
+apply a recursive chmod/chown or assume that every file has the same owner or
+mode. Recheck after activation and the relevant service restart. Test the
+configured authenticated cache as the actual service identity, using its trusted
+host key and explicit identity with agent/password fallback disabled.
+
+Permission restoration does not prove that nobody read the key while access
+was wider. Assess the possible exposure using the affected interval, directory
+traversal permissions, local principals and available audit evidence. Replace
+and revoke the credential through the existing lifecycle when that assessment
+requires it. A widened mode alone does not establish actual compromise. The
+module does not automatically rotate or delete keys or change registered
+identities.
+
 ## Bulk evaluator resources
 
 Before tuning build resources, configure bulk evaluation separately. The

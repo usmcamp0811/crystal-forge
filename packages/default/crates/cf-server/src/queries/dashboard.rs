@@ -2644,31 +2644,24 @@ mod tests {
         .fetch_one(&pool)
         .await
         .unwrap();
-        sqlx::query(
+        let expected_commit_id: i32 = sqlx::query_scalar(
             "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) \
-             VALUES ($1, $2, NOW() - INTERVAL '1 day')",
+             VALUES ($1, $2, NOW() - INTERVAL '1 day') RETURNING id",
         )
         .bind(expected_flake_id)
         .bind(format!("ahead-expected-commit-{suffix}"))
-        .execute(&pool)
-        .await
-        .unwrap();
-
-        let deployed_flake_id: i32 = sqlx::query_scalar(
-            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
-        )
-        .bind(format!("ahead-deployed-{suffix}"))
-        .bind(format!(
-            "https://example.invalid/ahead-deployed-{suffix}.git"
-        ))
         .fetch_one(&pool)
         .await
         .unwrap();
+
+        // Migration 0291 compares the observed configuration with a published
+        // deployable target in the same flake. A newer cross-flake path or an
+        // absent deployable target is unknown, not ahead.
         let deployed_commit_id: i32 = sqlx::query_scalar(
             "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) \
              VALUES ($1, $2, NOW()) RETURNING id",
         )
-        .bind(deployed_flake_id)
+        .bind(expected_flake_id)
         .bind(format!("ahead-deployed-commit-{suffix}"))
         .fetch_one(&pool)
         .await
@@ -2698,6 +2691,30 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+            let target_store_path = format!("/nix/store/ahead-target-{label}-{suffix}");
+            let target_derivation_id: i32 = sqlx::query_scalar(
+                "INSERT INTO derivations (commit_id, derivation_name, derivation_target, \
+                 derivation_type, status_id, expected_store_path, store_path, \
+                 cf_agent_enabled, policy_requirements_met, completed_at) \
+                 VALUES ($1, $2, $2, 'nixos', 10, $3, $3, TRUE, TRUE, NOW()) RETURNING id",
+            )
+            .bind(expected_commit_id)
+            .bind(&hostname)
+            .bind(&target_store_path)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO cache_push_jobs (derivation_id, store_path, status, completed_at) \
+                 VALUES ($1, $2, 'completed', NOW())",
+            )
+            .bind(target_derivation_id)
+            .bind(&target_store_path)
+            .execute(&pool)
+            .await
+            .unwrap();
+            // The newer observed path intentionally has no completed cache
+            // publication, so the older eligible artifact remains the target.
             sqlx::query(
                 "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id, expected_store_path) \
                  VALUES ($1, $2, $2, 'nixos', 5, $3)",
@@ -2717,6 +2734,14 @@ mod tests {
             .execute(&pool)
             .await
             .unwrap();
+            let deployment_status: String = sqlx::query_scalar(
+                "SELECT deployment_status FROM view_system_deployment_status WHERE hostname = $1",
+            )
+            .bind(&hostname)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(deployment_status, "ahead");
         }
 
         let unscoped_after = fetch_deployment_status(&pool).await.unwrap();

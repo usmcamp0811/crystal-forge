@@ -18,12 +18,12 @@ use uuid::Uuid;
 use crate::api::client::{
     ApiClientError, create_compliance_assignment, create_environment, delete_compliance_assignment,
     delete_environment, fetch_compliance_bundles, fetch_environment_assignments,
-    fetch_environment_policies, fetch_environment_policies_map, fetch_environments, fetch_policies,
+    fetch_environment_policies_map, fetch_environments, fetch_policies,
     update_compliance_assignment, update_environment, update_environment_policies,
 };
 use crate::api::models::{
     AssignmentResponse, ComplianceBundleSummary, CreateAssignmentRequest, CreateEnvironmentRequest,
-    EnvironmentSummary, UpdateAssignmentRequest, UpdateEnvironmentRequest,
+    DeploymentPolicySummary, EnvironmentSummary, UpdateAssignmentRequest, UpdateEnvironmentRequest,
 };
 use crate::components::environments::{
     BundleAssignmentChange, EnvBundleAssignment, EnvironmentCacheSummary,
@@ -75,7 +75,7 @@ pub struct PoliciesLoadResult {
 
 /// Fetch the environments list from the backend, with fallback to deterministic mock data.
 ///
-/// The `default_required_policy` is used only for fallback data and create flows.
+/// The `default_required_policy` is used only for fallback display data.
 pub async fn load_environments_with_fallback(
     default_required_policy: Uuid,
 ) -> EnvironmentsLoadResult {
@@ -185,27 +185,18 @@ pub async fn load_environment_colors_with_fallback() -> EnvironmentColorsLoadRes
     }
 }
 
-/// Fetch policy options from backend for environment requirements modal.
+/// Loads enabled, assignable environment gate options for display.
+///
+/// Excludes the global CF-agent invariant by policy type. On a read failure,
+/// returns labeled display fallback data; save validation must instead use
+/// [`load_assignable_environment_policies`] and must not trust that fallback.
 pub async fn load_policies_with_fallback() -> PoliciesLoadResult {
     match fetch_policies().await {
-        Ok(items) => {
-            let mut policies: Vec<PolicyOption> = items
-                .into_iter()
-                .filter(|p| p.enabled)
-                .map(|p| PolicyOption {
-                    id: p.id,
-                    name: p.name,
-                    description: p.description.unwrap_or_default(),
-                })
-                .collect();
-            policies.sort_by_key(|p| p.name.to_ascii_lowercase());
-
-            PoliciesLoadResult {
-                policies,
-                notice: None,
-                redirect_to_login: false,
-            }
-        }
+        Ok(items) => PoliciesLoadResult {
+            policies: assignable_policy_options(items),
+            notice: None,
+            redirect_to_login: false,
+        },
         Err(error) if should_redirect_to_login(&error) => PoliciesLoadResult {
             policies: fallback_policy_library(),
             notice: None,
@@ -219,6 +210,38 @@ pub async fn load_policies_with_fallback() -> PoliciesLoadResult {
             redirect_to_login: false,
         },
     }
+}
+
+fn assignable_policy_options(items: Vec<DeploymentPolicySummary>) -> Vec<PolicyOption> {
+    // The server uses enabled/type, not display names, as assignment authority.
+    // CF-agent enablement is enforced globally and cannot be assigned here.
+    let mut policies: Vec<PolicyOption> = items
+        .into_iter()
+        .filter(|p| p.enabled && p.policy_type != "require_cf_agent")
+        .map(|p| PolicyOption {
+            id: p.id,
+            name: p.name,
+            description: p.description.unwrap_or_default(),
+        })
+        .collect();
+    policies.sort_by_key(|p| p.name.to_ascii_lowercase());
+    policies
+}
+
+/// Reads the assignable policy catalog before an environment save.
+///
+/// Unlike display loading, this read never substitutes static fallback data.
+/// Callers must validate every explicit selection before writing metadata.
+/// The server revalidates assignments transactionally to cover catalog races.
+///
+/// # Errors
+/// Returns an error if the authoritative catalog cannot be read. Callers must
+/// retain the draft and must not start a metadata write on this error.
+pub async fn load_assignable_environment_policies() -> Result<Vec<PolicyOption>, String> {
+    fetch_policies()
+        .await
+        .map(assignable_policy_options)
+        .map_err(|error| format!("Could not validate environment policies: {error}"))
 }
 
 fn fallback_environment_names() -> Vec<String> {
@@ -558,7 +581,13 @@ pub async fn reconcile_environment_assignments(
     Ok(())
 }
 
-/// Create a new environment via backend API.
+/// Creates environment metadata and projects the caller's optional gate IDs.
+///
+/// The caller must save these IDs separately. A successful metadata request is
+/// committed even if the later assignment request fails.
+///
+/// # Errors
+/// Returns an error if the metadata request fails or its response is invalid.
 pub async fn create_environment_via_api(
     name: String,
     description: Option<String>,
@@ -568,7 +597,7 @@ pub async fn create_environment_via_api(
     auto_sync: Option<bool>,
     requires_approval: Option<bool>,
     is_production: Option<bool>,
-    default_required_policy: Uuid,
+    required_policy_ids: Vec<Uuid>,
 ) -> Result<EnvironmentItem, String> {
     let request = CreateEnvironmentRequest {
         name,
@@ -582,11 +611,7 @@ pub async fn create_environment_via_api(
     };
 
     match create_environment(&request).await {
-        Ok(env) => Ok(api_to_environment_item(
-            env,
-            vec![default_required_policy],
-            &[],
-        )),
+        Ok(env) => Ok(api_to_environment_item(env, required_policy_ids, &[])),
         Err(ApiClientError::Status {
             code: 401 | 403, ..
         }) => Err("Authentication required. Please log in.".to_string()),
@@ -609,7 +634,13 @@ pub async fn delete_environment_via_api(environment_id: Uuid) -> Result<(), Stri
     }
 }
 
-/// Update environment metadata via backend API.
+/// Updates environment metadata and preserves the caller's selected gate IDs.
+///
+/// Does not synthesize a CF-agent assignment or replace a failed policy read
+/// with a default. The caller persists optional assignments separately.
+///
+/// # Errors
+/// Returns an error if the metadata request fails or its response is invalid.
 pub async fn update_environment_via_api(
     environment_id: Uuid,
     name: String,
@@ -619,7 +650,7 @@ pub async fn update_environment_via_api(
     auto_sync: Option<bool>,
     requires_approval: Option<bool>,
     is_production: Option<bool>,
-    default_required_policy: Uuid,
+    required_policy_ids: Vec<Uuid>,
 ) -> Result<EnvironmentItem, String> {
     let request = UpdateEnvironmentRequest {
         name,
@@ -632,13 +663,7 @@ pub async fn update_environment_via_api(
     };
 
     match update_environment(&environment_id, &request).await {
-        Ok(env) => {
-            let required_policy_ids = match fetch_environment_policies(&environment_id).await {
-                Ok(details) => details.required_policy_ids,
-                Err(_) => vec![default_required_policy],
-            };
-            Ok(api_to_environment_item(env, required_policy_ids, &[]))
-        }
+        Ok(env) => Ok(api_to_environment_item(env, required_policy_ids, &[])),
         Err(ApiClientError::Status {
             code: 401 | 403, ..
         }) => Err("Authentication required. Please log in.".to_string()),
@@ -687,6 +712,43 @@ mod tests {
     use super::*;
 
     const DEFAULT_POLICY: Uuid = Uuid::from_u128(1);
+
+    #[test]
+    fn optional_policy_catalog_uses_enabled_and_type_not_display_identity() {
+        let policy = |id: u128, name: &str, kind: &str, enabled: bool| {
+            serde_json::from_value::<DeploymentPolicySummary>(serde_json::json!({
+                "id": Uuid::from_u128(id), "name": name, "description": null,
+                "policy_type": kind, "config": {}, "enabled": enabled,
+            }))
+            .expect("authored policy catalog record")
+        };
+        let options = assignable_policy_options(vec![
+            policy(1, "Renamed agent", "require_cf_agent", true),
+            policy(2, "Disabled optional", "custom_check", false),
+            policy(3, "Require Crystal Forge Agent", "custom_check", true),
+        ]);
+        assert_eq!(options.len(), 1);
+        assert_eq!(options[0].id, Uuid::from_u128(3));
+        assert!(
+            crate::components::environments::validate_optional_policy_ids(&[], &options).is_ok()
+        );
+        assert!(
+            crate::components::environments::validate_optional_policy_ids(
+                &[Uuid::from_u128(3)],
+                &options
+            )
+            .is_ok()
+        );
+        for stale in [1, 2, 4] {
+            assert!(
+                crate::components::environments::validate_optional_policy_ids(
+                    &[Uuid::from_u128(3), Uuid::from_u128(stale)],
+                    &options
+                )
+                .is_err()
+            );
+        }
+    }
 
     #[test]
     fn should_redirect_for_auth_errors() {

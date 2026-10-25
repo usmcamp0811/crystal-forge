@@ -1,7 +1,7 @@
 ---
 type: UI Design
 title: "Web UI history rendering rules"
-description: "Defines how the Web UI maps backend event_kind and event_type values to Deployment History entries, the backwards-compatibility fallback to system_states, and the documented failed-deployment limitation."
+description: "Defines History lifecycle presentation, distinct deployment-attempt counts, event identity, and bounded legacy compatibility."
 tags:
   - crystal-forge
   - web-ui
@@ -26,7 +26,7 @@ Expected mappings:
 
 | backend `event_kind` | UI event kind | Timeline visibility |
 | --- | --- | --- |
-| `cf_deployment` | `Deploy` / `DeployFailed` depending on outcome | visible |
+| `cf_deployment` | `DeployStarted` / `Deploy` / `DeployFailed` depending on outcome | visible |
 | `local_rebuild` | `LocalRebuildMatched` or `LocalRebuildUntracked` | visible |
 | `restart` | `Restart` | visible, clusterable |
 | `agent_restart` | `AgentRestart` | visible, not clustered |
@@ -36,6 +36,48 @@ New event-backed rows also carry `event_type`, generation/store-path deltas,
 actor/source, deployment identifiers, timestamps, `correlation_id`, and metadata.
 New fields are optional/defaulted on the wire so older clients and older history
 rows remain compatible.
+
+## Deployment observations and counts
+
+TASK-500 repairs presentation against `SystemDetail.jsx` at `df11c800`, with
+the authoritative persisted lifecycle taking precedence over the mock data.
+`cf_deployment_started` maps to `DeployStarted`, even if another payload field
+suggests success. The card says **Deployment started**, **started · nonterminal**,
+and **activation not yet confirmed**. These describe that observation, not the
+latest state of the deployment. A later terminal observation remains a separate
+card. Started has no activation generation, generation transition, or rollback
+action. It does not decrement the legacy generation fallback and does not produce
+reconstructed completion log lines.
+
+`cf_deployment_succeeded` maps to `Deploy`; `cf_deployment_failed` maps to
+`DeployFailed`. Explicit event types take precedence over kind/outcome and text
+heuristics. For older payloads, `cf_deployment` with outcome `started` also maps
+to `DeployStarted`. The legacy text fallback recognizes outcome `started` or
+reason `cf_deployment_started` before failure and rebuild heuristics.
+
+The **deploys** metric counts CF deployment attempts and local rebuilds in the
+loaded history window. It is not a count of successful activations or timeline
+cards. This preserves the approved reference's `type: "deploy"` category, which
+includes failed CF attempts and both matched and untracked local rebuilds.
+
+- CF observations with the same `deployment_id` count once, including a
+  Started-only attempt, Started plus success, or Started plus failure.
+- Repeated persisted event `id` values produce one card and count once.
+- Each local rebuild counts once after event-ID deduplication.
+- Without `deployment_id`, each distinct observation counts once. The UI does
+  not join rows by commit, store path, generation, or timestamp. Those values
+  cannot distinguish a retry from another lifecycle observation.
+- Without event IDs, legacy rows remain separate. History and reconstructed Logs
+  retain positional `ev{index}` anchors for these rows only.
+- Persisted event IDs anchor History cards and their Logs jump. Cards expose
+  `data-event-id` and, when present, `data-deployment-id` for exact identification.
+- Counts derive from the response on each render. Reload does not depend on a
+  client-side accumulator. The metric describes the returned window, not an
+  inferred all-time total.
+
+The rollback plan displays Strategy **switch_to_generation**, as specified by
+the approved `DeployTab` previous-generation state. This presentation label does
+not change the rollback API operation.
 
 Backwards compatibility rule:
 
@@ -51,15 +93,15 @@ Important UI rule:
 
 ## Current limitation: failed deployment history
 
-> **Status:** Current limitation documented in the source as of commit 3b23d36f; this migration did not compare it with the code. The UI model and the server event type `cf_deployment_failed` both appear in `packages/web-ui/src/views/system_detail.rs`, so a later verification pass must check whether `DeployFailed` is now fed by persisted failure events. See [Authoritative system_events timeline](../data-model/system-events-timeline.md).
+Failure presentation depends on available failure evidence. Missing terminal
+events cannot identify the final result of an attempt.
 
-`DeployFailed` only appears when the history/API payload includes a failure-like
-outcome (for example a value containing `fail` or `error`). The current
-heartbeat/system-state history path emits `outcome = recorded` for normal state
-rows, and an agent-side `DeploymentResult::Failed` is not automatically converted
-into a failed deployment history row unless that failure is also persisted and
-merged into the history stream. Treat `DeployFailed` as supported by the UI model
-but dependent on a failure outcome being present in the data.
+The server event model and query layer support persisted
+`cf_deployment_failed`; the History API maps that type to outcome `failed`.
+The UI renders that explicit type as failure even if its outcome text differs.
+Legacy failure-like outcomes containing `fail` or `error` remain supported.
+An absent terminal event does not prove success or failure. The UI must not
+invent completion evidence for a Started observation.
 
 
 ## Related concepts

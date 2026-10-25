@@ -29,3 +29,6 @@ pub mod vulnix;
 
 #[cfg(test)]
 pub mod test_utils;
+
+#[cfg(test)]
+mod deployment_config_tests;

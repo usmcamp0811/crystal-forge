@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai'
 created_date: '2026-10-17 16:13'
-updated_date: '2026-10-19 19:27'
+updated_date: '2026-10-24 23:05'
 labels:
   - testing
   - integration
@@ -28,31 +28,33 @@ ordinal: 512000
 ## Description
 
 <!-- SECTION:DESCRIPTION:BEGIN -->
-Build a small, trustworthy product-testing architecture with exactly four final native Snowfall owners: integration-access, integration-delivery, integration-assurance and integration-upgrade. Permanent files and scenario boundaries follow stable product behavior, not tracking tasks or implementing agents. Minimize duplicate work and justify configuration/isolation boundaries.
+Deliver the agreed four-owner integration-testing foundation in MR335, not complete end-to-end coverage of every Crystal Forge feature. Exactly four total native flake checks are required: integration-access, integration-delivery, integration-assurance, and integration-upgrade. Preserve the existing real workflows, independent assertions, shared harness, authorized product/regression fixes, and truthful CI failure propagation. No additional framework, wrapper package, VM scenario, generated registry or architecture redesign.
 
-The nine superseded suites and fifteen verify-* wrappers remain retired. Unique assertions run in ordinary components, direct module/runtime/schema/tool CI and the existing isolated PostgreSQL workflow. No replacement registry, aggregator, DSL or fifth check is permitted. Access and Delivery now have meaningful native owners; Assurance and Upgrade are absent, not placeholders.
+The final owner instruction explicitly accepts foundation merge when four real owners and mandatory lower-level compilation/database/schema/documentation/Clippy/CI-integrity gates pass on source reconciled with dev. Future workflow coverage remains honestly tracked in the existing79-row map and child tasks; it is not automatically68 foundation merge blockers. The accepted classification is6 expressly proved contracts,68 incomplete multi-part workflows with passing subsets, and5 decision-blocked rows. Do not mark those future tasks or unproved behavior complete.
 
-Verified code bea0c299 passed hosted pipeline 2964502717 with all eight required jobs successful. Access preserves all 23 existing cases in one controller/database lifecycle and uses sessions/authorization/admin-forms modules. Delivery passed eight cases in one five-role lifecycle: authored Git commit, exact native evaluation/attempt/derivation, authenticated API-only builder realization, independently cold nonce output, signed local publication, distinct builder sessions and real target periodic reporting. This is not complete coverage of either owner.
+The final review resolves current dev conflicts without discarding target work, preserves TASK504 documentation and its automatic Pages publication, and retains its static browser assertions outside the four root checks. Option1 is explicitly approved for the existing static GitLab Pages publish only. No Crystal Forge system deployment, NixOS activation, software release or additional manual deployment/release job is authorized.
 
-The existing 79-row catalog has 11 rows with passed subsets, 59 planned and nine decision-blocked. Known failing runtime variants remain explicit; passing subsets are not percentages or complete rows. Accepted requirements and designs define expectations. Current code locates mechanisms only.
+Approved UI parity debt remains in the canonical punch list. TASK503 stays separately deferred with existing attribution/fencing intact. D2 is approved and its genuine predecessor, migration, old-agent continuity and recovery proof must stay verified. Coverage percentage and complexity/size debt are advisory; enabled required analysis cannot manufacture successful completion. Full-workspace Tarpaulin is not a new numerical release floor or an open-ended backend project.
 
-The corrective iteration verified true offline outer/nested Nix acquisition settings, separate controlled preparation, declared absolute Bash, root PostgreSQL privilege separation, short invocation-owned sockets and explicit XCCDF realization. Hosted database execution passed 515 cases and both populated migration rehearsals. Local outbound-denied verification and its host-daemon limitation are recorded in the coverage map.
-
-The owner separately authorized TASK-495 after offline=true exposed an unsupported legacy Nix flag. It was developed in its own worktree, committed independently and is now Review in draft MR !335. offline=true and all Delivery assertions remain. Prior .25/.26 repairs remain integrated. No other production/UI/API/schema/design repair is authorized; TASK-496 remains Backlog.
-
-Extended Access and Delivery, all Assurance, the supported Upgrade transition and final minimization remain open. Cold raw-recipe preparation retains one complete native baseline closure and remains a cost constraint; source-generator fan-out reduction is not a whole-pipeline speed/recipe claim. Keep this parent In Progress and MR !335 draft. No merge, deployment or Done.
+Merge MR335 into dev only after all final gates pass and repository protections are satisfied. Keep branch/worktrees as explicitly requested after merge; preserve future coverage tracking. This parent also remains the existing umbrella for unassigned future coverage details, even when its foundation milestone is merged.
 <!-- SECTION:DESCRIPTION:END -->
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 The adopted integration maintenance contract and verification guidance accurately distinguish approved requirements from as-built evidence, and state exactly four TOTAL final flake check attributes
-- [ ] #2 The coverage map assigns accepted obligations one primary owner/scenario, independent expected results, evidence and truthful status; distinguish executed coverage, required gaps, obsolete suites and lower-level verification retained outside checks
-- [ ] #3 Final `nix eval .#checks.x86_64-linux --apply builtins.attrNames --json` returns exactly integration-access, integration-delivery, integration-assurance and integration-upgrade, with complete accepted coverage and no other attributes
+- [ ] #1 The adopted integration maintenance contract and verification guidance accurately distinguish the agreed foundation, approved requirements, future coverage and as-built evidence, and state exactly four TOTAL final flake check attributes
+- [ ] #2 The existing coverage map assigns unfinished obligations a responsible owner, covered subset, missing behavior, existing task or parent umbrella, planned acceptance proof and truthful disposition; preserve the UI punch list and lower-level verification
+- [ ] #3 Final nix eval .#checks.x86_64-linux --apply builtins.attrNames --json returns exactly integration-access, integration-delivery, integration-assurance and integration-upgrade, with every registered foundation workflow executed and no additional attributes
 - [ ] #4 Each normal native Snowfall owner is a pkgs.linkFarm aggregate of all explicitly registered scenario gates and propagates every failure; no placeholder owners
 - [ ] #5 Shared helpers use lib/integration-test; coordinator composes owner-local compatible case fragments with the fewest justified scenario boundaries; no duplicate execution without distinct evidence
-- [ ] #6 Delete the authorized nine legacy suites and obsolete manual jobs after relocating needed assets. Useful Rust/database/package/schema/doc/tool tests remain outside flake checks; consolidate duplicate selections or justify distinct conditions. Source retirement does not mark missing accepted obligations covered
-- [ ] #7 No production/migration/SQLx/UI/design changes except separately authorized TASK-490.25/.26 and the subsequent owner-authorized TASK-495 offline-realization repair; no unrelated product fixes
+- [ ] #6 Delete the authorized nine legacy suites and obsolete manual jobs after relocating needed assets; retain useful Rust/database/package/schema/doc/tool tests outside flake checks and consolidate duplicate selections or justify distinct conditions; missing future coverage is not marked passed
+- [ ] #7 Preserve all separately owner-authorized product, migration, SQLx, UI and regression corrections already in MR335; no unrelated production changes or bypassed correctness/security/CI-integrity requirements
 <!-- AC:END -->
+
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+Latest final-merge instruction explicitly approves the foundation scope and conditional merge. Parent criterion3 formerly required complete accepted feature coverage and criterion7 named only early repair approvals; those stale formulations now reflect the owner-approved foundation and all separately approved existing fixes. This scope alignment does not delete future requirements or untested assertions. Current child tasks remain future/in-progress as recorded. Coordinator performs a normal target-into-source merge and new verification input, then GitLab merge only after all gates; no force push, deployment or worktree deletion.
+<!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
 

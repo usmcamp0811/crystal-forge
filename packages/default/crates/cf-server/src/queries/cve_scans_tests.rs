@@ -348,17 +348,56 @@ async fn save_scan_results_sets_fleet_relevant_since_atomically_with_cve_attenti
         return;
     };
 
-    let (_env_id, _system_id, hostname) = insert_environment_and_system(&pool).await;
-
-    // NixOS derivation matching the system hostname, build-complete.
-    let nixos_derivation_id: i32 = sqlx::query_scalar(
-        "INSERT INTO derivations (commit_id, derivation_type, derivation_name, status_id, attempt_count) \
-         VALUES (NULL, 'nixos', $1, 10, 0) RETURNING id",
+    let (env_id, system_id, hostname) = insert_environment_and_system(&pool).await;
+    let suffix = Uuid::new_v4().simple().to_string();
+    let flake_id: i32 =
+        sqlx::query_scalar("INSERT INTO flakes (name, repo_url) VALUES ($1, $2) RETURNING id")
+            .bind(format!("atomic-fleet-{suffix}"))
+            .bind(format!("https://example.invalid/{suffix}"))
+            .fetch_one(&pool)
+            .await
+            .expect("insert registered flake");
+    let commit_id: i32 = sqlx::query_scalar(
+        "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) \
+         VALUES ($1, $2, now()) RETURNING id",
     )
+    .bind(flake_id)
+    .bind(&suffix)
+    .fetch_one(&pool)
+    .await
+    .expect("insert registered commit");
+    sqlx::query("UPDATE systems SET flake_id = $1, system_configuration_name = $2 WHERE id = $3")
+        .bind(flake_id)
+        .bind(&hostname)
+        .bind(system_id)
+        .execute(&pool)
+        .await
+        .expect("register system configuration");
+
+    // Current authority requires a consistent latest report and a unique
+    // output for this registered flake and configuration.
+    let store_path = format!("/nix/store/{suffix}-atomic-fleet");
+    let nixos_derivation_id: i32 = sqlx::query_scalar(
+        "INSERT INTO derivations (commit_id, derivation_type, derivation_name, derivation_path, \
+         store_path, status_id, completed_at, attempt_count) \
+         VALUES ($1, 'nixos', $2, $3, $4, 10, now(), 0) RETURNING id",
+    )
+    .bind(commit_id)
     .bind(&hostname)
+    .bind(format!("{store_path}.drv"))
+    .bind(&store_path)
     .fetch_one(&pool)
     .await
     .expect("insert nixos derivation");
+    let system_state_id: i32 = sqlx::query_scalar(
+        "INSERT INTO system_states (hostname, change_reason, store_path, generation, \
+         generation_matches_current_store_path) VALUES ($1, 'startup', $2, 1, true) RETURNING id",
+    )
+    .bind(&hostname)
+    .bind(&store_path)
+    .fetch_one(&pool)
+    .await
+    .expect("insert current system report");
 
     let claim = create_cve_scan(
         &pool,
@@ -407,11 +446,43 @@ async fn save_scan_results_sets_fleet_relevant_since_atomically_with_cve_attenti
         claim.scan_id,
         &vulnix_results,
         Some(123),
-        Some("/nix/store/fake-atomic-path"),
+        Some(&store_path),
         claim.execution_id,
     )
     .await
     .expect("save_scan_results should succeed");
+
+    let authority: (Uuid, Uuid, i32, String, i32, i32, Uuid) = sqlx::query_as(
+        "SELECT system_id, environment_id, generation, store_path, derivation_id, commit_id, scan_id \
+         FROM view_current_cve_authority WHERE system_id = $1",
+    )
+    .bind(system_id)
+    .fetch_one(&pool)
+    .await
+    .expect("saved scan must establish exact Current authority");
+    assert_eq!(
+        authority,
+        (
+            system_id,
+            env_id,
+            1,
+            store_path,
+            nixos_derivation_id,
+            commit_id,
+            claim.scan_id,
+        ),
+        "Current must select the fixture's observed output and saved scan"
+    );
+    let current_occurrence: (Uuid, Uuid) = sqlx::query_as(
+        "SELECT system_id, scan_id FROM view_current_exact_cve_occurrences \
+         WHERE system_id = $1 AND cve_id = $2 AND package_name = 'test-pkg'",
+    )
+    .bind(system_id)
+    .bind(&cve_id)
+    .fetch_one(&pool)
+    .await
+    .expect("saved finding must belong to the fixture's exact Current scan");
+    assert_eq!(current_occurrence, (system_id, claim.scan_id));
 
     let fleet_relevant_since: Option<chrono::DateTime<chrono::Utc>> =
         sqlx::query_scalar("SELECT fleet_relevant_since FROM cves WHERE id = $1")
@@ -437,40 +508,78 @@ async fn save_scan_results_sets_fleet_relevant_since_atomically_with_cve_attenti
         "exactly one open CVE attention occurrence must exist after the scan"
     );
 
-    // Cleanup.
-    let _ = sqlx::query(
-        "DELETE FROM attention_occurrences WHERE category = 'cves' AND subject_id = $1",
+    let opened_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+        "SELECT opened_at FROM attention_occurrences \
+         WHERE category = 'cves' AND subject_id = $1 AND resolved_at IS NULL",
     )
     .bind(&cve_id)
-    .execute(&pool)
-    .await;
-    let _ = sqlx::query("DELETE FROM package_vulnerabilities WHERE cve_id = $1")
+    .fetch_one(&pool)
+    .await
+    .expect("fetch open CVE attention timestamp");
+    assert_eq!(
+        Some(opened_at),
+        fleet_relevant_since,
+        "the attention occurrence and fleet relevance must share an episode timestamp"
+    );
+
+    // Delete only owned rows. Removing the scan first cascades its immutable
+    // observations before the referenced CVE can be deleted.
+    sqlx::query("DELETE FROM attention_occurrences WHERE category = 'cves' AND subject_id = $1")
         .bind(&cve_id)
         .execute(&pool)
-        .await;
-    let _ = sqlx::query("DELETE FROM cves WHERE id = $1")
+        .await
+        .expect("delete owned CVE attention occurrences");
+    sqlx::query("DELETE FROM package_vulnerabilities WHERE cve_id = $1 AND derivation_id = $2")
+        .bind(&cve_id)
+        .bind(pkg_derivation_id)
+        .execute(&pool)
+        .await
+        .expect("delete owned package vulnerability");
+    sqlx::query("DELETE FROM scan_packages WHERE scan_id = $1")
+        .bind(claim.scan_id)
+        .execute(&pool)
+        .await
+        .expect("delete owned scan packages");
+    sqlx::query("DELETE FROM cve_scans WHERE id = $1")
+        .bind(claim.scan_id)
+        .execute(&pool)
+        .await
+        .expect("delete owned scan and observations");
+    sqlx::query("DELETE FROM cves WHERE id = $1")
         .bind(&cve_id)
         .execute(&pool)
-        .await;
-    let _ = sqlx::query("DELETE FROM scan_packages WHERE scan_id = $1")
-        .bind(claim.scan_id)
+        .await
+        .expect("delete owned CVE");
+    sqlx::query("DELETE FROM system_states WHERE id = $1")
+        .bind(system_state_id)
         .execute(&pool)
-        .await;
-    let _ = sqlx::query("DELETE FROM cve_scans WHERE id = $1")
-        .bind(claim.scan_id)
+        .await
+        .expect("delete owned system report");
+    sqlx::query("DELETE FROM systems WHERE id = $1")
+        .bind(system_id)
         .execute(&pool)
-        .await;
-    let _ = sqlx::query("DELETE FROM derivations WHERE id = ANY($1)")
+        .await
+        .expect("delete owned system");
+    sqlx::query("DELETE FROM derivations WHERE id = ANY($1)")
         .bind(vec![nixos_derivation_id, pkg_derivation_id])
         .execute(&pool)
-        .await;
-    let _ = sqlx::query("DELETE FROM systems WHERE hostname = $1")
-        .bind(&hostname)
+        .await
+        .expect("delete owned derivations");
+    sqlx::query("DELETE FROM commits WHERE id = $1")
+        .bind(commit_id)
         .execute(&pool)
-        .await;
-    let _ = sqlx::query("DELETE FROM environments WHERE name LIKE 'env-%'")
+        .await
+        .expect("delete owned commit");
+    sqlx::query("DELETE FROM flakes WHERE id = $1")
+        .bind(flake_id)
         .execute(&pool)
-        .await;
+        .await
+        .expect("delete owned flake");
+    sqlx::query("DELETE FROM environments WHERE id = $1")
+        .bind(env_id)
+        .execute(&pool)
+        .await
+        .expect("delete owned environment");
 }
 
 /// Proves that version-1 evidence is canonical, occurrence-scoped, immutable,

@@ -980,10 +980,12 @@ mod tests {
         poam_id
     }
 
-    #[tokio::test]
-    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
-    async fn user_notifications_materialize_event_after_user_creation_before_api_touch() {
-        let pool = test_pool().await;
+    // One bounded producer pass needs a fixture-local initialization queue.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires repository-provided isolated PostgreSQL"]
+    async fn user_notifications_materialize_event_after_user_creation_before_api_touch(
+        pool: PgPool,
+    ) {
         let user_id = create_test_user(&pool, "preference-init").await;
         sqlx::query("DELETE FROM user_notification_preferences WHERE user_id = $1")
             .bind(user_id)

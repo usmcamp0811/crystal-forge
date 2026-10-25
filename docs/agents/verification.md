@@ -11,7 +11,7 @@ The examples below reflect common Crystal Forge targets. Confirm current flake a
 | Rust formatting | `nix develop -c cargo fmt --manifest-path <manifest> -- --check` |
 | Server/agent/builder logic | Targeted tests for the affected package or module, then the relevant Nix package build |
 | Dioxus state or component logic | Web UI formatting and targeted tests, then `nix build .#web-ui` |
-| User-visible UI | Relevant UI tests plus authoritative `web-ui` integration check and screenshot |
+| User-visible UI | Relevant UI tests, the owning integration scenario, and screenshot (see "Integration owners" below) |
 | API contract shared across components | Tests/builds for every affected producer and consumer |
 | SQLx checked query | SQLx preparation plus affected server tests/build |
 | Migration/schema | Migration against isolated dev DB, SQLx preparation, and affected integration tests |
@@ -29,8 +29,9 @@ nix develop -c cargo fmt --manifest-path packages/web-ui/Cargo.toml -- --check
 nix develop -c cargo test --manifest-path packages/web-ui/Cargo.toml
 nix build .#packages.x86_64-linux.server --no-link
 nix build .#packages.x86_64-linux.web-ui --no-link
-nix build .#checks.x86_64-linux.web-ui --no-link
-nix build .#checks.x86_64-linux.ui-screenshots --no-link
+nix build .#checks.x86_64-linux.integration-access --no-link
+nix build .#ui-screenshots --no-link
+nix build .#okf-knowledge --no-link
 nix flake check --keep-going
 ```
 
@@ -51,12 +52,12 @@ web-ui-test 12-systems
 
 Pass more workflow names as separate arguments. The command keeps PostgreSQL,
 the Crystal Forge server, and Dioxus running between invocations. If a workflow
-requires VM-only infrastructure, the command rejects it and prints the
-authoritative NixOS invocation.
+requires retired VM-only infrastructure, the command rejects it and reports
+that the legacy harness is retired.
 
-`web-ui-test` is the fast development feedback loop. The NixOS Web UI check
-remains the reproducible authoritative verification boundary. Host-side
-success does not replace the relevant focused NixOS check before completion.
+`web-ui-test` is the retained development feedback loop, implemented under
+`packages/devScripts/web-ui/`. Its supported host workflows do not replace
+owning integration evidence. The legacy `web-ui` NixOS check is retired.
 
 ### Feature integration
 
@@ -74,16 +75,570 @@ Run `nix flake check --keep-going` when:
 
 If it is not run, state what was run instead and why that is sufficient. Never imply that the full check passed.
 
+## Integration owners
+
+The integration layer is defined by the
+[integration test maintenance contract](../knowledge/testing/integration-test-contract.md).
+Owners, scenarios, status, and legacy retirement are in the
+[integration coverage map](../knowledge/testing/integration-coverage-map.md).
+
+```bash
+# One scenario (gate): fails unless every case passes.
+nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L
+# Evidence of the same run, including after a failure (never a gate).
+nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap.run -L
+# Every registered Access scenario gate.
+nix build .#checks.x86_64-linux.integration-access -L --keep-going
+```
+
+Access, Delivery, Assurance and Upgrade are currently discoverable. Each coordinator-owned
+`checks/integration-<owner>/default.nix` explicitly registers a `scenarios`
+attribute set and uses normal `pkgs.linkFarm` aggregation to build all registered
+scenario gates. Meaningful WIP checks may be discoverable; there is no
+completeness flag. A passing registered subset does not prove missing
+obligations.
+
+Implemented integration owners run automatically in GitLab. The four owner
+jobs are required on merge requests and `main`. For example, Access runs
+`sh packages/ci/integration-owner-build.sh integration-access`, which builds the
+normal owner aggregate (never a `.run` output) and exports evidence files to
+`integration-evidence/integration-access/`, including after a failed build.
+TASK-490.24 authorizes retirement of the nine legacy suite directories before
+replacement coverage is complete. `legacy-flake-check`, `web-ui-check`, and
+`web-ui-baseline-candidates` are removed. One explicit `component-tests` job
+replaces the six-entry package matrix. All fifteen public `verify-*` wrappers
+are removed. Three process-compose database Rust jobs remain and share the
+invocation-owned launcher. The state-machine workflow owns the consolidated
+server regressions. The
+[coverage map](../knowledge/testing/integration-coverage-map.md#current-gitlab-selection)
+lists the obligations that have no automatic integration coverage.
+
+Shared helpers live in `lib/integration-test/`; native Snowfall checks call
+`lib.crystal-forge.makeIntegrationTestHarness { inherit pkgs inputs; }`. An
+implementation packet does not automatically receive a NixOS derivation.
+Compatible case fragments use the existing Nix/Python/browser-script structure;
+the coordinator composes and registers the scenario. The local scenario uses
+`pkgs.writeText` plus `builtins.readFile` to append
+`scenarios/fragments/sessions.py` after bootstrap and registers the
+matching `.cjs` as `session-sign-out`; no new DSL, gate, or role is needed.
+Each separately built
+scenario gets a fresh VM/database; cases within one scenario may use real earlier
+records through receipts. Future Delivery, Assurance, and Upgrade scenarios,
+fixtures, and assets belong beneath `checks/integration-{delivery,assurance,upgrade}/`.
+Do not create placeholder `default.nix` files or custom discovery.
+
+The historical Access scenario at `fc930335878279ac426510359c039dfd8961dc13`
+failed before migrations/HTTP. Separate TASK-490.25/.26 repairs are integrated.
+After rebase on `origin/dev` `5ae7feab`, the latest focused Access scenario
+passed ten cases at `81d65be745cc9f9777d368900d01fe0f207cb052`: the original
+five bootstrap cases and five selected session/CSRF/sign-out cases. The exact
+owner command `nix build .#checks.x86_64-linux.integration-access -L` passed
+by reusing the focused run. Receipts record 292 migrations, 22 actual Unix-socket
+clients, and exact retained/revoked/browser session identities with persisted
+revocation and sign-out. This proves the registered subset; missing Access
+obligations and three other owners remain uncovered. The same VM journal
+records TASK-492, an independent
+Postgres Jobs ordering defect that does not fail the Access gate. The
+[coverage map](../knowledge/testing/integration-coverage-map.md#foundation-execution-record)
+records the failures, current receipts, and uploaded reviewer artifacts.
+TASK-490.1 foundation is in `Review`; its documentation validation passed.
+TASK-490.2 remains `In Progress`: the selected Operator/Viewer admin-denial cases
+are implemented, and only the exact environment-scope and closed-registration
+cases wait for accepted decisions. The Access scenario previously passed all 16 cases
+(ten earlier, six authorization) through the CI job script at
+`8a857bc872cf331a19036b97a93f2b7741e9728b`, with the VM executed newly; see the
+[authorization record](../knowledge/testing/integration-coverage-map.md#access-authorization-cases-task-4902).
+Validate this
+documentation follow-up with `nix build .#okf-knowledge -L`;
+do not rerun a VM merely because documentation follows the tested source.
+
 ## UI evidence
 
 For a user-visible UI change:
 
-1. Update or add an assertion in the authoritative `web-ui` check when practical.
-2. Ensure the check navigates to and renders the changed state.
-3. Capture the screenshot from that check.
+1. Update or add an assertion in the owning integration scenario.
+2. Ensure the scenario navigates to and renders the changed state.
+3. Capture the screenshot and any design comparison from that scenario.
 4. Include it in the MR description or discussion with the tested state identified.
 
-The lightweight `ui-screenshots` helper is useful for iteration but is not a substitute when project policy requires DB-backed `web-ui` evidence.
+The legacy `web-ui` suite and baseline-candidate job are retired. Its historical
+workflow list is not a mandatory replacement catalog. Accepted requirements
+in the coverage map govern new owner scenarios. `ui-screenshots` remains a
+package for design iteration, without semantic integration proof.
+
+## Final inventory verification
+
+Current inventory: `integration-access`, `integration-assurance`,
+`integration-delivery` and `integration-upgrade`, versus 27 before retirement.
+Access's original 16 cases remain unchanged; seven
+Admin-form cases now follow them and passed at `c254b1c5` through the normal
+owner CI script, with a new VM and independent SQL/reload evidence.
+Assurance owns the real evidence/remediation lifecycle. Upgrade owns the approved
+real predecessor transition. Their registration does not prove complete coverage;
+the coverage map separates local results from final integrated and hosted proof.
+Delivery's `delivery-lifecycle` registers real Git/native evaluation, API-only
+builders and target-agent proof. Run its normal aggregate with
+`sh packages/ci/integration-owner-build.sh integration-delivery`; exact tested
+revisions and remaining obligations are in the coverage map.
+Final completion requires exactly four TOTAL attributes, plus complete accepted
+coverage and execution evidence. Evaluate the full set (not a filtered subset):
+
+```bash
+nix eval --json .#checks.x86_64-linux --apply builtins.attrNames
+nix eval --json .#checks.x86_64-linux --apply 'c: builtins.attrNames c == [ "integration-access" "integration-assurance" "integration-delivery" "integration-upgrade" ]'
+```
+
+The final predicate must return `true`; a successful evaluation returning
+`false` does not pass final acceptance. Consolidated lower-level verification
+runs outside `checks`, as described below. Do not add a fifth check or replace
+the removed wrappers with another registry or aggregation framework.
+
+## Consolidated component verification
+
+The explicit `component-tests` job in `.gitlab-ci.yml` runs these commands on
+merge requests and `main`. Ordinary core tests own nonignored server library/bin
+tests, all thirteen unchanged `cf-config` CA library tests, 41 `cf-protocol`
+tests and the three pure export targets (13 tests). Core supplies
+`check-jsonschema`, `xmllint` and `CF_TEST_OSCAL_SCHEMAS` explicitly. Core `postCheck`
+owns real Nix inspection, observation, snapshot isolation, source parity and
+Go/Rust CA dataset comparison. These checks do not repeat in the embedded build.
+
+```bash
+for component in cf-server-core-drv cf-server-drv cf-agent-drv cf-builder-drv cf-keygen-drv; do
+  sh packages/ci/public-cache-build.sh ".#default.$component" -L --show-trace --builders '' --max-jobs 1 --cores 2
+done
+nix build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge .#xccdf-1-2-schemas -L --show-trace --builders '' --max-jobs 1 --cores 2
+
+for suite in builder-cve stig packaging; do
+  nix eval --impure --json --expr "
+    let
+      f = builtins.getFlake (\"git+file://\" + toString ./.);
+      p = import f.inputs.nixpkgs {
+        system = builtins.currentSystem;
+        overlays = [ f.overlays.default ];
+      };
+    in import ./modules/nixos/crystal-forge/tests/$suite.nix {
+      inputs = f.inputs // { self = f; };
+      pkgs = p;
+      lib = p.lib // { crystal-forge = f.lib; };
+    }"
+done
+
+nix develop -c bash modules/nixos/crystal-forge/tests/discovery.sh
+nix shell --impure --expr '
+  let
+    f = builtins.getFlake ("git+file://" + toString ./.);
+    p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
+  in [ p.remarshal p.jq p.libxml2 p.openscap ]
+' --command bash -euo pipefail -c '
+  bash modules/nixos/crystal-forge/tests/packaging.sh
+  core=$(nix eval --raw .#default.cf-server-core-drv.outPath)
+  xccdf_schemas=$(nix eval --raw .#xccdf-1-2-schemas.outPath)
+  bash packages/default/crates/cf-server/tests/xccdf-schema.sh \
+    "$core" "$xccdf_schemas" "$PWD/schemas/cf-xccdf-1/cf-xccdf-1.xsd"
+'
+
+nix develop -c env -u DB_HOST -u DB_PORT -u DB_USER -u DB_NAME bash -euo pipefail -c '
+  bash packages/devScripts/db-usability-check-test.sh packages/devScripts/db-usability-check.sh
+  bash packages/devScripts/db-only-start-test.sh packages/devScripts/db-only-start.sh
+  bash packages/devScripts/web-ui/tests/web-ui-test-runner-test.sh \
+    packages/devScripts/web-ui/tests/web-ui-test.sh packages/devScripts/web-ui/coverage-manifest.json
+'
+```
+
+Each pure module evaluation must return `true`; none creates a verification
+derivation. Discovery uses independent temporary Nix stores. Packaging probes
+the installed wrappers and generated service contract. Schema validation uses
+actual installed exporter output, five CF extension types and OpenSCAP; it does
+not claim XSD coverage for every custom-check variant. Build core before running
+the installed-fixture command. Evaluation alone does not realize its inputs.
+
+Prepare the launcher, SQLx environment and locked Cargo sources separately.
+Only this preparation phase permits network acquisition:
+
+```bash
+nix build .#devScripts.state-machine-test .#devScripts.cve-test \
+  .#devScripts.dashboard-visibility-test --no-link --builders '' \
+  --option substituters https://cache.nixos.org --option extra-substituters '' \
+  --option accept-flake-config false --max-jobs 1 --cores 2
+nix develop .#sqlx --builders '' \
+  --option substituters https://cache.nixos.org --option extra-substituters '' \
+  --option accept-flake-config false --max-jobs 1 --cores 2 \
+  -c cargo fetch --locked --manifest-path packages/default/Cargo.toml
+```
+
+Run one prepared database workflow offline. Select `state-machine-test`,
+`cve-test`, or `dashboard-visibility-test` explicitly:
+
+```bash
+DATABASE_TEST_APP=state-machine-test
+CARGO_NET_OFFLINE=true SQLX_OFFLINE=true \
+nix run --offline --option substituters '' --option substitute false \
+  --option builders '' --option fallback false \
+  --option accept-flake-config false --max-jobs 0 --no-update-lock-file \
+  ".#devScripts.$DATABASE_TEST_APP" -- -t=false up
+```
+
+The nested SQLx shell uses the same Nix settings. Missing shell or Cargo inputs
+fail before cluster creation with preparation instructions. `SQLX_OFFLINE`
+does not control Nix networking. Descendant Nix fixture builds can execute
+locally, but must not substitute, use remote builders or fall back to fetching.
+The launch chain declares Bash and uses absolute Nix executables. On root CI
+runners, only PostgreSQL children drop to the resolved `nobody` UID/GID; Cargo
+and evidence retain the invoking user's permissions. Cluster and short socket
+directories are invocation-owned. The launcher waits for PostgreSQL shutdown
+before removing them. Cleanup preserves an earlier failure or signal status.
+If PostgreSQL cannot stop, the launcher retains its storage and fails.
+
+Each launcher owns a fresh temporary cluster: CVE uses port 35432, state-machine
+uses 35433, and dashboard uses 35434. An occupied port fails; an existing server
+is never reused. The SQLx shell verifies the actual data
+directory, role privileges (`LOGIN SUPERUSER CREATEDB`) and `pg_stat_statements`
+preload, and exports both database URLs inside the SQLx shell. All selections
+share `target/database-tests` by default. The state-machine selection preserves both
+populated migration rehearsals, its ignored library regressions, and the
+previously selected integration targets, and adopts the two migration targets
+listed in the [catalog](../knowledge/testing/flake-checks.md#optional-measurement-and-adopted-test-ownership).
+The normal TASK-505 run passed 561 expected/emitted tests across 245 selections,
+including the eight tests in the two adopted migration targets.
+The library selections include two TASK-496 heartbeat/state-decoding regressions.
+Six repeated ignored selections and 94 nonignored library selections were
+removed; normal package tests own the latter. Two repeated `composite_policy`
+executions were removed from the CVE job because the full target owns them.
+The CVE and dashboard jobs remain separate. CVE retains its historical
+27-filter/30-test selection plus MR335's ignored isolation regression. TASK-505
+adds 12 live-database tests through five exact selections and the seven-test
+`queries::cve_scans_tests::` prefix. These serialized selections require a live
+database even when coverage is off. The historical counts are not results for
+the expanded workflow. Dashboard retains two `cf-server --lib --ignored`
+visibility prefixes, each selecting two tests. Both dashboard groups execute
+even when one fails; any failure makes the job fail. These selections are not
+fully subsumed by the consolidated state-machine runner. The dashboard query
+prefix owns `visibility_scope_handles_ambiguous_systems_cache_pushes_and_eval_attempts`;
+TASK-501 removes that one duplicate from the state-machine job. The other
+dedicated selections do not overlap the consolidated database selections.
+Ordinary nonignored package
+tests do not replace live-database execution: some CVE tests return early when
+`CRYSTAL_FORGE_TEST_DATABASE_URL` is absent.
+
+Every executed Cargo selection reports its command, passed/failed/ignored
+counts, and exit status. The guard first derives the expected native libtest
+names using the same Cargo targets, filters and libtest options with `--list`.
+Listing does not execute test bodies. Default listings include ignored tests,
+so the guard subtracts an ignored-only listing unless those tests are explicitly
+enabled. The expected executable selection must be nonempty. Executed names
+must match the listed multiset, including repeated names across workspace
+targets, and emitted results must agree with summary counts. A positive count
+from an unrelated suite cannot pass. Workspace libraries with zero matches do
+not establish success for the selection.
+Compilation-only commands do not count as executed tests. The outer launcher
+also requires a valid invocation-owned completion receipt. Process-compose
+success without that receipt fails. Never interpret selection inventory,
+compilation, or a reused build as passing test execution.
+
+See the [component ownership table](../knowledge/testing/flake-checks.md#current-inventory-and-commands)
+for the exact source homes and the task notes for the assertion audit.
+
+### Optional native coverage
+
+Coverage is off by default. In CI, `CF_COVERAGE=1` makes the existing component
+and three database jobs produce native LLVM bundles. It does not create a test
+owner or change the four integration checks. The optional `coverage-check` job
+consumes those artifacts only. MR configuration has 10 jobs by default and 11
+with measurement enabled, compared with 11 before TASK-505.
+
+For components, select the explicit variant; the environment variable alone
+does not instrument an ordinary `nix build`:
+
+```bash
+nix build .#default.cf-keygen-drv.coverage.profile --no-link -L
+nix eval --raw .#default.cf-keygen-drv.coverage.profile.outPath
+```
+
+Use the same `.coverage.profile` suffix for `cf-server-core-drv`, `cf-server-drv`,
+`cf-agent-drv` and `cf-builder-drv`. Each variant uses the same build/check phases
+as its normal owner. The separate `profile` output contains `profile.profdata`
+and coverage-bearing executable `objects/`. Normal installed component variants
+and ordinary developer builds remain uninstrumented.
+CI also runs installed XCCDF schema validation against the instrumented core
+output and merges its extra raw profiles into the core native bundle.
+
+For a database owner, prepare its launcher, SQLx shell and locked Cargo inputs
+as above. Also prepare the pinned collector/tools before offline execution:
+
+```bash
+nix build .#coverage .#coverage.llvm --no-link -L
+```
+
+Then run the existing isolated entry from the repository root. Choose a fresh
+absolute artifact directory outside the invocation's disposable PostgreSQL and
+temporary directories; the launcher rejects an existing directory. The example
+assumes `coverage-artifacts/state-machine-test` does not yet exist:
+
+```bash
+export CF_LLVM_BIN="$(nix eval --raw .#coverage.llvm.outPath)/bin"
+export CF_COVERAGE_DIR="$PWD/coverage-artifacts/state-machine-test"
+DATABASE_TEST_APP=state-machine-test
+CARGO_NET_OFFLINE=true SQLX_OFFLINE=true \
+nix run --offline --option substituters '' --option substitute false \
+  --option builders '' --option fallback false \
+  --option accept-flake-config false --max-jobs 0 --no-update-lock-file \
+  ".#devScripts.$DATABASE_TEST_APP" -- -t=false up
+unset CF_COVERAGE_DIR CF_LLVM_BIN
+```
+
+For `cve-test` or `dashboard-visibility-test`, change both the app and bundle
+directory. The direct hook is enabled by `CF_COVERAGE_DIR`; CI sets that variable
+only when `CF_COVERAGE=1`. The hook compiles into
+the launcher's fresh `$TMPDIR/coverage-target`, separate from the normal
+`target/database-tests` cache. This prevents stale objects from a previous run
+from entering the report. Data-directory/privilege checks, migrations, Cargo
+membership guards, completion receipts and cleanup remain in the same isolated
+lifecycle. Profiles and executable objects survive outside disposable storage.
+A failed Cargo selection fails its owner. Export runs after successful tests;
+missing profiles/objects or LLVM failures return tooling status 65 rather than
+claiming successful measurement.
+
+From the repository root, collect explicit bundles from the same source/run:
+
+```bash
+nix run .#coverage -- coverage-report \
+  "$(nix eval --raw .#default.cf-keygen-drv.coverage.profile.outPath)"
+```
+
+The first argument is `OUTPUT_DIRECTORY` (`coverage-report` here), followed by
+one or more `PRODUCER_BUNDLE` paths. CI passes all component and database bundles.
+The collector runs no Cargo, tests, migrations or PostgreSQL. Pinned
+`llvm-profdata` merges profiles into `coverage.profdata`; `llvm-cov report`
+writes the sole presentation, `report.txt`. Authored `.rs` files under
+`packages/default/crates`, including authored tests, examples and build code,
+define source scope;
+dependencies, generated files and the separate Web UI workspace are excluded.
+Remapped source paths allow
+component and database bundles to merge. No coverage minimum is enforced.
+Missing/invalid bundles, invalid LLVM data or a zero line denominator fail with
+status 65. A zero numerator with a positive denominator succeeds. The collector
+removes an earlier `report.txt` before processing so it cannot present stale
+success after an input failure.
+
+**TASK-505 local checkpoint (coordinator-reported):**
+
+| Execution | Result |
+| --- | --- |
+| Normal components | Core, agent, builder, keygen and embedded server builds all exited 0. Core ran separately from the other four builds. |
+| Normal core selection | 1,996 passed: server library 1,839, config 101, protocol 41, worker 1, pure exports 13 and warm `postCheck` 1. The nested raw-fork result is not counted again. |
+| Normal database entries | CVE 43 expected/emitted across 33 selections; state-machine 561/245; dashboard 4/2. All passed. State-machine includes the eight adopted migration tests. |
+| Existing CVE/dashboard fault guards | All 16 controls passed with the expected failure statuses and cleanup. These are launcher controls, not product tests. |
+| Instrumented components | All five passed: core, embedded server, agent, builder and keygen. |
+| Instrumented database entries | All three passed with identical normal counts: CVE 43/33 selections, state-machine 561/245 and dashboard 4/2. Exact expected/emitted membership matched; all had zero failed and zero ignored tests. |
+| Instrumented database cleanup | PostgreSQL PIDs 13573, 13691 and 23377 were dead. Invocation roots, sockets and fresh `$TMPDIR/coverage-target` directories were removed; external profiles remained. |
+| Installed native collector | Ran once over all eight bundles, including CI-schema-merged core. Lines: 232,639 total / 87,806 missed, 62.26%; regions: 295,137 / 112,033 missed, 62.04%; functions: 16,301 / 5,746 missed, 64.75%. |
+| Full flake check | `nix flake check --keep-going` exited 0; `/tmp/opencode/task505-flake.status` contains `0`. The four root checks remain unchanged. |
+
+The combined measurement covers mapped authored backend `.rs` files, including
+tests, examples and build code. It is not whole-product coverage and is not
+comparable with historical Tarpaulin source/test semantics. LLVM's warning that
+2,400 functions have mismatched data remains visible. A bounded core probe found
+dependency-hash-zero records; no scoped CF-authored mismatch was found in the
+inspected records. This is not an exhaustive mismatch diagnosis. No warning
+suppression or custom LLVM format is adopted.
+
+The core ELF bundle is approximately 931 MB (approximately 303 MB with ordinary
+ZIP compression). Producers retain full coverage-bearing ELF files; LLVM object
+extraction is not implemented. GitLab hosted profile upload is unverified, and
+the new TASK-505 MR is not yet open. Local execution does not establish hosted
+artifact acceptance. Product policy, APIs and schema are unchanged; SQLx metadata
+refresh is not applicable. Required complexity/Clippy checks remain unchanged.
+
+Earlier tiny native libtest controls proved hook/export handling, collection
+without rerunning tests, invalid-input rejection and test/tool status distinctions.
+Their percentages are synthetic. A real keygen bundle's 0/72-line report was
+accepted, and its ordinary derivation was verified uninstrumented. Evidence is
+under `/tmp/opencode/task505-native-hook-evidence`, summarized in
+`/tmp/opencode/task505-native-hook-summary.md`.
+
+The former Tarpaulin 40-target / 2,378-passed / 830-ignored run remains historical
+evidence, not a new measurement. The 27 ignored tests across eight previously
+skipped targets remain disabled; running the entire ignored inventory is not
+required. Scoped package replacement counts are in the
+[catalog](../knowledge/testing/flake-checks.md#optional-measurement-and-adopted-test-ownership).
+
+### Database CI failure-path regression
+
+The dedicated CVE/dashboard jobs run
+`packages/devScripts/tests/database-ci-test.py` before their normal entry.
+The script reads the actual offline execution block from `.gitlab-ci.yml` and
+uses temporary process-compose fault configurations. It proves initialization
+failure, Cargo-child failure, empty selection, unrelated positive results,
+missing/malformed completion, failed receipt with successful compose exit, and
+interruption. It requires a nonempty invocation data/socket path report and
+checks removal of those exact paths. Main-server evidence must identify the
+`[db]` postmaster's startup PID, reported listening socket and same-PID final
+shutdown; `db-init`'s temporary-server shutdown does not qualify. The script
+records the live PID's kernel starttime and corroborates death through `/proc`
+where readable. Unavailable/unobserved process evidence is explicit, not a
+claim that an unreadable PID died. Its controlled
+runner inputs are launcher regression evidence, not product integration tests.
+CI retains logs and `results.json` under `database-ci-evidence/`, including after
+a failed job.
+
+Prepare the pinned Nix Python separately, then run the script offline. This
+uses the same Python expression as CI and adds no flake check or verification
+package:
+
+```bash
+python_expression='let
+  f = builtins.getFlake ("git+file://" + toString ./.);
+  p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
+in p.python3'
+nix shell --impure --expr "$python_expression" --builders '' \
+  --option substituters https://cache.nixos.org --option extra-substituters '' \
+  --option accept-flake-config false --max-jobs 1 --cores 2 --command true
+nix shell --offline --option substituters '' --option substitute false \
+  --option builders '' --option fallback false \
+  --option accept-flake-config false --max-jobs 0 --no-update-lock-file \
+  --impure --expr "$python_expression" --command python3 \
+  packages/devScripts/tests/database-ci-test.py /tmp/task501-database-evidence
+```
+
+An optional app argument limits the script to `cve-test` or
+`dashboard-visibility-test`. Run on a disposable root CI runner to exercise
+privilege separation. On Linux hosts with subordinate-ID user namespaces,
+prefix the offline command with
+`unshare --user --map-auto --map-root-user`. This exercises UID 0 in that
+namespace, not a hosted runner. Nonroot execution checks the ordinary path.
+
+Initial TASK-501 local verification exposed assertions that the former false-green
+jobs did not execute. At base `dbf50b47` plus the runner repair, the full CVE
+entry executed one passing test, then failed
+`recorded_derivation_path_restores_when_output_deriver_is_unknown` at
+`cve_worker.rs:2705` (scanner calls 0, expected 1), returning 101. The normal
+dashboard entry executed all four declared tests on root/nonroot paths:
+three passed and `visibility_deployment_status_preserves_ahead_as_up_to_date`
+failed at `queries/dashboard.rs:2723` (0, expected 2), returning 101.
+Those initial results are failing gates, not passing integration evidence.
+The recorded-derivation failure also reproduced without root. Its fixture writes
+a legacy completed cache publication for `file:///unused-test-cache` but creates
+no matching eligible cache destination. Disposable-database inspection found
+zero matching enabled destinations and a failed scan with unavailable inputs.
+Migration `0301` and the materialization resolver require that match. This is a
+fixture precondition mismatch, not evidence of a root or offline-toolchain fault.
+
+Independent CVE selector diagnostics executed the remaining declared tests,
+including each of the three ignored tests once with one passing result. Across
+the root first test and those separate diagnostics, all 30 distinct selected
+names executed: 27 passed and three failed. Besides the recorded-derivation
+assertion, `policy_scan_heartbeat_prevents_recovery_and_ownership_loss_cancels_execution`
+timed out waiting for its first scanner invocation, and
+`remote_lease_claim_heartbeat_validation_and_clean_completion` observed one
+diagnostic where its assertion expected zero. These independent results do not
+constitute a successful full CVE job. Dashboard's failing fixture also lacks
+the deployable same-flake target required by the current deployment view;
+disposable-database inspection classified its two hosts as `unknown`.
+
+At the runner-only checkpoint, the controlled regression passed all seven cases for both apps on both
+root-namespace and nonroot paths: 28 verified case results. An interruption
+exercise exposed a cleanup race; the launcher now waits for the invocation's
+PostgreSQL shutdown before removing files. The final exercises verified clean
+shutdown, removed data/socket directories, and preserved exit 143. A separate
+intermediate execution correctly failed before cluster creation when a changed
+launcher closure had not yet been prepared; that attempt is not a passing fault
+case. After explicit preparation, the nonroot fault regression passed.
+
+The runner-only checkpoint `ee32c209` changed no Rust code or assertions. The canonical task notes
+retain raw logs, selection inventory, independent diagnostic results, and
+remaining verification. Full-flake/VM and exact-head hosted verification remain
+coordinator-owned; no local fault result substitutes for those checks.
+
+### Authorized fixture follow-up to `ee32c209`
+
+The coordinator authorized corrections to the four named test fixtures after
+classifying the failures as prerequisite/expectation drift. The follow-up changes
+only `cfg(test)` code in `cve_worker.rs`, `cve_scan_leases.rs`, and
+`queries/dashboard.rs`. Production code, test names, runner selections and
+migrations remain unchanged. The source contracts below authorize the fixture
+data; a failing test result alone does not authorize an expectation change.
+
+| Fixture | Source contract and correction |
+| --- | --- |
+| Recorded derivation restoration | Migration `0301_cache_push_destination_identity.sql` and `materialization_source_for_reference` require one current eligible destination for a legacy publication. The fixture retains its legacy publication and adds one matching enabled Nix destination. It still requires one scanner call, restoration of only the recorded `.drv`, no output recopy, and completed status. |
+| Post-build heartbeat ownership | `queries::cve_scans::create_cve_scan_with_trigger` binds PostBuild claims to the latest successful build job within the recovery window. The fixture adds that successful job and verifies the scan's exact job binding. Heartbeat renewal, stale-recovery prevention, cancellation on revocation, nonoverlap and terminal-state assertions remain unchanged. |
+| Expired remote diagnostic denial | `cve_scan_diagnostics` defines append-only events. This test already persists and identifies one valid `scanner_started` event before expiry. The fixture snapshots every persisted event field before the stale completion, verifies the known event's ID/type, then requires the complete ordered row set to remain identical. This replaces an incorrect empty-baseline assumption and detects insertion, deletion and mutation. The `RemoteCompletion::Stale` assertion and all other fencing/denial assertions remain unchanged. |
+| Ahead deployment normalization | Migration `0291_prefer_deployable_running_path_identity.sql` requires a published deployable target and same-flake configuration identity. The fixture seeds the older eligible target and observes a newer unpublished path in that same flake. An additional assertion requires the actual view status to be `ahead`; all original unscoped/scoped normalization, visibility and unknown-count assertions remain unchanged. |
+
+Normal offline entries executed their complete unchanged selections on both
+root-namespace and nonroot paths:
+
+| Entry | Root namespace | Nonroot |
+| --- | --- | --- |
+| `devScripts.cve-test` | 30 passed / 0 failed / 0 ignored; exit 0 | 30 passed / 0 failed / 0 ignored; exit 0 |
+| `devScripts.dashboard-visibility-test` | 4 passed / 0 failed / 0 ignored; exit 0 | 4 passed / 0 failed / 0 ignored; exit 0 |
+
+The three explicitly enabled ignored CVE tests each executed once per normal
+invocation and passed. Exact output names, libtest modes, per-selection counts,
+completion receipts and removed data/socket paths were checked against the
+30/4-name inventory. Compiled test programs executed from the prepared shared
+target cache; cached compilation is not reused test-result evidence. No runner
+selection was added or duplicated.
+
+Raw logs and statuses use `/tmp/opencode/task501-fixtures-*`; the successful
+root CVE attempt is `task501-fixtures-root-cve-retry`. Its initial attempt
+failed in the unchanged first test with `PoolTimedOut` while the task-owned
+PostgreSQL process was in uninterruptible I/O state. That failed attempt remains
+retained and is not counted as a pass. The successful retry used the same normal
+entry and assertions after the process recovered. The complete named result
+comparison is `/tmp/opencode/task501-fixture-execution-proof.json`; the
+production-prefix/test-name/assertion preservation audit is
+`/tmp/opencode/task501-fixture-scope-proof.json`.
+
+Targeted Rust formatting passed for all three changed files. The crate-wide
+`cargo fmt -p cf-server -- --check` remains blocked by a pre-existing formatting
+difference in unchanged `src/bin/server.rs:1196`. No production formatting
+change is included. Full-flake/VM and exact-head hosted verification remain
+coordinator-owned.
+
+### Runtime membership and main-server evidence follow-up
+
+Independent review identified two gaps after `0f9e6715`: a positive aggregate
+count did not enforce intended-suite membership at runtime, and the cleanup
+verifier could accept `db-init` shutdown or missing path reports. The existing
+Cargo guard and direct CI regression now enforce the stronger contracts above.
+No static selection registry, repeated test execution, new wrapper or flake
+check was added. The listing passes preserve the original argv, including
+ignored/exact filters; compilation-only commands remain exempt. Original Cargo
+failures remain authoritative through comparison and cleanup.
+
+The controlled unrelated-result fixture forwards listings to the real test
+binary, then emits unrelated successful names with the same positive count.
+Both apps reject that fixture with exit 1 on root/nonroot paths. All eight
+controlled process cases passed for each app and role: 32 case results.
+All 32 reported nonempty removed data/socket sets. All 28 non-initialization
+cases recorded a live main-postmaster starttime and its later absent PID,
+along with the matching `[db]` final shutdown. Initialization faults correctly
+recorded no main-server startup. Eight additional evidence mutations were
+rejected: removing the later main-server shutdown while retaining `db-init`'s
+shutdown, or removing the invocation path report. Those are verifier fixtures,
+not additional process executions or product integration tests.
+
+Normal root-namespace offline entries passed with runtime membership enforced:
+CVE 30 passed/0 failed/0 ignored and dashboard 4 passed/0 failed/0 ignored,
+each exit 0. These were the unchanged normal selections, including the three
+explicitly enabled ignored CVE tests. The fault matrix also ran nonroot;
+nonroot normal-entry results in the earlier fixture record are separate evidence.
+
+Focused shared-guard checks exercised a real broad mixed library prefix
+(3 passed, 1 intentionally ignored), a six-test group containing expected-panic
+display annotations (6 passed), compilation-only integration target selection,
+and one exact ignored integration test (1 passed). A default ignored-only
+selection was rejected before execution despite its positive `--list` inventory.
+All focused checks used a fresh invocation database and exited 0 overall with
+that expected rejection explicitly checked. This proves those native argv and
+output shapes; it does not claim the full state-machine workflow passed.
+
+Evidence is under `/tmp/opencode/task501-membership-*` and
+`/tmp/opencode/task501-mixed-*`, including per-case reported paths, PID/starttime
+and death records in `results.json`. Full state-machine and exact-head hosted
+verification remain coordinator-owned.
 
 ## Output handling
 

@@ -170,6 +170,84 @@ impl VulnerabilitiesLoad {
     }
 }
 
+// Keep Current independent of explicit revision inspection. Both consumers use
+// the same server resolver, response validation, and refresh epochs.
+async fn load_cve_inventory(
+    id: String,
+    selection: SystemCveInventorySelection,
+    refresh_nonce: u64,
+    detail_nonce: u64,
+) -> VulnerabilitiesLoad {
+    let mut load = VulnerabilitiesLoad {
+        system_id: id.clone(),
+        selection,
+        refresh_nonce,
+        detail_nonce,
+        inventory: None,
+        error: None,
+        redirect_to_login: false,
+    };
+    let Ok(system_id) = Uuid::parse_str(&id) else {
+        load.error = Some("Invalid system identifier.".to_string());
+        return load;
+    };
+    match fetch_system_cve_inventory_for_target(&system_id, None, selection).await {
+        Ok(inventory) if cve_page_matches_request(system_id, selection, &inventory) => {
+            load.inventory = Some(inventory);
+        }
+        Ok(_) => {
+            load.error = Some(
+                "The server returned a different system, target, source, or read capability."
+                    .to_string(),
+            );
+        }
+        Err(ApiClientError::Status {
+            code: 401 | 403, ..
+        }) => load.redirect_to_login = true,
+        Err(error) => load.error = Some(format!("Unable to load vulnerabilities: {error}")),
+    }
+    load
+}
+
+// INVARIANT: Header CVEs are distinct IDs from the unfiltered Current source,
+// including unknown severity. A page's finding counts, historical selection,
+// newest attempt, and legacy system summary cannot supply running exposure.
+// CONCURRENCY: A matching request epoch and reported generation are required
+// before independently loaded detail and Current reads can be shown together.
+fn current_header_cves(
+    load: Option<&VulnerabilitiesLoad>,
+    system_id: &str,
+    generation: Option<i32>,
+    refresh_nonce: u64,
+    detail_nonce: u64,
+) -> Option<(i64, i64, i64)> {
+    let selection = SystemCveInventorySelection::Current;
+    let load = load.filter(|load| {
+        load.matches_request(system_id, selection, refresh_nonce, detail_nonce)
+            && load.error.is_none()
+            && !load.redirect_to_login
+    })?;
+    let page = load.inventory.as_ref()?;
+    if !cve_page_matches_request(Uuid::parse_str(system_id).ok()?, selection, page)
+        || !matches!(
+            page.authority,
+            SystemCveInventoryAuthority::Exact | SystemCveInventoryAuthority::MappedRunning
+        )
+        || generation.is_none()
+        || page.running_target.as_ref()?.generation != generation
+    {
+        return None;
+    }
+    let metadata = &page.metadata;
+    let (total, critical, high) = (
+        metadata.total_cves,
+        metadata.cve_critical?,
+        metadata.cve_high?,
+    );
+    (total >= 0 && critical >= 0 && high >= 0 && critical <= total && high <= total - critical)
+        .then_some((total, critical, high))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RevisionScopeMode {
     Generations,
@@ -1307,11 +1385,14 @@ pub fn SystemDetailView(
     });
     let now = now_tick();
 
-    // System data state — use_resource reads detail_reload as a dependency so that
-    // incrementing the reload nonce (e.g. after saving edits) triggers a re-fetch.
+    // CONCURRENCY: A CVE refresh can resolve an externally activated generation.
+    // Refresh detail in the same epoch so its cached generation cannot leave the
+    // header permanently fenced. This dependency does not increment either
+    // nonce or restart Current, so each user refresh causes one read per resource.
     let id_for_detail = id.clone();
     let mut detail_resource = use_resource(move || {
         let _ = detail_reload();
+        let _ = cve_refresh();
         let id = id_for_detail.clone();
         async move { load_system_detail_with_fallback(&id).await }
     });
@@ -1391,70 +1472,34 @@ pub fn SystemDetailView(
         });
     }
 
+    let id_for_current_cves = id.clone();
+    let current_cves_resource = use_resource(move || {
+        load_cve_inventory(
+            id_for_current_cves.clone(),
+            SystemCveInventorySelection::Current,
+            cve_refresh(),
+            detail_reload(),
+        )
+    });
     let id_for_vulns = id.clone();
-    let mut vulnerabilities_resource = use_resource(move || {
+    let selected_cves_resource = use_resource(move || {
         let id = id_for_vulns.clone();
         let selection = cve_selection();
         let refresh_nonce = cve_refresh();
         let detail_nonce = detail_reload();
         async move {
-            // Security data must never fall back to mock CVEs in production paths.
-            // Surface a real error/empty state instead so an API outage cannot
-            // render fake vulnerabilities (TASK-353 review).
-            let Ok(system_id) = Uuid::parse_str(&id) else {
-                return VulnerabilitiesLoad {
-                    system_id: id,
-                    refresh_nonce,
-                    detail_nonce,
-                    selection,
-                    inventory: None,
-                    error: Some("Invalid system identifier.".to_string()),
-                    redirect_to_login: false,
-                };
-            };
-
-            match fetch_system_cve_inventory_for_target(&system_id, None, selection).await {
-                Ok(inventory) if !cve_page_matches_request(system_id, selection, &inventory) => {
-                    VulnerabilitiesLoad {
-                        system_id: id,
-                        refresh_nonce,
-                        detail_nonce,
-                        selection,
-                        inventory: None,
-                        error: Some("The server returned a different system, target, source, or read capability.".to_string()),
-                        redirect_to_login: false,
-                    }
-                }
-                Ok(inventory) => VulnerabilitiesLoad {
-                    system_id: id,
-                    refresh_nonce,
-                    detail_nonce,
-                    selection,
-                    inventory: Some(inventory),
-                    error: None,
-                    redirect_to_login: false,
-                },
-                Err(ApiClientError::Status {
-                    code: 401 | 403, ..
-                }) => VulnerabilitiesLoad {
-                    system_id: id,
-                    refresh_nonce,
-                    detail_nonce,
-                    selection,
-                    inventory: None,
-                    error: None,
-                    redirect_to_login: true,
-                },
-                Err(err) => VulnerabilitiesLoad {
-                    system_id: id,
-                    refresh_nonce,
-                    detail_nonce,
-                    selection,
-                    inventory: None,
-                    error: Some(format!("Unable to load vulnerabilities: {err}")),
-                    redirect_to_login: false,
-                },
+            if selection == SystemCveInventorySelection::Current {
+                None
+            } else {
+                Some(load_cve_inventory(id, selection, refresh_nonce, detail_nonce).await)
             }
+        }
+    });
+    let vulnerabilities_resource = use_memo(move || {
+        if cve_selection() == SystemCveInventorySelection::Current {
+            current_cves_resource.read().clone()
+        } else {
+            selected_cves_resource.read().clone().flatten()
         }
     });
     use_effect(move || {
@@ -2222,9 +2267,16 @@ pub fn SystemDetailView(
                 } else {
                     format!("activated · {last_seen_text}")
                 };
-                let cve_total = system.cve_counts.total();
-                let cve_critical = system.cve_counts.critical;
-                let cve_high = system.cve_counts.high;
+                let cve_counts = current_header_cves(
+                    current_cves_resource.read().as_ref(), &id, system.generation,
+                    cve_refresh(), detail_reload(),
+                );
+                let cve_total = cve_counts.map_or_else(|| "—".to_string(), |counts| counts.0.to_string());
+                let cve_subtext = cve_counts.map_or_else(
+                    || "— critical · — high".to_string(),
+                    |(_, critical, high)| format!("{critical} critical · {high} high"),
+                );
+                let cve_critical = cve_counts.map_or(0, |counts| counts.1);
                 let deploy_stage = deployment_progress.as_ref().map(|p| p.stage.clone());
                 let deploy_started_at_ms = deployment_progress
                     .as_ref()
@@ -2266,13 +2318,15 @@ pub fn SystemDetailView(
                         // CVEs
                         div {
                             class: "sd-metric",
+                            "data-testid": "system-current-cves",
                             div { class: "sd-metric-label", "CVEs" }
                             div {
                                 class: "sd-metric-val-num",
+                                "data-testid": "system-current-cves-total",
                                 style: if cve_critical > 0 { "color: #f87171;" } else { "color: #34d399;" },
                                 "{cve_total}"
                             }
-                            div { class: "sd-metric-sub", "{cve_critical} critical · {cve_high} high" }
+                            div { class: "sd-metric-sub", "data-testid": "system-current-cves-severity", "{cve_subtext}" }
                         }
                         // Policy
                         div {
@@ -5167,7 +5221,7 @@ fn DeployTab(
                                 }
 
                                 dt { "Strategy" }
-                                dd { "rollback" }
+                                dd { "switch_to_generation" }
 
                                 dt { "Policy" }
                                 dd { class: "mono", "{policy_name}" }
@@ -5707,7 +5761,7 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
         // Synthesize anchored lines from history entries so each timeline event has a
         // real line to jump to. The anchored (key) line carries the event id.
         for (idx, entry) in history_entries.iter().enumerate() {
-            let event_id = format!("ev{idx}");
+            let event_id = history_event_id(entry, idx);
             let kind = classify_history_entry(entry);
             let base = entry.timestamp;
             let short_msg = entry
@@ -5740,6 +5794,14 @@ fn LogsTabStyled(props: LogsTabProps) -> Element {
             };
 
             match kind {
+                HistoryEventKind::DeployStarted => {
+                    push(
+                        0,
+                        "info",
+                        format!("[reconstructed timeline] deploy started: {short_msg}"),
+                        true,
+                    );
+                }
                 HistoryEventKind::Restart | HistoryEventKind::AgentRestart => {
                     let is_agent = matches!(kind, HistoryEventKind::AgentRestart);
                     push(
@@ -8131,6 +8193,8 @@ fn render_json_value(value: &JsonValue) -> String {
 /// Kind of history timeline event, mirroring the design reference's event model.
 #[derive(Debug, Clone, PartialEq)]
 enum HistoryEventKind {
+    /// Start observation only; does not prove activation or a terminal result.
+    DeployStarted,
     /// Config deployed through Crystal Forge (generation-changing).
     Deploy,
     /// Deploy that failed to activate.
@@ -8153,6 +8217,7 @@ enum HistoryEventKind {
 #[derive(Debug, Clone, PartialEq)]
 struct HistoryEvent {
     id: String,
+    deployment_id: Option<Uuid>,
     kind: HistoryEventKind,
     timestamp: chrono::DateTime<chrono::Utc>,
     generation: Option<i32>,
@@ -8175,9 +8240,8 @@ enum TimelineItem {
 
 /// Classify a history entry's source/outcome into a timeline event kind.
 ///
-/// Prefers the authoritative `event_kind` provided by the backend (derived from
-/// `system_states.change_reason`): `cf_deployment` (CF deploy), `local_rebuild`
-/// (on-host/out-of-band activation), and `restart` (reboot). Reconciliation of an
+/// Prefers persisted `event_type`, then backend `event_kind` and outcome.
+/// A start observation never proves activation. Reconciliation of an
 /// out-of-band rebuild uses the backend `reconciled` flag (running store-path maps
 /// to a tracked flake commit). Falls back to string heuristics only for legacy
 /// payloads that predate these fields.
@@ -8185,6 +8249,7 @@ fn classify_history_entry(entry: &SystemHistoryEntry) -> HistoryEventKind {
     let outcome = entry.outcome.to_lowercase();
 
     match entry.event_type.as_str() {
+        "cf_deployment_started" => return HistoryEventKind::DeployStarted,
         "cf_deployment_succeeded" => return HistoryEventKind::Deploy,
         "cf_deployment_failed" => return HistoryEventKind::DeployFailed,
         "local_rebuild_detected" => {
@@ -8201,7 +8266,9 @@ fn classify_history_entry(entry: &SystemHistoryEntry) -> HistoryEventKind {
 
     match entry.event_kind.as_str() {
         "cf_deployment" => {
-            if outcome.contains("fail") || outcome.contains("error") {
+            if outcome == "started" {
+                HistoryEventKind::DeployStarted
+            } else if outcome.contains("fail") || outcome.contains("error") {
                 HistoryEventKind::DeployFailed
             } else {
                 HistoryEventKind::Deploy
@@ -8247,6 +8314,7 @@ fn history_event_message(entry: &SystemHistoryEntry, kind: &HistoryEventKind) ->
         raw.as_str(),
         "config_change"
             | "cf_deployment"
+            | "cf_deployment_started"
             | "cf_deployment_succeeded"
             | "cf_deployment_failed"
             | "local_rebuild_detected"
@@ -8259,6 +8327,7 @@ fn history_event_message(entry: &SystemHistoryEntry, kind: &HistoryEventKind) ->
     );
 
     match kind {
+        HistoryEventKind::DeployStarted => "Deployment started".to_string(),
         HistoryEventKind::Deploy => {
             if is_raw_reason {
                 "Deployed through Crystal Forge".to_string()
@@ -8310,6 +8379,9 @@ fn classify_history_entry_legacy(entry: &SystemHistoryEntry) -> HistoryEventKind
     let outcome = entry.outcome.to_lowercase();
     let actor = entry.actor.to_lowercase();
 
+    if outcome == "started" || reason == "cf_deployment_started" {
+        return HistoryEventKind::DeployStarted;
+    }
     if outcome.contains("fail") || outcome.contains("error") {
         return HistoryEventKind::DeployFailed;
     }
@@ -8353,8 +8425,13 @@ fn build_history_events(
     let mut running_gen = current_generation;
     // Whether any entry carries an authoritative recorded generation.
     let has_authoritative_gen = entries.iter().any(|e| e.generation.is_some());
+    let mut seen_event_ids = HashSet::new();
 
     for (idx, entry) in entries.iter().enumerate() {
+        // INVARIANT: Repeated delivery of one persisted event is one observation.
+        if entry.id.is_some_and(|id| !seen_event_ids.insert(id)) {
+            continue;
+        }
         let kind = classify_history_entry(entry);
         if matches!(kind, HistoryEventKind::StateChange) {
             continue;
@@ -8372,8 +8449,12 @@ fn build_history_events(
             HistoryEventKind::Restart
                 | HistoryEventKind::AgentRestart
                 | HistoryEventKind::DeployFailed
+                | HistoryEventKind::DeployStarted
         );
-        let (generation, prev_generation) = if has_authoritative_gen {
+        let (generation, prev_generation) = if matches!(kind, HistoryEventKind::DeployStarted) {
+            // A reported current generation on a start is not a new activation.
+            (None, None)
+        } else if has_authoritative_gen {
             // Authoritative: use the recorded generation and compare against the
             // next-older recorded generation to show a real transition.
             let current = entry.generation;
@@ -8403,7 +8484,8 @@ fn build_history_events(
         };
 
         events.push(HistoryEvent {
-            id: format!("ev{idx}"),
+            id: history_event_id(entry, idx),
+            deployment_id: entry.deployment_id,
             kind,
             timestamp: entry.timestamp,
             generation,
@@ -8421,6 +8503,46 @@ fn build_history_events(
     }
 
     events
+}
+
+// Persisted IDs keep History and Logs linked across refreshes. Positional IDs
+// retain the existing bounded fallback for legacy rows without event identity.
+fn history_event_id(entry: &SystemHistoryEntry, index: usize) -> String {
+    entry
+        .id
+        .map_or_else(|| format!("ev{index}"), |id| id.to_string())
+}
+
+/// Counts deployment attempts and local rebuilds in the loaded history window.
+///
+/// The approved SystemDetail `type: "deploy"` metric includes failed CF
+/// attempts and local rebuilds, not only successful activations. CF lifecycle
+/// observations sharing a deployment ID count once, including Started-only
+/// attempts. Persisted event IDs deduplicate repeated rows. Legacy rows without
+/// deployment IDs each count once: commit, path, generation, and timestamps
+/// cannot safely correlate retries. This pure derivation is stable on reload.
+fn history_deploy_count(entries: &[SystemHistoryEntry]) -> usize {
+    let mut event_ids = HashSet::new();
+    let mut deployment_ids = HashSet::new();
+    entries
+        .iter()
+        .filter(|entry| {
+            if entry.id.is_some_and(|id| !event_ids.insert(id)) {
+                return false;
+            }
+            match classify_history_entry(entry) {
+                HistoryEventKind::DeployStarted
+                | HistoryEventKind::Deploy
+                | HistoryEventKind::DeployFailed => entry
+                    .deployment_id
+                    .is_none_or(|id| deployment_ids.insert(id)),
+                HistoryEventKind::LocalRebuildMatched | HistoryEventKind::LocalRebuildUntracked => {
+                    true
+                }
+                _ => false,
+            }
+        })
+        .count()
 }
 
 /// Fold consecutive restart events into clusters; deploys/rebuilds stay standalone.
@@ -8554,6 +8676,7 @@ mod fold_tests {
     fn ev(kind: HistoryEventKind, generation: Option<i32>) -> HistoryEvent {
         HistoryEvent {
             id: String::new(),
+            deployment_id: None,
             kind,
             timestamp: Utc::now(),
             generation,
@@ -8710,15 +8833,7 @@ fn HistoryTab(
         .map(|generation| generation.generation)
         .collect::<HashSet<_>>();
 
-    let deploy_count = events
-        .iter()
-        .filter(|e| {
-            !matches!(
-                e.kind,
-                HistoryEventKind::Restart | HistoryEventKind::AgentRestart
-            )
-        })
-        .count();
+    let deploy_count = history_deploy_count(&entries);
     let restart_count = events
         .iter()
         .filter(|e| {
@@ -8981,7 +9096,7 @@ fn RestartLine(event: HistoryEvent) -> Element {
     }
 }
 
-/// A prominent generation-changing event row (design `DeployRow`).
+/// Renders an activation or attempt observation without promoting Started to success.
 #[component]
 fn DeployRow(
     event: HistoryEvent,
@@ -8990,6 +9105,7 @@ fn DeployRow(
     on_rollback: EventHandler<()>,
     on_view_logs: EventHandler<()>,
 ) -> Element {
+    let started = matches!(event.kind, HistoryEventKind::DeployStarted);
     let failed = matches!(event.kind, HistoryEventKind::DeployFailed);
     let matched = matches!(event.kind, HistoryEventKind::LocalRebuildMatched);
     let untracked = matches!(event.kind, HistoryEventKind::LocalRebuildUntracked);
@@ -8998,6 +9114,8 @@ fn DeployRow(
     // Accent color per event kind (mirrors the design's accent map).
     let accent = if failed {
         "var(--cf-red)"
+    } else if started {
+        "var(--cf-blue)"
     } else if untracked {
         "var(--cf-amber)"
     } else if matched {
@@ -9008,6 +9126,8 @@ fn DeployRow(
 
     let kind_label = if failed {
         "Deploy failed"
+    } else if started {
+        "Deployment started"
     } else if local {
         "Local rebuild"
     } else {
@@ -9032,10 +9152,12 @@ fn DeployRow(
         .and_then(|p| p.rsplit('/').next())
         .map(|s| s.to_string());
     let when = relative_time(event.timestamp);
-    let can_rollback = allow_mutations && rollback_eligible && !failed;
+    let can_rollback = allow_mutations && rollback_eligible && !failed && !started;
 
     rsx! {
         div { class: "tl-row",
+            "data-event-id": "{event.id}",
+            "data-deployment-id": event.deployment_id.map(|id| id.to_string()),
             // Rail node
             div { class: "tl-rail",
                 span {
@@ -9055,7 +9177,9 @@ fn DeployRow(
                         span { class: "tl-kind", style: "color: {accent};", "{kind_label}" }
 
                         // Generation transition (#prev → #cur) or "no generation activated"
-                        if let Some(gen_num) = event.generation {
+                        if started {
+                            span { class: "tl-gen tl-gen-none", "activation not yet confirmed" }
+                        } else if let Some(gen_num) = event.generation {
                             span { class: "tl-gen",
                                 if let Some(prev) = event.prev_generation {
                                     span { class: "tl-gen-prev", "#{prev}" }
@@ -9085,6 +9209,8 @@ fn DeployRow(
                                 Icon { name: IconName::X, size: 10 }
                                 " failed"
                             }
+                        } else if started {
+                            span { class: "chip chip-info", "started · nonterminal" }
                         } else {
                             span { class: "chip chip-healthy",
                                 Icon { name: IconName::Check, size: 10 }
@@ -12277,6 +12403,7 @@ mod tests {
         SystemHistoryEntry,
     };
     use chrono::{Duration, Utc};
+    use uuid::Uuid;
 
     fn config_commit(hash: char, inspectable: bool) -> SystemCommitHistory {
         SystemCommitHistory {
@@ -12427,6 +12554,160 @@ mod tests {
         assert!(!stale.matches_request(&stale.system_id, selection, 3, 0));
         assert!(!stale.matches_request(&stale.system_id, selection, 1, 1));
         assert!(!stale.matches_request(&uuid::Uuid::from_u128(20).to_string(), selection, 1, 0));
+    }
+
+    fn header_load() -> super::VulnerabilitiesLoad {
+        super::VulnerabilitiesLoad {
+            system_id: uuid::Uuid::from_u128(19).to_string(),
+            refresh_nonce: 3,
+            detail_nonce: 4,
+            selection: SystemCveInventorySelection::Current,
+            inventory: Some(serde_json::from_value(serde_json::json!({
+                "system_id": uuid::Uuid::from_u128(19), "selection": {"kind":"current"},
+                "authority":"exact", "current_state":"exact_current_scan",
+                "exact_authority_failure":null, "read_only":false,
+                "running_target":{"derivation_id":41,"generation":7,"commit_hash":"a".repeat(40),"reported_at":"2026-09-14T20:00:00Z"},
+                "source":{"scan_id":uuid::Uuid::from_u128(55),"scanner_name":"vulnix","scanner_version":null,"completed_at":"2026-09-14T21:00:00Z"},
+                "evidence_representation":"schema1_observations", "vulnerabilities":[],
+                "metadata":{"total_findings":120,"total_cves":3,"total_packages":120,
+                    "severity":{"critical":90,"high":29,"medium":0,"low":0,"unknown":1},
+                    "cve_critical":1,"cve_high":1},
+                "inventory_revision":"a","has_more":true,"next_cursor":"bounded-page"
+            })).expect("authored full-scope metadata should parse")),
+            error: None,
+            redirect_to_login: false,
+        }
+    }
+
+    #[test]
+    fn current_header_counts_distinct_cves_not_findings_or_loaded_pages() {
+        let mut load = header_load();
+        let counts = |load: &super::VulnerabilitiesLoad| {
+            super::current_header_cves(Some(load), &load.system_id, Some(7), 3, 4)
+        };
+        assert_eq!(counts(&load), Some((3, 1, 1)));
+        // A newer failed attempt does not remove the retained completed source.
+        load.inventory.as_mut().unwrap().attempt = Some(serde_json::from_value(serde_json::json!({
+            "scan_id":uuid::Uuid::from_u128(56),"derivation_id":41,"status":"failed","created_at":null
+        })).unwrap());
+        assert_eq!(counts(&load), Some((3, 1, 1)));
+        let metadata = &mut load.inventory.as_mut().unwrap().metadata;
+        metadata.total_cves = 1;
+        metadata.cve_critical = Some(0);
+        metadata.cve_high = Some(0);
+        assert_eq!(
+            counts(&load),
+            Some((1, 0, 0)),
+            "unknown severity is still a CVE"
+        );
+        load.inventory.as_mut().unwrap().metadata.total_cves = 0;
+        assert_eq!(
+            counts(&load),
+            Some((0, 0, 0)),
+            "completed empty is available"
+        );
+    }
+
+    #[test]
+    fn current_header_rejects_historical_unavailable_old_server_and_stale_reads() {
+        let load = header_load();
+        let counts = |load: &super::VulnerabilitiesLoad| {
+            super::current_header_cves(Some(load), &load.system_id, Some(7), 3, 4)
+        };
+        assert_eq!(
+            super::current_header_cves(None, &load.system_id, Some(7), 3, 4),
+            None
+        );
+        assert_eq!(
+            super::current_header_cves(Some(&load), &load.system_id, Some(7), 4, 4),
+            None
+        );
+        assert_eq!(
+            super::current_header_cves(Some(&load), &load.system_id, Some(7), 3, 5),
+            None
+        );
+        assert_eq!(
+            super::current_header_cves(Some(&load), &load.system_id, Some(8), 3, 4),
+            None
+        );
+        assert_eq!(
+            super::current_header_cves(
+                Some(&load),
+                &uuid::Uuid::from_u128(20).to_string(),
+                Some(7),
+                3,
+                4
+            ),
+            None
+        );
+        let mut changed = load.clone();
+        changed.selection = SystemCveInventorySelection::ExactDerivation { derivation_id: 41 };
+        assert_eq!(counts(&changed), None);
+        changed = load.clone();
+        changed.error = Some("read failed".into());
+        assert_eq!(counts(&changed), None);
+        changed = load.clone();
+        changed.inventory.as_mut().unwrap().metadata.cve_critical = None;
+        assert_eq!(counts(&changed), None, "old servers cannot imply zero");
+        changed = load.clone();
+        changed.inventory.as_mut().unwrap().source = None;
+        assert_eq!(
+            counts(&changed),
+            None,
+            "failed-only and missing sources are unavailable"
+        );
+        changed = load;
+        changed.inventory.as_mut().unwrap().system_id = Some(uuid::Uuid::from_u128(20));
+        assert_eq!(counts(&changed), None);
+    }
+
+    #[test]
+    fn mounted_current_header_recovers_when_coordinated_detail_refresh_finishes() {
+        let old = header_load();
+        let mut current = old.clone();
+        current.refresh_nonce += 1;
+        let page = current.inventory.as_mut().unwrap();
+        page.running_target.as_mut().unwrap().generation = Some(8);
+        page.running_target.as_mut().unwrap().derivation_id = 42;
+        page.running_target.as_mut().unwrap().commit_hash = "b".repeat(40);
+        page.source.as_mut().unwrap().scan_id = uuid::Uuid::from_u128(56);
+        page.metadata.total_cves = 0;
+        page.metadata.total_findings = 0;
+        page.metadata.total_packages = 0;
+        page.metadata.severity = Default::default();
+        page.metadata.cve_critical = Some(0);
+        page.metadata.cve_high = Some(0);
+        page.has_more = false;
+        page.next_cursor = None;
+        page.inventory_revision = "b".to_string();
+        let counts = |load: &super::VulnerabilitiesLoad, generation| {
+            super::current_header_cves(Some(load), &old.system_id, generation, 4, 4)
+        };
+        assert_eq!(
+            counts(&old, Some(7)),
+            None,
+            "old Current epoch stays fenced"
+        );
+        assert_eq!(
+            counts(&current, Some(7)),
+            None,
+            "new Current cannot borrow old detail identity"
+        );
+        assert_eq!(
+            counts(&current, Some(8)),
+            Some((0, 0, 0)),
+            "one matching detail response restores exposure"
+        );
+        assert_eq!(
+            counts(&old, Some(8)),
+            None,
+            "late old Current cannot undo recovery"
+        );
+        assert_eq!(
+            counts(&current, Some(8)),
+            Some((0, 0, 0)),
+            "settled reads need no further refresh"
+        );
     }
 
     #[test]
@@ -13139,6 +13420,103 @@ mod tests {
             generation_matches_current_store_path: Some(true),
             restart_type: None,
         }
+    }
+
+    #[test]
+    fn history_started_is_nonterminal_even_with_generation_or_misleading_outcome() {
+        let mut started = history_entry("cf_deployment_started", "crystal-forge", "cf_deployment");
+        started.event_type = "cf_deployment_started".into();
+        started.outcome = "success".into();
+        started.id = Some(Uuid::from_u128(1));
+        started.deployment_id = Some(Uuid::from_u128(10));
+        let events = build_history_events(&[started.clone()], &[], Some(42));
+        assert_eq!(events[0].kind, HistoryEventKind::DeployStarted);
+        assert_eq!(events[0].generation, None);
+        assert_eq!(events[0].prev_generation, None);
+        assert_eq!(events[0].id, Uuid::from_u128(1).to_string());
+        assert_eq!(events[0].deployment_id, started.deployment_id);
+        assert_eq!(super::history_deploy_count(&[started.clone()]), 1);
+
+        // Both compatibility paths preserve Started without a persisted type.
+        started.event_type.clear();
+        started.outcome = "started".into();
+        assert_eq!(
+            classify_history_entry(&started),
+            HistoryEventKind::DeployStarted
+        );
+        started.event_kind.clear();
+        assert_eq!(
+            classify_history_entry(&started),
+            HistoryEventKind::DeployStarted
+        );
+    }
+
+    #[test]
+    fn history_counts_attempts_including_failure_and_local_rebuild_not_observations() {
+        let mut started = history_entry("cf_deployment_started", "crystal-forge", "cf_deployment");
+        started.event_type = "cf_deployment_started".into();
+        started.id = Some(Uuid::from_u128(1));
+        started.deployment_id = Some(Uuid::from_u128(10));
+        let mut succeeded = started.clone();
+        succeeded.id = Some(Uuid::from_u128(2));
+        succeeded.event_type = "cf_deployment_succeeded".into();
+        let mut failed = started.clone();
+        failed.id = Some(Uuid::from_u128(3));
+        failed.deployment_id = Some(Uuid::from_u128(20));
+        failed.event_type = "cf_deployment_failed".into();
+        let mut failed_start = failed.clone();
+        failed_start.id = Some(Uuid::from_u128(4));
+        failed_start.event_type = "cf_deployment_started".into();
+        let local = history_entry("config_change", "root@host", "local_rebuild");
+        let restart = history_entry("startup", "agent", "restart");
+        let entries = vec![
+            succeeded.clone(),
+            started,
+            failed,
+            failed_start,
+            succeeded,
+            local,
+            restart,
+        ];
+        assert_eq!(super::history_deploy_count(&entries), 3);
+        let events = build_history_events(&entries, &[], Some(42));
+        assert_eq!(events.len(), 6, "duplicate persisted event ID is one card");
+        assert_eq!(events[0].kind, HistoryEventKind::Deploy);
+        assert_eq!(events[1].kind, HistoryEventKind::DeployStarted);
+        assert_eq!(events[2].kind, HistoryEventKind::DeployFailed);
+        assert_eq!(events[3].kind, HistoryEventKind::DeployStarted);
+
+        // Reload reconstructs identical identities/counts, with no retained state.
+        let reloaded: Vec<SystemHistoryEntry> =
+            serde_json::from_str(&serde_json::to_string(&entries).unwrap()).unwrap();
+        assert_eq!(super::history_deploy_count(&reloaded), 3);
+        assert_eq!(build_history_events(&reloaded, &[], Some(42)), events);
+        let mut reordered = reloaded;
+        reordered.reverse();
+        assert_eq!(super::history_deploy_count(&reordered), 3);
+    }
+
+    #[test]
+    fn history_without_deployment_ids_does_not_guess_lifecycle_links() {
+        let mut started = history_entry("cf_deployment_started", "crystal-forge", "cf_deployment");
+        started.event_type = "cf_deployment_started".into();
+        started.id = Some(Uuid::from_u128(1));
+        let mut terminal = started.clone();
+        terminal.id = Some(Uuid::from_u128(2));
+        terminal.event_type = "cf_deployment_failed".into();
+        assert_eq!(
+            super::history_deploy_count(&[started.clone(), terminal.clone(), terminal.clone()]),
+            2
+        );
+        started.id = None;
+        terminal.id = None;
+        let mut legacy = history_entry("deploy", "crystal-forge", "");
+        legacy.event_type.clear();
+        assert_eq!(classify_history_entry(&legacy), HistoryEventKind::Deploy);
+        assert_eq!(
+            super::history_deploy_count(&[started, terminal, legacy.clone(), legacy]),
+            4
+        );
     }
 
     #[test]

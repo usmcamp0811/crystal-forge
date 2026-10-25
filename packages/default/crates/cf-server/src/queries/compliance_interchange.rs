@@ -4181,9 +4181,8 @@ mod tests {
                     mode: "all".to_string(),
                     rules: vec![ImportedCustomCheckRule {
                         field_name: "shared".to_string(),
-                        expression:
-                            "cfg.config.services.openssh.settings.PermitRootLogin == \"no\""
-                                .to_string(),
+                        expression: "config.services.openssh.settings.PermitRootLogin == \"no\""
+                            .to_string(),
                         description: "shared test".to_string(),
                         strict: true,
                     }],

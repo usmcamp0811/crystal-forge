@@ -4,7 +4,7 @@ title: 'Delivery: Config Inspector values and provenance scenario'
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-18 03:26'
+updated_date: '2026-10-24 23:07'
 labels:
   - testing
   - integration
@@ -49,4 +49,6 @@ Writable paths are the named fragments and immutable owner-local fixtures. Produ
 2026-10-17 organization correction replaces paths/commands with native owner-local layout and coordinator registration. Foundation dependency commit unresolved; two existing Rust package tests block foundation; no VM execution. Backlog, not ready. Actual dependency commit(s) and verified commands required before To Do. No Luna delegation or slice execution is claimed.
 
 Isolation correction: TASK-490.8's runtime commit/evaluation output cannot cross scenario runs. Recreate the authored Git input and evaluate the exact revisions in this scenario's own fresh VM/database; reuse only immutable fixture definitions. Foundation VM is blocked by TASK-490.25/.26; remain Backlog.
+
+Merge reconciliation retains source-packet future acceptance specificity: distinguish option values and definition-file provenance, exercise both System Config and flake Config Inspector, and show partial inventory only when the worker actually reports it. Pure Nix-expression unit behavior remains a lower-level responsibility, not another integration scenario. Preserve canonical exact-revision, redaction, changed-revision/history and same-run isolation criteria. No new execution is claimed.
 <!-- SECTION:NOTES:END -->

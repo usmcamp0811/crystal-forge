@@ -4,7 +4,7 @@ title: 'Access: OIDC authorization-code sign-in and group-to-role mapping scenar
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:36'
-updated_date: '2026-10-18 02:37'
+updated_date: '2026-10-24 23:07'
 labels:
   - testing
   - integration
@@ -45,4 +45,6 @@ Requires TASK-490.7 provider/browser-trusted origin and passing TASK-490.1 and T
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction replaces prior paths and registration model. Actual foundation commit unresolved; foundation blocked by two existing Rust package tests, no VM execution. Remain Backlog; actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
+
+Merge reconciliation retains source-packet specificity for future OIDC proof: persist user_sessions.auth_source=oidc and the external identity binding; distinguish bootstrap-admin mappings from mappings created through Admin; a legacy redirect-only test does not prove callback/session/mapping. External-provider variants and token-refresh timing remain non-goals. The source packet proposed no role for an unmapped user; keep that proposal distinguishable from accepted mapping policy and confirm authority before choosing an expectation. Canonical fragment-only/coordinator composition boundaries supersede obsolete exclusive lifecycle-oidc scenario-file ownership. This future task remains Backlog, not a foundation merge blocker or a claimed pass.
 <!-- SECTION:NOTES:END -->

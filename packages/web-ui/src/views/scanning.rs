@@ -2438,7 +2438,7 @@ fn detail_status_strip(detail: &ScanningScanDetailResponse, now: DateTime<Utc>) 
             time { datetime: "{timestamp.to_rfc3339()}", title: "{timestamp.to_rfc3339()}", "{detail_time(timestamp)}" }
             if let Some(elapsed) = elapsed { span { class: "scanning-detail-elapsed", "Elapsed {elapsed}" } }
             if detail.archived_at.is_some() { span { class: "chip chip-unknown", "Archived" } }
-            if detail.total_vulnerabilities > 0 { div { class: "scanning-detail-severity",
+            if completed_findings_available(detail) && detail.total_vulnerabilities > 0 { div { class: "scanning-detail-severity",
                 if detail.critical_count > 0 { span { class: "chip chip-critical", "{detail.critical_count}C" } }
                 if detail.high_count > 0 { span { class: "chip chip-warning", "{detail.high_count}H" } }
                 if detail.medium_count > 0 { span { class: "chip chip-info", "{detail.medium_count}M" } }
@@ -2519,6 +2519,13 @@ fn detail_callout(
     }
 }
 
+// Terminal failures also have a completion timestamp and default zero counters.
+// Only completed scans establish findings, including clean and legacy scans.
+// This describes the exact execution, not a retained inventory source.
+fn completed_findings_available(detail: &ScanningScanDetailResponse) -> bool {
+    detail.status == "completed"
+}
+
 fn detail_summary(detail: &ScanningScanDetailResponse) -> Element {
     let meta = status_meta(&detail.status);
     let flake = detail.flake_name.as_deref().unwrap_or("Not recorded");
@@ -2539,14 +2546,16 @@ fn detail_summary(detail: &ScanningScanDetailResponse) -> Element {
         .unwrap_or_else(|| "Not terminal".to_string());
     rsx! {
         div { class: "scanning-detail-summary",
-            div { class: "scanning-detail-findings",
-                h3 { "Findings" }
-                div { class: "scanning-detail-finding-total", strong { "{detail.total_vulnerabilities}" } span { " vulnerabilities across {detail.total_packages} packages" } }
-                div { class: "scanning-detail-severity",
-                    span { class: "chip chip-critical", "{detail.critical_count} critical" }
-                    span { class: "chip chip-warning", "{detail.high_count} high" }
-                    span { class: "chip chip-info", "{detail.medium_count} medium" }
-                    span { class: "chip chip-unknown", "{detail.low_count} low" }
+            if completed_findings_available(detail) {
+                div { class: "scanning-detail-findings",
+                    h3 { "Findings" }
+                    div { class: "scanning-detail-finding-total", strong { "{detail.total_vulnerabilities}" } span { " vulnerabilities across {detail.total_packages} packages" } }
+                    div { class: "scanning-detail-severity",
+                        span { class: "chip chip-critical", "{detail.critical_count} critical" }
+                        span { class: "chip chip-warning", "{detail.high_count} high" }
+                        span { class: "chip chip-info", "{detail.medium_count} medium" }
+                        span { class: "chip chip-unknown", "{detail.low_count} low" }
+                    }
                 }
             }
             dl { class: "scanning-detail-grid",
@@ -3114,6 +3123,30 @@ mod tests {
             cancellable: false,
             events,
             truncated,
+        }
+    }
+
+    #[test]
+    fn exact_scan_findings_require_completed_status_not_counts_or_terminal_time() {
+        let mut scan = detail(Vec::new(), false);
+        scan.completed_at = Some(Utc::now());
+        for status in [
+            "failed",
+            "pending",
+            "in_progress",
+            "awaiting_build",
+            "awaiting_closure",
+        ] {
+            scan.status = status.to_string();
+            for count in [0, 7] {
+                scan.total_vulnerabilities = count;
+                assert!(!completed_findings_available(&scan), "{status}: {count}");
+            }
+        }
+        scan.status = "completed".to_string();
+        for count in [0, 7] {
+            scan.total_vulnerabilities = count;
+            assert!(completed_findings_available(&scan), "completed: {count}");
         }
     }
 

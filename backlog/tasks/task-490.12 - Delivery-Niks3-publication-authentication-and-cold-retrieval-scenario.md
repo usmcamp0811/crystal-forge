@@ -4,7 +4,7 @@ title: 'Delivery: Niks3 publication, authentication, and cold retrieval scenario
 status: Backlog
 assignee: []
 created_date: '2026-10-17 16:37'
-updated_date: '2026-10-18 03:26'
+updated_date: '2026-10-24 23:07'
 labels:
   - testing
   - integration
@@ -44,4 +44,6 @@ Requires TASK-490.7/.10 roles and accepted authority, plus passing foundation/.2
 
 <!-- SECTION:NOTES:BEGIN -->
 2026-10-17 organization correction replaces prior paths/commands with native owner-local layout. Coordinator owns registration/shared lib/CI/docs. Foundation commit unresolved; foundation blocked by two existing Rust package tests; no VM execution. Backlog, not ready; actual dependency commit(s) and verified commands required before To Do. No Luna delegation or executed slice is claimed.
+
+Merge reconciliation retains source-packet future proof detail: exercise token write authentication then mTLS as distinct configurations, not only a combined token+mTLS success; bind publication to the exact cache ID and independently verify it; include wrong-token and wrong-client-certificate negatives. Cache Test/credentials transport boundaries belong to Delivery while generic form persistence belongs to Access. Preserve absence-before-cold-retrieval and independent bytes/NAR/signature assertions. This record remains future work, not a foundation-completion claim.
 <!-- SECTION:NOTES:END -->

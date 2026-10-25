@@ -59,8 +59,42 @@ turned into invented Nix expressions. Imported content starts as draft,
 disabled, untrusted, and unassigned. Import does not activate policies, evaluate
 expressions, install modules, or assign a bundle.
 
+Preview can translate supported literal NixOS option assignments in fix text
+into typed suggestions for review and refinement. Suggestion presence does not
+classify a foreign document as CF-native or grant trusted or enabled status.
+Preview does not persist import records or enqueue evaluation or build work.
+
 The original package bytes and source provenance are retained. ZIP processing
 selects an XCCDF entry server-side and records the selected entry and hashes.
+Preview rejects parsed `UnsupportedPackage` documents, including non-XCCDF XML
+and a `Benchmark` in an unsupported namespace, with HTTP 422 and
+`IMPORT_DOCUMENT_CLASS_UNSUPPORTED`, consistent with committed import. Preview
+still returns HTTP 200 for supported XCCDF 1.1 and 1.2 Benchmarks with zero rules;
+zero rules alone do not make a document unsupported. Blocking XML diagnostics
+retain HTTP 422 with diagnostic codes. Malformed multipart uploads and empty
+files retain HTTP 400; unsupported file types retain HTTP 415. Preview does not
+persist import records.
+
+### Benchmark releases and rule revisions
+
+The parser keeps direct XCCDF `Benchmark/version` and `Rule/version` values
+separate. A rule revision can be a non-numeric string such as `ANIX-00-000010`.
+Nested metadata, foreign-namespace elements, and sibling rules do not supply
+either value. An absent version is `null`; an empty direct version is an empty
+string. DISA requirement metadata retains the rule revision in `metadata.version`.
+The stable requirement key still comes from the DISA control identity, such as
+the enclosing `Group` ID. The rule revision does not replace that key.
+
+The rule-revision parser repair does not change source bytes or their SHA-256.
+It can change newly computed policy, requirement, and framework semantic digests
+because the canonical metadata now contains the source revision instead of `null`.
+The repair does not migrate or backfill existing imports. Exact-artifact
+reimport reuses the original imported records, including any old `null` rule
+revisions. A successful new preview does not mean those stored records changed.
+Importing different bytes for the same existing framework release can report
+`FRAMEWORK_RELEASE_CONFLICT` when the corrected metadata differs from the stored
+canonical content. The importer does not silently rewrite the existing release.
+This repair provides no automatic historical-import correction workflow.
 
 ## Importing CF-XCCDF
 

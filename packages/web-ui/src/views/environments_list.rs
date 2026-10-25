@@ -15,12 +15,14 @@ use crate::components::environments::{
     EnvironmentItem, EnvironmentTable, NewEnvironmentDraft, PolicyOption, RemoveEnvironmentDialog,
     environment_name_for_id, normalize_color_hex, normalize_optional, policy_library,
     required_agent_policy_id, validate_environment, validate_environment_form,
+    validate_optional_policy_ids,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::environments::adapter::{
-    create_environment_via_api, delete_environment_via_api, load_environments_with_fallback,
-    load_policies_with_fallback, update_environment_policies_via_api, update_environment_via_api,
+    create_environment_via_api, delete_environment_via_api, load_assignable_environment_policies,
+    load_environments_with_fallback, load_policies_with_fallback,
+    update_environment_policies_via_api, update_environment_via_api,
 };
 use crate::routes::Route;
 use crate::state::app_state::AppState;
@@ -85,7 +87,6 @@ pub fn EnvironmentsListView(initial_query: String) -> Element {
     let config_health = app_state.read().config_health.clone();
 
     let mut policy_library_state = use_signal(policy_library);
-    let default_required_policy = required_agent_policy_id(&policy_library_state.read());
 
     let mut environments = use_signal(Vec::<EnvironmentItem>::new);
     let mut bundle_catalog = use_signal(Vec::<crate::api::models::ComplianceBundleSummary>::new);
@@ -277,7 +278,7 @@ pub fn EnvironmentsListView(initial_query: String) -> Element {
                         "data-coach-target": "env",
                         onclick: move |_| {
                             form_error.set(None);
-                            form_draft.set(Some(new_environment_form_draft(default_required_policy)));
+                            form_draft.set(Some(new_environment_form_draft()));
                         },
                         Icon { name: IconName::Plus, size: 14 }
                         " Add environment"
@@ -436,7 +437,6 @@ pub fn EnvironmentsListView(initial_query: String) -> Element {
                         form_draft.clone(),
                         form_error.clone(),
                         api_notice.clone(),
-                        default_required_policy,
                     );
                 }
             }
@@ -557,13 +557,15 @@ fn filtered_environments(items: &[EnvironmentItem], query: &str) -> Vec<Environm
         .collect()
 }
 
-fn new_environment_form_draft(default_required_policy: Uuid) -> EnvironmentFormDraft {
+fn new_environment_form_draft() -> EnvironmentFormDraft {
     EnvironmentFormDraft {
         id: None,
         name: String::new(),
         description: String::new(),
         color_hex: "#2563eb".to_string(),
-        required_policy_ids: vec![default_required_policy],
+        // Optional gates start empty in the approved EnvironmentsView design.
+        // The mandatory CF-agent invariant is enforced globally by the server.
+        required_policy_ids: Vec::new(),
         // Matches the design's declared defaults for a freshly created
         // environment (docs/design/CrystalForge/components/EnvironmentsView.jsx):
         // manual deploys, auto-sync on, approval required, not production.
@@ -642,9 +644,22 @@ fn save_environment_form(
     mut form_draft: Signal<Option<EnvironmentFormDraft>>,
     mut form_error: Signal<Option<String>>,
     mut api_notice: Signal<Option<String>>,
-    default_required_policy: Uuid,
 ) {
     spawn(async move {
+        // Validate the exact draft against a fresh authoritative catalog before
+        // either metadata write. Do not silently remove stale selections. The
+        // assignment endpoint still revalidates within its own transaction.
+        let policies = match load_assignable_environment_policies().await {
+            Ok(policies) => policies,
+            Err(message) => {
+                form_error.set(Some(message));
+                return;
+            }
+        };
+        if let Err(message) = validate_optional_policy_ids(&next.required_policy_ids, &policies) {
+            form_error.set(Some(message));
+            return;
+        }
         let result = if let Some(environment_id) = next.id {
             update_environment_via_api(
                 environment_id,
@@ -655,7 +670,7 @@ fn save_environment_form(
                 next.auto_sync,
                 next.requires_approval,
                 next.is_production,
-                default_required_policy,
+                next.required_policy_ids.clone(),
             )
             .await
         } else {
@@ -665,8 +680,7 @@ fn save_environment_form(
                 color_hex: next.color_hex.clone(),
                 required_policy_ids: next.required_policy_ids.clone(),
             };
-            if let Err(err) = validate_environment(&draft, &environments.read(), &policy_library())
-            {
+            if let Err(err) = validate_environment(&draft, &environments.read(), &policies) {
                 form_error.set(Some(err));
                 return;
             }
@@ -679,7 +693,7 @@ fn save_environment_form(
                 next.auto_sync,
                 next.requires_approval,
                 next.is_production,
-                default_required_policy,
+                next.required_policy_ids.clone(),
             )
             .await
         };
@@ -1129,6 +1143,24 @@ fn plural_s(count: usize) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn optional_policy_new_draft_is_empty_and_edit_preserves_exact_assignments() {
+        let draft = new_environment_form_draft();
+        assert!(draft.required_policy_ids.is_empty());
+        let new = NewEnvironmentDraft {
+            name: "zero-optional-gates".into(),
+            description: String::new(),
+            color_hex: draft.color_hex,
+            required_policy_ids: draft.required_policy_ids,
+        };
+        assert!(validate_environment(&new, &[], &[]).is_ok());
+        let mut existing = test_env("existing");
+        existing.required_policy_ids = vec![Uuid::from_u128(2), Uuid::from_u128(3)];
+        let edit = form_draft_from_environment(&existing);
+        assert_eq!(edit.id, Some(existing.id));
+        assert_eq!(edit.required_policy_ids, existing.required_policy_ids);
+    }
 
     fn test_env(name: &str) -> EnvironmentItem {
         EnvironmentItem {

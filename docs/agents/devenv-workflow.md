@@ -142,7 +142,7 @@ information, plus the current Portless URLs when enabled.
 
 ## Running `web-ui-test` against this stack
 
-`checks/web-ui/tests/web-ui-test.sh` is unmodified. `devenv.nix` exports
+`packages/devScripts/web-ui/tests/web-ui-test.sh` provides the retained host runner. `devenv.nix` exports
 the exact environment variables it already reads as overrides:
 
 ```bash
@@ -150,7 +150,7 @@ devenv shell
 web-ui-test 12-systems
 ```
 
-`web-ui-test` (matching `checks/web-ui/tests/web-ui-test.sh`'s reads) is on
+`web-ui-test` (matching `packages/devScripts/web-ui/tests/web-ui-test.sh`'s reads) is on
 `PATH` directly inside `devenv shell`, the same script
 `shells/default/default.nix`'s legacy `nix run .#devScripts.webUiTest`
 alias resolves to. `CF_UI_DEV_BASE_URL` / `CF_UI_DEV_API_BASE_URL` point

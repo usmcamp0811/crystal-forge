@@ -1,7 +1,10 @@
 use serde::Deserialize;
 use std::time::Duration;
 
-/// Configuration for nix build resource limits and behavior
+/// Configures resource limits and Nix input acquisition for realization.
+///
+/// Offline realization disables substitution and remote execution. It does not
+/// firewall derivation builders or the builder's API and publication traffic.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub struct BuildConfig {
@@ -9,7 +12,11 @@ pub struct BuildConfig {
     pub cores: u32,
     /// Whether to use binary substitutes/caches
     pub use_substitutes: bool,
-    /// Build in offline mode (no network access)
+    /// Disables substitutes, remote builders, and substitution fallback.
+    ///
+    /// Overrides [`Self::use_substitutes`]. Required source inputs must already
+    /// be available locally. This is Nix acquisition policy, not an OS firewall;
+    /// fixed-output derivations can still require network isolation by the host.
     pub offline: bool,
     /// Interval between checking for new build jobs
     #[serde(with = "humantime_serde")]
@@ -94,7 +101,23 @@ fn default_cores_per_job() -> usize {
 }
 
 impl BuildConfig {
-    /// Apply build configuration to a nix command
+    /// Appends resource limits and acquisition policy to a Nix command.
+    ///
+    /// Supports both `nix-store --realise` and modern `nix` commands. Callers
+    /// that wrap Nix in `systemd-run` must first add `--` and the Nix invocation.
+    /// Does not start the command. Offline mode overrides `use_substitutes` and
+    /// inherited substituters, remote builders, and substitution fallback.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use cf_config::config::BuildConfig;
+    /// let config = BuildConfig { offline: true, ..Default::default() };
+    /// let mut command = tokio::process::Command::new("nix-store");
+    /// command.args(["--realise", "/nix/store/example.drv"]);
+    /// config.apply_to_command(&mut command);
+    /// assert!(!command.as_std().get_args().any(|arg| arg == "--offline"));
+    /// ```
     pub fn apply_to_command(&self, cmd: &mut tokio::process::Command) {
         // Resource limits - use new config fields
         cmd.args([
@@ -116,13 +139,28 @@ impl BuildConfig {
         cmd.args(["--option", "sandbox", &self.sandbox.to_string()]);
 
         // Substitute settings
-        if !self.use_substitutes {
+        if !self.use_substitutes || self.offline {
             cmd.arg("--no-substitute");
         }
 
-        // Offline mode
+        // COMPATIBILITY: nix-store rejects the modern CLI's --offline flag.
+        // These shared settings also prevent inherited remote acquisition;
+        // disabling substitution alone would still permit remote builders.
         if self.offline {
-            cmd.arg("--offline");
+            cmd.args([
+                "--option",
+                "substituters",
+                "",
+                "--option",
+                "extra-substituters",
+                "",
+                "--option",
+                "builders",
+                "",
+                "--option",
+                "fallback",
+                "false",
+            ]);
         }
     }
 
@@ -285,6 +323,74 @@ impl BuildConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn offline_arguments_support_legacy_modern_and_scoped_realization() {
+        let config = BuildConfig {
+            offline: true,
+            use_substitutes: true,
+            ..Default::default()
+        };
+        for prefix in [
+            vec!["nix-store", "--realise", "/nix/store/example.drv"],
+            vec!["nix", "build", "/nix/store/example.drv^out"],
+            vec![
+                "systemd-run",
+                "--scope",
+                "--",
+                "nix-store",
+                "--realise",
+                "/nix/store/example.drv",
+            ],
+        ] {
+            let mut command = tokio::process::Command::new(prefix[0]);
+            command.args(&prefix[1..]);
+            config.apply_to_command(&mut command);
+            let args: Vec<_> = command
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy())
+                .collect();
+            assert_eq!(&args[..prefix.len() - 1], &prefix[1..]);
+            assert!(!args.iter().any(|arg| arg == "--offline"));
+            assert_eq!(
+                args.iter().filter(|arg| *arg == "--no-substitute").count(),
+                1
+            );
+            for option in [
+                ["--option", "substituters", ""],
+                ["--option", "extra-substituters", ""],
+                ["--option", "builders", ""],
+                ["--option", "fallback", "false"],
+            ] {
+                assert!(args.windows(3).any(|window| window == option));
+            }
+        }
+    }
+
+    #[test]
+    fn online_arguments_preserve_acquisition_and_substitution_selection() {
+        for use_substitutes in [true, false] {
+            let config = BuildConfig {
+                use_substitutes,
+                ..Default::default()
+            };
+            let mut command = tokio::process::Command::new("nix-store");
+            config.apply_to_command(&mut command);
+            let args: Vec<_> = command
+                .as_std()
+                .get_args()
+                .map(|arg| arg.to_string_lossy())
+                .collect();
+            assert_eq!(
+                args.iter().any(|arg| arg == "--no-substitute"),
+                !use_substitutes
+            );
+            for setting in ["substituters", "extra-substituters", "builders", "fallback"] {
+                assert!(!args.iter().any(|arg| arg == setting));
+            }
+        }
+    }
 
     #[test]
     fn test_safe_defaults() {

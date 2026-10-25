@@ -3159,6 +3159,158 @@ mod tests {
         verified_source_discovery_command,
     };
     use crate::flake::credentials::FlakeCredentialEnv;
+    use futures::FutureExt;
+
+    // Only roots freshly allocated here may reach GC. Store objects stay
+    // immutable throughout the fixture; Nix disposes of them before close()
+    // checks removal of the remaining writable store metadata. Catch the whole
+    // fixture future so assertion panics also run cleanup before unwinding.
+    async fn with_private_nix_store<F, Fut, T>(fixture: F) -> T
+    where
+        F: FnOnce(std::path::PathBuf) -> Fut,
+        Fut: std::future::Future<Output = T>,
+    {
+        let store = tempfile::tempdir().expect("fresh private Nix store root");
+        let root = store.path().to_path_buf();
+        let outcome = std::panic::AssertUnwindSafe(async { fixture(root.clone()).await })
+            .catch_unwind()
+            .await;
+        if let Err(error) = collect_private_nix_store(&root).await {
+            // Retain the exact failed root for diagnosis instead of silently
+            // attempting TempDir's unsuitable recursive deletion again.
+            let retained = store.keep();
+            panic!(
+                "private Nix store cleanup failed (fixture panicked: {}), retained {}: {error:#}",
+                outcome.is_err(),
+                retained.display(),
+            );
+        }
+        store
+            .close()
+            .expect("remove collected private Nix store root");
+        match outcome {
+            Ok(value) => value,
+            Err(panic) => std::panic::resume_unwind(panic),
+        }
+    }
+
+    // The caller owns this invocation's fresh root. Never accept a default
+    // store fallback. Bound GC and reap it before reporting a timeout.
+    async fn collect_private_nix_store(root: &std::path::Path) -> anyhow::Result<()> {
+        use anyhow::Context;
+
+        anyhow::ensure!(root.is_absolute() && root != std::path::Path::new("/"));
+        let home = tempfile::tempdir().context("create private GC home")?;
+        let mut command = tokio::process::Command::new("nix");
+        command
+            .args([
+                "--extra-experimental-features",
+                "nix-command",
+                "store",
+                "gc",
+                "--offline",
+                "--store",
+            ])
+            .arg(root)
+            .env("HOME", home.path())
+            .env("XDG_CACHE_HOME", home.path())
+            // Keep GC progress out of libtest's machine-checked result stream.
+            // Failure diagnostics remain on stderr and status stays checked.
+            .stdout(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let mut child = command.spawn().context("start private store GC")?;
+        let status =
+            match tokio::time::timeout(std::time::Duration::from_secs(30), child.wait()).await {
+                Ok(status) => status.context("wait for private store GC")?,
+                Err(_) => {
+                    child
+                        .kill()
+                        .await
+                        .context("kill and reap timed-out private store GC")?;
+                    anyhow::bail!("private store GC timed out after 30 seconds");
+                }
+            };
+        home.close().context("remove private GC home")?;
+        anyhow::ensure!(status.success(), "private store GC exited with {status}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn private_nix_store_cleanup_after_success_error_and_panic() {
+        for mode in ["success", "error", "panic"] {
+            let mut owned_root = None;
+            let outcome = std::panic::AssertUnwindSafe(with_private_nix_store(|store| {
+                owned_root = Some(store.clone());
+                async move {
+                    let source = tempfile::tempdir().unwrap();
+                    std::fs::create_dir(source.path().join("nested")).unwrap();
+                    std::fs::write(source.path().join("nested/file"), "immutable fixture").unwrap();
+                    let import = std::process::Command::new("nix")
+                        .args([
+                            "--extra-experimental-features",
+                            "nix-command",
+                            "store",
+                            "add-path",
+                            "--offline",
+                            "--store",
+                        ])
+                        .arg(&store)
+                        .arg(source.path())
+                        .env("HOME", source.path())
+                        .output()
+                        .unwrap();
+                    assert!(
+                        import.status.success(),
+                        "{}",
+                        String::from_utf8_lossy(&import.stderr)
+                    );
+                    let logical = String::from_utf8(import.stdout).unwrap();
+                    let physical = store.join(logical.trim().trim_start_matches('/'));
+                    use std::os::unix::fs::PermissionsExt;
+                    assert_eq!(
+                        std::fs::metadata(physical.join("nested"))
+                            .unwrap()
+                            .permissions()
+                            .mode()
+                            & 0o777,
+                        0o555
+                    );
+                    match mode {
+                        "panic" => panic!("deliberate fixture panic"),
+                        "error" => Err("deliberate fixture error"),
+                        _ => Ok(()),
+                    }
+                }
+            }))
+            .catch_unwind()
+            .await;
+            assert!(!owned_root.unwrap().exists(), "root survived {mode}");
+            match mode {
+                "panic" => assert_eq!(
+                    outcome.unwrap_err().downcast_ref::<&str>(),
+                    Some(&"deliberate fixture panic")
+                ),
+                "error" => assert_eq!(outcome.unwrap(), Err("deliberate fixture error")),
+                _ => assert_eq!(outcome.unwrap(), Ok(())),
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn private_nix_store_cleanup_reports_nonzero_gc() {
+        let store = tempfile::tempdir().unwrap();
+        // Corrupt only this new empty store's metadata to make real Nix fail.
+        // No immutable store objects exist in this negative fixture.
+        let db = store.path().join("nix/var/nix/db");
+        std::fs::create_dir_all(&db).unwrap();
+        std::fs::write(db.join("db.sqlite"), "not a SQLite database").unwrap();
+        let error = collect_private_nix_store(store.path()).await.unwrap_err();
+        assert!(
+            error.to_string().contains("private store GC exited with"),
+            "{error:#}"
+        );
+        store.close().unwrap();
+    }
 
     #[tokio::test]
     async fn verified_discovery_failure_retains_real_error_after_warnings_without_urls() {
@@ -3279,8 +3431,8 @@ mod tests {
 
     #[tokio::test]
     async fn verified_discovery_cold_warm_store_source_preserves_lock_and_purity() {
+        with_private_nix_store(|store| async move {
         let source = tempfile::tempdir().unwrap();
-        let store = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let lock = br#"{"nodes":{"root":{}},"root":"root","version":7}"#;
         std::fs::write(source.path().join("flake.lock"), lock).unwrap();
@@ -3292,7 +3444,7 @@ mod tests {
                 "nix-command flakes",
                 "--store",
             ])
-            .arg(store.path())
+            .arg(&store)
             .args(["store", "add-path"])
             .arg(source.path())
             .env("HOME", home.path())
@@ -3306,7 +3458,7 @@ mod tests {
         let store_path = String::from_utf8(import.stdout).unwrap().trim().to_string();
         // A local store reports logical paths; path fetchers read the physical
         // filesystem path in this isolated fixture.
-        let store_path = store.path().join(store_path.trim_start_matches('/'));
+        let store_path = store.join(store_path.trim_start_matches('/'));
         let store_path = store_path.to_str().unwrap();
         let hash = std::process::Command::new("nix")
             .args([
@@ -3324,7 +3476,7 @@ mod tests {
         let reference = cf_protocol::builder::nar_qualified_store_flake_ref(&store_path, &nar_hash);
         for _ in 0..2 {
             let mut command =
-                verified_source_discovery_command(&reference, None, true, Some(store.path()));
+                verified_source_discovery_command(&reference, None, true, Some(&store));
             command
                 .env("HOME", home.path())
                 .env("XDG_CACHE_HOME", home.path());
@@ -3346,7 +3498,7 @@ mod tests {
             "sha256-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=",
         );
         let mut command =
-            verified_source_discovery_command(&incorrect, None, true, Some(store.path()));
+            verified_source_discovery_command(&incorrect, None, true, Some(&store));
         command
             .env("HOME", home.path())
             .env("XDG_CACHE_HOME", home.path());
@@ -3357,14 +3509,15 @@ mod tests {
                 std::time::Duration::from_secs(30),
             )
             .await
-            .is_err()
+                .is_err()
         );
+        }).await;
     }
 
     #[tokio::test]
     async fn verified_discovery_rejects_incomplete_and_stale_locks_like_policy_get_flake() {
+        with_private_nix_store(|store| async move {
         let fixture = tempfile::tempdir().unwrap();
-        let store = tempfile::tempdir().unwrap();
         let home = tempfile::tempdir().unwrap();
         let dependency = fixture.path().join("dependency");
         std::fs::create_dir(&dependency).unwrap();
@@ -3414,7 +3567,7 @@ mod tests {
                 &hash_path(&source),
             );
             let mut discovery =
-                verified_source_discovery_command(&reference, None, true, Some(store.path()));
+                verified_source_discovery_command(&reference, None, true, Some(&store));
             discovery
                 .env("HOME", home.path())
                 .env("XDG_CACHE_HOME", home.path());
@@ -3436,7 +3589,7 @@ mod tests {
                     "nix-command flakes",
                     "--store",
                 ])
-                .arg(store.path())
+                .arg(&store)
                 .args([
                     "eval",
                     "--json",
@@ -3470,6 +3623,7 @@ mod tests {
                 lock_bytes
             );
         }
+        }).await;
     }
 
     #[tokio::test]
@@ -3656,6 +3810,7 @@ mod tests {
 
     #[tokio::test]
     async fn configuration_discovery_does_not_create_or_modify_flake_lock() {
+        with_private_nix_store(|store| async move {
         let repository = tempfile::tempdir().expect("temporary repository should exist");
         let dependency = repository.path().join("dependency");
         std::fs::create_dir(&dependency).expect("dependency directory should exist");
@@ -3697,7 +3852,6 @@ mod tests {
         let tree_before = run_git(&["rev-parse", "HEAD^{tree}"]);
         let flake_before = std::fs::read(repository.path().join("flake.nix"))
             .expect("fixture source should be readable");
-        let store = tempfile::tempdir().expect("temporary Nix store should exist");
         let home = tempfile::tempdir().expect("temporary Nix home should exist");
         let cache = home.path().join("cache");
         std::fs::create_dir(&cache).expect("temporary Nix cache should exist");
@@ -3707,7 +3861,7 @@ mod tests {
             &revision,
             None,
             None,
-            Some(store.path()),
+            Some(&store),
         );
         command
             .env("HOME", home.path())
@@ -3729,6 +3883,7 @@ mod tests {
         );
         assert_eq!(run_git(&["rev-parse", "HEAD^{tree}"]), tree_before);
         assert!(run_git(&["status", "--porcelain"]).is_empty());
+        }).await;
     }
 
     #[test]
