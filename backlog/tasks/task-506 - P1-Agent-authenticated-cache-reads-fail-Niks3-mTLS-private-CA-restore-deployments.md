@@ -3,9 +3,11 @@ id: TASK-506
 title: >-
   P1: Agent authenticated cache reads fail (Niks3 mTLS private CA) - restore
   deployments
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@agent'
 created_date: '2026-10-25 17:03'
+updated_date: '2026-10-25 17:03'
 labels:
   - cache
   - agent
@@ -35,3 +37,9 @@ Contract: when a cache is configured in CF and assigned to an environment, CF su
 - [ ] #6 Public cache reads keep working
 - [ ] #7 Follow-up gaps for Attic/HTTP/S3 read auth recorded as Backlog tasks
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Worktree /home/mcamp/code/crystal-forge/TASK-506-agent-cache-read-auth, branch TASK-506-agent-cache-read-auth, base origin/dev f0dea246. No production host access; reproduce locally only.
+<!-- SECTION:NOTES:END -->
