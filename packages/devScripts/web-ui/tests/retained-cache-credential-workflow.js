@@ -145,7 +145,7 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
           assert.equal(result.write_authorization_valid, null);
           assert.equal(result.write_auth_valid, null);
           assert.equal(result.read_access_valid, true);
-          assert.equal(result.signing_keys_valid, true);
+          assert.equal(result.signing_keys_valid, null);
           assert.equal(result.write_api_reachable, null);
           assert(body.niks3_server_url == null && body.niks3_write_client_key == null && body.niks3_auth_token == null);
         }
@@ -584,7 +584,7 @@ async function retainedCacheCredentialWorkflow(page, baseUrl, apiBaseUrl, captur
         assert.equal(result.write_authorization_valid, null);
         assert.equal(result.write_auth_valid, null);
         assert.equal(result.read_access_valid, ok);
-        if (ok) assert.equal(result.signing_keys_valid, true);
+        assert.equal(result.signing_keys_valid, null);
         assert.equal(result.write_api_reachable, null);
         for (const field of ["niks3_server_url", "niks3_write_client_cert", "niks3_write_client_key", "niks3_write_ca_cert", "niks3_auth_token"])
           assert(patch[field] == null, "read-only Test excludes all write transport fields");

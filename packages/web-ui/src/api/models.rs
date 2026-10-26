@@ -6883,7 +6883,11 @@ pub struct CacheCredentialTestResult {
     /// Reports selected read endpoint access, not write readiness.
     #[serde(default)]
     pub read_access_valid: Option<bool>,
-    /// Reports signing-key metadata validity, not artifact signature verification.
+    /// Reports whether a configured signing key matches a key Niks3 advertises.
+    /// `Some(true)` means a match and `Some(false)` means no overlap. `None`
+    /// means not verified, as in the Read test, which cannot obtain advertised
+    /// keys. Key format validity and artifact signature verification are
+    /// separate assertions that this field does not report.
     #[serde(default)]
     pub signing_keys_valid: Option<bool>,
 }
@@ -6936,6 +6940,9 @@ pub fn cache_diagnostic_message(code: &str) -> Option<&'static str> {
         }
         "invalid_niks3_metadata" => {
             "Niks3 metadata is invalid. Check the API endpoint and published cache configuration."
+        }
+        "signing_key_mismatch" => {
+            "Configured signing public key does not match the signing keys advertised by Niks3."
         }
         "target_policy_rejected" => {
             "Target policy rejected the endpoint. Ask an administrator to review the permitted target policy."

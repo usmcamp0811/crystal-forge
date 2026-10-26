@@ -109,7 +109,7 @@ certificate EKUs, or upload permission. Private keys never enter responses.
 
 ## Exact probe diagnostic codes
 
-The server and browser use these 17 exact allowlisted codes. Messages are
+The server and browser use these 18 exact allowlisted codes. Messages are
 static local guidance, not raw provider or cryptographic-parser text.
 
 | Code | Operator interpretation |
@@ -128,6 +128,7 @@ static local guidance, not raw provider or cryptographic-parser text.
 | `dns_or_connection_failed` | Check DNS, routing, and endpoint availability. |
 | `http_response_failed` | The endpoint returned an unsuccessful response or redirect. |
 | `invalid_niks3_metadata` | Metadata is invalid or inconsistent. |
+| `signing_key_mismatch` | No configured signing public key is advertised by Niks3. See [Signing keys and trust](niks3-cache.md#signing-keys-and-trust). |
 | `target_policy_rejected` | The target is outside the permitted probe policy. |
 | `probe_timeout` | The probe reached its deadline. |
 | `probe_failed` | No more specific safe classification is available. |
@@ -193,6 +194,8 @@ Keep certificate/private-key material out of diagnosis output.
 
 The [operator guide](niks3-cache.md) describes bounded CLI diagnostic hints.
 An earlier deployment's exit code 1 alone does not identify TLS trust, client
-identity, or storage failure. The original cause remains unknown without safe
-evidence from that operation. Current capture improves future diagnosis; it
-does not retrospectively prove a cause or a running upstream version.
+identity, storage failure, or an untrusted signing key. The original cause
+remains unknown without safe evidence from that operation. Current capture
+improves future diagnosis; it does not retrospectively prove a cause or a
+running upstream version. For a failed agent copy, see
+[troubleshooting a failed agent cache copy](niks3-cache.md#troubleshooting-a-failed-agent-cache-copy).
