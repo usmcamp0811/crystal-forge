@@ -2957,7 +2957,7 @@ pub fn cache_probe_error_message(error: &ApiClientError) -> &'static str {
     CACHE_PROBE_FAILURE_MESSAGE
 }
 
-const CACHE_DIAGNOSTIC_CODES: [&str; 17] = [
+const CACHE_DIAGNOSTIC_CODES: [&str; 18] = [
     "ca_bundle_framing_invalid",
     "ca_certificate_invalid",
     "ca_bundle_content_unsupported",
@@ -2972,6 +2972,7 @@ const CACHE_DIAGNOSTIC_CODES: [&str; 17] = [
     "dns_or_connection_failed",
     "http_response_failed",
     "invalid_niks3_metadata",
+    "signing_key_mismatch",
     "target_policy_rejected",
     "probe_timeout",
     "probe_failed",

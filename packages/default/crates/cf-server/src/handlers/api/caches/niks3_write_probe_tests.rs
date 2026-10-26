@@ -959,6 +959,16 @@ async fn all_metadata_key_mismatch_keeps_api_reachable_and_does_not_skip_authent
     assert_eq!(stages.write_api_reachable, Some(true));
     assert!(!stages.discovery_valid);
     assert_eq!(stages.signing_keys_valid, Some(false));
+    // A syntactically valid key that Niks3 does not advertise is reported with
+    // its own actionable code, not as generic malformed metadata.
+    let hint = super::super::static_probe_diagnostic(
+        "Advertised signing keys do not match configured trust",
+    );
+    assert_eq!(hint.code, "signing_key_mismatch");
+    assert_eq!(
+        hint.message,
+        "Configured signing public key does not match the signing keys advertised by Niks3."
+    );
     let auth = Niks3WriteAuth::Token {
         token: "synthetic-probe-token".into(),
     };
@@ -980,6 +990,69 @@ async fn all_metadata_key_mismatch_keeps_api_reachable_and_does_not_skip_authent
     assert_eq!(stages.write_authorization_valid, Some(true));
     assert_eq!(stages.write_api_reachable, Some(true));
     assert_eq!(fake.state.lock().unwrap().requests.len(), 5);
+}
+
+#[tokio::test]
+async fn all_metadata_match_reports_valid_and_rotation_keeps_retired_keys() {
+    use super::super::{Niks3ProbeScope, probe_niks3_metadata};
+    let advertised = crate::models::cache_destination::nix_public_key_fixture("native");
+    let retired = crate::models::cache_destination::nix_public_key_fixture("retired");
+    // Rotation: an older key that Niks3 no longer advertises may stay
+    // configured for artifacts still signed with it, while the current key
+    // matches. Only a total absence of overlap is a mismatch.
+    for keys in [vec![advertised.clone()], vec![retired, advertised]] {
+        let fake = fake(vec![native_metadata()]).await;
+        let create = CreateCacheDestination {
+            cache_type: "Niks3".into(),
+            push_to: Some("https://93.184.216.34/".into()),
+            niks3_public_keys: keys,
+            ..Default::default()
+        };
+        let mut stages = Niks3ConnectionTestResult::default();
+        let mut status = None;
+        probe_niks3_metadata(
+            &create,
+            Niks3ProbeScope::All,
+            &fake.client,
+            &fake.url,
+            false,
+            &mut stages,
+            &mut status,
+        )
+        .await
+        .unwrap();
+        assert_eq!(stages.signing_keys_valid, Some(true));
+        assert!(stages.discovery_valid);
+    }
+}
+
+#[tokio::test]
+async fn write_scope_metadata_cannot_claim_signing_key_correspondence() {
+    use super::super::{Niks3ProbeScope, probe_niks3_metadata};
+    // Write scope observes advertised keys but does not compare configured
+    // trust, so a wrong configured key must not become Some(true).
+    let fake = fake(vec![native_metadata()]).await;
+    let create = CreateCacheDestination {
+        cache_type: "Niks3".into(),
+        niks3_public_keys: vec![crate::models::cache_destination::nix_public_key_fixture(
+            "configured",
+        )],
+        ..Default::default()
+    };
+    let mut stages = Niks3ConnectionTestResult::default();
+    let mut status = None;
+    probe_niks3_metadata(
+        &create,
+        Niks3ProbeScope::Write,
+        &fake.client,
+        &fake.url,
+        false,
+        &mut stages,
+        &mut status,
+    )
+    .await
+    .unwrap();
+    assert_eq!(stages.signing_keys_valid, None);
 }
 
 #[test]

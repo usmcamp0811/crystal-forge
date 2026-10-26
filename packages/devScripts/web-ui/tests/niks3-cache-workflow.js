@@ -534,7 +534,9 @@ async function niks3CacheWorkflow(page, baseUrl, apiBaseUrl, screenshot, capture
     await expect(dialog.locator("header")).not.toContainText("Unsaved changes");
     await assertWrite(dialog, ["Verified", "Verified", "Verified"]);
     const provenRead = await nativeTest(dialog, "read");
-    assert.equal(provenRead.ok, true); assert.equal(provenRead.read_access_valid, true); assert.equal(provenRead.signing_keys_valid, true);
+    assert.equal(provenRead.ok, true); assert.equal(provenRead.read_access_valid, true);
+    // The read endpoint cannot show that configured keys match Niks3's; key presence is not evidence.
+    assert.equal(provenRead.signing_keys_valid, null);
     assert.equal(provenRead.write_api_reachable, null); assert.equal(provenRead.write_authorization_valid, null);
     await expect(evidence(dialog, "Read access")).toContainText("Verified");
     await section(dialog, "Write / API");
