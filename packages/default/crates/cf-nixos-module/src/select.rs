@@ -58,7 +58,8 @@ impl SelectionConflict {
 ///
 /// # Errors
 /// Returns conflicts for globally reused version identities, incompatible
-/// lineage selections, differing semantic digests, or lifecycle disagreements.
+/// lineage selections, differing semantic digests, or lifecycle/version-label
+/// disagreements.
 /// Equal digests alone do not establish identical manifest metadata.
 pub fn select_policies(inputs: &[LoadedInput]) -> Result<Selection, Vec<SelectionConflict>> {
     let mut conflicts: Vec<SelectionConflict> = Vec::new();
@@ -73,125 +74,142 @@ pub fn select_policies(inputs: &[LoadedInput]) -> Result<Selection, Vec<Selectio
     let mut version_lineages: BTreeMap<Uuid, Uuid> = BTreeMap::new();
     let mut deduplicated: Vec<String> = Vec::new();
 
-    for input in inputs {
-        for policy in &input.policies {
-            if let Some(lineage) = version_lineages.get(&policy.policy_version_id) {
-                if *lineage != policy.policy_id {
-                    let (first, second) = if *lineage < policy.policy_id {
-                        (*lineage, policy.policy_id)
-                    } else {
-                        (policy.policy_id, *lineage)
-                    };
+    // A stable representative also keeps diagnostics identical when more than
+    // two exports disagree about a version label.
+    let mut candidates: Vec<_> = inputs.iter().flat_map(|input| &input.policies).collect();
+    candidates.sort_by(|a, b| a.version.cmp(&b.version));
+    for policy in candidates {
+        if let Some(lineage) = version_lineages.get(&policy.policy_version_id) {
+            if *lineage != policy.policy_id {
+                let (first, second) = if *lineage < policy.policy_id {
+                    (*lineage, policy.policy_id)
+                } else {
+                    (policy.policy_id, *lineage)
+                };
+                conflicts.push(SelectionConflict::new(
+                    "CF_POLICY_VERSION_LINEAGE_CONFLICT",
+                    format!(
+                        "policy version {} is claimed by different lineages {first} and {second}",
+                        policy.policy_version_id
+                    ),
+                ));
+                continue;
+            }
+        } else {
+            version_lineages.insert(policy.policy_version_id, policy.policy_id);
+        }
+        let existing = by_lineage
+            .get(&policy.policy_id)
+            .map(|selected| (selected.policy_version_id, Specificity::BundleBaseline));
+
+        match resolve_lineage_candidate(
+            policy.policy_id,
+            existing,
+            policy.policy_version_id,
+            Specificity::BundleBaseline,
+        ) {
+            LineageDecision::Insert => {
+                by_lineage.insert(policy.policy_id, policy.clone());
+            }
+            LineageDecision::Deduplicate { .. } => {
+                // Same immutable version seen again. It must be identical:
+                // one immutable identity may not have two definitions.
+                let selected = by_lineage
+                    .get_mut(&policy.policy_id)
+                    .expect("lineage present for a deduplicate decision");
+
+                if selected.semantic_digest != policy.semantic_digest {
                     conflicts.push(SelectionConflict::new(
-                        "CF_POLICY_VERSION_LINEAGE_CONFLICT",
+                        "CF_POLICY_VERSION_DIGEST_CONFLICT",
                         format!(
-                            "policy version {} is claimed by different lineages {first} and {second}",
-                            policy.policy_version_id
+                            "policy version {} ('{}') is defined with semantic digest {} in {} \
+                                 and with {} in {}. An immutable policy version must not have two \
+                                 different definitions.",
+                            policy.policy_version_id,
+                            policy.name,
+                            selected.semantic_digest,
+                            selected.origin.primary_input_label(),
+                            policy.semantic_digest,
+                            policy.origin.primary_input_label(),
                         ),
                     ));
                     continue;
                 }
-            } else {
-                version_lineages.insert(policy.policy_version_id, policy.policy_id);
-            }
-            let existing = by_lineage
-                .get(&policy.policy_id)
-                .map(|selected| (selected.policy_version_id, Specificity::BundleBaseline));
 
-            match resolve_lineage_candidate(
-                policy.policy_id,
-                existing,
-                policy.policy_version_id,
-                Specificity::BundleBaseline,
-            ) {
-                LineageDecision::Insert => {
-                    by_lineage.insert(policy.policy_id, policy.clone());
-                }
-                LineageDecision::Deduplicate { .. } => {
-                    // Same immutable version seen again. It must be identical:
-                    // one immutable identity may not have two definitions.
-                    let selected = by_lineage
-                        .get_mut(&policy.policy_id)
-                        .expect("lineage present for a deduplicate decision");
-
-                    if selected.semantic_digest != policy.semantic_digest {
-                        conflicts.push(SelectionConflict::new(
-                            "CF_POLICY_VERSION_DIGEST_CONFLICT",
-                            format!(
-                                "policy version {} ('{}') is defined with semantic digest {} in {} \
-                                 and with {} in {}. An immutable policy version must not have two \
-                                 different definitions.",
-                                policy.policy_version_id,
-                                policy.name,
-                                selected.semantic_digest,
-                                selected.origin.primary_input_label(),
-                                policy.semantic_digest,
-                                policy.origin.primary_input_label(),
-                            ),
-                        ));
-                        continue;
-                    }
-
-                    // Lifecycle metadata is not covered by the semantic digest,
-                    // but is emitted in the manifest. Reject disagreement rather
-                    // than letting input order choose accepted versus deprecated.
-                    if selected.publication_state != policy.publication_state {
-                        let mut states = [
-                            selected.publication_state.as_str(),
-                            policy.publication_state.as_str(),
-                        ];
-                        states.sort();
-                        conflicts.push(SelectionConflict::new(
-                            "CF_POLICY_VERSION_LIFECYCLE_CONFLICT",
-                            format!(
-                                "policy version {} has conflicting publication states {} and {}",
-                                policy.policy_version_id, states[0], states[1]
-                            ),
-                        ));
-                        continue;
-                    }
-
-                    // Identical duplicate: record every origin so provenance
-                    // does not depend on CLI argument order. The diagnostic is
-                    // derived from the final merged state below, not from
-                    // whichever occurrence happened to arrive second.
-                    selected.origin.merge(&policy.origin);
-                }
-                LineageDecision::Replace | LineageDecision::Suppress => {
-                    // Unreachable while every offline input is a peer, but
-                    // handled explicitly so a future specificity source cannot
-                    // silently take a branch this generator never reviewed.
+                // Lifecycle metadata is not covered by the semantic digest,
+                // but is emitted in the manifest. Reject disagreement rather
+                // than letting input order choose accepted versus deprecated.
+                if selected.publication_state != policy.publication_state {
+                    let mut states = [
+                        selected.publication_state.as_str(),
+                        policy.publication_state.as_str(),
+                    ];
+                    states.sort();
                     conflicts.push(SelectionConflict::new(
-                        "CF_POLICY_LINEAGE_SPECIFICITY_UNSUPPORTED",
+                        "CF_POLICY_VERSION_LIFECYCLE_CONFLICT",
                         format!(
-                            "policy lineage {} resolved by specificity, which offline generation \
-                             does not model",
-                            policy.policy_id
+                            "policy version {} has conflicting publication states {} and {}",
+                            policy.policy_version_id, states[0], states[1]
                         ),
                     ));
+                    continue;
                 }
-                LineageDecision::Conflict {
-                    lineage_id,
-                    existing_version_id,
-                    candidate_version_id,
-                } => {
-                    let existing_policy = by_lineage.get(&lineage_id);
+
+                // Version labels are also manifest metadata outside the
+                // semantic digest. Never let input order select a label.
+                if selected.version != policy.version {
+                    let mut versions = [selected.version.as_str(), policy.version.as_str()];
+                    versions.sort();
                     conflicts.push(SelectionConflict::new(
-                        "CF_EFFECTIVE_POLICY_VERSION_CONFLICT",
+                        "CF_POLICY_VERSION_LABEL_CONFLICT",
                         format!(
-                            "policy lineage {lineage_id} is selected at two different versions: {} \
+                            "policy version {} has conflicting version labels {:?} and {:?}",
+                            policy.policy_version_id, versions[0], versions[1]
+                        ),
+                    ));
+                    continue;
+                }
+
+                // Identical duplicate: record every origin so provenance
+                // does not depend on CLI argument order. The diagnostic is
+                // derived from the final merged state below, not from
+                // whichever occurrence happened to arrive second.
+                selected.origin.merge(&policy.origin);
+            }
+            LineageDecision::Replace | LineageDecision::Suppress => {
+                // Unreachable while every offline input is a peer, but
+                // handled explicitly so a future specificity source cannot
+                // silently take a branch this generator never reviewed.
+                conflicts.push(SelectionConflict::new(
+                    "CF_POLICY_LINEAGE_SPECIFICITY_UNSUPPORTED",
+                    format!(
+                        "policy lineage {} resolved by specificity, which offline generation \
+                             does not model",
+                        policy.policy_id
+                    ),
+                ));
+            }
+            LineageDecision::Conflict {
+                lineage_id,
+                existing_version_id,
+                candidate_version_id,
+            } => {
+                let existing_policy = by_lineage.get(&lineage_id);
+                conflicts.push(SelectionConflict::new(
+                    "CF_EFFECTIVE_POLICY_VERSION_CONFLICT",
+                    format!(
+                        "policy lineage {lineage_id} is selected at two different versions: {} \
                              (from {}) and {} (from {}). Crystal Forge resolves one version per \
                              lineage; generate from a single resolved policy set, or remove one of \
                              the inputs.",
-                            existing_version_id,
-                            existing_policy
-                                .map(|p| p.origin.primary_input_label())
-                                .unwrap_or_else(|| "<unknown>".to_string()),
-                            candidate_version_id,
-                            policy.origin.primary_input_label(),
-                        ),
-                    ));
-                }
+                        existing_version_id,
+                        existing_policy
+                            .map(|p| p.origin.primary_input_label())
+                            .unwrap_or_else(|| "<unknown>".to_string()),
+                        candidate_version_id,
+                        policy.origin.primary_input_label(),
+                    ),
+                ));
             }
         }
     }
@@ -199,11 +217,12 @@ pub fn select_policies(inputs: &[LoadedInput]) -> Result<Selection, Vec<Selectio
     // ── Bundles: reconcile immutable bundle version identities ──────────────
     let mut by_bundle_version: BTreeMap<Uuid, ResolvedBundle> = BTreeMap::new();
 
-    for input in inputs {
-        let Some(bundle) = &input.bundle else {
-            continue;
-        };
-
+    let mut candidates: Vec<_> = inputs
+        .iter()
+        .filter_map(|input| input.bundle.as_ref())
+        .collect();
+    candidates.sort_by(|a, b| a.version.cmp(&b.version));
+    for bundle in candidates {
         match by_bundle_version.get_mut(&bundle.bundle_version_id) {
             None => {
                 by_bundle_version.insert(bundle.bundle_version_id, bundle.clone());
@@ -236,6 +255,19 @@ pub fn select_policies(inputs: &[LoadedInput]) -> Result<Selection, Vec<Selectio
                             bundle.bundle_version_id,
                             existing.primary_input_label(),
                             bundle.primary_input_label(),
+                        ),
+                    ));
+                    continue;
+                }
+
+                if existing.version != bundle.version {
+                    let mut versions = [existing.version.as_str(), bundle.version.as_str()];
+                    versions.sort();
+                    conflicts.push(SelectionConflict::new(
+                        "CF_BUNDLE_VERSION_LABEL_CONFLICT",
+                        format!(
+                            "bundle version {} has conflicting version labels {:?} and {:?}",
+                            bundle.bundle_version_id, versions[0], versions[1]
                         ),
                     ));
                     continue;
@@ -451,6 +483,36 @@ mod tests {
         assert_eq!(forward[0].message, reverse[0].message);
     }
 
+    #[test]
+    fn policy_version_label_disagreement_is_order_independent() {
+        let first = policy("p", L1, V1, "same-digest", "a.json");
+        let mut second = policy("p", L1, V1, "same-digest", "b.json");
+        second.version = "2".into();
+        let mut inputs = vec![input("a.json", vec![first]), input("b.json", vec![second])];
+        let forward = select_policies(&inputs).expect_err("conflicting version labels");
+        inputs.reverse();
+        let reverse = select_policies(&inputs).expect_err("conflicting version labels");
+        assert_eq!(forward.len(), 1);
+        assert_eq!(forward[0].code, "CF_POLICY_VERSION_LABEL_CONFLICT");
+        assert_eq!(reverse[0].code, forward[0].code);
+        assert_eq!(forward[0].message, reverse[0].message);
+        assert_eq!(
+            forward[0].message,
+            format!("policy version {V1} has conflicting version labels \"1\" and \"2\"")
+        );
+        let mut third = policy("p", L1, V1, "same-digest", "c.json");
+        third.version = "3".into();
+        inputs.push(input("c.json", vec![third]));
+        let forward = select_policies(&inputs).expect_err("three conflicting labels");
+        inputs.reverse();
+        let reverse = select_policies(&inputs).expect_err("three conflicting labels");
+        assert_eq!(forward.len(), 2);
+        assert_eq!(
+            forward.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            reverse.iter().map(ToString::to_string).collect::<Vec<_>>()
+        );
+    }
+
     // ── 10.5 deterministic provenance ───────────────────────────────────────
 
     #[test]
@@ -547,6 +609,36 @@ mod tests {
         assert_eq!(
             selection.bundles[0].input_labels,
             vec!["a.xml".to_string(), "b.xml".to_string()]
+        );
+    }
+
+    #[test]
+    fn bundle_version_label_disagreement_is_order_independent() {
+        let first = bundle(BV, "same-digest", "a.xml", vec![V1]);
+        let mut second = bundle(BV, "same-digest", "b.xml", vec![V1]);
+        second.version = "2".into();
+        let mut inputs = vec![bundle_input("a.xml", first), bundle_input("b.xml", second)];
+        let forward = select_policies(&inputs).expect_err("conflicting version labels");
+        inputs.reverse();
+        let reverse = select_policies(&inputs).expect_err("conflicting version labels");
+        assert_eq!(forward.len(), 1);
+        assert_eq!(forward[0].code, "CF_BUNDLE_VERSION_LABEL_CONFLICT");
+        assert_eq!(reverse[0].code, forward[0].code);
+        assert_eq!(forward[0].message, reverse[0].message);
+        assert_eq!(
+            forward[0].message,
+            format!("bundle version {BV} has conflicting version labels \"1\" and \"2\"")
+        );
+        let mut third = bundle(BV, "same-digest", "c.xml", vec![V1]);
+        third.version = "3".into();
+        inputs.push(bundle_input("c.xml", third));
+        let forward = select_policies(&inputs).expect_err("three conflicting labels");
+        inputs.reverse();
+        let reverse = select_policies(&inputs).expect_err("three conflicting labels");
+        assert_eq!(forward.len(), 2);
+        assert_eq!(
+            forward.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            reverse.iter().map(ToString::to_string).collect::<Vec<_>>()
         );
     }
 

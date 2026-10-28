@@ -73,8 +73,11 @@ A policy version UUID has one lineage across all inputs, not one per document.
 Exports that claim the same version UUID for different lineages are rejected.
 If duplicate policy or bundle versions disagree about `publication_state`
 (`accepted` versus `deprecated`), generation also fails. Lifecycle state is not
-part of the semantic digest, but is emitted in the manifest. Rejecting the
-disagreement prevents input order from choosing the manifest's lifecycle state.
+part of the semantic digest, but is emitted in the manifest. Differing human-
+readable `version` labels on duplicate policy or bundle versions are rejected
+for the same reason. Diagnostics name the immutable version UUID and both
+labels in sorted order. Rejecting these disagreements prevents input order
+from choosing the manifest's metadata.
 Obtain consistent exports before trying again.
 
 ## Output layout

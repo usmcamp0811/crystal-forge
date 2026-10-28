@@ -252,8 +252,12 @@ fn reordering_equivalent_inputs_produces_byte_identical_output() {
     let forward = run(vec![
         ("a.json", policy_set_json().into_bytes()),
         ("b.json", policy_set_json().into_bytes()),
+        ("a.xml", bundle_xccdf_xml().into_bytes()),
+        ("b.xml", bundle_xccdf_xml().into_bytes()),
     ]);
     let reverse = run(vec![
+        ("b.xml", bundle_xccdf_xml().into_bytes()),
+        ("a.xml", bundle_xccdf_xml().into_bytes()),
         ("b.json", policy_set_json().into_bytes()),
         ("a.json", policy_set_json().into_bytes()),
     ]);
@@ -265,6 +269,20 @@ fn reordering_equivalent_inputs_produces_byte_identical_output() {
     assert_eq!(
         policy["source_inputs"],
         serde_json::json!(["a.json", "b.json"])
+    );
+    assert_eq!(forward.implemented.len(), 4);
+    let manifest = manifest(&forward);
+    assert_eq!(manifest["bundles"].as_array().unwrap().len(), 1);
+    assert_eq!(manifest["bundles"][0]["version"], "1");
+    assert_eq!(
+        manifest["bundles"][0]["source_inputs"],
+        serde_json::json!(["a.xml", "b.xml"])
+    );
+    let bundled_policy = manifest_policy(&manifest, "require-time-sync");
+    assert_eq!(bundled_policy["version"], "1.0.0");
+    assert_eq!(
+        bundled_policy["source_inputs"],
+        serde_json::json!(["a.xml", "b.xml"])
     );
 }
 
@@ -326,6 +344,64 @@ fn accepted_and_deprecated_exports_cannot_choose_manifest_metadata_by_order() {
     let reverse = select_policies(&inputs).expect_err("lifecycle disagreement");
     assert_eq!(forward[0].code, "CF_POLICY_VERSION_LIFECYCLE_CONFLICT");
     assert_eq!(forward[0].message, reverse[0].message);
+}
+
+#[test]
+fn independently_valid_policy_exports_with_different_version_labels_conflict() {
+    let export: serde_json::Value = serde_json::from_str(&policy_set_json()).unwrap();
+    let first = export["policies"][0].clone();
+    let mut second = first.clone();
+    second["version"] = serde_json::json!("2.0.0");
+    // Both supplied digests still validate: the display label is not hashed.
+    let mut inputs = load(vec![
+        ("first.json", serde_json::to_vec(&first).unwrap()),
+        ("second.json", serde_json::to_vec(&second).unwrap()),
+    ]);
+    assert_eq!(
+        inputs[0].policies[0].semantic_digest,
+        inputs[1].policies[0].semantic_digest
+    );
+    let forward = select_policies(&inputs).expect_err("conflicting version labels");
+    inputs.reverse();
+    let reverse = select_policies(&inputs).expect_err("conflicting version labels");
+    assert_eq!(forward.len(), 1);
+    assert_eq!(forward[0].code, "CF_POLICY_VERSION_LABEL_CONFLICT");
+    assert_eq!(reverse[0].code, forward[0].code);
+    assert_eq!(forward[0].message, reverse[0].message);
+    assert!(
+        forward[0]
+            .message
+            .contains(first["version_id"].as_str().unwrap())
+    );
+    assert!(forward[0].message.contains("\"1.0.0\" and \"2.0.0\""));
+}
+
+#[test]
+fn independently_valid_bundle_exports_with_different_version_labels_conflict() {
+    let first = bundle_xccdf_xml();
+    assert!(first.contains("<version>1</version>"));
+    let second = first.replacen("<version>1</version>", "<version>2</version>", 1);
+    let mut inputs = load(vec![
+        ("first.xml", first.into_bytes()),
+        ("second.xml", second.into_bytes()),
+    ]);
+    let first = inputs[0].bundle.as_ref().unwrap();
+    let second = inputs[1].bundle.as_ref().unwrap();
+    assert_eq!(first.semantic_digest, second.semantic_digest);
+    assert_eq!(
+        first.selected_policy_version_ids,
+        second.selected_policy_version_ids
+    );
+    let version_id = first.bundle_version_id;
+    let forward = select_policies(&inputs).expect_err("conflicting version labels");
+    inputs.reverse();
+    let reverse = select_policies(&inputs).expect_err("conflicting version labels");
+    assert_eq!(forward.len(), 1);
+    assert_eq!(forward[0].code, "CF_BUNDLE_VERSION_LABEL_CONFLICT");
+    assert_eq!(reverse[0].code, forward[0].code);
+    assert_eq!(forward[0].message, reverse[0].message);
+    assert!(forward[0].message.contains(&version_id.to_string()));
+    assert!(forward[0].message.contains("\"1\" and \"2\""));
 }
 
 #[test]
