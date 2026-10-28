@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude-opus-5'
 created_date: '2026-08-16 15:17'
-updated_date: '2026-10-28 03:16'
+updated_date: '2026-10-28 03:40'
 labels:
   - cli
   - nixos
@@ -227,6 +227,10 @@ produces `stig-hardening/` with `default.nix`, `manifest.json`, and `policies/*.
 - [ ] #23 cargo fmt --all --check passes
 - [x] #24 SQLX_OFFLINE=true cargo check passes for affected Rust packages
 - [ ] #25 Relevant Nix builds and flake checks pass
+- [ ] #26 Existing component-tests CI job explicitly builds cf-nixos-module plus its helper and generation package tests
+- [ ] #27 Combined inputs reject a policy version UUID claimed by different lineages and reject accepted/deprecated metadata disagreements independently of input order
+- [ ] #28 The three-file artifact is staged and validated before atomic directory publication; hardlinks and symlinks cannot modify external file contents; unrelated entries and unsupported exchange fail without changing existing output
+- [ ] #29 Filesystem regressions cover initial generation regeneration link safety unrelated entries and failed publication; MR description states the approved default-apply behavior
 <!-- AC:END -->
 
 ## Definition of Done
@@ -278,6 +282,8 @@ produces `stig-hardening/` with `default.nix`, `manifest.json`, and `policies/*.
 - Eligible-policy coverage depends entirely on how many real policies use the strict `config.<path> == <literal>` shape. If coverage is low, the honest outcome is many explicit skip diagnostics, not looser inference.
 
 P2 remediation on commit 696707c8: (1) keep task status In Progress and replace stale notes with approved default-apply/explicit-disable semantics plus current commit verification; (2) add `publication_state` to each implemented policy entry in `manifest.json` from `ResolvedPolicy`, with a regression assertion; (3) replace the broad XCCDF publication-state mutation with a fixture where the bundle remains accepted and one selected policy is draft/interim, asserting generation rejects the selected policy lifecycle state; (4) rerun focused Rust/Nix checks and applicable server/Nix checks against current origin/dev, then commit and push without moving TASK-425 to Review.
+
+MR !317 P2 review remediation: add generator CLI/helper/generation outputs to the existing component-tests job; enforce global policy-version ownership across inputs; reject duplicate lifecycle-state disagreements deterministically; replace three-file writes with a private sibling plus atomic directory publication. Owner explicitly approved generator-owned output directories, rejection of unrelated entries, no rollback fallback, and parent-directory permission requirements. Preserve shared compliance architecture and do not merge/deploy.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
