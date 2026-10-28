@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude-opus-5'
 created_date: '2026-08-16 15:17'
-updated_date: '2026-10-28 03:15'
+updated_date: '2026-10-28 03:16'
 labels:
   - cli
   - nixos
@@ -18,9 +18,12 @@ labels:
 dependencies:
   - TASK-412
 references:
-  - https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/317
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/317'
   - docs/knowledge/compliance/nixos-module-generation.md
   - packages/default/crates/cf-nixos-module/nix/tests-generation/default.nix
+  - >-
+    https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/317#note_4104197357
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2997257917'
 documentation:
   - >-
     docs/design/CrystalForge/docs/crystal-forge-xccdf-interchange-profile-v0.1.md
@@ -295,6 +298,8 @@ MR !317 merge-conflict resolution pushed as bf28da5e (merge dev 1d831c05) and 4f
 Local verification: cargo check --all-targets for cf-compliance/cf-nixos-module/cf-server passed with SQLX_OFFLINE=true. cargo test for cf-compliance/cf-nixos-module passed: 329 compliance lib tests (1 ignored), 75 generator lib, 7 CLI, 16 integration, 1 compliance doctest. Focused server compliance tests: 192 passed /150 ignored. Nix builds passed: .#cf-nixos-module, .#default.cf-server-core-drv, .#cf-nixos-module.tests.helper (22 assertions), .#cf-nixos-module.tests.generation (real NixOS evaluation and all retained assertions), .#okf-knowledge (194 concepts, 216 Mermaid blocks/0 errors). Core server package lib tests: 1529 passed/784 ignored. CLI wrapper also successfully validated a CF-native fixture with incoming PATH=/var/empty, proving wrapper supplies its parser.
 
 Limitations: nix flake check --keep-going exceeded the 240-second tool deadline while building the integration derivations; no full-suite pass claimed. Earlier local full server lib run with devshell DATABASE_URL set failed 8 CVE tests (PoolTimedOut, no DB). With DATABASE_URL unset one run hit a child-readiness deadline in unchanged niks3_input_owner_acknowledges_reap_and_cleanup_after_detach; that test passed individually and the packaged full suite passed. No unrelated test changes or retries added. cargo fmt for compliance/generator passes; server fmt has pre-existing src/bin/server.rs drift, left unchanged. Task remains In Progress rather than complete/review-ready pending full verification. MR remains open; not merged.
+
+Refreshed GitLab state for head 4f16b41a: has_conflicts=false, merge_status=can_be_merged, detailed_merge_status=ci_still_running. Pipeline 2997257917 is running; no green current-head result claimed. Unchecked AC23/25 because repository-wide formatting and the full flake check are not green/completed for this revision. Local worktree clean after push; MR note records the exact verification commands and limitations. No merge/deployment performed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
