@@ -1,3 +1,5 @@
+pub mod eval_policy_matrix;
+
 /// API data transfer objects (DTOs) for the Crystal Forge REST API.
 ///
 /// These types define the JSON contracts between the server and UI clients.

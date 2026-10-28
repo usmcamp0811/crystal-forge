@@ -1,4 +1,4 @@
-//! Time-driven attention reconciliation for systems, environments, and flakes.
+//! Time-driven attention reconciliation for systems, environments, flakes, and POA&Ms.
 //!
 //! System health and flake sync staleness are computed continuously from
 //! heartbeat/timestamp data rather than being pushed on every relevant
@@ -15,7 +15,8 @@
 //!   systems that silently went offline with no further heartbeat).
 //! * [`run_attention_reconciliation_loop`] — a bounded background task that
 //!   periodically reconciles all active systems' health attention and all
-//!   flakes stuck in `syncing` past the staleness threshold.
+//!   flakes stuck in `syncing` past the staleness threshold. The same loop
+//!   reconciles POA&Ms whose target date crosses the server's UTC date.
 
 use crate::queries::attention;
 use crate::queries::commits::SYNC_LOCK_BASE;
@@ -948,9 +949,163 @@ pub async fn run_attention_reconciliation_loop(pool: PgPool) {
         reconcile_synced_flakes_missing_resolution(&pool).await;
         reconcile_terminal_events(&pool).await;
         reconcile_cve_attention(&pool).await;
+        reconcile_poam_overdue_attention(&pool).await;
         reconcile_stale_occurrences(&pool).await;
         debug!("Attention reconciliation sweep complete");
     }
+}
+
+/// Reconciles one POA&M's overdue attention episode from authoritative server time.
+///
+/// The per-POA&M advisory lock serializes concurrent sweeps. One uninterrupted
+/// interval where the POA&M is not completed and its target date is before the
+/// server's UTC date maps to one occurrence. The occurrence opens at the later
+/// of POA&M creation or midnight UTC immediately after the target date. It
+/// resolves when the condition clears and is never reopened after resolution.
+///
+/// # Errors
+///
+/// Returns an error when the lock, authoritative state read, occurrence write,
+/// or transaction commit fails.
+pub(crate) async fn reconcile_poam_overdue_subject(
+    pool: &PgPool,
+    poam_id: Uuid,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("failed to begin POA&M attention transaction")?;
+    let subject_id = poam_id.to_string();
+    let lock_key = format!("attention_occurrence:poams:{subject_id}");
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(lock_key)
+        .execute(&mut *tx)
+        .await
+        .context("failed to acquire POA&M attention lock")?;
+
+    // CONCURRENCY: POA&M state writers lock this row before transition writes.
+    // Taking the same lock keeps the derived occurrence consistent with the
+    // status and target date committed by those writers.
+    let state: Option<(
+        String,
+        Option<chrono::NaiveDate>,
+        chrono::NaiveDate,
+        chrono::DateTime<chrono::Utc>,
+    )> = sqlx::query_as(
+        "SELECT status, target_date, (statement_timestamp() AT TIME ZONE 'UTC')::date, created_at \
+         FROM poams WHERE id = $1 FOR UPDATE",
+    )
+    .bind(poam_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("failed to read POA&M overdue state")?;
+
+    let is_overdue = state
+        .as_ref()
+        .is_some_and(|(status, target_date, today, _)| {
+            status != "completed" && target_date.is_some_and(|date| date < *today)
+        });
+
+    if is_overdue {
+        let (target_date, poam_created_at) = state
+            .and_then(|(_, target_date, _, created_at)| {
+                target_date.map(|target_date| (target_date, created_at))
+            })
+            .context("overdue POA&M state did not include a target date")?;
+        let existing: Option<Uuid> = sqlx::query_scalar(
+            "SELECT id FROM attention_occurrences \
+             WHERE category = 'poams' AND subject_id = $1 AND resolved_at IS NULL \
+               AND metadata->>'reason' = 'overdue' FOR UPDATE",
+        )
+        .bind(&subject_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("failed to read open POA&M overdue occurrence")?;
+
+        if let Some(occurrence_id) = existing {
+            sqlx::query(
+                "UPDATE attention_occurrences SET last_observed_at = statement_timestamp() \
+                 WHERE id = $1",
+            )
+            .bind(occurrence_id)
+            .execute(&mut *tx)
+            .await
+            .context("failed to observe POA&M overdue occurrence")?;
+        } else {
+            let episode_id = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO attention_occurrences (category, subject_type, subject_id, \
+                    source_occurrence_key, opened_at, last_observed_at, metadata) \
+                 VALUES ('poams', 'poam', $1, $2, \
+                    GREATEST((($3 + 1)::timestamp AT TIME ZONE 'UTC'), $4), statement_timestamp(), \
+                    jsonb_build_object('reason', 'overdue', 'poam_id', $1, 'target_date', $3)) \
+                 ON CONFLICT DO NOTHING",
+            )
+            .bind(&subject_id)
+            .bind(format!("poam:{poam_id}:overdue:{episode_id}"))
+            .bind(target_date)
+            .bind(poam_created_at)
+            .execute(&mut *tx)
+            .await
+            .context("failed to open POA&M overdue occurrence")?;
+        }
+    } else {
+        sqlx::query(
+            "UPDATE attention_occurrences SET resolved_at = statement_timestamp(), \
+                    last_observed_at = statement_timestamp() \
+             WHERE category = 'poams' AND subject_id = $1 AND resolved_at IS NULL \
+               AND metadata->>'reason' = 'overdue'",
+        )
+        .bind(&subject_id)
+        .execute(&mut *tx)
+        .await
+        .context("failed to resolve POA&M overdue occurrence")?;
+    }
+
+    tx.commit()
+        .await
+        .context("failed to commit POA&M attention transaction")?;
+    Ok(())
+}
+
+/// Reconciles a bounded set of POA&Ms whose overdue state may have changed.
+async fn reconcile_poam_overdue_attention(pool: &PgPool) {
+    let candidates: Vec<Uuid> = match sqlx::query_scalar(
+        "SELECT id FROM ( \
+            SELECT p.id, p.target_date AS ordering FROM poams p \
+            WHERE p.status <> 'completed' \
+              AND p.target_date < (statement_timestamp() AT TIME ZONE 'UTC')::date \
+              AND NOT EXISTS (SELECT 1 FROM attention_occurrences ao \
+                  WHERE ao.category = 'poams' AND ao.subject_id = p.id::text \
+                    AND ao.resolved_at IS NULL AND ao.metadata->>'reason' = 'overdue') \
+            UNION \
+            SELECT p.id, p.target_date AS ordering FROM poams p \
+            JOIN attention_occurrences ao ON ao.category = 'poams' \
+              AND ao.subject_id = p.id::text AND ao.resolved_at IS NULL \
+              AND ao.metadata->>'reason' = 'overdue' \
+            WHERE p.status = 'completed' OR p.target_date IS NULL \
+               OR p.target_date >= (statement_timestamp() AT TIME ZONE 'UTC')::date \
+          ) candidates ORDER BY ordering NULLS FIRST, id LIMIT 500",
+    )
+    .fetch_all(pool)
+    .await
+    {
+        Ok(candidates) => candidates,
+        Err(error) => {
+            error!(%error, "failed to load POA&M overdue reconciliation candidates");
+            return;
+        }
+    };
+
+    stream::iter(candidates)
+        .for_each_concurrent(16, |poam_id| async move {
+            if let Err(error) = reconcile_poam_overdue_subject(pool, poam_id).await {
+                warn!(%error, %poam_id, "failed to reconcile POA&M overdue attention");
+            }
+        })
+        .await;
 }
 
 /// Reconcile a single CVE's attention state under its per-CVE advisory lock.
@@ -1394,7 +1549,7 @@ pub async fn run_attention_cleanup_loop(pool: PgPool) {
 #[cfg(test)]
 mod tests {
     use super::{
-        reconcile_cve_attention, reconcile_errored_flakes,
+        reconcile_cve_attention, reconcile_errored_flakes, reconcile_poam_overdue_subject,
         reconcile_synced_flakes_missing_resolution,
     };
     use crate::queries::attention;
@@ -1409,6 +1564,153 @@ mod tests {
         )
         .await
         .expect("failed to connect to test database")
+    }
+
+    async fn insert_throwaway_poam(pool: &sqlx::PgPool) -> uuid::Uuid {
+        let token = uuid::Uuid::new_v4().simple().to_string();
+        let user_id = uuid::Uuid::new_v4();
+        let environment_id = uuid::Uuid::new_v4();
+        let system_id = uuid::Uuid::new_v4();
+        let policy_id = uuid::Uuid::new_v4();
+        let finding_id = uuid::Uuid::new_v4();
+        let poam_id = uuid::Uuid::new_v4();
+        let mut tx = pool.begin().await.expect("begin POA&M fixture transaction");
+
+        sqlx::query(
+            "INSERT INTO users (id, username, first_name, last_name, email, user_type, is_active) \
+             VALUES ($1, $2, 'POAM', 'Reconciler', $3, 'human', TRUE)",
+        )
+        .bind(user_id)
+        .bind(format!("poam-reconcile-{token}"))
+        .bind(format!("poam-reconcile-{token}@example.test"))
+        .execute(&mut *tx)
+        .await
+        .expect("insert POA&M fixture user");
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(environment_id)
+            .bind(format!("poam-reconcile-{token}"))
+            .execute(&mut *tx)
+            .await
+            .expect("insert POA&M fixture environment");
+        sqlx::query(
+            "INSERT INTO systems (id, hostname, environment_id, public_key, derivation, is_active) \
+             VALUES ($1, $2, $3, $4, '', TRUE)",
+        )
+        .bind(system_id)
+        .bind(format!("poam-reconcile-{token}"))
+        .bind(environment_id)
+        .bind(format!("ssh-ed25519 AAAA-poam-reconcile-{token}"))
+        .execute(&mut *tx)
+        .await
+        .expect("insert POA&M fixture system");
+        sqlx::query(
+            "INSERT INTO deployment_policies (id, name, policy_type, config, enabled) \
+             VALUES ($1, $2, 'custom_check', '{\"expression\": \"true\"}', FALSE)",
+        )
+        .bind(policy_id)
+        .bind(format!("poam-reconcile-{token}"))
+        .execute(&mut *tx)
+        .await
+        .expect("insert POA&M fixture policy");
+        sqlx::query(
+            "INSERT INTO poam_findings (id, system_id, policy_lineage_id) VALUES ($1, $2, $3)",
+        )
+        .bind(finding_id)
+        .bind(system_id)
+        .bind(policy_id)
+        .execute(&mut *tx)
+        .await
+        .expect("insert POA&M fixture finding");
+        sqlx::query(
+            "INSERT INTO poams (id, title, target_date, risk, created_by) \
+             VALUES ($1, $2, CURRENT_DATE - 2, 'medium', $3)",
+        )
+        .bind(poam_id)
+        .bind(format!("Overdue reconciliation {token}"))
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .expect("insert POA&M fixture");
+        sqlx::query(
+            "INSERT INTO poam_finding_links (poam_id, finding_id, linked_by) VALUES ($1, $2, $3)",
+        )
+        .bind(poam_id)
+        .bind(finding_id)
+        .bind(user_id)
+        .execute(&mut *tx)
+        .await
+        .expect("link POA&M fixture finding");
+        tx.commit().await.expect("commit POA&M fixture");
+        poam_id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated repository-provided isolated database"]
+    async fn poam_overdue_reconciliation_deduplicates_resolves_and_opens_new_episode() {
+        let pool = test_pool().await;
+        let poam_id = insert_throwaway_poam(&pool).await;
+
+        let (first, second) = tokio::join!(
+            reconcile_poam_overdue_subject(&pool, poam_id),
+            reconcile_poam_overdue_subject(&pool, poam_id)
+        );
+        first.expect("first concurrent reconciliation");
+        second.expect("second concurrent reconciliation");
+
+        let first_episode: (uuid::Uuid, chrono::DateTime<chrono::Utc>, i64) = sqlx::query_as(
+            "SELECT id, opened_at, COUNT(*) OVER () FROM attention_occurrences \
+             WHERE category = 'poams' AND subject_id = $1 AND resolved_at IS NULL \
+               AND metadata->>'reason' = 'overdue'",
+        )
+        .bind(poam_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("read first overdue episode");
+        assert_eq!(first_episode.2, 1);
+        let expected_opened_at: chrono::DateTime<chrono::Utc> = sqlx::query_scalar(
+            "SELECT GREATEST(((target_date + 1)::timestamp AT TIME ZONE 'UTC'), created_at) \
+             FROM poams WHERE id = $1",
+        )
+        .bind(poam_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read expected overdue opening time");
+        assert_eq!(first_episode.1, expected_opened_at);
+
+        sqlx::query("UPDATE poams SET target_date = CURRENT_DATE + 1 WHERE id = $1")
+            .bind(poam_id)
+            .execute(&pool)
+            .await
+            .expect("move target date into future");
+        reconcile_poam_overdue_subject(&pool, poam_id)
+            .await
+            .expect("resolve overdue episode");
+        let first_resolved: bool = sqlx::query_scalar(
+            "SELECT resolved_at IS NOT NULL FROM attention_occurrences WHERE id = $1",
+        )
+        .bind(first_episode.0)
+        .fetch_one(&pool)
+        .await
+        .expect("read resolved overdue episode");
+        assert!(first_resolved);
+
+        sqlx::query("UPDATE poams SET target_date = CURRENT_DATE - 1 WHERE id = $1")
+            .bind(poam_id)
+            .execute(&pool)
+            .await
+            .expect("move target date into past again");
+        reconcile_poam_overdue_subject(&pool, poam_id)
+            .await
+            .expect("open second overdue episode");
+        let second_episode: uuid::Uuid = sqlx::query_scalar(
+            "SELECT id FROM attention_occurrences WHERE category = 'poams' AND subject_id = $1 \
+             AND resolved_at IS NULL AND metadata->>'reason' = 'overdue'",
+        )
+        .bind(poam_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("read second overdue episode");
+        assert_ne!(first_episode.0, second_episode);
     }
 
     async fn insert_throwaway_flake(pool: &sqlx::PgPool) -> i32 {

@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 pub use uuid::Uuid;
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -202,6 +203,7 @@ pub enum CveSeverity {
     High,
     Medium,
     Low,
+    Unknown,
 }
 
 impl CveSeverity {
@@ -213,6 +215,7 @@ impl CveSeverity {
             Self::High => cve::HIGH_TEXT,
             Self::Medium => cve::MEDIUM_TEXT,
             Self::Low => cve::LOW_TEXT,
+            Self::Unknown => cve::UNKNOWN_TEXT,
         }
     }
 
@@ -223,6 +226,7 @@ impl CveSeverity {
             Self::High => "High",
             Self::Medium => "Medium",
             Self::Low => "Low",
+            Self::Unknown => "Unknown",
         }
     }
 }
@@ -279,6 +283,8 @@ pub struct DashboardSummary {
     pub total_systems: i64,
     pub active_builds: i64,
     pub build_queue: Option<BuildQueueSummary>,
+    #[serde(default)]
+    pub cache_health: Option<CacheHealthSummary>,
     pub recent_deployments: Vec<RecentDeployment>,
     pub timestamp: DateTime<Utc>,
 }
@@ -406,6 +412,140 @@ pub struct CveFilters {
     pub limit: Option<i64>,
 }
 
+/// Selects a server-scoped, filtered page of environment or host CVE inventory.
+/// A missing group ID selects unassigned hosts only for environment members.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CveInventoryQuery {
+    /// `environment` or `host`.
+    pub group_by: String,
+    /// Restricts the query to one authorized environment when present.
+    pub environment_id: Option<Uuid>,
+    /// Exact group identity for membership requests.
+    pub group_id: Option<Uuid>,
+    /// Applies CVE/package filters before grouping and pagination.
+    pub filters: CveFilters,
+    /// Zero-based server page offset.
+    pub offset: i64,
+    /// Requested page size (1 through 200).
+    pub limit: i64,
+}
+
+/// One complete finding aggregate for a scoped environment or host.
+/// Pair counts are distinct CVE/package identities; hosts without findings
+/// are not necessarily clean or scanned.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveInventoryGroup {
+    /// Environment or system ID; absent for unassigned hosts.
+    pub group_id: Option<Uuid>,
+    /// Environment name or hostname.
+    pub name: String,
+    /// Distinct CVE/package pairs after filters.
+    pub cve_package_count: i64,
+    /// Distinct CVE IDs after filters.
+    pub cve_count: i64,
+    /// Distinct critical CVE/package pairs after filters.
+    pub critical_pair_count: i64,
+    /// Distinct high CVE/package pairs after filters.
+    pub high_pair_count: i64,
+    /// Distinct medium CVE/package pairs after filters.
+    pub medium_pair_count: i64,
+    /// Distinct low CVE/package pairs after filters.
+    pub low_pair_count: i64,
+    /// Distinct unknown-severity CVE/package pairs after filters.
+    pub unknown_pair_count: i64,
+    /// Distinct CVE/package pairs marked exploited after filters.
+    pub exploited_pair_count: i64,
+    /// Distinct CVE/package pairs with an available fix after filters.
+    pub patchable_pair_count: i64,
+    /// Distinct hosts with findings in any section.
+    pub host_count: i64,
+    /// Authorized active hosts assigned to the environment, including hosts
+    /// without findings. `None` for a host group. Not scan coverage.
+    pub total_active_hosts: Option<i64>,
+    /// Distinct hosts with current exposure.
+    pub current_host_count: i64,
+    /// Distinct hosts with scheduled-target exposure.
+    pub scheduled_host_count: i64,
+    /// Distinct hosts with historical-only evidence.
+    pub historical_host_count: i64,
+    /// Registered flake name for host groups only.
+    pub flake_name: Option<String>,
+    /// Deployment state for host groups only.
+    pub deployment_status: Option<String>,
+}
+
+/// Server-ordered page of scoped CVE finding aggregates.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveInventoryGroupPage {
+    /// Groups in name and ID order.
+    pub items: Vec<CveInventoryGroup>,
+    /// Complete matching group count, not the loaded page count.
+    pub total: i64,
+    /// Continuation offset, absent at the end.
+    pub next_offset: Option<i64>,
+}
+
+/// One host/CVE/package/section membership; never a clean-host assertion.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveInventoryMember {
+    /// Canonical CVE identity.
+    pub cve_id: String,
+    /// Retained package identity, if known.
+    pub package_name: Option<String>,
+    /// Stable system identity.
+    pub system_id: Uuid,
+    /// Assigned environment identity, if present.
+    pub environment_id: Option<Uuid>,
+    /// Current hostname.
+    pub hostname: String,
+    /// `current`, `scheduled_deployment_target`, or `historical`.
+    pub inventory_section: String,
+    /// Version from the selected inventory source.
+    pub installed_version: String,
+    /// Existing deployment status.
+    pub deployment_status: Option<String>,
+    /// Registered flake name.
+    pub flake_name: Option<String>,
+}
+
+/// Server-ordered page of exact memberships within one group.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveInventoryMemberPage {
+    /// Exact member rows in CVE, package, system, and section order.
+    pub items: Vec<CveInventoryMember>,
+    /// Complete matching membership count.
+    pub total: i64,
+    /// Continuation offset, absent at the end.
+    pub next_offset: Option<i64>,
+}
+
+/// Returns server-filtered CVE/package pairs in a bounded, scoped page.
+/// A page is not evidence that the entire filtered collection was loaded.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CveInventoryPairPage {
+    /// Pairs with the same identity and metadata as the CVE list.
+    pub items: Vec<CveListItem>,
+    /// Complete filtered pair count before pagination.
+    pub total: i64,
+    /// Next offset, absent after the final pair.
+    pub next_offset: Option<i64>,
+    /// Co-snapshot package unions, present only when the first page contains
+    /// the whole filtered pair set. Never combine with another page or request.
+    #[serde(default)]
+    pub package_host_unions: Vec<CveInventoryPackageHostUnion>,
+}
+
+/// Counts distinct visible affected systems for one package in a complete pair page.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CveInventoryPackageHostUnion {
+    /// Gives the canonical package identity, if present.
+    pub package_name: Option<String>,
+    /// Counts filtered CVE/package pairs in this package.
+    pub pair_count: i64,
+    /// Counts the union of Current and scheduled-target hosts, excluding history-only hosts.
+    pub affected_system_count: i64,
+}
+
 /// CVE list item for table views.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CveListItem {
@@ -421,11 +561,39 @@ pub struct CveListItem {
     pub fixed_version: Option<String>,
     pub fix_status: String,
     pub affected_count: i64,
+    /// Counts affected systems backed by exact immutable observations.
+    #[serde(default)]
+    pub exact_affected_count: i64,
+    /// Counts affected systems visible only through legacy scan inventory.
+    #[serde(default)]
+    pub legacy_affected_count: i64,
+    /// Counts systems affected in their exact current deployment when supplied.
+    #[serde(default)]
+    pub current_affected_count: Option<i64>,
+    /// Counts exact active scheduled deployment targets when supplied.
+    #[serde(default)]
+    pub scheduled_deployment_target_count: Option<i64>,
+    /// Counts systems represented by retained historical inventory when supplied.
+    #[serde(default)]
+    pub historical_inventory_count: Option<i64>,
     pub affected_environments: Option<Vec<String>>,
     pub first_seen: Option<DateTime<Utc>>,
     pub last_seen: Option<DateTime<Utc>>,
     pub age_days: i32,
     pub triage_status: String,
+}
+
+impl CveListItem {
+    /// Returns presence-aware current, scheduled-target, and historical counts.
+    pub(crate) fn inventory_counts(&self) -> (i64, i64, i64) {
+        normalize_inventory_relation_counts(
+            self.exact_affected_count,
+            self.legacy_affected_count,
+            self.current_affected_count,
+            self.scheduled_deployment_target_count,
+            self.historical_inventory_count,
+        )
+    }
 }
 
 /// CVE package group with aggregated statistics.
@@ -439,6 +607,15 @@ pub struct CvePackageGroup {
     pub low_count: i64,
     pub environments_count: i64,
     pub total_affected_systems: i64,
+    /// Counts systems affected in their exact current deployment when supplied.
+    #[serde(default)]
+    pub current_affected_systems: Option<i64>,
+    /// Counts exact active scheduled deployment targets when supplied.
+    #[serde(default)]
+    pub scheduled_deployment_target_systems: Option<i64>,
+    /// Counts systems represented by retained historical inventory when supplied.
+    #[serde(default)]
+    pub historical_inventory_systems: Option<i64>,
     pub fixable_count: i64,
     pub outstanding_count: i64,
     pub exploited_count: i64,
@@ -446,6 +623,19 @@ pub struct CvePackageGroup {
     pub severity_score: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cves: Option<Vec<CveListItem>>,
+}
+
+impl CvePackageGroup {
+    /// Returns presence-aware current, scheduled-target, and historical counts.
+    pub(crate) fn inventory_counts(&self) -> (i64, i64, i64) {
+        normalize_inventory_relation_counts(
+            0,
+            0,
+            self.current_affected_systems,
+            self.scheduled_deployment_target_systems,
+            self.historical_inventory_systems,
+        )
+    }
 }
 
 /// Detailed CVE information for the drawer view.
@@ -470,15 +660,46 @@ pub struct CveDetail {
 /// System affected by a CVE (for drawer detail view).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CveAffectedSystemDetail {
+    /// Identifies the affected managed system.
     pub system_id: Uuid,
+    /// Gives the system hostname.
     pub hostname: String,
+    /// Identifies the visible environment when one is assigned.
+    #[serde(default)]
+    pub environment_id: Option<Uuid>,
+    /// Gives the visible environment name when one is assigned.
     pub environment: Option<String>,
+    /// Gives the latest reported primary IP address when available.
     pub primary_ip_address: Option<String>,
+    /// Gives the managed flake name when one is assigned.
     pub flake_name: Option<String>,
+    /// Identifies the managed flake when one is assigned.
     pub flake_id: Option<i32>,
+    /// Gives the selected revision when the read resolves one.
     pub commit_hash: Option<String>,
+    /// Gives the system deployment-policy identifier.
     pub deployment_policy: String,
+    /// Gives the package version observed by the selected inventory source.
     pub current_package_version: Option<String>,
+    /// Identifies whether the displayed finding is exact or display-only.
+    #[serde(default)]
+    pub inventory_authority: SystemCveInventoryAuthority,
+    /// Identifies why the system appears in fleet inventory.
+    #[serde(default)]
+    pub inventory_section: FleetCveInventorySection,
+}
+
+/// Identifies one read-only fleet CVE inventory section.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetCveInventorySection {
+    /// The finding affects the system's exact current deployment.
+    #[default]
+    Current,
+    /// The finding affects an exact active scheduled deployment target.
+    ScheduledDeploymentTarget,
+    /// The finding is retained historical inventory and is display-only.
+    Historical,
 }
 
 /// CVE justification (triage) record.
@@ -514,15 +735,87 @@ pub struct CveFleetStats {
     pub fixable: i64,
     pub environments_affected: i64,
     pub systems_affected: i64,
+    /// Counts distinct affected systems with at least one exact finding.
+    #[serde(default)]
+    pub exact_systems_affected: i64,
+    /// Counts distinct affected systems with at least one legacy-only finding.
+    #[serde(default)]
+    pub legacy_systems_affected: i64,
+    /// Counts distinct systems with an exact current finding when supplied.
+    #[serde(default)]
+    pub current_systems_affected: Option<i64>,
+    /// Counts distinct systems with an exact active scheduled-target finding.
+    #[serde(default)]
+    pub scheduled_deployment_target_systems: Option<i64>,
+    /// Counts distinct systems represented by retained historical inventory.
+    #[serde(default)]
+    pub historical_inventory_systems: Option<i64>,
+    /// Counts visible active systems without a usable completed scan.
+    #[serde(default)]
+    pub no_scan_systems: i64,
     pub outstanding: i64,
     pub accepted: i64,
     pub scheduled: i64,
 }
 
+impl CveFleetStats {
+    /// Returns presence-aware current, scheduled-target, and historical counts.
+    pub(crate) fn inventory_counts(&self) -> (i64, i64, i64) {
+        normalize_inventory_relation_counts(
+            self.exact_systems_affected,
+            self.legacy_systems_affected,
+            self.current_systems_affected,
+            self.scheduled_deployment_target_systems,
+            self.historical_inventory_systems,
+        )
+    }
+}
+
+// COMPATIBILITY: A response with no relation fields predates inventory sections.
+// Its exact and legacy authority counts are the only safe relation sources. The
+// compatibility affected count can combine authorities and must not become
+// current exposure. Any explicit relation field selects the additive contract.
+fn normalize_inventory_relation_counts(
+    exact: i64,
+    legacy: i64,
+    current: Option<i64>,
+    scheduled: Option<i64>,
+    historical: Option<i64>,
+) -> (i64, i64, i64) {
+    if current.is_none() && scheduled.is_none() && historical.is_none() {
+        (exact, 0, legacy)
+    } else {
+        (
+            current.unwrap_or_default(),
+            scheduled.unwrap_or_default(),
+            historical.unwrap_or_default(),
+        )
+    }
+}
+
 /// Response from fleet rescan trigger.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FleetRescanResponse {
+    /// Counts distinct currently deployed derivations considered by the request.
+    pub eligible_count: i64,
+    /// Counts new pending scans created by the request.
     pub enqueued_count: i64,
+    /// Counts eligible derivations that already had active work.
+    pub reused_count: i64,
+    /// Summarizes the enqueue result for presentation.
+    pub message: String,
+}
+
+/// Response from an exact-derivation CVE rescan request.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DerivationRescanResponse {
+    /// Identifies the exact derivation requested by the caller.
+    pub derivation_id: i32,
+    /// Identifies the new or reused active scan.
+    pub scan_id: Uuid,
+    /// Is `true` when the request created a pending scan.
+    pub enqueued: bool,
+    /// Summarizes whether the endpoint queued or reused work.
     pub message: String,
 }
 
@@ -547,18 +840,311 @@ pub struct UpdateScanSchedulePolicyRequest {
     pub rebuild_to_scan: bool,
 }
 
+/// Reports authoritative fleet scan coverage and lifecycle counts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScanningStatsResponse {
+    /// Counts scans currently owned by an executor.
     pub scanning: i64,
+    /// Counts runnable scans waiting for executor ownership.
     pub queued: i64,
+    /// Counts scans waiting for an exact build output.
+    pub awaiting_build: i64,
+    /// Counts scans waiting for an exact cache closure.
+    pub awaiting_closure: i64,
+    /// Counts completed evidence older than its rescan interval.
     pub stale: i64,
+    /// Counts configurations without completed scan evidence.
     pub never_scanned: i64,
+    /// Counts configurations whose latest lifecycle failed.
     pub failed: i64,
+    /// Reports configuration coverage as an integer percentage.
     pub coverage_percent: i64,
+}
+
+/// Returns one bounded archive-aware page of exact scan lifecycles.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanningScanRecordsResponse {
+    /// Contains rows in the server's deterministic collection order.
+    pub items: Vec<ScanningScanRecordResponse>,
+    /// Counts matching rows before response limiting and archive filtering.
+    ///
+    /// The count covers the whole server-filtered collection, not the returned
+    /// page, so it stays truthful while pages accumulate in the browser.
+    pub total: i64,
+    /// Counts archived rows omitted when archived records are not requested.
+    pub hidden_archived: i64,
+    /// Is true when another request-bound keyset page exists.
+    ///
+    /// COMPATIBILITY: A server that predates request-bound scan-record
+    /// pagination omits this field. The default reports a complete collection,
+    /// which keeps the view from offering a continuation it cannot request.
+    #[serde(default)]
+    pub has_more: bool,
+    /// Continues after the last returned stable scan identity.
+    ///
+    /// The value is opaque. It is only valid for the exact request parameters
+    /// that produced it; the server rejects it for any other request identity.
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+/// Selects the server lifecycle collection for one scan-record request.
+///
+/// Only [`ScanRecordCollectionParam::Completed`] accepts a continuation
+/// cursor. The server rejects a cursor for every other collection because
+/// nonterminal and mixed history rows have no stable keyset order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanRecordCollectionParam {
+    /// Selects waiting, queued, and running rows.
+    Active,
+    /// Selects completed and failed rows.
+    Completed,
+    /// Selects every persisted lifecycle row.
+    History,
+}
+
+impl ScanRecordCollectionParam {
+    /// Returns the exact `collection` query value accepted by the server.
+    pub fn as_param(self) -> &'static str {
+        match self {
+            Self::Active => "active",
+            Self::Completed => "completed",
+            Self::History => "history",
+        }
+    }
+
+    /// Is true when the server applies keyset pagination to this collection.
+    pub fn supports_cursor(self) -> bool {
+        matches!(self, Self::Completed)
+    }
+}
+
+/// Selects the fixed terminal status filter applied by the server.
+///
+/// The variants are fixed by the server contract. They are never derived from
+/// loaded rows, so the filter keeps the same meaning on every page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanRecordStatusParam {
+    /// Selects every terminal status.
+    All,
+    /// Selects successful terminal scans.
+    Completed,
+    /// Selects failed terminal scans.
+    Failed,
+}
+
+impl ScanRecordStatusParam {
+    /// Returns the exact `status` query value accepted by the server.
+    pub fn as_param(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Selects the revision class filter applied by the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanRecordRevisionParam {
+    /// Selects every revision class.
+    All,
+    /// Selects exact currently deployed revisions.
+    Deployed,
+    /// Selects the latest ready flake revision that is not deployed.
+    Recent,
+    /// Selects older flake revisions.
+    Superseded,
+}
+
+impl ScanRecordRevisionParam {
+    /// Returns the exact `revision` query value accepted by the server.
+    pub fn as_param(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Deployed => "deployed",
+            Self::Recent => "recent",
+            Self::Superseded => "superseded",
+        }
+    }
+}
+
+/// Selects the primary ordering key applied by the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanRecordSortParam {
+    /// Orders by configuration name.
+    Configuration,
+    /// Orders by commit revision.
+    Revision,
+    /// Orders by terminal lifecycle status.
+    Status,
+    /// Orders lexicographically by critical, high, medium, and low counts.
+    Severity,
+    /// Orders by the authoritative terminal timestamp.
+    Timestamp,
+}
+
+impl ScanRecordSortParam {
+    /// Returns the exact `sort` query value accepted by the server.
+    pub fn as_param(self) -> &'static str {
+        match self {
+            Self::Configuration => "configuration",
+            Self::Revision => "revision",
+            Self::Status => "status",
+            Self::Severity => "severity",
+            Self::Timestamp => "timestamp",
+        }
+    }
+}
+
+/// Selects the primary ordering direction applied by the server.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScanRecordDirectionParam {
+    /// Orders the primary key from low to high.
+    Asc,
+    /// Orders the primary key from high to low.
+    Desc,
+}
+
+impl ScanRecordDirectionParam {
+    /// Returns the exact `direction` query value accepted by the server.
+    pub fn as_param(self) -> &'static str {
+        match self {
+            Self::Asc => "asc",
+            Self::Desc => "desc",
+        }
+    }
+}
+
+/// Requests one bounded, server-filtered page of exact scan lifecycles.
+///
+/// Every field maps to one validated query parameter of
+/// `GET /api/v1/scanning/scans`. The server owns search, status, revision,
+/// latest-revision, ordering, archive visibility, and page bounds, so the
+/// browser never filters or sorts a partially loaded collection and calls it
+/// authoritative.
+///
+/// INVARIANT: `limit` must be 1 through 500. The server answers any other
+/// value with a validation error instead of silently clamping the page.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanningScanRecordQuery {
+    /// Selects the lifecycle collection.
+    pub collection: ScanRecordCollectionParam,
+    /// Includes archive-marked terminal rows when true.
+    pub include_archived: bool,
+    /// Restricts rows to one active system's exact flake and configuration.
+    pub system_id: Option<Uuid>,
+    /// Bounds the returned page to 1 through 500 rows.
+    pub limit: u16,
+    /// Searches configuration, flake, commit, scan UUID, and derivation ID.
+    ///
+    /// The server normalizes whitespace and case and rejects a value longer
+    /// than 200 characters after normalization.
+    pub search: Option<String>,
+    /// Selects the terminal status filter.
+    pub status: ScanRecordStatusParam,
+    /// Selects the revision class filter.
+    pub revision: ScanRecordRevisionParam,
+    /// Requires the latest ready flake revision when true.
+    pub latest_only: bool,
+    /// Selects the primary ordering key.
+    pub sort: ScanRecordSortParam,
+    /// Selects the primary ordering direction.
+    pub direction: ScanRecordDirectionParam,
+    /// Continues from the opaque cursor returned by the previous page.
+    ///
+    /// The cursor is only accepted for [`ScanRecordCollectionParam::Completed`]
+    /// and only with the parameters that produced it.
+    pub after: Option<String>,
+}
+
+/// Describes one exact persisted scan lifecycle.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanningScanRecordResponse {
+    /// Identifies the immutable scan lifecycle.
+    pub scan_id: Uuid,
+    /// Identifies the exact derivation.
+    pub derivation_id: i32,
+    /// Contains the configuration name.
+    pub hostname: String,
+    /// Contains the owning flake name when available.
+    pub flake_name: Option<String>,
+    /// Contains the full immutable revision when available.
+    pub commit_hash: Option<String>,
+    #[serde(default)]
+    pub is_current: bool,
+    #[serde(default)]
+    pub is_latest_per_flake: bool,
+    /// Contains the persisted lifecycle status.
+    pub status: String,
+    /// Contains canonical trigger provenance when recorded.
+    pub source_trigger: Option<String>,
+    /// Contains lifecycle creation time.
+    pub created_at: DateTime<Utc>,
+    /// Contains requested schedule time when available.
+    pub scheduled_at: Option<DateTime<Utc>>,
+    /// Contains authoritative execution start time when execution began.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Contains terminal time when available.
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Contains the scanner implementation name.
+    pub scanner_name: String,
+    /// Contains the scanner version when recorded.
+    pub scanner_version: Option<String>,
+    /// Contains bounded executor identity when recorded.
+    pub executor: Option<String>,
+    /// Contains a bounded redacted failure summary.
+    pub failure: Option<String>,
+    /// Explains why a waiting lifecycle is not runnable.
+    pub wait_reason: Option<String>,
+    /// Counts examined packages.
+    pub total_packages: i32,
+    /// Counts all vulnerability findings.
+    pub total_vulnerabilities: i32,
+    /// Counts critical findings.
+    pub critical_count: i32,
+    /// Counts high findings.
+    pub high_count: i32,
+    /// Counts medium findings.
+    pub medium_count: i32,
+    /// Counts low findings.
+    pub low_count: i32,
+    /// Contains scanner duration in milliseconds when recorded.
+    pub scan_duration_ms: Option<i32>,
+    /// Counts execution attempts.
+    pub attempts: i32,
+    /// Contains archive time when hidden by an administrator.
+    pub archived_at: Option<DateTime<Utc>>,
+    /// Is false until the server can enforce execution-owner cancellation.
+    pub cancellable: bool,
+}
+
+/// Requests an idempotent archive-state change for terminal scans.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateScanningArchiveRequest {
+    /// Selects at most 100 exact terminal scan identities.
+    pub scan_ids: Vec<Uuid>,
+    /// Archives rows when true and restores rows when false.
+    pub archived: bool,
+}
+
+/// Reports an archive-state update result.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct UpdateScanningArchiveResponse {
+    /// Counts unique scan identities accepted by the server.
+    pub requested: usize,
+    /// Counts archive metadata records inserted or removed.
+    pub changed: u64,
+    /// Contains the requested resulting archive state.
+    pub archived: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScanningQueueItemResponse {
+    /// Identifies the exact derivation represented by the row.
+    pub derivation_id: i32,
+    /// Is `true` when the derivation has a built store path that can be scanned.
+    pub rescan_eligible: bool,
     /// `None` when the system is deployed but has never been scanned.
     pub scan_id: Option<Uuid>,
     pub hostname: String,
@@ -576,12 +1162,13 @@ pub struct ScanningQueueItemResponse {
     /// True when this is the latest scan row for its derivation.
     #[serde(default)]
     pub is_current: bool,
-    /// True when this derivation's commit is the latest known commit for its flake.
+    /// True when this derivation's commit is position-0 in the ready branch
+    /// snapshot for its flake.
     #[serde(default)]
     pub is_latest_per_flake: bool,
-    /// Scan trigger source (not yet tracked server-side).
+    /// Persisted scan trigger source.
     #[serde(default)]
-    pub trigger: Option<String>,
+    pub source_trigger: Option<String>,
 }
 
 /// Paginated deployed configurations response (P2#6).
@@ -598,6 +1185,7 @@ pub struct ScanningDeployedResponse {
 pub struct ScanningSystemsItemResponse {
     pub system_id: Uuid,
     pub hostname: String,
+    pub flake_name: Option<String>,
     pub environment: Option<String>,
     pub total_configs: i64,
     pub scanned: i64,
@@ -606,6 +1194,16 @@ pub struct ScanningSystemsItemResponse {
     pub unscanned: i64,
     pub current_crit: i64,
     pub current_high: i64,
+    #[serde(default)]
+    pub current_medium: i64,
+    #[serde(default)]
+    pub current_low: i64,
+    #[serde(default)]
+    pub current_scan_id: Option<Uuid>,
+    #[serde(default)]
+    pub historical_evidence: bool,
+    /// Identifies the derivation in the system's latest reported store path.
+    pub current_derivation_id: Option<i32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -617,6 +1215,94 @@ pub struct ScanningActivityItemResponse {
     pub status: String,
 }
 
+/// Contains bounded operational diagnostics for one exact CVE scan.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanningScanDetailResponse {
+    /// Exact scan identity.
+    pub scan_id: Uuid,
+    /// Identifies the exact derivation scanned.
+    pub derivation_id: i32,
+    /// Contains the configuration identity.
+    pub hostname: String,
+    /// Contains the owning flake name when available.
+    pub flake_name: Option<String>,
+    /// Contains the full immutable revision when available.
+    pub commit_hash: Option<String>,
+    /// Current scan lifecycle status.
+    pub status: String,
+    /// Scanner implementation name.
+    pub scanner_name: String,
+    /// Scanner version, when recorded.
+    pub scanner_version: Option<String>,
+    /// Durable trigger provenance.
+    pub source_trigger: Option<String>,
+    /// Contains lifecycle creation time.
+    pub created_at: DateTime<Utc>,
+    /// Contains requested schedule time when available.
+    pub scheduled_at: Option<DateTime<Utc>>,
+    /// Contains authoritative execution start time when execution began.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Contains terminal time when available.
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Contains scanner duration in milliseconds when recorded.
+    pub scan_duration_ms: Option<i32>,
+    /// Counts execution attempts.
+    pub attempts: i32,
+    /// Counts examined packages.
+    pub total_packages: i32,
+    /// Counts all vulnerability findings.
+    pub total_vulnerabilities: i32,
+    /// Counts critical findings.
+    pub critical_count: i32,
+    /// Counts high findings.
+    pub high_count: i32,
+    /// Counts medium findings.
+    pub medium_count: i32,
+    /// Counts low findings.
+    pub low_count: i32,
+    /// Contains a bounded redacted failure summary.
+    pub failure: Option<String>,
+    /// Explains why the lifecycle is waiting.
+    pub wait_reason: Option<String>,
+    /// Identifies the build attempt most directly associated with this scan.
+    pub build_job_id: Option<Uuid>,
+    /// Contains that build attempt's current lifecycle status.
+    pub build_status: Option<String>,
+    /// Contains bounded executor identity when recorded.
+    pub executor: Option<String>,
+    /// Contains archive time when hidden by an administrator.
+    pub archived_at: Option<DateTime<Utc>>,
+    /// Is false until the server can enforce execution-owner cancellation.
+    pub cancellable: bool,
+    /// Chronologically ordered diagnostic events.
+    pub events: Vec<ScanningScanDiagnosticEventResponse>,
+    /// Is `true` when the fixed API response omitted later events.
+    pub truncated: bool,
+}
+
+/// Describes one immutable execution-attempt diagnostic event.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanningScanDiagnosticEventResponse {
+    /// Immutable server identity for this diagnostic row.
+    pub id: i64,
+    /// Immutable execution token for the attempt.
+    pub execution_id: Uuid,
+    /// One-based attempt number.
+    pub attempt_number: i32,
+    /// Time at which the worker observed the event.
+    pub occurred_at: DateTime<Utc>,
+    /// Normalized event severity.
+    pub level: String,
+    /// Normalized event producer.
+    pub source: String,
+    /// Lifecycle or output event kind.
+    pub event_type: String,
+    /// Redacted bounded diagnostic text.
+    pub message: String,
+    /// Is `true` when output was omitted at a capture or persistence bound.
+    pub truncated: bool,
+}
+
 /// A single recent deployment event.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RecentDeployment {
@@ -625,6 +1311,73 @@ pub struct RecentDeployment {
     pub commit_message: Option<String>,
     pub deployed_at: DateTime<Utc>,
     pub status: DeploymentStatus,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CacheHealthSummary {
+    pub status: CacheHealthStatus,
+    pub destination_count: i64,
+    pub enabled_destination_count: i64,
+    pub successful_pushes_24h: i64,
+    pub failed_pushes_24h: i64,
+    pub last_activity_at: Option<DateTime<Utc>>,
+    pub used_bytes: Option<i64>,
+    pub capacity_bytes: Option<i64>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheHealthStatus {
+    Healthy,
+    Degraded,
+    Unknown,
+    Disabled,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DashboardActivity {
+    #[serde(default)]
+    pub id: String,
+    pub kind: DashboardActivityKind,
+    pub status: DashboardActivityStatus,
+    pub occurred_at: DateTime<Utc>,
+    pub title: String,
+    pub system_id: Option<Uuid>,
+    pub flake_id: Option<i32>,
+    pub commit_id: Option<i32>,
+    pub commit_hash: Option<String>,
+    pub build_job_id: Option<Uuid>,
+    pub deployment_id: Option<Uuid>,
+    #[serde(default)]
+    pub evaluation_attempt_id: Option<Uuid>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardActivityKind {
+    Deployment,
+    Build,
+    Evaluation,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DashboardActivityStatus {
+    DeploymentStarted,
+    DeploymentSucceeded,
+    DeploymentFailed,
+    BuildQueued,
+    BuildBuilding,
+    BuildCancelling,
+    BuildSucceeded,
+    BuildFailed,
+    BuildCancelled,
+    EvaluationPending,
+    EvaluationInProgress,
+    EvaluationCancelling,
+    EvaluationSucceeded,
+    EvaluationFailed,
+    EvaluationCancelled,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -716,6 +1469,11 @@ pub struct SystemDetail {
     /// Timestamp of the heartbeat that triggered the last restart classification.
     #[serde(default)]
     pub last_restart_at: Option<DateTime<Utc>>,
+    /// Stable SHA256 fingerprint of the system's registered agent public key.
+    /// Read-only; the server derives it from `systems.public_key`. `None` when
+    /// the server could not parse the stored key.
+    #[serde(default)]
+    pub public_key_fingerprint: Option<String>,
 }
 
 /// Hardware information subset for system detail.
@@ -804,6 +1562,1023 @@ pub struct FlakeRegistryItem {
     pub environments: Vec<String>,
     #[serde(default)]
     pub total_commit_count: i64,
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Evaluation and flake-output snapshot DTOs
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Identifies the durable lifecycle exposed by a snapshot API.
+///
+/// Config V2 active states describe targeted Config Inspector work. Primary
+/// fallback and flake-output active states describe commit evaluation work.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotLifecycle {
+    /// The lifecycle-specific work is queued.
+    Queued,
+    /// The lifecycle-specific worker owns the work.
+    Running,
+    /// The lifecycle-specific work ended with a safe diagnostic.
+    Failed,
+    /// The snapshot is available for database-only reads.
+    Available,
+    /// No reusable snapshot exists for the revision.
+    Unavailable,
+}
+
+/// Selects the baseline semantics for an evaluated-options request.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SnapshotRevisionMode {
+    /// Compares with the selected commit's Git first parent.
+    #[default]
+    Commit,
+    /// Compares with the preceding retained generation snapshot.
+    Generation,
+}
+
+impl SnapshotRevisionMode {
+    /// Returns the server query value.
+    pub fn as_query_value(self) -> &'static str {
+        match self {
+            Self::Commit => "commit",
+            Self::Generation => "generation",
+        }
+    }
+}
+
+/// Selects the server-side evaluated-option subset.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluatedOptionFilter {
+    /// Returns every matching option.
+    #[default]
+    All,
+    /// Returns options with proven overridden definitions.
+    Overridden,
+    /// Returns options that differ from a valid baseline.
+    Changed,
+}
+
+impl EvaluatedOptionFilter {
+    /// Returns the server query value.
+    pub fn as_query_value(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Overridden => "overridden",
+            Self::Changed => "changed",
+        }
+    }
+}
+
+/// Defines one bounded evaluated-options request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvaluatedOptionsRequest {
+    /// Full immutable revision SHA.
+    pub revision: String,
+    /// Retained generation in generation mode.
+    pub generation: Option<i32>,
+    /// Comparison mode.
+    pub mode: SnapshotRevisionMode,
+    /// Debounced server-side search text.
+    pub search: String,
+    /// Active subset.
+    pub filter: EvaluatedOptionFilter,
+    /// Requested bounded page size.
+    pub limit: i64,
+    /// Requested bounded zero-based offset.
+    pub offset: i64,
+    /// Opaque token that binds the request to one selected artifact and baseline.
+    pub snapshot_token: Option<String>,
+}
+
+/// Reports revision-global option counts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvaluatedOptionCounts {
+    /// Number of options in the selected snapshot.
+    pub all: i64,
+    /// Number with proven overridden definitions.
+    pub overridden: i64,
+    /// Number changed from a valid baseline, or no count without a baseline.
+    pub changed: Option<i64>,
+}
+
+/// Classifies whether the server observed the complete option inventory.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptionInventoryState {
+    /// Every option-tree subtree was enumerated.
+    Complete,
+    /// Healthy observed options are available with unreadable prefixes.
+    Partial,
+    /// No meaningful option inventory is available.
+    #[default]
+    Unavailable,
+}
+
+/// Identifies one bounded unreadable option-tree prefix.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OptionInventoryDiagnostic {
+    /// Exact unreadable option path components.
+    pub path_components: Vec<String>,
+    /// Stable failure category.
+    pub code: String,
+    /// Stable redacted diagnostic.
+    pub message: String,
+}
+
+/// Returns one bounded page of evaluated options.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvaluatedOptionsPage {
+    /// Selected snapshot lifecycle.
+    pub lifecycle: SnapshotLifecycle,
+    /// Completeness of the observed option inventory.
+    #[serde(default)]
+    pub option_inventory_state: OptionInventoryState,
+    /// Bounded unreadable prefixes for a partial inventory.
+    #[serde(default)]
+    pub option_inventory_diagnostics: Vec<OptionInventoryDiagnostic>,
+    /// True when bounding or redaction deduplication omitted diagnostic detail.
+    #[serde(default)]
+    pub option_inventory_diagnostics_truncated: bool,
+    /// Full selected revision SHA.
+    pub revision: String,
+    /// Selected local generation identity in generation mode.
+    #[serde(default)]
+    pub generation: Option<i32>,
+    /// Durable retained-generation snapshot identity.
+    #[serde(default)]
+    pub generation_snapshot_id: Option<Uuid>,
+    /// Opaque token for the exact selected artifact and comparison baseline.
+    #[serde(default)]
+    pub snapshot_token: Option<String>,
+    /// Full baseline SHA when comparison is available.
+    pub baseline_revision: Option<String>,
+    /// Preceding retained generation used as the generation-mode baseline.
+    #[serde(default)]
+    pub baseline_generation: Option<i32>,
+    /// Whether Changed has a valid baseline.
+    pub comparison_available: bool,
+    /// Safe evaluation diagnostic for a failed snapshot.
+    pub error: Option<String>,
+    /// Number of distinct `(source_input, source_revision, source_path)` tuples.
+    pub module_count: i64,
+    /// End-to-end evaluator duration in milliseconds.
+    pub evaluation_duration_ms: Option<i64>,
+    /// Revision-global counts independent of search and active filter.
+    pub counts: EvaluatedOptionCounts,
+    /// Number of rows matching the active search and filter.
+    pub total: i64,
+    /// Bounded zero-based offset.
+    pub offset: i64,
+    /// Bounded page size.
+    pub limit: i64,
+    /// Rows in this page.
+    pub options: Vec<EvaluatedOptionRow>,
+}
+
+/// Identifies an active registered flake and one exact active revision.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TrackedFlakeIdentity {
+    /// Registered flake database identity.
+    pub flake_id: i32,
+    /// Registered flake display name.
+    pub flake_name: String,
+    /// Registered repository URL after credential sanitization.
+    pub repo_url: String,
+    /// Full immutable revision.
+    pub revision: String,
+}
+
+/// Aggregates one exact module source across the observed selected inventory.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvaluationModuleSummary {
+    /// Evaluator-provided flake input name.
+    pub source_input: Option<String>,
+    /// Evaluator-provided full source revision.
+    pub source_revision: Option<String>,
+    /// Exact Nix module source path, when available.
+    pub source_path: Option<String>,
+    /// Number of definitions emitted by this source.
+    pub defined_count: i64,
+    /// Number of options with a winning definition from this source.
+    pub won_count: i64,
+    /// Server-issued navigation identity after visibility checks.
+    pub tracked_flake: Option<TrackedFlakeIdentity>,
+}
+
+/// Classifies selected-versus-running configuration drift by exact store identity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EvaluationDrift {
+    /// Selected and running store paths are exactly equal.
+    Matches,
+    /// Both exact paths are known and differ.
+    Differs,
+    /// One or both exact paths are unavailable.
+    Unavailable,
+}
+
+/// Classifies the selected configuration against the latest agent observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentFingerprintStatus {
+    /// The selected and latest agent-reported store paths are equal.
+    Matches,
+    /// Both exact store paths are available and differ.
+    Differs,
+    /// Either exact store path is unavailable.
+    Unavailable,
+}
+
+/// Classifies exact running-store observations during the trailing seven days.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SevenDayDriftStatus {
+    /// Complete coverage contains only the selected store path.
+    NoObservedDrift,
+    /// Complete coverage contains another exact store path.
+    ObservedDrift,
+    /// Observation coverage is absent or contains an excessive gap.
+    InsufficientCoverage,
+}
+
+/// Returns complete selected-revision Config summary metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SelectedEvaluationSummary {
+    /// Selected snapshot lifecycle.
+    pub lifecycle: SnapshotLifecycle,
+    /// Completeness of the observed option inventory.
+    #[serde(default)]
+    pub option_inventory_state: OptionInventoryState,
+    /// Bounded unreadable prefixes for a partial inventory.
+    #[serde(default)]
+    pub option_inventory_diagnostics: Vec<OptionInventoryDiagnostic>,
+    /// True when bounding or redaction deduplication omitted diagnostic detail.
+    #[serde(default)]
+    pub option_inventory_diagnostics_truncated: bool,
+    /// Full selected revision SHA.
+    pub revision: String,
+    /// Selected retained generation in generation mode.
+    pub generation: Option<i32>,
+    /// Safe lifecycle or integrity diagnostic.
+    pub error: Option<String>,
+    /// Opaque token for the exact selected artifact and comparison baseline.
+    #[serde(default)]
+    pub snapshot_token: Option<String>,
+    /// Preceding retained generation used as the generation-mode baseline.
+    #[serde(default)]
+    pub baseline_generation: Option<i32>,
+    /// Authoritative number of module sources in the observed inventory.
+    pub module_source_total: i64,
+    /// Snapshot completion timestamp.
+    pub completed_at: Option<DateTime<Utc>>,
+    /// End-to-end evaluator duration in milliseconds.
+    pub evaluation_duration_ms: Option<i64>,
+    /// Exact count of observed persisted option rows.
+    pub option_total: i64,
+    /// Exact selected NixOS toplevel store path.
+    pub selected_store_path: Option<String>,
+    /// Existing closure package count, when calculated.
+    pub closure_package_count: Option<i32>,
+    /// Recursive Nix closure size in bytes from a complete local measurement.
+    pub closure_size_bytes: Option<i64>,
+    /// Exact latest running store path.
+    pub running_store_path: Option<String>,
+    /// Agent-reported profile match for the latest running state.
+    pub running_profile_matches: Option<bool>,
+    /// Number of selected option states that differ from the same-commit mode.
+    pub host_delta_count: Option<i64>,
+    /// Exact selected-versus-agent store identity status.
+    pub agent_fingerprint: AgentFingerprintStatus,
+    /// Exact running-store drift during the trailing seven days.
+    pub seven_day_drift: SevenDayDriftStatus,
+    /// Exact-store-identity drift classification.
+    pub drift: EvaluationDrift,
+}
+
+/// Returns one bounded page of module sources for a selected evaluation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EvaluationModuleSourcesPage {
+    /// Selected snapshot lifecycle.
+    pub lifecycle: SnapshotLifecycle,
+    /// Completeness of the observed option inventory.
+    #[serde(default)]
+    pub option_inventory_state: OptionInventoryState,
+    /// Bounded unreadable prefixes for a partial inventory.
+    #[serde(default)]
+    pub option_inventory_diagnostics: Vec<OptionInventoryDiagnostic>,
+    /// True when bounding or redaction deduplication omitted diagnostic detail.
+    #[serde(default)]
+    pub option_inventory_diagnostics_truncated: bool,
+    /// Full selected revision SHA.
+    pub revision: String,
+    /// Selected retained generation in generation mode.
+    pub generation: Option<i32>,
+    /// Safe lifecycle or integrity diagnostic.
+    pub error: Option<String>,
+    /// Opaque persisted snapshot token that binds continuation pages.
+    pub snapshot_token: Option<String>,
+    /// Authoritative number of sources in the observed inventory.
+    pub total: i64,
+    /// Applied zero-based offset.
+    pub offset: i64,
+    /// Applied bounded page size.
+    pub limit: i64,
+    /// Sources in deterministic server order.
+    pub sources: Vec<EvaluationModuleSummary>,
+}
+
+/// Adds baseline comparison data to one evaluated option.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvaluatedOptionRow {
+    /// Selected revision value and provenance, or no value when removed.
+    pub option: Option<EvaluatedOption>,
+    /// Baseline value when the option existed there.
+    pub before: Option<EvaluatedOption>,
+    /// Whether selected and baseline payloads differ.
+    pub changed: Option<bool>,
+    /// Type-aware change summary when a comparison is available.
+    pub diff: Option<TypedOptionDiff>,
+}
+
+/// Classifies an option comparison without treating removal as missing data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OptionChangeKind {
+    /// The option exists only in the selected snapshot.
+    Added,
+    /// The option exists only in the baseline snapshot.
+    Removed,
+    /// The option exists in both snapshots with different typed content.
+    Modified,
+    /// The option content is unchanged.
+    Unchanged,
+}
+
+/// Describes typed additions and removals for an option comparison.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct TypedOptionDiff {
+    /// Option-level change classification.
+    pub kind: OptionChangeKind,
+    /// Safe value kind used for presentation.
+    pub value_kind: String,
+    /// Added values, package identities, elements, or attributes.
+    pub added: Vec<Value>,
+    /// Removed values, package identities, elements, or attributes.
+    pub removed: Vec<Value>,
+}
+
+/// Represents an evaluated option without fabricating unsupported data.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "value", rename_all = "snake_case")]
+pub enum SafeOptionValue {
+    /// A JSON scalar.
+    Scalar(Value),
+    /// Package identity and output metadata.
+    Package(SafePackageValue),
+    /// A bounded list of tagged values.
+    List(Vec<SafeOptionValue>),
+    /// A bounded attribute set.
+    AttributeSet(serde_json::Map<String, Value>),
+    /// A bounded submodule value.
+    Submodule(serde_json::Map<String, Value>),
+    /// A function or another value that cannot be serialized safely.
+    Opaque { type_name: String },
+    /// Evaluation did not produce a value.
+    Failed(SafeEvaluationError),
+}
+
+/// Describes a package without depending on a live store path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SafePackageValue {
+    /// Package display name.
+    pub name: Option<String>,
+    /// Package pname.
+    pub pname: Option<String>,
+    /// Package version.
+    pub version: Option<String>,
+    /// Evaluated output path.
+    pub output_path: Option<String>,
+}
+
+/// Describes a failed or deliberately unsupported evaluation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SafeEvaluationError {
+    /// Stable machine-readable failure category.
+    pub code: String,
+    /// Redacted diagnostic suitable for display.
+    pub message: String,
+}
+
+/// Identifies one option definition and its source provenance.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct OptionDefinitionProvenance {
+    /// Source path reported by the Nix module system, when available.
+    pub source_path: Option<String>,
+    /// Source input when tracked metadata resolved it.
+    pub source_input: Option<String>,
+    /// Full source revision when resolved.
+    pub source_revision: Option<String>,
+    /// Safe definition value.
+    pub value: Option<Value>,
+    /// Whether evaluator metadata identifies this definition as winning.
+    pub winning: bool,
+    /// Module-system priority when available.
+    #[serde(default)]
+    pub priority: Option<i64>,
+    /// Stable evaluator-provided definition status.
+    #[serde(default)]
+    pub status: Option<String>,
+    /// Safe explanation of why this definition won or lost.
+    #[serde(default)]
+    pub winner_note: Option<String>,
+    /// Server-issued navigation identity after visibility checks.
+    #[serde(default)]
+    pub tracked_flake: Option<TrackedFlakeIdentity>,
+}
+
+/// Contains the safe representation of one NixOS option.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvaluatedOption {
+    /// Full option path.
+    pub path: String,
+    /// Declared NixOS option type, when metadata supplied it.
+    pub declared_type: Option<String>,
+    /// Safe metadata evaluation failure, distinct from a missing declared type.
+    #[serde(default)]
+    pub metadata_error: Option<SafeEvaluationError>,
+    /// Tagged evaluated value or explicit failure.
+    pub value: SafeOptionValue,
+    /// Complete provenance emitted by the evaluator.
+    pub definitions: Vec<OptionDefinitionProvenance>,
+    /// Whether provenance proves that lower-priority definitions exist.
+    /// `None` means definition provenance was unavailable.
+    pub overridden: Option<bool>,
+}
+
+/// Reports the result of an explicit targeted Config Inspector action.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueueConfigInspectionResponse {
+    /// Full requested revision SHA.
+    pub revision: String,
+    /// Exact effective NixOS configuration name.
+    pub configuration_name: String,
+    /// Lifecycle after the idempotent action.
+    pub lifecycle: SnapshotLifecycle,
+    /// Whether this request inserted a queued inspection job.
+    pub queued: bool,
+}
+
+/// Selects one bounded, non-authoritative Config Explorer observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigObservationKind {
+    /// Lists immediate children at the option-tree root.
+    Root,
+    /// Lists immediate children below an exact structured prefix.
+    Prefix,
+    /// Reads safe value and basic metadata for one exact option.
+    Option,
+    /// Reads bounded definition provenance for one exact option.
+    Provenance,
+    /// Lists bounded identities with surviving non-default assignments.
+    ConfiguredIndex,
+}
+
+/// Requests one exact Config Explorer operation without accepting Nix source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CreateConfigObservationRequest {
+    /// Closed observation operation.
+    pub kind: ConfigObservationKind,
+    /// Exact option path components. Dotted text is not an identity.
+    pub path_components: Vec<String>,
+    /// Zero-based immediate-child offset. Non-tree operations require zero.
+    #[serde(default)]
+    pub child_offset: u32,
+    /// True for a bounded automatic preview started without an explicit
+    /// click. The server accepts this only for [`ConfigObservationKind::Option`]
+    /// and applies a short execution budget instead of the explicit deadline.
+    #[serde(default)]
+    pub automatic: bool,
+}
+
+/// Describes the durable lifecycle of one scoped observation request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigObservationLifecycle {
+    /// The request is queued for a worker pass.
+    Queued,
+    /// The request is waiting for evaluator capacity.
+    WaitingForCapacity,
+    /// The evaluator is inspecting the requested scope.
+    Running,
+    /// An immutable observation is available.
+    Succeeded,
+    /// The bounded observation failed.
+    Failed,
+}
+
+/// Reports one exact scoped request without evaluator internals.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigObservationRequestResponse {
+    /// Durable request identity.
+    pub request_id: Uuid,
+    /// Full immutable commit SHA.
+    pub revision: String,
+    /// Effective NixOS configuration name.
+    pub configuration_name: String,
+    /// Exact requested operation.
+    pub kind: ConfigObservationKind,
+    /// Exact requested path components.
+    pub path_components: Vec<String>,
+    /// Zero-based immediate-child offset included in the request identity.
+    #[serde(default)]
+    pub child_offset: u32,
+    /// Current durable lifecycle.
+    pub lifecycle: ConfigObservationLifecycle,
+    /// Immutable observation identity after success.
+    pub observation_id: Option<Uuid>,
+    /// Bounded safe failure message after failure.
+    pub error: Option<String>,
+    /// Number of executions that acquired capacity.
+    pub attempts: i32,
+    /// Last running heartbeat, if the request is running.
+    pub heartbeat_at: Option<DateTime<Utc>>,
+    /// Whether the POST reused an active request or cached observation.
+    #[serde(default)]
+    pub reused: bool,
+}
+
+/// Classifies one immediate Config Explorer child.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigObservationChildKind {
+    /// The child is an exact option.
+    Option,
+    /// The child is an expandable prefix.
+    Prefix,
+    /// The child is unreadable and has no inferred descendants.
+    Unavailable,
+}
+
+/// Identifies one immediate child by its exact structured path.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigObservationChild {
+    /// Exact child path components.
+    pub path_components: Vec<String>,
+    /// Stable content key supplied by the server.
+    pub key: String,
+    /// Child behavior observed by the server.
+    pub kind: ConfigObservationChildKind,
+}
+
+/// Identifies one configured option without loading its value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfiguredOptionIdentity {
+    /// Exact option path components.
+    pub path_components: Vec<String>,
+    /// Stable content key supplied by the server.
+    pub key: String,
+}
+
+/// Describes one bounded traversal diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigObservationDiagnostic {
+    /// Exact affected path components.
+    pub path_components: Vec<String>,
+    /// Stable diagnostic category.
+    pub code: String,
+    /// Bounded safe diagnostic.
+    pub message: String,
+}
+
+/// Describes one bounded configured-option classifier diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigClassifierDiagnostic {
+    /// Stable content key for the affected option.
+    pub key: String,
+    /// Stable diagnostic category.
+    pub code: String,
+    /// Bounded safe diagnostic.
+    pub message: String,
+}
+
+/// Describes one definition without claiming complete provenance.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigObservationDefinition {
+    /// Source path reported by the module system, when available.
+    pub source_path: Option<String>,
+    /// Module-system priority, when available.
+    pub priority: Option<i64>,
+}
+
+/// Contains one typed, bounded Config Explorer payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum ConfigObservationPayload {
+    /// Contains immediate children at the root.
+    Root {
+        /// Exact empty root path.
+        path_components: Vec<String>,
+        /// Applied zero-based child offset.
+        child_offset: u32,
+        /// Bounded immediate children.
+        children: Vec<ConfigObservationChild>,
+        /// Whether additional children were omitted.
+        children_truncated: bool,
+        /// Total immediate children before bounding.
+        total_children: u64,
+    },
+    /// Contains immediate children below one exact prefix.
+    Prefix {
+        /// Exact requested prefix components.
+        path_components: Vec<String>,
+        /// Applied zero-based child offset.
+        child_offset: u32,
+        /// Bounded immediate children.
+        children: Vec<ConfigObservationChild>,
+        /// Whether additional children were omitted.
+        children_truncated: bool,
+        /// Total immediate children before bounding.
+        total_children: u64,
+    },
+    /// Contains safe basic detail for one exact option.
+    Option {
+        /// Exact option path components.
+        path_components: Vec<String>,
+        /// Stable content key supplied by the server.
+        key: String,
+        /// Declared NixOS option type, when available.
+        declared_type: Option<String>,
+        /// Whether the module system reports the option as defined.
+        is_defined: bool,
+        /// Highest surviving module priority, when available.
+        highest_prio: Option<i64>,
+        /// Existing safe encoded-value contract.
+        value: SafeOptionValue,
+    },
+    /// Contains separately requested bounded provenance.
+    Provenance {
+        /// Exact option path components.
+        path_components: Vec<String>,
+        /// Stable content key supplied by the server.
+        key: String,
+        /// Bounded definitions in server order.
+        definitions: Vec<ConfigObservationDefinition>,
+        /// Whether additional definitions were omitted.
+        definitions_truncated: bool,
+        /// Total definitions before bounding.
+        total_definitions: u64,
+    },
+    /// Contains the independent bounded configured-options index.
+    ConfiguredIndex {
+        /// Exact empty index path.
+        path_components: Vec<String>,
+        /// Total option identities traversed.
+        total_traversed: u64,
+        /// Bounded traversal diagnostics.
+        diagnostics: Vec<ConfigObservationDiagnostic>,
+        /// Whether traversal diagnostics were omitted.
+        diagnostics_truncated: bool,
+        /// Bounded configured identities.
+        configured: Vec<ConfiguredOptionIdentity>,
+        /// Total configured identities before bounding.
+        total_configured: u64,
+        /// Whether configured identities were omitted.
+        configured_truncated: bool,
+        /// Bounded classifier diagnostics.
+        classifier_diagnostics: Vec<ConfigClassifierDiagnostic>,
+        /// Whether classifier diagnostics were omitted.
+        classifier_diagnostics_truncated: bool,
+    },
+}
+
+/// Returns one immutable, typed Config Explorer observation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigObservationResponse {
+    /// Immutable observation identity.
+    pub observation_id: Uuid,
+    /// Full immutable commit SHA.
+    pub revision: String,
+    /// Effective NixOS configuration name.
+    pub configuration_name: String,
+    /// Observation schema version.
+    pub schema_version: i32,
+    /// Exact operation that produced the payload.
+    pub kind: ConfigObservationKind,
+    /// Exact structured path components.
+    pub path_components: Vec<String>,
+    /// Applied immediate-child offset included in the observation identity.
+    #[serde(default)]
+    pub child_offset: u32,
+    /// Typed redacted observation payload.
+    pub payload: ConfigObservationPayload,
+    /// Observation creation time.
+    pub created_at: DateTime<Utc>,
+}
+
+/// Classifies a declared-to-managed flake system relationship.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ReconciledFlakeSystemState {
+    /// The selected revision declares a managed configuration.
+    Managed,
+    /// The selected revision declares an unmanaged configuration.
+    DeclaredUnmanaged,
+    /// A managed system is absent from the selected revision.
+    ManagedUndeclared,
+}
+
+/// Represents one system in authoritative flake reconciliation.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReconciledFlakeSystem {
+    /// Declared or managed configuration name.
+    pub configuration_name: String,
+    /// Managed Crystal Forge system.
+    pub system_id: Option<Uuid>,
+    /// Managed hostname.
+    pub hostname: Option<String>,
+    /// Visible managed environment name.
+    pub environment_name: Option<String>,
+    /// Visible managed environment color.
+    pub environment_color: Option<String>,
+    /// Reconciled relationship state.
+    pub state: ReconciledFlakeSystemState,
+    /// Full deployed revision when it differs from the selected revision.
+    pub deployed_revision: Option<String>,
+    /// Whether multiple managed hosts collapse onto this output name.
+    pub output_collapsed: bool,
+}
+
+/// Describes bounded top-level flake output collection paging.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlakeOutputPagination {
+    /// Applied zero-based offset.
+    pub offset: usize,
+    /// Applied per-collection limit.
+    pub limit: usize,
+    /// Number of visible reconciliation rows for the active systems filter.
+    #[serde(default)]
+    pub system_total: i64,
+    /// Whether another reconciliation row exists after this page.
+    #[serde(default)]
+    pub systems_has_more: bool,
+}
+
+/// Describes one resolved input revision change.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlakeInputRevisionBump {
+    /// Stable lock node identity.
+    pub node: String,
+    /// Previous full locked revision.
+    pub before: Option<String>,
+    /// Selected full locked revision.
+    pub after: Option<String>,
+}
+
+/// Summarizes selected flake outputs against the Git first parent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FlakeOutputDelta {
+    /// Exact added-system count before the bounded sample was truncated.
+    pub systems_added_total: usize,
+    /// Exact removed-system count before the bounded sample was truncated.
+    pub systems_removed_total: usize,
+    /// Exact added-module count before the bounded sample was truncated.
+    pub modules_added_total: usize,
+    /// Exact removed-module count before the bounded sample was truncated.
+    pub modules_removed_total: usize,
+    /// Exact added-input count before the bounded sample was truncated.
+    pub inputs_added_total: usize,
+    /// Exact removed-input count before the bounded sample was truncated.
+    pub inputs_removed_total: usize,
+    /// Exact input-revision-change count before the bounded sample was truncated.
+    pub input_revision_bumps_total: usize,
+    /// Declared systems added at the selected revision.
+    pub systems_added: Vec<String>,
+    /// Declared systems removed at the selected revision.
+    pub systems_removed: Vec<String>,
+    /// Exported modules added at the selected revision.
+    pub modules_added: Vec<String>,
+    /// Exported modules removed at the selected revision.
+    pub modules_removed: Vec<String>,
+    /// Lock nodes added at the selected revision.
+    pub inputs_added: Vec<String>,
+    /// Lock nodes removed at the selected revision.
+    pub inputs_removed: Vec<String>,
+    /// Lock inputs whose resolved revision changed.
+    pub input_revision_bumps: Vec<FlakeInputRevisionBump>,
+}
+
+/// One safe option declaration exported by a flake module.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeModuleDeclaration {
+    /// Declared option path.
+    pub path: String,
+    /// Declared Nix option type.
+    pub declared_type: String,
+    /// Whether a safe default is present.
+    pub has_default: bool,
+    /// Safe default value when present.
+    pub default: Option<Value>,
+    /// Complete declaration source paths.
+    pub source_paths: Vec<String>,
+}
+
+/// One exported `nixosModules` output and its cached analysis.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeOutputModule {
+    /// Exported module name.
+    pub name: String,
+    /// Module description when emitted.
+    pub description: Option<String>,
+    /// Flake input that owns the exported module attribute.
+    pub source_input: Option<String>,
+    /// Full source revision when available.
+    pub source_revision: Option<String>,
+    /// Source path relative to the owning input root.
+    pub source_path: Option<String>,
+    /// Bounded declaration details.
+    pub declarations: Vec<FlakeModuleDeclaration>,
+    /// Whether `declarations` contains the authoritative complete declaration set.
+    #[serde(default)]
+    pub declarations_complete: bool,
+    /// Managed configurations that consume the module.
+    pub consumers: Vec<String>,
+    /// Authoritative declaration count.
+    pub declaration_count: i64,
+    /// Authoritative consumer count.
+    pub consumer_count: i64,
+    /// Safe module-analysis diagnostic.
+    pub error: Option<String>,
+}
+
+/// Returns one stable page of declarations for an exported module.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeModuleDeclarationsPage {
+    /// Selected flake-output snapshot lifecycle.
+    pub lifecycle: SnapshotLifecycle,
+    /// Full selected revision SHA.
+    pub revision: String,
+    /// Exact exported module name.
+    pub module_name: String,
+    /// Safe lifecycle or integrity diagnostic.
+    pub error: Option<String>,
+    /// Content digest that binds all continuation pages to one snapshot.
+    pub snapshot_token: Option<String>,
+    /// Authoritative declaration count.
+    pub total: i64,
+    /// Applied zero-based offset.
+    pub offset: usize,
+    /// Applied page limit, at most 100.
+    pub limit: usize,
+    /// Declarations in deterministic stable order.
+    pub declarations: Vec<FlakeModuleDeclaration>,
+}
+
+/// One resolved flake lock input.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeOutputInput {
+    /// Stable lock node identity.
+    pub node: String,
+    /// Root input names that resolve to this node.
+    pub names: Vec<String>,
+    /// Whether the root references this node directly.
+    pub direct: bool,
+    /// Whether this node is reachable only transitively.
+    pub transitive: bool,
+    /// Raw follows paths for root aliases.
+    pub follows: Vec<Value>,
+    /// Original lock metadata after server redaction.
+    pub original: Value,
+    /// Locked metadata after server redaction.
+    pub locked: Value,
+    /// Lock source type.
+    pub source_type: String,
+    /// Safe source URL when emitted.
+    pub source: Option<String>,
+    /// Full locked revision when emitted.
+    pub locked_revision: Option<String>,
+    /// Source update timestamp.
+    pub last_modified: Option<i64>,
+    /// Whether the input uses an indirect channel reference.
+    pub channel: bool,
+    /// Whether the lock source is revision-tracked.
+    pub tracked: bool,
+    /// Number of immediate children for a direct root input.
+    pub direct_descendant_count: Option<i64>,
+    /// Number of unique transitive descendants for a direct root input.
+    pub transitive_descendant_count: Option<i64>,
+}
+
+/// Reports whether exported-module evaluation metadata was available.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeModuleEvaluation {
+    /// Whether a nixpkgs library was available for module evaluation.
+    pub available: bool,
+    /// Library source used for evaluation.
+    pub source: Option<String>,
+    /// Safe diagnostic when evaluation was unavailable.
+    pub error: Option<String>,
+}
+
+/// Typed configuration-independent flake output payload.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeOutputPayload {
+    /// Declared `nixosConfigurations` names.
+    pub declared_systems: Vec<String>,
+    /// Exported module analysis.
+    pub exported_modules: Vec<FlakeOutputModule>,
+    /// Resolved lock inputs.
+    pub inputs: Vec<FlakeOutputInput>,
+    /// Authoritative direct input count.
+    pub direct_input_count: i64,
+    /// Authoritative resolved input count.
+    pub resolved_input_count: i64,
+    /// Safe lock-read diagnostic.
+    pub lock_error: Option<String>,
+    /// Exported-module evaluation state.
+    pub module_evaluation: FlakeModuleEvaluation,
+    /// Distinct full nixpkgs revisions in the lock graph.
+    #[serde(rename = "nixpkgsRevisions")]
+    pub nixpkgs_revisions: Vec<String>,
+    /// Whether multiple nixpkgs revisions are resolved.
+    pub multiple_nixpkgs_revisions: bool,
+}
+
+/// Returns cached revision-scoped flake outputs and reconciliation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FlakeOutputSnapshotResponse {
+    /// Snapshot lifecycle.
+    pub lifecycle: SnapshotLifecycle,
+    /// Full selected revision SHA.
+    pub revision: String,
+    /// Full Git first-parent revision when known.
+    pub first_parent_revision: Option<String>,
+    /// Whether Git authoritatively resolved parent data.
+    pub first_parent_resolved: bool,
+    /// Whether the first-parent output snapshot is available.
+    pub comparison_available: bool,
+    /// Safe failure diagnostic.
+    pub error: Option<String>,
+    /// Digest that binds continuation pages to the selected snapshot version.
+    pub snapshot_token: Option<String>,
+    /// Selected-revision output payload.
+    pub outputs: Option<FlakeOutputPayload>,
+    /// First-parent output payload when available.
+    pub previous_outputs: Option<FlakeOutputPayload>,
+    /// Typed first-parent delta when comparison is available.
+    pub delta: Option<FlakeOutputDelta>,
+    /// Authoritative system reconciliation.
+    pub systems: Vec<ReconciledFlakeSystem>,
+    /// Number of managed systems for the flake.
+    pub managed_system_count: i64,
+    /// Number of declared configurations at the revision.
+    pub declared_system_count: i64,
+    /// Number of declared configurations in the usable Git first parent.
+    pub previous_declared_system_count: Option<i64>,
+    /// Revision-global visible declared-but-unmanaged count.
+    pub declared_unmanaged_count: i64,
+    /// Revision-global visible managed-but-undeclared count.
+    pub managed_undeclared_count: i64,
+    /// Revision-global count of visible managed rows sharing an output name.
+    #[serde(default)]
+    pub output_collapsed_count: i64,
+    /// Revision-global count of visible systems pinned away from this revision.
+    #[serde(default)]
+    pub pinned_revision_count: i64,
+    /// Revision-global count of direct inputs older than 90 days.
+    #[serde(default)]
+    pub stale_direct_input_count: i64,
+    /// Number of exported modules at the revision before pagination.
+    pub exported_module_count: i64,
+    /// Applied collection pagination.
+    pub pagination: FlakeOutputPagination,
+}
+
+/// Selects one flake-system reconciliation subset.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FlakeSystemFilter {
+    /// Returns every visible reconciliation row.
+    #[default]
+    All,
+    /// Returns declarations without a visible managed system.
+    DeclaredUnmanaged,
+    /// Returns visible managed systems absent from the revision.
+    ManagedUndeclared,
+}
+
+impl FlakeSystemFilter {
+    /// Returns the server query representation.
+    pub const fn as_query_value(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::DeclaredUnmanaged => "declared_unmanaged",
+            Self::ManagedUndeclared => "managed_undeclared",
+        }
+    }
 }
 
 fn default_sync_status() -> String {
@@ -1113,10 +2888,19 @@ pub struct SystemComplianceBundlesResponse {
     pub bundles: Vec<SystemComplianceBundle>,
 }
 
+/// Gives one bundle lineage and the server-resolved assignment for this system.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemComplianceBundle {
+    /// Contains catalog metadata, not the selected assignment revision.
     pub bundle: ComplianceBundleSummary,
+    /// Contains this system's effective policy outcomes.
     pub rollup: ComplianceSystemRollup,
+    /// Identifies the selected immutable assignment's bundle version, when supplied.
+    #[serde(default)]
+    pub assigned_bundle_version_id: Option<Uuid>,
+    /// Gives the selected assignment's enforce or report-only mode, when supplied.
+    #[serde(default)]
+    pub assignment_mode: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
@@ -1198,6 +2982,27 @@ pub struct ComplianceEvidenceResponse {
     pub resolution_state: Option<String>,
 }
 
+/// Describes one normalized requirement mapping attached to compliance evidence.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ComplianceRequirementIdentity {
+    /// Identifies the immutable requirement version.
+    pub requirement_version_id: Uuid,
+    /// Contains the framework-published requirement or control identifier.
+    pub external_id: String,
+    /// Contains the optional human-readable requirement title.
+    pub title: Option<String>,
+    /// Identifies the authoritative framework lineage.
+    pub framework_id: Uuid,
+    /// Contains the human-readable framework name.
+    pub framework_name: String,
+    /// Identifies the immutable framework release.
+    pub framework_version_id: Uuid,
+    /// Contains the human-readable framework release version.
+    pub framework_version: String,
+    /// Contains the optional human-readable framework release title.
+    pub framework_title: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ComplianceControlEvidence {
     pub policy_id: Uuid,
@@ -1207,6 +3012,21 @@ pub struct ComplianceControlEvidence {
     pub summary: String,
     pub evidence_items: Vec<ComplianceEvidenceItem>,
     pub framework_mapping: String,
+    /// Contains normalized mapping identity when supplied by the server.
+    #[serde(default)]
+    pub requirements: Vec<ComplianceRequirementIdentity>,
+    /// Contains the authoritative composite assessment when one was recorded.
+    #[serde(default)]
+    pub composite_result: Option<CompositeAssessmentResult>,
+    /// Identifies the stable server finding used for remediation actions.
+    #[serde(default)]
+    pub finding_id: Option<Uuid>,
+    /// Binds a legacy finding to the exact authoritative observation.
+    #[serde(default)]
+    pub finding_observation: Option<FindingObservationReference>,
+    /// True when this control is composite even if no exact assessment exists yet.
+    #[serde(default)]
+    pub composite_expected: bool,
     /// Grouping metadata from the exact policy version used for this control.
     #[serde(default)]
     pub control_family: Option<String>,
@@ -1214,6 +3034,72 @@ pub struct ComplianceControlEvidence {
     pub cmmc_level: Option<i32>,
     #[serde(default)]
     pub cis_section: Option<String>,
+}
+
+/// Identifies the authoritative evidence source behind a stable finding.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FindingObservationSource {
+    /// Uses a deployed derivation's persisted Nix policy result.
+    NixPolicyResult,
+    /// Uses a completed CVE scan for the deployed derivation.
+    CveScan,
+}
+
+/// References one exact observation that the server can recompute.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FindingObservationReference {
+    /// Selects the authoritative evidence resolver.
+    pub source: FindingObservationSource,
+    /// Identifies the source derivation or scan.
+    pub source_id: String,
+    /// Identifies the effective immutable policy version.
+    pub policy_version_id: Uuid,
+    /// Binds the source values and effective policy semantics.
+    pub token: String,
+}
+
+/// Describes the server-computed result of one composite policy assessment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompositeAssessmentResult {
+    /// Identifies the persisted assessment when the server stored one.
+    #[serde(default)]
+    pub assessment_id: Option<Uuid>,
+    /// Identifies the evaluation attempt that produced the assessment.
+    #[serde(default)]
+    pub evaluation_attempt_id: Option<Uuid>,
+    /// Identifies the immutable policy semantics used for evaluation.
+    pub policy_version_id: Uuid,
+    /// Identifies the evaluated derivation when the assessment targeted one.
+    #[serde(default)]
+    pub target_store_path: Option<String>,
+    /// Contains the digest of the effective policy set.
+    #[serde(default)]
+    pub effective_set_digest: Option<String>,
+    /// Contains the digest of the effective policy configuration.
+    #[serde(default)]
+    pub effective_config_digest: Option<String>,
+    /// Contains the server-derived aggregate assessment status.
+    pub overall_status: String,
+    /// Contains the ordered results for each evaluated policy rule.
+    pub rule_results: Vec<CompositeAssessmentRuleResult>,
+}
+
+/// Describes one server-evaluated rule in a composite assessment.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CompositeAssessmentRuleResult {
+    /// Identifies the rule within its immutable policy version.
+    pub rule_id: Uuid,
+    /// Contains the rule evaluator kind.
+    pub kind: String,
+    /// Contains the evaluation phase in which the rule ran.
+    pub phase: String,
+    /// Contains the server-derived rule status.
+    pub status: String,
+    /// Contains the human-readable evaluation explanation.
+    pub detail: String,
+    /// Contains evaluator-specific evidence without changing its JSON shape.
+    pub evidence: serde_json::Value,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -1323,6 +3209,55 @@ pub struct DeploymentPolicySummary {
     /// Human-readable rationale
     #[serde(default)]
     pub rationale: Option<String>,
+}
+
+/// Search metadata for one NixOS option. The server derives these fields from
+/// the pinned NixOS module option set; `value_type` controls the policy value
+/// editor while unknown types deliberately fall back to a semantic string.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum NixosOptionValueType {
+    /// Uses a boolean editor and JSON boolean value.
+    Boolean,
+    /// Uses the server-supplied set of allowed values.
+    Enum,
+    /// Uses a signed integer editor and JSON number value.
+    Integer,
+    /// Uses a single-line semantic string value.
+    String,
+    /// Uses a multiline semantic string value.
+    Lines,
+    /// Preserves an unrecognized type as a semantic string.
+    Unknown,
+}
+
+impl NixosOptionValueType {
+    /// Returns the stable editor type name used by policy authoring state.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Boolean => "boolean",
+            Self::Enum => "enum",
+            Self::Integer => "integer",
+            Self::String => "string",
+            Self::Lines => "lines",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+/// Describes one option from the server's pinned NixOS metadata index.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct NixosOptionMetadata {
+    /// Contains the canonical NixOS option path.
+    pub path: String,
+    /// Selects the value editor without overriding target evaluation semantics.
+    pub value_type: NixosOptionValueType,
+    /// Contains allowed enum values when the option has a closed value set.
+    #[serde(default)]
+    pub enum_values: Vec<serde_json::Value>,
+    /// Contains the option documentation supplied by the metadata index.
+    #[serde(default)]
+    pub description: Option<String>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1449,6 +3384,57 @@ pub struct DeploymentPolicyVersionSummary {
     /// Evidence collection specifications for ATO audits
     #[serde(default)]
     pub evidence_specs: Vec<EvidenceSpec>,
+    /// Authoritative imported-origin provenance recorded at import time.
+    /// Empty for policies authored in Crystal Forge. Read-only: the editor
+    /// renders it and never submits it.
+    #[serde(default)]
+    pub provenance: Vec<PolicyOriginProvenance>,
+}
+
+/// One authoritative imported-origin record for a policy version, mirroring the
+/// server DTO. Populated from the immutable source artifact and its recorded
+/// source-object mapping, including origins inherited from the version a draft
+/// was derived from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyOriginProvenance {
+    /// Identifies the immutable imported source artifact.
+    pub source_artifact_id: Uuid,
+    /// Contains the original source filename.
+    pub filename: String,
+    /// Contains the source artifact media type.
+    pub media_type: String,
+    /// Contains the artifact's lowercase SHA-256 digest.
+    pub sha256: String,
+    /// Contains the importer version that parsed the source.
+    pub parser_version: String,
+    /// Contains the detected XCCDF version when the artifact declared one.
+    #[serde(default)]
+    pub detected_xccdf_version: Option<String>,
+    /// Contains the imported source object kind when available.
+    #[serde(default)]
+    pub object_kind: Option<String>,
+    /// Contains the source object's stable external identity when available.
+    #[serde(default)]
+    pub source_identity: Option<String>,
+    /// Describes the recorded import fidelity when available.
+    #[serde(default)]
+    pub fidelity: Option<String>,
+    /// Identifies the user who imported the source when retained by the server.
+    #[serde(default)]
+    pub imported_by: Option<Uuid>,
+    /// Contains the server-resolved importer display name when available.
+    #[serde(default)]
+    pub imported_by_display: Option<String>,
+    /// Records when the source artifact was imported.
+    pub imported_at: DateTime<Utc>,
+    /// Identifies the first policy version created from this source object.
+    pub origin_policy_version_id: Uuid,
+    /// Counts derivation edges from the original imported policy version.
+    #[serde(default)]
+    pub lineage_depth: i32,
+    /// Indicates that the current version inherited rather than created this origin.
+    #[serde(default)]
+    pub inherited: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2015,6 +4001,34 @@ pub struct TrustPolicyVersionResponse {
     pub trusted_at: Option<DateTime<Utc>>,
 }
 
+/// Requests publication of one immutable policy version.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PublishPolicyVersionRequest {
+    /// Supplies the server-authoritative digest for optimistic validation when
+    /// available.
+    pub expected_semantic_digest: Option<String>,
+}
+
+/// Requests a new mutable draft from the current published policy version.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreatePolicyDraftRequest {
+    /// Overrides the server-derived version when present.
+    pub new_version: Option<String>,
+}
+
+/// Describes a policy draft created from an immutable published version.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CreatePolicyDraftResponse {
+    /// Identifies the new mutable policy version.
+    pub version_id: Uuid,
+    /// Contains the explicit or server-derived version string.
+    pub version: String,
+    /// Contains the new version's publication state.
+    pub publication_state: String,
+    /// Identifies the immutable published source version.
+    pub derived_from_version_id: Uuid,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TrustBundleVersionRequest {
     pub trusted: bool,
@@ -2169,6 +4183,39 @@ impl DeletionEligibility {
     }
 }
 
+/// Request body for bulk-deleting policies from the catalog's multi-select
+/// toolbar (TASK-433 Phase 1 — policy catalog scaling).
+#[derive(Debug, Clone, Serialize)]
+pub struct BulkDeletePoliciesRequest {
+    /// Identifies the policy lineages to delete independently.
+    pub policy_ids: Vec<Uuid>,
+}
+
+/// One policy that a bulk-delete request could not remove, with the same
+/// authoritative eligibility payload the single-policy delete endpoint
+/// returns on conflict.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BulkDeleteSkippedPolicy {
+    /// Identifies the requested policy lineage that was not deleted.
+    pub policy_id: Uuid,
+    /// Stable machine-readable reason: "not_found" or "deletion_blocked".
+    pub reason: String,
+    /// Contains authoritative deletion blockers for a blocked policy.
+    #[serde(default)]
+    pub eligibility: Option<DeletionEligibility>,
+}
+
+/// Response for a bulk-delete request. Every requested id resolves into
+/// exactly one of `deleted` or `skipped`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BulkDeletePoliciesResponse {
+    /// Contains policy lineage IDs that the server deleted.
+    pub deleted: Vec<Uuid>,
+    /// Contains requested policies the server did not delete and the reason.
+    #[serde(default)]
+    pub skipped: Vec<BulkDeleteSkippedPolicy>,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AssignmentListResponse {
     pub assignments: Vec<AssignmentResponse>,
@@ -2234,6 +4281,7 @@ pub struct CreateDeploymentPolicyRequest {
     /// Evidence collection specifications for ATO audits
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub evidence_specs: Vec<EvidenceSpec>,
+    /// Creates normalized requirement mappings with the new policy version.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub requirement_mappings: Vec<CreatePolicyMappingRequest>,
 }
@@ -2261,18 +4309,25 @@ pub struct UpdateDeploymentPolicyRequest {
     pub cci_ids: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub category: Option<String>,
+    /// Replaces, clears, or preserves the framework for `Some(Some(_))`,
+    /// `Some(None)`, or `None`, respectively.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub framework: Option<String>,
+    pub framework: Option<Option<String>>,
+    /// Replaces, clears, or preserves the severity.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub severity: Option<String>,
+    pub severity: Option<Option<String>>,
+    /// Replaces, clears, or preserves the control family.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub control_family: Option<String>,
+    pub control_family: Option<Option<String>>,
+    /// Replaces, clears, or preserves the CMMC level.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cmmc_level: Option<i32>,
+    pub cmmc_level: Option<Option<i32>>,
+    /// Replaces, clears, or preserves the CIS section.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub cis_section: Option<String>,
+    pub cis_section: Option<Option<String>>,
+    /// Replaces, clears, or preserves the rationale.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub rationale: Option<String>,
+    pub rationale: Option<Option<String>>,
     /// When `Some`, replace evidence specs; `Some([])` clears them.
     /// `None` (omitted) preserves the existing value.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2446,6 +4501,16 @@ pub struct BuildQueueSummary {
     pub building_count: i64,
     /// Number of builds waiting in the queue.
     pub queued_count: i64,
+    #[serde(default)]
+    pub failed_24h_count: i64,
+    #[serde(default)]
+    pub active_workers: i64,
+    #[serde(default)]
+    pub total_workers: i64,
+    #[serde(default)]
+    pub used_slots: i64,
+    #[serde(default)]
+    pub total_slots: i64,
     /// List of active build items (building + queued, limited).
     pub items: Vec<BuildQueueItem>,
     /// Server timestamp for freshness.
@@ -2457,6 +4522,12 @@ pub struct BuildQueueSummary {
 pub struct BuildQueueItem {
     #[serde(default)]
     pub job_id: Option<Uuid>,
+    /// Database commit identity for exact-revision recovery.
+    #[serde(default)]
+    pub commit_id: Option<i32>,
+    /// Server-owned terminal failure code used by operator recovery actions.
+    #[serde(default)]
+    pub server_failure_code: Option<String>,
     #[serde(default)]
     pub system_id: Option<Uuid>,
     #[serde(default)]
@@ -2502,6 +4573,64 @@ pub struct BuildQueueItem {
     pub cached_derivs: i64,
 }
 
+/// Identifies the Builds collection that owns an exact attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BuildAttemptCollection {
+    /// The attempt is queued, building, or stopping.
+    Active,
+    /// The attempt completed, failed, or was cancelled.
+    Completed,
+}
+
+/// Contains one authorization-scoped build attempt and its owning collection.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuildAttemptLookupResponse {
+    /// Collection that the Builds view must select.
+    pub collection: BuildAttemptCollection,
+    /// Exact visible build attempt.
+    pub attempt: BuildQueueItem,
+}
+
+/// Result of idempotently requeueing a terminal build attempt.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequeueBuildJobResponse {
+    /// New or existing active attempt identity.
+    pub attempt_id: Uuid,
+    /// Immutable lineage attempt number.
+    pub attempt_number: i32,
+    /// Current active attempt status.
+    pub status: String,
+    /// `created` or `reused`.
+    pub outcome: String,
+}
+
+/// Structured error returned by the build requeue endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RequeueBuildJobErrorResponse {
+    /// Stable machine-readable error code.
+    pub error: String,
+    /// Human-readable error summary.
+    pub message: String,
+    /// Exact commit that requires authoritative re-evaluation.
+    #[serde(default)]
+    pub commit_id: Option<i32>,
+    /// Current lifecycle status for a visible non-terminal conflict.
+    #[serde(default)]
+    pub status: Option<String>,
+}
+
+/// Result of requesting authoritative commit re-evaluation.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ReEvaluateCommitResponse {
+    /// Stable success marker.
+    pub status: String,
+    /// True when this request created queued evaluation work.
+    pub queued: bool,
+    /// Human-readable server outcome.
+    pub message: String,
+}
+
 fn default_attempt_number() -> i32 {
     1
 }
@@ -2511,6 +4640,8 @@ fn default_attempt_number() -> i32 {
 pub struct EvalQueueSummary {
     pub active_count: i64,
     pub completed_count: i64,
+    #[serde(default)]
+    pub successful_count: i64,
     pub failed_count: i64,
     #[serde(default)]
     pub domain_total: i64,
@@ -2524,6 +4655,18 @@ pub struct EvalQueueSummary {
 /// A single commit item in the evaluation queue.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalQueueItem {
+    /// Configuration coverage unavailable for this attempt or caller.
+    #[serde(default)]
+    pub policy_unavailable_count: i64,
+    /// Discovered configurations explicitly not selected for execution.
+    #[serde(default)]
+    pub unselected_count: i64,
+    /// True only when the represented attempt has a verified visible inventory.
+    #[serde(default)]
+    pub inventory_available: bool,
+    /// Selected configurations without an attributable terminal gate result.
+    #[serde(default)]
+    pub policy_pending_count: i64,
     pub commit_id: i32,
     pub flake_id: i32,
     pub flake_name: String,
@@ -2539,7 +4682,16 @@ pub struct EvalQueueItem {
     pub queue_position: i64,
     pub systems: Vec<String>,
     pub system_count: i64,
+    /// Counts persisted derivation records for this attempt, not closure
+    /// packages or outputs. `None` means unavailable or unattributable legacy
+    /// records. Isolated mock outcomes do not contribute to this count.
+    #[serde(default)]
+    pub derivation_count: Option<i64>,
     pub passed_count: i64,
+    /// Known attempt-scoped counts are available, possibly with partial coverage.
+    /// False means unavailable, not zero passing or complete coverage.
+    #[serde(default)]
+    pub policy_counts_available: bool,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
     /// 1-indexed attempt number within this evaluation's retry lineage.
@@ -2556,6 +4708,18 @@ pub struct ReorderEvalQueueRequest {
 /// A single row in the eval history list.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalHistoryItem {
+    /// Configuration coverage unavailable for this attempt or caller.
+    #[serde(default)]
+    pub policy_unavailable_count: i64,
+    /// Discovered configurations explicitly not selected for execution.
+    #[serde(default)]
+    pub unselected_count: i64,
+    /// True only when the represented attempt has a verified visible inventory.
+    #[serde(default)]
+    pub inventory_available: bool,
+    /// Selected configurations without an attributable terminal gate result.
+    #[serde(default)]
+    pub policy_pending_count: i64,
     pub commit_id: i32,
     pub flake_id: i32,
     pub flake_name: String,
@@ -2572,7 +4736,16 @@ pub struct EvalHistoryItem {
     pub evaluation_duration_ms: Option<i64>,
     pub evaluation_error_message: Option<String>,
     pub system_count: i64,
+    /// Counts persisted derivation records for this attempt, not closure
+    /// packages or outputs. `None` means unavailable or unattributable legacy
+    /// records. Isolated mock outcomes do not contribute to this count.
+    #[serde(default)]
+    pub derivation_count: Option<i64>,
     pub passed_count: i64,
+    /// Known attempt-scoped counts are available, possibly with partial coverage.
+    /// False means unavailable, not zero passing or complete coverage.
+    #[serde(default)]
+    pub policy_counts_available: bool,
     pub policy_failed_count: i64,
     pub eval_failed_count: i64,
     pub alert_occurrence_id: String,
@@ -2601,11 +4774,22 @@ pub struct EvalLogEntry {
     pub message: String,
 }
 
+/// Typed evaluation-time matrix wire contract, shared by matrix presentation.
+#[path = "../views/evaluations/policy_wire.rs"]
+pub mod eval_policy_matrix;
+
+/// Returns flat compatibility evidence and optional captured provenance.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct EvalPolicyMatrixResponse {
+    /// Identifies the evaluated commit.
     pub commit_id: i32,
+    /// Names compatibility checks, including the global platform check.
     pub policies: Vec<String>,
+    /// Contains compatibility results by evaluator configuration.
     pub systems: Vec<EvalPolicySystemRow>,
+    /// Contains attempt-scoped provenance; older servers can omit this field.
+    #[serde(default)]
+    pub matrix: Option<eval_policy_matrix::EvalPolicyMatrixSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2676,29 +4860,126 @@ pub struct SystemRollbackRequest {
     pub target_commit: String,
 }
 
+/// Requests rollback to an exact retained generation artifact.
+///
+/// Either the retained artifact identity or the system-local generation
+/// authorizes target resolution. [`Self::store_path`] can only narrow that
+/// server-side identity.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemRollbackGenerationRequest {
-    pub store_path: String,
+    /// Identifies the durable retained generation artifact.
+    pub generation_snapshot_id: Option<Uuid>,
+    /// Identifies the retained generation within its system.
+    pub generation: Option<i32>,
+    /// Narrows artifact resolution without granting rollback authority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub store_path: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+/// Selects how a manual deployment request treats an `auto_latest` policy.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualDeploymentAction {
+    /// Deploy under the current manual or pinned policy.
+    #[default]
+    Deploy,
+    /// Deploy once and preserve the persisted `auto_latest` policy.
+    ContinueAutoLatest,
+    /// Persist the manual policy before attempting deployment.
+    ConvertToManual,
+}
+
+/// Requests deployment of a specific commit.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeploySystemRequest {
+    /// Full 40- or 64-character hexadecimal commit identity to deploy.
     pub commit_sha: String,
+    /// Specifies how the request handles an `auto_latest` system.
+    #[serde(default)]
+    pub action: ManualDeploymentAction,
+    /// Stable identity reused while retrying the same deployment intent.
+    pub request_id: Option<Uuid>,
 }
 
+/// Persisted system policy after a manual deployment request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualDeploymentPolicyState {
+    /// Automatic latest-commit deployment remains persisted.
+    AutoLatest,
+    /// Manual deployment is persisted.
+    Manual,
+    /// The pinned deployment policy remains persisted.
+    Pinned,
+}
+
+/// Policy conversion result for a manual deployment request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualDeploymentConversionState {
+    /// The request did not ask to change policy.
+    NotRequested,
+    /// This request persisted the manual policy.
+    Converted,
+    /// An earlier request already persisted the manual policy.
+    AlreadyManual,
+}
+
+/// Pending deployment result for a manual deployment request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManualDeploymentRequestState {
+    /// This request created pending deployment work.
+    Queued,
+    /// Active pending work already exists for this target.
+    AlreadyQueued,
+    /// No deployment work was queued by this attempt.
+    Failed,
+}
+
+/// Reports persisted policy and deployment state independently.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManualDeploymentResponse {
+    /// Persisted policy after the request.
+    pub policy: ManualDeploymentPolicyState,
+    /// Policy conversion result.
+    pub conversion: ManualDeploymentConversionState,
+    /// Pending deployment result.
+    pub deployment: ManualDeploymentRequestState,
+    /// New or reused pending deployment identity.
+    pub deployment_id: Option<Uuid>,
+    /// Human-readable result including partial success.
+    pub message: String,
+}
+
+/// Contains tracked commits and an observational current-revision mapping.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SystemCommitsResponse {
+    /// Tracked commits in stable newest-first order.
     pub commits: Vec<CommitInfo>,
+    /// Full current SHA when the server mapped the observation unambiguously.
     pub current_commit: Option<String>,
 }
 
+/// Describes one tracked commit and its targeted Config prerequisites.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CommitInfo {
+    /// Full immutable commit SHA used for requests and navigation.
     pub sha: String,
+    /// Display-only abbreviated SHA.
     pub short_sha: String,
+    /// Commit message.
     pub message: String,
+    /// Commit author.
     pub author: String,
+    /// RFC 3339 commit timestamp.
     pub timestamp: String,
+    /// Indicates that exact targeted Config observations can start.
+    #[serde(default)]
+    pub config_inspectable: bool,
+    /// Indicates that the server has observed this commit deployed on the system.
+    #[serde(default)]
+    pub deployed_here: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2707,13 +4988,28 @@ pub struct SystemGenerationsResponse {
     pub current_generation: Option<i32>,
 }
 
+/// Describes one system-local generation retained by the server.
+///
+/// Rollback eligibility depends on retained snapshot identity. A store path is
+/// optional metadata and cannot authorize rollback.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemGeneration {
+    /// Identifies the generation within its system.
     pub generation: i32,
+    /// Provides an optional store-path narrowing hint.
     pub store_path: Option<String>,
+    /// Identifies the full commit associated with the generation, when known.
     pub commit_hash: Option<String>,
+    /// Records when the server first observed the generation.
     pub timestamp: DateTime<Utc>,
+    /// Indicates whether this generation is currently active.
     pub is_current: bool,
+    /// Identifies the durable retained artifact that authorizes exact rollback.
+    #[serde(default)]
+    pub generation_snapshot_id: Option<Uuid>,
+    /// Indicates whether the server can resolve exact retained rollback lineage.
+    #[serde(default)]
+    pub rollback_eligible: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -2915,6 +5211,66 @@ pub struct HardeningServiceResultResponse {
     pub missing_directives_count: i32,
 }
 
+/// Identifies the completed hardening scan selected for one revision target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemHardeningInventorySourceResponse {
+    /// Identifies the selected completed hardening scan.
+    pub scan_id: Uuid,
+    /// Gives the real scan completion time.
+    pub completed_at: DateTime<Utc>,
+    /// Gives the aggregate score persisted with the selected scan.
+    pub overall_score: Option<i32>,
+    /// Counts services persisted for the selected scan.
+    pub total_services: i32,
+}
+
+/// Reports the newest hardening attempt for one exact revision target.
+///
+/// This is lifecycle information, not evidence. A `queued`, `scanning`, or
+/// `failed` attempt never replaces the completed evidence carried by
+/// [`SystemHardeningInventoryResponse::source`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemHardeningInventoryAttemptResponse {
+    /// Identifies the newest attempt.
+    pub scan_id: Uuid,
+    /// Gives `queued`, `scanning`, `failed`, or `completed`.
+    pub state: String,
+    /// Gives `manual`, `legacy`, `post_build`, or `backfill`.
+    pub source_trigger: String,
+    /// Gives the admission time.
+    pub scheduled_at: Option<DateTime<Utc>>,
+    /// Gives the execution start time, when execution started.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Gives the terminal time, when the attempt finished.
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Counts execution attempts recorded for the attempt.
+    pub attempts: i32,
+    /// Gives server-redacted, bounded failure text for a `failed` attempt.
+    pub error: Option<String>,
+}
+
+/// Returns hardening evidence for one server-authorized system revision target.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemHardeningInventoryResponse {
+    /// Echoes the server-validated target selection.
+    pub selection: SystemCveInventorySelection,
+    /// Identifies the exact derivation, or is `None` when Current is unresolved.
+    pub derivation_id: Option<i32>,
+    /// Gives selected scan provenance, or `None` when this target has no scan.
+    pub source: Option<SystemHardeningInventorySourceResponse>,
+    /// Contains only service rows from the selected scan.
+    pub services: Vec<HardeningServiceResultResponse>,
+    /// Gives the newest attempt, or `None` when this target was never scanned.
+    ///
+    /// The default keeps responses from a server that predates the lifecycle
+    /// contract readable. When completed `source` evidence exists, the UI
+    /// derives the completed state instead of claiming the target was unscanned.
+    #[serde(default)]
+    pub attempt: Option<SystemHardeningInventoryAttemptResponse>,
+    /// Is true when mutations cannot apply to the selected historical target.
+    pub read_only: bool,
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HardeningJustificationResponse {
     pub id: Uuid,
@@ -3046,6 +5402,9 @@ pub struct SystemCommitHistory {
     /// Optional config identity shown on timeline cards.
     #[serde(default)]
     pub config_identity: Option<String>,
+    /// Indicates that exact targeted Config observations can start.
+    #[serde(default)]
+    pub config_inspectable: bool,
 }
 
 /// Deployment log entry for the Logs tab.
@@ -3117,6 +5476,291 @@ pub struct SystemVulnerability {
     /// Last update timestamp for saved justification.
     #[serde(default)]
     pub justification_updated_at: Option<DateTime<Utc>>,
+    /// Contains server-issued exact-CVE remediation context when available.
+    #[serde(default)]
+    pub remediation: Option<crate::views::poam_api::CvePoamRelationship>,
+}
+
+/// Identifies one stable row in a system CVE inventory.
+///
+/// Display package names and versions are evidence context and are not part of
+/// this identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct SystemCveInventoryRowIdentity {
+    /// Gives the canonical CVE identifier.
+    pub canonical_cve_id: String,
+    /// Gives the canonical package name.
+    pub canonical_package_name: String,
+}
+
+/// Contains one vulnerability from a bounded system CVE inventory page.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemCveInventoryVulnerability {
+    /// Gives the stable identity used for pagination, deduplication, and row keys.
+    pub stable_identity: SystemCveInventoryRowIdentity,
+    /// Gives the canonical CVE identifier.
+    pub cve_id: String,
+    /// Gives the canonical package name independent of scanner display text.
+    pub canonical_package_name: String,
+    /// Gives the normalized CVSS severity.
+    pub severity: CveSeverity,
+    /// Gives the current CVSS v3 score when available.
+    pub cvss_score: Option<f32>,
+    /// Gives the current CVE description.
+    pub description: String,
+    /// Gives the package name emitted by the selected evidence source.
+    pub package_name: String,
+    /// Gives the installed version emitted by the selected evidence source.
+    pub installed_version: String,
+    /// Gives the known fixed version when available.
+    pub fixed_version: Option<String>,
+    /// Gives the selected scan completion time when available.
+    pub first_seen: Option<DateTime<Utc>>,
+    /// Gives the CVE publication time when available.
+    pub published_at: Option<DateTime<Utc>>,
+    /// Gives the truthful fix state, either `open` or `fix_available`.
+    pub status: String,
+    /// Gives the applicable system or fleet justification category.
+    pub justification_category: Option<String>,
+    /// Gives the applicable system or fleet justification reason.
+    pub justification_reason: Option<String>,
+    /// Gives the applicable justification update time.
+    pub justification_updated_at: Option<DateTime<Utc>>,
+    /// Provides exact remediation context only for an exact row on this page.
+    #[serde(default)]
+    pub remediation: Option<crate::views::poam_api::CvePoamRelationship>,
+}
+
+/// Identifies the evidence authority used for a system CVE inventory read.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveInventoryAuthority {
+    /// Uses immutable schema-1 observations for the exact deployed generation.
+    #[default]
+    Exact,
+    /// Shows the reported running target's scan without retained proof or writes.
+    MappedRunning,
+    /// Uses the bounded latest completed legacy scan.
+    Legacy,
+    /// Reports that no completed scan is usable for inventory display.
+    NoScan,
+}
+
+/// Reports the first prerequisite that prevented exact CVE authority.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExactCveAuthorityFailureReason {
+    /// The latest state has no usable generation or store path.
+    MissingCurrentGeneration,
+    /// The generation is not verified to own the current store path.
+    CurrentStoreMismatch,
+    /// No retained snapshot binds the latest generation.
+    RetainedGenerationUnavailable,
+    /// The retained generation binds a different store path.
+    RetainedStoreMismatch,
+    /// The retained generation lineage is not verified.
+    LineageUnverified,
+    /// The retained evaluation snapshot is missing or unavailable.
+    SnapshotUnavailable,
+    /// The retained evaluation snapshot uses an unsupported integrity version.
+    SnapshotUnsupported,
+    /// The retained generation has no matching NixOS derivation.
+    ExactDerivationUnavailable,
+    /// The exact derivation has no completed schema-1 scan.
+    NoSchema1CurrentScan,
+}
+
+/// Reports the explicit authority state of a Current system CVE inventory read.
+///
+/// Historical selections omit this state because they never claim authority for
+/// the running deployment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveCurrentAuthorityState {
+    /// Uses the newest completed schema-1 scan for the exact running derivation.
+    ExactCurrentScan,
+    /// Shows matching schema-1 findings without retained remediation proof.
+    MappedRunningReadOnlyScan,
+    /// Identifies a mapped running target without a completed schema-1 scan.
+    MappedRunningNoScan,
+    /// No running-state report exists.
+    NoRunningReport,
+    /// The latest report has incomplete or contradictory identity.
+    InvalidRunningReport,
+    /// The reported output has no registered flake/configuration derivation.
+    UnmappedRunning,
+    /// More than one scoped derivation matches the reported output.
+    AmbiguousRunning,
+    /// Reports that the exact running derivation has no completed schema-1 scan.
+    NoCurrentScan,
+    /// Reports that the server could not prove the current deployment identity.
+    CurrentAuthorityUnavailable,
+}
+
+/// Identifies a uniquely matched reported running derivation independently
+/// from the retained-generation proof required for mutations.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveRunningTarget {
+    /// Identifies the registered target; this is not a mutation credential.
+    pub derivation_id: i32,
+    /// Gives the reported generation only when it matches the running output.
+    pub generation: Option<i32>,
+    /// Gives the target's full registered commit hash.
+    pub commit_hash: String,
+    /// Gives the latest observation time.
+    pub reported_at: DateTime<Utc>,
+}
+
+/// Gives provenance for the selected completed CVE scan.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventorySource {
+    /// Identifies the selected scan.
+    pub scan_id: Uuid,
+    /// Gives the scanner implementation name.
+    pub scanner_name: String,
+    /// Gives the scanner implementation version when recorded.
+    pub scanner_version: Option<String>,
+    /// Gives the real scan completion time.
+    pub completed_at: DateTime<Utc>,
+}
+
+/// Describes the newest scan attempt for one server-validated exact target.
+///
+/// This lifecycle fact cannot replace a completed source or authorize triage.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventoryAttempt {
+    /// Identifies the attempt, which may differ from the source scan.
+    pub scan_id: Uuid,
+    /// Identifies the exact derivation selected by the server.
+    pub derivation_id: i32,
+    /// Gives the persisted lifecycle status.
+    pub status: String,
+    /// Gives the persisted creation timestamp when present.
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// Selects one server-authorized system CVE inventory target.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SystemCveInventorySelection {
+    #[default]
+    Current,
+    RetainedGeneration {
+        generation_snapshot_id: Uuid,
+    },
+    ExactDerivation {
+        derivation_id: i32,
+    },
+}
+
+/// Identifies the selected scan's finding representation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SystemCveEvidenceRepresentation {
+    Schema1Observations,
+    Schema0Projection,
+}
+
+/// Describes one server-owned candidate for future revision selection.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventoryCandidate {
+    pub selection: SystemCveInventorySelection,
+    pub generation: Option<i32>,
+    pub commit_hash: Option<String>,
+    pub derivation_id: Option<i32>,
+    pub is_current: bool,
+    pub is_latest_per_flake: bool,
+    pub source: Option<SystemCveInventorySource>,
+    pub evidence_representation: Option<SystemCveEvidenceRepresentation>,
+    pub scan_available: bool,
+    pub read_only: bool,
+}
+
+/// Returns server-owned current and historical inventory candidates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventoryCandidatesResponse {
+    pub items: Vec<SystemCveInventoryCandidate>,
+}
+
+/// Counts severities over the complete active inventory scope.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventorySeverityCounts {
+    /// Counts critical findings.
+    pub critical: i64,
+    /// Counts high findings.
+    pub high: i64,
+    /// Counts medium findings.
+    pub medium: i64,
+    /// Counts low findings.
+    pub low: i64,
+    /// Counts findings without a normalized CVSS severity.
+    pub unknown: i64,
+}
+
+/// Contains authoritative totals for the complete active inventory scope.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SystemCveInventoryMetadata {
+    /// Counts stable CVE and canonical-package identities.
+    pub total_findings: i64,
+    /// Counts distinct canonical CVE identifiers.
+    pub total_cves: i64,
+    /// Counts distinct canonical package names.
+    pub total_packages: i64,
+    /// Counts severities over the same scope as the totals.
+    pub severity: SystemCveInventorySeverityCounts,
+    /// Counts distinct critical CVE IDs over the complete active filter scope.
+    ///
+    /// Absent for a missing completed source or an older server. It must not
+    /// fall back to the finding count in `severity.critical`.
+    #[serde(default)]
+    pub cve_critical: Option<i64>,
+    /// Counts distinct high CVE IDs over the complete active filter scope.
+    ///
+    /// Absent for a missing completed source or an older server.
+    #[serde(default)]
+    pub cve_high: Option<i64>,
+}
+
+/// Contains one non-unioned source for a system CVE inventory.
+///
+/// Legacy authority disables exact remediation context. It does not redefine
+/// the ordinary system justification endpoint.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemCveInventoryPageResponse {
+    /// Identifies the selected inventory authority.
+    pub authority: SystemCveInventoryAuthority,
+    /// Reports why exact authority was unavailable for a fallback response.
+    pub exact_authority_failure: Option<ExactCveAuthorityFailureReason>,
+    /// Reports the explicit state when [`Self::selection`] is Current.
+    #[serde(default)]
+    pub current_state: Option<SystemCveCurrentAuthorityState>,
+    /// Gives the uniquely mapped running identity when the server proved it.
+    #[serde(default)]
+    pub running_target: Option<SystemCveRunningTarget>,
+    /// Binds the payload to the requested visible system; older servers omit it.
+    #[serde(default)]
+    pub system_id: Option<Uuid>,
+    /// Gives scan provenance, including when the scan is clean.
+    pub source: Option<SystemCveInventorySource>,
+    /// Gives the newest attempt for this exact target independently of source.
+    #[serde(default)]
+    pub attempt: Option<SystemCveInventoryAttempt>,
+    #[serde(default)]
+    pub selection: SystemCveInventorySelection,
+    #[serde(default)]
+    pub evidence_representation: Option<SystemCveEvidenceRepresentation>,
+    #[serde(default)]
+    pub read_only: bool,
+    /// Contains findings from only the selected source.
+    pub vulnerabilities: Vec<SystemCveInventoryVulnerability>,
+    /// Gives complete scope totals independent of loaded page count.
+    pub metadata: SystemCveInventoryMetadata,
+    /// Identifies the selected inventory and mutable rendered dimensions.
+    pub inventory_revision: String,
+    /// Reports whether another bounded page exists.
+    pub has_more: bool,
+    /// Continues this exact system, source, and filter scope.
+    pub next_cursor: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3134,6 +5778,7 @@ impl CveSeverity {
             Self::High => cve::HIGH_BG,
             Self::Medium => cve::MEDIUM_BG,
             Self::Low => cve::LOW_BG,
+            Self::Unknown => cve::LOW_BG,
         }
     }
 }
@@ -3285,10 +5930,17 @@ pub enum NotificationCategory {
     HeartbeatLost,
 }
 
+/// Represents a user-visible notification with its persisted source identity.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UserNotificationDto {
     pub id: Uuid,
     pub category: NotificationCategory,
+    /// Identifies the server-owned notification source domain.
+    #[serde(default)]
+    pub source_type: String,
+    /// Preserves the opaque source identity for validated navigation.
+    #[serde(default)]
+    pub source_id: String,
     pub title: String,
     pub summary: String,
     pub route: String,
@@ -3357,6 +6009,8 @@ pub enum AuditAction {
     SystemSyncRequested,
     SystemDeployRequested,
     SystemRollbackRequested,
+    /// A system's agent public key was replaced (TASK-435).
+    SystemKeyRotated,
     SessionInvalidated,
     CveScanRequested,
     BuilderRotateKey,
@@ -3431,22 +6085,73 @@ pub struct AdminUpdateUserRequest {
     pub password: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+/// Reports whether one server-derived setup coach step is complete.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SetupWizardStepStatus {
+    /// Indicates whether at least one qualifying entity exists.
     pub complete: bool,
+    /// Gives the number of qualifying persisted records or lineages for the step.
     pub count: i64,
 }
 
+/// Reports administrator setup coach progress derived from persisted state.
+///
+/// Optional coach fields preserve compatibility with the legacy six-step API.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SetupWizardProgressResponse {
+    /// Indicates whether the current administrator dismissed the coach.
     pub dismissed: bool,
+    /// Indicates whether the current administrator acknowledged agent setup.
     pub agent_acknowledged: bool,
+    /// Reports environment setup progress.
     pub environment: SetupWizardStepStatus,
+    /// Reports flake setup progress.
     pub flake: SetupWizardStepStatus,
+    /// Reports builder setup progress.
     pub builder: SetupWizardStepStatus,
+    /// Reports cache destination setup progress.
     pub cache: SetupWizardStepStatus,
+    /// Reports progress for systems linked to an environment and flake.
     pub system: SetupWizardStepStatus,
+    /// Reports policy lineage progress from user-attributed policy versions.
+    #[serde(default)]
+    pub policy: Option<SetupWizardStepStatus>,
+    /// Reports compliance bundle lineage progress.
+    #[serde(default)]
+    pub bundle: Option<SetupWizardStepStatus>,
+    /// Reports POA&M progress across all lifecycle states.
+    #[serde(default)]
+    pub poam: Option<SetupWizardStepStatus>,
+    /// Indicates whether the original five infrastructure steps are complete.
     pub all_required_complete: bool,
+    /// Indicates whether all nine setup coach steps are complete.
+    #[serde(default)]
+    pub all_coach_steps_complete: Option<bool>,
+}
+
+#[cfg(test)]
+mod setup_wizard_tests {
+    use super::*;
+
+    #[test]
+    fn older_setup_progress_preserves_absent_new_steps() {
+        let progress: SetupWizardProgressResponse = serde_json::from_value(serde_json::json!({
+            "dismissed": false,
+            "agent_acknowledged": true,
+            "environment": { "complete": true, "count": 1 },
+            "flake": { "complete": true, "count": 1 },
+            "builder": { "complete": true, "count": 1 },
+            "cache": { "complete": true, "count": 1 },
+            "system": { "complete": true, "count": 1 },
+            "all_required_complete": true
+        }))
+        .expect("older setup progress should deserialize");
+
+        assert_eq!(progress.policy, None);
+        assert_eq!(progress.bundle, None);
+        assert_eq!(progress.poam, None);
+        assert_eq!(progress.all_coach_steps_complete, None);
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -3756,6 +6461,56 @@ pub struct CacheDestination {
     pub attic_public_key: Option<String>,
     pub attic_ignore_upstream_cache_filter: Option<bool>,
     pub attic_jobs: Option<i32>,
+    /// Indicates an active Attic token without exposing stored material.
+    #[serde(default)]
+    pub attic_token_configured: bool,
+    /// Indicates a complete active S3 access-key identity.
+    #[serde(default)]
+    pub s3_credentials_configured: bool,
+    /// Indicates an active S3 session token without exposing its value.
+    #[serde(default)]
+    pub s3_session_token_configured: bool,
+    /// Indicates retained HTTP Basic credentials in the server-only URL.
+    #[serde(default)]
+    pub http_basic_auth_configured: bool,
+    /// Indicates a legacy credential query that requires explicit migration.
+    #[serde(default)]
+    pub legacy_query_credentials_configured: bool,
+    /// HTTPS write API URL; `push_to` remains the independent read URL.
+    pub niks3_server_url: Option<String>,
+    /// Trusted Nix signing keys for reads, including rotation overlap.
+    #[serde(default)]
+    pub niks3_public_keys: Vec<String>,
+    /// Selected write authentication: `token` or `mtls`.
+    pub niks3_write_auth_mode: Option<String>,
+    /// Redacted write token; GET responses never populate this field.
+    pub niks3_auth_token: Option<String>,
+    /// Public PEM write client certificate.
+    pub niks3_write_client_cert: Option<String>,
+    /// Redacted write private key; GET responses never populate this field.
+    pub niks3_write_client_key: Option<String>,
+    /// Optional PEM trust anchor for the write server.
+    pub niks3_write_ca_cert: Option<String>,
+    /// Selected read authentication: `none`, `basic` or `mtls`.
+    pub niks3_read_auth_mode: Option<String>,
+    /// Public PEM read client certificate.
+    pub niks3_read_client_cert: Option<String>,
+    /// Redacted read private key; GET responses never populate this field.
+    pub niks3_read_client_key: Option<String>,
+    /// Optional PEM trust anchor for the read server.
+    pub niks3_read_ca_cert: Option<String>,
+    /// Indicates an existing write token without exposing its value.
+    #[serde(default)]
+    pub niks3_write_token_configured: bool,
+    /// Indicates an existing complete write mTLS identity.
+    #[serde(default)]
+    pub niks3_write_mtls_configured: bool,
+    /// Indicates an existing complete read mTLS identity.
+    #[serde(default)]
+    pub niks3_read_mtls_configured: bool,
+    /// Indicates an active complete Basic read identity without returning either value.
+    #[serde(default)]
+    pub niks3_read_basic_configured: bool,
     pub parallel_uploads: Option<i32>,
     pub max_retries: Option<i32>,
     pub retry_delay_seconds: Option<i64>,
@@ -3765,6 +6520,49 @@ pub struct CacheDestination {
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
     pub last_used_at: Option<DateTime<Utc>>,
+}
+
+/// Classifies a request-local cache inventory observation.
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheMetricsStatus {
+    /// Contains provider-reported values with explicit measurement bases.
+    Available,
+    /// Indicates that the provider has no supported cheap inventory totals.
+    Unsupported,
+    /// Indicates that an observation could not be made.
+    Unavailable,
+    /// Indicates invalid configuration or invalid provider metadata.
+    Error,
+    /// Represents an unrecognized status without granting evidence to values.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Contains a credential-free observation from `GET /caches/:id/metrics`.
+/// Values are not persisted. Count and byte meanings depend on their explicit
+/// bases. Logical bytes are not physical usage or capacity. Attic inventory does
+/// not verify integrity or download availability. Missing values remain unknown.
+#[derive(Debug, Clone, Deserialize, PartialEq)]
+pub struct CacheStorageMetrics {
+    /// Classifies the observation; values are usable only when available.
+    pub status: CacheMetricsStatus,
+    /// Contains a reason code; presentation must map it to static explanations.
+    pub reason_code: String,
+    /// Contains the logical byte total for the reported basis, including zero.
+    pub storage_bytes: Option<u64>,
+    /// Identifies `reported_logical` (Niks3) or `uncompressed_nar_bytes` (Attic).
+    /// Attic sums per-path NAR sizes, including repeated deduplicated bytes.
+    pub storage_bytes_basis: Option<String>,
+    /// Contains live tracked objects (Niks3) or cached Nix paths (Attic).
+    pub object_count: Option<u64>,
+    /// Identifies `live_tracked_objects` or `cached_nix_paths` respectively.
+    pub object_count_basis: Option<String>,
+    /// Contains Attic's cached Nix path count, equal to its compatibility object
+    /// count. Niks3 returns null; tracked objects must not substitute for paths.
+    pub path_count: Option<u64>,
+    /// Contains the server's UTC observation time, not an upstream measurement time.
+    pub measured_at: Option<DateTime<Utc>>,
 }
 
 /// Create cache destination request
@@ -3794,6 +6592,47 @@ pub struct CreateCacheDestination {
     pub force_repush: Option<bool>,
     pub require_sigs: Option<bool>,
     pub environment_ids: Option<Vec<Uuid>>,
+    /// HTTPS write API URL, separate from the read URL in `push_to`.
+    pub niks3_server_url: Option<String>,
+    /// Nonempty trusted Nix signing keys.
+    #[serde(default)]
+    pub niks3_public_keys: Vec<String>,
+    /// Required Niks3 write mode: `token` or `mtls`.
+    pub niks3_write_auth_mode: Option<String>,
+    /// Plaintext replacement token, sent only in authenticated Save bodies.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_auth_token: Option<String>,
+    /// PEM write client certificate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_client_cert: Option<String>,
+    /// PEM write private key, encrypted by the server on save.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_client_key: Option<String>,
+    /// Optional PEM write server trust anchor.
+    /// Preserves raw delimiter columns until server validation and normalization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_ca_cert: Option<String>,
+    /// Required Niks3 read mode: `none`, `basic` or `mtls`.
+    pub niks3_read_auth_mode: Option<String>,
+    /// PEM read client certificate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_client_cert: Option<String>,
+    /// PEM read private key, encrypted by the server on save.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_client_key: Option<String>,
+    /// Optional PEM read server trust anchor.
+    /// Preserves raw delimiter columns until server validation and normalization.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_ca_cert: Option<String>,
+    /// Supplies a replacement Basic read username only with its password.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_basic_username: Option<String>,
+    /// Supplies a Basic password; allowed whitespace is preserved verbatim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_basic_password: Option<String>,
+    /// Selects a non-mutating Niks3 test plane; Save omits this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_scope: Option<Niks3ProbeScope>,
 }
 
 /// Update cache destination request
@@ -3807,10 +6646,18 @@ pub struct UpdateCacheDestination {
     pub compression: Option<String>,
     pub s3_region: Option<String>,
     pub s3_profile: Option<String>,
+    /// Replaces the S3 access key ID; omission retains the configured identity.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub s3_access_key_id: Option<String>,
+    /// Replaces the S3 secret access key; omission retains stored material.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub s3_secret_access_key: Option<String>,
+    /// Retains the session token when omitted; an empty replacement clears it.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub s3_session_token: Option<String>,
     pub s3_endpoint_url: Option<String>,
+    /// Replaces the Attic token; omission retains the configured token.
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub attic_token: Option<String>,
     pub attic_cache_name: Option<String>,
     pub attic_public_key: Option<String>,
@@ -3823,14 +6670,431 @@ pub struct UpdateCacheDestination {
     pub force_repush: Option<bool>,
     pub require_sigs: Option<bool>,
     pub environment_ids: Option<Vec<Uuid>>,
+    /// Replaces the HTTPS write API URL.
+    pub niks3_server_url: Option<String>,
+    /// Replaces trusted signing keys when nonempty.
+    #[serde(default)]
+    pub niks3_public_keys: Vec<String>,
+    /// Selects write mode; mode changes clear the previous identity atomically.
+    pub niks3_write_auth_mode: Option<String>,
+    /// Replaces the token; omission preserves the configured token.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_auth_token: Option<String>,
+    /// Replaces the write client certificate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_client_cert: Option<String>,
+    /// Replaces the write private key; omission preserves it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_client_key: Option<String>,
+    /// Replaces the write trust anchor; omission preserves it.
+    /// Must preserve raw text because trimming can change the Go root set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_ca_cert: Option<String>,
+    /// Selects read mode; `none` clears the read identity atomically.
+    pub niks3_read_auth_mode: Option<String>,
+    /// Replaces the read client certificate.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_client_cert: Option<String>,
+    /// Replaces the read private key; omission preserves it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_client_key: Option<String>,
+    /// Replaces the read trust anchor; omission preserves it.
+    /// Must preserve raw text because trimming can change the Go root set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_ca_cert: Option<String>,
+    /// Explicitly clears the token; incompatible with a simultaneous replacement.
+    #[serde(default)]
+    pub clear_niks3_auth_token: bool,
+    /// Explicitly clears the write key when changing authentication mode.
+    #[serde(default)]
+    pub clear_niks3_write_client_key: bool,
+    /// Explicitly clears the read key when changing to public reads.
+    #[serde(default)]
+    pub clear_niks3_read_client_key: bool,
+    /// Removes the custom write CA and restores system trust.
+    #[serde(default)]
+    pub clear_niks3_write_ca_cert: bool,
+    /// Removes the custom read CA and restores system trust.
+    #[serde(default)]
+    pub clear_niks3_read_ca_cert: bool,
+    /// Replaces the Basic username as part of an atomic read-identity pair.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_basic_username: Option<String>,
+    /// Replaces the Basic password; omission retains it on the same authority.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_read_basic_password: Option<String>,
+    /// Selects a non-mutating Niks3 test plane; Save omits this field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probe_scope: Option<Niks3ProbeScope>,
 }
 
+/// Selects the independently tested Niks3 plane without granting Save permission.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Niks3ProbeScope {
+    /// Tests write metadata and protected API route/method access with the
+    /// selected write identity. Does not upload, sign or publish objects.
+    Write,
+    /// Tests the read endpoint and selected read identity only.
+    Read,
+    /// Tests both planes using the complete configuration.
+    All,
+}
+
+/// Supplies write-only discovery transport; tokens and read identities are excluded.
+/// Private keys are sent only in authenticated request bodies, never diagnostics.
+#[derive(Clone, Serialize, Deserialize, Default)]
+pub struct Niks3DiscoverRequest {
+    /// HTTPS write API URL without userinfo, queries or fragments.
+    pub server_url: String,
+    /// Selects mTLS explicitly; omitted fields retain public URL-only discovery.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_auth_mode: Option<String>,
+    /// Contains the draft client certificate chain for mTLS.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_client_cert: Option<String>,
+    /// Contains the draft private key for mTLS; GET never supplies it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_client_key: Option<String>,
+    /// Contains an optional raw server trust bundle for server-side validation.
+    /// Must preserve delimiter columns because trimming can change the root set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub niks3_write_ca_cert: Option<String>,
+}
+
+/// Identifies an allowlisted cache probe without preserving unknown wire text.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheProbeKind {
+    /// Reads the canonical named Attic cache-config API.
+    AtticCacheConfig,
+    /// Represents an unsupported probe kind; its evidence cannot prove access.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Identifies the observed stage of a named-cache read probe.
+/// A completed read does not establish upload authorization.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheProbeStage {
+    /// Rejects the configured target before network access.
+    TargetPolicy,
+    /// Fails to resolve the configured server.
+    Dns,
+    /// Fails verified TLS setup or connectivity; no finer cause is asserted.
+    Transport,
+    /// Receives an upstream access denial; cache existence remains unresolved.
+    Authentication,
+    /// Receives a recognized named-cache-not-found response.
+    CacheNotFound,
+    /// Receives unexpected status or invalid cache-config metadata.
+    Response,
+    /// Validates successful named-cache configuration metadata.
+    Complete,
+    /// Represents unsupported stage text without exposing that text.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Classifies the safe policy errors accepted by the Attic probe parser.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheProbePolicyError {
+    /// Rejects local configuration or configured-target policy.
+    InvalidCacheTestConfig,
+    /// Rejects a legacy credential query before network access.
+    LegacyQueryCredentialsUnsupported,
+    /// Represents an unsupported error code; it must remain an API error.
+    #[serde(other)]
+    Unknown,
+}
+
+/// Reports non-mutating connectivity checks; absent authorization is untested.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct CacheCredentialTestResult {
+    /// Legacy aggregate result; does not establish cache write permission.
+    #[serde(alias = "success")]
     pub ok: bool,
+    /// Optional HTTP response code from the probe.
     pub status_code: Option<u16>,
+    /// Untrusted legacy prose; presentation must use local diagnostic constants.
     pub message: String,
+    /// Optional diagnostic classification; unknown values have no display authority.
+    /// Missing codes preserve compatibility with older servers.
+    #[serde(default)]
+    pub diagnostic_code: Option<String>,
+    /// Preserves the per-write outcome when aggregate discovery or read guidance
+    /// differs. Decoding retains only recognized write diagnostic constants.
+    /// Presentation also requires [`Niks3ProbeScope::Write`] or
+    /// [`Niks3ProbeScope::All`]; codes never replace boolean evidence.
+    #[serde(default, deserialize_with = "deserialize_write_probe_diagnostic")]
+    pub write_probe_diagnostic_code: Option<String>,
+    /// Untrusted endpoint metadata; probe presentation must not display this URL.
     pub tested_url: Option<String>,
+    /// Identifies the typed probe; omission preserves older server compatibility.
+    #[serde(default)]
+    pub probe_kind: Option<CacheProbeKind>,
+    /// Identifies the observed stage, never an inferred upstream error cause.
+    #[serde(default)]
+    pub stage: Option<CacheProbeStage>,
+    /// Reports validated named-cache read access; omission means untested.
+    #[serde(default)]
+    pub cache_access_valid: Option<bool>,
+    /// Reports native Attic visibility after complete named-cache validation.
+    /// Missing evidence means unknown, never public. This response-only field
+    /// does not describe configured credentials or establish write permission.
+    #[serde(default)]
+    pub cache_is_public: Option<bool>,
+    /// Confirms token acceptance for a private cache read only.
+    /// Public success and missing evidence do not establish token validity.
+    #[serde(default)]
+    pub token_auth_valid: Option<bool>,
+    /// Contains an allowlisted classification for a structured HTTP 400 result.
+    #[serde(default)]
+    pub error: Option<CacheProbePolicyError>,
+    /// Whether the Niks3 API responded.
+    pub server_reachable: Option<bool>,
+    /// Whether the public cache configuration passed validation.
+    pub discovery_valid: Option<bool>,
+    /// Contains the legacy Niks3 alias for protected write API route access.
+    /// Does not establish upload or publication; `None` means untested.
+    pub write_auth_valid: Option<bool>,
+    /// Whether the independently authenticated read endpoint responded.
+    pub read_endpoint_reachable: Option<bool>,
+    /// Whether trusted signing keys were found.
+    pub signing_keys_found: Option<bool>,
+    /// Identifies the selected Niks3 probe plane; missing evidence stays untested.
+    #[serde(default)]
+    pub probe_scope: Option<Niks3ProbeScope>,
+    /// Reports access to the probed write API route and method.
+    /// Only `Some(true)` establishes API access. This field does not validate
+    /// S3 upload, signing, or object publication; absence means untested.
+    #[serde(default)]
+    pub write_api_reachable: Option<bool>,
+    /// Reports explicitly observed authentication for the probed write API.
+    /// Metadata discovery and configured flags cannot establish this result.
+    #[serde(default)]
+    pub write_authn_valid: Option<bool>,
+    /// Reports authorization for the probed write API route and method.
+    /// This result does not establish successful object publication.
+    #[serde(default)]
+    pub write_authorization_valid: Option<bool>,
+    /// Reports selected read endpoint access, not write readiness.
+    #[serde(default)]
+    pub read_access_valid: Option<bool>,
+    /// Reports whether a configured signing key matches a key Niks3 advertises.
+    /// `Some(true)` means a match and `Some(false)` means no overlap. `None`
+    /// means not verified, as in the Read test, which cannot obtain advertised
+    /// keys. Key format validity and artifact signature verification are
+    /// separate assertions that this field does not report.
+    #[serde(default)]
+    pub signing_keys_valid: Option<bool>,
+}
+
+/// Returns local guidance for an exact allowlisted cache diagnostic code.
+///
+/// Codes are hints, not authentication or write-authorization evidence. Unknown,
+/// decorated, or differently cased codes return `None`. Server prose and URLs
+/// must never be used as a fallback.
+pub fn cache_diagnostic_message(code: &str) -> Option<&'static str> {
+    Some(match code {
+        "ca_bundle_framing_invalid" => {
+            "Server CA bundle framing is invalid. Check the PEM begin and end markers."
+        }
+        "ca_certificate_invalid" => {
+            "Server CA bundle contains an invalid certificate. Check the certificate encoding."
+        }
+        "ca_bundle_content_unsupported" => {
+            "Server CA bundle contains unsupported content. Use supported certificate PEM blocks."
+        }
+        "ca_bundle_trust_ambiguous" => {
+            "Server CA bundle trust is ambiguous. Use an unambiguous certificate trust bundle."
+        }
+        "ca_bundle_empty" => {
+            "Server CA bundle contains no certificates. Supply a certificate bundle or select system trust."
+        }
+        "ca_bundle_too_large" => {
+            "Server CA bundle exceeds the supported size limit. Use a smaller certificate bundle."
+        }
+        "client_identity_invalid" => {
+            "Client identity is invalid. Check the client certificate and matching private key."
+        }
+        "client_certificate_invalid" => {
+            "Client certificate is invalid. Use a certificate-only chain with the leaf certificate first."
+        }
+        "client_private_key_invalid" => {
+            "Client private key is invalid. Use exactly one supported unencrypted PEM private key."
+        }
+        "client_identity_mismatch" => {
+            "Client identity does not match. The private key must match the first certificate in the client chain."
+        }
+        "tls_verification_failed" => {
+            "TLS verification failed. Check server certificate trust and the selected client identity."
+        }
+        "dns_or_connection_failed" => {
+            "DNS resolution or connection failed. Check the endpoint, DNS and connectivity."
+        }
+        "http_response_failed" => {
+            "The endpoint returned an unsuccessful HTTP response. Check endpoint access and proxy configuration."
+        }
+        "invalid_niks3_metadata" => {
+            "Niks3 metadata is invalid. Check the API endpoint and published cache configuration."
+        }
+        "signing_key_mismatch" => {
+            "Configured signing public key does not match the signing keys advertised by Niks3."
+        }
+        "target_policy_rejected" => {
+            "Target policy rejected the endpoint. Ask an administrator to review the permitted target policy."
+        }
+        "probe_timeout" => {
+            "The cache probe timed out. Check endpoint availability and connectivity, then retry."
+        }
+        "token_rejected" => {
+            "The write API rejected the selected token. Check the token and API endpoint."
+        }
+        "mtls_subject_rejected" => {
+            "The write API rejected the selected client identity. Check the certificate and permitted identity."
+        }
+        "proxy_access_denied" => {
+            "The proxy denied API access. Check its access policy for the selected identity."
+        }
+        "method_rejected" => {
+            "The write API rejected the probe method. Check proxy routing and the supported API contract."
+        }
+        "route_unsupported" => {
+            "The endpoint did not establish the supported write API contract. Check the API URL and proxy routes."
+        }
+        "unexpected_write_response" => {
+            "The write API returned an unexpected probe response. Upload and publication remain untested."
+        }
+        "probe_response_too_large" => {
+            "The probe response exceeded the supported size limit. API access and publication are not established by an oversized response."
+        }
+        "write_credentials_missing" => {
+            "Write credentials are missing. Select a stored credential or enter a complete replacement. The write endpoint was not contacted."
+        }
+        "write_credentials_invalid" => {
+            "Write credentials failed local validation. Check the token format or client identity. The write endpoint was not contacted; this is not an upstream credential rejection."
+        }
+        "auth_control_inconclusive" => {
+            "The credential-omission control was inconclusive. API authentication and authorization are not established by metadata access."
+        }
+        "write_route_verified" => {
+            "Protected write API route and method access was verified. S3 upload, signing and object publication remain untested."
+        }
+        "write_route_verified_certificate_gate" => {
+            "The selected session reached the protected write API route, and transport rejected the certificate-omission control. Native Go subject enforcement is not proved. S3 upload, signing and object publication remain untested."
+        }
+        "read_access_verified" => {
+            "Read endpoint access was verified. This does not establish write API access, upload or publication."
+        }
+        "probe_failed" => CACHE_PROBE_FAILURE_MESSAGE,
+        _ => return None,
+    })
+}
+
+/// Contains generic local guidance when a cache probe has no recognized code.
+pub const CACHE_PROBE_FAILURE_MESSAGE: &str = "Test failed. Review the selected endpoint, identity, server trust and permitted target policy.";
+
+// SECURITY: Read-only success and aggregate metadata diagnostics cannot be
+// presented as per-write outcomes. Retain shared transport/identity failures,
+// but never arbitrary upstream prose or an unsupported successful-read code.
+fn write_probe_diagnostic_message(code: &str) -> Option<&'static str> {
+    match code {
+        "token_rejected"
+        | "mtls_subject_rejected"
+        | "proxy_access_denied"
+        | "method_rejected"
+        | "route_unsupported"
+        | "auth_control_inconclusive"
+        | "unexpected_write_response"
+        | "probe_response_too_large"
+        | "write_route_verified"
+        | "write_route_verified_certificate_gate"
+        | "write_credentials_missing"
+        | "write_credentials_invalid"
+        | "ca_bundle_framing_invalid"
+        | "ca_certificate_invalid"
+        | "ca_bundle_content_unsupported"
+        | "ca_bundle_trust_ambiguous"
+        | "ca_bundle_empty"
+        | "ca_bundle_too_large"
+        | "client_identity_invalid"
+        | "client_certificate_invalid"
+        | "client_private_key_invalid"
+        | "client_identity_mismatch"
+        | "tls_verification_failed"
+        | "dns_or_connection_failed"
+        | "http_response_failed"
+        | "target_policy_rejected"
+        | "probe_timeout"
+        | "probe_failed" => cache_diagnostic_message(code),
+        _ => None,
+    }
+}
+
+fn deserialize_write_probe_diagnostic<'de, D>(decoder: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(decoder)?;
+    Ok(value
+        .as_str()
+        .filter(|code| write_probe_diagnostic_message(code).is_some())
+        .map(str::to_owned))
+}
+
+impl CacheCredentialTestResult {
+    /// Returns allowlisted local guidance for the response's write-plane outcome.
+    ///
+    /// A write-only response may use its aggregate code for older servers. An
+    /// all-plane response requires the explicit per-write code because read or
+    /// discovery failure can replace the aggregate diagnostic. Read-only and
+    /// missing-scope responses return `None`. Guidance never establishes evidence;
+    /// callers must render the nullable write booleans independently.
+    pub fn write_probe_diagnostic(&self) -> Option<&'static str> {
+        match self.probe_scope {
+            Some(Niks3ProbeScope::Write) => self
+                .write_probe_diagnostic_code
+                .as_deref()
+                .and_then(write_probe_diagnostic_message)
+                .or_else(|| {
+                    self.diagnostic_code
+                        .as_deref()
+                        .and_then(write_probe_diagnostic_message)
+                }),
+            Some(Niks3ProbeScope::All) => self
+                .write_probe_diagnostic_code
+                .as_deref()
+                .and_then(write_probe_diagnostic_message),
+            _ => None,
+        }
+    }
+
+    /// Returns static failure guidance without displaying untrusted response prose.
+    ///
+    /// The caller must use the individual evidence fields for probe outcomes.
+    /// This message never establishes authentication or write authorization.
+    pub fn failure_message(&self) -> &'static str {
+        self.diagnostic_code
+            .as_deref()
+            .and_then(cache_diagnostic_message)
+            .unwrap_or(CACHE_PROBE_FAILURE_MESSAGE)
+    }
+}
+
+/// Contains public Niks3 discovery metadata; discovery does not save a cache.
+#[derive(Clone, Deserialize, PartialEq)]
+pub struct Niks3Discovery {
+    /// Canonical HTTPS write API URL.
+    pub server_url: String,
+    /// Independent HTTPS Nix read URL.
+    pub substituter_url: String,
+    /// Published trusted Nix signing keys.
+    pub public_keys: Vec<String>,
+    /// Advertised OIDC audience; external providers are not initially supported.
+    pub oidc_audience: Option<String>,
 }
 
 /// Cache push job status and details
@@ -4222,7 +7486,506 @@ pub struct UpdatePolicyMappingRequest {
 
 #[cfg(test)]
 mod tests {
-    use super::XccdfPreviewResponse;
+    #[test]
+    fn cache_probe_evidence_defaults_untested_for_legacy_results() {
+        let result: super::CacheCredentialTestResult =
+            serde_json::from_value(serde_json::json!({"success":true,"message":"legacy"})).unwrap();
+        assert!(result.ok);
+        assert!(result.probe_kind.is_none());
+        assert!(result.stage.is_none());
+        assert!(result.cache_access_valid.is_none());
+        assert!(result.cache_is_public.is_none());
+        assert!(result.token_auth_valid.is_none());
+        assert!(result.write_auth_valid.is_none());
+        assert!(result.error.is_none());
+    }
+
+    #[test]
+    fn cache_probe_wire_enums_discard_unknown_values_and_preserve_known_case() {
+        let result: super::CacheCredentialTestResult = serde_json::from_value(
+            serde_json::json!({"ok":true,"message":"untrusted","probe_kind":"unexpected-kind","stage":"unexpected-stage","error":"unexpected-code"})
+        ).unwrap();
+        assert_eq!(result.probe_kind, Some(super::CacheProbeKind::Unknown));
+        assert_eq!(result.stage, Some(super::CacheProbeStage::Unknown));
+        assert_eq!(result.error, Some(super::CacheProbePolicyError::Unknown));
+        assert_eq!(
+            serde_json::to_value(super::CacheProbeKind::AtticCacheConfig).unwrap(),
+            "attic_cache_config"
+        );
+        assert_eq!(
+            serde_json::to_value(super::CacheProbeStage::CacheNotFound).unwrap(),
+            "cache_not_found"
+        );
+        assert_eq!(
+            serde_json::to_value(super::CacheProbeStage::TargetPolicy).unwrap(),
+            "target_policy"
+        );
+    }
+
+    #[test]
+    fn cache_update_omits_retained_secrets_but_preserves_explicit_session_clear() {
+        let retained = serde_json::to_value(super::UpdateCacheDestination::default())
+            .expect("serialize retained credential patch");
+        for field in [
+            "attic_token",
+            "s3_access_key_id",
+            "s3_secret_access_key",
+            "s3_session_token",
+            "niks3_auth_token",
+            "niks3_write_client_key",
+            "niks3_read_client_key",
+        ] {
+            assert!(retained.get(field).is_none(), "omit {field}");
+        }
+        let replacement = serde_json::to_value(super::UpdateCacheDestination {
+            s3_access_key_id: Some("fixture-access".into()),
+            s3_secret_access_key: Some("fixture-secret".into()),
+            s3_session_token: Some(String::new()),
+            ..Default::default()
+        })
+        .expect("serialize explicit credential replacement");
+        assert_eq!(replacement["s3_session_token"], "");
+        assert!(replacement.get("attic_token").is_none());
+        assert!(replacement.get("niks3_auth_token").is_none());
+    }
+
+    #[test]
+    fn cache_configured_flags_default_false_for_older_servers() {
+        let legacy = serde_json::json!({
+            "id": 7, "name": "fixture", "cache_type": "Attic",
+            "enabled": true, "created_at": "2026-10-04T00:00:00Z",
+            "updated_at": "2026-10-04T00:00:00Z"
+        });
+        let cache: super::CacheDestination =
+            serde_json::from_value(legacy.clone()).expect("deserialize legacy destination");
+        assert!(!cache.attic_token_configured);
+        assert!(!cache.s3_credentials_configured);
+        assert!(!cache.s3_session_token_configured);
+        assert!(!cache.http_basic_auth_configured);
+        assert!(!cache.legacy_query_credentials_configured);
+        let mut configured = legacy;
+        configured["attic_token_configured"] = true.into();
+        configured["s3_credentials_configured"] = true.into();
+        configured["s3_session_token_configured"] = true.into();
+        configured["http_basic_auth_configured"] = true.into();
+        configured["legacy_query_credentials_configured"] = true.into();
+        let cache: super::CacheDestination =
+            serde_json::from_value(configured).expect("deserialize configured flags");
+        assert!(cache.attic_token_configured);
+        assert!(cache.s3_credentials_configured);
+        assert!(cache.s3_session_token_configured);
+        assert!(cache.http_basic_auth_configured);
+        assert!(cache.legacy_query_credentials_configured);
+        assert!(cache.attic_token.is_none());
+        assert!(cache.s3_secret_access_key.is_none());
+        assert!(cache.s3_session_token.is_none());
+    }
+
+    use super::{
+        ComplianceControlEvidence, ConfigObservationLifecycle, ConfigObservationPayload,
+        ConfigObservationRequestResponse, ConfigObservationResponse, CreatePolicyDraftRequest,
+        CreatePolicyDraftResponse, EvaluatedOption, EvaluationModuleSummary,
+        ExactCveAuthorityFailureReason, SystemCommitsResponse, SystemCveCurrentAuthorityState,
+        SystemCveInventoryAuthority, SystemCveInventoryPageResponse,
+        SystemHardeningInventoryResponse, XccdfPreviewResponse,
+        normalize_inventory_relation_counts,
+    };
+
+    #[test]
+    fn inventory_relation_normalization_preserves_presence() {
+        assert_eq!(
+            normalize_inventory_relation_counts(3, 1, None, None, None),
+            (3, 0, 1)
+        );
+        assert_eq!(
+            normalize_inventory_relation_counts(9, 8, None, Some(2), Some(1)),
+            (0, 2, 1)
+        );
+        assert_eq!(
+            normalize_inventory_relation_counts(9, 8, Some(0), Some(0), Some(3)),
+            (0, 0, 3)
+        );
+        assert_eq!(
+            normalize_inventory_relation_counts(0, 0, None, None, None),
+            (0, 0, 0),
+            "a grouped compatibility total must not become current exposure"
+        );
+    }
+
+    #[test]
+    fn commit_inspectability_defaults_false_for_older_servers() {
+        let response: SystemCommitsResponse = serde_json::from_value(serde_json::json!({
+            "current_commit": null,
+            "commits": [{
+                "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "short_sha": "aaaaaaa",
+                "message": "pending",
+                "author": "Test",
+                "timestamp": "2026-09-14T00:00:00Z"
+            }]
+        }))
+        .expect("deserialize legacy commit response");
+
+        assert!(!response.commits[0].config_inspectable);
+        assert!(!response.commits[0].deployed_here);
+    }
+
+    #[test]
+    fn hardening_inventory_accepts_unresolved_current_derivation() {
+        let response: SystemHardeningInventoryResponse =
+            serde_json::from_value(serde_json::json!({
+                "selection": {"kind": "current"},
+                "derivation_id": null,
+                "source": null,
+                "services": [],
+                "read_only": false
+            }))
+            .expect("deserialize unresolved current hardening inventory");
+
+        assert_eq!(response.derivation_id, None);
+        assert!(response.source.is_none());
+        assert!(response.services.is_empty());
+        assert!(!response.read_only);
+        // A response without the lifecycle field means "never scanned", not
+        // "unknown". Older servers must stay readable.
+        assert!(response.attempt.is_none());
+    }
+
+    #[test]
+    fn hardening_inventory_keeps_completed_evidence_when_a_later_attempt_failed() {
+        let response: SystemHardeningInventoryResponse =
+            serde_json::from_value(serde_json::json!({
+                "selection": {"kind": "current"},
+                "derivation_id": 42,
+                "source": {
+                    "scan_id": "00000000-0000-0000-0000-000000000001",
+                    "completed_at": "2026-09-01T00:00:00Z",
+                    "overall_score": 71,
+                    "total_services": 9
+                },
+                "services": [],
+                "attempt": {
+                    "scan_id": "00000000-0000-0000-0000-000000000002",
+                    "state": "failed",
+                    "source_trigger": "post_build",
+                    "scheduled_at": "2026-09-02T00:00:00Z",
+                    "started_at": "2026-09-02T00:01:00Z",
+                    "completed_at": "2026-09-02T00:02:00Z",
+                    "attempts": 3,
+                    "error": "nix eval exited with status 1"
+                },
+                "read_only": false
+            }))
+            .expect("deserialize hardening inventory with a failed newer attempt");
+
+        let source = response.source.expect("completed evidence must survive");
+        assert_eq!(source.overall_score, Some(71));
+        let attempt = response.attempt.expect("lifecycle attempt must be present");
+        assert_eq!(attempt.state, "failed");
+        assert_eq!(attempt.source_trigger, "post_build");
+        assert_eq!(attempt.attempts, 3);
+        assert_eq!(
+            attempt.error.as_deref(),
+            Some("nix eval exited with status 1")
+        );
+    }
+
+    #[test]
+    fn policy_draft_dtos_preserve_the_exact_server_contract() {
+        let request = CreatePolicyDraftRequest { new_version: None };
+        assert_eq!(
+            serde_json::to_string(&request).expect("serialize policy draft request"),
+            r#"{"new_version":null}"#
+        );
+
+        let version_id = uuid::Uuid::from_u128(1);
+        let source_id = uuid::Uuid::from_u128(2);
+        let response: CreatePolicyDraftResponse = serde_json::from_value(serde_json::json!({
+            "version_id": version_id,
+            "version": "2.0.0",
+            "publication_state": "draft",
+            "derived_from_version_id": source_id
+        }))
+        .expect("deserialize policy draft response");
+        assert_eq!(response.version_id, version_id);
+        assert_eq!(response.version, "2.0.0");
+        assert_eq!(response.publication_state, "draft");
+        assert_eq!(response.derived_from_version_id, source_id);
+    }
+
+    #[test]
+    fn system_cve_inventory_deserializes_exact_legacy_and_no_scan_states() {
+        let exact: SystemCveInventoryPageResponse = serde_json::from_value(serde_json::json!({
+            "authority": "exact",
+            "exact_authority_failure": null,
+            "current_state": "exact_current_scan",
+            "source": {
+                "scan_id": "00000000-0000-0000-0000-000000000441",
+                "scanner_name": "vulnix",
+                "scanner_version": "1.10.1",
+                "completed_at": "2026-09-14T21:00:00Z"
+            },
+            "vulnerabilities": [{
+                "stable_identity": {
+                    "canonical_cve_id": "CVE-2026-0440",
+                    "canonical_package_name": "openssl"
+                },
+                "cve_id": "CVE-2026-0440",
+                "canonical_package_name": "openssl",
+                "severity": "high",
+                "cvss_score": 8.1,
+                "description": "Test finding",
+                "package_name": "openssl-3.4.1",
+                "installed_version": "3.4.1",
+                "fixed_version": "3.4.2",
+                "first_seen": null,
+                "published_at": null,
+                "status": "fix_available",
+                "justification_category": null,
+                "justification_reason": null,
+                "justification_updated_at": null
+            }],
+            "metadata": {
+                "total_findings": 1315,
+                "total_cves": 1200,
+                "total_packages": 415,
+                "severity": {"critical": 15, "high": 300, "medium": 700, "low": 300, "unknown": 0}
+            },
+            "inventory_revision": "exact-revision",
+            "has_more": true,
+            "next_cursor": "opaque+/= cursor"
+        }))
+        .expect("exact-clean inventory should deserialize");
+        assert_eq!(exact.authority, SystemCveInventoryAuthority::Exact);
+        assert!(exact.exact_authority_failure.is_none());
+        assert_eq!(
+            exact.current_state,
+            Some(SystemCveCurrentAuthorityState::ExactCurrentScan)
+        );
+        assert!(exact.source.is_some());
+        assert_eq!(exact.vulnerabilities.len(), 1);
+        assert_eq!(exact.metadata.total_findings, 1315);
+        assert_eq!(exact.metadata.total_packages, 415);
+        assert_eq!(exact.next_cursor.as_deref(), Some("opaque+/= cursor"));
+        assert_eq!(
+            exact.vulnerabilities[0].stable_identity.canonical_cve_id,
+            "CVE-2026-0440"
+        );
+
+        let legacy: SystemCveInventoryPageResponse = serde_json::from_value(serde_json::json!({
+            "authority": "legacy",
+            "exact_authority_failure": "retained_generation_unavailable",
+            "source": {
+                "scan_id": "00000000-0000-0000-0000-000000000440",
+                "scanner_name": "vulnix",
+                "scanner_version": "1.10.1",
+                "completed_at": "2026-09-14T20:00:00Z"
+            },
+            "vulnerabilities": [],
+            "metadata": {
+                "total_findings": 0,
+                "total_cves": 0,
+                "total_packages": 0,
+                "severity": {"critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0}
+            },
+            "inventory_revision": "legacy-revision",
+            "has_more": false,
+            "next_cursor": null
+        }))
+        .expect("legacy-clean inventory should deserialize");
+        assert_eq!(legacy.authority, SystemCveInventoryAuthority::Legacy);
+        assert_eq!(
+            legacy.exact_authority_failure,
+            Some(ExactCveAuthorityFailureReason::RetainedGenerationUnavailable)
+        );
+        assert!(legacy.source.is_some());
+        assert!(legacy.vulnerabilities.is_empty());
+
+        let no_scan: SystemCveInventoryPageResponse = serde_json::from_value(serde_json::json!({
+            "authority": "no_scan",
+            "exact_authority_failure": "missing_current_generation",
+            "current_state": "current_authority_unavailable",
+            "source": null,
+            "vulnerabilities": [],
+            "metadata": {
+                "total_findings": 0,
+                "total_cves": 0,
+                "total_packages": 0,
+                "severity": {"critical": 0, "high": 0, "medium": 0, "low": 0, "unknown": 0}
+            },
+            "inventory_revision": "no-scan-revision",
+            "has_more": false,
+            "next_cursor": null
+        }))
+        .expect("no-scan inventory should deserialize");
+        assert_eq!(no_scan.authority, SystemCveInventoryAuthority::NoScan);
+        assert_eq!(
+            no_scan.current_state,
+            Some(SystemCveCurrentAuthorityState::CurrentAuthorityUnavailable)
+        );
+        assert!(no_scan.source.is_none());
+    }
+
+    #[test]
+    fn config_dtos_deserialize_missing_failed_and_known_v1_states() {
+        let missing: EvaluatedOption = serde_json::from_value(serde_json::json!({
+            "path": "services.example.missing",
+            "declared_type": null,
+            "metadata_error": null,
+            "value": {"kind": "scalar", "value": true},
+            "definitions": [{
+                "source_path": null,
+                "source_input": "self",
+                "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "value": null,
+                "winning": true
+            }],
+            "overridden": null
+        }))
+        .expect("missing V2 metadata and provenance should deserialize");
+        assert!(missing.declared_type.is_none());
+        assert!(missing.metadata_error.is_none());
+        assert!(missing.definitions[0].source_path.is_none());
+        assert!(missing.overridden.is_none());
+
+        let failed: EvaluatedOption = serde_json::from_value(serde_json::json!({
+            "path": "services.example.failed",
+            "declared_type": null,
+            "metadata_error": {
+                "code": "metadata_not_evaluated",
+                "message": "Option metadata did not evaluate"
+            },
+            "value": {"kind": "scalar", "value": false},
+            "definitions": [],
+            "overridden": null
+        }))
+        .expect("failed V2 metadata should deserialize");
+        assert_eq!(
+            failed
+                .metadata_error
+                .as_ref()
+                .map(|error| error.code.as_str()),
+            Some("metadata_not_evaluated")
+        );
+
+        let known_v1: EvaluatedOption = serde_json::from_value(serde_json::json!({
+            "path": "services.example.known",
+            "declared_type": "boolean",
+            "value": {"kind": "scalar", "value": true},
+            "definitions": [{
+                "source_path": "modules/example.nix",
+                "source_input": "self",
+                "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "value": true,
+                "winning": true
+            }],
+            "overridden": false
+        }))
+        .expect("known legacy V1 fields should deserialize");
+        assert_eq!(known_v1.declared_type.as_deref(), Some("boolean"));
+        assert!(known_v1.metadata_error.is_none());
+        assert_eq!(known_v1.overridden, Some(false));
+
+        let module: EvaluationModuleSummary = serde_json::from_value(serde_json::json!({
+            "source_input": "self",
+            "source_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "source_path": null,
+            "defined_count": 1,
+            "won_count": 1,
+            "tracked_flake": null
+        }))
+        .expect("nullable V2 module source path should deserialize");
+        assert!(module.source_path.is_none());
+    }
+
+    #[test]
+    fn scoped_config_observation_dtos_preserve_typed_payloads_and_lifecycle() {
+        let error = serde_json::from_value::<ConfigObservationRequestResponse>(serde_json::json!({
+            "request_id": "00000000-0000-0000-0000-000000000440",
+            "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "configuration_name": "atlas-01",
+            "kind": "waiting_for_capacity",
+            "path_components": ["services"],
+            "lifecycle": "waiting_for_capacity",
+            "observation_id": null,
+            "error": null,
+            "attempts": 0,
+            "heartbeat_at": null,
+            "reused": true
+        }))
+        .expect_err("an operation kind cannot be replaced by a lifecycle value");
+        assert!(error.to_string().contains("unknown variant"));
+
+        let response: ConfigObservationResponse = serde_json::from_value(serde_json::json!({
+            "observation_id": "00000000-0000-0000-0000-000000000441",
+            "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "configuration_name": "atlas-01",
+            "schema_version": 1,
+            "kind": "configured_index",
+            "path_components": [],
+            "payload": {
+                "kind": "configured_index",
+                "path_components": [],
+                "total_traversed": 16000,
+                "diagnostics": [],
+                "diagnostics_truncated": false,
+                "configured": [{"path_components": ["services", "openssh", "enable"], "key": "a".repeat(64)}],
+                "total_configured": 1,
+                "configured_truncated": false,
+                "classifier_diagnostics": [],
+                "classifier_diagnostics_truncated": false
+            },
+            "created_at": "2026-09-11T20:00:00Z"
+        }))
+        .expect("configured-index observation should deserialize");
+        assert_eq!(response.kind, super::ConfigObservationKind::ConfiguredIndex);
+        let ConfigObservationPayload::ConfiguredIndex {
+            configured,
+            total_traversed,
+            ..
+        } = response.payload
+        else {
+            panic!("expected configured-index payload");
+        };
+        assert_eq!(
+            configured[0].path_components,
+            ["services", "openssh", "enable"]
+        );
+        assert_eq!(total_traversed, 16000);
+        assert_eq!(
+            ConfigObservationLifecycle::WaitingForCapacity,
+            ConfigObservationLifecycle::WaitingForCapacity
+        );
+    }
+
+    #[test]
+    fn compliance_requirement_identity_is_additive_and_rolling_compatible() {
+        let mut value = serde_json::json!({
+            "policy_id": "00000000-0000-0000-0000-000000000001",
+            "policy_name": "Mapped policy",
+            "status": "pass",
+            "severity": "high",
+            "summary": "Passed",
+            "evidence_items": [],
+            "framework_mapping": "NIST SP 800-53 Rev. 5 · AC-2"
+        });
+        let legacy: ComplianceControlEvidence = serde_json::from_value(value.clone()).unwrap();
+        assert!(legacy.requirements.is_empty());
+
+        value["requirements"] = serde_json::json!([{
+            "requirement_version_id": "00000000-0000-0000-0000-000000000002",
+            "external_id": "AC-2",
+            "title": "Account Management",
+            "framework_id": "00000000-0000-0000-0000-000000000003",
+            "framework_name": "NIST SP 800-53",
+            "framework_version_id": "00000000-0000-0000-0000-000000000004",
+            "framework_version": "Rev. 5",
+            "framework_title": null
+        }]);
+        let enriched: ComplianceControlEvidence = serde_json::from_value(value).unwrap();
+        assert_eq!(enriched.requirements[0].external_id, "AC-2");
+        assert_eq!(enriched.requirements[0].framework_version, "Rev. 5");
+    }
 
     #[test]
     fn deserializes_20ac_shared_implementation_group() {

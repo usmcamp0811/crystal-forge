@@ -3,6 +3,9 @@
 use chrono::{DateTime, Datelike, Timelike, Utc};
 use dioxus::prelude::*;
 
+use crate::components::dialog_focus::{
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
+};
 use crate::theme;
 
 use super::helpers::{
@@ -62,6 +65,7 @@ impl DetailTab {
 pub fn BuildDetailPane(
     selected: Option<BuildItem>,
     can_requeue: bool,
+    retry_pending: bool,
     on_close: EventHandler<()>,
     on_log: EventHandler<()>,
     on_build_action: EventHandler<BuildAction>,
@@ -207,9 +211,10 @@ pub fn BuildDetailPane(
                         if build.status == BuildStatus::Stopping { "Force kill" } else { "Cancel" }
                     }
                 }
-                if can_requeue && build.status == BuildStatus::Failed {
+                if can_requeue && matches!(build.status, BuildStatus::Failed | BuildStatus::Complete | BuildStatus::Cancelled) {
                     button {
                         class: "btn btn-ghost focus-ring xs",
+                        disabled: retry_pending,
                         onclick: move |_| on_build_action.call(BuildAction::Restart),
                         svg {
                             width: "12", height: "12",
@@ -221,7 +226,7 @@ pub fn BuildDetailPane(
                             path { d: "M21 3v9h-9" }
                             path { d: "M21 12A9 9 0 0 0 3.26 9.26" }
                         }
-                        "Retry"
+                        if retry_pending { "Retrying..." } else { "Retry" }
                     }
                 }
                 button {
@@ -553,6 +558,7 @@ pub fn QueueActionButton(label: &'static str, onclick: EventHandler<MouseEvent>)
 #[component]
 pub fn ConfirmActionModal(
     action: PendingAction,
+    pending: bool,
     on_cancel: EventHandler<()>,
     on_confirm: EventHandler<()>,
 ) -> Element {
@@ -561,24 +567,51 @@ pub fn ConfirmActionModal(
     rsx! {
         div {
             class: "fixed inset-0 z-50 bg-black/60 flex items-center justify-center p-4 cf-modal-overlay",
-            onclick: move |_| on_cancel.call(()),
+            onclick: move |_| {
+                if !pending {
+                    on_cancel.call(());
+                }
+            },
             div {
+                id: "build-action-dialog",
                 class: "relative bg-gray-900 rounded-xl border border-gray-700 shadow-2xl p-6 cf-modal-panel-30",
+                role: "dialog",
+                aria_modal: "true",
+                aria_labelledby: "build-action-dialog-title",
+                aria_busy: pending,
+                tabindex: "-1",
                 onclick: |evt| evt.stop_propagation(),
-                h3 { class: "text-lg font-semibold text-white mb-2", "{title}" }
+                onkeydown: move |event| {
+                    if event.key() == Key::Escape && !pending {
+                        on_cancel.call(());
+                    }
+                },
+                DialogFocusRestore {}
+                DialogFocusSentinel {
+                    dialog_id: "build-action-dialog".to_string(),
+                    boundary: DialogFocusBoundary::Last,
+                }
+                h3 { id: "build-action-dialog-title", class: "text-lg font-semibold text-white mb-2", "{title}" }
                 p { class: "text-sm {theme::text::SECONDARY} mb-6", "{description}" }
                 div {
                     class: "flex gap-3",
                     button {
                         class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm transition-colors bg-gray-700 hover:bg-gray-600 text-white",
+                        disabled: pending,
                         onclick: move |_| on_cancel.call(()),
                         "Cancel"
                     }
                     button {
                         class: "flex-1 px-4 py-2 rounded-lg font-medium text-sm text-white {theme::interactive::PRIMARY_BTN}",
+                        disabled: pending,
+                        autofocus: true,
                         onclick: move |_| on_confirm.call(()),
-                        "{confirm_label}"
+                        if pending { "Working..." } else { "{confirm_label}" }
                     }
+                }
+                DialogFocusSentinel {
+                    dialog_id: "build-action-dialog".to_string(),
+                    boundary: DialogFocusBoundary::First,
                 }
             }
         }

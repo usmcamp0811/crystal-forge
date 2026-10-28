@@ -261,29 +261,12 @@ The core issue is confusing **authorization** with **UI presentation**.
 
 ### Correct Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│ Real Role (Authorization)                                    │
-│ - Route guards                                               │
-│ - Mutation permissions                                       │
-│ - Never affected by masquerade                               │
-│ - Multi-role: check ALL roles                                │
-└─────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────┐
-│ Display Role (UI Preview)                                    │
-│ - Show/hide UI elements                                      │
-│ - Affected by masquerade                                     │
-│ - Single role: masquerade_role OR highest_real_role          │
-│ - Used for badge display and conditional rendering           │
-└─────────────────────────────────────────────────────────────┘
-
-┌─────────────────────────────────────────────────────────────┐
-│ API Header (Backend Data Filtering - Advisory Only)         │
-│ - X-Masquerade-Role header                                   │
-│ - Backend MAY filter data by this role                       │
-│ - Backend MUST authorize by real role                        │
-└─────────────────────────────────────────────────────────────┘
+```mermaid
+%% diagram-id: backlog-task205-role-authorization-preview-boundaries
+flowchart LR
+    real["Real Role (Authorization)<br/>Route guards<br/>Mutation permissions<br/>Never affected by masquerade<br/>Multi-role: check ALL roles"]
+    display["Display Role (UI Preview)<br/>Show/hide UI elements<br/>Affected by masquerade<br/>Single role: masquerade_role OR highest_real_role<br/>Used for badge display and conditional rendering"]
+    header["API Header (Backend Data Filtering - Advisory Only)<br/>X-Masquerade-Role header<br/>Backend MAY filter data by this role<br/>Backend MUST authorize by real role"]
 ```
 
 ## Proposed Implementation

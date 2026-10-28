@@ -1,0 +1,136 @@
+{
+  "document": "systems-view-design-v0.1.md",
+  "version": "0.3",
+  "date": "2026-09-23",
+  "mr": 329,
+  "original_application_audit_head": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+  "decision_update_branch_head": "327d03b6d58055eb688fe657f12e223b8419f446",
+  "original_document_git_blob": "54735e4e64a86152ff819137160b80805e3f7aed",
+  "original_inspection_base": "72c8066323bcc1ef507c853a89852dfd880e469a",
+  "decision_update_reads": [
+    "GitLab branch metadata",
+    "AGENTS.md (full)",
+    "packages/default/crates/cf-server/src/models/poam.rs:80-168",
+    "packages/web-ui/src/views/system_detail.rs:120-290",
+    "packages/default/crates/cf-server/src/queries/cves.rs:590-785,870-1140",
+    "packages/default/crates/cf-server/src/handlers/api/systems.rs:read_only hydration search"
+  ],
+  "change_scope": "Complete supplied-document correction: Claude UI authority, design-state gate, and aligned SC1 prompt/validation. No new UI design or product behavior.",
+  "implementation_performed": false,
+  "repository_writes_made": false,
+  "application_tests_run": false,
+  "database_queries_run": false,
+  "browser_workflows_run": false,
+  "mermaid_rendered": false,
+  "markdown_structure_validated": true,
+  "diagrams": 12,
+  "source_references": 37,
+  "regression_scenarios": 36,
+  "SC1_acceptance_cases": 15,
+  "files": [
+    {
+      "path": "README.md",
+      "bytes": 2383,
+      "sha256": "34cde989702b0c29555b59ce8e74b6887e1c9bcf6358dbf6e974871e08793d45"
+    },
+    {
+      "path": "detail-evidence.png",
+      "bytes": 107613,
+      "sha256": "98f6ed9470fabeaab7cbc00a6cd0a14008cd969c46803407917271eb6020775a"
+    },
+    {
+      "path": "diagrams/01-screen-navigation.mmd",
+      "bytes": 587,
+      "sha256": "fa35060d4fb66a8edc67d3c3f3e36be40804def5d40813d8e338fbc771fce239"
+    },
+    {
+      "path": "diagrams/02-logical-data-model.mmd",
+      "bytes": 991,
+      "sha256": "f61f416307babf4649fcb7bfc9fac065602e025813f46e7e1800e38cfb81f4ae"
+    },
+    {
+      "path": "diagrams/03-as-built-read-paths.mmd",
+      "bytes": 915,
+      "sha256": "c65b490999ff245c727f51c1f1e3764c680bf2e1f5a6b7712cdab50f0852acba"
+    },
+    {
+      "path": "diagrams/04-current-cve-authority.mmd",
+      "bytes": 812,
+      "sha256": "4fbdd222859cc86901456988ff29b36f30d95e10ccf5a862b07f1ae0493f0dbf"
+    },
+    {
+      "path": "diagrams/05-generation-retention.mmd",
+      "bytes": 880,
+      "sha256": "a3ef2da4ce20842d2eabb6081d64f52948624a530f0921dad418087214d9c3c4"
+    },
+    {
+      "path": "diagrams/06-screenshot-inconsistency.mmd",
+      "bytes": 688,
+      "sha256": "3cdc68a17c6c804b6f9e897faec9823602716af3449b21f551dbd49d4a2c2801"
+    },
+    {
+      "path": "diagrams/07-proposed-default-selection.mmd",
+      "bytes": 1009,
+      "sha256": "140b20e8b76e6e0c930d0f272aa4f5c61f3e9db1096039fdb42a4b1d72aa686c"
+    },
+    {
+      "path": "diagrams/08-proposed-read-model.mmd",
+      "bytes": 653,
+      "sha256": "0233f780fa293b1dfd1618fdd3366c886c9adddc7ff29ebe9b56af3381175a7a"
+    },
+    {
+      "path": "diagrams/09-attempt-versus-evidence.mmd",
+      "bytes": 459,
+      "sha256": "93ba39f79308d7a7d4e2be6ef9c2bf42645851069a095a2077be70035a7ee5f6"
+    },
+    {
+      "path": "diagrams/10-proposed-page-load.mmd",
+      "bytes": 814,
+      "sha256": "9233d6cf7ec8a30ff11d09950de83d468791981a045a1023edf712bb2b7bb132"
+    },
+    {
+      "path": "diagrams/11-proposed-mutation-validation.mmd",
+      "bytes": 858,
+      "sha256": "7f68d601b6a00a71af84fd04dc4511ba6d093d62e12b55e3f6894d193fbb5f5c"
+    },
+    {
+      "path": "diagrams/12-continuity-and-readiness.mmd",
+      "bytes": 732,
+      "sha256": "7e2a0c3e65230cd392b39eb81f447f794440df45bbf82a9c691dea86e8a7bfa1"
+    },
+    {
+      "path": "scanning-evidence.png",
+      "bytes": 81942,
+      "sha256": "ab0916f20d62c8df5095c8c49bade22d1cfdb64b1ac163d3bab91a212e156046"
+    },
+    {
+      "path": "system-cves-chunk-1-agent-prompt.md",
+      "bytes": 10622,
+      "sha256": "e2d965a7b62648ec92fabfd9fd76b647be93f6d20b6a6c1a7327f0459232a5e7"
+    },
+    {
+      "path": "system-cves-chunk-1-manual-validation.md",
+      "bytes": 7578,
+      "sha256": "7f23b1022f736cd97547af4c302d3e00033d6cebffe9eed174630b9f18f0dbc7"
+    },
+    {
+      "path": "system-cves-chunk-1.md",
+      "bytes": 21588,
+      "sha256": "41354ca21c0a686c62d4fb554f403f4080738e64f206e4500c615d357edfe7c5"
+    },
+    {
+      "path": "systems-view-design-v0.1.md",
+      "bytes": 131155,
+      "sha256": "be6c6d788d7883f06bc7d129947afc9a41d8e2182c8653c82607f8c54c76d922"
+    }
+  ],
+  "ui_authority_correction": {
+    "date": "2026-09-23",
+    "basis": "Owner instruction: use the existing Claude design setup; do not invent UI elements.",
+    "source_files": "Previous complete SC1 bundle and its four matching mounted Markdown files.",
+    "new_repository_reads": false,
+    "new_application_audit": false,
+    "design_state_coverage_verified": false,
+    "required_next_step": "Implementation agent maps affected states to the existing Claude design before UI edits; missing states return to that design workflow."
+  }
+}

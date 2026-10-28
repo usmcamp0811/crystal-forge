@@ -15,3 +15,4 @@
 pub mod agent;
 pub mod builder;
 pub mod cache;
+pub mod source_artifact;

@@ -1,0 +1,3293 @@
+//! Reusable POA&M workflow components.
+//!
+//! Finding identity always comes from server-issued IDs. The presentation
+//! fields carried alongside those IDs are read-only context, never identity.
+
+use std::collections::{BTreeMap, HashSet};
+
+use chrono::NaiveDate;
+use dioxus::prelude::*;
+use gloo_timers::future::TimeoutFuture;
+use uuid::Uuid;
+
+use crate::components::dialog_focus::{
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
+};
+use crate::components::icon::{Icon, IconName};
+use crate::state::app_state::AppState;
+use crate::views::poam_api::{
+    self, ActivityView, AddFindingRequest, AddMilestoneRequest, AddNoteRequest, AssessmentOutcome,
+    AssignmentReferenceRequest, ClosePreconditionDetails, CreateCvePoamRequest, CveFindingView,
+    CveObservationReference, FindingObservationReference, FindingRelationshipEntry,
+    FindingRequirementView, FindingView, MilestoneView, PoamApiError, PoamAssigneeCatalog,
+    PoamAssigneeRequest, PoamAssigneeView, PoamDetail, PoamDetailQuery, PoamRisk, PoamStatus,
+    PoamSummary, RevisionRequest, Rollup, TransitionPoamRequest, UpdateMilestoneRequest,
+    UpdatePoamRequest, VerificationResult,
+};
+
+/// Describes an immutable assignment version that a POA&M can reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AssignmentVersionCandidate {
+    /// Identifies the assignment lineage.
+    pub assignment_id: Uuid,
+    /// Identifies the immutable assignment version.
+    pub assignment_version_id: Uuid,
+    /// Identifies the assigned compliance bundle lineage.
+    pub bundle_id: Uuid,
+    /// Identifies the exact assigned bundle version.
+    pub bundle_version_id: Uuid,
+    /// Contains the human-readable bundle name.
+    pub bundle_name: String,
+    /// Contains the human-readable bundle version.
+    pub bundle_version: String,
+    /// Describes the system or environment assignment scope.
+    pub scope_label: String,
+}
+
+/// Provides authoritative finding identity and read-only display context.
+///
+/// Components must use `finding_id`, `assessment_id`, and `observation` for
+/// mutations. Human-readable fields do not establish finding identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FindingPoamContext {
+    /// Identifies the current composite assessment when one exists.
+    pub assessment_id: Option<Uuid>,
+    /// Identifies the stable server finding.
+    pub finding_id: Uuid,
+    /// Binds source-neutral findings to the exact displayed observation.
+    pub observation: Option<FindingObservationReference>,
+    /// Identifies the affected system.
+    pub system_id: Uuid,
+    /// Contains the affected system's display hostname.
+    pub hostname: String,
+    /// Identifies the policy lineage.
+    pub policy_lineage_id: Uuid,
+    /// Identifies the immutable policy version used for the observation.
+    pub policy_version_id: Uuid,
+    /// Contains the policy display name.
+    pub policy_name: String,
+    /// Contains the immutable policy version label.
+    pub policy_version: String,
+    /// Identifies the related bundle lineage when bundle context exists.
+    pub bundle_id: Option<Uuid>,
+    /// Contains the related bundle name when available.
+    pub bundle_name: Option<String>,
+    /// Identifies the exact related bundle version when available.
+    pub bundle_version_id: Option<Uuid>,
+    /// Contains the related bundle version label when available.
+    pub bundle_version: Option<String>,
+    /// Contains the authoritative requirement display label when available.
+    pub requirement: Option<String>,
+    /// Contains the authoritative framework display label when available.
+    pub framework: Option<String>,
+    /// Contains the assessment outcome displayed when remediation starts.
+    pub result: AssessmentOutcome,
+    /// Summarizes the evidence without replacing authoritative identity.
+    pub evidence_summary: String,
+    /// Contains immutable assignments available as supplemental references.
+    pub assignment_versions: Vec<AssignmentVersionCandidate>,
+}
+
+/// Reports a remediation interaction to the component owner.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FindingPoamEvent {
+    /// Requests that the owner open the identified POA&M.
+    Open(Uuid),
+    /// Reports a newly created POA&M using the server response.
+    Created(PoamDetail),
+    /// Reports a newly linked POA&M using the server response.
+    Linked(PoamDetail),
+    /// Requests invalidation of cached assessment or finding evidence.
+    InvalidateAssessment(Uuid),
+}
+
+/// Provides read-only display fields beside opaque exact-CVE mutation context.
+#[derive(Debug, Clone, PartialEq)]
+pub struct CvePoamContext {
+    /// Contains the server-issued exact occurrence identity.
+    pub observation: CveObservationReference,
+    /// Contains the affected hostname.
+    pub hostname: String,
+    /// Contains the scanner-observed package name.
+    pub observed_package_name: String,
+    /// Contains the scanner-observed installed version.
+    pub installed_version: String,
+    /// Contains the advisory fixed version when supplied.
+    pub fixed_version: Option<String>,
+    /// Contains the severity label shown by the system CVE response.
+    pub severity: String,
+    /// Contains the CVSS score when supplied.
+    pub cvss_score: Option<f32>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PoamAssigneeDraft {
+    Unassigned,
+    User {
+        user_id: Uuid,
+        display: String,
+        available: bool,
+    },
+    OidcGroup {
+        group_name: String,
+        display: String,
+        available: bool,
+    },
+    Historical {
+        display: String,
+    },
+}
+
+impl PoamAssigneeDraft {
+    fn from_summary(poam: &PoamSummary) -> Self {
+        match poam.assignee.as_ref() {
+            Some(PoamAssigneeView::User {
+                user_id,
+                display,
+                available,
+            }) => Self::User {
+                user_id: *user_id,
+                display: display.clone(),
+                available: *available,
+            },
+            Some(PoamAssigneeView::OidcGroup {
+                group_name,
+                display,
+                available,
+            }) => Self::OidcGroup {
+                group_name: group_name.clone(),
+                display: display.clone(),
+                available: *available,
+            },
+            Some(PoamAssigneeView::Unassigned) => Self::Unassigned,
+            Some(PoamAssigneeView::Legacy { display }) => Self::Historical {
+                display: display.clone(),
+            },
+            None if poam.owner.is_empty() => Self::Unassigned,
+            None => Self::Historical {
+                display: poam.owner.clone(),
+            },
+        }
+    }
+
+    fn option_value(&self) -> String {
+        match self {
+            Self::Unassigned => "unassigned".to_string(),
+            Self::User { user_id, .. } => format!("user:{user_id}"),
+            Self::OidcGroup { group_name, .. } => format!("group:{group_name}"),
+            Self::Historical { .. } => "historical".to_string(),
+        }
+    }
+
+    fn display(&self) -> &str {
+        match self {
+            Self::Unassigned => "Unassigned",
+            Self::User { display, .. }
+            | Self::OidcGroup { display, .. }
+            | Self::Historical { display } => display,
+        }
+    }
+
+    fn request(&self) -> Option<PoamAssigneeRequest> {
+        match self {
+            Self::Unassigned => Some(PoamAssigneeRequest::Unassigned),
+            Self::User { user_id, .. } => Some(PoamAssigneeRequest::User { user_id: *user_id }),
+            Self::OidcGroup { group_name, .. } => Some(PoamAssigneeRequest::OidcGroup {
+                group_name: group_name.clone(),
+            }),
+            Self::Historical { .. } => None,
+        }
+    }
+
+    fn unavailable_label(&self) -> String {
+        match self {
+            Self::User {
+                display,
+                available: false,
+                ..
+            } => format!("Former assignee — {display}"),
+            Self::OidcGroup {
+                display,
+                available: false,
+                ..
+            } => format!("Former group — {display}"),
+            Self::Historical { display } => format!("Former / legacy assignee — {display}"),
+            _ => self.display().to_string(),
+        }
+    }
+
+    #[cfg(test)]
+    fn is_catalogued_in(&self, catalog: &PoamAssigneeCatalog) -> bool {
+        match self {
+            Self::Unassigned => true,
+            Self::User { user_id, .. } => {
+                catalog.people.iter().any(|item| item.user_id == *user_id)
+            }
+            Self::OidcGroup { group_name, .. } => catalog
+                .groups
+                .iter()
+                .any(|item| item.group_name == *group_name),
+            Self::Historical { .. } => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum AssigneeCatalogState {
+    Loading,
+    Loaded(PoamAssigneeCatalog),
+    Failed(String),
+}
+
+fn assignee_from_option(value: &str, catalog: &PoamAssigneeCatalog) -> Option<PoamAssigneeDraft> {
+    if value == "unassigned" {
+        return Some(PoamAssigneeDraft::Unassigned);
+    }
+    if let Some(raw_id) = value.strip_prefix("user:") {
+        let user_id = Uuid::parse_str(raw_id).ok()?;
+        let person = catalog.people.iter().find(|item| item.user_id == user_id)?;
+        return Some(PoamAssigneeDraft::User {
+            user_id,
+            display: person.label.clone(),
+            available: true,
+        });
+    }
+    let group_name = value.strip_prefix("group:")?;
+    let group = catalog
+        .groups
+        .iter()
+        .find(|item| item.group_name == group_name)?;
+    Some(PoamAssigneeDraft::OidcGroup {
+        group_name: group.group_name.clone(),
+        display: group.group_name.clone(),
+        available: true,
+    })
+}
+
+fn default_assignee(
+    current_user_id: Option<Uuid>,
+    catalog: &PoamAssigneeCatalog,
+) -> PoamAssigneeDraft {
+    current_user_id
+        .and_then(|user_id| {
+            catalog
+                .people
+                .iter()
+                .find(|person| person.user_id == user_id)
+        })
+        .map(|person| PoamAssigneeDraft::User {
+            user_id: person.user_id,
+            display: person.label.clone(),
+            available: true,
+        })
+        .unwrap_or(PoamAssigneeDraft::Unassigned)
+}
+
+fn assignee_display(poam: &PoamSummary) -> String {
+    match poam.assignee.as_ref() {
+        Some(PoamAssigneeView::User {
+            display,
+            available: false,
+            ..
+        }) => format!("Former assignee — {display}"),
+        Some(PoamAssigneeView::OidcGroup {
+            display,
+            available: false,
+            ..
+        }) => format!("Former group — {display}"),
+        Some(PoamAssigneeView::Legacy { display }) => {
+            format!("Former / legacy assignee — {display}")
+        }
+        Some(PoamAssigneeView::Unassigned) => "Unassigned".to_string(),
+        Some(PoamAssigneeView::User { display, .. })
+        | Some(PoamAssigneeView::OidcGroup { display, .. }) => display.clone(),
+        None if poam.owner.is_empty() => "Unassigned".to_string(),
+        None => format!("Former / legacy assignee — {}", poam.owner),
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct PoamAssigneeSelectProps {
+    selection: Signal<PoamAssigneeDraft>,
+    catalog: AssigneeCatalogState,
+    disabled: bool,
+    /// Uses the compact in-band style of the detail metadata strip instead of
+    /// the full-height form-field style.
+    #[props(default)]
+    inline: bool,
+    /// Names the select when no wrapping `label` supplies a name. An empty
+    /// value adds no `aria-label`.
+    #[props(default)]
+    aria_label: String,
+}
+
+#[component]
+fn PoamAssigneeSelect(props: PoamAssigneeSelectProps) -> Element {
+    let mut selection = props.selection;
+    let select_class = if props.inline {
+        "poam-inline-input focus-ring"
+    } else {
+        "input focus-ring"
+    };
+    let accessible_name = (!props.aria_label.is_empty()).then_some(props.aria_label.as_str());
+    let empty_catalog = PoamAssigneeCatalog::default();
+    let catalog = match &props.catalog {
+        AssigneeCatalogState::Loaded(catalog) => catalog,
+        _ => &empty_catalog,
+    };
+    let selected = props.selection.read().clone();
+    let selected_value = selected.option_value();
+    // COMPATIBILITY: Keep the selected option at one stable DOM location while
+    // the asynchronous catalog loads. Moving the selected value into an
+    // optgroup can make the browser reset the native select to Unassigned.
+    let include_current = !matches!(selected, PoamAssigneeDraft::Unassigned);
+    let catalog_for_change = catalog.clone();
+    rsx! {
+        select {
+            class: select_class,
+            "data-testid": "poam-assignee-select",
+            aria_label: accessible_name,
+            value: "{selected_value}",
+            disabled: props.disabled || matches!(props.catalog, AssigneeCatalogState::Loading),
+            onchange: move |event| {
+                if let Some(next) = assignee_from_option(&event.value(), &catalog_for_change) {
+                    selection.set(next);
+                }
+            },
+            option { value: "unassigned", selected: selected_value == "unassigned", "Unassigned" }
+            if include_current {
+                option { value: "{selected_value}", selected: true, "{selected.unavailable_label()}" }
+            }
+            if !catalog.people.is_empty() {
+                optgroup { label: "People",
+                    for person in &catalog.people {
+                        if selected_value != format!("user:{}", person.user_id) {
+                            option { value: "user:{person.user_id}", "{person.label}" }
+                        }
+                    }
+                }
+            }
+            if !catalog.groups.is_empty() {
+                optgroup { label: "Groups",
+                    for group in &catalog.groups {
+                        if selected_value != format!("group:{}", group.group_name) {
+                            option { value: "group:{group.group_name}", "{group.group_name}" }
+                        }
+                    }
+                }
+            }
+        }
+        match &props.catalog {
+            AssigneeCatalogState::Loading => rsx! { small { "Loading assignees…" } },
+            AssigneeCatalogState::Failed(error) => rsx! { small { role: "alert", "Current assignees unavailable: {error}" } },
+            AssigneeCatalogState::Loaded(_) => rsx! {},
+        }
+    }
+}
+
+/// Selects the lifecycle subset displayed in a POA&M list.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PoamFilter {
+    /// Includes all non-completed remediation plans.
+    #[default]
+    Open,
+    /// Includes active remediation plans past their target date.
+    Overdue,
+    /// Includes remediation plans waiting for verification.
+    Awaiting,
+    /// Includes completed remediation plans.
+    Closed,
+    /// Includes remediation plans in every lifecycle state.
+    All,
+}
+
+impl PoamFilter {
+    /// Returns the product label for this filter.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Open => "Open",
+            Self::Overdue => "Overdue",
+            Self::Awaiting => "Awaiting verification",
+            Self::Closed => "Closed",
+            Self::All => "All",
+        }
+    }
+
+    /// Returns whether a server summary belongs in this filter.
+    pub fn includes(self, poam: &PoamSummary) -> bool {
+        match self {
+            Self::Open => poam.status.is_active(),
+            Self::Overdue => poam.status.is_active() && poam.overdue,
+            Self::Awaiting => poam.status == PoamStatus::AwaitingVerification,
+            Self::Closed => poam.status == PoamStatus::Completed,
+            Self::All => true,
+        }
+    }
+}
+
+/// Returns the product label for a server POA&M status.
+pub const fn status_label(status: PoamStatus) -> &'static str {
+    status.label()
+}
+
+fn available_status_transitions(status: PoamStatus) -> &'static [PoamStatus] {
+    match status {
+        PoamStatus::Open => &[
+            PoamStatus::InProgress,
+            PoamStatus::Blocked,
+            PoamStatus::AwaitingVerification,
+        ],
+        PoamStatus::InProgress => &[
+            PoamStatus::Open,
+            PoamStatus::Blocked,
+            PoamStatus::AwaitingVerification,
+        ],
+        PoamStatus::Blocked => &[
+            PoamStatus::Open,
+            PoamStatus::InProgress,
+            PoamStatus::AwaitingVerification,
+        ],
+        PoamStatus::AwaitingVerification => &[PoamStatus::InProgress, PoamStatus::Blocked],
+        PoamStatus::Completed => &[],
+    }
+}
+
+/// Returns whether the detail view may offer `Verify now` and
+/// `Authoritative close`.
+///
+/// The server records a verification attempt only for a POA&M that is
+/// awaiting verification. It answers every other state, including `Open`,
+/// `InProgress`, `Blocked`, and `Completed`, with `409 invalid_transition`.
+/// The view therefore never offers these actions elsewhere. This function
+/// mirrors that rule for presentation only; the server still decides.
+fn verification_actions_available(status: PoamStatus) -> bool {
+    status == PoamStatus::AwaitingVerification
+}
+
+/// Returns the semantic CSS class for a server POA&M status.
+pub const fn status_class(status: PoamStatus) -> &'static str {
+    match status {
+        PoamStatus::Open => "poam-chip-open",
+        PoamStatus::InProgress => "poam-chip-progress",
+        PoamStatus::Blocked => "poam-chip-blocked",
+        PoamStatus::AwaitingVerification => "poam-chip-awaiting",
+        PoamStatus::Completed => "poam-chip-completed",
+    }
+}
+
+/// Returns the category and severity label for a POA&M risk.
+pub const fn risk_label(risk: PoamRisk) -> &'static str {
+    match risk {
+        PoamRisk::High => "CAT I - High",
+        PoamRisk::Medium => "CAT II - Medium",
+        PoamRisk::Low => "CAT III - Low",
+    }
+}
+
+/// Returns the semantic CSS class for a POA&M risk.
+pub const fn risk_class(risk: PoamRisk) -> &'static str {
+    match risk {
+        PoamRisk::High => "poam-risk-high",
+        PoamRisk::Medium => "poam-risk-medium",
+        PoamRisk::Low => "poam-risk-low",
+    }
+}
+
+/// Returns the product label for an authoritative verification result.
+pub const fn result_label(result: VerificationResult) -> &'static str {
+    match result {
+        VerificationResult::Pass => "Pass",
+        VerificationResult::Waiver => "Waiver",
+        VerificationResult::Fail => "Fail",
+        VerificationResult::Error => "Error",
+        VerificationResult::NotChecked => "Not checked",
+        VerificationResult::Missing => "Missing",
+        VerificationResult::Stale => "Stale",
+        VerificationResult::Unknown => "Unknown",
+        VerificationResult::Warn => "Warn",
+        VerificationResult::NotApplicable => "Not applicable",
+    }
+}
+
+/// Returns the semantic CSS class for an authoritative verification result.
+pub const fn result_class(result: VerificationResult) -> &'static str {
+    match result {
+        VerificationResult::Pass => "poam-result-pass",
+        VerificationResult::Waiver => "poam-result-waiver",
+        VerificationResult::Fail | VerificationResult::Error => "poam-result-fail",
+        VerificationResult::Warn => "poam-result-warn",
+        VerificationResult::NotChecked
+        | VerificationResult::Missing
+        | VerificationResult::Stale
+        | VerificationResult::Unknown
+        | VerificationResult::NotApplicable => "poam-result-unknown",
+    }
+}
+
+/// Returns the explicit server exact-CVE verification label.
+pub fn cve_result_label(result: &str) -> &'static str {
+    match result {
+        "pass" => "PASS",
+        "fail" => "FAIL",
+        "missing" => "MISSING",
+        "stale" => "STALE",
+        "whitelisted" => "WHITELISTED",
+        "justified" => "JUSTIFIED",
+        "error" => "ERROR",
+        _ => "ERROR",
+    }
+}
+
+fn cve_result_class(result: &str) -> &'static str {
+    match result {
+        "pass" => "poam-result-pass",
+        "fail" | "error" => "poam-result-fail",
+        "whitelisted" | "justified" => "poam-result-waiver",
+        "missing" | "stale" => "poam-result-unknown",
+        _ => "poam-result-fail",
+    }
+}
+
+fn assessment_label(result: AssessmentOutcome) -> &'static str {
+    match result {
+        AssessmentOutcome::Pass => "PASS",
+        AssessmentOutcome::Fail => "FAIL",
+        AssessmentOutcome::Error => "ERROR",
+        AssessmentOutcome::NotChecked => "NOT CHECKED",
+    }
+}
+
+fn format_date(date: Option<NaiveDate>) -> String {
+    date.map(|value| value.format("%Y-%m-%d").to_string())
+        .unwrap_or_else(|| "Not set".to_string())
+}
+
+fn target_timing_label(poam: &PoamSummary, today: NaiveDate) -> Option<String> {
+    if poam.status == PoamStatus::Completed {
+        return poam
+            .closed_at
+            .map(|closed| format!("Closed {}", closed.date_naive()));
+    }
+    poam.target_date.map(|target| {
+        let days = (target - today).num_days();
+        if days < 0 {
+            format!("{}d overdue", days.unsigned_abs())
+        } else if days == 0 {
+            "Due today".to_string()
+        } else {
+            format!("{days}d remaining")
+        }
+    })
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct RequirementPresentation {
+    framework: Option<String>,
+    control: String,
+    title: Option<String>,
+}
+
+fn requirement_presentations(
+    requirements: &[FindingRequirementView],
+    requirement_version_ids: &[Uuid],
+) -> Vec<RequirementPresentation> {
+    if !requirements.is_empty() {
+        requirements
+            .iter()
+            .map(|requirement| RequirementPresentation {
+                framework: Some(format!(
+                    "{} · {}",
+                    requirement.framework_name, requirement.framework_version
+                )),
+                control: requirement.external_id.clone(),
+                title: requirement
+                    .title
+                    .clone()
+                    .filter(|title| !title.trim().is_empty()),
+            })
+            .collect()
+    } else if requirement_version_ids.is_empty() {
+        Vec::new()
+    } else {
+        requirement_version_ids
+            .iter()
+            .map(|id| RequirementPresentation {
+                framework: None,
+                control: id.to_string(),
+                title: None,
+            })
+            .collect()
+    }
+}
+
+fn close_rejection_message(committed_revision: i64) -> String {
+    format!(
+        "Closure was rejected after verification was committed at revision {committed_revision}. Current server data was reloaded; your drafts are preserved."
+    )
+}
+
+/// Returns whether the assignee draft names a different assignee than the
+/// loaded POA&M.
+///
+/// INVARIANT: Assignee identity is [`PoamAssigneeDraft::option_value`], which
+/// encodes the kind and the stable user ID or group name. The display text is
+/// presentation only and may differ between the assignee catalog and the
+/// server response for the same assignee. Comparing it would leave the draft
+/// permanently "changed" after a successful save. [`metadata_is_dirty`] and
+/// [`build_metadata_request`] both use this predicate, so a visible unsaved
+/// state always corresponds to a request that carries the new assignee.
+fn assignee_changed(poam: &PoamSummary, draft: &PoamAssigneeDraft) -> bool {
+    draft.option_value() != PoamAssigneeDraft::from_summary(poam).option_value()
+}
+
+/// Returns whether any editable metadata draft differs from the loaded POA&M.
+///
+/// The comparison mirrors what [`build_metadata_request`] sends: the title is
+/// compared after trimming, the target date as an ISO `YYYY-MM-DD` string, and
+/// the assignee as a typed draft. A remediation plan draft is not metadata and
+/// never affects this result.
+///
+/// The detail header uses this value to show `Save metadata` only while there
+/// is something to save. It does not authorize a write; the server still
+/// enforces the revision and the actor's mutation permission.
+fn metadata_is_dirty(
+    poam: &PoamSummary,
+    title: &str,
+    assignee: &PoamAssigneeDraft,
+    target: &str,
+    risk: PoamRisk,
+) -> bool {
+    let saved_target = poam
+        .target_date
+        .map(|date| date.to_string())
+        .unwrap_or_default();
+    title.trim() != poam.title.trim()
+        || assignee_changed(poam, assignee)
+        || target.trim() != saved_target
+        || risk != poam.risk
+}
+
+/// Builds the explicit `Save metadata` PATCH from the header drafts.
+///
+/// CONTRACT: The request carries only `title`, `assignee`, `target_date`, and
+/// `risk`. It never carries `plan` or the free-form `owner`, so saving metadata
+/// cannot persist an unsaved remediation plan draft. The assignee is sent only
+/// when it differs from the loaded value, and a historical or legacy assignee
+/// has no request form and is therefore never rewritten.
+///
+/// # Errors
+///
+/// Returns the user-facing message when `target` is neither empty nor a valid
+/// `YYYY-MM-DD` date. An empty target clears the target date.
+fn build_metadata_request(
+    revision: i64,
+    poam: &PoamSummary,
+    title: &str,
+    assignee: &PoamAssigneeDraft,
+    target: &str,
+    risk: PoamRisk,
+) -> Result<UpdatePoamRequest, &'static str> {
+    let target = target.trim();
+    let target_date = if target.is_empty() {
+        None
+    } else {
+        Some(
+            NaiveDate::parse_from_str(target, "%Y-%m-%d")
+                .map_err(|_| "Enter a valid target date.")?,
+        )
+    };
+    let assignee = assignee_changed(poam, assignee)
+        .then(|| assignee.request())
+        .flatten();
+    Ok(UpdatePoamRequest {
+        revision,
+        title: Some(title.trim().to_string()),
+        plan: None,
+        owner: None,
+        assignee,
+        target_date: Some(target_date),
+        risk: Some(risk),
+    })
+}
+
+/// Builds the explicit `Save plan` PATCH.
+///
+/// CONTRACT: The request carries only `plan`. Title, owner, assignee, target
+/// date, and risk are all `None`, so saving the plan cannot persist unsaved
+/// metadata drafts. The plan text is sent exactly as entered.
+fn build_plan_request(revision: i64, plan: &str) -> UpdatePoamRequest {
+    UpdatePoamRequest {
+        revision,
+        plan: Some(plan.to_string()),
+        ..UpdatePoamRequest::default()
+    }
+}
+
+/// Returns the `Deficiency` section heading for the active policy findings.
+fn deficiency_title(finding_count: usize) -> String {
+    format!(
+        "Deficiency · {finding_count} finding{}",
+        if finding_count == 1 { "" } else { "s" }
+    )
+}
+
+/// Returns the `Vulnerability scope` section heading.
+///
+/// The counts describe the links that currently define the plan's scope. Active
+/// exact links are the scope while any exist. When none are active, as on a
+/// completed POA&M whose links were all retired, the retired links are the only
+/// recorded scope and are counted instead. Hosts are counted by system ID, not
+/// by hostname.
+fn vulnerability_scope_title(active: &[CveFindingView], historical: &[CveFindingView]) -> String {
+    let scope = if active.is_empty() {
+        historical
+    } else {
+        active
+    };
+    let cves = scope
+        .iter()
+        .map(|finding| finding.canonical_cve_id.as_str())
+        .collect::<HashSet<_>>()
+        .len();
+    let hosts = scope
+        .iter()
+        .map(|finding| finding.system_id)
+        .collect::<HashSet<_>>()
+        .len();
+    format!(
+        "Vulnerability scope · {cves} CVE{} · {hosts} host{}",
+        if cves == 1 { "" } else { "s" },
+        if hosts == 1 { "" } else { "s" }
+    )
+}
+
+/// Groups the exact-CVE links of one POA&M by canonical CVE and package.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CveScopeGroup {
+    cve_id: String,
+    package: String,
+    findings: Vec<CveFindingView>,
+}
+
+/// Groups exact-CVE links so each CVE and package is shown once.
+///
+/// The key is the canonical CVE ID plus the canonical package name, the same
+/// pair that identifies an exact finding. Groups sort by CVE and then package.
+/// Hosts inside a group sort by hostname, then system ID, then link ID, so the
+/// order never depends on server response order. The function adds no data: it
+/// never derives severity, CVSS, or a fixed version, because the POA&M detail
+/// response does not carry them.
+fn group_cve_scope(findings: &[CveFindingView]) -> Vec<CveScopeGroup> {
+    let mut groups: BTreeMap<(String, String), Vec<CveFindingView>> = BTreeMap::new();
+    for finding in findings {
+        groups
+            .entry((
+                finding.canonical_cve_id.clone(),
+                finding.canonical_package_name.clone(),
+            ))
+            .or_default()
+            .push(finding.clone());
+    }
+    groups
+        .into_iter()
+        .map(|((cve_id, package), mut findings)| {
+            findings.sort_by(|a, b| {
+                a.hostname
+                    .cmp(&b.hostname)
+                    .then(a.system_id.cmp(&b.system_id))
+                    .then(a.link_id.cmp(&b.link_id))
+            });
+            CveScopeGroup {
+                cve_id,
+                package,
+                findings,
+            }
+        })
+        .collect()
+}
+
+/// Returns a compact exact-scan reference for a host row.
+///
+/// The reference is the first eight characters of the scan UUID. The full
+/// UUID stays available in the element title. A missing scan is reported as
+/// `Unavailable`, never as a placeholder identifier.
+fn short_scan_ref(scan_id: Option<Uuid>) -> String {
+    scan_id
+        .map(|id| id.to_string().chars().take(8).collect())
+        .unwrap_or_else(|| "Unavailable".to_string())
+}
+
+/// Returns `1 host` or `N hosts`.
+fn host_count_label(count: usize) -> String {
+    format!("{count} host{}", if count == 1 { "" } else { "s" })
+}
+
+fn api_message(error: &PoamApiError) -> String {
+    match error {
+        PoamApiError::Server(server) => server.message.clone(),
+        _ => error.to_string(),
+    }
+}
+
+#[component]
+fn StatusChip(poam: PoamSummary) -> Element {
+    rsx! {
+        span { class: "poam-chip {status_class(poam.status)}", "{status_label(poam.status)}" }
+        if poam.overdue && poam.status.is_active() {
+            span { class: "poam-chip poam-chip-overdue", "Overdue" }
+        }
+    }
+}
+
+#[component]
+fn RiskChip(risk: PoamRisk) -> Element {
+    rsx! { span { class: "poam-chip {risk_class(risk)}", "{risk_label(risk)}" } }
+}
+
+/// Configures the remediation controls rendered beside one finding.
+#[derive(Props, Clone, PartialEq)]
+pub struct FindingPoamBarProps {
+    /// Provides immutable finding identity and display context.
+    pub context: FindingPoamContext,
+    /// Provides the server-authoritative active and historical relationships.
+    pub relationship: FindingRelationshipEntry,
+    /// Disables create and link mutations for read-only users.
+    #[props(default)]
+    pub viewer: bool,
+    /// Receives open, mutation, and evidence-invalidation events.
+    pub on_event: EventHandler<FindingPoamEvent>,
+}
+
+/// Renders remediation state and create or link actions for one finding.
+///
+/// The component rejects mismatched relationship identity and delegates all
+/// persistence and cache invalidation outcomes to server responses and events.
+#[component]
+pub fn FindingPoamBar(props: FindingPoamBarProps) -> Element {
+    let mut create_open = use_signal(|| false);
+    let mut link_open = use_signal(|| false);
+    let active = props.relationship.active.clone();
+    let history = props.relationship.history.clone();
+    let can_start = props.context.result == AssessmentOutcome::Fail && active.is_none();
+
+    if props.relationship.finding_id != props.context.finding_id
+        || (props.relationship.assessment_id.is_some()
+            && props.relationship.assessment_id != props.context.assessment_id)
+    {
+        return rsx! {
+            div { role: "alert", class: "sd-callout sd-callout-danger",
+                "Remediation relationship does not match this authoritative assessment. Refresh evidence before continuing."
+            }
+        };
+    }
+
+    if props.context.result != AssessmentOutcome::Fail && active.is_none() && history.is_empty() {
+        return rsx! {};
+    }
+
+    rsx! {
+        section { class: "poam-bar", aria_label: "Finding remediation", "data-testid": "finding-poam-remediation", "data-coach-target": "finding-poam", "data-finding-id": "{props.context.finding_id}",
+            div { class: "poam-bar-label", Icon { name: IconName::Gear, size: 12 } "Remediation" }
+            div { class: "poam-finding-result",
+                span { "Current result" }
+                strong { class: if props.context.result == AssessmentOutcome::Fail { "poam-current-fail" } else { "" }, "{assessment_label(props.context.result)}" }
+            }
+            if let Some(poam) = active {
+                button { class: "poam-ref focus-ring", onclick: move |_| props.on_event.call(FindingPoamEvent::Open(poam.id)),
+                    span { class: "mono poam-human-id", "{poam.human_id}" }
+                    StatusChip { poam: poam.clone() }
+                    span { class: "poam-muted", "Due {format_date(poam.target_date)}" }
+                    Icon { name: IconName::ChevronRight, size: 12 }
+                }
+            } else if can_start {
+                div { class: "poam-bar-actions",
+                    button { class: "btn btn-ghost xs focus-ring", "data-coach-open": "finding-poam-form", disabled: props.viewer, onclick: move |_| create_open.set(true), Icon { name: IconName::Plus, size: 11 } "Create POA&M" }
+                    button { class: "btn btn-ghost xs focus-ring", disabled: props.viewer, onclick: move |_| link_open.set(true), Icon { name: IconName::Link, size: 11 } "Link existing" }
+                    span { class: "poam-muted", "No active remediation plan. The finding remains FAIL." }
+                }
+            } else {
+                span { class: "poam-muted", "No active remediation plan." }
+            }
+            if !history.is_empty() {
+                div { class: "poam-history",
+                    span { "Completed history" }
+                    for poam in history {
+                        button { key: "{poam.id}", class: "poam-ref poam-ref-quiet focus-ring", onclick: move |_| props.on_event.call(FindingPoamEvent::Open(poam.id)),
+                            span { class: "mono", "{poam.human_id}" }
+                            span { "closed {format_date(poam.closed_at.map(|value| value.date_naive()))}" }
+                        }
+                    }
+                }
+            }
+        }
+        if create_open() {
+            PoamCreateModal {
+                context: props.context.clone(),
+                on_close: move |_| create_open.set(false),
+                on_created: move |detail| {
+                    create_open.set(false);
+                    props.on_event.call(FindingPoamEvent::Created(detail));
+                    props.on_event.call(FindingPoamEvent::InvalidateAssessment(props.context.assessment_id.unwrap_or(props.context.finding_id)));
+                },
+            }
+        }
+        if link_open() {
+            PoamLinkExistingModal {
+                context: props.context.clone(),
+                on_close: move |_| link_open.set(false),
+                on_linked: move |detail| {
+                    link_open.set(false);
+                    props.on_event.call(FindingPoamEvent::Linked(detail));
+                    props.on_event.call(FindingPoamEvent::InvalidateAssessment(props.context.assessment_id.unwrap_or(props.context.finding_id)));
+                },
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct PoamCreateModalProps {
+    context: FindingPoamContext,
+    on_close: EventHandler<()>,
+    on_created: EventHandler<PoamDetail>,
+}
+
+#[component]
+fn PoamCreateModal(props: PoamCreateModalProps) -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let current_user_id = app_state
+        .read()
+        .auth
+        .as_ref()
+        .and_then(|auth| auth.user.as_ref())
+        .and_then(|user| Uuid::parse_str(&user.id).ok());
+    let mut title = use_signal(|| {
+        format!(
+            "{} remediation on {}",
+            props.context.policy_name, props.context.hostname
+        )
+    });
+    let mut assignee = use_signal(|| PoamAssigneeDraft::Unassigned);
+    let mut assignee_catalog = use_signal(|| AssigneeCatalogState::Loading);
+    let mut target = use_signal(String::new);
+    let mut risk = use_signal(|| PoamRisk::Medium);
+    let mut plan = use_signal(String::new);
+    let mut milestones = use_signal(|| true);
+    let mut assignments = use_signal(HashSet::<Uuid>::new);
+    let mut pending = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+    let close = props.on_close;
+
+    use_effect(move || {
+        spawn(async move {
+            match poam_api::fetch_assignee_catalog().await {
+                Ok(catalog) => {
+                    assignee.set(default_assignee(current_user_id, &catalog));
+                    assignee_catalog.set(AssigneeCatalogState::Loaded(catalog));
+                }
+                Err(fetch_error) => {
+                    assignee_catalog.set(AssigneeCatalogState::Failed(api_message(&fetch_error)))
+                }
+            }
+        });
+    });
+    let catalog_loading = matches!(&*assignee_catalog.read(), AssigneeCatalogState::Loading);
+
+    rsx! {
+        div { class: "modal-backdrop", onclick: move |_| if !pending() { close.call(()) },
+            div { id: "poam-create-dialog", class: "modal poam-modal", role: "dialog", aria_modal: "true", aria_labelledby: "poam-create-title", tabindex: "-1", "data-coach-target": "poam-create-dialog", onclick: |event| event.stop_propagation(), onkeydown: move |event| {
+                event.stop_propagation();
+                if event.key() == Key::Escape && !pending() {
+                    close.call(());
+                }
+            },
+                DialogFocusRestore {}
+                DialogFocusSentinel { dialog_id: "poam-create-dialog".to_string(), boundary: DialogFocusBoundary::Last }
+                div { class: "modal-head poam-modal-head",
+                    div { h2 { id: "poam-create-title", "Create POA&M" } p { "Track remediation for a known deficiency. The assessment result does not change." } }
+                    button { class: "btn-icon focus-ring", aria_label: "Close", disabled: pending(), onclick: move |_| close.call(()), Icon { name: IconName::X, size: 16 } }
+                }
+                div { class: "modal-body poam-modal-body",
+                    FindingContextPanel { context: props.context.clone() }
+                    div { class: "poam-form-grid",
+                        label { class: "field poam-span-all", span { "Title" } input { class: "input focus-ring", autofocus: true, value: "{title}", disabled: pending(), oninput: move |event| title.set(event.value()) } }
+                        label { class: "field", span { "Assignee" } PoamAssigneeSelect { selection: assignee, catalog: assignee_catalog.read().clone(), disabled: pending() } }
+                        label { class: "field", span { "Target completion" } input { class: "input focus-ring mono", r#type: "date", value: "{target}", disabled: pending(), oninput: move |event| target.set(event.value()) } }
+                        label { class: "field", span { "Risk" } select { class: "input focus-ring", value: "{risk:?}", disabled: pending(), onchange: move |event| risk.set(match event.value().as_str() { "High" => PoamRisk::High, "Low" => PoamRisk::Low, _ => PoamRisk::Medium }), option { value: "High", "CAT I - High" } option { value: "Medium", "CAT II - Medium" } option { value: "Low", "CAT III - Low" } } }
+                        label { class: "field poam-span-all", span { "Remediation plan" } textarea { class: "input focus-ring", rows: "4", value: "{plan}", placeholder: "What will change, where, and how it will be verified", disabled: pending(), oninput: move |event| plan.set(event.value()) } }
+                    }
+                    label { class: "poam-check", input { r#type: "checkbox", checked: milestones(), disabled: pending(), onchange: move |event| milestones.set(event.checked()) } span { "Start with server-standard milestones" small { " Server dates the standard module, staging, validation, production, and verification milestones." } } }
+                    if !props.context.assignment_versions.is_empty() {
+                        section { class: "poam-subsection",
+                            h3 { "Baseline assignment reference" }
+                            p { "Supplemental reference only. Linking an exact immutable assignment version does not alter that assignment." }
+                            for candidate in props.context.assignment_versions.clone() {
+                                label { class: "poam-check poam-assignment-choice",
+                                    input { r#type: "checkbox", checked: assignments.read().contains(&candidate.assignment_version_id), disabled: pending(), onchange: move |event| { let mut next = assignments.read().clone(); if event.checked() { next.insert(candidate.assignment_version_id); } else { next.remove(&candidate.assignment_version_id); } assignments.set(next); } }
+                                    span { strong { "{candidate.bundle_name} {candidate.bundle_version}" } small { class: "mono", "{candidate.scope_label} · version {candidate.assignment_version_id}" } }
+                                }
+                            }
+                        }
+                    }
+                    div { class: "sd-callout sd-callout-info", Icon { name: IconName::Shield, size: 13 } div { "A POA&M records work to fix a deficiency. Risk acceptance uses the separate waiver flow; neither action changes this finding's result." } }
+                    if let Some(message) = error() { div { role: "alert", class: "sd-callout sd-callout-danger", Icon { name: IconName::Warn, size: 13 } div { "{message}" } } }
+                }
+                div { class: "modal-foot",
+                    button { class: "btn btn-ghost focus-ring", disabled: pending(), onclick: move |_| close.call(()), "Cancel" }
+                    button { class: "btn btn-primary focus-ring", disabled: pending() || catalog_loading || title.read().trim().is_empty(), onclick: move |_| {
+                        let parsed_target = if target.read().trim().is_empty() { Ok(None) } else { NaiveDate::parse_from_str(target.read().trim(), "%Y-%m-%d").map(Some).map_err(|_| "Enter a valid target date.".to_string()) };
+                        let Ok(target_date) = parsed_target else { error.set(parsed_target.err()); return; };
+                        let request = poam_api::CreatePoamRequest { assessment_id: props.context.assessment_id, finding_id: props.context.assessment_id.is_none().then_some(props.context.finding_id), observation: props.context.observation.clone(), title: title.read().trim().to_string(), plan: plan.read().trim().to_string(), owner: String::new(), assignee: assignee.read().request(), target_date, risk: risk(), default_milestones: milestones(), assignment_version_ids: assignments.read().iter().copied().collect() };
+                        let mut pending = pending; let mut error = error; let on_created = props.on_created;
+                        spawn(async move { pending.set(true); match poam_api::create_poam(&request).await { Ok(detail) => on_created.call(detail), Err(err) => { error.set(Some(if err.is_active_remediation() { "This finding already has an active remediation plan. Refresh the finding before retrying.".to_string() } else { api_message(&err) })); pending.set(false); } } });
+                    }, if pending() { "Creating..." } else { "Create POA&M" } }
+                    if pending() { span { role: "status", aria_live: "polite", class: "sr-only", "Creating POA&M." } }
+                }
+                DialogFocusSentinel { dialog_id: "poam-create-dialog".to_string(), boundary: DialogFocusBoundary::First }
+            }
+        }
+    }
+}
+
+/// Configures the exact-CVE POA&M creation dialog.
+#[derive(Props, Clone, PartialEq)]
+pub struct CvePoamCreateModalProps {
+    /// Provides immutable display fields and opaque server-issued identity.
+    pub context: CvePoamContext,
+    /// Receives a request to close the dialog.
+    pub on_close: EventHandler<()>,
+    /// Receives authoritative detail after successful creation.
+    pub on_created: EventHandler<PoamDetail>,
+}
+
+/// Creates a remediation plan from server-issued exact-CVE evidence.
+#[component]
+pub fn CvePoamCreateModal(props: CvePoamCreateModalProps) -> Element {
+    let app_state = use_context::<Signal<AppState>>();
+    let current_user_id = app_state
+        .read()
+        .auth
+        .as_ref()
+        .and_then(|auth| auth.user.as_ref())
+        .and_then(|user| Uuid::parse_str(&user.id).ok());
+    let mut title = use_signal(|| {
+        format!(
+            "{} - patch {} on {}",
+            props.context.observation.canonical_cve_id,
+            props.context.observation.canonical_package_name,
+            props.context.hostname
+        )
+    });
+    let mut assignee = use_signal(|| PoamAssigneeDraft::Unassigned);
+    let mut assignee_catalog = use_signal(|| AssigneeCatalogState::Loading);
+    let default_days = match props.context.severity.to_ascii_lowercase().as_str() {
+        "critical" => 14,
+        "high" => 30,
+        _ => 56,
+    };
+    let mut target = use_signal(|| {
+        (chrono::Utc::now().date_naive() + chrono::Duration::days(default_days)).to_string()
+    });
+    let initial_risk = match props.context.severity.to_ascii_lowercase().as_str() {
+        "critical" | "high" => PoamRisk::High,
+        "low" => PoamRisk::Low,
+        _ => PoamRisk::Medium,
+    };
+    let mut risk = use_signal(|| initial_risk);
+    let mut plan = use_signal(String::new);
+    let mut milestones = use_signal(|| true);
+    let mut pending = use_signal(|| false);
+    let mut error = use_signal(|| None::<String>);
+    let close = props.on_close;
+
+    use_effect(move || {
+        spawn(async move {
+            match poam_api::fetch_assignee_catalog().await {
+                Ok(catalog) => {
+                    assignee.set(default_assignee(current_user_id, &catalog));
+                    assignee_catalog.set(AssigneeCatalogState::Loaded(catalog));
+                }
+                Err(fetch_error) => {
+                    assignee_catalog.set(AssigneeCatalogState::Failed(api_message(&fetch_error)))
+                }
+            }
+        });
+    });
+    let catalog_loading = matches!(&*assignee_catalog.read(), AssigneeCatalogState::Loading);
+    let fixed_version = props
+        .context
+        .fixed_version
+        .as_deref()
+        .unwrap_or("Unavailable");
+    let cvss = props
+        .context
+        .cvss_score
+        .map(|score| format!("{score:.1}"))
+        .unwrap_or_else(|| "Unavailable".to_string());
+
+    rsx! {
+        div { class: "modal-backdrop", onclick: move |_| if !pending() { close.call(()) },
+            div { id: "cve-poam-create-dialog", class: "modal poam-modal", role: "dialog", aria_modal: "true", aria_labelledby: "cve-poam-create-title", tabindex: "-1", "data-testid": "cve-poam-create", onclick: |event| event.stop_propagation(), onkeydown: move |event| {
+                event.stop_propagation();
+                if event.key() == Key::Escape && !pending() { close.call(()); }
+            },
+                DialogFocusRestore {}
+                DialogFocusSentinel { dialog_id: "cve-poam-create-dialog".to_string(), boundary: DialogFocusBoundary::Last }
+                div { class: "modal-head poam-modal-head",
+                    div { h2 { id: "cve-poam-create-title", "Create POA&M" } p { "Track remediation for a known vulnerability. Only a later exact scan that no longer contains the occurrence permits closure." } }
+                    button { class: "btn-icon focus-ring", aria_label: "Close", disabled: pending(), onclick: move |_| close.call(()), Icon { name: IconName::X, size: 16 } }
+                }
+                div { class: "modal-body poam-modal-body",
+                    section { class: "poam-context", "data-testid": "cve-poam-context",
+                        header { Icon { name: IconName::Shield, size: 12 } "Vulnerability context" span { "Authoritative and read-only" } }
+                        dl {
+                            div { dt { "System" } dd { class: "mono", "{props.context.hostname}" } }
+                            div { dt { "CVE" } dd { class: "mono", "{props.context.observation.canonical_cve_id}" } }
+                            div { dt { "Canonical package" } dd { class: "mono", "{props.context.observation.canonical_package_name}" } }
+                            div { dt { "Installed version" } dd { class: "mono", "{props.context.installed_version}" } }
+                            div { dt { "Fixed version" } dd { class: "mono", "{fixed_version}" } }
+                            div { dt { "Severity / CVSS" } dd { "{props.context.severity} / {cvss}" } }
+                            div { dt { "Scan" } dd { class: "mono", "{props.context.observation.scan_id}" } }
+                            div { dt { "Occurrence" } dd { class: "mono", title: "{props.context.observation.occurrence_derivation_path}", "{props.context.observation.occurrence_derivation_path}" } }
+                        }
+                    }
+                    div { class: "poam-form-grid",
+                        label { class: "field poam-span-all", span { "Title" } input { class: "input focus-ring", autofocus: true, value: "{title}", disabled: pending(), oninput: move |event| title.set(event.value()) } }
+                        label { class: "field", span { "Assignee" } PoamAssigneeSelect { selection: assignee, catalog: assignee_catalog.read().clone(), disabled: pending() } }
+                        label { class: "field", span { "Target completion" } input { class: "input focus-ring mono", r#type: "date", value: "{target}", disabled: pending(), oninput: move |event| target.set(event.value()) } }
+                        label { class: "field", span { "Risk" } select { class: "input focus-ring", value: "{risk:?}", disabled: pending(), onchange: move |event| risk.set(match event.value().as_str() { "High" => PoamRisk::High, "Low" => PoamRisk::Low, _ => PoamRisk::Medium }), option { value: "High", "CAT I - High" } option { value: "Medium", "CAT II - Medium" } option { value: "Low", "CAT III - Low" } } }
+                        label { class: "field poam-span-all", span { "Remediation plan" } textarea { class: "input focus-ring", rows: "4", value: "{plan}", placeholder: "What will change, where, and how the exact CVE absence will be verified", disabled: pending(), oninput: move |event| plan.set(event.value()) } }
+                    }
+                    label { class: "poam-check", input { r#type: "checkbox", checked: milestones(), disabled: pending(), onchange: move |event| milestones.set(event.checked()) } span { "Start with server-standard patch milestones" small { " The server creates identify, stage, deploy, and exact-scan verification milestones." } } }
+                    div { class: "sd-callout sd-callout-info", Icon { name: IconName::Shield, size: 13 } div { "Justification and scanner whitelisting are separate risk decisions. Neither remediates this vulnerability nor permits closure." } }
+                    if let Some(message) = error() { div { role: "alert", class: "sd-callout sd-callout-danger", Icon { name: IconName::Warn, size: 13 } div { "{message}" } } }
+                }
+                div { class: "modal-foot",
+                    button { class: "btn btn-ghost focus-ring", disabled: pending(), onclick: move |_| close.call(()), "Cancel" }
+                    button { class: "btn btn-primary focus-ring", disabled: pending() || catalog_loading || title.read().trim().is_empty(), onclick: move |_| {
+                        let parsed_target = if target.read().trim().is_empty() { Ok(None) } else { NaiveDate::parse_from_str(target.read().trim(), "%Y-%m-%d").map(Some).map_err(|_| "Enter a valid target date.".to_string()) };
+                        let Ok(target_date) = parsed_target else { error.set(parsed_target.err()); return; };
+                        let request = CreateCvePoamRequest { observation: props.context.observation.clone(), title: title.read().trim().to_string(), plan: plan.read().trim().to_string(), owner: String::new(), assignee: assignee.read().request(), target_date, risk: risk(), default_milestones: milestones(), assignment_version_ids: Vec::new() };
+                        let mut pending = pending; let mut error = error; let on_created = props.on_created;
+                        spawn(async move { pending.set(true); match poam_api::create_cve_poam(&request).await { Ok(detail) => on_created.call(detail), Err(err) => { error.set(Some(if err.is_active_remediation() { "This exact vulnerability already has an active remediation plan. Refresh before retrying.".to_string() } else { api_message(&err) })); pending.set(false); } } });
+                    }, if pending() { "Creating..." } else { "Create POA&M" } }
+                    if pending() { span { role: "status", aria_live: "polite", class: "sr-only", "Creating exact-CVE POA&M." } }
+                }
+                DialogFocusSentinel { dialog_id: "cve-poam-create-dialog".to_string(), boundary: DialogFocusBoundary::First }
+            }
+        }
+    }
+}
+
+#[component]
+fn FindingContextPanel(context: FindingPoamContext) -> Element {
+    let bundle = match (&context.bundle_name, &context.bundle_version) {
+        (Some(name), Some(version)) => format!("{name} · {version}"),
+        (Some(name), None) => name.clone(),
+        _ => "No bundle context".to_string(),
+    };
+    let observation_label = context
+        .assessment_id
+        .map(|id| id.to_string())
+        .unwrap_or_else(|| {
+            context
+                .observation
+                .as_ref()
+                .map(|value| {
+                    let source = match value.source {
+                        poam_api::FindingObservationSource::NixPolicyResult => "nix-policy-result",
+                        poam_api::FindingObservationSource::CveScan => "cve-scan",
+                    };
+                    format!("{source}:{}", value.source_id)
+                })
+                .unwrap_or_else(|| "Unavailable".to_string())
+        });
+    let requirement = context.requirement.as_deref().unwrap_or("Not mapped");
+    let framework = context.framework.as_deref().unwrap_or("Not provided");
+    rsx! {
+        section { class: "poam-context", "data-testid": "poam-finding-context",
+            header { Icon { name: IconName::Shield, size: 12 } "Finding context" span { "Authoritative and read-only" } }
+            dl {
+                div { dt { "System" } dd { class: "mono", "{context.hostname}" } }
+                div { dt { "Policy / version" } dd { "{context.policy_name} · {context.policy_version}" } }
+                div { dt { "Requirement" } dd { class: "mono", "{requirement}" } }
+                div { dt { "Framework" } dd { "{framework}" } }
+                div { dt { "Bundle / version" } dd { "{bundle}" } }
+                div { dt { "Result" } dd { class: "poam-current-fail", "{assessment_label(context.result)}" } }
+                div { dt { "Observation" } dd { class: "mono", "{observation_label}" } }
+                div { dt { "Evidence" } dd { "{context.evidence_summary}" } }
+            }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct PoamLinkExistingModalProps {
+    context: FindingPoamContext,
+    on_close: EventHandler<()>,
+    on_linked: EventHandler<PoamDetail>,
+}
+
+#[component]
+fn PoamLinkExistingModal(props: PoamLinkExistingModalProps) -> Element {
+    let mut query = use_signal(String::new);
+    let mut generation = use_signal(|| 0_u64);
+    let mut results = use_signal(Vec::<PoamSummary>::new);
+    let mut loading = use_signal(|| true);
+    let mut pending = use_signal(|| None::<Uuid>);
+    let mut error = use_signal(|| None::<String>);
+    let mut refresh_nonce = use_signal(|| 0_u64);
+    let close = props.on_close;
+    let assessment_id = props.context.assessment_id;
+    let finding_id = props.context.finding_id;
+    let observation = props.context.observation.clone();
+    let search_observation = observation.clone();
+
+    use_effect(move || {
+        let term = query();
+        let _ = refresh_nonce();
+        generation += 1;
+        let request_generation = generation();
+        let observation = search_observation.clone();
+        spawn(async move {
+            loading.set(true);
+            TimeoutFuture::new(300).await;
+            if generation() != request_generation {
+                return;
+            }
+            match poam_api::compatible_poams(
+                assessment_id,
+                assessment_id.is_none().then_some(finding_id),
+                observation.as_ref(),
+                (!term.trim().is_empty()).then_some(term.trim()),
+                50,
+                0,
+            )
+            .await
+            {
+                Ok(page) if generation() == request_generation => {
+                    results.set(page.items);
+                    error.set(None);
+                    loading.set(false);
+                }
+                Err(err) if generation() == request_generation => {
+                    results.set(Vec::new());
+                    error.set(Some(api_message(&err)));
+                    loading.set(false);
+                }
+                _ => {}
+            }
+        });
+    });
+
+    rsx! {
+        div { class: "modal-backdrop", onclick: move |_| if pending().is_none() { close.call(()) },
+            div { id: "poam-link-dialog", class: "modal poam-modal poam-link-modal", role: "dialog", aria_modal: "true", aria_labelledby: "poam-link-title", tabindex: "-1", onclick: |event| event.stop_propagation(), onkeydown: move |event| {
+                event.stop_propagation();
+                if event.key() == Key::Escape && pending().is_none() {
+                    close.call(());
+                }
+            },
+                DialogFocusRestore {}
+                DialogFocusSentinel { dialog_id: "poam-link-dialog".to_string(), boundary: DialogFocusBoundary::Last }
+                div { class: "modal-head poam-modal-head",
+                    div { h2 { id: "poam-link-title", "Link existing POA&M" } p { "Only server-confirmed compatible remediation plans are shown for {props.context.hostname} / {props.context.policy_name}." } }
+                    button { class: "btn-icon focus-ring", aria_label: "Close", disabled: pending().is_some(), onclick: move |_| close.call(()), Icon { name: IconName::X, size: 16 } }
+                }
+                div { class: "modal-body poam-modal-body",
+                    div { class: "filter-search poam-search", Icon { name: IconName::Search, size: 12 } input { class: "input focus-ring", autofocus: true, value: "{query}", placeholder: "Search by POA&M ID, title, or assignee", disabled: pending().is_some(), oninput: move |event| query.set(event.value()) } }
+                    p { class: "poam-muted", "Compatibility and the one-active-remediation rule are enforced by the server. Linking does not change the FAIL result." }
+                    if loading() { div { role: "status", aria_live: "polite", class: "poam-empty", "Searching compatible POA&M items..." } }
+                    if let Some(message) = error() { div { role: "alert", class: "sd-callout sd-callout-danger", "{message}" } }
+                    if !loading() && error().is_none() && results.read().is_empty() { div { role: "status", class: "poam-empty", "No compatible active POA&M items match." } }
+                    div { class: "poam-picker-list",
+                        for item in results.read().clone() {
+                            {
+                            let observation = observation.clone();
+                            rsx! { button { key: "{item.id}", class: "poam-pick focus-ring", disabled: pending().is_some(), onclick: move |_| {
+                                pending.set(Some(item.id)); error.set(None);
+                                let request = AddFindingRequest { revision: item.revision, assessment_id, finding_id: assessment_id.is_none().then_some(finding_id), observation: observation.clone() };
+                                let mut pending = pending; let mut error = error; let on_linked = props.on_linked;
+                                spawn(async move { match poam_api::link_poam_finding(item.id, &request).await { Ok(detail) => on_linked.call(detail), Err(err) => { let stale = err.is_stale(); error.set(Some(if err.is_active_remediation() { "This finding already has an active remediation plan. Refresh before retrying.".to_string() } else if stale { "This POA&M changed while it was selected. Refreshed the current server results; retry the updated item.".to_string() } else { api_message(&err) })); pending.set(None); if stale { refresh_nonce += 1; } } } });
+                            },
+                                div { class: "poam-pick-head", span { class: "mono poam-human-id", "{item.human_id}" } StatusChip { poam: item.clone() } RiskChip { risk: item.risk } }
+                                strong { "{item.title}" }
+                                small { "{assignee_display(&item)} · due {format_date(item.target_date)} · {item.finding_count} linked findings · revision {item.revision}" }
+                                if pending() == Some(item.id) { span { role: "status", aria_live: "polite", class: "poam-pending", "Linking..." } }
+                            } }
+                            }
+                        }
+                    }
+                }
+                DialogFocusSentinel { dialog_id: "poam-link-dialog".to_string(), boundary: DialogFocusBoundary::First }
+            }
+        }
+    }
+}
+
+/// Configures the optional POA&M detail tray host.
+#[derive(Props, Clone, PartialEq)]
+pub struct PoamDetailHostProps {
+    /// Selects the POA&M to open, or hides the tray when absent.
+    pub poam_id: Option<Uuid>,
+    /// Disables all mutations for read-only users.
+    #[props(default)]
+    pub viewer: bool,
+    /// Provides immutable assignment versions that can be referenced.
+    #[props(default)]
+    pub assignment_versions: Vec<AssignmentVersionCandidate>,
+    /// Receives requests to close the tray.
+    pub on_close: EventHandler<()>,
+    /// Receives requests to open a linked finding.
+    pub on_open_finding: EventHandler<FindingView>,
+    /// Receives requests to open exact-CVE evidence when the host supports it.
+    #[props(default)]
+    pub on_open_cve_finding: Option<EventHandler<CveFindingView>>,
+    /// Receives reconciled server state after successful mutations.
+    #[props(default)]
+    pub on_changed: Option<EventHandler<PoamDetail>>,
+}
+
+/// Renders a keyed POA&M detail tray when `poam_id` is present.
+#[component]
+pub fn PoamDetailHost(props: PoamDetailHostProps) -> Element {
+    let Some(poam_id) = props.poam_id else {
+        return rsx! {};
+    };
+    rsx! { PoamDetailTray { key: "{poam_id}", poam_id, viewer: props.viewer, assignment_versions: props.assignment_versions, on_close: props.on_close, on_open_finding: props.on_open_finding, on_open_cve_finding: props.on_open_cve_finding, on_changed: props.on_changed } }
+}
+
+/// Configures the server-backed POA&M detail tray.
+#[derive(Props, Clone, PartialEq)]
+pub struct PoamDetailTrayProps {
+    /// Identifies the POA&M to load and mutate.
+    pub poam_id: Uuid,
+    /// Disables all mutations for read-only users.
+    #[props(default)]
+    pub viewer: bool,
+    /// Provides immutable assignment versions that can be referenced.
+    #[props(default)]
+    pub assignment_versions: Vec<AssignmentVersionCandidate>,
+    /// Receives requests to close the tray.
+    pub on_close: EventHandler<()>,
+    /// Receives requests to open a linked finding.
+    pub on_open_finding: EventHandler<FindingView>,
+    /// Receives requests to open exact-CVE evidence when supported.
+    #[props(default)]
+    pub on_open_cve_finding: Option<EventHandler<CveFindingView>>,
+    /// Receives reconciled server state after successful mutations.
+    #[props(default)]
+    pub on_changed: Option<EventHandler<PoamDetail>>,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+enum DetailState {
+    Loading,
+    NotVisible,
+    Failed(String),
+    Loaded(PoamDetail),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum HistoryPageKind {
+    Findings,
+    Activity,
+    Verification,
+}
+
+fn append_history_page(current: &mut PoamDetail, page: PoamDetail, kind: HistoryPageKind) {
+    match kind {
+        HistoryPageKind::Findings => {
+            let existing = current
+                .findings
+                .iter()
+                .map(|item| item.link_id)
+                .collect::<HashSet<_>>();
+            current.findings.extend(
+                page.findings
+                    .into_iter()
+                    .filter(|item| !existing.contains(&item.link_id)),
+            );
+            let existing_cves = current
+                .cve_findings
+                .iter()
+                .map(|item| item.link_id)
+                .collect::<HashSet<_>>();
+            current.cve_findings.extend(
+                page.cve_findings
+                    .into_iter()
+                    .filter(|item| !existing_cves.contains(&item.link_id)),
+            );
+            current.findings_has_more = page.findings_has_more;
+            current.findings_next_cursor = page.findings_next_cursor;
+        }
+        HistoryPageKind::Activity => {
+            let existing = current
+                .activity
+                .iter()
+                .map(|item| item.id)
+                .collect::<HashSet<_>>();
+            current.activity.extend(
+                page.activity
+                    .into_iter()
+                    .filter(|item| !existing.contains(&item.id)),
+            );
+            current.activity_has_more = page.activity_has_more;
+            current.activity_next_cursor = page.activity_next_cursor;
+        }
+        HistoryPageKind::Verification => {
+            let existing = current
+                .verification_attempts
+                .iter()
+                .map(|item| item.id)
+                .collect::<HashSet<_>>();
+            current.verification_attempts.extend(
+                page.verification_attempts
+                    .into_iter()
+                    .filter(|item| !existing.contains(&item.id)),
+            );
+            current.verification_has_more = page.verification_has_more;
+            current.verification_next_cursor = page.verification_next_cursor;
+        }
+    }
+}
+
+/// Renders a server-backed POA&M detail tray and lifecycle controls.
+///
+/// Server revisions govern all mutations. Stale or rejected operations reload
+/// authoritative state while preserving user drafts where retry is safe.
+#[component]
+pub fn PoamDetailTray(props: PoamDetailTrayProps) -> Element {
+    let mut state = use_signal(|| DetailState::Loading);
+    let mut generation = use_signal(|| 0_u64);
+    let mut busy = use_signal(|| None::<String>);
+    let mut message = use_signal(|| None::<String>);
+    let mut close_details = use_signal(|| None::<ClosePreconditionDetails>);
+    let mut title = use_signal(String::new);
+    let mut assignee = use_signal(|| PoamAssigneeDraft::Unassigned);
+    let mut assignee_catalog = use_signal(|| AssigneeCatalogState::Loading);
+    let mut target = use_signal(String::new);
+    let mut risk = use_signal(|| PoamRisk::Medium);
+    let mut plan = use_signal(String::new);
+    let mut note = use_signal(String::new);
+    let mut milestone_title = use_signal(String::new);
+    let mut milestone_target = use_signal(String::new);
+    let mut loaded_poam_id = use_signal(|| None::<Uuid>);
+    let mut finding_picker = use_signal(|| false);
+    let mut finding_query = use_signal(String::new);
+    let mut finding_generation = use_signal(|| 0_u64);
+    let mut finding_results = use_signal(Vec::new);
+    let mut finding_loading = use_signal(|| false);
+    let mut assignment_choice = use_signal(String::new);
+    let mut history_loading = use_signal(|| None::<HistoryPageKind>);
+    let mut expanded = use_signal(|| false);
+    let mut preserve_drafts_on_retry = use_signal(|| false);
+    let close = props.on_close;
+
+    let mut load = move |reset_drafts: bool| {
+        generation += 1;
+        let requested = generation();
+        state.set(DetailState::Loading);
+        spawn(async move {
+            match poam_api::fetch_poam(props.poam_id, &PoamDetailQuery::default()).await {
+                Ok(detail) if generation() == requested => {
+                    if reset_drafts {
+                        title.set(detail.poam.title.clone());
+                        assignee.set(PoamAssigneeDraft::from_summary(&detail.poam));
+                        target.set(
+                            detail
+                                .poam
+                                .target_date
+                                .map(|date| date.to_string())
+                                .unwrap_or_default(),
+                        );
+                        risk.set(detail.poam.risk);
+                        plan.set(detail.poam.plan.clone());
+                    }
+                    preserve_drafts_on_retry.set(false);
+                    state.set(DetailState::Loaded(detail));
+                }
+                Err(err)
+                    if generation() == requested
+                        && (err.is_not_visible() || err.is_unauthorized()) =>
+                {
+                    state.set(DetailState::NotVisible)
+                }
+                Err(err) if generation() == requested => {
+                    state.set(DetailState::Failed(api_message(&err)))
+                }
+                _ => {}
+            }
+        });
+    };
+
+    use_effect(move || {
+        if loaded_poam_id() == Some(props.poam_id) {
+            return;
+        }
+        loaded_poam_id.set(Some(props.poam_id));
+        load(true);
+    });
+
+    use_effect(move || {
+        if props.viewer {
+            assignee_catalog.set(AssigneeCatalogState::Loaded(PoamAssigneeCatalog::default()));
+            return;
+        }
+        spawn(async move {
+            match poam_api::fetch_assignee_catalog().await {
+                Ok(catalog) => assignee_catalog.set(AssigneeCatalogState::Loaded(catalog)),
+                Err(error) => {
+                    assignee_catalog.set(AssigneeCatalogState::Failed(api_message(&error)))
+                }
+            }
+        });
+    });
+
+    let mut load_more = move |kind: HistoryPageKind, query: PoamDetailQuery| {
+        if history_loading().is_some() {
+            return;
+        }
+        let requested = generation();
+        history_loading.set(Some(kind));
+        spawn(async move {
+            match poam_api::fetch_poam(props.poam_id, &query).await {
+                Ok(page) if generation() == requested => {
+                    let loaded = state.read().clone();
+                    if let DetailState::Loaded(mut current) = loaded {
+                        if current.poam.revision == page.poam.revision {
+                            append_history_page(&mut current, page, kind);
+                            state.set(DetailState::Loaded(current));
+                            message.set(None);
+                        } else {
+                            history_loading.set(None);
+                            message.set(Some(
+                                "The POA&M changed while loading history; current data was refreshed."
+                                    .to_string(),
+                            ));
+                            load(false);
+                            return;
+                        }
+                    }
+                    history_loading.set(None);
+                }
+                Err(error) if generation() == requested => {
+                    history_loading.set(None);
+                    message.set(Some(format!("Could not load more history: {error}")));
+                }
+                _ => {}
+            }
+        });
+    };
+
+    use_effect(move || {
+        if !finding_picker() {
+            return;
+        }
+        let term = finding_query();
+        finding_generation += 1;
+        let requested = finding_generation();
+        spawn(async move {
+            finding_loading.set(true);
+            TimeoutFuture::new(300).await;
+            if finding_generation() != requested {
+                return;
+            }
+            match poam_api::compatible_findings(
+                props.poam_id,
+                (!term.trim().is_empty()).then_some(term.trim()),
+                50,
+                0,
+            )
+            .await
+            {
+                Ok(page) if finding_generation() == requested => {
+                    finding_results.set(page.items);
+                    finding_loading.set(false);
+                }
+                Err(err) if finding_generation() == requested => {
+                    message.set(Some(api_message(&err)));
+                    finding_results.set(Vec::new());
+                    finding_loading.set(false);
+                }
+                _ => {}
+            }
+        });
+    });
+
+    let detail = match state.read().clone() {
+        DetailState::Loading => {
+            return tray_shell(
+                props.on_close,
+                rsx! { div { role: "status", aria_live: "polite", class: "poam-tray-state", "Loading POA&M..." } },
+            );
+        }
+        DetailState::NotVisible => {
+            return tray_shell(
+                props.on_close,
+                rsx! { div { role: "alert", class: "poam-tray-state", h2 { "POA&M not visible" } p { "It may not exist or you may not have access to its scope." } } },
+            );
+        }
+        DetailState::Failed(error) => {
+            return tray_shell(
+                props.on_close,
+                rsx! { div { role: "alert", class: "poam-tray-state", h2 { "Could not load POA&M" } p { "{error}" } button { class: "btn btn-ghost focus-ring", onclick: move |_| load(!preserve_drafts_on_retry()), "Retry" } } },
+            );
+        }
+        DetailState::Loaded(detail) => detail,
+    };
+    let revision = detail.poam.revision;
+    let readonly = props.viewer || busy().is_some();
+    let linked_assignment_ids = detail
+        .assignment_references
+        .iter()
+        .map(|item| item.assignment_version_id)
+        .collect::<HashSet<_>>();
+    let assignment_candidates = props
+        .assignment_versions
+        .iter()
+        .filter(|item| !linked_assignment_ids.contains(&item.assignment_version_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    let completed_milestones = detail
+        .milestones
+        .iter()
+        .filter(|item| item.completed_at.is_some())
+        .count();
+    let active_findings = detail
+        .findings
+        .iter()
+        .filter(|finding| finding.link_active)
+        .cloned()
+        .collect::<Vec<_>>();
+    let active_cve_findings = detail
+        .cve_findings
+        .iter()
+        .filter(|finding| finding.link_active)
+        .cloned()
+        .collect::<Vec<_>>();
+    let historical_cve_findings = detail
+        .cve_findings
+        .iter()
+        .filter(|finding| !finding.link_active)
+        .cloned()
+        .collect::<Vec<_>>();
+    let progress = if detail.milestones.is_empty() {
+        0
+    } else {
+        completed_milestones * 100 / detail.milestones.len()
+    };
+    let target_timing = target_timing_label(&detail.poam, chrono::Utc::now().date_naive());
+    let deficiency_heading = deficiency_title(active_findings.len());
+    let vulnerability_scope =
+        vulnerability_scope_title(&active_cve_findings, &historical_cve_findings);
+    let active_cve_groups = group_cve_scope(&active_cve_findings);
+    // Viewers never see metadata controls, so they never see the save action.
+    // The save handler clones the loaded summary because it must outlive this
+    // render and `detail.poam` is still read by later siblings in the tray.
+    let metadata_dirty = !props.viewer
+        && metadata_is_dirty(
+            &detail.poam,
+            &title.read(),
+            &assignee.read(),
+            &target.read(),
+            risk(),
+        );
+    let poam_for_metadata = detail.poam.clone();
+    let finding_page_query = detail
+        .findings_next_cursor
+        .as_ref()
+        .map(|cursor| PoamDetailQuery {
+            finding_limit: Some(100),
+            finding_before_at: Some(cursor.at),
+            finding_before_id: Some(cursor.id),
+            ..Default::default()
+        });
+    let activity_page_query = detail
+        .activity_next_cursor
+        .as_ref()
+        .map(|cursor| PoamDetailQuery {
+            activity_limit: Some(100),
+            activity_before_at: Some(cursor.at),
+            activity_before_id: Some(cursor.id),
+            ..Default::default()
+        });
+    let verification_page_query =
+        detail
+            .verification_next_cursor
+            .as_ref()
+            .map(|cursor| PoamDetailQuery {
+                verification_limit: Some(10),
+                verification_before_at: Some(cursor.at),
+                verification_before_id: Some(cursor.id),
+                ..Default::default()
+            });
+
+    let mut reconcile = move |next: PoamDetail| {
+        if let Some(handler) = props.on_changed {
+            handler.call(next.clone());
+        }
+        state.set(DetailState::Loaded(next));
+        busy.set(None);
+        message.set(None);
+        close_details.set(None);
+    };
+    let mut handle_error = move |intent: &'static str, err: PoamApiError| {
+        busy.set(None);
+        if err.is_stale() {
+            message.set(Some(format!("This POA&M changed before {intent}. Your entered values are preserved; review the current revision and retry.")));
+            load(false);
+        } else if err.is_active_remediation() {
+            message.set(Some(
+                "That finding is already linked to another active remediation plan.".to_string(),
+            ));
+        } else if let Some(details) = err.close_precondition_details() {
+            let committed_revision = details.committed_revision;
+            close_details.set(Some(details));
+            preserve_drafts_on_retry.set(true);
+            message.set(Some(close_rejection_message(committed_revision)));
+            load(false);
+        } else {
+            message.set(Some(api_message(&err)));
+        }
+    };
+
+    rsx! {
+        div { class: "poam-tray-backdrop", onclick: move |_| if busy().is_none() { close.call(()) } }
+        aside { id: "poam-detail-dialog", class: if expanded() { "poam-tray poam-tray-expanded" } else { "poam-tray" }, role: "dialog", aria_modal: "true", aria_labelledby: "poam-detail-title", tabindex: "-1", "data-testid": "poam-detail", "data-coach-target": "poam-tray", "data-poam-id": "{detail.poam.id}", "data-poam-revision": "{detail.poam.revision}", onkeydown: move |event| if event.key() == Key::Escape && busy().is_none() { close.call(()) },
+            DialogFocusRestore {}
+            DialogFocusSentinel { dialog_id: "poam-detail-dialog".to_string(), boundary: DialogFocusBoundary::Last }
+            header { class: "poam-tray-head",
+                div { class: "poam-tray-title",
+                    Icon { name: IconName::Activity, size: 18 }
+                    div { class: "poam-tray-heading",
+                        div { id: "poam-detail-title", class: "poam-title-line",
+                            span { class: "mono poam-human-id", "{detail.poam.human_id}" }
+                            StatusChip { poam: detail.poam.clone() }
+                            if props.viewer {
+                                RiskChip { risk: detail.poam.risk }
+                            } else {
+                                // The risk control takes the place and colour
+                                // of the risk chip so the header keeps the
+                                // design hierarchy. It edits a draft only;
+                                // `Save metadata` persists it.
+                                select { class: "poam-chip poam-risk-select {risk_class(risk())} focus-ring", aria_label: "Risk", value: "{risk:?}", disabled: readonly, onchange: move |event| risk.set(match event.value().as_str() { "High" => PoamRisk::High, "Low" => PoamRisk::Low, _ => PoamRisk::Medium }), option { value: "High", "CAT I - High" } option { value: "Medium", "CAT II - Medium" } option { value: "Low", "CAT III - Low" } }
+                            }
+                        }
+                        if props.viewer {
+                            p { "{detail.poam.title}" }
+                        } else {
+                            // The idle title reads as plain header text; hover
+                            // and focus reveal that it is editable. It edits a
+                            // draft only.
+                            input { class: "poam-inline-input poam-title-input focus-ring", aria_label: "Title", value: "{title}", disabled: readonly, oninput: move |event| title.set(event.value()) }
+                        }
+                    }
+                }
+                div { class: "poam-tray-head-actions",
+                    button { class: "btn-icon focus-ring", aria_pressed: expanded(), aria_label: if expanded() { "Restore POA&M detail" } else { "Expand POA&M detail" }, title: if expanded() { "Restore POA&M detail" } else { "Expand POA&M detail" }, onclick: move |_| expanded.toggle(), Icon { name: if expanded() { IconName::Minimize } else { IconName::Maximize }, size: 15 } }
+                    button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close", disabled: busy().is_some(), onclick: move |_| close.call(()), Icon { name: IconName::X, size: 16 } }
+                }
+            }
+            div { class: "poam-tray-scroll",
+                if let Some(intent) = busy() { div { role: "status", aria_live: "polite", class: "poam-tray-alert sd-callout sd-callout-info", "{intent}..." } }
+                if let Some(text) = message() { div { role: "alert", class: "poam-tray-alert sd-callout sd-callout-warn", Icon { name: IconName::Warn, size: 13 } div { "{text}" } } }
+                // The single metadata surface. Operators edit drafts in place;
+                // nothing persists until the explicit `Save metadata` action
+                // below.
+                section { class: "poam-meta-grid", aria_label: "Remediation metadata", "data-testid": "poam-meta",
+                    div {
+                        span { "Assignee" }
+                        if props.viewer {
+                            strong { "{assignee_display(&detail.poam)}" }
+                        } else {
+                            PoamAssigneeSelect { selection: assignee, catalog: assignee_catalog.read().clone(), disabled: readonly, inline: true, aria_label: "Assignee".to_string() }
+                        }
+                    }
+                    div {
+                        span { "Target completion" }
+                        if props.viewer {
+                            strong { class: if detail.poam.overdue { "poam-overdue" } else { "" }, "{format_date(detail.poam.target_date)}" }
+                        } else {
+                            input { class: if detail.poam.overdue { "poam-inline-input mono poam-overdue focus-ring" } else { "poam-inline-input mono focus-ring" }, r#type: "date", aria_label: "Target completion", value: "{target}", disabled: readonly, oninput: move |event| target.set(event.value()) }
+                        }
+                        if let Some(timing) = target_timing.as_deref() { em { class: if detail.poam.overdue { "poam-target-timing poam-overdue" } else { "poam-target-timing" }, "{timing}" } }
+                    }
+                    div { span { "Opened" } strong { class: "mono", "{detail.poam.created_at.date_naive()}" } }
+                    div { span { "Milestones" } strong { class: "mono", "{completed_milestones} of {detail.milestones.len()} complete" } div { class: "poam-progress", aria_label: "Milestone progress: {progress}%", span { style: "width:{progress}%" } } }
+                }
+                // `Save metadata` is offered only while a draft differs from
+                // the loaded POA&M, and never to a viewer. It persists title,
+                // assignee, target date, and risk only; see
+                // `build_metadata_request`.
+                if metadata_dirty {
+                    div { class: "poam-meta-save", role: "group", aria_label: "Unsaved metadata", "data-testid": "poam-meta-save",
+                        span { "Metadata changes are not saved yet." }
+                        button { class: "btn btn-primary xs focus-ring", disabled: readonly, onclick: move |_| {
+                            let request = match build_metadata_request(revision, &poam_for_metadata, &title.read(), &assignee.read(), &target.read(), risk()) {
+                                Ok(request) => request,
+                                Err(text) => { message.set(Some(text.to_string())); return; }
+                            };
+                            busy.set(Some("Saving metadata".to_string()));
+                            spawn(async move { match poam_api::update_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("saving metadata", err) } });
+                        }, if busy().is_some() { "Working..." } else { "Save metadata" } }
+                    }
+                }
+                LifecycleSection { detail: detail.clone(), readonly, close_details: close_details(), verification_loading: history_loading() == Some(HistoryPageKind::Verification), on_load_more_verification: move |_| if let Some(query) = verification_page_query.clone() { load_more(HistoryPageKind::Verification, query); }, on_transition: move |status| { let request = TransitionPoamRequest { revision, status, note: None }; busy.set(Some("Changing status".to_string())); spawn(async move { match poam_api::transition_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("changing status", err) } }); }, on_verify: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Verifying".to_string())); spawn(async move { match poam_api::verify_poam(props.poam_id, &request).await { Ok(_) => { busy.set(None); load(true); }, Err(err) => handle_error("verifying remediation", err) } }); }, on_close: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Closing".to_string())); spawn(async move { match poam_api::close_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("closing", err) } }); }, on_reopen: move |_| { let request = RevisionRequest { revision }; busy.set(Some("Reopening".to_string())); spawn(async move { match poam_api::reopen_poam(props.poam_id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("reopening", err) } }); } }
+                section { class: "poam-tray-section", "data-testid": "poam-deficiency",
+                    header { h3 { "{deficiency_heading}" } button { class: "btn btn-ghost xs focus-ring", disabled: readonly, onclick: move |_| finding_picker.toggle(), Icon { name: IconName::Link, size: 11 } "Link finding" } }
+                    if active_findings.is_empty() && detail.cve_findings.is_empty() { div { role: "status", class: "poam-empty", "No findings are linked." } }
+                    if !active_findings.is_empty() {
+                    div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-findings-table", thead { tr { th { "Host" } th { "Requirement" } th { "Policy" } th { "Current result" } th { "Actions" } } } tbody {
+                        for finding in active_findings.clone() { { let finding_for_navigation = finding.clone(); let finding_id = finding.id; let requirements = requirement_presentations(&finding.requirements, &finding.requirement_version_ids); rsx! { tr { key: "{finding.link_id}", "data-testid": "poam-linked-finding", "data-finding-id": "{finding.id}", td { class: "mono", "{finding.hostname}" } td { class: "poam-requirement", if requirements.is_empty() { span { class: "poam-muted", "Not provided by this finding" } } else { for requirement in requirements { div { class: "poam-requirement-context", if let Some(framework) = requirement.framework { span { class: "poam-requirement-framework", "{framework}" } } else { span { class: "poam-requirement-framework", "Unresolved requirement version" } } strong { class: "mono", "{requirement.control}" } if let Some(title) = requirement.title { span { class: "poam-requirement-title", "{title}" } } } } } } td { "{finding.policy_name}" } td { span { class: "poam-chip {result_class(finding.resolution_state)}", "{result_label(finding.resolution_state)}" } } td { class: "poam-row-actions", button { class: "btn btn-ghost xs focus-ring", onclick: move |_| props.on_open_finding.call(finding_for_navigation.clone()), "Evidence" } button { class: "btn-icon focus-ring", title: "Unlink finding", disabled: readonly, onclick: move |_| { busy.set(Some("Unlinking finding".to_string())); spawn(async move { match poam_api::unlink_poam_finding(props.poam_id, finding_id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("unlinking finding", err) } }); }, Icon { name: IconName::X, size: 12 } } } } } } }
+                    } } }
+                    }
+                    if detail.findings_has_more { button { class: "btn btn-ghost focus-ring", "data-testid": "poam-load-more-findings", disabled: history_loading().is_some(), onclick: move |_| if let Some(query) = finding_page_query.clone() { load_more(HistoryPageKind::Findings, query); }, if history_loading() == Some(HistoryPageKind::Findings) { "Loading…" } else { "Load more findings" } } }
+                    if finding_picker() {
+                        div { class: "poam-picker-panel",
+                            div { class: "filter-search poam-search",
+                                Icon { name: IconName::Search, size: 12 }
+                                input { class: "input focus-ring", value: "{finding_query}", placeholder: "Search compatible failing findings", oninput: move |event| finding_query.set(event.value()) }
+                            }
+                            if finding_loading() { p { class: "poam-muted", "Searching..." } }
+                            for candidate in finding_results.read().clone() {
+                                {
+                                    let outcome = candidate.outcome.map(assessment_label).unwrap_or("UNKNOWN");
+                                    rsx! {
+                                        button { class: "poam-pick focus-ring", disabled: readonly,
+                                            onclick: move |_| {
+                                                let Some(assessment_id) = candidate.assessment_id else {
+                                                    message.set(Some("This candidate has no current authoritative assessment.".to_string()));
+                                                    return;
+                                                };
+                                                let request = AddFindingRequest { revision, assessment_id: Some(assessment_id), finding_id: None, observation: None };
+                                                busy.set(Some("Linking finding".to_string()));
+                                                spawn(async move {
+                                                    match poam_api::link_poam_finding(props.poam_id, &request).await {
+                                                        Ok(next) => { finding_picker.set(false); reconcile(next); }
+                                                        Err(err) => handle_error("linking finding", err),
+                                                    }
+                                                });
+                                            },
+                                            strong { class: "mono", "{candidate.hostname}" }
+                                            span { "{candidate.policy_name}" }
+                                            small { "Current result: {outcome}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    // Baseline assignment references are source-backed audit
+                    // context for the deficiency. They link exact immutable
+                    // assignment versions and never change assignment content
+                    // or current-version pointers.
+                    if !detail.assignment_references.is_empty() || !assignment_candidates.is_empty() {
+                        div { class: "poam-ctx", "data-testid": "poam-assignment-references",
+                            h4 { class: "poam-ctx-head", Icon { name: IconName::Shield, size: 12 } "Baseline assignment references · {detail.assignment_references.len()}" }
+                            div { class: "poam-ctx-body",
+                                p { class: "poam-section-help", "Supplemental references to exact immutable assignment versions. These links never change assignment content or current-version pointers." }
+                    for reference in detail.assignment_references.clone() { div { class: "poam-assignment-row", div { strong { "{reference.bundle_name} {reference.bundle_version}" } small { class: "mono", "Assignment version {reference.assignment_version_id}" } } button { class: "btn btn-ghost xs focus-ring", disabled: readonly, onclick: move |_| { busy.set(Some("Unlinking assignment reference".to_string())); spawn(async move { match poam_api::unlink_poam_assignment(props.poam_id, reference.assignment_version_id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("unlinking assignment reference", err) } }); }, "Unlink reference" } } }
+                    if !assignment_candidates.is_empty() { div { class: "poam-assignment-link", select { class: "input focus-ring", value: "{assignment_choice}", disabled: readonly, onchange: move |event| assignment_choice.set(event.value()), option { value: "", "Select exact assignment version" } for candidate in assignment_candidates.clone() { option { value: "{candidate.assignment_version_id}", "{candidate.bundle_name} {candidate.bundle_version} · {candidate.scope_label}" } } } button { class: "btn btn-ghost focus-ring", disabled: readonly || assignment_choice.read().is_empty(), onclick: move |_| { let Ok(assignment_version_id) = Uuid::parse_str(assignment_choice.read().as_str()) else { return; }; let request = AssignmentReferenceRequest { revision, assignment_version_id }; busy.set(Some("Linking assignment reference".to_string())); spawn(async move { match poam_api::link_poam_assignment(props.poam_id, &request).await { Ok(next) => { assignment_choice.set(String::new()); reconcile(next); }, Err(err) => handle_error("linking assignment reference", err) } }); }, "Link reference" } } }
+                            }
+                        }
+                    }
+                }
+                if !active_cve_findings.is_empty() || !historical_cve_findings.is_empty() {
+                    section { class: "poam-tray-section", "data-testid": "poam-linked-vulnerabilities",
+                        header { h3 { "{vulnerability_scope}" } }
+                        p { class: "poam-section-help", "Scope is fixed at creation; a re-scan does not change the recorded links. Justification or whitelisting is not remediation. Closure still requires authoritative exact evidence to clear the finding." }
+                        for group in active_cve_groups.clone() {
+                            div { key: "{group.cve_id}-{group.package}", class: "poam-cve-group", "data-testid": "poam-cve-group", "data-cve-id": "{group.cve_id}", "data-cve-package": "{group.package}",
+                                div { class: "poam-cve-group-head",
+                                    Icon { name: IconName::Shield, size: 12 }
+                                    strong { class: "mono", "{group.cve_id}" }
+                                    span { class: "mono poam-muted", "{group.package}" }
+                                    span { class: "poam-cve-group-count", "{host_count_label(group.findings.len())}" }
+                                }
+                                for finding in group.findings.clone() {
+                                    {
+                                        let finding_id = finding.id;
+                                        let finding_for_evidence = finding.clone();
+                                        let scan_ref = short_scan_ref(finding.current_scan_id);
+                                        let scan_title = finding.current_scan_id.map(|id| id.to_string()).unwrap_or_else(|| "No current exact scan".to_string());
+                                        let installed = finding.current_observed_package_version.as_deref().or(finding.baseline_observed_package_version.as_deref()).unwrap_or("Unavailable");
+                                        rsx! {
+                                            div { key: "{finding.link_id}", class: "poam-cve-host", "data-testid": "poam-linked-vulnerability", "data-cve-finding-id": "{finding.id}",
+                                                span { class: "mono poam-cve-host-name", "{finding.hostname}" }
+                                                span { class: "poam-cve-host-evidence",
+                                                    span { class: "mono", title: "Installed version", "{installed}" }
+                                                    small { class: "mono poam-muted", title: "{scan_title}", "scan {scan_ref}" }
+                                                }
+                                                span { class: "poam-chip {cve_result_class(&finding.resolution_state)}", "{cve_result_label(&finding.resolution_state)}" }
+                                                span { class: "poam-row-actions",
+                                                    if let Some(handler) = props.on_open_cve_finding { button { class: "btn btn-ghost xs focus-ring", onclick: move |_| handler.call(finding_for_evidence.clone()), "Evidence" } }
+                                                    button { class: "btn-icon focus-ring", title: "Unlink vulnerability", aria_label: "Unlink vulnerability {finding.canonical_cve_id} {finding.canonical_package_name}", disabled: readonly, onclick: move |_| { busy.set(Some("Unlinking vulnerability".to_string())); spawn(async move { match poam_api::unlink_poam_cve_finding(props.poam_id, finding_id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("unlinking vulnerability", err) } }); }, Icon { name: IconName::X, size: 12 } }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        // Retired links are immutable audit evidence. They stay
+                        // secondary while active links exist and open by
+                        // default when none do, so a completed POA&M still
+                        // shows its recorded scope. Rows are stacked, not
+                        // tabular, so the baseline evidence never needs
+                        // horizontal scrolling.
+                        if !historical_cve_findings.is_empty() {
+                            details { class: "poam-retired-history", open: active_cve_findings.is_empty(), "data-testid": "poam-retired-vulnerability-history",
+                                summary { class: "focus-ring", "Retired vulnerability history · {historical_cve_findings.len()}" }
+                                p { class: "poam-section-help", "Retired links are immutable audit evidence and cannot be unlinked." }
+                                for finding in historical_cve_findings.clone() {
+                                    {
+                                        let baseline_version = finding.baseline_observed_package_version.as_deref().unwrap_or("Unavailable");
+                                        let baseline_scan = finding.baseline_scan_id.map(|id| id.to_string()).unwrap_or_else(|| "Unavailable".to_string());
+                                        let baseline_generation = finding.baseline_generation.map(|generation| generation.to_string()).unwrap_or_else(|| "Unavailable".to_string());
+                                        let baseline_store_path = finding.baseline_target_store_path.as_deref().unwrap_or("Unavailable");
+                                        let baseline_occurrence = finding.baseline_occurrence_derivation_path.as_deref().unwrap_or("Unavailable");
+                                        let retired_at = finding.retired_at.map(|at| at.to_rfc3339()).unwrap_or_else(|| "Unknown time".to_string());
+                                        let retired_reason = finding.retirement_reason.as_deref().unwrap_or("No reason recorded");
+                                        rsx! {
+                                            div { key: "history-{finding.link_id}", class: "poam-retired-row", "data-testid": "poam-retired-vulnerability", "data-cve-finding-id": "{finding.id}",
+                                                div { class: "poam-retired-identity",
+                                                    span { class: "mono poam-cve-host-name", "{finding.hostname}" }
+                                                    strong { class: "mono", "{finding.canonical_cve_id}" }
+                                                    span { class: "mono poam-muted", "{finding.canonical_package_name}" }
+                                                    span { class: "poam-chip", "RETIRED" }
+                                                }
+                                                div { class: "poam-retired-evidence",
+                                                    small { class: "mono", "Baseline {baseline_version} · Scan {baseline_scan}" }
+                                                    small { class: "mono poam-muted", "Generation {baseline_generation} · {baseline_store_path}" }
+                                                    small { class: "mono poam-muted", "{baseline_occurrence}" }
+                                                    small { class: "poam-muted", "{retired_at} · {retired_reason}" }
+                                                }
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                section { class: "poam-tray-section",
+                    header {
+                        h3 { "Remediation plan" }
+                        button { class: "btn btn-ghost xs focus-ring", disabled: readonly, onclick: move |_| {
+                            // Persists only the plan; unsaved metadata drafts
+                            // are never sent. See `build_plan_request`.
+                            let request = build_plan_request(revision, &plan.read());
+                            busy.set(Some("Saving remediation plan".to_string()));
+                            spawn(async move {
+                                match poam_api::update_poam(props.poam_id, &request).await {
+                                    Ok(next) => reconcile(next),
+                                    Err(err) => handle_error("saving remediation plan", err),
+                                }
+                            });
+                        }, if busy().is_some() { "Working..." } else { "Save plan" } }
+                    }
+                    textarea { class: "input focus-ring poam-plan", rows: "5", value: "{plan}", disabled: readonly, placeholder: "What will change, where, and how it will be verified", oninput: move |event| plan.set(event.value()) }
+                }
+                MilestonesSection { milestones: detail.milestones.clone(), new_title: milestone_title, new_target: milestone_target, readonly: props.viewer, mutation_busy: busy().is_some(), on_add: move |values: (String, String)| { let (new_title, new_target) = values; let Ok(target_date) = NaiveDate::parse_from_str(&new_target, "%Y-%m-%d") else { message.set(Some("Enter a valid milestone target date.".to_string())); return; }; let request = AddMilestoneRequest { revision, title: new_title, target_date }; busy.set(Some("Adding milestone".to_string())); spawn(async move { match poam_api::add_poam_milestone(props.poam_id, &request).await { Ok(next) => { milestone_title.set(String::new()); milestone_target.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding milestone", err) } }); }, on_toggle: move |values: (Uuid, bool)| { let (id, completed) = values; let request = UpdateMilestoneRequest { revision, title: None, target_date: None, completed: Some(completed) }; busy.set(Some("Updating milestone".to_string())); spawn(async move { match poam_api::update_poam_milestone(props.poam_id, id, &request).await { Ok(next) => reconcile(next), Err(err) => handle_error("updating milestone", err) } }); }, on_remove: move |id| { busy.set(Some("Removing milestone".to_string())); spawn(async move { match poam_api::remove_poam_milestone(props.poam_id, id, revision).await { Ok(next) => reconcile(next), Err(err) => handle_error("removing milestone", err) } }); } }
+                section { class: "poam-tray-section", header { h3 { "Activity" } } ActivityList { activity: detail.activity.clone() } if detail.activity_has_more { button { class: "btn btn-ghost focus-ring", "data-testid": "poam-load-more-activity", disabled: history_loading().is_some(), onclick: move |_| if let Some(query) = activity_page_query.clone() { load_more(HistoryPageKind::Activity, query); }, if history_loading() == Some(HistoryPageKind::Activity) { "Loading…" } else { "Load more activity" } } } div { class: "poam-note-form", input { class: "input focus-ring", aria_label: "Add a note", value: "{note}", placeholder: "Add a note...", disabled: readonly, oninput: move |event| note.set(event.value()), onkeydown: move |event| if event.key() == Key::Enter && !readonly && !note.read().trim().is_empty() { let request = AddNoteRequest { revision, text: note.read().trim().to_string() }; busy.set(Some("Adding note".to_string())); spawn(async move { match poam_api::add_poam_note(props.poam_id, &request).await { Ok(next) => { note.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding note", err) } }); } } button { class: "btn btn-ghost focus-ring", disabled: readonly || note.read().trim().is_empty(), onclick: move |_| { let request = AddNoteRequest { revision, text: note.read().trim().to_string() }; busy.set(Some("Adding note".to_string())); spawn(async move { match poam_api::add_poam_note(props.poam_id, &request).await { Ok(next) => { note.set(String::new()); reconcile(next); }, Err(err) => handle_error("adding note", err) } }); }, "Add note" } } }
+            }
+            DialogFocusSentinel { dialog_id: "poam-detail-dialog".to_string(), boundary: DialogFocusBoundary::First }
+        }
+    }
+}
+
+fn tray_shell(on_close: EventHandler<()>, content: Element) -> Element {
+    rsx! { div { class: "poam-tray-backdrop", onclick: move |_| on_close.call(()) } aside { id: "poam-state-dialog", class: "poam-tray", role: "dialog", aria_modal: "true", aria_label: "POA&M detail", tabindex: "-1", onkeydown: move |event| if event.key() == Key::Escape { on_close.call(()) }, DialogFocusRestore {} DialogFocusSentinel { dialog_id: "poam-state-dialog".to_string(), boundary: DialogFocusBoundary::Last } header { class: "poam-tray-head", strong { "POA&M" } button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close", onclick: move |_| on_close.call(()), Icon { name: IconName::X, size: 16 } } } {content} DialogFocusSentinel { dialog_id: "poam-state-dialog".to_string(), boundary: DialogFocusBoundary::First } } }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct LifecycleSectionProps {
+    detail: PoamDetail,
+    readonly: bool,
+    close_details: Option<ClosePreconditionDetails>,
+    on_transition: EventHandler<PoamStatus>,
+    on_verify: EventHandler<()>,
+    on_close: EventHandler<()>,
+    on_reopen: EventHandler<()>,
+    verification_loading: bool,
+    on_load_more_verification: EventHandler<()>,
+}
+
+#[component]
+fn LifecycleSection(props: LifecycleSectionProps) -> Element {
+    let status = props.detail.poam.status;
+    rsx! {
+        section { class: "poam-tray-section",
+            header { h3 { "Remediation status" } if status == PoamStatus::Completed { div { class: "poam-lifecycle-actions", button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_reopen.call(()), Icon { name: IconName::Rollback, size: 11 } "Reopen" } } } }
+            if status != PoamStatus::Completed {
+                div { class: "seg poam-status-seg", "data-coach-target": "poam-lifecycle",
+                    // The current state remains visible but cannot submit a
+                    // no-op transition. This preserves the complete lifecycle
+                    // context without permitting a forbidden server mutation.
+                    button {
+                        class: "active focus-ring",
+                        aria_current: "true",
+                        title: status.description(),
+                        disabled: true,
+                        "{status_label(status)}"
+                    }
+                    for choice in available_status_transitions(status).iter().copied() {
+                        button { class: "focus-ring", title: choice.description(), disabled: props.readonly, onclick: move |_| props.on_transition.call(choice), "{status_label(choice)}" }
+                    }
+                }
+            }
+            // COMPATIBILITY: The server accepts verification only while a POA&M
+            // is awaiting verification and answers `409 invalid_transition` in
+            // every other state. `Verify now` and `Authoritative close`
+            // therefore exist only in that state. `Authoritative close` stays
+            // enabled after a failed check: the server, not the browser,
+            // decides closure and returns the structured rejection.
+            if verification_actions_available(status) {
+                div { class: "poam-verify-box", "data-coach-target": "poam-verify",
+                    div { role: "status", class: "sd-callout sd-callout-warn", Icon { name: IconName::Warn, size: 13 } div { strong { "Awaiting verification." } " Remediation is reported complete, but the finding result remains independent. Verify against current assessments, then use authoritative close." } }
+                    div { class: "poam-verify-actions",
+                        button { class: "btn btn-ghost xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_verify.call(()), "Verify now" }
+                        button { class: "btn btn-primary xs focus-ring", disabled: props.readonly, onclick: move |_| props.on_close.call(()), Icon { name: IconName::Check, size: 11 } "Authoritative close" }
+                    }
+                }
+            }
+            for (index, attempt) in props.detail.verification_attempts.clone().into_iter().enumerate() {
+                div { class: "poam-verification", "data-testid": "poam-verification-result",
+                    div { class: "poam-verification-head",
+                        strong { if index == 0 { "Latest verification · {attempt.outcome:?}" } else { "Earlier verification · {attempt.outcome:?}" } }
+                        time { class: "mono", "{attempt.attempted_at}" }
+                    }
+                    for item in attempt.items.clone() {
+                        {
+                            let requirements = requirement_presentations(&item.requirements, &item.requirement_version_ids);
+                            let host = item.hostname.clone().unwrap_or_else(|| item.system_id.to_string());
+                            let policy = item.policy_name.clone().unwrap_or_else(|| item.policy_lineage_id.to_string());
+                            rsx! {
+                                div { class: "poam-verification-item", "data-finding-id": "{item.finding_id}",
+                                    div { class: "poam-verification-identity",
+                                        span { "System / host" }
+                                        strong { "{host}" }
+                                        span { "Policy" }
+                                        strong { "{policy}" }
+                                        if let Some(version) = item.policy_version {
+                                            span { "Policy version" }
+                                            code { class: "mono", "{version}" }
+                                        }
+                                        if requirements.is_empty() {
+                                            span { "Finding ID" }
+                                            code { class: "mono", "{item.finding_id}" }
+                                        } else {
+                                            for requirement in requirements {
+                                                {
+                                                    let framework = requirement.framework.unwrap_or_else(|| "Unresolved requirement version".to_string());
+                                                    rsx! {
+                                                        span { "Framework / release" }
+                                                        strong { "{framework}" }
+                                                        span { "Requirement" }
+                                                        strong { class: "mono", "{requirement.control}" }
+                                                        if let Some(title) = requirement.title {
+                                                            span { "Requirement title" }
+                                                            span { "{title}" }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    span { class: "poam-chip {result_class(item.result)}", "{result_label(item.result)}" }
+                                    p { "{item.detail}" }
+                                    if item.result == VerificationResult::Waiver {
+                                        strong { class: "poam-verification-basis", "Closure basis: waiver" }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    for item in attempt.cve_items.clone() {
+                        {
+                        let installed_version = item.observed_package_version.as_deref().unwrap_or("Unavailable");
+                        let scan_id = item.scan_id.map(|id| id.to_string()).unwrap_or_else(|| "Unavailable".to_string());
+                        rsx! { div { class: "poam-verification-item poam-cve-verification-item", "data-cve-finding-id": "{item.cve_finding_id}",
+                            div { class: "poam-verification-identity",
+                                span { "System" } code { class: "mono", "{item.system_id}" }
+                                span { "Vulnerability" } strong { class: "mono", "{item.canonical_cve_id}" }
+                                span { "Canonical package" } strong { class: "mono", "{item.canonical_package_name}" }
+                                span { "Installed version" } code { class: "mono", "{installed_version}" }
+                                span { "Exact scan" } code { class: "mono", "{scan_id}" }
+                            }
+                            span { class: "poam-chip {cve_result_class(&item.result)}", "{cve_result_label(&item.result)}" }
+                            p { "{item.detail}" }
+                            if matches!(item.result.as_str(), "whitelisted" | "justified") { strong { class: "poam-verification-basis", "Not remediated. Exact absence PASS is required for closure." } }
+                        } }
+                        }
+                    }
+                }
+            }
+            if props.detail.verification_has_more { button { class: "btn btn-ghost focus-ring", "data-testid": "poam-load-more-verification", disabled: props.verification_loading, onclick: move |_| props.on_load_more_verification.call(()), if props.verification_loading { "Loading…" } else { "Load more verification attempts" } } }
+            if let Some(details) = props.close_details { div { role: "alert", class: "poam-close-details", "data-testid": "poam-close-rejection", strong { "Closure rejected for these findings" } for item in details.items { div { "data-finding-id": "{item.finding_id}", span { class: "mono", "{item.finding_id}" } span { class: "poam-chip {result_class(item.result)}", "{result_label(item.result)}" } if item.result == VerificationResult::Waiver { span { "Accepted basis: waiver" } } } } } }
+        }
+    }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct MilestonesSectionProps {
+    milestones: Vec<MilestoneView>,
+    new_title: Signal<String>,
+    new_target: Signal<String>,
+    readonly: bool,
+    mutation_busy: bool,
+    on_add: EventHandler<(String, String)>,
+    on_toggle: EventHandler<(Uuid, bool)>,
+    on_remove: EventHandler<Uuid>,
+}
+
+/// Returns whether an open milestone is past its target date.
+///
+/// A completed milestone is never late, whatever its target date was. The
+/// comparison uses the caller's date so tests do not depend on the clock.
+fn milestone_is_late(milestone: &MilestoneView, today: NaiveDate) -> bool {
+    milestone.completed_at.is_none() && milestone.target_date < today
+}
+
+#[component]
+fn MilestonesSection(props: MilestonesSectionProps) -> Element {
+    let mut new_title = props.new_title;
+    let mut new_target = props.new_target;
+    let controls_disabled = props.readonly || props.mutation_busy;
+    let today = chrono::Utc::now().date_naive();
+    rsx! {
+        section { class: "poam-tray-section",
+            header { h3 { "Milestones · {props.milestones.iter().filter(|item| item.completed_at.is_some()).count()} of {props.milestones.len()} complete" } }
+            div { class: "poam-milestones",
+                for milestone in props.milestones.clone() {
+                    {
+                        let completed = milestone.completed_at.is_some();
+                        let late = milestone_is_late(&milestone, today);
+                        let action_label = if completed {
+                            format!("Reopen {}", milestone.title)
+                        } else {
+                            format!("Mark {} complete", milestone.title)
+                        };
+                        let date_label = milestone
+                            .completed_at
+                            .map(|at| format!("done {}", short_display_date(at.date_naive())))
+                            .unwrap_or_else(|| format!("due {}", short_display_date(milestone.target_date)));
+                        rsx! {
+                            // The row follows the design: a label wraps the
+                            // checkbox and the title, so clicking either
+                            // toggles completion. Existing milestones have no
+                            // title or date editor.
+                            div { class: "poam-ms", "data-testid": "poam-milestone", "data-milestone-id": "{milestone.id}",
+                                label { class: "poam-check poam-ms-label",
+                                    input { class: "focus-ring poam-milestone-check", r#type: "checkbox", checked: completed, disabled: controls_disabled, aria_label: "{action_label}", onchange: move |_| props.on_toggle.call((milestone.id, !completed)) }
+                                    span { class: if completed { "poam-milestone-title poam-milestone-completed" } else { "poam-milestone-title" }, "{milestone.title}" }
+                                }
+                                span { class: if late { "mono poam-milestone-date poam-overdue" } else { "mono poam-milestone-date" }, "{date_label}" }
+                                button { class: "btn-icon focus-ring", title: "Remove milestone", aria_label: "Remove milestone {milestone.title}", disabled: controls_disabled, onclick: move |_| props.on_remove.call(milestone.id), Icon { name: IconName::Trash, size: 12 } }
+                            }
+                        }
+                    }
+                }
+            }
+            div { class: "poam-milestone-add",
+                input { class: "input focus-ring", aria_label: "Milestone title", value: "{new_title}", placeholder: "Add a milestone...", disabled: controls_disabled, oninput: move |event| new_title.set(event.value()), onkeydown: move |event| if event.key() == Key::Enter && !controls_disabled && !new_title.read().trim().is_empty() && !new_target.read().is_empty() { props.on_add.call((new_title.read().trim().to_string(), new_target.read().clone())); } }
+                input { class: "input focus-ring mono", aria_label: "Milestone target date", r#type: "date", value: "{new_target}", disabled: controls_disabled, oninput: move |event| new_target.set(event.value()) }
+                button { class: "btn btn-ghost focus-ring poam-milestone-add-action", title: "Add milestone", aria_label: "Add milestone", disabled: controls_disabled || new_title.read().trim().is_empty() || new_target.read().is_empty(), onclick: move |_| props.on_add.call((new_title.read().trim().to_string(), new_target.read().clone())), Icon { name: IconName::Plus, size: 12 } }
+            }
+        }
+    }
+}
+
+#[component]
+fn ActivityList(activity: Vec<ActivityView>) -> Element {
+    rsx! {
+        div { class: "poam-activity",
+            if activity.is_empty() { div { class: "poam-empty", "No durable activity has been recorded." } }
+            for item in activity {
+                {
+                    // The stored payload feeds `activity_description`; the
+                    // drawer shows only the resulting message, as the design
+                    // does.
+                    let description = activity_description(&item);
+                    let actor = activity_actor(&item);
+                    let timestamp = item.created_at.to_rfc3339();
+                    rsx! {
+                        div { class: "poam-activity-row", "data-activity-kind": "{item.kind}",
+                            time { class: "mono poam-activity-date", datetime: "{timestamp}", title: "{timestamp}", "{item.created_at.date_naive()}" }
+                            span { class: "mono poam-activity-actor", title: "{actor}", "{actor}" }
+                            span { class: "poam-activity-message", "{description}" }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn short_display_date(date: NaiveDate) -> String {
+    date.format("%b %-d").to_string()
+}
+
+fn activity_actor(activity: &ActivityView) -> String {
+    activity.actor_display.clone().unwrap_or_else(|| {
+        if activity.actor_user_id.is_some() {
+            "Deleted or unavailable user".to_string()
+        } else {
+            "System".to_string()
+        }
+    })
+}
+
+fn payload_text<'a>(activity: &'a ActivityView, key: &str) -> Option<&'a str> {
+    activity
+        .payload
+        .get(key)
+        .and_then(serde_json::Value::as_str)
+}
+
+fn activity_description(activity: &ActivityView) -> String {
+    match activity.kind.as_str() {
+        "created" => "POA&M created".to_string(),
+        "updated" => updated_activity_description(activity),
+        "status_changed" => match (payload_text(activity, "from"), payload_text(activity, "to")) {
+            (Some(from), Some(to)) => format!("Changed status from {from} to {to}"),
+            _ => "Changed POA&M status".to_string(),
+        },
+        "milestone_added" => payload_text(activity, "title")
+            .map(|title| format!("Added milestone “{title}”"))
+            .unwrap_or_else(|| "Added a remediation milestone".to_string()),
+        "milestone_updated" => milestone_activity_description(activity),
+        "milestone_removed" => activity
+            .payload
+            .get("old")
+            .and_then(|value| value.get("title"))
+            .and_then(serde_json::Value::as_str)
+            .map(|title| format!("Removed milestone “{title}”"))
+            .unwrap_or_else(|| "Removed a remediation milestone".to_string()),
+        "note" => payload_text(activity, "text")
+            .map(|text| format!("Added note: {text}"))
+            .unwrap_or_else(|| "Added a durable note".to_string()),
+        "finding_linked" => "Linked an authoritative finding".to_string(),
+        "finding_unlinked" => "Unlinked a finding".to_string(),
+        "assignment_linked" => "Linked an immutable assignment version reference".to_string(),
+        "assignment_unlinked" => "Unlinked an immutable assignment version reference".to_string(),
+        "verification_attempted" => payload_text(activity, "outcome")
+            .map(|outcome| format!("Verification {outcome}"))
+            .unwrap_or_else(|| "Verification recorded".to_string()),
+        "closed" => "POA&M closed after authoritative verification".to_string(),
+        "reopened" => "POA&M reopened".to_string(),
+        other => format!("Recorded {} activity", other.replace('_', " ")),
+    }
+}
+
+fn updated_activity_description(activity: &ActivityView) -> String {
+    let Some(old) = activity.payload.get("old") else {
+        return "Updated POA&M metadata or remediation plan".to_string();
+    };
+    let Some(new) = activity.payload.get("new") else {
+        return "Updated POA&M metadata or remediation plan".to_string();
+    };
+    let mut changes = Vec::new();
+    if old.get("plan") != new.get("plan") {
+        changes.push("Updated remediation plan".to_string());
+    }
+    if old.get("assignee") != new.get("assignee") || old.get("owner") != new.get("owner") {
+        let from = assignee_payload_label(old).unwrap_or_else(|| "Unassigned".to_string());
+        let to = assignee_payload_label(new).unwrap_or_else(|| "Unassigned".to_string());
+        changes.push(format!("Changed assignee from {from} to {to}"));
+    }
+    if old.get("target_date") != new.get("target_date") {
+        if let Some(target) = new.get("target_date").and_then(serde_json::Value::as_str) {
+            changes.push(format!(
+                "Changed target date to {}",
+                payload_date_label(target)
+            ));
+        } else {
+            changes.push("Cleared target date".to_string());
+        }
+    }
+    if old.get("risk") != new.get("risk") {
+        let from = old.get("risk").and_then(serde_json::Value::as_str);
+        let to = new.get("risk").and_then(serde_json::Value::as_str);
+        if let (Some(from), Some(to)) = (from, to) {
+            changes.push(format!("Changed risk from {from} to {to}"));
+        }
+    }
+    if old.get("title") != new.get("title") {
+        changes.push("Changed POA&M title".to_string());
+    }
+    if changes.is_empty() {
+        "Updated POA&M metadata or remediation plan".to_string()
+    } else {
+        changes.join("; ")
+    }
+}
+
+fn assignee_payload_label(value: &serde_json::Value) -> Option<String> {
+    value
+        .get("assignee")
+        .and_then(|assignee| assignee.get("display"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| value.get("owner").and_then(serde_json::Value::as_str))
+        .filter(|label| !label.is_empty())
+        .map(str::to_string)
+}
+
+fn payload_date_label(value: &str) -> String {
+    NaiveDate::parse_from_str(value, "%Y-%m-%d")
+        .map(short_display_date)
+        .unwrap_or_else(|_| value.to_string())
+}
+
+fn milestone_activity_description(activity: &ActivityView) -> String {
+    let old = activity.payload.get("old");
+    let new = activity.payload.get("new");
+    let title = new
+        .and_then(|value| value.get("title"))
+        .and_then(serde_json::Value::as_str)
+        .or_else(|| {
+            old.and_then(|value| value.get("title"))
+                .and_then(serde_json::Value::as_str)
+        });
+    let completion_changed = old.and_then(|value| value.get("completed_at"))
+        != new.and_then(|value| value.get("completed_at"));
+    if completion_changed {
+        let completed = new
+            .and_then(|value| value.get("completed_at"))
+            .is_some_and(|value| !value.is_null());
+        return match (completed, title) {
+            (true, Some(title)) => format!("Completed milestone “{title}”"),
+            (false, Some(title)) => format!("Reopened milestone “{title}”"),
+            (true, None) => "Completed a remediation milestone".to_string(),
+            (false, None) => "Reopened a remediation milestone".to_string(),
+        };
+    }
+    title
+        .map(|title| format!("Updated milestone “{title}”"))
+        .unwrap_or_else(|| "Updated a remediation milestone".to_string())
+}
+
+/// Configures the aggregate finding and POA&M count strip.
+#[derive(Props, Clone, PartialEq)]
+pub struct PoamCountStripProps {
+    /// Provides server-computed counts for one scope.
+    pub rollup: Rollup,
+}
+
+/// Renders authoritative finding coverage and POA&M lifecycle counts.
+#[component]
+pub fn PoamCountStrip(props: PoamCountStripProps) -> Element {
+    let cells = [
+        (
+            "Open findings",
+            props.rollup.open_findings,
+            "poam-count-fail",
+        ),
+        ("On POA&M", props.rollup.on_poam_findings, "poam-count-info"),
+        ("No POA&M", props.rollup.no_poam_findings, "poam-count-warn"),
+        ("Overdue", props.rollup.overdue, "poam-count-fail"),
+        (
+            "Awaiting verification",
+            props.rollup.awaiting_verification,
+            "poam-count-awaiting",
+        ),
+        ("Closed", props.rollup.completed, "poam-count-ok"),
+    ];
+    rsx! { div { class: "stat-strip stat-strip-flush poam-count-strip", for (label, value, class) in cells { div { class: "stat", div { class: "stat-label", "{label}" } div { class: "stat-value {class}", "{value}" } } } } }
+}
+
+/// Configures a compact table of server-visible POA&M summaries.
+#[derive(Props, Clone, PartialEq)]
+pub struct PoamTableProps {
+    /// Provides POA&M rows in the caller's chosen server order.
+    pub items: Vec<PoamSummary>,
+    /// Receives the selected POA&M identity.
+    pub on_open: EventHandler<Uuid>,
+    /// Provides the status text rendered when no rows are present.
+    #[props(default = "No POA&M items in this view.".to_string())]
+    pub empty_note: String,
+}
+
+/// Renders an accessible POA&M summary table or its explicit empty state.
+#[component]
+pub fn PoamTable(props: PoamTableProps) -> Element {
+    if props.items.is_empty() {
+        return rsx! { div { role: "status", class: "poam-empty", "{props.empty_note}" } };
+    }
+    rsx! { div { class: "poam-table-wrap", table { class: "sys-table compact sys-table-dense poam-table", thead { tr { th { "POA&M" } th { "Title" } th { "Risk" } th { "Status" } th { "Assignee" } th { "Due" } } } tbody { for item in props.items { tr { key: "{item.id}", role: "button", tabindex: "0", aria_label: "Open {item.human_id}: {item.title}", "data-testid": "poam-row", "data-poam-id": "{item.id}", "data-poam-human-id": "{item.human_id}", onclick: move |_| props.on_open.call(item.id), onkeydown: move |event| { let key = event.key(); if key == Key::Enter || matches!(key, Key::Character(ref value) if value == " ") { event.prevent_default(); props.on_open.call(item.id); } }, td { class: "mono poam-human-id", "{item.human_id}" } td { strong { "{item.title}" } small { "{item.finding_count} linked findings" } } td { RiskChip { risk: item.risk } } td { StatusChip { poam: item.clone() } } td { "{assignee_display(&item)}" } td { class: if item.overdue { "mono poam-overdue" } else { "mono" }, "{format_date(item.target_date)}" } } } } } } }
+}
+
+/// Configures the POA&M section for one system detail view.
+#[derive(Props, Clone, PartialEq)]
+pub struct SystemPoamSectionProps {
+    /// Contains the system hostname used in the section heading.
+    pub hostname: String,
+    /// Provides server-computed counts for the system.
+    pub rollup: Rollup,
+    /// Provides all server-visible POA&M rows for client-side filtering.
+    pub items: Vec<PoamSummary>,
+    /// Selects the lifecycle subset displayed in the table.
+    pub filter: PoamFilter,
+    /// Receives filter changes so the parent owns selection state.
+    pub on_filter: EventHandler<PoamFilter>,
+    /// Receives the selected POA&M identity.
+    pub on_open: EventHandler<Uuid>,
+}
+
+/// Renders system-scoped POA&M counts, filters, and remediation rows.
+#[component]
+pub fn SystemPoamSection(props: SystemPoamSectionProps) -> Element {
+    let filtered = props
+        .items
+        .iter()
+        .filter(|item| props.filter.includes(item))
+        .cloned()
+        .collect();
+    rsx! { section { class: "card poam-system-section", header { Icon { name: IconName::Gear, size: 14 } div { h2 { "POA&M" } p { "Remediation plans for {props.hostname}" } } FilterButtons { filter: props.filter, rollup: props.rollup.clone(), on_filter: props.on_filter } } PoamCountStrip { rollup: props.rollup } PoamTable { items: filtered, on_open: props.on_open, empty_note: "No POA&M items match this filter.".to_string() } } }
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct FilterButtonsProps {
+    filter: PoamFilter,
+    rollup: Rollup,
+    on_filter: EventHandler<PoamFilter>,
+}
+
+#[component]
+fn FilterButtons(props: FilterButtonsProps) -> Element {
+    rsx! { div { class: "seg poam-filter", for option in [PoamFilter::Open, PoamFilter::Overdue, PoamFilter::Awaiting, PoamFilter::Closed, PoamFilter::All] { { let count = match option { PoamFilter::Open => props.rollup.active, PoamFilter::Overdue => props.rollup.overdue, PoamFilter::Awaiting => props.rollup.awaiting_verification, PoamFilter::Closed => props.rollup.completed, PoamFilter::All => props.rollup.total }; rsx! { button { class: if props.filter == option { "active" } else { "" }, onclick: move |_| props.on_filter.call(option), "{option.label()}" span { class: "mono", "{count}" } } } } } } }
+}
+
+/// Configures a bundle-scoped POA&M roll-up.
+#[derive(Props, Clone, PartialEq)]
+pub struct BundlePoamRollupProps {
+    /// Contains the bundle name used in the roll-up heading.
+    pub bundle_name: String,
+    /// Provides server-computed counts for the bundle.
+    pub rollup: Rollup,
+    /// Receives the lifecycle filter selected by a roll-up action.
+    pub on_open_list: EventHandler<PoamFilter>,
+    /// Shows only the four source-backed summary counters in a bundle overview.
+    #[props(default)]
+    pub compact: bool,
+}
+
+/// Renders bundle-scoped finding coverage and POA&M navigation actions.
+#[component]
+pub fn BundlePoamRollup(props: BundlePoamRollupProps) -> Element {
+    rsx! {
+        section { class: "poam-bundle-rollup",
+            div { class: "poam-rollup-title", title: "Finding coverage for {props.bundle_name}",
+                Icon { name: IconName::Gear, size: 14 }
+                div { strong { "POA&M roll-up" }
+                    small { "Which failing findings have a remediation plan — and which do not." }
+                }
+            }
+            div { class: "poam-rollup-counts",
+                div { strong { class: "poam-count-fail", "{props.rollup.open_findings}" } span { "Open findings" } }
+                div { strong { class: "poam-count-info", "{props.rollup.on_poam_findings}" } span { "On POA&M" } }
+                div { strong { class: "poam-count-warn", "{props.rollup.no_poam_findings}" } span { "No POA&M" } }
+                button { onclick: move |_| props.on_open_list.call(PoamFilter::Overdue),
+                    strong { class: "poam-count-fail", "{props.rollup.overdue}" } span { "Overdue" }
+                }
+                if !props.compact {
+                    button { onclick: move |_| props.on_open_list.call(PoamFilter::Awaiting),
+                        strong { class: "poam-count-awaiting", "{props.rollup.awaiting_verification}" } span { "Awaiting" }
+                    }
+                    button { onclick: move |_| props.on_open_list.call(PoamFilter::Closed),
+                        strong { class: "poam-count-ok", "{props.rollup.completed}" } span { "Closed" }
+                    }
+                }
+                button { class: "btn btn-ghost xs focus-ring", onclick: move |_| props.on_open_list.call(PoamFilter::All),
+                    "{props.rollup.total} POA&M items" Icon { name: IconName::ArrowRight, size: 11 }
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary(status: PoamStatus, overdue: bool) -> PoamSummary {
+        PoamSummary {
+            id: Uuid::nil(),
+            human_id: "POAM-1".into(),
+            title: "Test".into(),
+            plan: String::new(),
+            owner: "Security".into(),
+            assignee: None,
+            target_date: None,
+            risk: PoamRisk::High,
+            status,
+            revision: 1,
+            overdue,
+            finding_count: 1,
+            cve_finding_count: 0,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+            closed_at: None,
+            closure_attempt_id: None,
+        }
+    }
+
+    #[test]
+    fn labels_and_styles_cover_server_vocabulary() {
+        assert_eq!(
+            status_label(PoamStatus::AwaitingVerification),
+            "Awaiting Verification"
+        );
+        assert_eq!(status_class(PoamStatus::Completed), "poam-chip-completed");
+        assert_eq!(risk_label(PoamRisk::High), "CAT I - High");
+        assert_eq!(risk_class(PoamRisk::Low), "poam-risk-low");
+        assert_eq!(result_label(VerificationResult::Waiver), "Waiver");
+        assert_eq!(
+            result_class(VerificationResult::Waiver),
+            "poam-result-waiver"
+        );
+        assert_ne!(
+            result_class(VerificationResult::Waiver),
+            result_class(VerificationResult::Pass)
+        );
+        assert!(PoamStatus::Blocked.description().contains("dependency"));
+        assert_eq!(
+            available_status_transitions(PoamStatus::AwaitingVerification),
+            &[PoamStatus::InProgress, PoamStatus::Blocked]
+        );
+        assert!(available_status_transitions(PoamStatus::Completed).is_empty());
+    }
+
+    #[test]
+    fn exact_cve_results_never_present_waivers_as_absence() {
+        assert_eq!(cve_result_label("pass"), "PASS");
+        assert_eq!(cve_result_label("whitelisted"), "WHITELISTED");
+        assert_eq!(cve_result_label("justified"), "JUSTIFIED");
+        assert_ne!(cve_result_class("pass"), cve_result_class("whitelisted"));
+        assert_ne!(cve_result_class("pass"), cve_result_class("justified"));
+        assert_eq!(cve_result_label("unexpected"), "ERROR");
+    }
+
+    #[test]
+    fn assignee_defaults_to_current_eligible_user_or_unassigned() {
+        let current_user_id = Uuid::from_u128(7);
+        let catalog = PoamAssigneeCatalog {
+            people: vec![poam_api::PoamAssigneePerson {
+                user_id: current_user_id,
+                label: "Jane Operator".into(),
+            }],
+            groups: vec![],
+        };
+        assert_eq!(
+            default_assignee(Some(current_user_id), &catalog),
+            PoamAssigneeDraft::User {
+                user_id: current_user_id,
+                display: "Jane Operator".into(),
+                available: true,
+            }
+        );
+        assert_eq!(
+            default_assignee(Some(Uuid::from_u128(8)), &catalog),
+            PoamAssigneeDraft::Unassigned
+        );
+        assert_eq!(
+            default_assignee(None, &catalog),
+            PoamAssigneeDraft::Unassigned
+        );
+    }
+
+    #[test]
+    fn assignee_catalog_supports_people_groups_and_historical_values() {
+        let user_id = Uuid::from_u128(9);
+        let catalog = PoamAssigneeCatalog {
+            people: vec![poam_api::PoamAssigneePerson {
+                user_id,
+                label: "Matt Camp".into(),
+            }],
+            groups: vec![poam_api::PoamAssigneeGroup {
+                group_name: "team:compliance".into(),
+            }],
+        };
+        assert!(matches!(
+            assignee_from_option(&format!("user:{user_id}"), &catalog),
+            Some(PoamAssigneeDraft::User { user_id: id, .. }) if id == user_id
+        ));
+        assert!(matches!(
+            assignee_from_option("group:team:compliance", &catalog),
+            Some(PoamAssigneeDraft::OidcGroup { group_name, .. })
+                if group_name == "team:compliance"
+        ));
+        let historical = PoamAssigneeDraft::Historical {
+            display: "Platform Security".into(),
+        };
+        assert_eq!(
+            historical.unavailable_label(),
+            "Former / legacy assignee — Platform Security"
+        );
+        assert!(!historical.is_catalogued_in(&catalog));
+
+        let current_but_not_catalogued = PoamAssigneeDraft::User {
+            user_id: Uuid::from_u128(10),
+            display: "Current Person Beyond Catalog Limit".into(),
+            available: true,
+        };
+        assert!(!current_but_not_catalogued.is_catalogued_in(&catalog));
+        assert_eq!(
+            current_but_not_catalogued.unavailable_label(),
+            "Current Person Beyond Catalog Limit"
+        );
+
+        let catalog_without_groups = PoamAssigneeCatalog {
+            people: catalog.people.clone(),
+            groups: vec![],
+        };
+        assert!(assignee_from_option("group:team:compliance", &catalog_without_groups).is_none());
+
+        let source = include_str!("mod.rs");
+        assert!(source.contains("optgroup { label: \"People\""));
+        assert!(source.contains("optgroup { label: \"Groups\""));
+    }
+
+    #[test]
+    fn filters_use_summary_state_without_deriving_counts() {
+        let open = summary(PoamStatus::Open, false);
+        let overdue = summary(PoamStatus::Blocked, true);
+        let awaiting = summary(PoamStatus::AwaitingVerification, false);
+        let closed = summary(PoamStatus::Completed, false);
+        assert!(PoamFilter::Open.includes(&open));
+        assert!(PoamFilter::Overdue.includes(&overdue));
+        assert!(PoamFilter::Awaiting.includes(&awaiting));
+        assert!(PoamFilter::Closed.includes(&closed));
+        assert!(!PoamFilter::Open.includes(&closed));
+    }
+
+    #[test]
+    fn target_timing_reports_remaining_and_overdue_days() {
+        let today = NaiveDate::from_ymd_opt(2026, 8, 31).unwrap();
+        let mut item = summary(PoamStatus::Open, false);
+        item.target_date = NaiveDate::from_ymd_opt(2026, 9, 5);
+        assert_eq!(
+            target_timing_label(&item, today).as_deref(),
+            Some("5d remaining")
+        );
+        item.target_date = NaiveDate::from_ymd_opt(2026, 8, 29);
+        assert_eq!(
+            target_timing_label(&item, today).as_deref(),
+            Some("2d overdue")
+        );
+    }
+
+    #[test]
+    fn requirement_labels_prefer_authoritative_metadata_without_fabrication() {
+        let requirement_version_id = Uuid::from_u128(1);
+        let metadata = FindingRequirementView {
+            requirement_version_id,
+            external_id: "AC-2".into(),
+            title: Some("Account Management".into()),
+            framework_id: Uuid::from_u128(2),
+            framework_name: "NIST SP 800-53".into(),
+            framework_version_id: Uuid::from_u128(3),
+            framework_version: "Rev. 5".into(),
+            framework_title: None,
+        };
+        assert_eq!(
+            requirement_presentations(&[metadata], &[requirement_version_id]),
+            vec![RequirementPresentation {
+                framework: Some("NIST SP 800-53 · Rev. 5".into()),
+                control: "AC-2".into(),
+                title: Some("Account Management".into()),
+            }]
+        );
+        assert_eq!(
+            requirement_presentations(&[], &[requirement_version_id]),
+            vec![RequirementPresentation {
+                framework: None,
+                control: requirement_version_id.to_string(),
+                title: None,
+            }]
+        );
+        assert!(requirement_presentations(&[], &[]).is_empty());
+    }
+
+    #[test]
+    fn close_rejection_message_identifies_committed_revision_and_preserved_drafts() {
+        let message = close_rejection_message(9);
+        assert!(message.contains("revision 9"));
+        assert!(message.contains("drafts are preserved"));
+    }
+
+    fn activity(kind: &str, payload: serde_json::Value) -> ActivityView {
+        ActivityView {
+            id: Uuid::from_u128(20),
+            actor_user_id: Some(Uuid::from_u128(21)),
+            actor_display: Some("j.okafor".into()),
+            kind: kind.into(),
+            payload,
+            created_at: chrono::DateTime::parse_from_rfc3339("2026-08-21T14:15:16.123456Z")
+                .unwrap()
+                .with_timezone(&chrono::Utc),
+        }
+    }
+
+    #[test]
+    fn activity_descriptions_report_typed_assignee_and_milestone_changes() {
+        let assignment = activity(
+            "updated",
+            serde_json::json!({
+                "old": {"owner":"Security", "assignee":{"kind":"oidc_group", "display":"Security"}},
+                "new": {"owner":"Jane Operator", "assignee":{"kind":"user", "display":"Jane Operator"}}
+            }),
+        );
+        assert_eq!(
+            activity_description(&assignment),
+            "Changed assignee from Security to Jane Operator"
+        );
+
+        let completed = activity(
+            "milestone_updated",
+            serde_json::json!({
+                "old": {"title":"Deploy to staging", "completed_at":null},
+                "new": {"title":"Deploy to staging", "completed_at":"2026-08-21T14:15:16Z"}
+            }),
+        );
+        assert_eq!(
+            activity_description(&completed),
+            "Completed milestone “Deploy to staging”"
+        );
+    }
+
+    #[test]
+    fn activity_uses_concise_dates_and_keeps_full_timestamp_as_metadata() {
+        let item = activity(
+            "note",
+            serde_json::json!({"text":"Staging validation clean"}),
+        );
+        assert_eq!(item.created_at.date_naive().to_string(), "2026-08-21");
+        assert_eq!(activity_actor(&item), "j.okafor");
+        assert_eq!(
+            activity_description(&item),
+            "Added note: Staging validation clean"
+        );
+        assert_eq!(short_display_date(item.created_at.date_naive()), "Aug 21");
+
+        let source = include_str!("mod.rs");
+        assert!(source.contains("class: \"mono poam-activity-date\""));
+        assert!(source.contains("class: \"mono poam-activity-actor\""));
+        assert!(source.contains("class: \"poam-activity-message\""));
+        // The drawer shows the human message only. Needles are assembled at run
+        // time so this test does not match its own source.
+        let diagnostics_class = format!("poam-activity-{}", "diagnostics");
+        let diagnostics_summary = format!("summary {{ \"{}\" }}", "Diagnostics");
+        assert!(!source.contains(&diagnostics_class));
+        assert!(!source.contains(&diagnostics_summary));
+        assert!(!include_str!("../../../assets/app.css").contains(&diagnostics_class));
+        let activity_component = source
+            .split("fn ActivityList")
+            .nth(1)
+            .unwrap()
+            .split("fn short_display_date")
+            .next()
+            .unwrap();
+        assert!(!activity_component.contains("Actor: {actor}"));
+    }
+
+    #[test]
+    fn milestone_row_is_a_label_wrapped_checklist_without_an_editor() {
+        let source = include_str!("mod.rs");
+        let component = source
+            .split("fn MilestonesSection")
+            .nth(1)
+            .unwrap()
+            .split("fn ActivityList")
+            .next()
+            .unwrap();
+        assert!(component.contains("class: \"poam-ms\""));
+        assert!(component.contains("label { class: \"poam-check poam-ms-label\""));
+        assert!(component.contains("class: \"focus-ring poam-milestone-check\""));
+        assert!(component.contains("format!(\"Mark {} complete\", milestone.title)"));
+        assert!(component.contains("format!(\"Reopen {}\", milestone.title)"));
+        assert!(component.contains("props.on_toggle.call((milestone.id, !completed))"));
+        assert!(component.contains("poam-milestone-completed"));
+        assert!(component.contains(
+            "title: \"Remove milestone\", aria_label: \"Remove milestone {milestone.title}\""
+        ));
+        assert!(component.contains("title: \"Add milestone\", aria_label: \"Add milestone\""));
+        assert!(component.contains("placeholder: \"Add a milestone...\""));
+        assert!(source.contains("placeholder: \"Add a note...\""));
+        // Existing milestones have no title or date editor. Needles are
+        // assembled at run time so this test does not match its own source.
+        for removed in [
+            format!("Edit {}", "milestone"),
+            format!("poam-milestone-{}", "editor"),
+            format!("Milestone title {}", "for"),
+            format!("Milestone target date {}", "for"),
+            format!("pending_save_{}", "focus"),
+            format!("Milestone{}", "Draft"),
+            format!("Milestone{}", "SaveFocus"),
+        ] {
+            assert!(!component.contains(&removed), "{removed} must be gone");
+            assert!(!source.contains(&format!("fn {}", removed.replace(' ', "_"))));
+        }
+    }
+
+    fn milestone(target: &str, completed: bool) -> MilestoneView {
+        let timestamp = chrono::DateTime::parse_from_rfc3339("2026-09-14T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        MilestoneView {
+            id: Uuid::from_u128(30),
+            ordinal: 0,
+            title: "Deploy update".to_string(),
+            target_date: NaiveDate::parse_from_str(target, "%Y-%m-%d").unwrap(),
+            completed_at: completed.then_some(timestamp),
+            completed_by: completed.then_some(Uuid::from_u128(31)),
+            created_by: Uuid::from_u128(31),
+            updated_by: Uuid::from_u128(31),
+            created_at: timestamp,
+            updated_at: timestamp,
+        }
+    }
+
+    #[test]
+    fn only_an_open_milestone_past_its_target_is_late() {
+        let today = NaiveDate::from_ymd_opt(2026, 9, 27).unwrap();
+        assert!(milestone_is_late(&milestone("2026-09-26", false), today));
+        assert!(!milestone_is_late(&milestone("2026-09-27", false), today));
+        assert!(!milestone_is_late(&milestone("2026-10-01", false), today));
+        // A completed milestone is never late, whatever its target was.
+        assert!(!milestone_is_late(&milestone("2026-08-01", true), today));
+    }
+
+    #[test]
+    fn responsive_verification_and_disabled_controls_have_scoped_styles() {
+        let css = include_str!("../../../assets/app.css");
+        assert!(css.contains(".poam-verification-head"));
+        assert!(css.contains(".poam-verification-item p, .poam-verification-basis"));
+        assert!(css.contains("--cf-disabled-control-text: #9ca3af"));
+        assert!(css.contains("--cf-disabled-control-text: #4b5563"));
+        assert!(css.contains(".poam-tray :is(button, input, select, textarea):disabled"));
+        assert!(css.contains(".poam-milestone-title.poam-milestone-completed"));
+        assert!(css.contains(".poam-ms { display: flex"));
+        assert!(css.contains(".poam-cve-host {"));
+        assert!(css.contains(".poam-cve-group-head"));
+    }
+
+    fn user_draft(id: u128, display: &str) -> PoamAssigneeDraft {
+        PoamAssigneeDraft::User {
+            user_id: Uuid::from_u128(id),
+            display: display.into(),
+            available: true,
+        }
+    }
+
+    #[test]
+    fn metadata_dirty_tracks_only_the_four_metadata_drafts() {
+        let mut poam = summary(PoamStatus::Open, false);
+        poam.title = "Disable root SSH".into();
+        poam.target_date = NaiveDate::from_ymd_opt(2026, 9, 5);
+        poam.risk = PoamRisk::High;
+        poam.assignee = Some(PoamAssigneeView::Unassigned);
+        let saved = PoamAssigneeDraft::from_summary(&poam);
+
+        assert!(!metadata_is_dirty(
+            &poam,
+            "Disable root SSH",
+            &saved,
+            "2026-09-05",
+            PoamRisk::High
+        ));
+        // Surrounding whitespace is not a change: save trims the title.
+        assert!(!metadata_is_dirty(
+            &poam,
+            "  Disable root SSH  ",
+            &saved,
+            " 2026-09-05 ",
+            PoamRisk::High
+        ));
+        assert!(metadata_is_dirty(
+            &poam,
+            "Disable root login",
+            &saved,
+            "2026-09-05",
+            PoamRisk::High
+        ));
+        assert!(metadata_is_dirty(
+            &poam,
+            "Disable root SSH",
+            &user_draft(1, "Jane"),
+            "2026-09-05",
+            PoamRisk::High
+        ));
+        assert!(metadata_is_dirty(
+            &poam,
+            "Disable root SSH",
+            &saved,
+            "2026-11-12",
+            PoamRisk::High
+        ));
+        assert!(metadata_is_dirty(
+            &poam,
+            "Disable root SSH",
+            &saved,
+            "",
+            PoamRisk::High
+        ));
+        assert!(metadata_is_dirty(
+            &poam,
+            "Disable root SSH",
+            &saved,
+            "2026-09-05",
+            PoamRisk::Low
+        ));
+    }
+
+    #[test]
+    fn assignee_identity_ignores_display_text_differences() {
+        let mut poam = summary(PoamStatus::Open, false);
+        poam.assignee = Some(PoamAssigneeView::User {
+            user_id: Uuid::from_u128(3),
+            display: "Jane Operator".into(),
+            available: true,
+        });
+        // The catalog may label the same user differently from the server.
+        let same_user_other_label = user_draft(3, "Jane Operator (jane@example.test)");
+        assert!(!assignee_changed(&poam, &same_user_other_label));
+        assert!(!metadata_is_dirty(
+            &poam,
+            &poam.title,
+            &same_user_other_label,
+            "",
+            poam.risk
+        ));
+        let request =
+            build_metadata_request(2, &poam, &poam.title, &same_user_other_label, "", poam.risk)
+                .unwrap();
+        assert_eq!(request.assignee, None);
+
+        // A different user is a real change and is sent.
+        assert!(assignee_changed(&poam, &user_draft(4, "Jane Operator")));
+        // A group with the same text as a user is still a different assignee.
+        let group = PoamAssigneeDraft::OidcGroup {
+            group_name: "3".into(),
+            display: "Jane Operator".into(),
+            available: true,
+        };
+        assert!(assignee_changed(&poam, &group));
+    }
+
+    #[test]
+    fn metadata_dirty_treats_a_missing_target_as_empty() {
+        let poam = summary(PoamStatus::Open, false);
+        assert!(poam.target_date.is_none());
+        let saved = PoamAssigneeDraft::from_summary(&poam);
+        assert!(!metadata_is_dirty(
+            &poam,
+            &poam.title,
+            &saved,
+            "",
+            poam.risk
+        ));
+        assert!(metadata_is_dirty(
+            &poam,
+            &poam.title,
+            &saved,
+            "2026-09-05",
+            poam.risk
+        ));
+    }
+
+    #[test]
+    fn metadata_request_carries_only_metadata_and_never_the_plan() {
+        let mut poam = summary(PoamStatus::Open, false);
+        poam.plan = "Saved plan that metadata must not touch".into();
+        poam.assignee = Some(PoamAssigneeView::Unassigned);
+        let request = build_metadata_request(
+            7,
+            &poam,
+            "  New title  ",
+            &user_draft(9, "Jane Operator"),
+            "2026-11-12",
+            PoamRisk::Low,
+        )
+        .unwrap();
+        // The whole struct is compared so any extra field fails the test.
+        assert_eq!(
+            request,
+            UpdatePoamRequest {
+                revision: 7,
+                title: Some("New title".into()),
+                plan: None,
+                owner: None,
+                assignee: Some(PoamAssigneeRequest::User {
+                    user_id: Uuid::from_u128(9)
+                }),
+                target_date: Some(NaiveDate::from_ymd_opt(2026, 11, 12)),
+                risk: Some(PoamRisk::Low),
+            }
+        );
+    }
+
+    #[test]
+    fn metadata_request_omits_an_unchanged_or_unrepresentable_assignee() {
+        let mut poam = summary(PoamStatus::Open, false);
+        poam.assignee = Some(PoamAssigneeView::User {
+            user_id: Uuid::from_u128(3),
+            display: "Jane".into(),
+            available: true,
+        });
+        let unchanged = PoamAssigneeDraft::from_summary(&poam);
+        let request =
+            build_metadata_request(2, &poam, "Test", &unchanged, "", PoamRisk::High).unwrap();
+        assert_eq!(request.assignee, None);
+
+        // A historical assignee has no request form and is never rewritten.
+        let historical = PoamAssigneeDraft::Historical {
+            display: "Platform Security".into(),
+        };
+        let request =
+            build_metadata_request(2, &poam, "Test", &historical, "", PoamRisk::High).unwrap();
+        assert_eq!(request.assignee, None);
+
+        // An explicit change to Unassigned is sent so the assignee clears.
+        let request = build_metadata_request(
+            2,
+            &poam,
+            "Test",
+            &PoamAssigneeDraft::Unassigned,
+            "",
+            PoamRisk::High,
+        )
+        .unwrap();
+        assert_eq!(request.assignee, Some(PoamAssigneeRequest::Unassigned));
+    }
+
+    #[test]
+    fn metadata_request_clears_an_empty_target_and_rejects_a_malformed_one() {
+        let poam = summary(PoamStatus::Open, false);
+        let saved = PoamAssigneeDraft::from_summary(&poam);
+        let cleared =
+            build_metadata_request(1, &poam, "Test", &saved, "  ", PoamRisk::High).unwrap();
+        assert_eq!(cleared.target_date, Some(None));
+        assert_eq!(
+            build_metadata_request(1, &poam, "Test", &saved, "11/12/2026", PoamRisk::High),
+            Err("Enter a valid target date.")
+        );
+    }
+
+    #[test]
+    fn plan_request_carries_only_the_plan() {
+        let request = build_plan_request(3, "  Exact plan\nwith a second line ");
+        assert_eq!(
+            request,
+            UpdatePoamRequest {
+                revision: 3,
+                title: None,
+                plan: Some("  Exact plan\nwith a second line ".into()),
+                owner: None,
+                assignee: None,
+                target_date: None,
+                risk: None,
+            }
+        );
+    }
+
+    fn cve_link(cve: &str, system: u128, active: bool) -> CveFindingView {
+        let timestamp = chrono::Utc::now();
+        CveFindingView {
+            id: Uuid::new_v4(),
+            system_id: Uuid::from_u128(system),
+            hostname: format!("host-{system}"),
+            environment_id: None,
+            canonical_cve_id: cve.into(),
+            canonical_package_name: "openssl".into(),
+            link_id: Uuid::new_v4(),
+            linked_at: timestamp,
+            linked_by: Uuid::from_u128(1),
+            retired_at: (!active).then_some(timestamp),
+            retired_by: None,
+            retirement_reason: None,
+            link_active: active,
+            baseline_scan_id: None,
+            baseline_scan_completed_at: None,
+            baseline_generation: None,
+            baseline_target_store_path: None,
+            baseline_occurrence_derivation_path: None,
+            baseline_observed_package_version: None,
+            current_derivation_id: None,
+            current_target_store_path: None,
+            current_scan_id: None,
+            current_occurrence_derivation_path: None,
+            current_observed_package_version: None,
+            resolution_state: "pass".into(),
+        }
+    }
+
+    #[test]
+    fn deficiency_heading_pluralizes_the_finding_count() {
+        assert_eq!(deficiency_title(0), "Deficiency · 0 findings");
+        assert_eq!(deficiency_title(1), "Deficiency · 1 finding");
+        assert_eq!(deficiency_title(12), "Deficiency · 12 findings");
+    }
+
+    #[test]
+    fn vulnerability_scope_counts_distinct_cves_and_systems_of_the_active_scope() {
+        let active = vec![
+            cve_link("CVE-2024-1", 1, true),
+            cve_link("CVE-2024-1", 2, true),
+            cve_link("CVE-2024-2", 2, true),
+        ];
+        let retired = vec![cve_link("CVE-2023-9", 7, false)];
+        // Active links define the scope; retired links are not counted.
+        assert_eq!(
+            vulnerability_scope_title(&active, &retired),
+            "Vulnerability scope · 2 CVEs · 2 hosts"
+        );
+        assert_eq!(
+            vulnerability_scope_title(&active[..1], &[]),
+            "Vulnerability scope · 1 CVE · 1 host"
+        );
+    }
+
+    #[test]
+    fn vulnerability_scope_falls_back_to_retired_links_when_none_are_active() {
+        let retired = vec![
+            cve_link("CVE-2024-1", 1, false),
+            cve_link("CVE-2024-1", 2, false),
+        ];
+        assert_eq!(
+            vulnerability_scope_title(&[], &retired),
+            "Vulnerability scope · 1 CVE · 2 hosts"
+        );
+    }
+
+    #[test]
+    fn verification_actions_exist_only_while_awaiting_verification() {
+        for status in [
+            PoamStatus::Open,
+            PoamStatus::InProgress,
+            PoamStatus::Blocked,
+            PoamStatus::Completed,
+        ] {
+            assert!(
+                !verification_actions_available(status),
+                "{status:?} must not offer verification"
+            );
+        }
+        assert!(verification_actions_available(
+            PoamStatus::AwaitingVerification
+        ));
+    }
+
+    #[test]
+    fn detail_has_one_metadata_surface_and_no_trailing_metadata_section() {
+        let source = include_str!("mod.rs");
+        // The needle is assembled at run time so this test does not match
+        // itself.
+        let duplicate_heading = format!("h3 {{ \"{}\" }}", "POA&M metadata");
+        let supplemental_class = format!("poam-tray-{}", "supplemental");
+        assert!(!source.contains(&duplicate_heading));
+        assert!(!source.contains(&supplemental_class));
+        assert!(!include_str!("../../../assets/app.css").contains(&supplemental_class));
+        // Retired exact-CVE evidence stays reachable and non-unlinkable.
+        assert!(source.contains("Retired vulnerability history"));
+        assert!(source.contains("Retired links are immutable audit evidence"));
+    }
+
+    fn cve_link_on(
+        cve: &str,
+        package: &str,
+        host: &str,
+        system: u128,
+        link: u128,
+    ) -> CveFindingView {
+        let mut finding = cve_link(cve, system, true);
+        finding.canonical_package_name = package.into();
+        finding.hostname = host.into();
+        finding.link_id = Uuid::from_u128(link);
+        finding
+    }
+
+    #[test]
+    fn scope_groups_hosts_under_one_card_per_cve_and_package() {
+        let findings = vec![
+            cve_link_on("CVE-2024-2", "openssl", "web-02", 2, 12),
+            cve_link_on("CVE-2024-1", "openssl", "web-03", 3, 13),
+            cve_link_on("CVE-2024-1", "openssl", "web-01", 1, 11),
+            cve_link_on("CVE-2024-1", "curl", "web-01", 1, 14),
+        ];
+        let groups = group_cve_scope(&findings);
+        let keys = groups
+            .iter()
+            .map(|group| {
+                (
+                    group.cve_id.as_str(),
+                    group.package.as_str(),
+                    group.findings.len(),
+                )
+            })
+            .collect::<Vec<_>>();
+        // Groups sort by CVE then package. The same CVE with two packages is
+        // two groups because the exact finding identity includes the package.
+        assert_eq!(
+            keys,
+            vec![
+                ("CVE-2024-1", "curl", 1),
+                ("CVE-2024-1", "openssl", 2),
+                ("CVE-2024-2", "openssl", 1),
+            ]
+        );
+        // Hosts sort by name, not by response order.
+        let hosts = groups[1]
+            .findings
+            .iter()
+            .map(|finding| finding.hostname.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(hosts, vec!["web-01", "web-03"]);
+        assert!(group_cve_scope(&[]).is_empty());
+    }
+
+    #[test]
+    fn scope_group_order_is_independent_of_response_order() {
+        let a = cve_link_on("CVE-2024-1", "openssl", "web-01", 1, 11);
+        let b = cve_link_on("CVE-2024-1", "openssl", "web-02", 2, 12);
+        assert_eq!(
+            group_cve_scope(&[a.clone(), b.clone()]),
+            group_cve_scope(&[b, a])
+        );
+    }
+
+    #[test]
+    fn scan_reference_is_compact_and_never_invented() {
+        let id = Uuid::parse_str("12345678-aaaa-bbbb-cccc-1234567890ab").unwrap();
+        assert_eq!(short_scan_ref(Some(id)), "12345678");
+        assert_eq!(short_scan_ref(None), "Unavailable");
+        assert_eq!(host_count_label(1), "1 host");
+        assert_eq!(host_count_label(4), "4 hosts");
+    }
+
+    #[test]
+    fn scope_markup_has_no_fabricated_severity_and_no_wide_table() {
+        let source = include_str!("mod.rs");
+        let scope = source
+            .split("poam-linked-vulnerabilities")
+            .nth(1)
+            .unwrap()
+            .split("\"Remediation plan\"")
+            .next()
+            .unwrap();
+        // The detail response carries no severity, CVSS, or fixed version, so
+        // the card header must not render any. Needles are assembled at run
+        // time.
+        for forbidden in [
+            format!("{}: Unavailable", "Fixed"),
+            format!("cvss{}", "_score"),
+            format!("poam-cve-findings-{}", "table"),
+            format!("th {{ \"{}\" }}", "Actions"),
+        ] {
+            assert!(!scope.contains(&forbidden), "{forbidden} must not render");
+        }
+        assert!(scope.contains("poam-cve-group-head"));
+        assert!(scope.contains("poam-cve-host"));
+    }
+}

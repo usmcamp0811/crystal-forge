@@ -9,21 +9,119 @@ use axum::{
 use serde::Deserialize;
 
 use crate::api::models::{
-    CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveJustification,
+    CveAffectedSystemDetail, CveDetail, CveFilters, CveFleetStats, CveInventoryGroupPage,
+    CveInventoryMemberPage, CveInventoryPairPage, CveInventoryProjectionParams, CveJustification,
     CveJustificationInput, CveListItem, CvePackageGroup,
 };
-use crate::auth::extractors::{AuthenticatedUser, RequireAdmin, RequireAuth};
+use crate::auth::extractors::{RequireAdmin, RequireAuth};
 use crate::handlers::agent_request::CFState;
+use crate::handlers::api::auth_session::RequireCsrf;
+use crate::queries::cve_scans::{
+    EnqueueCveScanOutcome, FleetEnqueueOutcome, enqueue_exact_cve_scan, enqueue_fleet_cve_scans,
+};
 use crate::queries::cves;
+
+fn validate_projection(
+    params: &CveInventoryProjectionParams,
+    group: Option<bool>,
+) -> Result<(), (StatusCode, String)> {
+    if (group.is_some() && !matches!(params.group_by.as_str(), "environment" | "host"))
+        || params.offset.unwrap_or(0) < 0
+        || params.offset.unwrap_or(0) > i64::MAX - 200
+        || !(1..=200).contains(&params.limit.unwrap_or(100))
+        || (group == Some(true) && params.group_by == "host" && params.group_id.is_none())
+    {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Invalid CVE inventory group or page".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// Returns complete scoped environment or host finding aggregates in bounded pages.
+/// This read never grants triage authority or reports scan coverage.
+///
+/// # Errors
+///
+/// Returns 400 for invalid paging, 401 for missing authentication, or 500 on a database failure.
+pub async fn list_inventory_groups(
+    State(state): State<CFState>,
+    Query(params): Query<CveInventoryProjectionParams>,
+    RequireAuth(user): RequireAuth,
+) -> Result<Json<CveInventoryGroupPage>, (StatusCode, String)> {
+    validate_projection(&params, Some(false))?;
+    let scope = cve_read_scope(&state, &user).await?;
+    cves::fetch_cve_inventory_groups(&state.pool, &scope, &params)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to load CVE groups: {error}"),
+            )
+        })
+}
+
+/// Returns paged scoped membership for one exact environment or system ID.
+/// For an environment, omitted `group_id` selects only unassigned hosts visible
+/// to an Admin. It does not select every environment. Historical rows are read-only.
+///
+/// # Errors
+///
+/// Returns 400 for invalid paging, 401 for missing authentication, or 500 on a database failure.
+pub async fn list_inventory_members(
+    State(state): State<CFState>,
+    Query(params): Query<CveInventoryProjectionParams>,
+    RequireAuth(user): RequireAuth,
+) -> Result<Json<CveInventoryMemberPage>, (StatusCode, String)> {
+    validate_projection(&params, Some(true))?;
+    let scope = cve_read_scope(&state, &user).await?;
+    cves::fetch_cve_inventory_members(&state.pool, &scope, &params)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to load CVE members: {error}"),
+            )
+        })
+}
+
+/// Lists filtered CVE/package pairs with exact scoped counts and bounded pages.
+/// The response uses the existing [`CveListItem`] row contract, without the
+/// legacy list's 1,000-row ceiling. It does not authorize CVE mutations.
+///
+/// # Errors
+///
+/// Returns 400 for invalid paging, 401 for missing authentication, or 500 on a database failure.
+pub async fn list_inventory_pairs(
+    State(state): State<CFState>,
+    Query(params): Query<CveInventoryProjectionParams>,
+    RequireAuth(user): RequireAuth,
+) -> Result<Json<CveInventoryPairPage>, (StatusCode, String)> {
+    validate_projection(&params, None)?;
+    let scope = cve_read_scope(&state, &user).await?;
+    cves::fetch_cve_inventory_pairs(&state.pool, &scope, &params)
+        .await
+        .map(Json)
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to load CVE pairs: {error}"),
+            )
+        })
+}
 
 /// GET /api/v1/cves
 /// List CVEs with filters.
 pub async fn list_cves(
     State(state): State<CFState>,
     Query(filters): Query<CveFilters>,
-    _user: RequireAuth,
+    RequireAuth(user): RequireAuth,
 ) -> Result<Json<Vec<CveListItem>>, (StatusCode, String)> {
-    let cves = cves::fetch_cve_list(&state.pool, &filters)
+    let scope = cve_read_scope(&state, &user).await?;
+    let cves = cves::fetch_cve_list(&state.pool, &scope, &filters)
         .await
         .map_err(|e| {
             (
@@ -40,9 +138,10 @@ pub async fn list_cves(
 pub async fn list_cves_grouped(
     State(state): State<CFState>,
     Query(filters): Query<CveFilters>,
-    _user: RequireAuth,
+    RequireAuth(user): RequireAuth,
 ) -> Result<Json<Vec<CvePackageGroup>>, (StatusCode, String)> {
-    let groups = cves::fetch_cve_packages_grouped(&state.pool, &filters)
+    let scope = cve_read_scope(&state, &user).await?;
+    let groups = cves::fetch_cve_packages_grouped(&state.pool, &scope, &filters)
         .await
         .map_err(|e| {
             (
@@ -58,9 +157,10 @@ pub async fn list_cves_grouped(
 /// Get fleet-wide CVE statistics.
 pub async fn get_fleet_stats(
     State(state): State<CFState>,
-    _user: RequireAuth,
+    RequireAuth(user): RequireAuth,
 ) -> Result<Json<CveFleetStats>, (StatusCode, String)> {
-    let stats = cves::fetch_cve_fleet_stats(&state.pool)
+    let scope = cve_read_scope(&state, &user).await?;
+    let stats = cves::fetch_cve_fleet_stats(&state.pool, &scope)
         .await
         .map_err(|e| {
             (
@@ -76,14 +176,17 @@ pub async fn get_fleet_stats(
 /// Get list of package names for autocomplete.
 pub async fn list_package_names(
     State(state): State<CFState>,
-    _user: RequireAuth,
+    RequireAuth(user): RequireAuth,
 ) -> Result<Json<Vec<String>>, (StatusCode, String)> {
-    let packages = cves::fetch_package_names(&state.pool).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("Failed to fetch package names: {}", e),
-        )
-    })?;
+    let scope = cve_read_scope(&state, &user).await?;
+    let packages = cves::fetch_package_names(&state.pool, &scope)
+        .await
+        .map_err(|e| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to fetch package names: {}", e),
+            )
+        })?;
 
     Ok(Json(packages))
 }
@@ -93,15 +196,23 @@ pub async fn list_package_names(
 pub async fn get_cve_detail(
     State(state): State<CFState>,
     Path(cve_id): Path<String>,
-    _user: RequireAuth,
+    RequireAuth(user): RequireAuth,
 ) -> Result<Json<CveDetail>, (StatusCode, String)> {
-    let detail = cves::fetch_cve_detail(&state.pool, &cve_id)
+    let scope = cve_read_scope(&state, &user).await?;
+    let detail = cves::fetch_cve_detail(&state.pool, &scope, &cve_id)
         .await
         .map_err(|e| {
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to fetch CVE detail: {}", e),
-            )
+            if matches!(
+                e.downcast_ref::<sqlx::Error>(),
+                Some(sqlx::Error::RowNotFound)
+            ) {
+                (StatusCode::NOT_FOUND, "CVE not found".to_string())
+            } else {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Failed to fetch CVE detail: {e}"),
+                )
+            }
         })?;
 
     Ok(Json(detail))
@@ -112,9 +223,10 @@ pub async fn get_cve_detail(
 pub async fn get_cve_systems(
     State(state): State<CFState>,
     Path(cve_id): Path<String>,
-    _user: RequireAuth,
+    RequireAuth(user): RequireAuth,
 ) -> Result<Json<Vec<CveAffectedSystemDetail>>, (StatusCode, String)> {
-    let systems = cves::fetch_cve_affected_systems(&state.pool, &cve_id)
+    let scope = cve_read_scope(&state, &user).await?;
+    let systems = cves::fetch_cve_affected_systems(&state.pool, &scope, &cve_id)
         .await
         .map_err(|e| {
             (
@@ -132,6 +244,7 @@ pub async fn save_justification(
     State(state): State<CFState>,
     Path(cve_id): Path<String>,
     RequireAdmin(user): RequireAdmin,
+    _csrf: RequireCsrf,
     Json(payload): Json<CveJustificationRequest>,
 ) -> Result<StatusCode, (StatusCode, String)> {
     // Validate category
@@ -195,6 +308,7 @@ pub async fn revoke_justification(
     State(state): State<CFState>,
     Path(cve_id): Path<String>,
     _user: RequireAdmin,
+    _csrf: RequireCsrf,
 ) -> Result<StatusCode, (StatusCode, String)> {
     cves::revoke_fleet_cve_justification(&state.pool, &cve_id)
         .await
@@ -213,9 +327,10 @@ pub async fn revoke_justification(
 pub async fn list_justifications(
     State(state): State<CFState>,
     Path(cve_id): Path<String>,
-    _user: RequireAuth,
+    RequireAuth(user): RequireAuth,
 ) -> Result<Json<Vec<CveJustification>>, (StatusCode, String)> {
-    let justifications = cves::fetch_cve_justifications(&state.pool, &cve_id)
+    let scope = cve_read_scope(&state, &user).await?;
+    let justifications = cves::fetch_cve_justifications(&state.pool, &scope, &cve_id)
         .await
         .map_err(|e| {
             (
@@ -230,24 +345,141 @@ pub async fn list_justifications(
 /// POST /api/v1/cves/rescan-fleet
 /// Trigger CVE scans for all active systems (admin only).
 ///
-/// Currently returns 501 Not Implemented: the enqueue path to the builder
-/// queue is not yet wired. The button in the UI is intentionally non-functional
-/// until this endpoint is fully implemented.
+/// Enqueues scans; it does not execute them. The CVE worker drains queued rows
+/// at its own bounded per-cycle rate, which is what prevents a fleet-wide
+/// request from starting an unbounded number of concurrent vulnix processes and
+/// ensures queued scans get the worker's cache-materialization path.
+///
+/// vulnix availability is intentionally not checked here: execution is
+/// deferred, so the relevant question is whether vulnix exists when the worker
+/// runs the scan, not when the request is made.
+///
+/// The route requires an administrator session and matching double-submit CSRF
+/// cookie and header before it can enqueue work.
 pub async fn trigger_fleet_rescan(
-    _state: State<CFState>,
+    State(state): State<CFState>,
     _user: RequireAdmin,
-) -> Result<Json<FleetRescanResponse>, (StatusCode, String)> {
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        "Fleet CVE rescan is not yet wired to the builder queue. \
-         Implement enqueue_scan_for_system() and remove this stub."
-            .to_string(),
+    _csrf: RequireCsrf,
+) -> Result<(StatusCode, Json<FleetRescanResponse>), (StatusCode, String)> {
+    let outcome = enqueue_fleet_cve_scans(&state.pool, "vulnix", None)
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to enqueue fleet CVE scans: {err:#}"),
+            )
+        })?;
+
+    Ok((StatusCode::ACCEPTED, Json(fleet_rescan_response(outcome))))
+}
+
+/// Enqueues a CVE rescan for one exact derivation.
+///
+/// The route requires an administrator session and matching double-submit CSRF
+/// values. It creates a canonical `pending` scan with the `manual` trigger, or
+/// returns the active scan identity when the derivation is already pending or
+/// in progress. It does not execute vulnix or schedule other work.
+///
+/// # Errors
+///
+/// Returns `404 Not Found` when the identifier does not select a built NixOS
+/// derivation. Returns `500 Internal Server Error` when the enqueue fails.
+pub async fn trigger_derivation_rescan(
+    State(state): State<CFState>,
+    Path(derivation_id): Path<i32>,
+    _user: RequireAdmin,
+    _csrf: RequireCsrf,
+) -> Result<(StatusCode, Json<DerivationRescanResponse>), (StatusCode, String)> {
+    let outcome = enqueue_exact_cve_scan(&state.pool, derivation_id, "vulnix", None)
+        .await
+        .map_err(|err| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to enqueue CVE scan for derivation {derivation_id}: {err:#}"),
+            )
+        })?
+        .ok_or_else(|| {
+            (
+                StatusCode::NOT_FOUND,
+                "Built NixOS derivation not found".to_string(),
+            )
+        })?;
+
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(derivation_rescan_response(outcome)),
     ))
 }
 
+fn derivation_rescan_response(outcome: EnqueueCveScanOutcome) -> DerivationRescanResponse {
+    let message = if outcome.created {
+        format!(
+            "Queued CVE scan {} for derivation {}.",
+            outcome.scan_id, outcome.derivation_id
+        )
+    } else {
+        format!(
+            "Derivation {} already has active CVE scan {}.",
+            outcome.derivation_id, outcome.scan_id
+        )
+    };
+    DerivationRescanResponse {
+        derivation_id: outcome.derivation_id,
+        scan_id: outcome.scan_id,
+        enqueued: outcome.created,
+        message,
+    }
+}
+
+fn fleet_rescan_response(outcome: FleetEnqueueOutcome) -> FleetRescanResponse {
+    let reused = outcome.reused();
+    let message = if outcome.eligible == 0 {
+        "No active systems are reporting a running configuration to scan.".to_string()
+    } else if outcome.created == 0 {
+        format!(
+            "All {eligible} eligible system configuration(s) already have a scan pending or in progress.",
+            eligible = outcome.eligible
+        )
+    } else if reused > 0 {
+        format!(
+            "Queued {created} CVE scan(s); {reused} already had an active scan.",
+            created = outcome.created
+        )
+    } else {
+        format!("Queued {created} CVE scan(s).", created = outcome.created)
+    };
+
+    FleetRescanResponse {
+        eligible_count: outcome.eligible,
+        enqueued_count: outcome.created,
+        reused_count: reused,
+        message,
+    }
+}
+
+/// Reports fleet enqueue counts for newly queued and reused active scans.
 #[derive(Debug, Serialize)]
 pub struct FleetRescanResponse {
+    /// Counts distinct currently deployed derivations considered by the request.
+    pub eligible_count: i64,
+    /// Counts new `pending` scans inserted by the request.
     pub enqueued_count: i64,
+    /// Counts eligible derivations that already had active work.
+    pub reused_count: i64,
+    /// Summarizes the enqueue result for presentation.
+    pub message: String,
+}
+
+/// Response from an exact-derivation CVE rescan request.
+#[derive(Debug, Serialize)]
+pub struct DerivationRescanResponse {
+    /// Identifies the exact derivation requested by the caller.
+    pub derivation_id: i32,
+    /// Identifies the new or reused active scan.
+    pub scan_id: uuid::Uuid,
+    /// Is `true` when this request created the pending scan.
+    pub enqueued: bool,
+    /// Summarizes whether the endpoint queued or reused work.
     pub message: String,
 }
 
@@ -262,25 +494,42 @@ fn csv_field(value: &str) -> String {
     }
 }
 
-/// GET /api/v1/cves/export
-/// Export CVEs as CSV.
+/// Exports the caller's complete filtered CVE result as CSV.
+///
+/// List pagination does not apply. The handler returns `422 Unprocessable
+/// Entity` and no CSV when the result exceeds
+/// [`cves::MAX_CVE_EXPORT_ROWS`].
+///
+/// # Errors
+///
+/// Returns an authentication or scope-resolution error before querying rows.
+/// Returns `422 Unprocessable Entity` when the caller must narrow the filters.
+/// Returns `500 Internal Server Error` when PostgreSQL cannot load the export.
 pub async fn export_cves(
     State(state): State<CFState>,
     Query(filters): Query<CveFilters>,
-    _user: RequireAuth,
+    RequireAuth(user): RequireAuth,
 ) -> Result<Response, (StatusCode, String)> {
-    let cves = cves::fetch_cve_list(&state.pool, &filters)
+    let scope = cve_read_scope(&state, &user).await?;
+    let cves = cves::fetch_cves_for_export(&state.pool, &scope, &filters)
         .await
-        .map_err(|e| {
-            (
+        .map_err(|error| match error {
+            cves::CveExportError::TooManyRows => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                format!(
+                    "CVE export exceeds the {}-row limit; narrow the filters and retry",
+                    cves::MAX_CVE_EXPORT_ROWS
+                ),
+            ),
+            cves::CveExportError::Database(error) => (
                 StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Failed to fetch CVEs for export: {}", e),
-            )
+                format!("Failed to fetch CVEs for export: {error}"),
+            ),
         })?;
 
     // Build CSV with proper RFC 4180 field escaping
     let mut csv_output = String::new();
-    csv_output.push_str("CVE ID,Severity,CVSS Score,Package,Installed Version,Fixed Version,Affected Systems,Environments,Fix Status,Triage Status,Age (days),First Seen,Last Seen\n");
+    csv_output.push_str("CVE ID,Severity,CVSS Score,Package,Installed Version,Fixed Version,Affected Systems,Currently Affected Systems,Scheduled Deployment Targets,Historical Inventory Systems,Environments,Fix Status,Triage Status,Age (days),First Seen,Last Seen\n");
 
     for cve in cves {
         let environments = cve.affected_environments.unwrap_or_default().join(";");
@@ -302,6 +551,9 @@ pub async fn export_cves(
             csv_field(&cve.installed_version.unwrap_or_default()),
             csv_field(&cve.fixed_version.unwrap_or_default()),
             cve.affected_count.to_string(),
+            cve.current_affected_count.to_string(),
+            cve.scheduled_deployment_target_count.to_string(),
+            cve.historical_inventory_count.to_string(),
             csv_field(&environments),
             csv_field(&cve.fix_status),
             csv_field(&cve.triage_status),
@@ -336,13 +588,29 @@ pub async fn export_cves(
 
 use serde::Serialize;
 
+async fn cve_read_scope(
+    state: &CFState,
+    user: &crate::auth::extractors::AuthenticatedUser,
+) -> Result<cves::CveReadScope, (StatusCode, String)> {
+    cves::CveReadScope::for_user(&state.pool, user)
+        .await
+        .map_err(|error| {
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Failed to resolve CVE read scope: {error}"),
+            )
+        })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    // Admin enforcement for save_justification and trigger_fleet_rescan is handled
-    // declaratively by the RequireAdmin extractor — covered by extractors.rs tests.
-    // Here we test pure business logic that requires no DB.
+    // Admin enforcement for trigger_fleet_rescan is exercised end-to-end against
+    // the real route below, because the extractor is what actually rejects a
+    // caller. `extractors::test_role_checks` only asserts helper methods such as
+    // `is_admin()` on a hand-built AuthenticatedUser; it never runs the
+    // RequireAdmin extractor and therefore proves nothing about this endpoint.
 
     // ── Validation unit tests (pure logic, no DB) ──
 
@@ -393,12 +661,13 @@ mod tests {
 
     #[test]
     fn csv_export_row_format_has_correct_column_count() {
-        // Verify our CSV header has 13 columns matching the row format string
+        // Verify the CSV header matches the row format string.
         let header = "CVE ID,Severity,CVSS Score,Package,Installed Version,Fixed Version,\
-                       Affected Systems,Environments,Fix Status,Triage Status,Age (days),\
-                       First Seen,Last Seen";
+                       Affected Systems,Currently Affected Systems,Scheduled Deployment Targets,\
+                       Historical Inventory Systems,Environments,Fix Status,Triage Status,\
+                       Age (days),First Seen,Last Seen";
         let col_count = header.split(',').count();
-        assert_eq!(col_count, 13, "CSV header must have 13 columns");
+        assert_eq!(col_count, 16, "CSV header must have 16 columns");
     }
 
     #[test]
@@ -448,5 +717,534 @@ mod tests {
         assert!(f.package.is_none());
         assert!(f.search.is_none());
         assert!(f.sort.is_none());
+    }
+
+    #[test]
+    fn fleet_rescan_response_distinguishes_queued_reused_and_empty_fleet() {
+        // All eligible targets newly queued.
+        let queued = fleet_rescan_response(FleetEnqueueOutcome {
+            eligible: 3,
+            created: 3,
+        });
+        assert_eq!(queued.enqueued_count, 3);
+        assert_eq!(queued.eligible_count, 3);
+        assert_eq!(queued.reused_count, 0);
+        assert_eq!(queued.message, "Queued 3 CVE scan(s).");
+
+        // Partially deduplicated against already-active scans.
+        let partial = fleet_rescan_response(FleetEnqueueOutcome {
+            eligible: 5,
+            created: 2,
+        });
+        assert_eq!(partial.enqueued_count, 2);
+        assert_eq!(partial.reused_count, 3);
+        assert_eq!(
+            partial.message,
+            "Queued 2 CVE scan(s); 3 already had an active scan."
+        );
+
+        // Every eligible target already had an active scan: a real no-op, but
+        // distinct from "nothing was eligible".
+        let all_active = fleet_rescan_response(FleetEnqueueOutcome {
+            eligible: 4,
+            created: 0,
+        });
+        assert_eq!(all_active.enqueued_count, 0);
+        assert_eq!(
+            all_active.message,
+            "All 4 eligible system configuration(s) already have a scan pending or in progress."
+        );
+
+        // No active system is reporting a running configuration at all.
+        let empty = fleet_rescan_response(FleetEnqueueOutcome {
+            eligible: 0,
+            created: 0,
+        });
+        assert_eq!(empty.enqueued_count, 0);
+        assert_eq!(
+            empty.message,
+            "No active systems are reporting a running configuration to scan."
+        );
+    }
+
+    #[test]
+    fn fleet_enqueue_outcome_reused_never_goes_negative() {
+        // Defensive: created should never exceed eligible, but the response
+        // text must not render a negative count if it somehow does.
+        let outcome = FleetEnqueueOutcome {
+            eligible: 0,
+            created: 2,
+        };
+        assert_eq!(outcome.reused(), 0);
+    }
+
+    #[test]
+    fn exact_rescan_response_returns_derivation_and_scan_identity() {
+        let scan_id = uuid::Uuid::new_v4();
+        let created = derivation_rescan_response(EnqueueCveScanOutcome {
+            scan_id,
+            derivation_id: 42,
+            created: true,
+        });
+        let reused = derivation_rescan_response(EnqueueCveScanOutcome {
+            scan_id,
+            derivation_id: 42,
+            created: false,
+        });
+
+        assert_eq!(created.derivation_id, 42);
+        assert_eq!(created.scan_id, scan_id);
+        assert!(created.enqueued);
+        assert!(!reused.enqueued);
+        assert!(reused.message.contains(&scan_id.to_string()));
+    }
+}
+
+#[cfg(test)]
+mod fleet_rescan_authorization_tests {
+    //! Route-level authorization coverage for `POST /api/v1/cves/rescan-fleet`.
+    //!
+    //! These drive a real axum route so the `RequireAdmin` extractor actually
+    //! executes. Asserting on `AuthenticatedUser` helper methods alone would
+    //! not prove that the endpoint rejects unauthorized callers.
+
+    use super::{trigger_derivation_rescan, trigger_fleet_rescan};
+    use crate::auth::session::{
+        CSRF_COOKIE_NAME, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, hash_token,
+    };
+    use crate::config::ServerConfig;
+    use crate::handlers::agent_request::CFState;
+    use crate::models::auth_identity::AuthRole;
+    use crate::queries::auth_identity::{create_user_session, sync_user_role};
+    use crate::queries::commits::{get_commit_by_id, insert_commit};
+    use crate::queries::derivations::{EvaluationStatus, insert_derivation};
+    use crate::queries::flakes::insert_flake;
+    use crate::queries::users::insert_user;
+    use crate::queue::QueueNotifier;
+    use axum::Router;
+    use axum::routing::post;
+    use chrono::Utc;
+    use sqlx::PgPool;
+    use std::sync::Arc;
+    use uuid::Uuid;
+
+    async fn test_pool() -> Option<PgPool> {
+        let url = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL").ok()?;
+        PgPool::connect(&url).await.ok()
+    }
+
+    async fn spawn_fleet_server(pool: PgPool) -> String {
+        let state = CFState::new(
+            pool,
+            ServerConfig::default(),
+            Arc::new(QueueNotifier::new()),
+            crate::server::jobs::BackgroundJobRegistry::new(),
+        );
+        let app = Router::new()
+            .route("/api/v1/cves/rescan-fleet", post(trigger_fleet_rescan))
+            .route(
+                "/api/v1/cves/rescan/:derivation_id",
+                post(trigger_derivation_rescan),
+            )
+            .with_state(state);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind loopback");
+        let addr = listener.local_addr().expect("local addr");
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.expect("serve fleet app");
+        });
+        format!("http://{addr}")
+    }
+
+    async fn session_token_for_role(pool: &PgPool, role: AuthRole) -> (String, Uuid) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let user = insert_user(
+            pool,
+            &format!("{suffix}@example.com"),
+            Some("TASK-325 Fleet Test User"),
+        )
+        .await
+        .expect("insert_user");
+        sync_user_role(pool, user.id, role)
+            .await
+            .expect("sync_user_role");
+        let token = format!("session-{suffix}");
+        create_user_session(
+            pool,
+            user.id,
+            hash_token(&token),
+            Utc::now() + chrono::Duration::hours(1),
+            Some("task-325-test".to_string()),
+            Some("127.0.0.1".to_string()),
+            "local".to_string(),
+        )
+        .await
+        .expect("create_user_session");
+        (token, user.id)
+    }
+
+    async fn cleanup_test_user(pool: &PgPool, user_id: Uuid) {
+        sqlx::query("DELETE FROM users WHERE id = $1")
+            .bind(user_id)
+            .execute(pool)
+            .await
+            .expect("test user and session should be deleted");
+    }
+
+    struct FleetAuthFixture {
+        flake_id: i32,
+        environment_id: Uuid,
+        system_id: Uuid,
+        hostname: String,
+        derivation_id: i32,
+    }
+
+    impl FleetAuthFixture {
+        async fn create(pool: &PgPool) -> Self {
+            let suffix = Uuid::new_v4().simple().to_string();
+            let repo_url = format!("https://example.com/task-325-auth-{suffix}.git");
+            let flake = insert_flake(
+                pool,
+                &format!("task-325-auth-{suffix}"),
+                &repo_url,
+                "main",
+                "cf_systems_only",
+            )
+            .await
+            .expect("authorization fixture flake should be inserted");
+            insert_commit(pool, &suffix, &repo_url, Utc::now())
+                .await
+                .expect("authorization fixture commit should be inserted");
+            let commit_id: i32 = sqlx::query_scalar("SELECT id FROM commits WHERE flake_id = $1")
+                .bind(flake.id)
+                .fetch_one(pool)
+                .await
+                .expect("authorization fixture commit should resolve");
+            let commit = get_commit_by_id(pool, commit_id)
+                .await
+                .expect("authorization fixture commit model should resolve");
+            let config_name = format!("auth-config-{suffix}");
+            let store_path = format!("/nix/store/{suffix}-auth-running");
+            let derivation_path = format!("/nix/store/{suffix}-auth-running.drv");
+            let derivation = insert_derivation(pool, Some(&commit), &config_name, "nixos")
+                .await
+                .expect("authorization fixture derivation should be inserted");
+            sqlx::query(
+                "UPDATE derivations SET status_id = $2, completed_at = NOW(), store_path = $3, derivation_path = $4 WHERE id = $1",
+            )
+            .bind(derivation.id)
+            .bind(EvaluationStatus::BuildComplete.as_id())
+            .bind(&store_path)
+            .bind(&derivation_path)
+            .execute(pool)
+            .await
+            .expect("authorization fixture derivation should be build-complete");
+
+            let environment_id = Uuid::new_v4();
+            sqlx::query("INSERT INTO environments (id, name, is_active) VALUES ($1, $2, TRUE)")
+                .bind(environment_id)
+                .bind(format!("task-325-auth-env-{suffix}"))
+                .execute(pool)
+                .await
+                .expect("authorization fixture environment should be inserted");
+            let system_id = Uuid::new_v4();
+            let hostname = format!("task-325-auth-host-{suffix}");
+            sqlx::query(
+                r#"
+                INSERT INTO systems (
+                    id, hostname, environment_id, is_active, public_key, flake_id,
+                    derivation, system_configuration_name
+                )
+                VALUES ($1, $2, $3, TRUE, 'test-key', $4, 'test-derivation', $5)
+                "#,
+            )
+            .bind(system_id)
+            .bind(&hostname)
+            .bind(environment_id)
+            .bind(flake.id)
+            .bind(&config_name)
+            .execute(pool)
+            .await
+            .expect("authorization fixture system should be inserted");
+            sqlx::query(
+                "INSERT INTO system_states (hostname, store_path, change_reason, timestamp) VALUES ($1, $2, 'config_change', NOW())",
+            )
+            .bind(&hostname)
+            .bind(&store_path)
+            .execute(pool)
+            .await
+            .expect("authorization fixture system state should be inserted");
+
+            Self {
+                flake_id: flake.id,
+                environment_id,
+                system_id,
+                hostname,
+                derivation_id: derivation.id,
+            }
+        }
+
+        async fn cleanup(self, pool: &PgPool) {
+            sqlx::query("DELETE FROM cve_scans WHERE derivation_id = $1")
+                .bind(self.derivation_id)
+                .execute(pool)
+                .await
+                .expect("authorization fixture scan should be deleted");
+            sqlx::query("DELETE FROM system_states WHERE hostname = $1")
+                .bind(&self.hostname)
+                .execute(pool)
+                .await
+                .expect("authorization fixture system state should be deleted");
+            sqlx::query("DELETE FROM systems WHERE id = $1")
+                .bind(self.system_id)
+                .execute(pool)
+                .await
+                .expect("authorization fixture system should be deleted");
+            sqlx::query("DELETE FROM derivations WHERE id = $1")
+                .bind(self.derivation_id)
+                .execute(pool)
+                .await
+                .expect("authorization fixture derivation should be deleted");
+            sqlx::query("DELETE FROM commits WHERE flake_id = $1")
+                .bind(self.flake_id)
+                .execute(pool)
+                .await
+                .expect("authorization fixture commit should be deleted");
+            sqlx::query("DELETE FROM flakes WHERE id = $1")
+                .bind(self.flake_id)
+                .execute(pool)
+                .await
+                .expect("authorization fixture flake should be deleted");
+            sqlx::query("DELETE FROM environments WHERE id = $1")
+                .bind(self.environment_id)
+                .execute(pool)
+                .await
+                .expect("authorization fixture environment should be deleted");
+        }
+    }
+
+    async fn post_fleet_rescan(
+        base: &str,
+        token: Option<&str>,
+        csrf_cookie: Option<&str>,
+        csrf_header: Option<&str>,
+    ) -> (u16, serde_json::Value) {
+        let mut request = reqwest::Client::new().post(format!("{base}/api/v1/cves/rescan-fleet"));
+        let mut cookies = Vec::new();
+        if let Some(token) = token {
+            cookies.push(format!("{SESSION_COOKIE_NAME}={token}"));
+        }
+        if let Some(csrf) = csrf_cookie {
+            cookies.push(format!("{CSRF_COOKIE_NAME}={csrf}"));
+        }
+        if !cookies.is_empty() {
+            request = request.header("cookie", cookies.join("; "));
+        }
+        if let Some(csrf) = csrf_header {
+            request = request.header(CSRF_HEADER_NAME.as_str(), csrf);
+        }
+        let response = request.send().await.expect("send");
+        let status = response.status().as_u16();
+        let body = response.json().await.expect("JSON response");
+        (status, body)
+    }
+
+    async fn post_derivation_rescan(
+        base: &str,
+        derivation_id: i32,
+        token: Option<&str>,
+        csrf_cookie: Option<&str>,
+        csrf_header: Option<&str>,
+    ) -> (u16, serde_json::Value) {
+        let mut request =
+            reqwest::Client::new().post(format!("{base}/api/v1/cves/rescan/{derivation_id}"));
+        let mut cookies = Vec::new();
+        if let Some(token) = token {
+            cookies.push(format!("{SESSION_COOKIE_NAME}={token}"));
+        }
+        if let Some(csrf) = csrf_cookie {
+            cookies.push(format!("{CSRF_COOKIE_NAME}={csrf}"));
+        }
+        if !cookies.is_empty() {
+            request = request.header("cookie", cookies.join("; "));
+        }
+        if let Some(csrf) = csrf_header {
+            request = request.header(CSRF_HEADER_NAME.as_str(), csrf);
+        }
+        let response = request.send().await.expect("send exact rescan");
+        let status = response.status().as_u16();
+        let body = response.json().await.expect("exact rescan JSON response");
+        (status, body)
+    }
+
+    #[tokio::test]
+    async fn fleet_rescan_rejects_unauthenticated_caller() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let base = spawn_fleet_server(pool.clone()).await;
+
+        let (status, body) = post_fleet_rescan(&base, None, None, None).await;
+        assert_eq!(
+            status, 401,
+            "an unauthenticated caller must not reach the fleet enqueue"
+        );
+        assert_eq!(body["error"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn fleet_rescan_rejects_viewer_and_operator() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let (viewer, viewer_id) = session_token_for_role(&pool, AuthRole::Viewer).await;
+        let (operator, operator_id) = session_token_for_role(&pool, AuthRole::Operator).await;
+        let base = spawn_fleet_server(pool.clone()).await;
+
+        let csrf = "task-325-non-admin-csrf";
+        let (viewer_status, viewer_body) =
+            post_fleet_rescan(&base, Some(&viewer), Some(csrf), Some(csrf)).await;
+        let (operator_status, operator_body) =
+            post_fleet_rescan(&base, Some(&operator), Some(csrf), Some(csrf)).await;
+        cleanup_test_user(&pool, viewer_id).await;
+        cleanup_test_user(&pool, operator_id).await;
+
+        assert_eq!(
+            viewer_status, 403,
+            "Viewer must be forbidden from triggering a fleet rescan"
+        );
+        assert_eq!(
+            operator_status, 403,
+            "Operator must be forbidden from triggering a fleet rescan"
+        );
+        assert_eq!(viewer_body["error"], "forbidden");
+        assert_eq!(operator_body["error"], "forbidden");
+    }
+
+    #[tokio::test]
+    async fn fleet_rescan_requires_matching_csrf_for_admin() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let (admin, admin_id) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_fleet_server(pool.clone()).await;
+
+        let (missing, missing_body) = post_fleet_rescan(&base, Some(&admin), None, None).await;
+        let (mismatched, mismatched_body) = post_fleet_rescan(
+            &base,
+            Some(&admin),
+            Some("cookie-token"),
+            Some("header-token"),
+        )
+        .await;
+        let fixture = FleetAuthFixture::create(&pool).await;
+        let csrf = "task-325-fleet-csrf";
+        let (status, _) = post_fleet_rescan(&base, Some(&admin), Some(csrf), Some(csrf)).await;
+        let fixture_scan: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM cve_scans WHERE derivation_id = $1")
+                .bind(fixture.derivation_id)
+                .fetch_optional(&pool)
+                .await
+                .expect("authorization fixture scan should resolve");
+        fixture.cleanup(&pool).await;
+        cleanup_test_user(&pool, admin_id).await;
+
+        assert!(
+            fixture_scan.is_some(),
+            "the successful admin request must enqueue the owned fleet fixture"
+        );
+        assert_eq!(missing, 403, "Admin without CSRF must be rejected");
+        assert_eq!(missing_body["error"], "csrf_validation_failed");
+        assert_eq!(
+            mismatched, 403,
+            "Admin with mismatched CSRF must be rejected"
+        );
+        assert_eq!(mismatched_body["error"], "csrf_validation_failed");
+        assert_eq!(
+            status, 202,
+            "Admin must be accepted and the request acknowledged as queued"
+        );
+    }
+
+    #[tokio::test]
+    async fn exact_rescan_requires_admin_csrf_and_reuses_only_the_requested_derivation() {
+        let Some(pool) = test_pool().await else {
+            return;
+        };
+        let requested = FleetAuthFixture::create(&pool).await;
+        let unrelated = FleetAuthFixture::create(&pool).await;
+        let (viewer, viewer_id) = session_token_for_role(&pool, AuthRole::Viewer).await;
+        let (admin, admin_id) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_fleet_server(pool.clone()).await;
+        let csrf = "task-440-exact-rescan-csrf";
+
+        let (unauthenticated, unauthenticated_body) =
+            post_derivation_rescan(&base, requested.derivation_id, None, None, None).await;
+        let (viewer_status, viewer_body) = post_derivation_rescan(
+            &base,
+            requested.derivation_id,
+            Some(&viewer),
+            Some(csrf),
+            Some(csrf),
+        )
+        .await;
+        let (missing_csrf, missing_csrf_body) =
+            post_derivation_rescan(&base, requested.derivation_id, Some(&admin), None, None).await;
+        let (first_status, first) = post_derivation_rescan(
+            &base,
+            requested.derivation_id,
+            Some(&admin),
+            Some(csrf),
+            Some(csrf),
+        )
+        .await;
+        let (second_status, second) = post_derivation_rescan(
+            &base,
+            requested.derivation_id,
+            Some(&admin),
+            Some(csrf),
+            Some(csrf),
+        )
+        .await;
+
+        let response_scan_id =
+            Uuid::parse_str(first["scan_id"].as_str().expect("scan ID response"))
+                .expect("response scan ID should be a UUID");
+        let persisted: (String, String) =
+            sqlx::query_as("SELECT status, source_trigger FROM cve_scans WHERE id = $1")
+                .bind(response_scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("exact scan lifecycle should persist");
+        let unrelated_scan: Option<Uuid> =
+            sqlx::query_scalar("SELECT id FROM cve_scans WHERE derivation_id = $1")
+                .bind(unrelated.derivation_id)
+                .fetch_optional(&pool)
+                .await
+                .expect("unrelated scan lookup should succeed");
+
+        assert_eq!(unauthenticated, 401);
+        assert_eq!(unauthenticated_body["error"], "unauthorized");
+        assert_eq!(viewer_status, 403);
+        assert_eq!(viewer_body["error"], "forbidden");
+        assert_eq!(missing_csrf, 403);
+        assert_eq!(missing_csrf_body["error"], "csrf_validation_failed");
+        assert_eq!(first_status, 202);
+        assert_eq!(second_status, 202);
+        assert_eq!(first["derivation_id"], requested.derivation_id);
+        assert_eq!(first["enqueued"], true);
+        assert_eq!(second["enqueued"], false);
+        assert_eq!(second["scan_id"], first["scan_id"]);
+        assert_eq!(persisted, ("pending".to_string(), "manual".to_string()));
+        assert!(
+            unrelated_scan.is_none(),
+            "the exact endpoint must not enqueue another fleet target"
+        );
+
+        requested.cleanup(&pool).await;
+        unrelated.cleanup(&pool).await;
+        cleanup_test_user(&pool, viewer_id).await;
+        cleanup_test_user(&pool, admin_id).await;
     }
 }

@@ -85,8 +85,10 @@ mod tests {
 
         let fingerprint = public_key.fingerprint();
 
-        assert!(fingerprint.starts_with("SHA256:"));
-        assert!(!fingerprint.contains('='));
+        assert_eq!(
+            fingerprint,
+            "SHA256:/oEsEvOrTOasXbaaw1L5BssbEe9D+zPiUu9/9VImOIk"
+        );
         assert_eq!(fingerprint, public_key.fingerprint());
     }
 }

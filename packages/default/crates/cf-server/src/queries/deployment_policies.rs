@@ -5,7 +5,9 @@ use sqlx::PgPool;
 use std::collections::HashMap;
 use uuid::Uuid;
 
-use crate::api::models::{DeletionEligibility, DeploymentPolicyVersionSummary};
+use crate::api::models::{
+    DeletionEligibility, DeploymentPolicyVersionSummary, PolicyOriginProvenance,
+};
 use crate::compliance::digest::{PolicyVersionCanonical, write_policy_version_digest};
 use crate::compliance::mappings::{
     decode_evidence_specs_strict, extract_cci_ids, extract_classification, extract_srg_ids,
@@ -13,7 +15,8 @@ use crate::compliance::mappings::{
     merge_evidence_into_metadata, merge_policy_mappings,
 };
 use crate::models::deployment_policies::{
-    CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
+    COMPOSITE_POLICY_TYPE, CreateDeploymentPolicyRequest, DeploymentPolicyRecord,
+    UpdateDeploymentPolicyRequest, validate_policy_type_config_async,
 };
 use crate::queries::compliance::ensure_policy_draft;
 use crate::queries::deletion::{blocker, eligibility};
@@ -316,8 +319,8 @@ pub async fn get_deployment_policy_by_version(
 ) -> Result<Option<DeploymentPolicyRecord>> {
     let row = sqlx::query_as::<_, DeploymentPolicyRecord>(
         r#"
-        SELECT dp.id, dp.name, dp.description, dp.policy_type,
-               COALESCE(pv.config, dp.config) AS config,
+        SELECT dp.id, dp.name, dp.description, pv.policy_type,
+               pv.config,
                dp.enabled, dp.created_at, dp.updated_at
           FROM deployment_policy_versions pv
           JOIN deployment_policies dp ON dp.id = pv.policy_id
@@ -363,8 +366,8 @@ pub async fn get_deployment_policies_by_versions(
         ),
     >(
         r#"
-        SELECT pv.id, dp.id, dp.name, dp.description, dp.policy_type,
-               COALESCE(pv.config, dp.config) AS config,
+        SELECT pv.id, dp.id, dp.name, dp.description, pv.policy_type,
+               pv.config,
                dp.enabled, dp.created_at, dp.updated_at
           FROM deployment_policy_versions pv
           JOIN deployment_policies dp ON dp.id = pv.policy_id
@@ -474,6 +477,161 @@ pub async fn load_policy_version_usage_counts(
         .collect())
 }
 
+/// Load authoritative imported-origin provenance for a batch of policy version ids.
+///
+/// One query for the whole batch (no per-version or per-revision query). The
+/// recursive term walks `derived_from_version_id` inside the same policy
+/// lineage so a mutable draft derived from an imported version keeps the
+/// imported origin; it is cycle-safe through the visited-path guard.
+///
+/// Two authoritative origin shapes are returned:
+/// - source-object mappings, which carry the exact source object identity
+///   (normally the XCCDF rule id) and import fidelity;
+/// - the direct `deployment_policy_versions.source_artifact_id` link, emitted
+///   only when no source-object mapping already covers that artifact.
+///
+/// Artifact bytes are never selected.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the provenance
+/// query.
+pub async fn fetch_policy_version_provenance(
+    pool: &PgPool,
+    policy_version_ids: &[Uuid],
+) -> Result<HashMap<Uuid, Vec<PolicyOriginProvenance>>> {
+    if policy_version_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+
+    #[derive(sqlx::FromRow)]
+    struct ProvenanceRow {
+        requested_version_id: Uuid,
+        origin_policy_version_id: Uuid,
+        lineage_depth: i32,
+        source_artifact_id: Uuid,
+        filename: String,
+        media_type: String,
+        sha256: String,
+        parser_version: String,
+        detected_xccdf_version: Option<String>,
+        object_kind: Option<String>,
+        source_identity: Option<String>,
+        fidelity: Option<String>,
+        imported_by: Option<Uuid>,
+        imported_by_display: Option<String>,
+        imported_at: chrono::DateTime<chrono::Utc>,
+    }
+
+    let rows = sqlx::query_as::<_, ProvenanceRow>(
+        r#"
+        WITH RECURSIVE lineage AS (
+            SELECT v.id AS requested_version_id,
+                   v.id AS origin_version_id,
+                   v.policy_id,
+                   v.derived_from_version_id,
+                   0 AS depth,
+                   ARRAY[v.id] AS visited
+              FROM deployment_policy_versions v
+             WHERE v.id = ANY($1)
+            UNION ALL
+            SELECT l.requested_version_id,
+                   parent.id,
+                   parent.policy_id,
+                   parent.derived_from_version_id,
+                   l.depth + 1,
+                   l.visited || parent.id
+              FROM lineage l
+              JOIN deployment_policy_versions parent
+                ON parent.id = l.derived_from_version_id
+               AND parent.policy_id = l.policy_id
+             WHERE NOT parent.id = ANY(l.visited)
+               AND l.depth < 64
+        ),
+        origins AS (
+            SELECT l.requested_version_id,
+                   l.origin_version_id AS origin_policy_version_id,
+                   l.depth AS lineage_depth,
+                   m.source_artifact_id,
+                   m.object_kind,
+                   m.source_identity,
+                   m.fidelity
+              FROM lineage l
+              JOIN compliance_source_object_mappings m
+                ON m.policy_version_id = l.origin_version_id
+            UNION ALL
+            SELECT l.requested_version_id,
+                   l.origin_version_id,
+                   l.depth,
+                   v.source_artifact_id,
+                   NULL::text,
+                   NULL::text,
+                   NULL::text
+              FROM lineage l
+              JOIN deployment_policy_versions v
+                ON v.id = l.origin_version_id
+             WHERE v.source_artifact_id IS NOT NULL
+               AND NOT EXISTS (
+                   SELECT 1
+                     FROM compliance_source_object_mappings m2
+                    WHERE m2.policy_version_id = v.id
+                      AND m2.source_artifact_id = v.source_artifact_id
+               )
+        )
+        SELECT o.requested_version_id,
+               o.origin_policy_version_id,
+               o.lineage_depth,
+               o.source_artifact_id,
+               a.filename,
+               a.media_type,
+               a.sha256,
+               a.parser_version,
+               a.detected_xccdf_version,
+               o.object_kind,
+               o.source_identity,
+               o.fidelity,
+               a.imported_by,
+               COALESCE(u.username, u.email) AS imported_by_display,
+               a.imported_at
+          FROM origins o
+          JOIN compliance_source_artifacts a ON a.id = o.source_artifact_id
+          LEFT JOIN users u ON u.id = a.imported_by
+         ORDER BY o.requested_version_id, o.lineage_depth,
+                  a.filename, o.object_kind NULLS FIRST, o.source_identity NULLS FIRST
+        "#,
+    )
+    .bind(policy_version_ids)
+    .fetch_all(pool)
+    .await
+    .context("Failed to load policy version provenance")?;
+
+    let mut by_version: HashMap<Uuid, Vec<PolicyOriginProvenance>> = HashMap::new();
+    for row in rows {
+        by_version
+            .entry(row.requested_version_id)
+            .or_default()
+            .push(PolicyOriginProvenance {
+                source_artifact_id: row.source_artifact_id,
+                filename: row.filename,
+                media_type: row.media_type,
+                sha256: row.sha256,
+                parser_version: row.parser_version,
+                detected_xccdf_version: row.detected_xccdf_version,
+                object_kind: row.object_kind,
+                source_identity: row.source_identity,
+                fidelity: row.fidelity,
+                imported_by: row.imported_by,
+                imported_by_display: row.imported_by_display,
+                imported_at: row.imported_at,
+                origin_policy_version_id: row.origin_policy_version_id,
+                lineage_depth: row.lineage_depth,
+                inherited: row.lineage_depth > 0,
+            });
+    }
+
+    Ok(by_version)
+}
+
 /// Fetch full version summaries for a batch of policy lineage IDs.
 ///
 /// This is the production path used by the deployment-policies list handler:
@@ -486,6 +644,11 @@ pub async fn load_policy_version_usage_counts(
 ///
 /// Returns a map of `policy_id -> Vec<DeploymentPolicyVersionSummary>`,
 /// ordered newest-first per policy.
+///
+/// # Errors
+///
+/// Returns an error when version history, current pointers, or provenance
+/// cannot be loaded, or when stored evidence specifications are invalid.
 pub async fn fetch_policy_version_summaries(
     pool: &PgPool,
     policy_ids: &[Uuid],
@@ -544,6 +707,10 @@ pub async fn fetch_policy_version_summaries(
     .map(|(id, published, draft)| (id, (published, draft)))
     .collect();
 
+    // One batched provenance query for every hydrated version id.
+    let version_ids: Vec<Uuid> = rows.iter().map(|row| row.id).collect();
+    let mut provenance_by_version = fetch_policy_version_provenance(pool, &version_ids).await?;
+
     let mut by_policy: HashMap<Uuid, Vec<DeploymentPolicyVersionSummary>> = HashMap::new();
     for row in rows {
         let pointers = pointer_rows
@@ -589,6 +756,7 @@ pub async fn fetch_policy_version_summaries(
                     row.id
                 )
             })?,
+            provenance: provenance_by_version.remove(&row.id).unwrap_or_default(),
         };
         by_policy
             .entry(summary.policy_id)
@@ -605,6 +773,11 @@ pub async fn fetch_policy_version_summaries(
 /// version row with `semantic_digest = 'pending'`; within the same transaction
 /// we compute the real Rust-canonical digest and persist it. A digest failure
 /// rolls back the entire insert.
+///
+/// # Errors
+///
+/// Returns an error under the same conditions as
+/// [`create_deployment_policy_with_mappings`].
 pub async fn create_deployment_policy(
     pool: &PgPool,
     request: &CreateDeploymentPolicyRequest,
@@ -621,11 +794,24 @@ fn duplicate_requirement_mapping_id(request: &CreateDeploymentPolicyRequest) -> 
         .find(|requirement_version_id| !requirement_ids.insert(*requirement_version_id))
 }
 
+/// Creates a deployment policy and its initial requirement mappings.
+///
+/// The operation attributes the trigger-created draft to `actor_id` in the
+/// same transaction. An absent actor leaves the draft unattributed for
+/// migration, seed, and internal callers.
+///
+/// # Errors
+///
+/// Returns an error when validation fails or any policy, attribution, digest,
+/// or requirement-mapping write fails. The transaction rolls back on error.
 pub async fn create_deployment_policy_with_mappings(
     pool: &PgPool,
     request: &CreateDeploymentPolicyRequest,
     actor_id: Option<Uuid>,
 ) -> Result<DeploymentPolicyRecord> {
+    validate_policy_type_config_async(&request.policy_type, &request.config)
+        .await
+        .map_err(anyhow::Error::msg)?;
     if let Some(requirement_version_id) = duplicate_requirement_mapping_id(request) {
         anyhow::bail!(
             "Duplicate requirement mapping {} in policy request",
@@ -650,6 +836,22 @@ pub async fn create_deployment_policy_with_mappings(
     .fetch_one(&mut *tx)
     .await
     .context("Failed to create deployment policy")?;
+
+    if let Some(actor_id) = actor_id {
+        // SECURITY: Attribution must be written before commit so seeded,
+        // unattributed versions cannot satisfy user-created policy checks.
+        let result = sqlx::query(
+            "UPDATE deployment_policy_versions SET created_by = $2 WHERE id = (SELECT current_draft_version_id FROM deployment_policies WHERE id = $1)",
+        )
+        .bind(policy.id)
+        .bind(actor_id)
+        .execute(&mut *tx)
+        .await
+        .context("Failed to attribute created policy draft")?;
+        if result.rows_affected() != 1 {
+            anyhow::bail!("Created policy draft was not available for attribution");
+        }
+    }
 
     // Compute and persist the canonical digest before committing.
     // New policies created via the legacy API have no opaque XML.
@@ -691,7 +893,11 @@ pub async fn create_deployment_policy_with_mappings(
         description: policy.description.clone(),
         policy_type: policy.policy_type.clone(),
         implementation_state: "native".to_string(),
-        execution_phase: "nix-evaluation".to_string(),
+        execution_phase: if policy.policy_type == COMPOSITE_POLICY_TYPE {
+            "multi-phase".to_string()
+        } else {
+            "nix-evaluation".to_string()
+        },
         config: policy.config.clone(),
         compliance_metadata,
         dependencies: serde_json::json!([]),
@@ -740,6 +946,11 @@ pub async fn create_deployment_policy_with_mappings(
 /// a plain name/config/enabled edit does not overwrite imported metadata (P1 #4).
 ///
 /// Runs entirely within a transaction; a digest failure rolls back the update.
+///
+/// # Errors
+///
+/// Returns an error when validation, draft creation, metadata decoding, digest
+/// computation, or any persistence operation fails.
 pub async fn update_deployment_policy(
     pool: &PgPool,
     policy_id: &Uuid,
@@ -747,6 +958,21 @@ pub async fn update_deployment_policy(
     actor_id: Option<Uuid>,
 ) -> Result<Option<DeploymentPolicyRecord>> {
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
+
+    let current_pair: Option<(String, serde_json::Value)> =
+        sqlx::query_as("SELECT policy_type, config FROM deployment_policies WHERE id = $1")
+            .bind(policy_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to load deployment policy type/config")?;
+    if let Some((current_type, current_config)) = current_pair {
+        validate_policy_type_config_async(
+            request.policy_type.as_deref().unwrap_or(&current_type),
+            request.config.as_ref().unwrap_or(&current_config),
+        )
+        .await
+        .map_err(anyhow::Error::msg)?;
+    }
 
     // Load the current draft version's rich fields before the lineage update,
     // so that updating the lineage cannot erase imported semantics (P1 #4).
@@ -814,7 +1040,7 @@ pub async fn update_deployment_policy(
         // Merge: preserve existing rich fields; update only what the legacy
         // request supports. Callers using the full version-aware API can update
         // implementation_state, execution_phase, etc. separately.
-        let (impl_state, exec_phase, existing_meta, deps, opaque_xml) =
+        let (impl_state, mut exec_phase, existing_meta, deps, opaque_xml) =
             if let Some(df) = draft_fields {
                 (
                     df.implementation_state,
@@ -833,6 +1059,9 @@ pub async fn update_deployment_policy(
                     None,
                 )
             };
+        if p.policy_type == COMPOSITE_POLICY_TYPE {
+            exec_phase = "multi-phase".to_string();
+        }
 
         // Merge SRG/CCI mappings into existing compliance_metadata, preserving
         // all other metadata keys (source fidelity, rationale, checks, etc.).
@@ -841,15 +1070,18 @@ pub async fn update_deployment_policy(
         let srg_cci_merged = merge_policy_mappings(&existing_meta, srg_opt, cci_opt)
             .context("Failed to merge SRG/CCI mappings")?;
         // Merge classification fields into the already-merged metadata.
-        let classified_meta = merge_classification_into_metadata(
+        let classified_meta = crate::compliance::mappings::patch_classification_into_metadata(
             &srg_cci_merged,
             request.category.as_deref(),
-            request.framework.as_deref(),
-            request.severity.as_deref(),
-            request.control_family.as_deref(),
+            request.framework.as_ref().map(|value| value.as_deref()),
+            request.severity.as_ref().map(|value| value.as_deref()),
+            request
+                .control_family
+                .as_ref()
+                .map(|value| value.as_deref()),
             request.cmmc_level,
-            request.cis_section.as_deref(),
-            request.rationale.as_deref(),
+            request.cis_section.as_ref().map(|value| value.as_deref()),
+            request.rationale.as_ref().map(|value| value.as_deref()),
         );
         // Merge evidence specs into the metadata.
         let evidence_specs = request.evidence_specs.as_deref();
@@ -879,10 +1111,14 @@ pub async fn update_deployment_policy(
     Ok(policy)
 }
 
+/// Describes the expected result of a guarded policy-lineage deletion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PolicyDeleteOutcome {
+    /// Indicates that the policy lineage and disposable references were deleted.
     Deleted,
+    /// Indicates that the policy lineage did not exist at deletion time.
     NotFound,
+    /// Contains the retained references that prohibit deletion.
     Blocked(DeletionEligibility),
 }
 
@@ -1039,6 +1275,14 @@ async fn policy_deletion_eligibility_in_transaction(
     Ok(Some(eligibility(blockers)))
 }
 
+/// Returns the records that permit or prevent deletion of a policy lineage.
+///
+/// Returns `None` when the policy lineage does not exist.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot begin or execute the eligibility
+/// transaction. The read transaction is rolled back after the result is built.
 pub async fn policy_deletion_eligibility(
     pool: &PgPool,
     policy_id: &Uuid,
@@ -1055,6 +1299,11 @@ pub async fn policy_deletion_eligibility(
 /// Delete a policy lineage only when no immutable history or reference would
 /// be destroyed. The lineage row is locked for the full eligibility check and
 /// delete; the FK guards remain defense in depth.
+///
+/// # Errors
+///
+/// Returns an error when eligibility checks, disposable-reference deletion, or
+/// transaction commit fails.
 pub async fn delete_deployment_policy(
     pool: &PgPool,
     policy_id: &Uuid,
@@ -1064,13 +1313,26 @@ pub async fn delete_deployment_policy(
         .await
         .context("Failed to begin policy deletion")?;
 
-    let Some(eligibility) = policy_deletion_eligibility_in_transaction(&mut tx, policy_id).await?
-    else {
-        tx.rollback().await.ok();
+    let outcome = delete_deployment_policy_in_transaction(&mut tx, policy_id).await?;
+    tx.commit()
+        .await
+        .context("Failed to commit deployment policy deletion")?;
+    Ok(outcome)
+}
+
+/// Delete one policy using an existing transaction.
+///
+/// Expected outcomes (`NotFound`, `Blocked`) leave the transaction usable for
+/// the caller. Unexpected database errors are returned so the caller can roll
+/// back the whole operation.
+async fn delete_deployment_policy_in_transaction(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    policy_id: &Uuid,
+) -> Result<PolicyDeleteOutcome> {
+    let Some(eligibility) = policy_deletion_eligibility_in_transaction(tx, policy_id).await? else {
         return Ok(PolicyDeleteOutcome::NotFound);
     };
     if !eligibility.eligible {
-        tx.rollback().await.ok();
         return Ok(PolicyDeleteOutcome::Blocked(eligibility));
     }
 
@@ -1091,19 +1353,19 @@ pub async fn delete_deployment_policy(
          )",
     )
     .bind(policy_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .context("Failed to remove disposable policy source mappings")?;
     sqlx::query("DELETE FROM compliance_bundle_version_policies bvp USING deployment_policy_versions pv, compliance_bundle_versions bv WHERE bvp.policy_version_id = pv.id AND bvp.bundle_version_id = bv.id AND pv.policy_id = $1 AND bv.publication_state IN ('incomplete', 'draft', 'interim')")
-        .bind(policy_id).execute(&mut *tx).await.context("Failed to remove mutable draft bundle memberships")?;
+        .bind(policy_id).execute(&mut **tx).await.context("Failed to remove mutable draft bundle memberships")?;
     sqlx::query("DELETE FROM environment_policies WHERE policy_id = $1")
         .bind(policy_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("Failed to remove mutable environment policy assignments")?;
     sqlx::query("DELETE FROM system_policies WHERE policy_id = $1")
         .bind(policy_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("Failed to remove mutable system policy assignments")?;
     sqlx::query(
@@ -1114,26 +1376,71 @@ pub async fn delete_deployment_policy(
            AND pv.publication_state IN ('incomplete', 'draft', 'interim')",
     )
     .bind(policy_id)
-    .execute(&mut *tx)
+    .execute(&mut **tx)
     .await
     .context("Failed to remove mutable policy requirement mappings")?;
 
     let deleted = sqlx::query("DELETE FROM deployment_policies WHERE id = $1")
         .bind(policy_id)
-        .execute(&mut *tx)
+        .execute(&mut **tx)
         .await
         .context("Failed to delete deployment policy")?
         .rows_affected();
 
     if deleted != 1 {
-        tx.rollback().await.ok();
         return Ok(PolicyDeleteOutcome::NotFound);
     }
+    Ok(PolicyDeleteOutcome::Deleted)
+}
 
+/// Describes deleted and skipped policy lineages from one bulk request.
+#[derive(Debug, Clone, Default)]
+pub struct BulkPolicyDeleteOutcome {
+    /// Lists policy lineage IDs deleted by the transaction.
+    pub deleted: Vec<Uuid>,
+    /// Lists `(policy_id, reason, eligibility)` for non-deleted lineages.
+    ///
+    /// The reason is `not_found` or `deletion_blocked`; eligibility is present
+    /// for `deletion_blocked`.
+    pub skipped: Vec<(Uuid, &'static str, Option<DeletionEligibility>)>,
+}
+
+/// Delete every eligible policy in `policy_ids`, skipping (never failing) any
+/// that are missing or blocked.
+///
+/// All eligible deletions run in one transaction. Expected immutable-history
+/// and not-found outcomes are returned as skips, while an unexpected database
+/// error rolls back every eligible deletion so the caller never receives a
+/// generic failure after hidden committed mutations.
+///
+/// # Errors
+///
+/// Returns an error when an unexpected eligibility, deletion, or transaction
+/// failure occurs. No eligible deletion commits in that case.
+pub async fn bulk_delete_deployment_policies(
+    pool: &PgPool,
+    policy_ids: &[Uuid],
+) -> Result<BulkPolicyDeleteOutcome> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin bulk policy deletion")?;
+    let mut outcome = BulkPolicyDeleteOutcome::default();
+    for policy_id in policy_ids {
+        match delete_deployment_policy_in_transaction(&mut tx, policy_id).await? {
+            PolicyDeleteOutcome::Deleted => outcome.deleted.push(*policy_id),
+            PolicyDeleteOutcome::NotFound => outcome.skipped.push((*policy_id, "not_found", None)),
+            PolicyDeleteOutcome::Blocked(eligibility) => {
+                outcome
+                    .skipped
+                    .push((*policy_id, "deletion_blocked", Some(eligibility)))
+            }
+        }
+    }
     tx.commit()
         .await
-        .context("Failed to commit deployment policy deletion")?;
-    Ok(PolicyDeleteOutcome::Deleted)
+        .context("Failed to commit bulk policy deletion")?;
+    Ok(outcome)
 }
 
 /// Check if a policy name already exists (case-insensitive)
@@ -1699,6 +2006,13 @@ mod tests {
         .await
         .expect("count mappings");
         assert_eq!(count, 2);
+        let created_by: Option<Uuid> =
+            sqlx::query_scalar("SELECT created_by FROM deployment_policy_versions WHERE id = $1")
+                .bind(draft_id)
+                .fetch_one(&pool)
+                .await
+                .expect("read draft attribution");
+        assert_eq!(created_by, Some(user_id));
         sqlx::query("DELETE FROM policy_requirement_mappings WHERE policy_version_id = $1")
             .bind(draft_id)
             .execute(&pool)
@@ -2564,6 +2878,232 @@ mod tests {
 
         drop(pool);
         drop_temp_db(&admin_pool, &db_name).await;
+    }
+
+    /// Bulk delete must resolve every requested id into either `deleted` or
+    /// `skipped` in one pass: a permanently-blocked policy (the core
+    /// `require_cf_agent` policy, seeded by migration) must not prevent the
+    /// two eligible draft policies from being deleted in the same request.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn bulk_delete_deployment_policies_partial_success() {
+        let pool = get_test_pool().await;
+
+        let deletable_a = create_deployment_policy(
+            &pool,
+            &CreateDeploymentPolicyRequest {
+                name: "Bulk Delete Eligible A".to_string(),
+                policy_type: "custom_check".to_string(),
+                config: serde_json::json!({"expression": "true", "strict": true}),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create first deletable policy")
+        .id;
+        let deletable_b = create_deployment_policy(
+            &pool,
+            &CreateDeploymentPolicyRequest {
+                name: "Bulk Delete Eligible B".to_string(),
+                policy_type: "custom_check".to_string(),
+                config: serde_json::json!({"expression": "true", "strict": true}),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create second deletable policy")
+        .id;
+        let core_policy_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM deployment_policies WHERE policy_type = $1")
+                .bind("require_cf_agent")
+                .fetch_one(&pool)
+                .await
+                .expect("require_cf_agent core policy must be seeded by migrations");
+
+        let outcome =
+            bulk_delete_deployment_policies(&pool, &[deletable_a, core_policy_id, deletable_b])
+                .await
+                .expect("bulk delete must not fail outright when one policy is blocked");
+
+        assert_eq!(
+            outcome
+                .deleted
+                .iter()
+                .copied()
+                .collect::<std::collections::HashSet<_>>(),
+            [deletable_a, deletable_b].into_iter().collect(),
+            "both eligible draft policies must be deleted"
+        );
+        assert_eq!(outcome.skipped.len(), 1, "only the core policy is skipped");
+        let (skipped_id, reason, eligibility) = &outcome.skipped[0];
+        assert_eq!(*skipped_id, core_policy_id);
+        assert_eq!(*reason, "deletion_blocked");
+        let eligibility = eligibility
+            .as_ref()
+            .expect("blocked skip carries eligibility");
+        assert!(!eligibility.eligible);
+        assert!(
+            eligibility.blockers.iter().any(|b| b.kind == "policy_core"),
+            "core policy blocker must be reported for the skipped policy"
+        );
+
+        // The eligible policies are actually gone; the blocked one remains.
+        assert!(
+            get_deployment_policy_by_id(&pool, &deletable_a)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            get_deployment_policy_by_id(&pool, &deletable_b)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            get_deployment_policy_by_id(&pool, &core_policy_id)
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+
+    /// An id that does not exist must be reported as skipped with reason
+    /// "not_found", never silently dropped from the response.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn bulk_delete_deployment_policies_reports_not_found() {
+        let pool = get_test_pool().await;
+        let missing_id = Uuid::new_v4();
+        let outcome = bulk_delete_deployment_policies(&pool, &[missing_id])
+            .await
+            .expect("bulk delete must not fail outright for a missing id");
+
+        assert!(outcome.deleted.is_empty());
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].0, missing_id);
+        assert_eq!(outcome.skipped[0].1, "not_found");
+        assert!(outcome.skipped[0].2.is_none());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn bulk_delete_deployment_policies_reports_all_blocked() {
+        let pool = get_test_pool().await;
+        let core_policy_id: Uuid =
+            sqlx::query_scalar("SELECT id FROM deployment_policies WHERE policy_type = $1")
+                .bind("require_cf_agent")
+                .fetch_one(&pool)
+                .await
+                .expect("require_cf_agent core policy must be seeded by migrations");
+
+        let outcome = bulk_delete_deployment_policies(&pool, &[core_policy_id])
+            .await
+            .expect("all-blocked bulk delete must return a response");
+
+        assert!(outcome.deleted.is_empty());
+        assert_eq!(outcome.skipped.len(), 1);
+        assert_eq!(outcome.skipped[0].0, core_policy_id);
+        assert_eq!(outcome.skipped[0].1, "deletion_blocked");
+        assert!(
+            !outcome.skipped[0]
+                .2
+                .as_ref()
+                .expect("blocked result includes eligibility")
+                .eligible
+        );
+        assert!(
+            get_deployment_policy_by_id(&pool, &core_policy_id)
+                .await
+                .expect("core policy lookup")
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn bulk_delete_rolls_back_prior_deletions_on_unexpected_error() {
+        let pool = get_test_pool().await;
+        let deletable_a = create_deployment_policy(
+            &pool,
+            &CreateDeploymentPolicyRequest {
+                name: "Bulk Delete Atomic A".to_string(),
+                policy_type: "custom_check".to_string(),
+                config: serde_json::json!({"expression": "true", "strict": true}),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create first atomic test policy")
+        .id;
+        let deletable_b = create_deployment_policy(
+            &pool,
+            &CreateDeploymentPolicyRequest {
+                name: "Bulk Delete Atomic Failure".to_string(),
+                policy_type: "custom_check".to_string(),
+                config: serde_json::json!({"expression": "true", "strict": true}),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("create second atomic test policy")
+        .id;
+
+        sqlx::query(
+            r#"
+            CREATE OR REPLACE FUNCTION cf_test_bulk_delete_failure()
+            RETURNS trigger LANGUAGE plpgsql AS $$
+            BEGIN
+                IF OLD.name = 'Bulk Delete Atomic Failure' THEN
+                    RAISE EXCEPTION 'intentional bulk delete failure';
+                END IF;
+                RETURN OLD;
+            END;
+            $$
+            "#,
+        )
+        .execute(&pool)
+        .await
+        .expect("install atomic bulk-delete failure function");
+        sqlx::query(
+            "CREATE TRIGGER cf_test_bulk_delete_failure_trigger BEFORE DELETE ON deployment_policies FOR EACH ROW EXECUTE FUNCTION cf_test_bulk_delete_failure()",
+        )
+        .execute(&pool)
+        .await
+        .expect("install atomic bulk-delete failure trigger");
+
+        let result = bulk_delete_deployment_policies(&pool, &[deletable_a, deletable_b]).await;
+        assert!(
+            result.is_err(),
+            "unexpected database failure must be returned"
+        );
+        assert!(
+            get_deployment_policy_by_id(&pool, &deletable_a)
+                .await
+                .expect("first atomic test policy lookup")
+                .is_some()
+        );
+        assert!(
+            get_deployment_policy_by_id(&pool, &deletable_b)
+                .await
+                .expect("failed atomic test policy lookup")
+                .is_some()
+        );
+
+        sqlx::query("DROP TRIGGER cf_test_bulk_delete_failure_trigger ON deployment_policies")
+            .execute(&pool)
+            .await
+            .expect("remove atomic bulk-delete failure trigger");
+        sqlx::query("DROP FUNCTION cf_test_bulk_delete_failure()")
+            .execute(&pool)
+            .await
+            .expect("remove atomic bulk-delete failure function");
+        sqlx::query("DELETE FROM deployment_policies WHERE id IN ($1, $2)")
+            .bind(deletable_a)
+            .bind(deletable_b)
+            .execute(&pool)
+            .await
+            .expect("clean up atomic bulk-delete test policies");
     }
 
     #[tokio::test]

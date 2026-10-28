@@ -1,0 +1,223 @@
+---
+type: Design Specification
+title: "Verified-source evaluator contract (source_re_evaluate_verified)"
+description: "Specifies the verified-source flow where the builder re-evaluates a canonical source archive and compares its .drvPath to the server value, including the evaluator fingerprint, next-job 409 reasons, and rolling-upgrade behavior."
+tags:
+  - crystal-forge
+  - builder
+  - evaluator
+  - verified-source
+implementation_status: implemented
+generated:
+  by: opencode/claude-sonnet-5-5
+  at: 2026-10-03T22:57:42-05:00
+sources:
+  - id: origin
+    resource: "Crystal Forge repository file docs/multi-builder-api.md at commit 3b23d36f"
+    title: "Multi-Builder API Documentation"
+---
+
+# Verified-source evaluator contract (source_re_evaluate_verified)
+
+## `source_re_evaluate_verified`
+
+`source_re_evaluate_verified` is the verified source strategy. It keeps the server authoritative while avoiding monolithic derivation-closure transfer as the common path.
+
+Flow:
+
+1. The server fetches the exact commit into its credentialed bare mirror. It
+   exports only the tracked Git tree and ingests that tree with the canonical
+   `crystal-forge-source-v1-<commit>` name. It evaluates the resulting immutable
+   store flake in pure mode with lock mutation disabled and IFD set explicitly.
+
+   Before bulk policy evaluation, the server always discovers the complete
+   configuration inventory from that same exact NAR-qualified source. Discovery
+   evaluates `builtins.attrNames (builtins.getFlake <source>).nixosConfigurations`
+   with `nix eval --json --expr`, pure evaluation, and IFD enabled. It performs
+   no additional root Git resolution or revision fallback. The `getFlake`
+   expression preserves the policy evaluator's lock semantics: a CLI flake
+   installable can reconcile an incomplete lock graph even with
+   `--no-write-lock-file`. Discovery must not use that reconciliation as proof
+   that the policy source is valid. Private locked inputs use the flake's
+   protected credentials, including an explicit Nix `netrc-file` setting when
+   present. Discovery does not write `flake.lock` or receive realization options.
+
+   The bulk policy invocation uses:
+
+   ```bash
+   nix-eval-jobs --expr '<authoritative expression>' \
+       --option pure-eval true \
+       --option allow-import-from-derivation true \
+       --meta \
+       --apply 'derivation: { policies = derivation.meta.policies; configObservationRoot = derivation.meta.crystalForgeConfigRoot or { status = "failed"; code = "root_capture_missing"; }; }' \
+       --workers <n> --max-memory-size <MiB>
+   ```
+
+   The resulting `.drvPath` is the server-authorized build-plan fingerprint. The server does not need `nix build --dry-run` for this identity. The authoritative evaluator does not receive `BuildConfig` realization options such as sandbox, offline mode, substitution policy, max jobs, cores, max-silent-time, or build timeout. Those settings control realization and must not alter evaluation semantics.
+
+   The production apply function preserves policies and the optional Config-root
+   observation in `extraValue`, while returning the unchanged system derivation.
+   A missing Config root records `root_capture_missing`; it does not establish a
+   successful observation or change derivation authorization.
+
+2. The server sends the full commit, lock digest, canonical store name, source
+   NAR hash, artifact format, artifact digest and size, evaluator contract,
+   flake target, and expected
+   `.drvPath`. The NAR hash and canonical name are the portable source identity.
+   The server's physical store path is diagnostic only.
+
+3. The builder obtains the canonical artifact through the job-owned API endpoint.
+   The manifest repository URL has embedded user information, passwords, query
+   parameters, and fragments removed. The builder does not use the URL to fetch.
+
+4. Before polling, the builder probes and caches its actual Nix version and
+   `builtins.currentSystem`. Each signed `NextJobRequest` advertises those values
+   with the contract version, pure-evaluation setting, lock-mutation setting,
+   IFD setting, and source materialization schema. The server compares the full
+   capability with its authoritative `nix-eval-jobs` fingerprint before queue
+   lookup or claim. Legacy requests and any mismatch receive HTTP 409 with the
+   `incompatible_evaluator` reason and do not mutate a queued job.
+
+5. The builder verifies artifact size, SHA-256, format, lock digest, store name,
+   and NAR hash. It rejects incompatible Nix version, purity,
+   lock-mutation, IFD, or materialization settings before evaluation. It then
+   evaluates the same NAR-qualified store reference as the server before building:
+
+   ```bash
+   drv=$(nix eval --raw --no-write-lock-file \
+      --option pure-eval true \
+      --option allow-import-from-derivation true \
+     'path:/nix/store/<source>?narHash=<percent-encoded-SRI>#nixosConfigurations.<host>.config.system.build.toplevel.drvPath')
+   ```
+
+6. The builder compares `$drv` to the server-provided expected `.drvPath`. A mismatch fails before any build starts with `derivation_mismatch`.
+
+7. If the strings match, the builder builds the exact verified derivation object:
+
+   ```bash
+   nix build "$drv^*"
+   ```
+
+   The important property is eval → compare → build, not build → inspect.
+
+This strategy verifies derivation identity/build-plan equality. It does not prove bit-for-bit output reproducibility; output reproducibility is a separate concern.
+
+The evaluator fingerprint covers contract version, linked Nix version,
+`builtins.currentSystem`, pure evaluation, lock-file mutation policy, IFD policy,
+and source materialization schema. Server-only worker count, evaluator memory
+limit, outer process timeout, and cache-status reporting are resource or
+diagnostic controls. They can stop an evaluation or add metadata, but they
+cannot change a successful `.drvPath`.
+
+The server's [bulk evaluator resource plan](../evaluation/bulk-evaluator-resource-planning.md)
+resolves one explicit nonzero worker count and per-worker MiB threshold after
+the heavy-Nix locks and before spawn. Automatic memory sizing and independent
+output-idle/overall deadlines are server-only controls. They do not change
+builder re-evaluation, the linked Nix fingerprint, purity, IFD, or source
+identity. An explicit `12288` MiB override with two workers retains the
+24576 MiB configured product. The resource guide distinguishes the packaged
+v2.34.3 restart threshold from version-dependent
+aggregate kill/retry behavior reported in a deployment.
+
+Configuration discovery has its own
+[bounded deadline and admission contract](../evaluation/bulk-evaluator-resource-planning.md#configuration-discovery-deadline).
+Source materialization completes before discovery admission. Discovery acquires
+the PostgreSQL advisory lock before the in-process heavy-Nix permit and finishes
+that scope before bulk admission. Nested admission is forbidden. An unconfirmed
+child retains both locks in quarantine until direct-child reap and process-group
+absence are confirmed, even beyond the discovery deadline.
+
+Legacy commit artifact-cache inventories have no verified source/lock provenance
+and never authorize the expected configuration set. Authoritative evaluation
+always rediscovers names, even when an artifact-cache row is populated. Nix's own
+warm fetch/evaluation cache remains available. Authoritative discovery attempts
+a best-effort display-inventory write with a 250-millisecond ceiling, including
+a valid empty set and preserving cached changed files. Write failure or timeout
+keeps the verified inventory in memory for evaluation. Cancellation checks remain
+authoritative during the write and at handoff; an unavailable final check cannot
+authorize bulk work. Background artifact hydration uses the same exact-source,
+credentialed discovery preflight and current server timeout. Its stored names
+remain display-only. Failed hydration leaves the row unpopulated; the missing-row
+selector does not automatically select that row again.
+
+The server's [adaptive recovery](../evaluation/bulk-evaluator-adaptive-recovery.md)
+reuses the same verified source, revision, policy parser, and snapshot paths.
+Only unresolved configurations enter an isolated child, at most once each.
+Normal fixed overrides remain exact; isolated thresholds use the original
+working-boundary plan, including visible-ancestor `memory.high` and `memory.max`.
+These resource phase changes do not alter source or evaluator authorization.
+
+An outer monitor assesses idle expiry and enforces one overall deadline across
+collection awaits. Fresh complete direct-worker CPU evidence can waive silence,
+not extend the overall deadline. The deadline also covers replacement children,
+small fallback, build-preparation drain, and foreground cleanup. Cancellation
+retains its cooperative two-second cadence, not a response-time guarantee.
+Replacement requires reap and group absence; unconfirmed cleanup retains
+heavy-Nix locks in quarantine. Resource exhaustion fails the commit/attempt
+while preserving only verified exact-attempt completion evidence, not globally
+successful evaluation or an automatic whole-flake retry.
+Quarantined cleanup can hold those locks beyond the monotonic deadline; a
+pending `D`-state member need not exit by that deadline. Cleanup proof covers
+controlled workers in the inherited process group, not an escaped subtree.
+
+A post-claim fingerprint mismatch remains a defense-in-depth check. The server
+releases that job to the queue without consuming retry budget or failing the
+shared derivation. A pre-upgrade queued job with no usable contract-v1
+publication is instead failed with the server-owned `server_failure_code` value
+`evaluator_contract_obsolete`; selection continues to the next queue candidate.
+Builder logs and failure requests cannot set this field. A later authoritative
+re-evaluation can revive the unique row only after source publication and pure
+evaluation succeed and the derivation reaches `DryRunComplete`. The same
+transaction that queues the row consumes the code by setting it to null. Other
+terminal failures retain normal retry and manual-requeue semantics.
+
+Recommended controls:
+
+- Keep source identity immutable: full commit hash, lock digest, artifact format,
+  artifact SHA-256 and size, canonical store name, and source NAR hash.
+- Retain canonical server artifacts independently of job completion. Dispatch
+  validates a published artifact before atomically claiming its exact job.
+- Extract builder artifacts only through the bounded contract-v1 tar validator
+  and remove each unique temporary directory after evaluation.
+- Prefer server-bundled inputs for locked-down or GovCloud-style builders with no internet egress.
+- Do not place broad private Git credentials on every builder.
+- Record or pin the Nix version/evaluator fingerprint across server and builders.
+- Never use `--impure` for this strategy. Impure evaluation can observe host
+  `nix.conf`, environment variables, and files and can authorize a host-specific
+  derivation.
+- P2 hardening: launch authoritative and builder evaluators with an explicit
+  environment allowlist so ambient credential variables cannot influence input
+  resolution. Contract version 1 does not yet enforce this process boundary.
+
+Expected pre-build failure phases include `source_fetch`,
+`source_identity_mismatch`, `evaluator_incompatible`,
+`source_input_availability`, `evaluation`, `derivation_mismatch`, and
+`path_materialization`.
+
+During rolling upgrades, new builders advertise evaluator contract version 1.
+Old builders and old request payloads default to version 0. The server returns
+409 before job claim when the configured verified-source strategy requires a
+contract the builder cannot validate. It does not silently select another
+strategy. A new builder can still poll an old server because old serde readers
+ignore the additive capability field.
+
+Every next-job 409 response has a JSON body with a stable `reason` field:
+
+- `unsupported_execution_strategy` means the builder did not advertise the
+  server's configured strategy.
+- `incompatible_evaluator` means the complete builder and server evaluator
+  fingerprints differ.
+- `incompatible_source_delivery` means the server delivery mode cannot satisfy
+  the selected evaluator contract.
+- `source_materialization_cancelled` means canonical source preparation was
+  cancelled before claim.
+
+The first three checks occur before queue lookup. Source cancellation occurs
+before the atomic claim. None of these responses claims or mutates a queued job.
+
+## Related concepts
+
+* [Remote builder execution strategies](remote-build-execution-strategies.md) - Explains the remote build execution strategies (source_re_evaluate_verified, server_derivation), the recommended default, source delivery modes, delta derivation materialization, and the forwarded-HTTPS rule for credential-bearing cache push.
+* [Builder failure phases and retry strategy](builder-failure-phases-and-retry.md) - Lists the pre-build failure phases a builder reports (source_fetch through build), which of them retry or fail permanently, and the priority-weighting retry and max-retries rules for build jobs.
+* [Builder threat model](../security/builder-threat-model.md) - Analyzes what an attacker obtains from a compromised builder, a malicious job claim, source archive tampering, and request replay, and which defenses (digest check, derivation_mismatch, timestamp window) apply.
+* [Builder API: job lifecycle endpoints](../api/builder-job-lifecycle-api.md) - Documents the builder-signed endpoints for heartbeat, next-job polling (including 409 evaluator conflicts), derivation manifest and delta/full derivation archives, job completion, failure, and log append.

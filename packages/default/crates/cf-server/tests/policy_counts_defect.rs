@@ -1,5 +1,5 @@
-//! Live-DB regression tests for PolicyCard counts (Defect 2), Owner display
-//! (Defect 3), and Evidence for ATO (Defect 4).
+//! Live-DB regressions for PolicyCard counts, PolicyDrawer owner and scoped
+//! usage hydration, and Evidence for ATO.
 //!
 //! These tests invoke the production query functions that power the policy
 //! management UI:
@@ -10,6 +10,17 @@
 //!   join and evidence_specs from compliance_metadata.
 //!
 //! Run with: cargo test -p cf-server --test policy_counts_defect -- --test-threads=1
+use axum::{Router, routing::get};
+use chrono::Utc;
+use crystal_forge::api::models::PolicyVersionUsageResponse;
+use crystal_forge::auth::session::{SESSION_COOKIE_NAME, hash_token};
+use crystal_forge::compliance::resolver::{
+    ResolutionOutcome, resolve_systems_effective_policies_for_bundle_versions_batch,
+};
+use crystal_forge::handlers::api::compliance::get_policy_version_usage;
+use crystal_forge::models::auth_identity::AuthRole;
+use crystal_forge::queries::auth_identity::{create_user_session, sync_user_role};
+use crystal_forge::queries::users::insert_user;
 use serde_json::{Value, json};
 use sqlx::PgPool;
 use uuid::Uuid;
@@ -18,6 +29,58 @@ use crystal_forge::queries::deployment_policies::{
     fetch_policy_version_summaries, get_deployment_policies_by_versions,
     load_policy_version_usage_counts,
 };
+
+async fn role_session(pool: &PgPool, role: AuthRole, label: &str) -> (Uuid, String) {
+    let suffix = Uuid::new_v4().simple().to_string();
+    let user = insert_user(
+        pool,
+        &format!("pu-{}@example.invalid", &suffix[..8]),
+        Some(label),
+    )
+    .await
+    .expect("create policy usage user");
+    sqlx::query("UPDATE users SET username=$2 WHERE id=$1")
+        .bind(user.id)
+        .bind(label)
+        .execute(pool)
+        .await
+        .expect("set policy usage display name");
+    sync_user_role(pool, user.id, role)
+        .await
+        .expect("assign policy usage role");
+    let token = format!("policy-usage-session-{suffix}");
+    create_user_session(
+        pool,
+        user.id,
+        hash_token(&token),
+        Utc::now() + chrono::Duration::hours(1),
+        Some("policy-usage-regression".into()),
+        Some("127.0.0.1".into()),
+        "local".into(),
+    )
+    .await
+    .expect("create policy usage session");
+    (user.id, token)
+}
+
+async fn usage_server(pool: PgPool) -> String {
+    let app = Router::new()
+        .route(
+            "/api/v1/policy-versions/:version_id/usage",
+            get(get_policy_version_usage),
+        )
+        .with_state(pool);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind policy usage server");
+    let address = listener.local_addr().expect("read policy usage address");
+    tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .expect("serve policy usage API")
+    });
+    format!("http://{address}")
+}
 
 /// Helper to create a policy with a version and return their IDs.
 async fn create_test_policy(pool: &PgPool, name: &str) -> (Uuid, Uuid) {
@@ -172,6 +235,195 @@ async fn create_test_bundle_with_policy(
     .expect("create bundle policy selection");
 
     bundle_version_id
+}
+
+async fn create_usage_assignment(
+    pool: &PgPool,
+    bundle_id: Uuid,
+    bundle_version_id: Uuid,
+    system_id: Uuid,
+) {
+    let assignment_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO compliance_bundle_assignments
+           (id, bundle_id, bundle_version_id, system_id, scope_type, active,
+            enforcement_mode, assignment_overlay_digest)
+           VALUES ($1, $2, $3, $4, 'system', true, 'enforce', 'usage-scope')"#,
+    )
+    .bind(assignment_id)
+    .bind(bundle_id)
+    .bind(bundle_version_id)
+    .bind(system_id)
+    .execute(pool)
+    .await
+    .expect("create usage assignment");
+    let assignment_version_id: Uuid = sqlx::query_scalar(
+        r#"INSERT INTO compliance_bundle_assignment_versions
+           (assignment_id, version_number, bundle_version_id, enforcement_mode,
+            assignment_overlay_digest)
+           VALUES ($1, 1, $2, 'enforce', 'usage-scope')
+           RETURNING id"#,
+    )
+    .bind(assignment_id)
+    .bind(bundle_version_id)
+    .fetch_one(pool)
+    .await
+    .expect("create immutable usage assignment version");
+    sqlx::query("UPDATE compliance_bundle_assignments SET current_version_id=$2 WHERE id=$1")
+        .bind(assignment_id)
+        .bind(assignment_version_id)
+        .execute(pool)
+        .await
+        .expect("set current usage assignment version");
+}
+
+async fn create_usage_scope_fixture(
+    pool: &PgPool,
+    created_by: Uuid,
+) -> (Uuid, Uuid, Uuid, Uuid, Uuid) {
+    let (policy_id, policy_version_id) = create_test_policy(pool, "policy-drawer-scope").await;
+    // INVARIANT: Acceptance and the lineage pointer must commit atomically.
+    let mut tx = pool.begin().await.expect("begin policy publication");
+    sqlx::query(
+        "UPDATE deployment_policy_versions
+         SET created_by=$2, publication_state='accepted', trust_state='trusted'
+         WHERE id=$1",
+    )
+    .bind(policy_version_id)
+    .bind(created_by)
+    .execute(&mut *tx)
+    .await
+    .expect("attribute policy version owner");
+    sqlx::query("UPDATE deployment_policies SET current_published_version_id=$2 WHERE id=$1")
+        .bind(policy_id)
+        .bind(policy_version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("publish policy version");
+    tx.commit().await.expect("commit policy publication");
+
+    let visible_environment_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO environments(name,description) VALUES($1,'visible') RETURNING id",
+    )
+    .bind(format!("visible-{}", Uuid::new_v4().simple()))
+    .fetch_one(pool)
+    .await
+    .expect("create visible environment");
+    let hidden_environment_id: Uuid = sqlx::query_scalar(
+        "INSERT INTO environments(name,description) VALUES($1,'hidden') RETURNING id",
+    )
+    .bind(format!("hidden-{}", Uuid::new_v4().simple()))
+    .fetch_one(pool)
+    .await
+    .expect("create hidden environment");
+
+    let visible_system_id = Uuid::new_v4();
+    let hidden_system_id = Uuid::new_v4();
+    for (system_id, hostname, environment_id) in [
+        (
+            visible_system_id,
+            format!("visible-{}.example.invalid", Uuid::new_v4()),
+            visible_environment_id,
+        ),
+        (
+            hidden_system_id,
+            format!("hidden-{}.example.invalid", Uuid::new_v4()),
+            hidden_environment_id,
+        ),
+    ] {
+        sqlx::query(
+            r#"INSERT INTO systems
+               (id,hostname,environment_id,is_active,public_key,derivation,reachability)
+               VALUES($1,$2,$3,true,$4,$4,'direct')"#,
+        )
+        .bind(system_id)
+        .bind(hostname)
+        .bind(environment_id)
+        .bind(format!("usage-key-{system_id}"))
+        .execute(pool)
+        .await
+        .expect("create usage system");
+    }
+
+    let bundle_id = Uuid::new_v4();
+    let bundle_version_id = Uuid::new_v4();
+    sqlx::query(
+        r#"INSERT INTO compliance_bundles(id,name,framework,version,layer,owner)
+           VALUES($1,$2,'Scope','1.0','fleet','Security')"#,
+    )
+    .bind(bundle_id)
+    .bind(format!("policy-usage-bundle-{}", Uuid::new_v4()))
+    .execute(pool)
+    .await
+    .expect("create usage bundle");
+    sqlx::query(
+        r#"INSERT INTO compliance_bundle_versions
+           (id,bundle_id,version,publication_state,trust_state,name,framework,
+            framework_version,description,layer,owner,semantic_digest)
+            VALUES($1,$2,'1.0','draft','trusted','Policy usage','Scope','1.0',
+                  'usage','fleet','Security','usage-bundle')"#,
+    )
+    .bind(bundle_version_id)
+    .bind(bundle_id)
+    .execute(pool)
+    .await
+    .expect("create usage bundle version");
+    sqlx::query(
+        "INSERT INTO compliance_bundle_version_policies
+         (bundle_version_id,policy_version_id,selected,policy_order)
+         VALUES($1,$2,true,1)",
+    )
+    .bind(bundle_version_id)
+    .bind(policy_version_id)
+    .execute(pool)
+    .await
+    .expect("select policy in usage bundle");
+    create_usage_assignment(pool, bundle_id, bundle_version_id, visible_system_id).await;
+    create_usage_assignment(pool, bundle_id, bundle_version_id, hidden_system_id).await;
+    // INVARIANT: The final digest, acceptance, and lineage pointer must commit
+    // atomically after draft membership is complete.
+    let mut tx = pool.begin().await.expect("begin bundle publication");
+    sqlx::query(
+        "UPDATE compliance_bundle_versions
+         SET publication_state='accepted', semantic_digest='usage-bundle-final'
+         WHERE id=$1",
+    )
+    .bind(bundle_version_id)
+    .execute(&mut *tx)
+    .await
+    .expect("accept usage bundle version");
+    sqlx::query("UPDATE compliance_bundles SET current_published_version_id=$2 WHERE id=$1")
+        .bind(bundle_id)
+        .bind(bundle_version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("publish usage bundle version");
+    tx.commit().await.expect("commit bundle publication");
+
+    let outcomes = resolve_systems_effective_policies_for_bundle_versions_batch(
+        pool,
+        &[(bundle_version_id, vec![visible_system_id, hidden_system_id])],
+    )
+    .await
+    .expect("resolve usage fixture assignments");
+    for system_id in [visible_system_id, hidden_system_id] {
+        assert!(
+            matches!(
+                outcomes.get(&(bundle_version_id, system_id)),
+                Some(ResolutionOutcome::Resolved(_))
+            ),
+            "usage fixture assignment must resolve: {:?}",
+            outcomes.get(&(bundle_version_id, system_id))
+        );
+    }
+
+    (
+        policy_id,
+        policy_version_id,
+        visible_environment_id,
+        visible_system_id,
+        hidden_system_id,
+    )
 }
 
 #[sqlx::test]
@@ -551,4 +803,101 @@ async fn test_bundle_usage_count_distinct_bundle_lineages_selected_only(pool: Pg
     );
 
     assert_eq!(mapped, 0, "no requirements mapped in this test");
+}
+
+#[sqlx::test]
+async fn policy_drawer_owner_and_usage_respect_environment_visibility(pool: PgPool) {
+    let (viewer_id, viewer_token) = role_session(&pool, AuthRole::Viewer, "Policy Owner").await;
+    let (_unscoped_viewer_id, unscoped_viewer_token) =
+        role_session(&pool, AuthRole::Viewer, "Unscoped Viewer").await;
+    let (_admin_id, admin_token) = role_session(&pool, AuthRole::Admin, "Fleet Admin").await;
+    let (policy_id, policy_version_id, visible_environment_id, visible_system_id, hidden_system_id) =
+        create_usage_scope_fixture(&pool, viewer_id).await;
+    sqlx::query("INSERT INTO user_environment_memberships(user_id,environment_id) VALUES($1,$2)")
+        .bind(viewer_id)
+        .bind(visible_environment_id)
+        .execute(&pool)
+        .await
+        .expect("grant viewer environment membership");
+
+    let summaries = fetch_policy_version_summaries(&pool, &[policy_id])
+        .await
+        .expect("load PolicyDrawer owner summary");
+    let selected = summaries[&policy_id]
+        .iter()
+        .find(|summary| summary.id == policy_version_id)
+        .expect("find exact PolicyDrawer version");
+    assert_eq!(selected.created_by, Some(viewer_id));
+    assert_eq!(selected.created_by_display.as_deref(), Some("Policy Owner"));
+
+    let base = usage_server(pool.clone()).await;
+    let client = reqwest::Client::new();
+    let request_usage = |token: &str| {
+        client
+            .get(format!(
+                "{base}/api/v1/policy-versions/{policy_version_id}/usage"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+    };
+
+    let viewer_response = request_usage(&viewer_token)
+        .send()
+        .await
+        .expect("request viewer policy usage");
+    assert_eq!(viewer_response.status(), reqwest::StatusCode::OK);
+    let viewer_usage: PolicyVersionUsageResponse = viewer_response
+        .json()
+        .await
+        .expect("decode viewer policy usage");
+    assert_eq!(viewer_usage.policy_version_id, policy_version_id);
+    assert_eq!(viewer_usage.bundle_versions.len(), 1);
+    assert_eq!(
+        viewer_usage
+            .systems
+            .iter()
+            .map(|system| system.system_id)
+            .collect::<Vec<_>>(),
+        vec![visible_system_id],
+        "a viewer must not receive hostnames outside their environment memberships"
+    );
+
+    let unscoped_response = request_usage(&unscoped_viewer_token)
+        .send()
+        .await
+        .expect("request unscoped viewer policy usage");
+    assert_eq!(unscoped_response.status(), reqwest::StatusCode::OK);
+    let unscoped_usage: PolicyVersionUsageResponse = unscoped_response
+        .json()
+        .await
+        .expect("decode unscoped viewer policy usage");
+    assert_eq!(unscoped_usage.policy_version_id, policy_version_id);
+    assert_eq!(
+        unscoped_usage.bundle_versions.len(),
+        1,
+        "environment scope must not hide non-sensitive bundle membership"
+    );
+    assert!(
+        unscoped_usage.systems.is_empty(),
+        "a viewer with no environment memberships must receive no system usage"
+    );
+
+    let admin_response = request_usage(&admin_token)
+        .send()
+        .await
+        .expect("request admin policy usage");
+    assert_eq!(admin_response.status(), reqwest::StatusCode::OK);
+    let admin_usage: PolicyVersionUsageResponse = admin_response
+        .json()
+        .await
+        .expect("decode admin policy usage");
+    let admin_system_ids = admin_usage
+        .systems
+        .iter()
+        .map(|system| system.system_id)
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(
+        admin_system_ids,
+        [visible_system_id, hidden_system_id].into_iter().collect(),
+        "an administrator must retain fleet-wide PolicyDrawer usage visibility"
+    );
 }

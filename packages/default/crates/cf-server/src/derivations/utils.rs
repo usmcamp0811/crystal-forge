@@ -1,6 +1,7 @@
 use crate::config::{BuildConfig, CacheConfig};
 use anyhow::{Result, anyhow};
 use std::collections::HashSet;
+use std::process::Stdio;
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use tokio::process::Command;
@@ -9,6 +10,7 @@ use tracing::{debug, info, warn};
 
 const CLOSURE_COUNT_COMMAND_TIMEOUT_SECS: u64 = 120;
 const CLOSURE_COUNT_ARG_CHUNK_SIZE: usize = 500;
+const CLOSURE_PATH_INFO_BYTES_LIMIT: u64 = 32 * 1024 * 1024;
 
 /// Add/remove to taste; this set covers AWS + MinIO/common S3 endpoints.
 pub const CACHE_ENV_ALLOWLIST: &[&str] = &[
@@ -86,6 +88,33 @@ pub fn debug_attic_environment() {
     debug!("=== End Attic Environment Debug ===");
 }
 
+/// Sets the Niks3 child environment without inheriting other cache credentials.
+///
+/// Preserves the selected Nix toolchain PATH and Nix daemon configuration.
+/// Authentication comes only from the prepared credential files. The caller
+/// supplies their protected directory as HOME and XDG_CONFIG_HOME so the CLI
+/// cannot select a persistent token instead of the authorized mTLS identity.
+pub fn apply_niks3_env_to_command(cmd: &mut Command, credential_directory: &std::path::Path) {
+    // SECURITY: An allowlist also excludes unknown AWS/Garage credential names.
+    cmd.env_clear();
+    for key in [
+        "PATH",
+        "NIX_CONFIG",
+        "NIX_REMOTE",
+        "NIX_SSL_CERT_FILE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "NO_PROXY",
+        "no_proxy",
+    ] {
+        if let Some(value) = std::env::var_os(key) {
+            cmd.env(key, value);
+        }
+    }
+    cmd.env("HOME", credential_directory);
+    cmd.env("XDG_CONFIG_HOME", credential_directory);
+}
+
 pub fn apply_cache_env_to_command(cmd: &mut Command) {
     for &key in CACHE_ENV_ALLOWLIST {
         if let Ok(val) = std::env::var(key) {
@@ -118,6 +147,10 @@ pub fn apply_cache_env_to_command(cmd: &mut Command) {
     }
 }
 
+/// Applies configured cache credentials and a canonical Attic server endpoint.
+///
+/// Call this after ambient environment setup to let configured child values win.
+/// Invalid or incomplete Attic URLs do not add an endpoint override.
 pub fn apply_cache_config_env_to_command(cmd: &mut Command, cache: &CacheConfig) {
     if let Some(ref v) = cache.s3_access_key_id {
         cmd.env("AWS_ACCESS_KEY_ID", v);
@@ -147,36 +180,17 @@ pub fn apply_cache_config_env_to_command(cmd: &mut Command, cache: &CacheConfig)
     }
 }
 
+/// Returns the canonical Attic login base for a configured cache.
+///
+/// Returns `None` for missing fields or invalid resolver inputs. Resolution is
+/// pure and does not log the raw URI or change the configured push target.
 pub fn attic_server_url_from_cache_config(cache: &CacheConfig) -> Option<String> {
-    let raw = cache.push_to.as_deref()?.trim();
-    if raw.is_empty() {
-        return None;
-    }
-
-    if let Some(rest) = raw.strip_prefix("attic://") {
-        let host = rest.split('/').next()?.trim();
-        if host.is_empty() {
-            return None;
-        }
-        return Some(format!("https://{host}"));
-    }
-
-    if !(raw.starts_with("http://") || raw.starts_with("https://")) {
-        return None;
-    }
-
-    let Some(cache_name) = cache
-        .attic_cache_name
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        return Some(raw.trim_end_matches('/').to_string());
-    };
-
-    let trimmed = raw.trim_end_matches('/');
-    let suffix = format!("/{cache_name}");
-    Some(trimmed.strip_suffix(&suffix).unwrap_or(trimmed).to_string())
+    cf_config::attic_urls::resolve_attic_urls(
+        cache.push_to.as_deref()?.trim(),
+        cache.attic_cache_name.as_deref()?.trim(),
+    )
+    .ok()
+    .map(|urls| urls.server_url.to_string())
 }
 
 pub fn apply_cache_config_env_for_scope(scoped: &mut Command, cache: &CacheConfig) {
@@ -355,15 +369,36 @@ pub fn normalize_flake_git_url(repo_url: &str) -> String {
 
 /// Build the base flake reference (git+url?rev=hash)
 pub fn build_flake_reference(repo_url: &str, commit_hash: &str) -> String {
-    // First normalize the URL so it's a valid Nix flake ref
     let normalized = normalize_flake_git_url(repo_url);
-
-    if normalized.contains("?rev=") {
-        normalized
-    } else {
-        let separator = if normalized.contains('?') { "&" } else { "?" };
-        format!("{normalized}{separator}rev={commit_hash}")
+    let (without_fragment, fragment) = normalized
+        .split_once('#')
+        .map_or((normalized.as_str(), None), |(base, fragment)| {
+            (base, Some(fragment))
+        });
+    let (base, query) = without_fragment
+        .split_once('?')
+        .map_or((without_fragment, ""), |(base, query)| (base, query));
+    let mut parameters = query
+        .split('&')
+        .filter(|parameter| !parameter.is_empty())
+        .filter(|parameter| parameter.split_once('=').map_or(*parameter, |(key, _)| key) != "rev")
+        .map(ToOwned::to_owned)
+        .collect::<Vec<_>>();
+    parameters.push(format!("rev={commit_hash}"));
+    let mut reference = format!("{base}?{}", parameters.join("&"));
+    if let Some(fragment) = fragment {
+        reference.push('#');
+        reference.push_str(fragment);
     }
+    reference
+}
+
+pub fn flake_reference_revision(flake_ref: &str) -> Option<&str> {
+    let query = flake_ref.split_once('?')?.1.split('#').next()?;
+    query.split('&').find_map(|parameter| {
+        let (key, value) = parameter.split_once('=')?;
+        (key == "rev" && !value.is_empty()).then_some(value)
+    })
 }
 
 /// Build flake target for agent deployment (nixos-rebuild compatible)
@@ -514,17 +549,24 @@ pub async fn get_store_path_and_build_status(drv_path: &str) -> Result<(String, 
     Ok((store_path, is_built))
 }
 
-/// Count the total packages in a system closure and how many are already cached.
+/// Counts closure packages, cached outputs, and available recursive Nix bytes.
 ///
 /// Uses two nix calls:
 ///   1. `nix-store --query --requisites <drv>` — list all .drv files in the closure (fast)
 ///   2. `nix-store --query --outputs <drv>...` — map each .drv to its output path
 ///   3. `nix path-info <paths>...` — batch check which outputs exist in the store
 ///
-/// Returns `(total, cached)` where:
+/// Returns `(total, cached, closure_size_bytes)` where:
 ///   total  = number of packages in the closure (excluding the nixos-system drv itself)
 ///   cached = number already present in the local/substituter-accessible store
-pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
+///   closure_size_bytes = sum of `narSize` for each unique path returned by a
+///   complete local recursive Nix query, or `None` when that query is unavailable
+///
+/// # Errors
+///
+/// Returns an error when Nix cannot enumerate the derivation closure or its
+/// outputs, a command exceeds the bounded timeout, or command output is invalid.
+pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32, Option<i64>)> {
     // Step 1: get all .drv requisites (the full closure as .drv paths)
     info!("📦 Counting closure requisites for {}", drv_path);
     let command_timeout = Duration::from_secs(CLOSURE_COUNT_COMMAND_TIMEOUT_SECS);
@@ -557,8 +599,38 @@ pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
         .collect();
 
     let total = drv_paths.len() as i32;
+
+    // A closure-size measurement is authoritative only when the actual NixOS
+    // toplevel output exists in this store and one recursive query succeeds.
+    // Dependency outputs alone are not a substitute for the system closure.
+    let root_outputs = timeout(
+        command_timeout,
+        Command::new("nix-store")
+            .args(["--query", "--outputs", drv_path])
+            .output(),
+    )
+    .await;
+    let closure_size_bytes = match root_outputs {
+        Ok(Ok(output)) if output.status.success() => {
+            let roots = String::from_utf8(output.stdout).ok();
+            let roots = roots.as_deref().map(str::lines).into_iter().flatten();
+            let mut roots_to_measure = Vec::new();
+            let mut root_count = 0usize;
+            for root in roots.filter(|root| !root.is_empty()) {
+                roots_to_measure.push(root.to_string());
+                root_count += 1;
+            }
+            if root_count == 0 {
+                None
+            } else {
+                collect_closure_size(&roots_to_measure, command_timeout).await
+            }
+        }
+        _ => None,
+    };
+
     if total == 0 {
-        return Ok((0, 0));
+        return Ok((0, 0, closure_size_bytes));
     }
 
     // Step 2: map .drv paths → output store paths. Large NixOS closures can
@@ -598,13 +670,15 @@ pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
         } else {
             // Fall back to zero cached if we can't map outputs
             warn!("nix-store --query --outputs failed; assuming 0 cached");
-            return Ok((total, 0));
+            return Ok((total, 0, closure_size_bytes));
         }
     }
 
     if store_paths.is_empty() {
-        return Ok((total, 0));
+        return Ok((total, 0, closure_size_bytes));
     }
+    store_paths.sort();
+    store_paths.dedup();
 
     // Step 3: batch check which outputs exist. Large closures are chunked for
     // the same argv-limit reason as output resolution.
@@ -647,7 +721,79 @@ pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
         };
     }
 
-    Ok((total, cached))
+    Ok((total, cached, closure_size_bytes))
+}
+
+/// Streams one recursive Nix path-info result under a strict byte ceiling.
+///
+/// `kill_on_drop` guarantees cancellation and timeout terminate the child. A
+/// measurement is returned only after the complete stream parses and the child
+/// exits successfully; truncated or partial JSON is never authoritative.
+async fn collect_closure_size(roots: &[String], command_timeout: Duration) -> Option<i64> {
+    use tokio::io::AsyncReadExt;
+
+    let mut command = Command::new("nix");
+    command
+        .args(["path-info", "--json", "--recursive"])
+        .args(roots)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .kill_on_drop(true);
+    let mut child = command.spawn().ok()?;
+    let stdout = child.stdout.take()?;
+    let mut bytes = Vec::new();
+    let mut limited = stdout.take(CLOSURE_PATH_INFO_BYTES_LIMIT + 1);
+    match timeout(command_timeout, limited.read_to_end(&mut bytes)).await {
+        Ok(Ok(_)) if (bytes.len() as u64) <= CLOSURE_PATH_INFO_BYTES_LIMIT => {}
+        _ => {
+            let _ = child.start_kill();
+            let _ = child.wait().await;
+            return None;
+        }
+    }
+    let status = match timeout(command_timeout, child.wait()).await {
+        Ok(Ok(status)) if status.success() => status,
+        _ => return None,
+    };
+    debug_assert!(status.success());
+    parse_nix_path_sizes(&bytes).and_then(|sizes| {
+        sizes
+            .values()
+            .try_fold(0i64, |total, size| total.checked_add(*size))
+    })
+}
+
+fn parse_nix_path_sizes(bytes: &[u8]) -> Option<std::collections::BTreeMap<String, i64>> {
+    let value: serde_json::Value = serde_json::from_slice(bytes).ok()?;
+    let mut sizes = std::collections::BTreeMap::new();
+    match value {
+        serde_json::Value::Object(paths) => {
+            for (path, metadata) in paths {
+                let size = metadata.get("narSize")?.as_i64()?;
+                if size < 0 {
+                    return None;
+                }
+                if sizes.insert(path, size).is_some() {
+                    return None;
+                }
+            }
+        }
+        serde_json::Value::Array(paths) => {
+            for metadata in paths {
+                let path = metadata.get("path")?.as_str()?.to_string();
+                let size = metadata.get("narSize")?.as_i64()?;
+                if size < 0 {
+                    return None;
+                }
+                if sizes.get(&path).is_some_and(|existing| *existing != size) {
+                    return None;
+                }
+                sizes.insert(path, size);
+            }
+        }
+        _ => return None,
+    }
+    Some(sizes)
 }
 
 // ============================================================================
@@ -657,6 +803,82 @@ pub async fn count_closure_packages(drv_path: &str) -> Result<(i32, i32)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn attic_url_wrapper_and_child_environment_use_shared_base() {
+        for input in [
+            "https://cache.example/prefix/",
+            "https://cache.example/prefix/team",
+            "https://cache.example/prefix/team/nix-cache-info",
+        ] {
+            let cache = CacheConfig {
+                push_to: Some(input.into()),
+                attic_cache_name: Some("remote:team".into()),
+                ..Default::default()
+            };
+            assert_eq!(
+                attic_server_url_from_cache_config(&cache).as_deref(),
+                Some("https://cache.example/prefix/")
+            );
+            let mut command = Command::new("unused");
+            command.env("ATTIC_SERVER_URL", "https://ambient.example/");
+            apply_cache_config_env_to_command(&mut command, &cache);
+            assert!(
+                command
+                    .as_std()
+                    .get_envs()
+                    .any(|(key, value)| key == "ATTIC_SERVER_URL"
+                        && value == Some(std::ffi::OsStr::new("https://cache.example/prefix/")))
+            );
+        }
+    }
+
+    #[test]
+    fn attic_url_wrapper_rejects_invalid_and_non_attic_configuration() {
+        for cache in [
+            CacheConfig {
+                push_to: Some("https://cache.example/".into()),
+                ..Default::default()
+            },
+            CacheConfig {
+                push_to: Some("s3://bucket".into()),
+                ..Default::default()
+            },
+            CacheConfig {
+                push_to: Some("https://user:password@cache.example/".into()),
+                attic_cache_name: Some("team".into()),
+                ..Default::default()
+            },
+        ] {
+            assert!(attic_server_url_from_cache_config(&cache).is_none());
+            let mut command = Command::new("unused");
+            apply_cache_config_env_to_command(&mut command, &cache);
+            assert!(
+                !command
+                    .as_std()
+                    .get_envs()
+                    .any(|(key, _)| key == "ATTIC_SERVER_URL")
+            );
+        }
+    }
+
+    #[test]
+    fn nix_path_sizes_accepts_both_json_shapes_and_deduplicates_paths() {
+        let object = br#"{"/nix/store/a":{"narSize":7},"/nix/store/b":{"narSize":11}}"#;
+        assert_eq!(
+            parse_nix_path_sizes(object).unwrap().values().sum::<i64>(),
+            18
+        );
+        let array = br#"[{"path":"/nix/store/a","narSize":7},{"path":"/nix/store/a","narSize":7}]"#;
+        assert_eq!(
+            parse_nix_path_sizes(array).unwrap().values().sum::<i64>(),
+            7
+        );
+        let conflicting =
+            br#"[{"path":"/nix/store/a","narSize":7},{"path":"/nix/store/a","narSize":8}]"#;
+        assert!(parse_nix_path_sizes(conflicting).is_none());
+        assert!(parse_nix_path_sizes(br#"{"/nix/store/a":{}}"#).is_none());
+    }
 
     #[test]
     fn test_normalize_scp_ssh_url_no_dot_git() {
@@ -766,11 +988,23 @@ mod tests {
             "git+https://github.com/ATALLC/nix-config?rev=def456",
             "abc123",
         );
-        // Already has ?rev= so it's returned as-is
         assert_eq!(
             result,
-            "git+https://github.com/ATALLC/nix-config?rev=def456"
+            "git+https://github.com/ATALLC/nix-config?rev=abc123"
         );
+    }
+
+    #[test]
+    fn test_build_flake_reference_replaces_rev_and_preserves_other_query_parameters() {
+        let result = build_flake_reference(
+            "git+https://github.com/ATALLC/nix-config?ref=main&rev=def456&shallow=1",
+            "abc123",
+        );
+        assert_eq!(
+            result,
+            "git+https://github.com/ATALLC/nix-config?ref=main&shallow=1&rev=abc123"
+        );
+        assert_eq!(flake_reference_revision(&result), Some("abc123"));
     }
 
     #[test]

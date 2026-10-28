@@ -17,12 +17,13 @@ use crate::api::models::{
 use crate::auth::extractors::RequireAuth;
 use crate::config::ServerConfig;
 use crate::handlers::api::auth_session::validate_csrf;
+use crate::models::user_notifications::UserNotificationPreferences;
 use crate::queries::admin::insert_admin_audit_event;
 use crate::queries::auth_identity::get_user_by_id;
 use crate::queries::user_notifications::{
-    dismiss_notification, get_or_create_notification_preferences, list_notifications,
-    mark_all_notifications_read, mark_notification_read,
-    materialize_attention_notifications_for_user, unread_notification_count,
+    dismiss_all_notifications, dismiss_notification,
+    get_notification_preferences as query_notification_preferences, list_notifications,
+    mark_all_notifications_read, mark_notification_read, unread_notification_count,
     update_notification_preferences,
 };
 use cf_config::config::{
@@ -44,11 +45,19 @@ pub async fn get_notification_preferences(
 ) -> impl IntoResponse {
     let email_capability = notification_email_capability(&pool, user.user_id, &server_config).await;
 
-    match get_or_create_notification_preferences(&pool, user.user_id).await {
-        Ok(preferences) => (
+    match query_notification_preferences(&pool, user.user_id).await {
+        Ok(Some(preferences)) => (
             StatusCode::OK,
             Json(NotificationPreferencesDto::from_model(
                 preferences,
+                email_capability,
+            )),
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::OK,
+            Json(NotificationPreferencesDto::from_model(
+                UserNotificationPreferences::defaults_for_user(user.user_id),
                 email_capability,
             )),
         )
@@ -133,7 +142,6 @@ pub async fn patch_notification_preferences(
 pub async fn get_notifications(
     RequireAuth(user): RequireAuth,
     State(pool): State<PgPool>,
-    State(server_config): State<ServerConfig>,
     Query(params): Query<ListNotificationsParams>,
 ) -> impl IntoResponse {
     let limit = params.limit.unwrap_or(20).clamp(1, 50);
@@ -154,17 +162,6 @@ pub async fn get_notifications(
         },
         None => params.before.map(|before| (before, Uuid::max())),
     };
-
-    if let Err(err) = materialize_attention_notifications_for_user(
-        &pool,
-        user.user_id,
-        server_config.notification_email_enabled
-            && server_config.notification_email_external_delivery_allowed,
-    )
-    .await
-    {
-        tracing::warn!(%err, user_id = %user.user_id, "failed to materialize attention notifications");
-    }
 
     let notifications =
         match list_notifications(&pool, user.user_id, limit, cursor, unread_only).await {
@@ -227,6 +224,26 @@ pub async fn read_all_notifications(
     match mark_all_notifications_read(&pool, user.user_id).await {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(err) => server_error(err, "notifications_mark_all_read_failed"),
+    }
+}
+
+/// Dismisses the current user's visible notification feed.
+///
+/// Requires the same session and CSRF protections as single-notification
+/// dismissal. The query captures its own execution-time cutoff so arrivals
+/// after the action starts remain available to the user.
+pub async fn dismiss_all_notifications_handler(
+    RequireAuth(user): RequireAuth,
+    State(pool): State<PgPool>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    if let Err(err) = validate_csrf(&headers) {
+        return err.into_response();
+    }
+
+    match dismiss_all_notifications(&pool, user.user_id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(err) => server_error(err, "notifications_dismiss_all_failed"),
     }
 }
 

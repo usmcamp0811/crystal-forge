@@ -7,6 +7,10 @@
   cfg = config.services.crystal-forge;
   tomlFormat = pkgs.formats.toml {};
   postgres_pkg = config.services.postgresql.package;
+  # INVARIANT: The Nix CLI and nix-eval-jobs must use the same Nix library
+  # version. The CF package exports that matching CLI with the native netrc
+  # authority guard. Agent Basic reads must use this CLI before other PATH tools.
+  evaluatorNix = pkgs.crystal-forge.default.evaluatorNix;
 
   # Recursively remove any null values so TOML generation won’t choke.
   stripNulls = v:
@@ -38,10 +42,16 @@
           port = cfg.server.port;
           eval_workers = cfg.server.eval_workers;
           eval_max_memory_mb = cfg.server.eval_max_memory_mb;
+          eval_memory_reserve_mb = cfg.server.eval_memory_reserve_mb;
+          eval_memory_max_percent = cfg.server.eval_memory_max_percent;
+          eval_output_idle_timeout_secs = cfg.server.eval_output_idle_timeout_secs;
+          eval_overall_timeout_secs = cfg.server.eval_overall_timeout_secs;
+          eval_discovery_timeout_secs = cfg.server.eval_discovery_timeout_secs;
           eval_check_cache = cfg.server.eval_check_cache;
           auto_hardening_scans = cfg.server.auto_hardening_scans;
           allow_private_cache_test_targets =
             cfg.server.allow_private_cache_test_targets;
+          attic_metrics_endpoints = cfg.server.attic_metrics_endpoints;
           trust_forwarded_builder_https =
             cfg.server.trust_forwarded_builder_https;
           notification_email_enabled = cfg.server.notificationEmail.enable;
@@ -63,8 +73,8 @@
           notification_email_digest_schedule = cfg.server.notificationEmail.digestSchedule;
           session_last_seen_throttle_seconds =
             cfg.server.sessionLastSeenThrottleSeconds;
-           session_retention_days = cfg.server.sessionRetentionDays;
-           trusted_proxy_cidrs = cfg.server.trustedProxyCidrs;
+          session_retention_days = cfg.server.sessionRetentionDays;
+          trusted_proxy_cidrs = cfg.server.trustedProxyCidrs;
           remote_build_execution_strategy = cfg.build.remote_execution_strategy;
           source_delivery_mode = cfg.build.source_delivery_mode;
           source_archive_root = toString cfg.build.source_archive_root;
@@ -165,6 +175,7 @@
           source_worktree_root = toString cfg.build.source_worktree_root;
           cleanup_source_worktrees = cfg.build.cleanup_source_worktrees;
           allow_import_from_derivation = cfg.build.allow_import_from_derivation;
+          cve_scanning_enabled = cfg.build.cve_scanning_enabled;
         }
         // lib.optionalAttrs cfg.build.api_mode {
           private_key_path =
@@ -338,7 +349,7 @@
 
         if [ ! -f "$BUILDER_API_KEY_PATH" ]; then
           echo "Generating builder API key for Crystal Forge API mode..."
-          ${pkgs.crystal-forge.default.server}/bin/cf-keygen -y -f "$BUILDER_API_KEY_PATH"
+          ${pkgs.crystal-forge.default.cf-keygen-drv}/bin/cf-keygen -y -f "$BUILDER_API_KEY_PATH"
           echo "Builder API key generated at $BUILDER_API_KEY_PATH"
           echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
           echo "📋 BUILDER REGISTRATION REQUIRED"
@@ -382,6 +393,21 @@
     includeBuilderApiKeySetup = false;
   };
 
+  # Each service script references only the component derivation that provides
+  # the binary it executes. Referencing an aggregate package instead would put
+  # unrelated components in the unit's closure, so any change to any component
+  # would rebuild and re-copy this closure.
+  #
+  #   serverScript                 server                  -> cfg.server.package
+  #   hardeningWorkerScript        hardening-worker        -> cfg.server.package
+  #   configInspectorWorkerScript  config-inspector-worker -> cfg.server.package
+  #   builderScript                builder                 -> cfg.build.package
+  #   agentScript                  agent                   -> cfg.client.package
+  #   builder API key setup        cf-keygen               -> cf-keygen-drv
+  #
+  # INVARIANT: a script may only run binaries provided by the package it
+  # references. Adding a binary invocation here requires confirming that the
+  # referenced package actually installs it.
   serverScript = pkgs.writeShellScript "crystal-forge-server" ''
     export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
 
@@ -403,12 +429,27 @@
       fi
     ''}
 
-    exec ${pkgs.crystal-forge.default.server}/bin/server "$@"
+    exec ${cfg.server.package}/bin/server "$@"
   '';
 
   hardeningWorkerScript = pkgs.writeShellScript "crystal-forge-hardening-worker" ''
     export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
-    exec ${pkgs.crystal-forge.default.server}/bin/hardening-worker "$@"
+    exec ${cfg.server.package}/bin/hardening-worker "$@"
+  '';
+
+  configInspectorWorkerScript = pkgs.writeShellScript "crystal-forge-config-inspector-worker" ''
+    export CRYSTAL_FORGE_CONFIG="${serverConfigPath}"
+
+    ${lib.optionalString (cfg.cache.encryption_key_file != null) ''
+      if [ -f "${cfg.cache.encryption_key_file}" ]; then
+        export CRYSTAL_FORGE_CACHE_ENCRYPTION_KEY="$(cat "${cfg.cache.encryption_key_file}")"
+      else
+        echo "ERROR: Cache encryption key file not found: ${cfg.cache.encryption_key_file}" >&2
+        exit 1
+      fi
+    ''}
+
+    exec ${cfg.server.package}/bin/config-inspector-worker "$@"
   '';
 
   builderScript = pkgs.writeShellScript "crystal-forge-builder" ''
@@ -435,12 +476,12 @@
     mkdir -p /var/lib/crystal-forge/workdir
     cd /var/lib/crystal-forge/workdir
     cleanup_old_builds
-    exec ${pkgs.crystal-forge.default.server}/bin/builder "$@"
+    exec ${cfg.build.package}/bin/builder "$@"
   '';
 
   agentScript = pkgs.writeShellScript "crystal-forge-agent" ''
     export CRYSTAL_FORGE_CONFIG="${agentConfigPath}"
-    exec ${pkgs.crystal-forge.default.agent}/bin/agent "$@"
+    exec ${cfg.client.package}/bin/agent "$@"
   '';
 in {
   options.services.crystal-forge = {
@@ -674,6 +715,15 @@ in {
         description = "Crystal Forge Builder";
       };
 
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = pkgs.crystal-forge.default.cf-builder-drv;
+        defaultText = lib.literalExpression "pkgs.crystal-forge.default.cf-builder-drv";
+        description = lib.mdDoc ''
+          Package providing the `builder` binary.
+        '';
+      };
+
       # === BUILD CONCURRENCY SETTINGS ===
 
       max_concurrent_derivations = lib.mkOption {
@@ -781,12 +831,15 @@ in {
         type = lib.types.bool;
         default = false;
         description = lib.mdDoc ''
-          Build in offline mode (no network access).
+          Disable substitutes, remote builders and substitution fallback during
+          Nix realization. Overrides use_substitutes and inherited acquisition
+          settings. Uses options supported by nix-store and the modern Nix CLI.
 
-          When true, Nix will not attempt to download anything. Useful
-          for air-gapped environments or testing.
-
-          **Note**: Requires all sources to be pre-fetched or in store.
+          Required sources must already be available locally. Missing inputs
+          cannot be obtained from substitutes or remote builders. This option
+          is not an OS network firewall: isolate fixed-output derivations at
+          the host boundary when a complete network prohibition is required.
+          Builder API communication and cache publication are not disabled.
         '';
       };
 
@@ -1126,24 +1179,20 @@ in {
           How the builder obtains the flake source for
           `source_re_evaluate_verified` builds.
 
-          - `server_bundled_archive` (recommended default): the server packages
-            the top-level flake repository as a gzipped tar archive (from its
-            own bare Git mirror) and serves it via an authenticated API
-            endpoint. The builder downloads, verifies the SHA-256 digest, and
-            extracts to a job-scoped directory. The builder does not need Git
-            credentials or direct access to the Git remote. Each job uses an
-            isolated directory so concurrent builds for the same repository do
-            not interfere.
+          - `server_bundled_archive` (required for evaluator contract version
+            1): the server publishes one canonical tracked-tree tar artifact
+            during authoritative evaluation. The builder downloads the exact
+            bytes through an authenticated endpoint, verifies the authorized size
+            and SHA-256 digest, and extracts them to a job-scoped directory.
+            Contract version 1 accepts 40-character SHA-1 Git object IDs and
+            rejects SHA-256 Git object IDs before mirror initialization.
 
             Note: only the top-level repository is bundled. Locked flake inputs
             (nixpkgs, etc.) must be reachable via Nix substituters or already
             present in the builder's Nix store.
 
-          - `local_git_worktree`: the builder maintains its own bare Git mirror.
-            It clones on first use and fetches when the authorized commit is
-            absent. The builder needs network access and credentials for the
-            repository URL. Colocated server/builder deployments may share the
-            same mirror root.
+          - `local_git_worktree`: reserved for a future evaluator contract. The
+            server rejects this mode before a version-1 job is claimed.
 
           This option is written to the server config and controls what the
           server sends in job manifests. Ignored when
@@ -1155,13 +1204,14 @@ in {
         type = lib.types.path;
         default = "/var/lib/crystal-forge/source-archives";
         description = lib.mdDoc ''
-          Root directory on the **server** where bare Git mirrors and per-job
-          source archives are stored for `server_bundled_archive` delivery.
+          Root directory on the server where canonical source publication data
+          is stored for `server_bundled_archive` delivery.
 
           Layout under this directory:
-          - `mirrors/<mirror_id>.git` — shared bare Git mirror per repository
-          - `archives/jobs/<job_id>.tar.gz` — per-job source archive
-            (created at job-claim time, deleted on job complete/fail)
+          - `mirrors/<mirror_id>.git`: shared bare Git mirror per repository
+          - `artifacts/<mirror_id>/<commit>.tar`: immutable tracked-tree bytes
+          - `identities/<mirror_id>/<commit>.json`: published artifact identity
+          - `locks/<mirror_id>.lock`: cross-process publication lock
 
           Must be writable by the Crystal Forge server process. Only relevant
           when `source_delivery_mode = "server_bundled_archive"`.
@@ -1198,15 +1248,33 @@ in {
 
       allow_import_from_derivation = lib.mkOption {
         type = lib.types.bool;
-        default = false;
+        default = true;
         description = lib.mdDoc ''
           Allow builder-side verified source re-evaluation to run Nix
           import-from-derivation (IFD) during `nix eval`.
 
-          The default is `false` so remote builders do not perform
-          evaluation-time builds unless the operator explicitly opts in. Set to
-          `true` only for flakes whose NixOS configurations require IFD during
-          evaluation, such as generated package metadata or domain lists.
+          Evaluator contract version 1 requires this value to be `true` on both
+          the authoritative server and builder. Disable verified-source support
+          before setting this option to `false`.
+        '';
+      };
+
+      cve_scanning_enabled = lib.mkOption {
+        type = lib.types.bool;
+        default = true;
+        description = lib.mdDoc ''
+          Advertise structured CVE scan support from the existing Crystal Forge
+          builder service.
+
+          The option defaults to `true` when `build.enable` starts the builder.
+          Set it to `false` to keep build execution enabled while making the
+          builder ineligible for CVE scan leases. Scans use one fixed concurrent
+          slot. A post-build scan and cache push can run concurrently, but the
+          builder does not claim another build until both outcomes settle. Scan
+          failure does not change a successful build outcome.
+
+          This option does not create a second service. The existing builder
+          service keeps `vulnix` in its `PATH`.
         '';
       };
     };
@@ -1373,7 +1441,13 @@ in {
       deployment_poll_interval = lib.mkOption {
         type = lib.types.str;
         default = "15m";
-        description = "Interval between deployment polling checks";
+        description = lib.mdDoc ''
+          Interval between deployment polling checks, as a human duration such
+          as "15m" or "1h 30m". The duration must resolve to nonnegative whole
+          seconds. The agent also accepts integer seconds in TOML for deployed
+          configuration compatibility and serializes this interval as integer
+          seconds. Invalid, overflowing, and fractional-second values are rejected.
+        '';
       };
       post_agent_start_deployment_delay = lib.mkOption {
         type = lib.types.ints.unsigned;
@@ -1535,6 +1609,24 @@ in {
 
     server = {
       enable = lib.mkEnableOption "Crystal Forge Server";
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = pkgs.crystal-forge.default.cf-server-drv;
+        defaultText = lib.literalExpression "pkgs.crystal-forge.default.cf-server-drv";
+        description = lib.mdDoc ''
+          Package providing the `server`, `hardening-worker`, and
+          `config-inspector-worker` binaries.
+
+          The default is the production server, which embeds the web UI and
+          therefore depends on the web UI build.
+
+          Set this to `pkgs.crystal-forge.default.cf-server-core-drv` for a
+          deployment or test that does not serve the browser UI. The core
+          build has no web UI input, so a web UI change does not rebuild it.
+          A core build answers a UI route with 404 Not Found; API routes are
+          unaffected.
+        '';
+      };
       host = lib.mkOption {
         type = lib.types.str;
         default = "127.0.0.1";
@@ -1675,11 +1767,12 @@ in {
         };
       };
       eval_workers = lib.mkOption {
-        type = lib.types.int;
+        type = lib.types.ints.unsigned;
         default = 2;
         description = lib.mdDoc ''
           Number of worker threads for nix-eval-jobs parallel evaluation.
-          Set to 0 to automatically use the number of CPU cores available.
+          Set to 0 for Crystal Forge to resolve Rust available_parallelism
+          explicitly before starting nix-eval-jobs.
 
           This controls how many systems can be evaluated concurrently
           when processing flake commits.
@@ -1687,18 +1780,79 @@ in {
       };
 
       eval_max_memory_mb = lib.mkOption {
-        type = lib.types.int;
+        type = lib.types.nullOr lib.types.ints.positive;
+        default = null;
+        description = lib.mdDoc ''
+          Per-worker memory threshold in MiB (despite the historical _mb name).
+          An explicit value is passed unchanged, including 12288. Null omits
+          the TOML field and selects Crystal Forge's automatic budget.
+
+          Automatic sizing uses the minimum of physical memory and independently
+          detected finite memory.high and memory.max across visible cgroup
+          ancestors, not fluctuating MemAvailable. memory.high is a reclaim and
+          throttling boundary, not an OOM-kill limit. Numeric zero is finite.
+          It divides
+          min(floor(effective MiB * eval_memory_max_percent / 100),
+          effective MiB - eval_memory_reserve_mb) by the resolved worker count.
+          Insufficient headroom is an error rather than a silent fallback.
+
+          The pinned nix-eval-jobs 2.34.3 checks each worker's RSS after a job
+          and restarts an oversized worker. A job can exceed this threshold;
+          it is not a hard memory limit. Later nix-eval-jobs versions use a
+          distinct aggregate workers * max-memory-size scheduler budget.
+          Service-cgroup limits provide hard containment independently.
+        '';
+      };
+
+      eval_memory_reserve_mb = lib.mkOption {
+        type = lib.types.ints.positive;
         default = 4096;
         description = lib.mdDoc ''
-          Worker restart threshold in MB for nix-eval-jobs.
+          Headroom reserved in MiB from stable effective memory for automatic
+          evaluator sizing. The reserve must be positive and leave room for
+          the resolved workers. An explicit eval_max_memory_mb bypasses sizing.
+        '';
+      };
 
-          nix-eval-jobs checks this threshold after evaluating an attribute and
-          then restarts an oversized worker. It is not a hard memory limit and
-          a worker can temporarily exceed it while evaluating an attribute.
-          Default is 4096 MB (4 GB) per worker. Use the server systemd memory
-          options for hard service-cgroup containment.
+      eval_memory_max_percent = lib.mkOption {
+        type = lib.types.ints.between 1 100;
+        default = 85;
+        description = lib.mdDoc ''
+          Maximum percentage of stable effective memory for automatic evaluator
+          sizing, from 1 through 100 inclusive. Crystal Forge uses the smaller
+          of the floored percentage budget and the reserve-subtracted budget,
+          then divides by the resolved worker count.
+        '';
+      };
 
-          Adjust based on available system memory and the number of workers.
+      eval_output_idle_timeout_secs = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 900;
+        description = lib.mdDoc ''
+          Maximum seconds without evaluator output before cancellation.
+          Output resets this idle clock. The independent absolute deadline
+          remains active even when the evaluator continues producing output.
+        '';
+      };
+
+      eval_overall_timeout_secs = lib.mkOption {
+        type = lib.types.ints.positive;
+        default = 3600;
+        description = lib.mdDoc ''
+          Absolute evaluator deadline in seconds from process start.
+          Output does not reset this clock. The output-idle deadline can
+          cancel evaluation earlier and is configured independently.
+        '';
+      };
+
+      eval_discovery_timeout_secs = lib.mkOption {
+        type = lib.types.ints.between 1 1800;
+        default = 300;
+        description = lib.mdDoc ''
+          Absolute configuration-discovery deadline in seconds, from 1 through
+          1800 inclusive. The default allows cold locked-input downloads.
+          This deadline is independent of realization and bulk evaluator
+          deadlines. Output does not reset this clock.
         '';
       };
 
@@ -1715,25 +1869,45 @@ in {
         '';
       };
 
-      # IMPORTANT: Keep this false (the default) on memory-constrained hosts.
-      # Setting it to true caused a production OOM on 2026-07-28: every
-      # finalized system re-enqueued the entire commit's derivation set, and
-      # each inserted row immediately spawned a full `nix eval` subprocess.
-      # Nine concurrent hardening evaluators overlapped one bulk nix-eval-jobs
-      # run, driving the server cgroup to 58.5 GiB / 1.9 GiB swap with 0 B
-      # available and the API unresponsive.
+      # Automatic admission is now tied to successful NixOS builds, not to
+      # commit evaluation, and admission is a single database insert that never
+      # spawns a subprocess. The default stays false so upgrading a deployment
+      # never changes its workload on its own.
+      #
+      # The historical reason for the false default was a production OOM on
+      # 2026-07-28 under the old evaluation-time design: every finalized system
+      # re-enqueued the entire commit's derivation set, and each inserted row
+      # immediately spawned a full `nix eval` subprocess. Nine concurrent
+      # hardening evaluators overlapped one bulk nix-eval-jobs run, driving the
+      # server cgroup to 58.5 GiB / 1.9 GiB swap with 0 B available and the API
+      # unresponsive.
       #
       # When false, the crystal-forge-hardening worker still runs and processes
-      # scans queued via the manual API endpoint — only automatic post-commit
-      # enqueueing is suppressed.
+      # scans queued through the manual API endpoint. Only automatic admission
+      # and the bounded backfill are suppressed.
       auto_hardening_scans = lib.mkOption {
         type = lib.types.bool;
         default = false;
         description = lib.mdDoc ''
-          Automatically enqueue systemd hardening scans after successful commit
-          evaluation. Disabled by default because each scan performs an
-          expensive full NixOS evaluation. Manual scan requests remain
-          available when this option is disabled.
+          Automatically admit a systemd hardening scan when an exact NixOS
+          configuration finishes building successfully, and let the hardening
+          worker run a small bounded backfill for already built configurations
+          that have no hardening evidence.
+
+          Admission is one idempotent database insert inside the build-success
+          transaction. It never starts an evaluation. Failed builds, cancelled
+          builds, non-NixOS derivations, and configurations that were evaluated
+          but never built admit nothing.
+
+          Disabled by default so that upgrading does not change the workload of
+          a running deployment. Enabling it is recommended when you want
+          continuous hardening evidence: scan volume tracks real builds, the
+          single serial worker and the shared heavy-Nix lock keep hardening to
+          one evaluation at a time, and the backfill is limited to a small fixed
+          batch per cycle. The cost of enabling it is queue depth and scan
+          latency, not concurrent memory use.
+
+          Manual scan requests remain available when this option is disabled.
         '';
       };
 
@@ -1749,26 +1923,60 @@ in {
         '';
       };
 
+      attic_metrics_endpoints = lib.mkOption {
+        type = lib.types.listOf (lib.types.submodule {
+          options = {
+            destination_id = lib.mkOption {
+              type = lib.types.int;
+              description = "Explicit Crystal Forge Attic destination database ID.";
+            };
+            url = lib.mkOption {
+              type = lib.types.str;
+              description = "HTTPS inventory adapter base with optional path prefix; no userinfo, query or fragment.";
+            };
+            token_file = lib.mkOption {
+              type = lib.types.str;
+              description = "Absolute non-store runtime token file owned by the server user, with no group/other permissions and no symlink.";
+            };
+          };
+        });
+        default = [];
+        example = [{
+          destination_id = 42;
+          url = "https://metrics.example/prefix/";
+          token_file = "/run/credentials/crystal-forge/attic-metrics";
+        }];
+        description = lib.mdDoc ''
+          Explicit destination-ID bindings for Admin-only Attic inventory
+          observations. Empty by default, so Attic totals remain unsupported.
+          Uses a separate adapter token, never an Attic upload credential.
+          Duplicate IDs or invalid entries fail closed on metrics requests.
+          HTTPS targets use the existing cache-test private-target policy.
+        '';
+      };
+
       trust_forwarded_builder_https = lib.mkOption {
         type = lib.types.bool;
         default = false;
         description = lib.mdDoc ''
-          Trust the `X-Forwarded-Proto: https` / `Forwarded: proto=https`
-          headers set by a reverse proxy when sending cache-push credentials
-          to remote builders.
+          Permit forwarded HTTPS verification for builder cache-push secrets
+          and private agent cache-read credentials. Verification requires the
+          actual direct socket peer to match `trustedProxyCidrs` and exactly
+          one `X-Forwarded-Proto` header with the value `https`. `Forwarded`
+          and protocol lists do not establish verified HTTPS.
 
-          When `false` (the default), the server refuses to send any
-          credential-bearing cache-push config to builders and returns
-          `426 Upgrade Required`, regardless of forwarded-proto headers.
+          When `false` (the default), forwarded headers cannot authorize secret
+          delivery. Builder requests that require secrets return
+          a transient `dispatch:cache_config` failure and HTTP 404 (no work for
+          that poll); unverified private agent delivery is withheld.
 
-          **Only set this to `true` when your reverse proxy unconditionally
-          strips and re-sets these headers itself.** Builders that can reach
-          the server directly over plaintext HTTP could otherwise spoof the
-          header and receive real cache credentials.
-
-          Typical deployment: set this to `true` when Crystal Forge is behind
-          an HTTPS-terminating reverse proxy (e.g. nginx, Caddy) that you
-          control, and builders only reach the server through that proxy.
+          Enable only behind a controlled HTTPS-terminating proxy that strips
+          incoming `X-Forwarded-Proto` and sets one value itself. An enabled
+          server requires an explicit nonempty `trustedProxyCidrs` list.
+          Allow only narrow CIDRs for the proxy's direct backend socket peer,
+          not builder or client addresses. Same-host loopback connections can
+          use `127.0.0.1/32` and `::1/128`; remote proxies require their actual
+          peer IP as `/32` or `/128`. No proxy CIDRs are added automatically.
         '';
       };
 
@@ -1890,11 +2098,19 @@ in {
         type = lib.types.listOf lib.types.str;
         default = [];
         description = lib.mdDoc ''
-          CIDR ranges of trusted reverse proxies. X-Forwarded-For is used only
-          when the direct peer is in one of these ranges; otherwise the direct
-          peer address is recorded for active sessions.
+          Explicit CIDRs for trusted reverse proxies' direct socket peers.
+          Active-session address recording uses `X-Forwarded-For` only when
+          the direct peer matches; otherwise it records the direct peer.
+
+          Builder secret delivery and private agent cache-read delivery also
+          require a matching direct peer, `trust_forwarded_builder_https`, and
+          exactly one `X-Forwarded-Proto: https` header. A nonempty list alone
+          does not authorize secret delivery. Missing or unmatched peers fail
+          closed. Use narrow proxy peer `/32` or `/128` CIDRs, not builder or
+          client IPs or broad network ranges. Loopback examples apply only when
+          the proxy connects to the backend over same-host loopback.
         '';
-        example = [ "127.0.0.1/32" "10.0.0.0/8" ];
+        example = ["127.0.0.1/32" "::1/128"];
       };
 
       role_mapping = lib.mkOption {
@@ -1964,6 +2180,14 @@ in {
 
     client = {
       enable = lib.mkEnableOption "Crystal Forge Agent";
+      package = lib.mkOption {
+        type = lib.types.package;
+        default = pkgs.crystal-forge.default.cf-agent-drv;
+        defaultText = lib.literalExpression "pkgs.crystal-forge.default.cf-agent-drv";
+        description = lib.mdDoc ''
+          Package providing the `agent` binary.
+        '';
+      };
       server_host = lib.mkOption {
         type = lib.types.str;
         default = "127.0.0.1";
@@ -2012,6 +2236,12 @@ in {
 
     users.groups.crystal-forge = {};
 
+    # SECURITY: Manage only these named directories, never their descendants.
+    # Credentials can have caller-managed ownership and restrictive modes,
+    # including secret-manager symlinks. Recursive Z/chmod/chown would expose
+    # private files and make OpenSSH reject otherwise valid cache identities.
+    # The generated config and default generated keys have explicit file
+    # lifecycles in makeConfigScript; caller-provided keys are not normalized.
     systemd.tmpfiles.rules = [
       "d /var/lib/crystal-forge 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.cache 0755 crystal-forge crystal-forge -"
@@ -2027,13 +2257,14 @@ in {
       "d /var/lib/crystal-forge/.local 0755 crystal-forge crystal-forge -"
       "d /var/lib/crystal-forge/.local/share 0755 crystal-forge crystal-forge -"
       "d /var/cache/crystal-forge/gc-roots 0755 crystal-forge crystal-forge -" # <-- ADD THIS
-      "Z /var/lib/crystal-forge/ 0755 crystal-forge crystal-forge -"
-    ];
+    ] ++ lib.optional cfg.server.enable
+      "d ${toString cfg.build.source_archive_root} 0750 crystal-forge crystal-forge -";
 
     # Aggregate resource boundary that caps the combined memory of the API
-    # server, the hardening worker, and all their Nix subprocess descendants.
-    # crystal-forge-server.service and crystal-forge-hardening.service must
-    # both set Slice = "crystal-forge.slice" to be covered by this boundary.
+    # server, the hardening worker, the Config Inspector worker, and all their
+    # Nix subprocess descendants. crystal-forge-server.service attaches
+    # directly. crystal-forge-hardening.service and
+    # crystal-forge-config-inspector.service attach through nested slices.
     systemd.slices.crystal-forge = lib.mkIf cfg.server.enable {
       description = "Crystal Forge aggregate resource boundary";
       sliceConfig = {
@@ -2049,14 +2280,18 @@ in {
     # so the LEFTMOST prefix segments determine ancestry:
     #
     #   crystal-forge-hardening.slice
-    #       → parent: crystal-forge.slice   ✓  (what we want)
+    #       → parent: crystal-forge.slice   ✓
+    #
+    #   crystal-forge-config-inspector.slice
+    #       → parent: crystal-forge-config.slice
+    #       → ancestor: crystal-forge.slice ✓
     #
     #   hardening-crystal-forge.slice
     #       → parent: hardening.slice       ✗  (root level, NOT under crystal-forge)
     #
-    # IMPORTANT: The slice attribute name and the Slice= assignment in
-    # crystal-forge-hardening.service MUST both use "crystal-forge-hardening"
-    # to achieve nesting under crystal-forge.slice.  Do not swap the words.
+    # IMPORTANT: Each slice attribute name and its service Slice= assignment
+    # MUST use the same "crystal-forge-*" name to achieve nesting under
+    # crystal-forge.slice. Do not swap the words.
     systemd.slices.crystal-forge-hardening = lib.mkIf (cfg.server.enable && cfg.hardening.enable) {
       description = "Crystal Forge hardening worker resource boundary";
       sliceConfig = {
@@ -2065,6 +2300,17 @@ in {
         MemorySwapMax = cfg.hardening.systemd_memory_swap_max;
         CPUQuota = toString cfg.hardening.systemd_cpu_quota + "%";
         TasksMax = cfg.hardening.systemd_tasks_max;
+      };
+    };
+
+    systemd.slices.crystal-forge-config-inspector = lib.mkIf cfg.server.enable {
+      description = "Crystal Forge Config Inspector resource boundary";
+      sliceConfig = {
+        MemoryHigh = "8G";
+        MemoryMax = "12G";
+        MemorySwapMax = "512M";
+        CPUQuota = "200%";
+        TasksMax = 512;
       };
     };
 
@@ -2401,7 +2647,8 @@ in {
 
       path = with pkgs;
         [
-          nix
+          evaluatorNix
+          pkgs.crystal-forge.default.niks3
           git
           gnutar
           gzip
@@ -2437,6 +2684,8 @@ in {
             then toString cfg.build.api_key_file
             else "/var/lib/crystal-forge/builder-api.key";
           CRYSTAL_FORGE__BUILDER__SERVER_URL = cfg.build.server_url;
+          CRYSTAL_FORGE__BUILDER__CVE_SCANNING_ENABLED =
+            lib.boolToString cfg.build.cve_scanning_enabled;
         })
         # Add Attic-specific environment variables if using Attic cache
         (lib.mkIf (cfg.cache.cache_type == "Attic") {
@@ -2457,12 +2706,8 @@ in {
         ${configScriptBuilder}
         mkdir -p /var/lib/crystal-forge/.config/attic
 
-        # Ensure proper ownership - do this AFTER creating all directories
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.cache
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config
-        # Ensure proper permissions
-        chmod -R 755 /var/lib/crystal-forge/.cache
-        chmod -R 755 /var/lib/crystal-forge/.config
+        # tmpfiles owns directory setup. Preserve descendant credential modes
+        # and ownership, including files managed by an external secret manager.
 
         # Source the attic environment if it exists
         if [ -f ${cfg.env-file} ]; then
@@ -2604,6 +2849,63 @@ in {
       };
     };
 
+    systemd.services.crystal-forge-config-inspector = lib.mkIf cfg.server.enable {
+      description = "Crystal Forge Config Inspector Worker";
+      wantedBy = ["multi-user.target"];
+      after = ["crystal-forge-server.service"] ++ lib.optional cfg.local-database "postgresql.service";
+      wants = ["crystal-forge-server.service"] ++ lib.optional cfg.local-database "postgresql.service";
+      startLimitIntervalSec = 300;
+      startLimitBurst = 2;
+
+      path = with pkgs; [evaluatorNix nix-eval-jobs git openssh coreutils];
+      environment = {
+        RUST_LOG = cfg.log_level;
+        TZDIR = "${pkgs.tzdata}/share/zoneinfo";
+        LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";
+        NIX_REMOTE = "daemon";
+        HOME = "/var/lib/crystal-forge";
+        XDG_CONFIG_HOME = "/var/lib/crystal-forge/.config";
+        NIX_REGISTRY = "/dev/null";
+        NIX_CONFIG_DIR = "/dev/null";
+        NIX_USER_CONF_FILES = "/dev/null";
+        NIX_CONFIG = ''
+          experimental-features = nix-command flakes
+          flake-registry =
+        '';
+        GIT_SSH_COMMAND = "ssh -i /var/lib/crystal-forge/.ssh/id_ed25519 -o UserKnownHostsFile=/var/lib/crystal-forge/.ssh/known_hosts -o StrictHostKeyChecking=yes";
+        NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
+      };
+
+      preStart = ''
+        mkdir -p /run/crystal-forge
+        ${configScriptServer}
+      '';
+      serviceConfig = {
+        Type = "exec";
+        ExecStart = configInspectorWorkerScript;
+        User = "crystal-forge";
+        Group = "crystal-forge";
+        WorkingDirectory = "/var/lib/crystal-forge";
+        # The dash hierarchy nests this slice under crystal-forge.slice.
+        Slice = "crystal-forge-config-inspector.slice";
+        EnvironmentFile = ["-${cfg.env-file}"];
+        # Kill nix-eval-jobs and all descendants when the service stops or OOMs.
+        KillMode = "control-group";
+        # Stop the complete service if the kernel OOM-kills a cgroup process.
+        OOMPolicy = "stop";
+        Restart = "on-failure";
+        RestartSec = 30;
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ProtectHome = true;
+        ReadWritePaths = ["/var/lib/crystal-forge" "/var/cache/crystal-forge-nix"];
+        ProtectKernelTunables = true;
+        ProtectKernelModules = true;
+        ProtectControlGroups = true;
+      };
+    };
+
     systemd.services.crystal-forge-server = lib.mkIf cfg.server.enable {
       description = "Crystal Forge Server";
       wantedBy = ["multi-user.target"];
@@ -2611,7 +2913,8 @@ in {
       wants = lib.optional cfg.local-database "postgresql.service";
 
       path = with pkgs; [
-        nix
+        evaluatorNix
+        pkgs.crystal-forge.default.niks3
         git
         openssh
         nix-fast-build
@@ -2633,6 +2936,9 @@ in {
         {
           # Core runtime
           RUST_LOG = cfg.log_level;
+          # Keep this in both supported modes: cf-config uses it when loading
+          # `server.auth_mode`, and several auth route gates read it directly.
+          AUTH_MODE = cfg.server.auth_mode;
           TZDIR = "${pkgs.tzdata}/share/zoneinfo";
           LOCALE_ARCHIVE = "${pkgs.glibcLocales}/lib/locale/locale-archive";
 
@@ -2660,7 +2966,6 @@ in {
           NIX_USER_CACHE_DIR = "/var/cache/crystal-forge-nix";
         }
         // lib.optionalAttrs (cfg.server.auth_mode == "oidc") ({
-            AUTH_MODE = "oidc";
             CRYSTAL_FORGE_OIDC_ISSUER_URL = cfg.server.oidc.issuerUrl;
             CRYSTAL_FORGE_OIDC_CLIENT_ID = cfg.server.oidc.clientId;
             CRYSTAL_FORGE_OIDC_REDIRECT_URI = cfg.server.oidc.redirectUri;
@@ -2698,10 +3003,7 @@ in {
         mkdir -p /run/crystal-forge
         ${configScriptServer}
         mkdir -p /var/lib/crystal-forge/.config/attic
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.cache
-        chown -R crystal-forge:crystal-forge /var/lib/crystal-forge/.config
-        chmod -R 755 /var/lib/crystal-forge/.cache
-        chmod -R 755 /var/lib/crystal-forge/.config
+        # tmpfiles owns directory setup; do not rewrite descendant credentials.
       '';
 
       serviceConfig = {
@@ -2728,6 +3030,7 @@ in {
         # Read/write permissions
         ReadWritePaths = [
           "/var/lib/crystal-forge"
+          (toString cfg.build.source_archive_root)
           "/var/lib/crystal-forge/.cache"
           "/tmp"
           "/run/crystal-forge"
@@ -2779,6 +3082,7 @@ in {
       after = lib.optional cfg.server.enable "crystal-forge-server.service";
 
       path = with pkgs; [
+        evaluatorNix
         nix-eval-jobs
         nix-fast-build
         coreutils
@@ -2797,7 +3101,6 @@ in {
         gnugrep
         findutils
         vulnix
-        nix
         nixos-rebuild
         git
       ];
@@ -2866,6 +3169,15 @@ in {
 
     assertions = [
       {
+        # SECURITY: This list identifies the proxy's direct backend peer.
+        # The enclosing cfg.enable gate and server.enable scope exclude
+        # inactive servers; runtime verification still checks the actual peer.
+        assertion =
+          (cfg.server.enable && cfg.server.trust_forwarded_builder_https)
+          -> cfg.server.trustedProxyCidrs != [];
+        message = "services.crystal-forge.server.trust_forwarded_builder_https requires nonempty services.crystal-forge.server.trustedProxyCidrs when services.crystal-forge.enable and services.crystal-forge.server.enable are true. Set narrow CIDRs for the reverse proxy's direct backend socket peer (Traefik peer IP /32 or /128), not builder/client IPs; no automatic or broad CIDR fallback is provided.";
+      }
+      {
         assertion = cfg.client.enable -> (cfg.client.private_key != null);
         message = "Crystal Forge client requires a private key file";
       }
@@ -2882,6 +3194,29 @@ in {
           on first start unless `services.crystal-forge.build.api_key_file` is
           set. Register the generated public key in the Crystal Forge UI.
         '';
+      }
+      {
+        assertion =
+          !(lib.elem "source_re_evaluate_verified" cfg.build.supported_execution_strategies)
+          || cfg.build.allow_import_from_derivation;
+        message = "Verified-source evaluator contract version 1 requires allow_import_from_derivation = true";
+      }
+      {
+        assertion =
+          !(cfg.server.enable && cfg.build.enable)
+          || lib.elem cfg.build.remote_execution_strategy cfg.build.supported_execution_strategies;
+        message = ''
+          A colocated Crystal Forge builder must support the server's configured
+          remote execution strategy. Add
+          services.crystal-forge.build.remote_execution_strategy to
+          services.crystal-forge.build.supported_execution_strategies.
+        '';
+      }
+      {
+        assertion =
+          cfg.build.remote_execution_strategy != "source_re_evaluate_verified"
+          || cfg.build.source_delivery_mode == "server_bundled_archive";
+        message = "Verified-source evaluator contract version 1 requires source_delivery_mode = server_bundled_archive";
       }
       {
         assertion =

@@ -114,6 +114,38 @@ const MATCH_PENDING_DEPLOYMENT_SQL: &str = r#"
         FOR UPDATE
         "#;
 
+const MATCH_REPORTED_DEPLOYMENT_SQL: &str = r#"
+        SELECT
+            id,
+            system_id,
+            target_store_path,
+            status,
+            source,
+            issued_at,
+            expires_at,
+            delivered_at,
+            applying_at,
+            completed_at,
+            failed_at,
+            failure_message
+        FROM pending_system_deployments deployment
+        WHERE deployment.id = (
+              SELECT candidate.id
+              FROM pending_system_deployments candidate
+              WHERE candidate.system_id = $1
+                AND candidate.target_store_path = $2
+                AND candidate.issued_at <= $3
+              ORDER BY candidate.issued_at DESC, candidate.id DESC
+              LIMIT 1
+          )
+          AND (
+              (status = 'pending' AND expires_at > NOW())
+              OR (status = 'expired'
+                  AND completed_at > NOW() - INTERVAL '24 hours')
+          )
+        FOR UPDATE
+        "#;
+
 pub fn deployment_progress_stage(
     status: &str,
     expires_at: DateTime<Utc>,
@@ -157,6 +189,17 @@ fn meaningful_generation_or_store_changed(
     };
 
     store_changed || generation_changed
+}
+
+pub(crate) async fn find_system_id_by_hostname_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    hostname: &str,
+) -> Result<Option<Uuid>> {
+    sqlx::query_scalar("SELECT id FROM systems WHERE hostname = $1")
+        .bind(hostname)
+        .fetch_optional(&mut **tx)
+        .await
+        .map_err(Into::into)
 }
 
 pub async fn lock_observed_system_state_by_hostname_tx(
@@ -588,6 +631,26 @@ async fn find_matching_pending_deployment_tx(
     Ok(row)
 }
 
+async fn find_matching_reported_deployment_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+    store_path: Option<&str>,
+    observed_at: DateTime<Utc>,
+) -> Result<Option<PendingSystemDeployment>> {
+    let Some(store_path) = store_path else {
+        return Ok(None);
+    };
+
+    let row = sqlx::query_as::<_, PendingSystemDeployment>(MATCH_REPORTED_DEPLOYMENT_SQL)
+        .bind(system_id)
+        .bind(store_path)
+        .bind(observed_at)
+        .fetch_optional(&mut **tx)
+        .await?;
+
+    Ok(row)
+}
+
 async fn mark_pending_deployment_succeeded_tx(
     tx: &mut Transaction<'_, Postgres>,
     deployment_id: Uuid,
@@ -703,10 +766,11 @@ pub async fn record_report_events_tx(
     }
 
     if generation_or_store_changed {
-        let pending = find_matching_pending_deployment_tx(
+        let pending = find_matching_reported_deployment_tx(
             tx,
             previous.system_id,
             payload.store_path.as_deref(),
+            occurred_at,
         )
         .await?;
 
@@ -871,10 +935,12 @@ mod tests {
     }
 
     #[test]
-    fn matching_pending_deployment_sql_excludes_succeeded_contexts() {
+    fn matching_reported_deployment_sql_accepts_only_live_or_recently_expired_contexts() {
         assert!(MATCH_PENDING_DEPLOYMENT_SQL.contains("status = 'pending'"));
-        assert!(!MATCH_PENDING_DEPLOYMENT_SQL.contains("succeeded"));
-        assert!(!MATCH_PENDING_DEPLOYMENT_SQL.contains("status IN"));
+        assert!(MATCH_REPORTED_DEPLOYMENT_SQL.contains("status = 'expired'"));
+        assert!(!MATCH_REPORTED_DEPLOYMENT_SQL.contains("succeeded"));
+        assert!(!MATCH_REPORTED_DEPLOYMENT_SQL.contains("status = 'failed'"));
+        assert!(!MATCH_REPORTED_DEPLOYMENT_SQL.contains("status = 'superseded'"));
     }
 
     #[test]

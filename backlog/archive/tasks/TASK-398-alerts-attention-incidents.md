@@ -72,24 +72,27 @@ Replace mutable category snapshots and browser-only row dismissals with one serv
 
 For every supported category:
 
-```text
-new underlying incident
-    -> stable occurrence is opened
-    -> eligible to alert for 24 hours
-    -> sidebar and relevant tab/row may show attention
-
-user acknowledges/dismisses occurrence
-    -> server records per-user dismissal
-    -> exact occurrence disappears immediately
-    -> exact occurrence never returns for that user
-
-incident remains unresolved past 24 hours
-    -> it may remain visible as ordinary status/history
-    -> it no longer contributes red attention or sidebar count
-
-incident resolves, then recurs
-    -> a new occurrence ID is opened
-    -> it may alert for a fresh 24-hour window
+```mermaid
+%% diagram-id: backlog-task-398-occurrence-lifecycle
+flowchart TD
+    subgraph New["New incident"]
+        N1["New underlying incident"] --> N2["Stable occurrence is opened"]
+        N2 --> N3["Eligible to alert for 24 hours"]
+        N3 --> N4["Sidebar and relevant tab or row may show attention"]
+    end
+    subgraph Dismiss["User dismisses"]
+        D1["User acknowledges or dismisses occurrence"] --> D2["Server records per-user dismissal"]
+        D2 --> D3["Exact occurrence disappears immediately"]
+        D3 --> D4["Exact occurrence never returns for that user"]
+    end
+    subgraph Aged["Unresolved past 24 hours"]
+        A1["Incident remains unresolved past 24 hours"] --> A2["May remain visible as ordinary status or history"]
+        A2 --> A3["No longer contributes red attention or sidebar count"]
+    end
+    subgraph Recur["Resolves then recurs"]
+        R1["Incident resolves, then recurs"] --> R2["A new occurrence ID is opened"]
+        R2 --> R3["May alert for a fresh 24-hour window"]
+    end
 ```
 
 Historical failed builds and evaluations remain queryable and visibly failed in their tables. Historical data must not keep a sidebar badge or tab red.

@@ -2,6 +2,16 @@
 
 This file governs work performed by automated agents in this repository. Follow higher-priority platform and safety instructions first. When this file, an active task, and a user request disagree, stop before making changes and ask the user to resolve any conflict that materially affects scope or behavior.
 
+## Standing live-preview requirement
+
+For implementation that changes browser-visible behavior, the task owner MUST start a persistent live preview from the task worktree before UI edits. Give the user the verified browser URL as soon as the application is usable. Keep the preview current during implementation and available at handoff. Do not wait for a commit, an MR, deployment, or the full Web UI suite before showing the work.
+
+Read [docs/agent/live-preview.md](docs/agent/live-preview.md) before starting this workflow. It defines startup, process ownership, database isolation, backend restarts, stylesheet updates, and preview reporting. Use the existing Nix/Dioxus tooling. This requirement does not change branches, worktrees, task states, merge approval, or final verification.
+
+Use a task-owned preview database. The user's long-running development instance is valuable persistent data, not a disposable preview target. Do not point experimental servers, fixture seeding, migrations, or destructive tests at it. A local address, a development label, or an available backup does not grant permission.
+
+The task owner also owns the preview when work is delegated. Subagents must use that owner's preview arrangement or a separate verified environment. They must not start competing default-port stacks. If startup is blocked, report the exact blocker promptly. Continue bounded startup repair or independent non-UI work, not an entire unpreviewed UI implementation without the user's explicit exception.
+
 ## Start by classifying the request
 
 | Request                         | Backlog task                                      | Dedicated worktree | Repository writes                       |
@@ -27,6 +37,8 @@ Do not change files, backlog state, branches, or merge requests for a read-only 
 9. Do not merge an MR unless the user explicitly authorizes it.
 10. Ask before making a decision that materially changes public behavior, compatibility, persistence, security boundaries, architecture, or task scope.
 11. Don't rely on utilities to be installed like python or glab.. just use `nix run nixpkgs#glab` for these type of things
+12. Treat source documentation as part of correctness. A behavior change is incomplete when its affected contracts, invariants, rationale, failure behavior, or other required documentation are stale or missing.
+13. Keep a verified live preview available while implementing browser-visible changes. Follow [docs/agent/live-preview.md](docs/agent/live-preview.md); do not substitute screenshots or a finished MR for early interactive feedback.
 
 ## Repository architecture
 
@@ -45,6 +57,45 @@ Preserve these boundaries:
 - Design documents named by an active task are authoritative for that task. Existing behavior and tests are evidence, but do not silently override an explicit design requirement.
 
 Avoid arbitrary abstractions. Introduce a trait, shared component, or new layer only when it expresses a real boundary, enables needed testing, or matches an established repository pattern. Do not refactor solely to satisfy a line-count target.
+
+## Simplicity and minimal implementation
+
+Simplicity is a primary design requirement. Agents MUST implement the least complex complete solution that meets the acceptance criteria. Correctness, security, data integrity, and required behavior take priority. Unnecessary complexity is a defect, even when the implementation works.
+
+### Implementation rules
+
+- **Prefer the simplest working solution.** Reuse existing code, tools, patterns, and infrastructure before introducing new mechanisms.
+- **Minimize changes.** Change only what the task requires. Do not refactor unrelated code or expand the task to solve hypothetical problems.
+- **Do not overengineer.** Do not add frameworks, abstraction layers, wrappers, factories, adapters, state machines, orchestration, or configuration options without a concrete requirement.
+- **Do not design for hypothetical futures.** Solve the current problem. Do not add extensibility, compatibility paths, fallback mechanisms, or generalized infrastructure for scenarios that the task does not require.
+- **Prefer deletion over addition.** Remove obsolete or redundant code when it is safe and within scope. Do not preserve complexity only because it already exists.
+- **Use native capabilities.** Prefer existing Rust, Nix, SQL, and repository mechanisms over custom implementations or new dependencies.
+- **Keep verification proportional.** Test observable behavior, contracts, and meaningful failure cases. Do not create tests of tests, checks of checks, redundant verification layers, or custom test infrastructure when existing checks provide sufficient evidence.
+- **Avoid speculative defensive code.** Add retries, recovery paths, synchronization, caching, and fallback behavior only when a requirement or demonstrated failure justifies them.
+- **Do not redesign for a local fix.** If a small change solves the problem, do not replace it with a generalized architecture.
+- **Challenge existing complexity.** When a task exposes unnecessary machinery, simplify it within the authorized scope instead of extending it.
+- **Stop when the task is complete.** After the acceptance criteria are met and required verification passes, do not invent more improvements, edge cases, infrastructure, or follow-up work.
+
+### Complexity justification
+
+Before introducing a significant abstraction, dependency, service, verification layer, or architectural component, an agent MUST be able to answer:
+
+1. Which acceptance criterion or demonstrated failure requires this complexity?
+2. Why is a simpler implementation insufficient?
+3. Can existing repository mechanisms solve the problem?
+4. What would fail if this additional component did not exist?
+
+If there is no concrete justification, the agent MUST use the simpler approach.
+
+Do not create a formal complexity assessment, scoring framework, approval process, or additional document to enforce these questions. Apply them directly during implementation and review.
+
+### Review standard
+
+Reviewers MUST treat unnecessary complexity as a maintainability defect. A technically correct implementation can still require revision when a simpler solution meets the same requirements with less code, fewer dependencies, fewer moving parts, and less maintenance.
+
+Minimal does not mean incomplete. Do not remove necessary correctness checks, security controls, required documentation, or regression coverage in the name of simplicity.
+
+**The objective is the least complex complete solution, not the most comprehensive system an agent can imagine.**
 
 ## Backlog workflow
 
@@ -73,10 +124,259 @@ Before the first implementation write:
 5. Verify the new worktree, branch, base, and status.
 6. Move the task to `In Progress` and add its lock.
 7. State a concise preflight containing the task, worktree, branch/base, intended scope, and verification plan.
+8. For browser-visible work, verify preview ownership and database isolation, start or resume the task preview, and publish its URL before UI edits. On a resumed task, reuse its verified session instead of creating a second stack.
 
 Do not pretend that `git status` in one worktree proves another worktree is clean. Exact commands and recovery rules are in [docs/agent/worktrees.md](docs/agent/worktrees.md).
 
 ## Implementation standards
+
+### Source documentation and technical writing
+
+These rules apply to source comments, Rust documentation comments, architecture notes, design notes, task notes, MR descriptions, user-facing technical text, and other technical prose created or modified by an agent.
+
+The key words **MUST**, **MUST NOT**, **SHOULD**, **SHOULD NOT**, and **MAY** in this section are normative and are interpreted as described by [IETF BCP 14](https://www.rfc-editor.org/info/bcp14), [RFC 2119](https://www.rfc-editor.org/rfc/rfc2119), and [RFC 8174](https://www.rfc-editor.org/rfc/rfc8174).
+
+Agents MUST use these published standards as the baseline instead of inventing an ad hoc documentation style:
+
+- [The Rust Style Guide](https://doc.rust-lang.org/style-guide/) controls Rust source and comment formatting.
+- [The rustdoc Book](https://doc.rust-lang.org/rustdoc/) controls Rust API documentation behavior and doctests.
+- [Rust RFC 1574](https://rust-lang.github.io/rfcs/1574-more-api-documentation-conventions.html) controls Rust API documentation conventions.
+- [Rust API Guidelines](https://rust-lang.github.io/api-guidelines/documentation.html) controls expectations for complete and useful Rust public API documentation.
+- [ASD-STE100 Simplified Technical English, Issue 9](https://www.asd-ste100.org/) controls technical prose style, subject to necessary Rust, Nix, SQL, protocol, product, and Crystal Forge terminology.
+- [ISO/IEC/IEEE 42010:2022](https://www.iso.org/standard/74393.html) applies when an agent creates or materially changes architecture descriptions. Source comments MUST NOT be used as a substitute for required architecture documentation.
+
+Repository-specific rules below are intentionally stricter when needed. Do not interpret any cited guideline as permission to weaken an explicit rule in this file.
+
+#### Documentation objective
+
+Code MUST communicate its intended semantics, not only its mechanics.
+
+A competent maintainer MUST be able to determine the contract and the reasons for non-obvious behavior without reverse-engineering unrelated code, database constraints, tests, historical commits, or author intent.
+
+When applicable, documentation MUST make these concepts explicit:
+
+- contracts, preconditions, postconditions, and caller obligations;
+- invariants and properties that future changes must preserve;
+- state meanings, valid state transitions, terminal states, and forbidden transitions;
+- side effects and significant operations that intentionally do not occur;
+- error conditions, retry behavior, cancellation behavior, and partial-failure behavior;
+- concurrency, ownership, locking, ordering, atomicity, and race-prevention assumptions;
+- persistence behavior, transaction boundaries, uniqueness assumptions, and data-integrity requirements;
+- authorization, trust boundaries, security assumptions, redaction requirements, and sensitive-data handling;
+- external protocol, serialization, compatibility, versioning, and deployed-component assumptions;
+- units, ranges, thresholds, timeouts, sentinel values, and the reason for arbitrary-looking constants;
+- non-obvious business rules and domain semantics;
+- non-obvious performance tradeoffs or deliberate optimizations;
+- `unsafe` requirements and the local proof that each unsafe operation is valid.
+
+Do not rely on tests as the only description of an intended contract. Tests prove observed behavior. Documentation identifies which behavior is intentional and why.
+
+Do not use comment count, comment-to-code ratio, or documentation volume as a quality target. A comment that only restates identifiers, syntax, or immediately visible control flow SHOULD NOT exist.
+
+#### Required Rust documentation
+
+Every public item added or materially modified by a change MUST have useful rustdoc documentation. This includes crates, modules, structs, enums, traits, public fields, functions, methods, associated items, constants, statics, type aliases, and macros. Existing lint configuration does not waive this requirement.
+
+An agent MUST NOT add `allow(missing_docs)` or another suppression to avoid documenting code.
+
+Crate-level and module-level documentation MUST explain responsibility, boundaries, and important invariants when those facts are not already obvious from the surrounding architecture.
+
+Public type documentation MUST explain the semantic meaning of the type and any invariant that valid values maintain.
+
+Public enum documentation MUST explain the meaning of states or variants when they represent a lifecycle, protocol, status, policy, or domain state. Document valid and forbidden transitions when transition rules exist.
+
+Public function and method documentation MUST state the observable contract. Include the following sections when applicable:
+
+- `# Errors` for meaningful error conditions returned by fallible APIs.
+- `# Panics` for caller-reachable panic conditions.
+- `# Safety` for every `unsafe fn` and unsafe trait contract.
+- `# Examples` for non-trivial public APIs. Examples SHOULD be doctests and MUST remain valid when behavior changes.
+- `# Aborts` or `# Undefined Behavior` when those conditions are relevant.
+
+The first rustdoc sentence MUST be a concise summary and SHOULD use the RFC 1574 third-person singular present form, for example, `Returns`, `Creates`, or `Schedules`.
+
+Use intra-doc links for related Rust items when they improve understanding. Broken documentation links are defects.
+
+#### Required maintainer-facing comments
+
+Private code does not need comments merely because it is private. It MUST be documented when correct maintenance depends on information that cannot be reliably inferred from local names, types, and control flow.
+
+The following implementation concepts MUST have adjacent explanatory documentation when they occur:
+
+- concurrency control, lock ordering, worker ownership, deduplication, and race prevention;
+- transaction boundaries and multi-step persistence invariants;
+- security or authorization decisions whose placement or ordering matters;
+- retry, idempotency, recovery, lease, heartbeat, timeout, or cancellation semantics;
+- state-machine transitions and restrictions not enforced completely by the type system;
+- compatibility paths, legacy formats, deployed-version assumptions, and temporary workarounds;
+- algorithms whose correctness depends on a non-obvious invariant;
+- non-obvious performance optimizations or query-shape choices;
+- domain rules that would otherwise have to be inferred from implementation behavior;
+- arbitrary-looking constants, thresholds, limits, durations, or ordering choices whose source or constraint is external to the local expression;
+- deliberate lint suppressions or unusual language/toolchain workarounds.
+
+Use these labels consistently when they make the semantic category clearer:
+
+```rust
+// INVARIANT:
+// CONCURRENCY:
+// SAFETY:
+// SECURITY:
+// COMPATIBILITY:
+// PERFORMANCE:
+```
+
+The text after a label MUST state the property or rationale that must remain true. Do not add a label to an obvious comment solely to satisfy this rule.
+
+Every significant `unsafe` block MUST have an immediately preceding `// SAFETY:` comment that explains why the unsafe operation is valid at that exact location. The comment MUST identify the relevant lifetime, aliasing, initialization, bounds, ownership, thread-safety, FFI, or other safety invariant. Writing only what the unsafe expression does is insufficient.
+
+#### Comment and rustdoc formatting
+
+Rust comments MUST follow the current Rust Style Guide.
+
+In particular:
+
+- Prefer `//` to `/* ... */`.
+- Prefer `///` to `/** ... */`.
+- Use `//!` only for crate-level or module-level documentation.
+- Put ordinary comments on their own line unless an inline comment is substantially clearer.
+- Put one space after `//`, `///`, or `//!`.
+- Write ordinary comments as complete sentences unless a short annotation is clearer.
+- Start a normal sentence with a capital letter and end it with punctuation.
+- Limit lines that consist entirely of comments to 80 characters where the Rust Style Guide permits; never exceed the repository's normal Rust line-width rules.
+- Put rustdoc before item attributes as required by the Rust Style Guide.
+- Use Markdown in rustdoc according to RFC 1574 and rustdoc conventions.
+
+Do not commit commented-out production code. Version control retains removed implementations.
+
+`TODO` and `FIXME` comments MUST identify a tracked task unless the comment will be resolved in the same change. They MUST state the specific remaining condition, not only `fix this` or equivalent.
+
+Example:
+
+```rust
+// TODO(TASK-482): Remove the version-2 compatibility path after all
+// supported agents advertise protocol version 3.
+```
+
+### Crystal Forge knowledge base
+
+`docs/knowledge/` is the canonical maintainer-facing knowledge base for
+Crystal Forge. Start at `docs/knowledge/index.md`.
+
+When a change affects documented behavior, architecture, configuration,
+operations, security, APIs, data models, UI behavior, or workflows, update
+the applicable knowledge concepts in the same change.
+
+Follow these rules:
+
+- Treat current implementation, approved design, proposed behavior, and
+  historical behavior as different states. Do not present historical or
+  superseded behavior as current.
+- Verify current-behavior claims against the implementation. Do not copy
+  stale documentation forward merely to preserve text.
+- Preserve useful historical rationale in a historical or deprecated concept
+  with a clear successor link when appropriate.
+- Do not leave known-wrong instructions or diagrams in current guidance with
+  only a note saying they are stale. Correct the main text.
+- Keep `implementation_status` and other OKF metadata accurate when behavior
+  changes.
+- Update related indexes and cross-links when concepts are added, renamed,
+  split, consolidated, deprecated, or removed.
+- Do not invent provenance, verification, approval, timestamps, or
+  implementation status.
+- Keep operational control files such as `AGENTS.md` separate from ordinary
+  knowledge concepts.
+
+#### Architecture and diagrams
+
+All authored architecture, workflow, state, sequence, relationship, and UI
+structure diagrams in project documentation MUST use Mermaid.
+
+Do not add new ASCII or Unicode box-and-arrow diagrams.
+
+When replacing or modifying a diagram:
+
+- preserve meaningful nodes, relationships, direction, labels, conditions,
+  retries, failure paths, trust boundaries, and authority boundaries;
+- choose the Mermaid diagram type that matches the semantics;
+- verify the diagram against the current implementation or the approved design
+  that owns the behavior;
+- do not simplify away important behavior only to make the diagram easier to
+  render.
+
+Literal command output, source code, configuration examples, logs, and test
+fixtures are not diagrams and MUST remain literal when their exact text matters.
+
+#### Current architecture boundaries
+
+Documentation MUST preserve these current Crystal Forge boundaries unless an
+approved design explicitly changes them:
+
+- The server owns persistence, authorization, authoritative evaluation,
+  coordination, and server-side domain policy.
+- API-only builders do not access PostgreSQL directly.
+- Builders obtain work and report results through authenticated server APIs.
+- Builder-side source re-evaluation, when configured, verifies the
+  server-authorized build plan; it does not replace server-authoritative
+  evaluation.
+- Agents communicate with the server, not builders.
+- The Dioxus Web UI communicates through Crystal Forge APIs. It does not read
+  PostgreSQL directly.
+- Grafana is not the primary Crystal Forge product UI or architectural control
+  surface. Any remaining Grafana support must be described as optional,
+  legacy, testing, or historical according to its actual status.
+
+#### Documentation verification
+
+For changes that affect `docs/knowledge/`, run the repository-owned
+documentation validation through Nix:
+
+```bash
+nix build .#okf-knowledge -L
+```
+
+#### Technical writing standard
+
+Technical prose MUST follow ASD-STE100 principles to the extent that they are compatible with exact software terminology.
+
+Agents MUST:
+
+- use short, direct, declarative sentences;
+- use active voice when the actor is known and active voice improves clarity;
+- use one term consistently for one concept instead of rotating through synonyms;
+- use exact identifiers, state names, units, boundaries, and conditions;
+- make cause and effect explicit;
+- make required, prohibited, optional, and conditional behavior explicit;
+- use project and domain terms consistently with the code and design documents;
+- prefer specific nouns over vague references such as `this`, `that`, `it`, or `they` when the referent could be ambiguous;
+- separate distinct requirements or actions instead of joining unrelated ideas in one long sentence;
+- state negative guarantees when they are part of the contract, such as operations that MUST NOT enqueue work, mutate state, reveal existence, or retry;
+- keep prose concise without omitting information needed for safe maintenance.
+
+Agents MUST NOT use filler or vague technical prose such as `it is important to note`, `basically`, `simply`, `as needed`, `appropriately`, `properly`, or `handle this` unless the sentence defines the exact condition or behavior.
+
+Project names, Rust identifiers, SQL identifiers, API names, protocol terms, security terms, and other necessary subject-specific vocabulary are permitted even when they are not in the ASD-STE100 general dictionary.
+
+#### Documentation maintenance and review gate
+
+Documentation is part of the implementation, not a follow-up activity.
+
+When behavior changes, the same change MUST update every affected source comment, rustdoc contract, architecture note, design document, example, and tracked technical description within the active task's scope.
+
+Stale documentation is a correctness defect. An agent MUST remove or correct a comment that no longer describes the resulting code.
+
+Before reporting implementation ready for review, the agent MUST inspect the diff specifically for documentation quality and confirm:
+
+- every new or materially changed public Rust item is documented;
+- required `# Errors`, `# Panics`, `# Safety`, and `# Examples` sections are present where applicable;
+- every significant unsafe block has a valid local `SAFETY` rationale;
+- non-obvious concurrency, persistence, security, compatibility, state, and performance semantics are documented;
+- no comment merely paraphrases obvious code;
+- no stale comment remains after implementation changes;
+- no untracked `TODO` or `FIXME` was introduced;
+- rustdoc examples and links affected by the change are verified when practical.
+
+If the repository already provides documentation lints or rustdoc checks, run them. For Rust API changes, run the applicable rustdoc build or doctest command through the repository's Nix environment when it is needed to verify the changed documentation. Do not modify repository-wide lint policy solely to make an unrelated task pass.
 
 ### Rust
 
@@ -88,11 +388,12 @@ Do not pretend that `git status` in one worktree proves another worktree is clea
 
 ### Dioxus/WASM
 
+- Keep the live preview current while editing. Check browser rendering, styles, API behavior, and the affected design sections after each coherent change. Restart the task backend when its code changes; frontend hot reload does not restart that backend.
 - Keep rendering code focused on presentation and event wiring.
 - Extract nontrivial state transitions and test them independently when practical.
 - Keep client DTOs aligned with the server contract, but do not duplicate server types when the UI intentionally needs a different representation.
 - Preserve loading, empty, error, authorization, and stale-data behavior when changing views.
-- A user-visible UI change must be exercised by the authoritative `web-ui` check and represented by an MR screenshot. Add a behavioral assertion when practical.
+- A user-visible UI change must be exercised by its owning integration scenario and represented by an MR screenshot. See "Integration test maintenance" below.
 
 ### Database and SQLx
 
@@ -107,7 +408,87 @@ See [docs/agent/database-safety.md](docs/agent/database-safety.md).
 
 Choose the smallest set of commands that proves the acceptance criteria and protects affected interfaces. Prefer targeted checks during implementation and broader checks before review when risk warrants them.
 
-Use the exact package manifests and flake attributes applicable to the change. The baseline command matrix is in [docs/agent/verification.md](docs/agent/verification.md).
+The persistent preview is the early UI feedback loop. Do not run a full integration owner or `nix flake check` merely to start or refresh it. Use focused checks during implementation. Required owning integration results and MR screenshots remain final-review requirements; exact-head CI may provide that evidence when the task permits it. A preview screenshot is not evidence that an integration check passed.
+
+Use the exact package manifests and flake attributes applicable to the change. The baseline command matrix is in [docs/agents/verification.md](docs/agents/verification.md).
+
+### Integration test maintenance
+
+Read `docs/knowledge/testing/integration-test-contract.md` before changing
+an integration contract, browser-visible behavior, integration tests,
+fixtures, or visual baselines. Owners, scenarios, status, and legacy
+retirement are in `docs/knowledge/testing/integration-coverage-map.md`.
+
+The integration owners are `integration-access`, `integration-delivery`,
+`integration-assurance`, and `integration-upgrade`. Extend the smallest
+existing owning scenario first. Add a scenario only for a distinct
+unproved behavior or state. A new feature, page, component, or regression
+does not authorize a new top-level flake check.
+
+Before editing acceptance expectations, record the approved requirement
+or design revision, affected consumers, owning scenario, and assertion
+disposition in the task/MR impact record. Use the approved design as the
+UI reference. Keep data meaning, identity, permissions, persistence, and
+evidence rules aligned with the accepted domain contract.
+
+Update implementation, affected contract links, fixtures, assertions,
+and approved visual targets together. Retain valid assertions; replace
+or remove obsolete assertions only with an approved requirement reason.
+Do not use current application output to approve its own expected result.
+
+Every user-visible change must be exercised by its owning integration
+check and have the required design comparison and MR images. Use focused
+local checks during implementation, then obtain results for affected
+owners at the review revision. Report failed, blocked, skipped,
+and unverified cases explicitly. A preview is not proof that a check passed.
+
+All four integration owners are currently discoverable. Their
+behavior-oriented scenarios use explicit owner-local registration. The
+`checks/integration-access/default.nix` explicitly registers scenarios; the
+normal check uses `pkgs.linkFarm` to build every registered scenario gate.
+Run a focused gate with
+`nix build .#checks.x86_64-linux.integration-access.scenarios.lifecycle-local-bootstrap -L`;
+append `.run` to the scenario attribute for evidence only. Meaningful WIP
+checks may be discoverable without a completeness flag. Record missing
+obligations in the coverage map. Implemented integration owners run
+automatically in GitLab. TASK-490.24 explicitly
+authorizes legacy source retirement before replacement coverage is complete.
+The nine legacy suites and their manual jobs are retired; missing accepted
+obligations remain gaps. Unique lower-level assertions run in ordinary component
+builds, explicit `component-tests` CI commands, and the existing isolated
+`devScripts.state-machine-test` workflow. All fifteen public `verify-*` wrappers
+are removed; do not recreate them or add a registry or aggregation framework.
+Core-only evaluator and CA checks must not repeat in the embedded build.
+Developer tools remain package/app outputs. Use the source/command mapping in
+`docs/knowledge/testing/flake-checks.md` and `docs/agents/verification.md`.
+The current inventory is four total checks (formerly 27), not proof of
+complete accepted coverage. Final `checks.x86_64-linux` MUST contain exactly
+`integration-access`, `integration-assurance`, `integration-delivery`, and
+`integration-upgrade`, with no additional checks or placeholders. Verify the
+final names with `nix eval --json .#checks.x86_64-linux --apply builtins.attrNames`.
+
+Shared helpers live in `lib/integration-test/`. Native Snowfall checks call:
+
+```nix
+lib.crystal-forge.makeIntegrationTestHarness {
+  inherit pkgs inputs;
+}
+```
+
+An implementation packet does not automatically receive a NixOS test
+derivation. Compatible case fragments use the existing Nix, Python, and browser
+script structure; the coordinator composes them into the owning scenario and
+registers that scenario. Each separately built scenario still runs in its own
+fresh VM and database. Later cases inside one scenario MAY use real records and
+identities created by earlier cases through the receipt mechanism. Never reuse
+runtime state from another scenario derivation. Keep owner scenarios, fixtures,
+and assets beneath `checks/integration-<owner>/`. Future Delivery, Assurance,
+and Upgrade owners follow this layout; do not create placeholder `default.nix`
+files or add custom discovery.
+
+Changing the four-check inventory requires an explicit owner-approved
+decision under the integration contract. Cite an approval already present
+in the active task; do not ask for the same approval again.
 
 Run `nix flake check --keep-going` when the task requires it or the change affects flakes, NixOS modules, development shells, packaging, CI/release behavior, or cross-package interfaces that targeted checks cannot adequately prove. Do not run it mechanically for every edit.
 
@@ -135,7 +516,9 @@ Before opening an MR:
 - Confirm only intended files changed and all intended new files are tracked.
 - Update SQLx metadata when applicable.
 - Add MR screenshots for user-visible UI changes.
+- For browser-visible work, report the current preview URL, process/session, backend freshness, data mode, and remaining gaps. Leave the preview available for user review unless the user requests shutdown or the task is being retired. Stop only task-owned processes before worktree removal.
 - Record out-of-scope discoveries as Backlog tasks.
+- Confirm source documentation and technical prose satisfy the documentation standard above; undocumented required semantics or stale documentation block review.
 
 Then open the MR, move the task to `Review`, add the MR link to the task, and remove the lock or mark it as awaiting review according to Backlog.md conventions.
 
@@ -150,5 +533,7 @@ Be precise and concise. Distinguish among:
 - pushed to a branch;
 - open for review;
 - merged and complete.
+
+For browser-visible work, include `Preview: ready | rebuilding | blocked | stopped` in meaningful progress reports and handoff. When ready, include the URL and review path. State when the browser still shows the last successful build. Preview health does not change the backlog task status or establish merge readiness.
 
 Never fabricate command output, test results, task state, commits, pushes, MR state, or screenshots.

@@ -59,12 +59,13 @@ The dashboard must remain usable in development and Nix checks without requiring
 
 Introduce a small data abstraction layer in `web-ui`:
 
-```
-dashboard/
-  ├── api.rs            # API client functions
-  ├── adapter.rs        # Real vs mock resolution logic
-  ├── models.rs         # DTOs
-  └── view.rs           # Existing UI view
+```mermaid
+%% diagram-id: backlog-task119-dashboard-module-tree
+flowchart TD
+    dashboard["dashboard/"] --> api["api.rs — API client functions"]
+    dashboard --> adapter["adapter.rs — Real vs mock resolution logic"]
+    dashboard --> models["models.rs — DTOs"]
+    dashboard --> view["view.rs — Existing UI view"]
 ```
 
 ### Flow

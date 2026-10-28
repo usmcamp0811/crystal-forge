@@ -10,7 +10,9 @@
 //!   then [`cf_compliance::xccdf::importer::validate_cf_native_document`],
 //!   which verifies every per-rule and whole-bundle semantic digest.
 //!
-//! No Nix contained in an export is ever evaluated in order to inspect it.
+//! No Nix contained in an export is evaluated. CF-native validation uses the
+//! same bounded `nix-instantiate --parse` syntax check as server imports, so
+//! `nix-instantiate` must be available on `PATH` for custom expressions.
 
 use std::fmt;
 

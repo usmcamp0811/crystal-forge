@@ -1,6 +1,39 @@
+use crate::evaluator_resources::validate_resolved_args;
 use cf_protocol::builder::{RemoteBuildExecutionStrategy, SourceInputDeliveryMode};
 use serde::Deserialize;
 use std::path::PathBuf;
+
+/// Binds an Attic inventory adapter to one Crystal Forge destination identity.
+///
+/// Validation occurs on metrics requests, not at server startup. Duplicate IDs
+/// or invalid entries fail closed. This adapter uses its own runtime token;
+/// it never uses an Attic upload token or a destination display name.
+///
+/// # Examples
+/// ```
+/// use cf_config::config::AtticMetricsEndpoint;
+/// let endpoint = AtticMetricsEndpoint {
+///     destination_id: 42,
+///     url: "https://metrics.example/proxy/".into(),
+///     token_file: "/run/credentials/crystal-forge/attic-metrics".into(),
+/// };
+/// assert_eq!(endpoint.destination_id, 42);
+/// ```
+#[derive(Debug, Deserialize, serde::Serialize, Clone, PartialEq, Eq)]
+pub struct AtticMetricsEndpoint {
+    /// Positive database destination ID. Display-name changes cannot retarget it.
+    pub destination_id: i32,
+    /// Explicit HTTPS adapter base, with an optional reverse-proxy prefix.
+    /// Userinfo, queries, and fragments are forbidden.
+    pub url: String,
+    /// Absolute non-store runtime token file, owned by the server user (not root).
+    /// The file must be regular, not a symlink, with no group/other permissions.
+    /// At most 4096 bytes are read. The token must match ASCII
+    /// `[A-Za-z0-9_-]{32,1024}`: URL-safe base64 without padding or hexadecimal.
+    /// Whitespace, including a trailing newline, is forbidden. The Bearer header
+    /// is at most 1031 bytes.
+    pub token_file: PathBuf,
+}
 
 #[derive(Debug, Deserialize, Clone, Copy, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -36,16 +69,37 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
 
-    /// Number of worker threads for nix-eval-jobs parallel evaluation.
-    /// Default: 2 (conservative to avoid hosing the system)
+    /// Number of evaluator workers. Defaults to 2; zero resolves the available
+    /// CPU count at runtime. The CLI always receives an explicit positive count.
     #[serde(default = "default_eval_workers")]
     pub eval_workers: usize,
 
-    /// Maximum memory size per worker in MB for nix-eval-jobs.
-    /// Total eval memory = eval_workers × eval_max_memory_mb
-    /// Default: 4096 MB (4 GB) per worker
-    #[serde(default = "default_eval_max_memory_mb")]
-    pub eval_max_memory_mb: usize,
+    /// Optional fixed per-worker MiB. Omission enables capacity-based sizing;
+    /// an explicit positive value is preserved exactly, including legacy 12288.
+    #[serde(default)]
+    pub eval_max_memory_mb: Option<usize>,
+
+    /// MiB reserved outside evaluation during automatic sizing. Defaults to 4096.
+    #[serde(default = "default_eval_memory_reserve_mb")]
+    pub eval_memory_reserve_mb: usize,
+
+    /// Maximum capacity percentage for automatic sizing, in 1..=100. Default: 85.
+    #[serde(default = "default_eval_memory_max_percent")]
+    pub eval_memory_max_percent: usize,
+
+    /// Positive seconds without evaluator output before cancellation. Default: 900.
+    #[serde(default = "default_eval_output_idle_timeout_secs")]
+    pub eval_output_idle_timeout_secs: u64,
+
+    /// Positive overall evaluator timeout in seconds. Default: 3600.
+    #[serde(default = "default_eval_overall_timeout_secs")]
+    pub eval_overall_timeout_secs: u64,
+
+    /// Absolute configuration-discovery deadline in seconds, in 1..=1800.
+    /// Defaults to 300 to allow cold locked-input downloads. This budget is
+    /// independent of realization and bulk evaluator deadlines.
+    #[serde(default = "default_eval_discovery_timeout_secs")]
+    pub eval_discovery_timeout_secs: u64,
 
     /// Whether to check cache status during evaluation.
     /// Adds --check-cache-status flag to nix-eval-jobs.
@@ -53,18 +107,46 @@ pub struct ServerConfig {
     #[serde(default = "default_eval_check_cache")]
     pub eval_check_cache: bool,
 
-    /// Automatically enqueue hardening scans after successful commit evaluation.
+    /// Automatically admit hardening scans after a successful NixOS build.
     ///
-    /// IMPORTANT: Keep this `false` (the default) on memory-constrained deployments.
-    /// Each hardening scan launches a full `nix eval` subprocess that can consume
-    /// several GiB of memory.  When `false`, scans must be triggered manually via
-    /// the API; the durable `crystal-forge-hardening` queue worker still runs and
-    /// will pick up any manually-enqueued scans.
+    /// When `true`, the transaction that records a successful exact NixOS build
+    /// also inserts one `pending` hardening scan for that exact derivation, and
+    /// the hardening worker additionally runs a small bounded backfill for
+    /// already built targets that have no hardening evidence. Admission is a
+    /// single guarded database insert. It never starts a scan.
     ///
-    /// Setting this to `true` caused a production OOM incident on 2026-07-28:
-    /// nine concurrent hardening `nix eval` processes overlapped a bulk
-    /// `nix-eval-jobs` evaluation, driving the server cgroup to 58.5 GiB with
-    /// 1.9 GiB of swap and making the API unresponsive.
+    /// When `false` (the default) nothing is admitted automatically. Scans must
+    /// be requested through the API. The durable `crystal-forge-hardening` queue
+    /// worker still runs and still executes those manual requests.
+    ///
+    /// # History
+    ///
+    /// Admission previously happened after successful commit *evaluation*, which
+    /// admitted one scan for every evaluated derivation of a commit and, in the
+    /// design of that time, detached a `nix eval` subprocess per admitted row.
+    /// That fan-out caused a production incident on 2026-07-28: nine concurrent
+    /// hardening `nix eval` processes overlapped a bulk `nix-eval-jobs`
+    /// evaluation, drove the server cgroup to 58.5 GiB with 1.9 GiB of swap, and
+    /// made the API unresponsive.
+    ///
+    /// # Recommendation
+    ///
+    /// The default remains `false` so an upgrade never changes the workload of a
+    /// running deployment on its own. Enabling it is now recommended for
+    /// deployments that want continuous hardening evidence, because the incident
+    /// conditions no longer apply:
+    ///
+    /// - admission is tied to a build that already succeeded, not to every
+    ///   evaluated configuration, so volume tracks real builds;
+    /// - admission performs no subprocess work;
+    /// - the single serial worker, the global one-in-progress index from
+    ///   migration 0188, and the shared heavy-Nix advisory lock keep hardening to
+    ///   one `nix eval` at a time and keep it from overlapping bulk evaluation;
+    /// - the backfill is bounded to a small fixed batch per cycle.
+    ///
+    /// The remaining cost of `true` is queue depth and scan latency, not
+    /// concurrent memory use. Keep it `false` when a deployment must never run
+    /// unattended `nix eval` work.
     #[serde(default)]
     pub auto_hardening_scans: bool,
 
@@ -118,6 +200,17 @@ pub struct ServerConfig {
     #[serde(default)]
     pub allow_private_cache_test_targets: bool,
 
+    /// Explicit Attic inventory adapters. Omission preserves unsupported totals.
+    ///
+    /// Each entry binds `destination_id`, an HTTPS `url` base, and a protected
+    /// `token_file`. TOML accepts `[[server.attic_metrics_endpoints]]`
+    /// with `destination_id = 42`, `url = "https://metrics.example/prefix/"`, and
+    /// `token_file = "/run/credentials/crystal-forge/attic-metrics"`.
+    /// Metrics requests validate entries and reject duplicate IDs without
+    /// preventing unrelated server startup. Only Admin can observe adapters.
+    #[serde(default)]
+    pub attic_metrics_endpoints: Vec<AtticMetricsEndpoint>,
+
     /// Allow credential-bearing builder cache-push config to be delivered when
     /// the request arrives via a reverse proxy that sets X-Forwarded-Proto /
     /// Forwarded headers asserting HTTPS.
@@ -149,18 +242,17 @@ pub struct ServerConfig {
     #[serde(default = "default_heartbeat_interval_secs")]
     pub heartbeat_interval_secs: u64,
 
-    /// Root directory for caching bare Git mirrors used to generate source
-    /// archives for ServerBundledArchive delivery mode.
+    /// Root directory for canonical source mirrors, tracked-tree artifacts,
+    /// published identities, and cross-process locks.
     /// Default: /var/lib/crystal-forge/source-archives
     #[serde(default = "default_source_archive_root")]
     pub source_archive_root: PathBuf,
 
     /// Default source/input delivery mode for verified source re-evaluation.
-    /// - `local_git_worktree` (default): builder clones/fetches the repo directly
-    ///   and creates a local worktree.
-    /// - `server_bundled_archive`: server generates a tar archive of its bare
-    ///   mirror and serves it via an authenticated API endpoint. Builders do not
-    ///   need direct Git remote access.
+    /// Evaluator contract version 1 supports only `server_bundled_archive`. The
+    /// server publishes one uncompressed tracked-tree tar for the exact commit
+    /// and serves those bytes through an authenticated API endpoint. Builders
+    /// do not need direct Git remote access.
     #[serde(default = "default_source_delivery_mode")]
     pub source_delivery_mode: SourceInputDeliveryMode,
 
@@ -242,7 +334,7 @@ fn default_source_archive_root() -> PathBuf {
 }
 
 fn default_source_delivery_mode() -> SourceInputDeliveryMode {
-    SourceInputDeliveryMode::LocalGitWorktree
+    SourceInputDeliveryMode::ServerBundledArchive
 }
 
 fn default_notification_email_sender_name() -> String {
@@ -278,8 +370,21 @@ fn default_eval_workers() -> usize {
     2 // Conservative: don't hose the system by default
 }
 
-fn default_eval_max_memory_mb() -> usize {
-    4096 // 4 GB per worker
+fn default_eval_memory_reserve_mb() -> usize {
+    4096
+}
+fn default_eval_memory_max_percent() -> usize {
+    85
+}
+fn default_eval_output_idle_timeout_secs() -> u64 {
+    900
+}
+fn default_eval_overall_timeout_secs() -> u64 {
+    3600
+}
+
+fn default_eval_discovery_timeout_secs() -> u64 {
+    300
 }
 
 fn default_eval_check_cache() -> bool {
@@ -316,7 +421,12 @@ impl Default for ServerConfig {
             host: "127.0.0.1".to_string(),
             port: 3000,
             eval_workers: default_eval_workers(),
-            eval_max_memory_mb: default_eval_max_memory_mb(),
+            eval_max_memory_mb: None,
+            eval_memory_reserve_mb: default_eval_memory_reserve_mb(),
+            eval_memory_max_percent: default_eval_memory_max_percent(),
+            eval_output_idle_timeout_secs: default_eval_output_idle_timeout_secs(),
+            eval_overall_timeout_secs: default_eval_overall_timeout_secs(),
+            eval_discovery_timeout_secs: default_eval_discovery_timeout_secs(),
             eval_check_cache: default_eval_check_cache(),
             auto_hardening_scans: false,
             auth_mode: default_auth_mode(),
@@ -328,6 +438,7 @@ impl Default for ServerConfig {
             failed_build_log_retention_days: default_failed_build_log_retention_days(),
             commit_cache_retention_days: default_commit_cache_retention_days(),
             allow_private_cache_test_targets: false,
+            attic_metrics_endpoints: Vec::new(),
             trust_forwarded_builder_https: false,
             remote_build_execution_strategy: default_remote_build_execution_strategy(),
             heartbeat_interval_secs: default_heartbeat_interval_secs(),
@@ -360,46 +471,61 @@ impl ServerConfig {
         format!("{}:{}", self.host, self.port)
     }
 
-    /// Get arguments for nix-eval-jobs based on config.
-    pub fn nix_eval_jobs_args(&self) -> Vec<String> {
+    /// Returns explicit nix-eval-jobs arguments from a resolved resource plan.
+    ///
+    /// nix-eval-jobs 2.34.3 does not interpret zero workers as CPU auto-detection.
+    /// Callers must resolve a fresh plan for each evaluation before spawning.
+    ///
+    /// # Errors
+    /// Returns an error for invalid policy, zero resolved values, overflow, or
+    /// a plan whose requested workers or fixed override do not match this config.
+    pub fn nix_eval_jobs_args(
+        &self,
+        plan: &crate::EvaluatorResourcePlan,
+    ) -> Result<Vec<String>, String> {
+        self.validate_evaluator_policy()?;
+        validate_resolved_args(self.eval_workers, self.eval_max_memory_mb, plan)?;
         let mut args = vec![
             "--workers".to_string(),
-            self.eval_workers.to_string(),
+            plan.effective_workers.to_string(),
             "--max-memory-size".to_string(),
-            self.eval_max_memory_mb.to_string(),
+            plan.per_worker_mb.to_string(),
         ];
 
         if self.eval_check_cache {
             args.push("--check-cache-status".to_string());
         }
 
-        args
+        Ok(args)
     }
 
-    /// Validate configuration and warn about potential issues.
-    pub fn validate(&self) -> Result<(), String> {
-        // Check for excessive memory allocation
-        let total_eval_memory_mb = self.eval_workers * self.eval_max_memory_mb;
-        if total_eval_memory_mb > 32768 {
-            // 32 GB
-            return Err(format!(
-                "Evaluation memory too high: {} workers × {} MB = {} MB total ({}GB). \
-                 This may exhaust system memory.",
-                self.eval_workers,
-                self.eval_max_memory_mb,
-                total_eval_memory_mb,
-                total_eval_memory_mb / 1024
-            ));
-        }
-
-        // Warn if eval workers seems excessive
-        if self.eval_workers > 16 {
-            eprintln!(
-                "⚠️  Warning: {} evaluation workers is very high. \
-                 Consider reducing to 4-8 for most systems.",
-                self.eval_workers
+    /// Validates evaluator ranges and fixed-budget arithmetic without runtime IO.
+    ///
+    /// # Errors
+    /// Returns an error for invalid memory/reserve/percentage/timeouts or overflow.
+    pub fn validate_evaluator_policy(&self) -> Result<(), String> {
+        if !(1..=1800).contains(&self.eval_discovery_timeout_secs) {
+            return Err(
+                "eval_discovery_timeout_secs must be between 1 and 1800 seconds".to_string(),
             );
         }
+        crate::evaluator_resources::validate_evaluator_policy(
+            self.eval_workers,
+            self.eval_max_memory_mb,
+            self.eval_memory_reserve_mb,
+            self.eval_memory_max_percent,
+            self.eval_output_idle_timeout_secs,
+            self.eval_overall_timeout_secs,
+        )
+    }
+
+    /// Validates static server policy without detecting runtime resources.
+    ///
+    /// # Errors
+    /// Returns an error when evaluator, logging, notification, session, execution,
+    /// or heartbeat settings violate their configured ranges or requirements.
+    pub fn validate(&self) -> Result<(), String> {
+        self.validate_evaluator_policy()?;
 
         if self.max_build_log_chunk_mb == 0 {
             return Err("max_build_log_chunk_mb must be greater than 0".to_string());
@@ -569,6 +695,64 @@ mod tests {
     use super::*;
 
     #[test]
+    fn discovery_timeout_defaults_and_validates_bounds() {
+        let parse = |text: &str| {
+            ::config::Config::builder()
+                .add_source(::config::File::from_str(text, ::config::FileFormat::Toml))
+                .build()
+                .unwrap()
+                .try_deserialize::<ServerConfig>()
+        };
+        let omitted = parse("host = '127.0.0.1'\nport = 3000").unwrap();
+        assert_eq!(omitted.eval_discovery_timeout_secs, 300);
+        assert_eq!(ServerConfig::default().eval_discovery_timeout_secs, 300);
+        for seconds in [1, 300, 1800] {
+            let cfg = ServerConfig {
+                eval_discovery_timeout_secs: seconds,
+                ..omitted.clone()
+            };
+            cfg.validate().unwrap();
+        }
+        for seconds in [0, 1801, u64::MAX] {
+            let cfg = ServerConfig {
+                eval_discovery_timeout_secs: seconds,
+                ..omitted.clone()
+            };
+            assert!(
+                cfg.validate()
+                    .unwrap_err()
+                    .contains("eval_discovery_timeout_secs")
+            );
+        }
+        assert!(
+            parse("host = '127.0.0.1'\nport = 3000\neval_discovery_timeout_secs = -1").is_err()
+        );
+    }
+
+    #[test]
+    fn attic_metrics_defaults_and_endpoint_roundtrip() {
+        let legacy: ServerConfig =
+            serde_json::from_str(r#"{"host":"localhost","port":3000}"#).unwrap();
+        assert!(legacy.attic_metrics_endpoints.is_empty());
+        assert!(ServerConfig::default().attic_metrics_endpoints.is_empty());
+        let endpoint = AtticMetricsEndpoint {
+            destination_id: 42,
+            url: "https://metrics.example/prefix/".into(),
+            token_file: "/run/credentials/crystal-forge/attic-metrics".into(),
+        };
+        let encoded = serde_json::to_value(&endpoint).unwrap();
+        assert_eq!(
+            serde_json::from_value::<AtticMetricsEndpoint>(encoded.clone()).unwrap(),
+            endpoint
+        );
+        let configured: ServerConfig = serde_json::from_value(serde_json::json!({
+            "host": "localhost", "port": 3000, "attic_metrics_endpoints": [encoded]
+        }))
+        .unwrap();
+        assert_eq!(configured.attic_metrics_endpoints, vec![endpoint]);
+    }
+
+    #[test]
     fn execution_mode_defaults_to_real() {
         let cfg = ServerConfig::default();
         assert_eq!(cfg.execution_mode, ExecutionMode::Real);
@@ -632,11 +816,11 @@ mod tests {
     }
 
     #[test]
-    fn source_delivery_mode_defaults_to_local_git_worktree() {
+    fn source_delivery_mode_defaults_to_server_bundled_archive() {
         let cfg = ServerConfig::default();
         assert_eq!(
             cfg.source_delivery_mode,
-            SourceInputDeliveryMode::LocalGitWorktree
+            SourceInputDeliveryMode::ServerBundledArchive
         );
     }
 }

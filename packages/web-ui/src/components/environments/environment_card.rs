@@ -97,6 +97,8 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
                 }
                 div { style: "display:flex; gap:4px;",
                     button {
+                        "data-coach-open": "env-edit",
+                        "data-coach-key": "{env.id}",
                         class: "btn-icon focus-ring",
                         title: "Edit",
                         onclick: move |e| {

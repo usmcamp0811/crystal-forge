@@ -21,6 +21,71 @@ use tracing::{debug, info};
 
 type InsertFuture<'a> = Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>;
 
+/// Persists one reported system state and its retention side effects atomically.
+///
+/// The transaction records state-transition events, inserts the observation,
+/// and retains an exact deployment-bound evaluation artifact when eligible. If
+/// ordinary retention finds no eligible binding, it runs the bounded
+/// reconciliation repair for the same observation.
+/// It acquires the snapshot-writer advisory lock before POA&M keys and the
+/// system observation row to preserve the repository-wide lock order. A
+/// retention miss is a successful no-op and does not roll back the observation.
+///
+/// # Errors
+///
+/// Returns an error when a lock cannot be acquired, an event or observation
+/// cannot be persisted, retention fails, or PostgreSQL cannot commit the
+/// transaction. Any error rolls back all writes in this transaction.
+pub(crate) async fn persist_reported_system_state(
+    pool: &PgPool,
+    payload: &SystemState,
+    version_compatible: bool,
+) -> Result<()> {
+    let mut tx = pool.begin().await?;
+    // CONCURRENCY: Snapshot publication, deployment creation, and state
+    // ingestion acquire this lock before POA&M and system-row locks.
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await?;
+    crate::services::composite_enforcement::lock_poam_derivations_for_store_path_tx(
+        &mut tx,
+        payload.store_path.as_deref(),
+    )
+    .await?;
+    let system_id =
+        crate::queries::system_events::find_system_id_by_hostname_tx(&mut tx, &payload.hostname)
+            .await?;
+    if let Some(system_id) = system_id {
+        crate::services::composite_enforcement::lock_poam_findings_for_system_tx(
+            &mut tx, system_id,
+        )
+        .await?;
+    }
+    let previous_observed =
+        lock_observed_system_state_by_hostname_tx(&mut tx, &payload.hostname).await?;
+
+    // The legacy state endpoint does not perform boot_id classification;
+    // restart_type is not known here and is left NULL. Generation/store-path
+    // transitions can still emit event-backed history transactionally.
+    record_report_events_tx(&mut tx, previous_observed.as_ref(), payload, None, None).await?;
+    insert_system_state(&mut *tx, payload, version_compatible, None, None).await?;
+    crate::queries::evaluation_snapshots::retain_observed_generation_snapshot_tx(
+        &mut tx,
+        &payload.hostname,
+        system_id,
+        payload.generation,
+        payload.store_path.as_deref(),
+        payload.timestamp.unwrap_or_else(chrono::Utc::now),
+    )
+    .await?;
+
+    tx.commit().await?;
+    if let Some(system_id) = system_id {
+        crate::services::poam::schedule_scheduled_environment_cve_reconciliation_for_system(
+            pool, system_id,
+        );
+    }
+    Ok(())
+}
+
 async fn update_with_lookup_and_insert<L, I>(
     headers: HeaderMap,
     body: Bytes,
@@ -73,21 +138,9 @@ pub async fn update(
     let pool = pool.clone();
     update_with_lookup_and_insert(headers, body, &pool, |payload, version_compatible| {
         let pool = pool.clone();
-        Box::pin(async move {
-            let mut tx = pool.begin().await?;
-            let previous_observed =
-                lock_observed_system_state_by_hostname_tx(&mut tx, &payload.hostname).await?;
-
-            // The legacy state endpoint does not perform boot_id classification;
-            // restart_type is not known here and is left NULL. Generation/store-path
-            // transitions can still emit event-backed history transactionally.
-            record_report_events_tx(&mut tx, previous_observed.as_ref(), payload, None, None)
-                .await?;
-            insert_system_state(&mut *tx, payload, version_compatible, None, None).await?;
-
-            tx.commit().await?;
-            Ok(())
-        })
+        Box::pin(
+            async move { persist_reported_system_state(&pool, payload, version_compatible).await },
+        )
     })
     .await
 }

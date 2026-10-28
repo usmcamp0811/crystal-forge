@@ -8,7 +8,7 @@ use crate::config::{BuildConfig, CacheConfig};
 use crate::derivations::Derivation;
 use crate::log::WorkerState;
 use crate::queries::build_reservations;
-use crate::queries::cache_push::create_cache_push_job;
+use crate::queries::cache_push::enqueue_cache_push_for_derivation;
 use crate::queries::derivations::{handle_derivation_failure, mark_target_build_complete};
 use anyhow::Result;
 use sqlx::PgPool;
@@ -16,12 +16,20 @@ use tokio::process::Command;
 use tokio::time::sleep;
 use tracing::{debug, error, info, warn};
 
-/// Main build worker loop
+/// Builds claimed derivations and queues publication after output persistence.
 ///
-/// CRITICAL IMPROVEMENTS:
-/// 1. Timeout protection prevents workers from getting stuck for hours
-/// 2. Helper functions for task description and status updates
-/// 3. Better error handling and logging
+/// Real builds enqueue through the canonical environment-scoped cache policy,
+/// including database-only destinations. Publication resolution failures retain
+/// the completed output for periodic queue recovery. Mock builds do not enqueue
+/// publication. Each build has a bounded timeout and releases its reservation
+/// through the completion or failure path.
+///
+/// # Parameters
+///
+/// `auto_hardening_scans` mirrors `server.auto_hardening_scans`. It is passed
+/// down from [`super::run_build_loop`], which loads configuration, so that this
+/// worker's build-success transaction can admit hardening work without reading
+/// configuration itself.
 pub(super) async fn build_worker(
     worker_id: usize,
     worker_uuid: String,
@@ -29,6 +37,7 @@ pub(super) async fn build_worker(
     build_config: BuildConfig,
     cache_config: CacheConfig,
     use_mock_build: bool,
+    auto_hardening_scans: bool,
 ) {
     update_worker_status(
         worker_id,
@@ -143,28 +152,6 @@ pub(super) async fn build_worker(
                                 );
                                 // non-fatal - we can still push to cache unsigned
                             }
-
-                            // TODO: Include the name of the server that built the derivation
-                            if let Some(ref store_path) = derivation.store_path {
-                                if let Err(e) = create_cache_push_job(
-                                    &pool,
-                                    derivation.id,
-                                    store_path, // &String coerces to &str
-                                    cache_config.push_to.as_deref(), // Option<String> -> Option<&str>
-                                )
-                                .await
-                                {
-                                    warn!(
-                                        "⚠️ cache queue failed for {}, continuing anyway: {}",
-                                        task_description, e
-                                    );
-                                }
-                            } else {
-                                warn!(
-                                    "⚠️ skipping cache queue for {}: missing store_path on derivation {}",
-                                    task_description, derivation.id
-                                );
-                            }
                         }
 
                         if let Err(e) = mark_build_complete_and_release(
@@ -172,10 +159,29 @@ pub(super) async fn build_worker(
                             &worker_uuid,
                             derivation.id,
                             &store_path,
+                            auto_hardening_scans,
                         )
                         .await
                         {
                             error!("failed to mark build complete: {}", e);
+                        } else if !use_mock_build {
+                            // PERSISTENCE: Queue only after the authoritative
+                            // output is saved. DB-only cache configuration is
+                            // resolved by environment, independently of the
+                            // local static push_to used for legacy signing.
+                            if enqueue_cache_push_for_derivation(
+                                &pool,
+                                derivation.id,
+                                &cache_config,
+                            )
+                            .await
+                            .is_err()
+                            {
+                                warn!(
+                                    "Cache destination resolution failed for {}; built output retained for queue recovery",
+                                    task_description
+                                );
+                            }
                         }
                     }
 
@@ -289,12 +295,31 @@ fn should_mock_build_fail(derivation_name: &str) -> bool {
     derivation_name.contains("-control-0")
 }
 
-/// Mark build complete and release reservation
+/// Marks a legacy in-server build complete and releases its reservation.
+///
+/// ATOMICITY: Reservation release, derivation completion, and automatic
+/// hardening admission commit together.
+///
+/// PROVENANCE: This legacy path builds from a `build_reservations` claim and
+/// has no `build_jobs` row, so the admitted hardening scan records no build job
+/// identity. Such an event is deduplicated only by the one-active-scan index
+/// from migration 0188, not by the per-build automatic-event index from 0274.
+///
+/// # Parameters
+///
+/// `auto_hardening_scans` mirrors `server.auto_hardening_scans` and is supplied
+/// by [`super::run_build_loop`], which owns the loaded configuration.
+///
+/// # Errors
+///
+/// Returns an error when the transaction, reservation release, derivation
+/// completion, or hardening admission fails.
 async fn mark_build_complete_and_release(
     pool: &PgPool,
     worker_uuid: &str,
     derivation_id: i32,
     store_path: &str,
+    auto_hardening_scans: bool,
 ) -> Result<()> {
     let mut tx = pool.begin().await?;
 
@@ -304,11 +329,31 @@ async fn mark_build_complete_and_release(
     // Mark complete
     mark_target_build_complete(&mut *tx, derivation_id, store_path).await?;
 
+    crate::queries::hardening_scans::enqueue_post_build_hardening_scan_tx(
+        &mut tx,
+        derivation_id,
+        None,
+        auto_hardening_scans,
+    )
+    .await?;
+
     tx.commit().await?;
 
     // Create GC root to prevent cleanup before cache push
-    if let Err(e) = create_gc_root(store_path, derivation_id).await {
-        warn!("Failed to create GC root for {}: {}", store_path, e);
+    if let Err(error) = create_gc_root(store_path, derivation_id).await {
+        warn!("Failed to create GC root for {}: {}", store_path, error);
+    }
+    if let Err(error) = crate::queries::cve_scans::promote_waiting_cve_scans(
+        pool,
+        crate::queries::cve_scans::EVENT_PROMOTION_LIMIT,
+    )
+    .await
+    {
+        warn!(
+            derivation_id,
+            %error,
+            "Failed to promote waiting CVE scans after local build completion"
+        );
     }
 
     Ok(())
@@ -387,18 +432,32 @@ pub async fn get_drv_gc_root_path(derivation_id: i32) -> String {
     format!("{}-drv", get_gc_root_path(derivation_id).await)
 }
 
-/// Create a GC root for a server-evaluated `.drv` so API builders can download
-/// the derivation archive later even if regular Nix GC runs before the job is
-/// claimed.
+/// Creates a GC root for a valid server-evaluated derivation.
+///
+/// Returns `false` when Nix reports an invalid path. The local validity probe
+/// has a 30-second ceiling; evaluation preparation also applies its shared
+/// invocation deadline and retains cleanup ownership through child reap.
+/// Rooting preserves the derivation for later API-builder archive delivery.
+///
+/// # Errors
+/// Returns an error for probe startup, timeout, unconfirmed process-group
+/// cleanup, or GC-root filesystem failures.
 pub async fn create_drv_gc_root(drv_path: &str, derivation_id: i32) -> Result<bool> {
-    let validity = Command::new("nix-store")
-        .arg("--check-validity")
-        .arg(drv_path)
-        .output()
-        .await?;
+    let mut command = Command::new("nix-store");
+    command.args(["--check-validity", drv_path]);
+    // Local store metadata should finish promptly. The bounded runner prevents
+    // aborted preparation tasks from abandoning this child or its cleanup lease.
+    let validity = crate::models::evaluate_with_policies::run_nix_command_bounded(
+        &mut command,
+        "derivation validity probe",
+        std::time::Duration::from_secs(30),
+        4096,
+        4096,
+    )
+    .await?;
 
     if !validity.status.success() {
-        let stderr = String::from_utf8_lossy(&validity.stderr);
+        let stderr = validity.stderr.diagnostic_excerpt(500);
         warn!(
             "Cannot create GC root for invalid derivation path {} (id={}): {}",
             drv_path,

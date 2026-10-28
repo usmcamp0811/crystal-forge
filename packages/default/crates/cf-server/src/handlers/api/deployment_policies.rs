@@ -16,13 +16,19 @@ use serde_json::Value;
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::api::models::{DeletionEligibility, DeploymentPolicyVersionSummary};
+use crate::api::models::{
+    BulkDeletePoliciesRequest, BulkDeletePoliciesResponse, BulkDeleteSkippedPolicy,
+    DeletionEligibility, DeploymentPolicyVersionSummary,
+};
 use crate::auth::extractors::{RequireAdmin, RequireAuth, RequireOperator};
 use crate::compliance::mappings::{normalise_cci_ids, normalise_srg_ids};
 use crate::handlers::agent_request::CFState;
+use crate::handlers::api::auth_session::RequireCsrf;
+#[cfg(test)]
+use crate::models::deployment_policies::validate_policy_type_config;
 use crate::models::deployment_policies::{
     CreateDeploymentPolicyRequest, DeploymentPolicyRecord, UpdateDeploymentPolicyRequest,
-    is_reserved_policy_result_field,
+    validate_policy_type_config_async,
 };
 use crate::queries::deployment_policies;
 use crate::queries::deployment_policies::PolicyDeleteOutcome;
@@ -84,6 +90,22 @@ fn normalize_required_packages(packages: &[Value]) -> Result<Vec<String>, (Statu
                 ))
         })
         .collect::<Result<Vec<_>, _>>()?;
+    if let Some(invalid) = normalized.iter().find(|pname| {
+        !pname
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphanumeric())
+            || !pname.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'+' | b'-' | b'.' | b'_')
+            })
+    }) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "config.packages entry {invalid:?} is not a package pname; checks apply only to direct config.environment.systemPackages entries"
+            ),
+        ));
+    }
     normalized.sort();
     normalized.dedup();
     if normalized.is_empty() {
@@ -95,35 +117,7 @@ fn normalize_required_packages(packages: &[Value]) -> Result<Vec<String>, (Statu
     Ok(normalized)
 }
 
-/// Validate and normalize a Nix expression for custom policy checks.
-///
-/// This function ensures expressions use the canonical `config.` variable scope.
-/// Legacy `cfg.config.` expressions are normalized for compatibility.
-///
-/// Returns the normalized expression or an error if validation fails.
-fn validate_and_normalize_nix_expression(expr: &str) -> Result<String, (StatusCode, String)> {
-    let trimmed = expr.trim();
-
-    if trimmed.is_empty() {
-        return Err((
-            StatusCode::BAD_REQUEST,
-            "Expression cannot be empty".to_string(),
-        ));
-    }
-
-    let (normalized, changed) = crate::server::normalize_custom_policy_expression(trimmed);
-    if changed {
-        tracing::warn!(
-            "Normalized legacy policy expression from 'cfg.config.' to 'config.': {} -> {}",
-            trimmed,
-            normalized
-        );
-    }
-
-    Ok(normalized)
-}
-
-fn validate_policy_config(
+fn validate_policy_config_fields(
     policy_type: &str,
     config: &Value,
 ) -> Result<Value, (StatusCode, String)> {
@@ -139,7 +133,9 @@ fn validate_policy_config(
         "Policy config must be a JSON object".to_string(),
     ))?;
 
-    if let Some(strict) = obj.get("strict") {
+    if policy_type != "custom_check"
+        && let Some(strict) = obj.get("strict")
+    {
         if !strict.is_boolean() {
             return Err((
                 StatusCode::BAD_REQUEST,
@@ -181,143 +177,12 @@ fn validate_policy_config(
             }
         }
         "custom_check" => {
-            let has_expression = obj
-                .get("expression")
-                .and_then(|v| v.as_str())
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
-
-            let has_rules = obj
-                .get("rules")
-                .and_then(|v| v.as_array())
-                .map(|a| !a.is_empty())
-                .unwrap_or(false);
-
-            if !has_expression && !has_rules {
-                return Err((
-                    StatusCode::BAD_REQUEST,
-                    "custom_check policy requires either non-empty config.expression or non-empty config.rules[]".to_string(),
-                ));
-            }
-
-            if has_expression && !has_rules {
-                // Single-expression (legacy) path — normalize expression and validate field_name.
-                let expression = obj
-                    .get("expression")
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .unwrap();
-                let normalized_expr = validate_and_normalize_nix_expression(expression)?;
-                if let Some(config_obj) = validated_config.as_object_mut() {
-                    config_obj.insert("expression".to_string(), Value::String(normalized_expr));
-                }
-
-                if let Some(field_name) = obj
-                    .get("field_name")
-                    .and_then(|v| v.as_str())
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-                {
-                    if is_reserved_policy_result_field(field_name) {
-                        return Err((
-                            StatusCode::BAD_REQUEST,
-                            format!(
-                                "config.field_name '{}' is reserved for built-in evaluator metadata",
-                                field_name
-                            ),
-                        ));
-                    }
-                }
-            }
-
-            if has_rules {
-                // Multi-rule path — validate each rule
-                let rules = obj.get("rules").and_then(|v| v.as_array()).unwrap();
-                let mut seen_field_names: HashSet<String> = HashSet::new();
-                let mut normalized_rule_expressions: Vec<String> = Vec::with_capacity(rules.len());
-                for (i, rule) in rules.iter().enumerate() {
-                    let rule_obj = rule.as_object().ok_or((
-                        StatusCode::BAD_REQUEST,
-                        format!("config.rules[{}] must be an object", i),
-                    ))?;
-
-                    let expr = rule_obj
-                        .get("expression")
-                        .and_then(|v| v.as_str())
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .ok_or((
-                            StatusCode::BAD_REQUEST,
-                            format!("config.rules[{}].expression must be a non-empty string", i),
-                        ))?;
-                    let normalized_expr = validate_and_normalize_nix_expression(expr)?;
-                    normalized_rule_expressions.push(normalized_expr);
-
-                    let field_name = rule_obj
-                        .get("field_name")
-                        .and_then(|v| v.as_str())
-                        .map(str::trim)
-                        .filter(|s| !s.is_empty())
-                        .ok_or((
-                            StatusCode::BAD_REQUEST,
-                            format!("config.rules[{}].field_name must be a non-empty string", i),
-                        ))?;
-
-                    if !seen_field_names.insert(field_name.to_string()) {
-                        return Err((
-                            StatusCode::BAD_REQUEST,
-                            format!(
-                                "config.rules[{}].field_name duplicates existing field_name '{}'",
-                                i, field_name
-                            ),
-                        ));
-                    }
-
-                    if is_reserved_policy_result_field(field_name) {
-                        return Err((
-                            StatusCode::BAD_REQUEST,
-                            format!(
-                                "config.rules[{}].field_name '{}' is reserved for built-in evaluator metadata",
-                                i, field_name
-                            ),
-                        ));
-                    }
-                }
-
-                if let Some(config_obj) = validated_config.as_object_mut() {
-                    if let Some(validated_rules) =
-                        config_obj.get_mut("rules").and_then(|v| v.as_array_mut())
-                    {
-                        for (i, normalized_expr) in
-                            normalized_rule_expressions.into_iter().enumerate()
-                        {
-                            if let Some(rule_obj) = validated_rules
-                                .get_mut(i)
-                                .and_then(|rule| rule.as_object_mut())
-                            {
-                                rule_obj.insert(
-                                    "expression".to_string(),
-                                    Value::String(normalized_expr),
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Validate mode if present
-                if let Some(mode) = obj.get("mode") {
-                    let mode_str = mode.as_str().ok_or((
-                        StatusCode::BAD_REQUEST,
-                        "config.mode must be a string (\"all\" or \"any\")".to_string(),
-                    ))?;
-                    if mode_str != "all" && mode_str != "any" {
-                        return Err((
-                            StatusCode::BAD_REQUEST,
-                            "config.mode must be \"all\" or \"any\"".to_string(),
-                        ));
-                    }
-                }
-            }
+            validated_config = crate::models::custom_check::validate_and_normalize_config(
+                config,
+                crate::models::custom_check::ExpressionBinding::Compatible,
+                false,
+            )
+            .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
         }
         "require_cve_check" => {
             // Validate by attempting deserialization into CveCheckConfig
@@ -343,13 +208,19 @@ fn validate_policy_config(
         }
         "time_window" => {
             // Validate by attempting deserialization
-            serde_json::from_value::<crate::models::deployment_policies::TimeWindowConfig>(
-                config.clone(),
-            )
+            let parsed = serde_json::from_value::<
+                crate::models::deployment_policies::TimeWindowConfig,
+            >(config.clone())
             .map_err(|e| {
                 (
                     StatusCode::BAD_REQUEST,
                     format!("Invalid time_window config: {}", e),
+                )
+            })?;
+            crate::services::time_window_policy::validate_config(&parsed).map_err(|message| {
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid time_window config: {message}"),
                 )
             })?;
 
@@ -430,9 +301,32 @@ fn validate_policy_config(
                 }
             }
         }
+        "composite" => {}
         _ => {}
     }
 
+    Ok(validated_config)
+}
+
+#[cfg(test)]
+fn validate_policy_config(
+    policy_type: &str,
+    config: &Value,
+) -> Result<Value, (StatusCode, String)> {
+    let validated_config = validate_policy_config_fields(policy_type, config)?;
+    validate_policy_type_config(policy_type, &validated_config)
+        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
+    Ok(validated_config)
+}
+
+async fn validate_policy_config_async(
+    policy_type: &str,
+    config: &Value,
+) -> Result<Value, (StatusCode, String)> {
+    let validated_config = validate_policy_config_fields(policy_type, config)?;
+    validate_policy_type_config_async(policy_type, &validated_config)
+        .await
+        .map_err(|message| (StatusCode::BAD_REQUEST, message))?;
     Ok(validated_config)
 }
 
@@ -710,6 +604,7 @@ fn reject_builtin_policy_type(policy_type: &str) -> Result<(), (StatusCode, Stri
 
 pub async fn create_deployment_policy(
     RequireOperator(_user): RequireOperator,
+    _csrf: RequireCsrf,
     State(state): State<CFState>,
     Json(request): Json<CreateDeploymentPolicyRequest>,
 ) -> Result<impl IntoResponse, (StatusCode, String)> {
@@ -747,6 +642,7 @@ pub async fn create_deployment_policy(
         "require_approvals",
         "canary_rollout",
         "cve_threshold",
+        "composite",
     ];
     if !valid_types.contains(&request.policy_type.as_str()) {
         return Err((
@@ -760,7 +656,7 @@ pub async fn create_deployment_policy(
     }
 
     // Validate and normalize the config (may auto-fix expressions)
-    request.config = validate_policy_config(&request.policy_type, &request.config)?;
+    request.config = validate_policy_config_async(&request.policy_type, &request.config).await?;
 
     // Check if policy name already exists
     let name_exists =
@@ -890,6 +786,7 @@ pub async fn create_deployment_policy(
 /// Returns 409 if the new name conflicts with an existing policy.
 pub async fn update_deployment_policy(
     RequireOperator(user): RequireOperator,
+    _csrf: RequireCsrf,
     State(state): State<CFState>,
     Path(policy_id): Path<Uuid>,
     Json(request): Json<UpdateDeploymentPolicyRequest>,
@@ -978,6 +875,7 @@ pub async fn update_deployment_policy(
             "require_approvals",
             "canary_rollout",
             "cve_threshold",
+            "composite",
         ];
         if !valid_types.contains(&policy_type.as_str()) {
             return Err((
@@ -1002,7 +900,8 @@ pub async fn update_deployment_policy(
 
     if request.policy_type.is_some() || request.config.is_some() {
         // Validate and normalize the config (may auto-fix expressions)
-        candidate_config = validate_policy_config(&candidate_policy_type, &candidate_config)?;
+        candidate_config =
+            validate_policy_config_async(&candidate_policy_type, &candidate_config).await?;
         // Update the request with the normalized config
         request.config = Some(candidate_config.clone());
     }
@@ -1105,6 +1004,7 @@ pub async fn get_deployment_policy_deletion_eligibility(
 
 pub async fn delete_deployment_policy(
     RequireAdmin(_user): RequireAdmin,
+    _csrf: RequireCsrf,
     State(state): State<CFState>,
     Path(policy_id): Path<Uuid>,
 ) -> Result<StatusCode, axum::response::Response> {
@@ -1135,6 +1035,73 @@ pub async fn delete_deployment_policy(
             Some(serde_json::json!({ "policy_id": policy_id, "eligibility": eligibility })),
         )),
     }
+}
+
+/// POST /api/v1/deployment-policies/bulk-delete - Delete multiple deployment
+/// policies from the catalog multi-select toolbar.
+///
+/// Available to Admin role only. Every requested id resolves into either
+/// `deleted` or `skipped` — the request never fails outright because one
+/// policy is blocked. All eligible deletions share one transaction, so an
+/// unexpected database error rolls back the complete operation. Each policy
+/// uses the same server-side eligibility check as the single-policy DELETE
+/// endpoint, so a stale client selection is always resolved authoritatively
+/// rather than trusting cached eligibility.
+pub async fn bulk_delete_deployment_policies(
+    RequireAdmin(_user): RequireAdmin,
+    _csrf: RequireCsrf,
+    State(state): State<CFState>,
+    Json(request): Json<BulkDeletePoliciesRequest>,
+) -> Result<Json<BulkDeletePoliciesResponse>, axum::response::Response> {
+    const MAX_BULK_DELETE: usize = 500;
+    if request.policy_ids.is_empty() {
+        return Ok(Json(BulkDeletePoliciesResponse {
+            deleted: Vec::new(),
+            skipped: Vec::new(),
+        }));
+    }
+    if request.policy_ids.len() > MAX_BULK_DELETE {
+        return Err(policy_delete_error(
+            StatusCode::BAD_REQUEST,
+            "too_many_ids",
+            &format!("A bulk delete request may include at most {MAX_BULK_DELETE} policies"),
+            None,
+        ));
+    }
+
+    // De-duplicate while preserving first-occurrence order so the response
+    // maps predictably back onto the caller's selection.
+    let mut seen = HashSet::with_capacity(request.policy_ids.len());
+    let policy_ids: Vec<Uuid> = request
+        .policy_ids
+        .into_iter()
+        .filter(|id| seen.insert(*id))
+        .collect();
+
+    let outcome = deployment_policies::bulk_delete_deployment_policies(&state.pool, &policy_ids)
+        .await
+        .map_err(|e| {
+            tracing::error!(error = %e, "failed to bulk delete deployment policies");
+            policy_delete_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "internal_error",
+                "Failed to bulk delete deployment policies",
+                None,
+            )
+        })?;
+
+    Ok(Json(BulkDeletePoliciesResponse {
+        deleted: outcome.deleted,
+        skipped: outcome
+            .skipped
+            .into_iter()
+            .map(|(policy_id, reason, eligibility)| BulkDeleteSkippedPolicy {
+                policy_id,
+                reason: reason.to_string(),
+                eligibility,
+            })
+            .collect(),
+    }))
 }
 
 fn policy_delete_error(
@@ -1173,11 +1140,71 @@ mod tests {
     }
 
     #[test]
+    fn validate_policy_config_enforces_pname_only_package_contract() {
+        let validated = validate_policy_config(
+            "require_packages",
+            &serde_json::json!({"packages": ["openssh", "curl", "openssh"]}),
+        )
+        .expect("direct package pnames must be accepted");
+        assert_eq!(
+            validated["packages"],
+            serde_json::json!(["curl", "openssh"])
+        );
+
+        let err = validate_policy_config(
+            "require_packages",
+            &serde_json::json!({"packages": ["nixpkgs#openssh"]}),
+        )
+        .expect_err("flake references must not be accepted as package pnames");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("package pname"));
+    }
+
+    #[test]
     fn validate_policy_config_rejects_custom_check_without_expression() {
         let err = validate_policy_config("custom_check", &serde_json::json!({"strict": false}))
             .expect_err("missing expression must be rejected");
         assert_eq!(err.0, StatusCode::BAD_REQUEST);
         assert!(err.1.contains("config.expression"));
+    }
+
+    #[test]
+    fn validate_policy_config_accepts_explicitly_empty_custom_check() {
+        let validated = validate_policy_config(
+            "custom_check",
+            &serde_json::json!({"mode": "all", "rules": []}),
+        )
+        .expect("an explicit empty rule set represents no enforcement");
+
+        // The canonical no-enforcement representation must survive validation
+        // byte-for-byte; the evaluator relies on the empty array to skip it.
+        assert_eq!(
+            validated,
+            serde_json::json!({"mode": "all", "rules": []}),
+            "no-enforcement config must not be rewritten into an executable shape"
+        );
+    }
+
+    #[test]
+    fn validate_policy_config_rejects_invalid_mode_on_empty_custom_check() {
+        let err = validate_policy_config(
+            "custom_check",
+            &serde_json::json!({"mode": "some", "rules": []}),
+        )
+        .expect_err("an invalid aggregation mode must be rejected for empty rule sets too");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("config.mode"));
+    }
+
+    #[test]
+    fn validate_policy_config_rejects_empty_any_custom_check() {
+        let err = validate_policy_config(
+            "custom_check",
+            &serde_json::json!({"mode": "any", "rules": []}),
+        )
+        .expect_err("any mode requires an effective rule");
+        assert_eq!(err.0, StatusCode::BAD_REQUEST);
+        assert!(err.1.contains("requires at least one rule"));
     }
 
     #[test]
@@ -1201,6 +1228,31 @@ mod tests {
             result.get("expression").and_then(|v| v.as_str()),
             Some("config.services.ssh.enable")
         );
+    }
+
+    #[test]
+    fn validate_policy_config_ignores_superseded_single_expression_fields() {
+        let config = serde_json::json!({
+            "mode": "any",
+            "strict": "not effective",
+            "expression": {"malformed": true},
+            "field_name": 42,
+            "description": false,
+            "rules": [{
+                "field_name": "effectiveRule",
+                "expression": "cfg.config.services.ssh.enable",
+                "strict": true
+            }]
+        });
+        let validated = validate_policy_config("custom_check", &config)
+            .expect("API validation must follow runtime non-empty-rules precedence");
+
+        assert_eq!(
+            validated["rules"][0]["expression"],
+            "config.services.ssh.enable"
+        );
+        assert_eq!(validated["expression"], config["expression"]);
+        assert_eq!(validated["strict"], config["strict"]);
     }
 
     #[test]
@@ -1362,6 +1414,85 @@ mod tests {
         );
     }
 
+    #[test]
+    fn composite_validation_treats_nixpkgs_baseline_semantics_as_advisory() {
+        let cases = [
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "10000000-0000-0000-0000-000000000001",
+                    "kind": "nixos_option",
+                    "config": {
+                        "path": "networking.firewall.backend",
+                        "operator": "==",
+                        "value_type": "unknown",
+                        "value": "target-specific-backend"
+                    }
+                }]
+            }),
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "10000000-0000-0000-0000-000000000002",
+                    "kind": "nixos_option",
+                    "config": {
+                        "path": "networking.firewall.backend",
+                        "operator": "==",
+                        "value_type": "enum",
+                        "value": "target-specific-backend"
+                    }
+                }]
+            }),
+            serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "10000000-0000-0000-0000-000000000003",
+                    "kind": "nixos_option",
+                    "config": {
+                        "path": "target.module.typedOption",
+                        "operator": ">=",
+                        "value_type": "integer",
+                        "value": 7
+                    }
+                }]
+            }),
+        ];
+
+        for config in cases {
+            let validated = validate_policy_config("composite", &config)
+                .expect("structurally valid target semantics must persist without metadata");
+            assert_eq!(validated, config);
+        }
+    }
+
+    #[test]
+    fn composite_validation_still_rejects_semantic_json_type_mismatches() {
+        let error = validate_policy_config(
+            "composite",
+            &serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "10000000-0000-0000-0000-000000000001",
+                    "kind": "nixos_option",
+                    "config": {
+                        "path": "networking.firewall.enable",
+                        "operator": "==",
+                        "value_type": "boolean",
+                        "value": "banana"
+                    }
+                }]
+            }),
+        )
+        .expect_err("boolean semantic values must remain JSON booleans");
+
+        assert_eq!(error.0, StatusCode::BAD_REQUEST);
+        assert!(error.1.contains("value does not match value_type"));
+    }
+
     async fn create_test_policy(pool: &PgPool, name: &str) -> Uuid {
         let request = CreateDeploymentPolicyRequest {
             name: name.to_string(),
@@ -1378,16 +1509,29 @@ mod tests {
             .id
     }
 
-    #[tokio::test]
-    #[ignore = "requires live postgres"]
-    async fn test_list_deployment_policies_empty() {
-        let pool = test_pool().await;
-        let policies = deployment_policies::list_deployment_policies(&pool, 100, 0)
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified disposable PostgreSQL"]
+    async fn test_list_deployment_policies_includes_fixture(pool: PgPool) {
+        // Migrations can seed policies; the fixture must add exactly one row.
+        let initial_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM deployment_policies")
+            .fetch_one(&pool)
             .await
-            .unwrap();
+            .expect("seed policy count should load");
+        let name = format!("List fixture {}", Uuid::new_v4());
+        let policy_id = create_test_policy(&pool, &name).await;
+        let policies = deployment_policies::list_deployment_policies(&pool, initial_count + 1, 0)
+            .await
+            .expect("policies should list");
 
-        // May have seed data, just verify it doesn't error
-        assert!(policies.len() >= 0);
+        assert_eq!(policies.len() as i64, initial_count + 1);
+        let fixtures: Vec<_> = policies
+            .iter()
+            .filter(|policy| policy.id == policy_id)
+            .collect();
+        assert_eq!(fixtures.len(), 1, "the fixture must appear exactly once");
+        assert_eq!(fixtures[0].name, name);
+        assert_eq!(fixtures[0].policy_type, "custom_check");
+        assert!(fixtures[0].enabled);
     }
 
     #[tokio::test]

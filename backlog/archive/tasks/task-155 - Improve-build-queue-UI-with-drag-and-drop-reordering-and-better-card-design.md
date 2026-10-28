@@ -54,13 +54,10 @@ The build queue UI currently has several usability and visual issues that need t
 - **Responsive**: Cards should adapt to container width
 
 ### Example Card Layout
-```
-┌─────────────────────────────────────┐
-│ 🟦 QUEUED          Priority: 20.0  │
-│ nixos-server-01    prod            │
-│ /nix/store/abc...xyz-config        │
-│ Queued: 5m ago                      │
-└─────────────────────────────────────┘
+```mermaid
+%% diagram-id: backlog-task155-build-queue-card-layout
+flowchart TD
+    card["🟦 QUEUED | Priority: 20.0 | nixos-server-01 | prod | /nix/store/abc...xyz-config | Queued: 5m ago"]
 ```
 
 ## Technical Considerations

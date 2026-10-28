@@ -128,6 +128,7 @@ pub async fn authenticate_agent_request(
 }
 
 use crate::config::ServerConfig;
+use crate::nixos_options_metadata::NixosOptionsMetadataProvider;
 use crate::queue::QueueNotifier;
 use crate::server::jobs::BackgroundJobRegistry;
 
@@ -139,10 +140,13 @@ pub struct CFState {
     pub started_at: Instant,
     pub queue_notifier: Arc<QueueNotifier>,
     pub job_registry: BackgroundJobRegistry,
-    pub eval_log_channels: Arc<
-        tokio::sync::Mutex<std::collections::HashMap<i32, tokio::sync::broadcast::Sender<String>>>,
-    >,
-    pub eval_log_history: Arc<tokio::sync::Mutex<std::collections::HashMap<i32, Vec<String>>>>,
+    pub nixos_options_metadata: NixosOptionsMetadataProvider,
+    /// State-local sole senders and replay, atomically rotated by exact attempt.
+    pub(crate) eval_log_registry:
+        Arc<tokio::sync::Mutex<crate::handlers::api::commits::log_registry::EvalLogRegistry>>,
+    /// Immutable producer capability; request state has no publication authority.
+    pub(crate) eval_log_producer:
+        Option<crate::handlers::api::commits::log_registry::ProducerToken>,
     pub build_log_channels: Arc<
         tokio::sync::Mutex<std::collections::HashMap<Uuid, tokio::sync::broadcast::Sender<String>>>,
     >,
@@ -162,8 +166,9 @@ impl CFState {
             started_at: Instant::now(),
             queue_notifier,
             job_registry,
-            eval_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
-            eval_log_history: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
+            nixos_options_metadata: NixosOptionsMetadataProvider::from_runtime(),
+            eval_log_registry: Arc::default(),
+            eval_log_producer: None,
             build_log_channels: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
             build_log_history: Arc::new(tokio::sync::Mutex::new(std::collections::HashMap::new())),
         }
@@ -184,6 +189,49 @@ impl FromRef<CFState> for ServerConfig {
     fn from_ref(state: &CFState) -> ServerConfig {
         state.server_config.clone()
     }
+}
+
+impl FromRef<CFState> for NixosOptionsMetadataProvider {
+    fn from_ref(state: &CFState) -> NixosOptionsMetadataProvider {
+        state.nixos_options_metadata.clone()
+    }
+}
+
+#[cfg(test)]
+impl FromRef<PgPool> for NixosOptionsMetadataProvider {
+    fn from_ref(_pool: &PgPool) -> NixosOptionsMetadataProvider {
+        NixosOptionsMetadataProvider::from_runtime()
+    }
+}
+
+/// Returns capabilities from the authenticated body only.
+///
+/// Missing flags default to false, including legacy V1 requests. The result is
+/// valid for this heartbeat only; version metadata and headers are not evidence.
+///
+/// # Errors
+/// Returns an error for malformed JSON or incorrectly typed capabilities.
+///
+/// # Examples
+/// ```no_run
+/// # fn inspect(request: &crystal_forge::handlers::agent_request::VerifiedAgentRequest)
+/// # -> anyhow::Result<()> {
+/// use crystal_forge::handlers::agent_request::deserialize_agent_capabilities;
+/// let capabilities = deserialize_agent_capabilities(request)?;
+/// if capabilities.supports_niks3 {
+///     // Read settings still require environment and transport checks.
+/// }
+/// # Ok(()) }
+/// ```
+pub fn deserialize_agent_capabilities(
+    agent_request: &VerifiedAgentRequest,
+) -> Result<cf_protocol::agent::AgentCapabilities> {
+    #[derive(serde::Deserialize)]
+    struct CapabilityBody {
+        #[serde(default)]
+        capabilities: cf_protocol::agent::AgentCapabilities,
+    }
+    Ok(serde_json::from_slice::<CapabilityBody>(&agent_request.body)?.capabilities)
 }
 
 pub fn deserialize_system_state_versioned(
@@ -327,6 +375,116 @@ mod tests {
         assert_eq!(verified.key_id, "test-host");
         assert_eq!(verified.system.hostname, "test-host");
         assert_eq!(verified.body, body);
+    }
+
+    #[tokio::test]
+    async fn niks3_capability_requires_authenticated_body_and_ignores_unsigned_headers() {
+        let (key, system) = create_test_system("test-host");
+        let lookup = MockSystemLookup::new(Some(system));
+        let state = SystemStateBuilder::new().hostname("test-host").build();
+        let mut legacy = serde_json::to_value(&state).unwrap();
+        // A seemingly new version is not a capability attestation.
+        legacy["agent_version"] = serde_json::json!("999.0.0");
+        legacy["agent_build_hash"] = serde_json::json!("current-hash");
+        let body = Bytes::from(serde_json::to_vec(&legacy).unwrap());
+        let mut headers = create_signed_headers("test-host", &body, &key);
+        headers.insert("x-agent-supports-niks3", "true".parse().unwrap());
+        headers.insert(
+            "x-agent-capabilities",
+            "{\"supports_niks3\":true}".parse().unwrap(),
+        );
+        let verified = authenticate_agent_request_with_lookup(&headers, body, &lookup)
+            .await
+            .unwrap();
+        assert!(
+            !deserialize_agent_capabilities(&verified)
+                .unwrap()
+                .supports_niks3
+        );
+        assert!(deserialize_system_state_versioned(&verified).unwrap().1);
+
+        legacy["capabilities"] = serde_json::json!({"supports_niks3": true});
+        let advertised = Bytes::from(serde_json::to_vec(&legacy).unwrap());
+        assert_eq!(
+            authenticate_agent_request_with_lookup(&headers, advertised.clone(), &lookup)
+                .await
+                .unwrap_err(),
+            StatusCode::UNAUTHORIZED,
+        );
+        let signed_headers = create_signed_headers("test-host", &advertised, &key);
+        let verified = authenticate_agent_request_with_lookup(&signed_headers, advertised, &lookup)
+            .await
+            .unwrap();
+        assert!(
+            deserialize_agent_capabilities(&verified)
+                .unwrap()
+                .supports_niks3
+        );
+        assert!(deserialize_system_state_versioned(&verified).unwrap().1);
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════
+    // TASK-435: key rotation regression
+    //
+    // Agent authentication verifies every request fresh against the live
+    // `systems.public_key` column — there is no session or cached key. These
+    // tests pin that contract by swapping the looked-up system's public key
+    // exactly the way `PUT /systems/:id/public-key` updates the row, and prove
+    // the cutover is immediate in both directions.
+    // ═══════════════════════════════════════════════════════════════════════
+
+    #[tokio::test]
+    async fn rotating_the_public_key_rejects_the_previous_private_key() {
+        let (old_signing_key, mut system) = create_test_system("rotating-host");
+        let body = Bytes::from(b"heartbeat payload".to_vec());
+        let old_key_headers = create_signed_headers("rotating-host", &body, &old_signing_key);
+
+        // Pre-rotation the old key is accepted.
+        let lookup = MockSystemLookup::new(Some(system.clone()));
+        assert!(
+            authenticate_agent_request_with_lookup(&old_key_headers, body.clone(), &lookup)
+                .await
+                .is_ok(),
+            "old key must be accepted before rotation"
+        );
+
+        // Rotate: replace the stored public key exactly as the handler does.
+        let (_new_signing_key, new_verifying_key) = generate_keypair();
+        system.public_key = PublicKey::from_verifying_key(new_verifying_key);
+
+        let lookup = MockSystemLookup::new(Some(system));
+        let result = authenticate_agent_request_with_lookup(&old_key_headers, body, &lookup).await;
+
+        assert_eq!(
+            result.err(),
+            Some(StatusCode::UNAUTHORIZED),
+            "a request signed with the pre-rotation private key must be rejected immediately"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotating_the_public_key_accepts_the_newly_generated_private_key() {
+        let (old_signing_key, mut system) = create_test_system("rotating-host");
+        let body = Bytes::from(b"heartbeat payload".to_vec());
+
+        let (new_signing_key, new_verifying_key) = generate_keypair();
+        system.public_key = PublicKey::from_verifying_key(new_verifying_key);
+
+        let new_key_headers = create_signed_headers("rotating-host", &body, &new_signing_key);
+        let lookup = MockSystemLookup::new(Some(system));
+
+        let verified =
+            authenticate_agent_request_with_lookup(&new_key_headers, body.clone(), &lookup)
+                .await
+                .expect("newly rotated key must be accepted");
+        assert_eq!(verified.key_id, "rotating-host");
+
+        // Sanity: the old key really is a different key, so the acceptance above
+        // is not an artefact of the two keypairs coinciding.
+        assert_ne!(
+            old_signing_key.verifying_key().to_bytes(),
+            new_signing_key.verifying_key().to_bytes()
+        );
     }
 
     #[tokio::test]
@@ -565,6 +723,11 @@ mod tests {
         assert!(result.is_ok());
         let (deserialized, version_compatible) = result.unwrap();
         assert!(!version_compatible); // V1 fallback returns false
+        assert!(
+            !deserialize_agent_capabilities(&request)
+                .unwrap()
+                .supports_niks3
+        );
         assert_eq!(deserialized.hostname, "legacy-host");
         // V1 'agent-startup' maps to 'startup'
         assert_eq!(deserialized.change_reason, "startup");

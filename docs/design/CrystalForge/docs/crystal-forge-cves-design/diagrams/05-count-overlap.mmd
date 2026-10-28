@@ -1,0 +1,10 @@
+flowchart LR
+    A["Current: host A and host B"] --> D["Active union: A, B, C = 3 hosts"]
+    B["Scheduled: host B and host C"] --> D
+    A --> E["Current count = 2"]
+    B --> F["Scheduled count = 2"]
+    C["Historical fallback: host D"] --> G["Historical count = 1"]
+    E --> H["Five role rows describe four distinct hosts"]
+    F --> H
+    G --> H
+    D --> I["Do not sum Current and Scheduled as four active hosts"]

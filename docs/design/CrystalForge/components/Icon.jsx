@@ -33,7 +33,10 @@ const Icon = ({ name, size = 16, ...rest }) => {
     case "chevron-down":  return <svg {...common}><path d="m6 9 6 6 6-6"/></svg>;
     case "chevron-up":    return <svg {...common}><path d="m6 15 6-6 6 6"/></svg>;
     case "arrow-left": return <svg {...common}><path d="M19 12H5M11 19l-7-7 7-7"/></svg>;
+    case "clock":     return <svg {...common}><circle cx="12" cy="12" r="9"/><path d="M12 7v5.2l3.4 2"/></svg>;
+    case "cache":     return <svg {...common}><ellipse cx="12" cy="5.5" rx="8" ry="2.8"/><path d="M4 5.5v6c0 1.55 3.58 2.8 8 2.8s8-1.25 8-2.8v-6"/><path d="M4 11.5v6c0 1.55 3.58 2.8 8 2.8s8-1.25 8-2.8v-6"/></svg>;
     case "terminal": return <svg {...common}><rect x="3" y="4" width="18" height="16" rx="2"/><path d="m7 9 3 3-3 3M13 15h4"/></svg>;
+    case "archive": return <svg {...common}><rect x="3" y="4" width="18" height="4" rx="1"/><path d="M5 8v11a1 1 0 0 0 1 1h12a1 1 0 0 0 1-1V8"/><path d="M10 12h4"/></svg>;
     case "history": return <svg {...common}><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg>;
     case "rollback": return <svg {...common}><path d="M3 7h11a6 6 0 1 1 0 12H8"/><path d="m8 3-5 4 5 4"/></svg>;
     case "deploy":    return <svg {...common}><path d="M12 3v12M6 9l6-6 6 6"/><rect x="4" y="17" width="16" height="4" rx="1"/></svg>;
@@ -60,6 +63,7 @@ const Icon = ({ name, size = 16, ...rest }) => {
     case "edit":      return <svg {...common}><path d="M12 20h9"/><path d="M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z"/></svg>;
     case "trash":     return <svg {...common}><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6M14 11v6"/></svg>;
     case "star":      return <svg {...common}><path d="m12 2.5 3 6.4 6.8.9-5 4.9 1.3 6.8L12 18l-6.1 3.5L7.2 14.7l-5-4.9 6.8-.9L12 2.5z"/></svg>;
+    case "help":      return <svg {...common}><circle cx="12" cy="12" r="9"/><path d="M9.5 9.2a2.6 2.6 0 0 1 5 1c0 1.8-2.5 2.2-2.5 3.8M12 17h.01"/></svg>;
     default: return null;
   }
 };

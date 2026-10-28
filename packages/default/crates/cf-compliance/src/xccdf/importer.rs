@@ -43,6 +43,10 @@ pub fn check_document_class(parsed: &ParsedXccdf) -> Option<ImportPlanError> {
 /// Validate the complete CF-native contract and construct portable records.
 /// This is intentionally typed and digest-checking: a document that claims to
 /// be CF-native is never silently downgraded to the foreign import path.
+///
+/// Custom expressions are additionally syntax-checked by one bounded
+/// `nix-instantiate --parse` subprocess per policy. This is the validation
+/// every server import boundary applies.
 pub fn validate_cf_native_document(
     parsed: &ParsedXccdf,
 ) -> Result<(ValidatedImportPlan, Vec<ImportedPolicyRecord>), ImportPlanError> {
@@ -103,12 +107,30 @@ pub fn validate_cf_native_document(
                 format!("rule {} has invalid portable identity", rule.id),
             ));
         }
+        if !matches!(
+            meta.publication_state.as_str(),
+            "incomplete" | "draft" | "interim" | "accepted" | "deprecated"
+        ) {
+            return Err(ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_METADATA_INVALID",
+                format!("rule {} has invalid publication state", rule.id),
+            ));
+        }
         let policy_type = meta.policy_type.clone().ok_or_else(|| {
             ImportPlanError::cf_native_invalid(
                 "CF_NATIVE_POLICY_TYPE_UNSUPPORTED",
                 format!("rule {} has no typed CF policy implementation", rule.id),
             )
         })?;
+        if meta.custom_check.is_some() && policy_type != "custom_check" {
+            return Err(ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_PAYLOAD_INVALID",
+                format!(
+                    "rule {} declares policy type {policy_type} but contains a typed custom-check implementation",
+                    rule.id
+                ),
+            ));
+        }
         let implementation_state = meta.implementation_state.clone().ok_or_else(|| {
             ImportPlanError::cf_native_invalid(
                 "CF_NATIVE_PAYLOAD_INVALID",
@@ -160,28 +182,73 @@ pub fn validate_cf_native_document(
             .compliance_metadata
             .clone()
             .unwrap_or_else(|| ImportedPolicyRecord::build_compliance_metadata(rule, false));
-        let config = meta.config.clone().ok_or_else(|| {
+        let source_config = meta.config.clone().ok_or_else(|| {
             ImportPlanError::cf_native_invalid(
                 "CF_NATIVE_PAYLOAD_INVALID",
                 format!("rule {} is missing typed configuration", rule.id),
             )
         })?;
+        let custom_binding = if policy_type == "custom_check" {
+            let typed = meta.custom_check.as_ref().ok_or_else(|| {
+                ImportPlanError::cf_native_invalid(
+                    "CF_NATIVE_PAYLOAD_INVALID",
+                    format!("rule {} is missing typed custom-check content", rule.id),
+                )
+            })?;
+            let binding =
+                crate::xccdf::custom_check::expression_binding(typed).map_err(|message| {
+                    ImportPlanError::cf_native_invalid(
+                        "CF_NATIVE_PAYLOAD_INVALID",
+                        format!("rule {} custom-check is inconsistent: {message}", rule.id),
+                    )
+                })?;
+            crate::custom_check::validate_config(&source_config, binding, true).map_err(
+                |message| {
+                    ImportPlanError::cf_native_invalid(
+                        "CF_NATIVE_PAYLOAD_INVALID",
+                        format!(
+                            "rule {} has invalid custom-check config: {message}",
+                            rule.id
+                        ),
+                    )
+                },
+            )?;
+            Some(binding)
+        } else {
+            None
+        };
         let dependencies = meta
             .dependencies
             .clone()
             .unwrap_or_else(|| serde_json::json!([]));
-        let canonical = PolicyVersionCanonical {
+        let execution_phase = meta.execution_phase.clone().ok_or_else(|| {
+            ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_PAYLOAD_INVALID",
+                format!("rule {} is missing execution phase", rule.id),
+            )
+        })?;
+        if policy_type == crate::policy_config::COMPOSITE_POLICY_TYPE
+            && execution_phase != "multi-phase"
+        {
+            return Err(ImportPlanError::cf_native_invalid(
+                "CF_NATIVE_PAYLOAD_INVALID",
+                format!(
+                    "rule {} composite policy must use execution phase multi-phase",
+                    rule.id
+                ),
+            ));
+        }
+        // COMPATIBILITY: Source validation above does not mutate source_config.
+        // A V1 digest authenticates that source representation. Verify it
+        // before current validation or persistence uses the normalized value.
+        // V2 source and current representations match.
+        let source_canonical = PolicyVersionCanonical {
             name: rule.title.clone().unwrap_or_else(|| rule.id.clone()),
             description: rule.description.clone(),
             policy_type: policy_type.clone(),
             implementation_state: implementation_state.clone(),
-            execution_phase: meta.execution_phase.clone().ok_or_else(|| {
-                ImportPlanError::cf_native_invalid(
-                    "CF_NATIVE_PAYLOAD_INVALID",
-                    format!("rule {} is missing execution phase", rule.id),
-                )
-            })?,
-            config: config.clone(),
+            execution_phase: execution_phase.clone(),
+            config: source_config.clone(),
             compliance_metadata: compliance_metadata.clone(),
             dependencies: dependencies.clone(),
             opaque_xml_digest: PolicyVersionCanonical::digest_opaque_xml(
@@ -189,16 +256,69 @@ pub fn validate_cf_native_document(
             ),
             enabled_by_default: Some(enabled_default),
         };
-        let recalculated_digest = canonical.compute_digest();
-        if recalculated_digest != imported_digest {
+        let source_digest = source_canonical.compute_digest();
+        if source_digest != imported_digest {
             return Err(ImportPlanError::cf_native_invalid(
                 "CF_NATIVE_DIGEST_MISMATCH",
                 format!(
                     "rule {} semantic digest does not match its typed payload (imported {}, recalculated {})",
-                    rule.id, imported_digest, recalculated_digest
+                    rule.id, imported_digest, source_digest
                 ),
             ));
         }
+        let config = if let Some(binding) = custom_binding {
+            let typed = meta.custom_check.as_ref().ok_or_else(|| {
+                ImportPlanError::cf_native_invalid(
+                    "CF_NATIVE_PAYLOAD_INVALID",
+                    format!("rule {} is missing typed custom-check content", rule.id),
+                )
+            })?;
+            let normalized =
+                crate::custom_check::validate_and_normalize_config(&source_config, binding, true)
+                    .map_err(|message| {
+                    ImportPlanError::cf_native_invalid(
+                        "CF_NATIVE_PAYLOAD_INVALID",
+                        format!(
+                            "rule {} has invalid custom-check config: {message}",
+                            rule.id
+                        ),
+                    )
+                })?;
+            let projection = crate::xccdf::custom_check::project_custom_check(
+                rule.title.as_deref().unwrap_or(&rule.id),
+                meta.policy_id,
+                rule.description.as_deref(),
+                &normalized,
+            )
+            .map_err(|message| {
+                ImportPlanError::cf_native_invalid(
+                    "CF_NATIVE_PAYLOAD_INVALID",
+                    format!(
+                        "rule {} has invalid custom-check config: {message}",
+                        rule.id
+                    ),
+                )
+            })?;
+            crate::xccdf::custom_check::reconcile_custom_check(typed, &projection).map_err(
+                |message| {
+                    ImportPlanError::cf_native_invalid(
+                        "CF_NATIVE_PAYLOAD_INVALID",
+                        format!("rule {} custom-check is inconsistent: {message}", rule.id),
+                    )
+                },
+            )?;
+            normalized
+        } else {
+            source_config
+        };
+        crate::policy_config::validate_policy_type_config(&policy_type, &config).map_err(
+            |message| ImportPlanError::cf_native_invalid("CF_NATIVE_PAYLOAD_INVALID", message),
+        )?;
+        let canonical = PolicyVersionCanonical {
+            config: config.clone(),
+            ..source_canonical
+        };
+        let canonical_digest = canonical.compute_digest();
         let version = meta.version.clone();
         records.push(ImportedPolicyRecord {
             policy_id: meta.policy_id,
@@ -214,7 +334,7 @@ pub fn validate_cf_native_document(
             dependencies,
             enabled_by_default: enabled_default,
             portable: true,
-            semantic_digest: Some(imported_digest),
+            semantic_digest: Some(canonical_digest),
             selected,
             policy_order,
             name: canonical.name,

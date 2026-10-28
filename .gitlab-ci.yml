@@ -2,124 +2,80 @@ stages:
   - check
   - metrics
   - coverage
+  - deploy
   - bump
 
-variables:
-  # GitLab API for posting MR comments
-  GITLAB_API_URL: "${CI_API_V4_URL}"
-
-# Post coverage report as MR comment
-.coverage-mr-comment:
-  stage: coverage
+# This static browser gate does not need the Dioxus application or a database.
+docs-site-check:
+  stage: check
   tags:
     - nix
-  image: alpine:latest
-  before_script:
-    - apk add --no-cache curl jq
   script:
-    - |
-      # Read the summary markdown
-      SUMMARY=$(cat coverage-report/summary.md)
+    - nix build .#docs-site.tests.browser -L --out-link docs-site-check-result --builders '' --max-jobs 1 --cores 2
+    - nix build .#docs-site -L --out-link docs-site-result --builders '' --max-jobs 1 --cores 2
+    - mkdir -p public docs-site-screenshots
+    - cp -rL docs-site-result/share/docs-site/. public/
+    - cp -rL docs-site-check-result/screenshots/. docs-site-screenshots/
+  artifacts:
+    expire_in: 30 days
+    paths:
+      - public/
+      - docs-site-screenshots/
+    expose_as: "Documentation Site"
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
 
-      # Escape for JSON
-      SUMMARY_ESCAPED=$(echo "$SUMMARY" | jq -Rs '.')
-
-      # Post or update MR comment
-      if [ -n "${CI_MERGE_REQUEST_IID}" ]; then
-        # Check for existing comment
-        EXISTING_COMMENTS=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes")
-
-        COMMENT_ID=$(echo "$EXISTING_COMMENTS" | jq -r '.[] | select(.body | contains("Code Coverage Report")) | .id')
-
-        if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
-          # Update existing comment
-          curl -s -X PUT --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-            --header "Content-Type: application/json" \
-            --data "{\"body\": $SUMMARY_ESCAPED}" \
-            "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes/$COMMENT_ID"
-          echo "Updated existing MR comment"
-        else
-          # Create new comment
-          curl -s -X POST --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-            --header "Content-Type: application/json" \
-            --data "{\"body\": $SUMMARY_ESCAPED}" \
-            "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes"
-          echo "Posted new MR comment"
-        fi
-      fi
+docs-pages:
+  stage: deploy
+  tags:
+    - nix
   dependencies:
-    - coverage-check
-  only:
-    - merge_requests
+    - docs-site-check
+  script:
+    - test -s public/index.html
+  pages:
+    publish: public
+  artifacts:
+    paths:
+      - public/
+  rules:
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
 
 coverage-check:
   stage: coverage
   tags:
     - nix
   before_script:
+    # Retain repository authentication for flake input resolution. Collection
+    # itself never builds or runs product tests.
     - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
     - echo "login gitlab-ci-token" >> ~/.netrc
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
+  needs:
+    - component-tests
+    - state-machine-tests
+    - cve-processing-test
+    - dashboard-visibility-tests
   script:
-    - nix run .#coverage.coverage-report
+    # This job reads artifacts only. All test failures belong to their producers.
+    - >-
+      nix run .#coverage -- coverage-report
+      coverage-artifacts/component-cf-server-core-drv
+      coverage-artifacts/component-cf-server-drv
+      coverage-artifacts/component-cf-agent-drv
+      coverage-artifacts/component-cf-builder-drv
+      coverage-artifacts/component-cf-keygen-drv
+      coverage-artifacts/state-machine-test
+      coverage-artifacts/cve-test
+      coverage-artifacts/dashboard-visibility-test
   artifacts:
-    when: always
     expire_in: 30 days
     paths:
-      - coverage-report/
-    expose_as: "Code Coverage Report"
-    reports:
-      junit: coverage-report/junit-report.xml
-  only:
-    - merge_requests
-    - main
-
-# Post complexity report as MR comment
-.complexity-mr-comment:
-  stage: metrics
-  tags:
-    - nix
-  image: alpine:latest
-  before_script:
-    - apk add --no-cache curl jq
-  script:
-    - |
-      # Read the summary markdown
-      SUMMARY=$(cat complexity-report/summary.md)
-
-      # Escape for JSON
-      SUMMARY_ESCAPED=$(echo "$SUMMARY" | jq -Rs '.')
-
-      # Post or update MR comment
-      if [ -n "${CI_MERGE_REQUEST_IID}" ]; then
-        # Check for existing comment
-        EXISTING_COMMENTS=$(curl -s --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes")
-        
-        COMMENT_ID=$(echo "$EXISTING_COMMENTS" | jq -r '.[] | select(.body | contains("Code Complexity Report")) | .id')
-        
-        if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
-          # Update existing comment
-          curl -s -X PUT --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-            --header "Content-Type: application/json" \
-            --data "{\"body\": $SUMMARY_ESCAPED}" \
-            "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes/$COMMENT_ID"
-          echo "Updated existing MR comment"
-        else
-          # Create new comment
-          curl -s -X POST --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-            --header "Content-Type: application/json" \
-            --data "{\"body\": $SUMMARY_ESCAPED}" \
-            "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes"
-          echo "Posted new MR comment"
-        fi
-      fi
-  dependencies:
-    - complexity-check
-  only:
-    - merge_requests
+      - coverage-report/report.txt
+  rules:
+    - if: '$CF_COVERAGE == "1" && ($CI_PIPELINE_SOURCE == "merge_request_event" || $CI_COMMIT_BRANCH == "main")'
 
 complexity-check:
   stage: metrics
@@ -131,7 +87,26 @@ complexity-check:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - nix run .#code-metrics.complexity-report
+    - nix build .#code-metrics.complexity-report --no-link --option substitute true --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2
+    - nix develop .#sqlx --option substitute true --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2 -c env CARGO_NET_OFFLINE=false cargo fetch --locked --manifest-path packages/default/Cargo.toml
+    - nix develop .#sqlx --option substitute true --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2 -c env CARGO_NET_OFFLINE=false cargo fetch --locked --manifest-path packages/web-ui/Cargo.toml
+    - |
+      export CARGO_NET_OFFLINE=true
+      export SQLX_OFFLINE=true
+      export NIX_CONFIG="${NIX_CONFIG:-}
+      substituters =
+      extra-substituters =
+      substitute = false
+      builders =
+      builders-use-substitutes = false
+      fallback = false
+      accept-flake-config = false
+      max-jobs = 1
+      cores = 2
+      "
+      nix run --offline --option substituters '' --option substitute false \
+        --builders '' --option fallback false --option accept-flake-config false \
+        --max-jobs 1 --cores 2 .#code-metrics.complexity-report
   artifacts:
     when: always
     expire_in: 30 days
@@ -171,7 +146,13 @@ manual-version-bump:
   variables:
     NEW_VERSION: ""
 
-flake-check:
+# Implemented integration owners run automatically and are required. The normal
+# owner aggregate builds every registered scenario gate and fails when any gate
+# fails. Never build a `.run` output here: it records a failed scenario and can
+# still build successfully. Access, Delivery and Assurance have real scenarios;
+# Upgrade is added only with a real approved version transition. See
+# docs/knowledge/testing/integration-coverage-map.md for the remaining gaps.
+integration-access:
   stage: check
   tags:
     - nix
@@ -179,13 +160,55 @@ flake-check:
     max: 2
     when:
       - runner_system_failure
-  parallel:
-    matrix:
-      - CHECK_NAME:
-          - integration
-          - oidc-auth
-          - server-regressions
-          - web-ui
+  before_script:
+    - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
+    - echo "login gitlab-ci-token" >> ~/.netrc
+    - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
+    - chmod 600 ~/.netrc
+  script:
+    - sh packages/ci/integration-owner-build.sh integration-access
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - integration-evidence/
+    expose_as: "Integration Access Evidence"
+  only:
+    - merge_requests
+    - main
+
+integration-delivery:
+  extends: integration-access
+  script:
+    - sh packages/ci/integration-owner-build.sh integration-delivery
+  artifacts:
+    expose_as: "Integration Delivery Evidence"
+
+integration-assurance:
+  extends: integration-access
+  script:
+    - sh packages/ci/integration-owner-build.sh integration-assurance
+  artifacts:
+    expose_as: "Integration Assurance Evidence"
+
+integration-upgrade:
+  extends: integration-access
+  script:
+    - sh packages/ci/integration-owner-build.sh integration-upgrade
+  artifacts:
+    expose_as: "Integration Upgrade Evidence"
+
+# Ordinary component builds own unit, evaluator-protocol and schema checks.
+# Pure module assertions and developer-command selftests run directly here;
+# there is no verification package per former suite.
+component-tests:
+  stage: check
+  tags:
+    - nix
+  retry:
+    max: 2
+    when:
+      - runner_system_failure
   before_script:
     # Create .netrc using CI job token (more secure)
     - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
@@ -193,196 +216,105 @@ flake-check:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - nix build ".#checks.x86_64-linux.${CHECK_NAME}" -L --show-trace
-    # Copy web-ui screenshots out of the Nix build result into the CI workspace
-    - mkdir -p web-ui-screenshots
     - |
-      if [ "$CHECK_NAME" = "web-ui" ]; then
-        STORE_PATH=$(readlink -f result)
-        if [ -d "$STORE_PATH/screenshots" ]; then
-          cp -r "$STORE_PATH/screenshots/"* web-ui-screenshots/
-          echo "Copied web-ui screenshots to workspace"
-        else
-          echo "No screenshots found in build result (tests may have failed)"
+      for component in cf-server-core-drv cf-server-drv cf-agent-drv cf-builder-drv cf-keygen-drv; do
+        target=".#default.$component"
+        if [ "${CF_COVERAGE:-0}" = 1 ]; then target="$target.coverage"; fi
+        sh packages/ci/public-cache-build.sh "$target" -L --show-trace --builders '' --max-jobs 1 --cores 2
+        if [ "${CF_COVERAGE:-0}" = 1 ]; then
+          mkdir -p coverage-artifacts
+          cp -rL --no-preserve=mode "$(nix eval --raw "$target.profile.outPath")" "coverage-artifacts/component-$component"
         fi
-      fi
+      done
+    - nix build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge .#xccdf-1-2-schemas -L --show-trace --builders '' --max-jobs 1 --cores 2
+    - nix build .#code-metrics.complexity-report --no-link --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2
+    - |
+      for suite in builder-cve stig packaging; do
+        nix eval --impure --json --expr "
+          let
+            f = builtins.getFlake (\"git+file://\" + toString ./.);
+            p = import f.inputs.nixpkgs {
+              system = builtins.currentSystem;
+              overlays = [ f.overlays.default ];
+            };
+          in import ./modules/nixos/crystal-forge/tests/$suite.nix {
+            inputs = f.inputs // { self = f; };
+            pkgs = p;
+            lib = p.lib // { crystal-forge = f.lib; };
+          }"
+      done
+    - |
+      nix shell --impure --expr '
+        let
+          f = builtins.getFlake ("git+file://" + toString ./.);
+          p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
+        in [ p.bash p.coreutils p.gnugrep p.gnused p.iproute2 p.procps p.util-linux
+             p.nodejs p.python3 p.nix-eval-jobs.nix p.nix-eval-jobs p.git
+             p.remarshal p.jq p.libxml2 p.openscap ]
+      ' --builders '' --max-jobs 1 --cores 2 --command bash -euo pipefail -c '
+        bash modules/nixos/crystal-forge/tests/discovery.sh
+        bash modules/nixos/crystal-forge/tests/packaging.sh
+        core_target=.#default.cf-server-core-drv
+        if [ "${CF_COVERAGE:-0}" = 1 ]; then core_target="$core_target.coverage"; fi
+        core=$(nix eval --raw "$core_target.outPath")
+        xccdf_schemas=$(nix eval --raw .#xccdf-1-2-schemas.outPath)
+        if [ "${CF_COVERAGE:-0}" = 1 ]; then
+          export LLVM_PROFILE_FILE="$PWD/coverage-artifacts/schema-raw/%m-%p.profraw"
+          mkdir -p coverage-artifacts/schema-raw
+        fi
+        bash packages/default/crates/cf-server/tests/xccdf-schema.sh \
+          "$core" "$xccdf_schemas" "$PWD/schemas/cf-xccdf-1/cf-xccdf-1.xsd"
+        if [ "${CF_COVERAGE:-0}" = 1 ]; then
+          llvm_bin="$(nix eval --raw .#coverage.llvm.outPath)/bin"
+          profile=coverage-artifacts/component-cf-server-core-drv/profile.profdata
+          "$llvm_bin/llvm-profdata" merge -sparse "$profile" coverage-artifacts/schema-raw/*.profraw -o "$profile.tmp"
+          mv "$profile.tmp" "$profile"
+          rm -r coverage-artifacts/schema-raw
+          unset LLVM_PROFILE_FILE
+        fi
+        unset DB_HOST DB_PORT DB_USER DB_NAME
+        bash packages/devScripts/db-usability-check-test.sh packages/devScripts/db-usability-check.sh
+        bash packages/devScripts/db-only-start-test.sh packages/devScripts/db-only-start.sh
+        bash packages/devScripts/web-ui/tests/web-ui-test-runner-test.sh \
+          packages/devScripts/web-ui/tests/web-ui-test.sh packages/devScripts/web-ui/coverage-manifest.json
+        complexity=$(nix eval --raw .#code-metrics.complexity-report.outPath)
+        CARGO_NET_OFFLINE=true python3 packages/code-metrics/test-report.py "$complexity/bin/complexity-report"
+      '
   artifacts:
+    when: always
+    paths:
+      - coverage-artifacts/
+  only:
+    - merge_requests
+    - main
+
+# Preserve the CVE workspace library filters (including the three ignored
+# scanning filters) and dashboard's two ignored visibility groups. All three
+# apps share invocation-owned initialization, root privilege separation and
+# fail-closed completion receipts; they do not share a running database.
+cve-processing-test:
+  extends: state-machine-tests
+  variables:
+    DATABASE_TEST_APP: cve-test
+  artifacts: &database-ci-evidence
     when: always
     expire_in: 30 days
     paths:
-      - web-ui-screenshots/
-    expose_as: "Web UI Screenshots"
-  only:
-    - merge_requests
-    - main
+      - database-ci-evidence/
+      - coverage-artifacts/
 
-# Post web UI screenshots as MR comment (with inline images)
-# Uses CI_JOB_TOKEN (always available) instead of GITLAB_TOKEN (protected variable).
-web-ui-screenshots-mr-comment:
-  stage: metrics
-  tags:
-    - nix
-  image: alpine:latest
-  before_script:
-    - apk add --no-cache curl jq
-  script:
-    - |
-      # Use CI_JOB_TOKEN for GitLab API auth (available in every job)
-      AUTH_HEADER="JOB-TOKEN: ${CI_JOB_TOKEN}"
+# Runs the dashboard aggregate visibility regressions (queries::dashboard::tests::visibility_
+# and handlers::api::dashboard::tests::visibility_, all #[ignore]-marked) via the
+# repo-owned `devScripts.dashboard-visibility-test` isolated process-compose app.
+dashboard-visibility-tests:
+  extends: state-machine-tests
+  variables:
+    DATABASE_TEST_APP: dashboard-visibility-test
+  artifacts: *database-ci-evidence
 
-      if [ -z "${CI_MERGE_REQUEST_IID}" ]; then
-        echo "Not a merge request, skipping screenshot upload"
-        exit 0
-      fi
-
-      # Check if any screenshots exist
-      SCREENSHOT_COUNT=$(ls -1 web-ui-screenshots/*.png 2>/dev/null | wc -l)
-      if [ "$SCREENSHOT_COUNT" -eq 0 ]; then
-        echo "No screenshots found, skipping MR comment"
-        exit 0
-      fi
-
-      # Build markdown body with inline screenshot images
-      SCREENSHOT_MD="## Web UI Screenshots\n\n"
-
-      # Prepend the coverage + visual-baseline summary emitted by the check
-      if [ -f web-ui-screenshots/visual-summary.md ]; then
-        SUMMARY_CONTENT=$(cat web-ui-screenshots/visual-summary.md | sed 's/\\/\\\\/g')
-        SCREENSHOT_MD="${SCREENSHOT_MD}${SUMMARY_CONTENT}\n\n---\n\n"
-      fi
-
-      # Prepend the non-blocking design-parity (design drift) summary
-      if [ -f web-ui-screenshots/design-drift-summary.md ]; then
-        DRIFT_CONTENT=$(cat web-ui-screenshots/design-drift-summary.md | sed 's/\\/\\\\/g')
-        SCREENSHOT_MD="${SCREENSHOT_MD}${DRIFT_CONTENT}\n\n---\n\n"
-      fi
-
-      SCREENSHOT_MD="${SCREENSHOT_MD}The following screenshots were captured during the web UI check:\n\n"
-      for f in web-ui-screenshots/*.png; do
-        [ -f "$f" ] || continue
-        FILENAME=$(basename "$f" .png)
-        echo "Uploading: $FILENAME"
-        # Upload screenshot as GitLab attachment; skip on failure
-        UPLOAD_RESP=$(curl -s --header "${AUTH_HEADER}" \
-          --form "file=@$f" \
-          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/uploads" 2>/dev/null || echo "")
-        MARKDOWN=$(echo "$UPLOAD_RESP" | jq -r '.markdown' 2>/dev/null || echo "")
-        if [ -n "$MARKDOWN" ] && [ "$MARKDOWN" != "null" ]; then
-          SCREENSHOT_MD="${SCREENSHOT_MD}### ${FILENAME}\n${MARKDOWN}\n\n"
-        else
-          echo "  WARNING: upload failed for $FILENAME (response: $(echo "$UPLOAD_RESP" | head -c 200))"
-          SCREENSHOT_MD="${SCREENSHOT_MD}### ${FILENAME}\n*Upload failed*\n\n"
-        fi
-      done
-
-      # Attach the design-parity matrix grid (combined view — primary visual)
-      if [ -f web-ui-screenshots/design-parity-matrix.png ]; then
-        echo "Uploading design-parity matrix grid"
-        UPLOAD_RESP=$(curl -s --header "${AUTH_HEADER}" \
-          --form "file=@web-ui-screenshots/design-parity-matrix.png" \
-          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/uploads" 2>/dev/null || echo "")
-        MATRIX_MD=$(echo "$UPLOAD_RESP" | jq -r '.markdown' 2>/dev/null || echo "")
-        if [ -n "$MATRIX_MD" ] && [ "$MATRIX_MD" != "null" ]; then
-          SCREENSHOT_MD="${SCREENSHOT_MD}---\n\n## Design Parity Matrix\n\nLeft = design example target · Right = real Dioxus UI (same shared fixture). Non-blocking.\n\n${MATRIX_MD}\n\n"
-        fi
-      fi
-
-      # Attach per-view design-parity montages (design target | real Dioxus)
-      if [ -d web-ui-screenshots/montages ]; then
-        MONTAGE_COUNT=$(find web-ui-screenshots/montages -maxdepth 1 -type f -name '*.png' | wc -l)
-      else
-        MONTAGE_COUNT=0
-      fi
-      if [ "$MONTAGE_COUNT" -gt 0 ]; then
-        SCREENSHOT_MD="${SCREENSHOT_MD}## Per-View Montages (${MONTAGE_COUNT})\n\nSide-by-side comparisons showing design (left) vs Dioxus (right) for each view and theme.\n\n"
-        MUP=0
-        for f in web-ui-screenshots/montages/*.png; do
-          [ -f "$f" ] || continue
-          if [ "$MUP" -ge 26 ]; then
-            SCREENSHOT_MD="${SCREENSHOT_MD}*...and $((MONTAGE_COUNT - 26)) more (see job artifacts).*\n\n"
-            break
-          fi
-          FILENAME=$(basename "$f" .png)
-          echo "Uploading montage: $FILENAME"
-          UPLOAD_RESP=$(curl -s --header "${AUTH_HEADER}" \
-            --form "file=@$f" \
-            "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/uploads" 2>/dev/null || echo "")
-          MARKDOWN=$(echo "$UPLOAD_RESP" | jq -r '.markdown' 2>/dev/null || echo "")
-          if [ -n "$MARKDOWN" ] && [ "$MARKDOWN" != "null" ]; then
-            SCREENSHOT_MD="${SCREENSHOT_MD}### ${FILENAME}\n${MARKDOWN}\n\n"
-            MUP=$((MUP + 1))
-          fi
-        done
-      fi
-
-      SCREENSHOT_MD="${SCREENSHOT_MD}---\n*Generated by pipeline ${CI_PIPELINE_ID} | Job ${CI_JOB_ID}*"
-
-      # Escape for JSON
-      SUMMARY_ESCAPED=$(printf "%b" "$SCREENSHOT_MD" | jq -Rs '.')
-
-      # Find existing comment by this bot to update (overwrite previous screenshots)
-      EXISTING_COMMENTS=$(curl -s --header "${AUTH_HEADER}" \
-        "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes" || echo "[]")
-
-      if ! echo "$EXISTING_COMMENTS" | jq -e 'type == "array"' >/dev/null 2>&1; then
-        echo "WARNING: could not read MR notes with CI job token; screenshots remain available as job artifacts"
-        echo "${SCREENSHOT_MD}" > web-ui-screenshots/mr-comment.md
-        exit 0
-      fi
-
-      COMMENT_ID=$(echo "$EXISTING_COMMENTS" | jq -r '.[] | select(.body | contains("Web UI Screenshots")) | .id' | head -1)
-
-      if [ -n "$COMMENT_ID" ] && [ "$COMMENT_ID" != "null" ]; then
-        COMMENT_RESP=$(curl -s -X PUT --header "${AUTH_HEADER}" \
-          --header "Content-Type: application/json" \
-          --data "{\"body\": $SUMMARY_ESCAPED}" \
-          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes/$COMMENT_ID" || echo "")
-        if echo "$COMMENT_RESP" | jq -e '.id' >/dev/null 2>&1; then
-          echo "Updated existing MR comment ($COMMENT_ID) with new screenshots"
-        else
-          echo "WARNING: MR comment update failed; screenshots remain available as job artifacts"
-          echo "${SCREENSHOT_MD}" > web-ui-screenshots/mr-comment.md
-        fi
-      else
-        COMMENT_RESP=$(curl -s -X POST --header "${AUTH_HEADER}" \
-          --header "Content-Type: application/json" \
-          --data "{\"body\": $SUMMARY_ESCAPED}" \
-          "${GITLAB_API_URL}/projects/${CI_PROJECT_ID}/merge_requests/${CI_MERGE_REQUEST_IID}/notes" || echo "")
-        if echo "$COMMENT_RESP" | jq -e '.id' >/dev/null 2>&1; then
-          echo "Posted new MR comment with web UI screenshots"
-        else
-          echo "WARNING: MR comment creation failed; screenshots remain available as job artifacts"
-          echo "${SCREENSHOT_MD}" > web-ui-screenshots/mr-comment.md
-        fi
-      fi
-  dependencies:
-    - flake-check
-  only:
-    - merge_requests
-
-# Runs the CVE scan loop processing test (scan_cycle_processes_target_with_fake_runner)
-# via the repo-owned `devScripts.cve-test` process-compose project. That target
-# starts the DB service, waits for health, runs migrations + the targeted test,
-# and then shuts itself down so `up --tui=false` exits cleanly.
-cve-processing-test:
-  stage: check
-  tags:
-    - nix
-  before_script:
-    - echo "machine ${CI_SERVER_HOST}" > ~/.netrc
-    - echo "login gitlab-ci-token" >> ~/.netrc
-    - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
-    - chmod 600 ~/.netrc
-  script:
-    - nix run .#devScripts.cve-test -- up --tui=false
-  only:
-    - merge_requests
-    - main
-
-# Runs the evaluation state-machine regression tests (queries::commits::tests and
-# queries::derivations::tests, all #[ignore]-marked) via the repo-owned
-# `devScripts.state-machine-test` process-compose project. That target starts an
-# isolated DB, applies migrations, runs the tests with --ignored, and exits.
+# One invocation-owned PostgreSQL cluster and Cargo target directory run the
+# unique ignored library/integration regressions and populated migration
+# rehearsals. Nonignored library tests stay in ordinary component builds.
 state-machine-tests:
   stage: check
   tags:
@@ -393,7 +325,52 @@ state-machine-tests:
     - echo "password ${CI_JOB_TOKEN}" >> ~/.netrc
     - chmod 600 ~/.netrc
   script:
-    - nix run .#devScripts.state-machine-test -- up --tui=false
+    # Preparation may acquire missing closures and Cargo sources. Execution below
+    # must fail on missing prerequisites instead of fetching them during tests.
+    - |
+      if [ "${CF_COVERAGE:-0}" = 1 ]; then
+        nix build .#coverage --no-link --builders '' --max-jobs 1 --cores 2
+      fi
+    - nix build ".#devScripts.${DATABASE_TEST_APP:-state-machine-test}" --no-link --builders '' --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --max-jobs 1 --cores 2
+    - nix develop .#sqlx --builders '' --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --max-jobs 1 --cores 2 -c cargo fetch --locked --manifest-path packages/default/Cargo.toml
+    - |
+      if [ -n "${DATABASE_TEST_APP:-}" ]; then
+        nix shell --impure --expr '
+          let
+            f = builtins.getFlake ("git+file://" + toString ./.);
+            p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
+          in [ p.python3 p.bash ]
+        ' --builders '' --option substituters https://cache.nixos.org \
+          --option extra-substituters '' --option accept-flake-config false \
+          --max-jobs 1 --cores 2 --command true
+      fi
+    - |
+      if [ -n "${DATABASE_TEST_APP:-}" ]; then
+        nix shell --offline --option substituters '' --option substitute false \
+          --option builders '' --option fallback false \
+          --option accept-flake-config false --max-jobs 0 --no-update-lock-file \
+          --impure --expr '
+            let
+              f = builtins.getFlake ("git+file://" + toString ./.);
+              p = import f.inputs.nixpkgs { system = builtins.currentSystem; };
+            in [ p.python3 p.bash ]
+          ' --command python3 packages/devScripts/tests/database-ci-test.py \
+            "database-ci-evidence/$DATABASE_TEST_APP" "$DATABASE_TEST_APP"
+      fi
+    - |
+      export CARGO_NET_OFFLINE=true SQLX_OFFLINE=true
+      if [ "${CF_COVERAGE:-0}" = 1 ]; then
+        export CF_LLVM_BIN="$(nix eval --raw .#coverage.llvm.outPath)/bin"
+        export CF_COVERAGE_DIR="$PWD/coverage-artifacts/${DATABASE_TEST_APP:-state-machine-test}"
+      fi
+      nix run --offline --option substituters '' --option substitute false \
+        --option builders '' --option fallback false \
+        --option accept-flake-config false --max-jobs 0 --no-update-lock-file \
+        ".#devScripts.${DATABASE_TEST_APP:-state-machine-test}" -- -t=false up
+  artifacts:
+    when: always
+    paths:
+      - coverage-artifacts/
   only:
     - merge_requests
     - main

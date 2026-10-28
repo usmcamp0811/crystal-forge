@@ -1,0 +1,228 @@
+[
+  {
+    "id": "CPD01",
+    "question": "What does an unavailable exact selection do?",
+    "recommendation": "Reject or show unavailable, rather than substituting a current/default selection.",
+    "tradeoff": "Convenient fallback is acceptable for an unqualified initial page, not an exact deep link or evidence export.",
+    "ledger_ids": [
+      "CPC02",
+      "CPC20"
+    ],
+    "gap_ids": [
+      "CPG06",
+      "CPG11",
+      "CPG12"
+    ],
+    "status": "Pending joint review"
+  },
+  {
+    "id": "CPD02",
+    "question": "Which effective-policy digest and assessment-set rules define current evidence?",
+    "recommendation": "Use one server compatibility resolver for matrix, detail, verification, and export.",
+    "tradeoff": "A display-only fallback can remain, but must carry different authority and capabilities.",
+    "ledger_ids": [
+      "CPC04"
+    ],
+    "gap_ids": [
+      "CPG02",
+      "CPG03"
+    ],
+    "status": "Pending joint review"
+  },
+  {
+    "id": "CPD03",
+    "question": "Can last-known or evaluation-attempt evidence be shown as fallback?",
+    "recommendation": "Allow only explicitly labeled secondary evidence that cannot authorize current mutation or closure.",
+    "tradeoff": "More visibility can help operations; silent substitution creates false assurance.",
+    "ledger_ids": [
+      "CPC03",
+      "CPC05"
+    ],
+    "gap_ids": [
+      "CPG03",
+      "CPG04"
+    ],
+    "status": "Pending joint review"
+  },
+  {
+    "id": "CPD04",
+    "question": "What do clean, score, fully compliant, and accepted mean?",
+    "recommendation": "Separate technical pass rate, evaluation completeness, accepted risk, and mapping coverage.",
+    "tradeoff": "Retain existing fields with explicit semantics or version the API; do not silently change denominators.",
+    "ledger_ids": [
+      "CPC09",
+      "CPC10",
+      "CPC11"
+    ],
+    "gap_ids": [
+      "CPG09",
+      "CPG10",
+      "CPG14"
+    ],
+    "status": "Pending joint review"
+  },
+  {
+    "id": "CPD05",
+    "question": "Which Compliance data are global catalog metadata versus scoped operational evidence?",
+    "recommendation": "Make host-bearing data and derived counts environment-scoped; explicitly document any global catalog fields.",
+    "tradeoff": "Global reusable definitions can be valid. Host presence, failures, and remediation information need a consistent access boundary.",
+    "ledger_ids": [
+      "CPC07",
+      "CPC08"
+    ],
+    "gap_ids": [
+      "CPG01",
+      "CPG28"
+    ],
+    "status": "Pending joint review"
+  },
+  {
+    "id": "CPD06",
+    "question": "Should an exact-CVE plan verify after deployment A changes to B?",
+    "recommendation": "Evaluate independently authorized current evidence while preserving the original link baseline, if continuity is approved.",
+    "tradeoff": "This is a lifecycle change, not a relaxed join. It needs recurrence, rollback, missing-scan, and race rules.",
+    "ledger_ids": [
+      "CPC13",
+      "CPC17"
+    ],
+    "gap_ids": [
+      "CPG27"
+    ],
+    "status": "Pending joint review"
+  },
+  {
+    "id": "CPD07",
+    "question": "Which plan fields are mandatory, and how are default milestones dated?",
+    "recommendation": "Approve family-specific defaults with common typed ownership and target-relative schedules.",
+    "tradeoff": "Generic policy plans currently allow weaker metadata. Tightening requirements needs compatibility and editing rules for existing plans.",
+    "ledger_ids": [
+      "CPC15"
+    ],
+    "gap_ids": [
+      "CPG26"
+    ],
+    "status": "Pending joint review"
+  },
+  {
+    "id": "CPD08",
+    "question": "Where does the complete policy-waiver workflow live?",
+    "recommendation": "Provide a separate finding-bound request/decision workflow with explicit authority, expiry, and status.",
+    "tradeoff": "Do not merge policy waiver, CVE accepted risk, and assignment reasons. Shared visual layout is still possible.",
+    "ledger_ids": [
+      "CPC11"
+    ],
+    "gap_ids": [
+      "CPG21"
+    ],
+    "status": "Pending joint review"
+  },
+  {
+    "id": "CPD09",
+    "question": "Does a bundle POA&M list represent a lineage, selected revision, current assignment, or historical reference?",
+    "recommendation": "Expose the chosen association scope explicitly and preserve exact pairs for historical navigation.",
+    "tradeoff": "One plan can have several valid contexts. A single unlabeled count cannot represent all of them.",
+    "ledger_ids": [
+      "CPC14"
+    ],
+    "gap_ids": [
+      "CPG11",
+      "CPG20",
+      "CPG31"
+    ],
+    "status": "Pending joint review"
+  },
+  {
+    "id": "CPD10",
+    "question": "Which actions and evidence routes must every common POA&M host support?",
+    "recommendation": "Use family-aware server capabilities and a complete navigation adapter for every entry point.",
+    "tradeoff": "Optional callbacks can hide omissions. A real unavailable state is preferable to a misleading action.",
+    "ledger_ids": [
+      "CPC16",
+      "CPC20"
+    ],
+    "gap_ids": [
+      "CPG13",
+      "CPG15",
+      "CPG22"
+    ],
+    "status": "Pending joint review"
+  },
+  {
+    "id": "CPD11",
+    "question": "How are committed results, failures, retries, and refreshes represented?",
+    "recommendation": "Define action-specific receipts and invalidation; preserve unrelated drafts and adopt committed revision changes even after rejected closure.",
+    "tradeoff": "A global reload is simpler but loses context. An HTTP error does not always mean the transaction rolled back.",
+    "ledger_ids": [
+      "CPC18",
+      "CPC19"
+    ],
+    "gap_ids": [
+      "CPG16",
+      "CPG17",
+      "CPG18",
+      "CPG25"
+    ],
+    "status": "Pending joint review"
+  },
+  {
+    "id": "CPD12",
+    "question": "What is the authoritative evidence export contract?",
+    "recommendation": "Export a validated exact-selection manifest with provenance, completeness, count units, and sourced metadata.",
+    "tradeoff": "Client formatting can remain. Multi-bundle consistency may need bounded snapshot generation rather than many unrelated live reads.",
+    "ledger_ids": [
+      "CPC21"
+    ],
+    "gap_ids": [
+      "CPG05",
+      "CPG06",
+      "CPG07",
+      "CPG08",
+      "CPG32"
+    ],
+    "status": "Pending joint review"
+  },
+  {
+    "id": "CPD13",
+    "question": "Who ensures that the stable finding population is complete?",
+    "recommendation": "Make reconciliation ownership and lag explicit; verify that UI reads do not determine which failures appear in rollups.",
+    "tradeoff": "Read-side identity materialization may remain useful, but it must not be the only undisclosed population mechanism.",
+    "ledger_ids": [
+      "CPC22"
+    ],
+    "gap_ids": [
+      "CPG29"
+    ],
+    "status": "Pending joint review"
+  },
+  {
+    "id": "CPD14",
+    "question": "Which source-level design differences are accepted production adaptations?",
+    "recommendation": "Preserve evidence and remediation hierarchy, then explicitly approve necessary additions or changed placement.",
+    "tradeoff": "Typed source metadata and explicit saves can improve the reference. Missing sections or dead-end workflows are not cosmetic choices.",
+    "ledger_ids": [
+      "CPC10",
+      "CPC16",
+      "CPC20"
+    ],
+    "gap_ids": [
+      "CPG23",
+      "CPG24",
+      "CPG31"
+    ],
+    "status": "Pending joint review"
+  },
+  {
+    "id": "CPD15",
+    "question": "How is a resumable import draft isolated and validated?",
+    "recommendation": "Bind draft restoration to source identity and a declared user/workspace scope, with explicit expiry and reset.",
+    "tradeoff": "Convenient local restoration cannot confer trust or survive an account change without a deliberate policy.",
+    "ledger_ids": [
+      "CPC07"
+    ],
+    "gap_ids": [
+      "CPG19",
+      "CPG30"
+    ],
+    "status": "Pending joint review"
+  }
+]

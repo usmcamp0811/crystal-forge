@@ -79,6 +79,9 @@ pub enum SyntheticFailureWrite {
 /// (e.g. from 4 → 7 by a build worker) cannot race between the check and
 /// the update. If the row was already modified concurrently, the `FOR UPDATE`
 /// wait ensures we see the latest committed state before deciding.
+/// Before commit, the function also acquires stable POA&M finding locks for
+/// systems that currently deploy the derivation. A create or link action cannot
+/// commit from an observation that this write supersedes.
 pub async fn record_synthetic_eval_failure(
     pool: &PgPool,
     commit_id: Option<i32>,
@@ -150,12 +153,25 @@ pub async fn record_synthetic_eval_failure(
             .await?;
 
             match existing {
-                Some((id, status_id)) => match status_id {
-                    3 | 4 | 5 | 6 => {
-                        // Dry-run evaluation states → DryRunFailed.
-                        // Also normalize stale evaluation fields (clear them).
-                        sqlx::query(
-                            r#"
+                Some((id, status_id)) => {
+                    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+                        &mut tx,
+                        id,
+                        &[],
+                    )
+                    .await?;
+                    sqlx::query(
+                        "DELETE FROM composite_policy_assessments WHERE derivation_id = $1",
+                    )
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                    match status_id {
+                        3 | 4 | 5 | 6 => {
+                            // Dry-run evaluation states → DryRunFailed.
+                            // Also normalize stale evaluation fields (clear them).
+                            sqlx::query(
+                                r#"
                             UPDATE derivations
                             SET status_id = $1,
                                 error_message = $2,
@@ -167,24 +183,32 @@ pub async fn record_synthetic_eval_failure(
                                 policy_requirements_met = FALSE,
                                 policy_results = '{}'::jsonb
                             WHERE id = $3
-                            "#,
-                        )
-                        .bind(EvaluationStatus::DryRunFailed.as_id())
-                        .bind(error_message)
-                        .bind(id)
-                        .execute(&mut *tx)
-                        .await?;
+                                "#,
+                            )
+                            .bind(EvaluationStatus::DryRunFailed.as_id())
+                            .bind(error_message)
+                            .bind(id)
+                            .execute(&mut *tx)
+                            .await?;
 
-                        SyntheticFailureWrite::UpdatedPendingEvaluation { derivation_id: id }
-                    }
-                    _ => {
-                        // All other statuses — preserve unchanged.
-                        SyntheticFailureWrite::PreservedExisting {
-                            derivation_id: id,
-                            status_id,
+                            SyntheticFailureWrite::UpdatedPendingEvaluation { derivation_id: id }
+                        }
+                        _ => {
+                            sqlx::query(
+                                "UPDATE derivations SET policy_requirements_met = FALSE, policy_results = '{}'::jsonb WHERE id = $1",
+                            )
+                            .bind(id)
+                            .execute(&mut *tx)
+                            .await?;
+                            // Preserve build state while invalidating the failed
+                            // reevaluation's deployment authorization state.
+                            SyntheticFailureWrite::PreservedExisting {
+                                derivation_id: id,
+                                status_id,
+                            }
                         }
                     }
-                },
+                }
                 None => {
                     // This should not happen — the CONFLICT proved someone else
                     // inserted, so the row must exist. Defensively bail.
@@ -198,6 +222,19 @@ pub async fn record_synthetic_eval_failure(
         }
     };
 
+    // CONCURRENCY: Publish refreshed policy results through the same stable
+    // finding-key boundary used by POA&M create and link actions. The helper
+    // also covers legacy policies that have no composite assessment rows.
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx,
+        match &result {
+            SyntheticFailureWrite::Inserted { derivation_id }
+            | SyntheticFailureWrite::UpdatedPendingEvaluation { derivation_id }
+            | SyntheticFailureWrite::PreservedExisting { derivation_id, .. } => *derivation_id,
+        },
+        &[],
+    )
+    .await?;
     tx.commit().await?;
     Ok(result)
 }
@@ -364,7 +401,13 @@ pub enum SuccessfulEvalWrite {
     /// BuildComplete, BuildFailed) and was preserved unchanged.
     /// Callers must NOT enqueue a duplicate build job.
     PreservedBuildState { derivation_id: i32, status_id: i32 },
+    /// The commit-owned row was recorded without a derivation path because an
+    /// older schema still enforces path uniqueness across all commits.
+    LegacyPathConflict { derivation_id: i32 },
 }
+
+const LEGACY_PATH_CONFLICT_ERROR: &str =
+    "Derivation path is owned by another commit under the legacy global path constraint";
 
 /// Atomically record a successful evaluation result for a derivation.
 ///
@@ -382,6 +425,9 @@ pub enum SuccessfulEvalWrite {
 ///
 /// Returns the derivation id and outcome so the caller can decide whether
 /// to enqueue a build job (only for Inserted and UpdatedEvaluationState).
+/// Before commit, the function also acquires stable POA&M finding locks for
+/// systems that currently deploy the derivation. A create or link action cannot
+/// commit from an observation that this write supersedes.
 pub async fn record_successful_eval_result(
     pool: &PgPool,
     commit_id: Option<i32>,
@@ -457,37 +503,50 @@ pub async fn record_successful_eval_result(
             .await?;
 
             match existing {
-                Some((id, status_id)) => match status_id {
-                    // Build-active or build-terminal: preserve the build
-                    // status but still refresh policy metadata so that
-                    // re-evaluation after a policy change produces
-                    // up-to-date matrix results.
-                    7 | 8 | 10 | 12 => {
-                        sqlx::query(
-                            r#"
+                Some((id, status_id)) => {
+                    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+                        &mut tx,
+                        id,
+                        &[],
+                    )
+                    .await?;
+                    sqlx::query(
+                        "DELETE FROM composite_policy_assessments WHERE derivation_id = $1",
+                    )
+                    .bind(id)
+                    .execute(&mut *tx)
+                    .await?;
+                    match status_id {
+                        // Build-active or build-terminal: preserve the build
+                        // status but still refresh policy metadata so that
+                        // re-evaluation after a policy change produces
+                        // up-to-date matrix results.
+                        7 | 8 | 10 | 12 => {
+                            sqlx::query(
+                                r#"
                             UPDATE derivations
                             SET cf_agent_enabled = $1,
                                 policy_requirements_met = $2,
                                 policy_results = $3
                             WHERE id = $4
                             "#,
-                        )
-                        .bind(cf_agent_enabled)
-                        .bind(policy_requirements_met)
-                        .bind(policy_results)
-                        .bind(id)
-                        .execute(&mut *tx)
-                        .await?;
-                        SuccessfulEvalWrite::PreservedBuildState {
-                            derivation_id: id,
-                            status_id,
+                            )
+                            .bind(cf_agent_enabled)
+                            .bind(policy_requirements_met)
+                            .bind(policy_results)
+                            .bind(id)
+                            .execute(&mut *tx)
+                            .await?;
+                            SuccessfulEvalWrite::PreservedBuildState {
+                                derivation_id: id,
+                                status_id,
+                            }
                         }
-                    }
-                    // DryRunPending (3), DryRunInProgress (4), DryRunFailed (6),
-                    // DryRunComplete (5): update to DryRunComplete with fresh data,
-                    // clearing any stale error.
-                    _ => {
-                        sqlx::query(
+                        // DryRunPending (3), DryRunInProgress (4), DryRunFailed (6),
+                        // DryRunComplete (5): update to DryRunComplete with fresh data,
+                        // clearing any stale error.
+                        _ => {
+                            sqlx::query(
                             r#"
                             UPDATE derivations
                             SET status_id = $1,
@@ -515,9 +574,10 @@ pub async fn record_successful_eval_result(
                         .execute(&mut *tx)
                         .await?;
 
-                        SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id: id }
+                            SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id: id }
+                        }
                     }
-                },
+                }
                 None => {
                     // Row disappeared between our INSERT and the SELECT — should not
                     // happen in practice, but bail rather than silently dropping data.
@@ -531,6 +591,20 @@ pub async fn record_successful_eval_result(
         }
     };
 
+    // CONCURRENCY: Publish refreshed policy results through the same stable
+    // finding-key boundary used by POA&M create and link actions. The helper
+    // also covers legacy policies that have no composite assessment rows.
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        &mut tx,
+        match &result {
+            SuccessfulEvalWrite::Inserted { derivation_id }
+            | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
+            | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
+            | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => *derivation_id,
+        },
+        &[],
+    )
+    .await?;
     tx.commit().await?;
     Ok(result)
 }
@@ -540,7 +614,12 @@ pub async fn record_successful_eval_result(
 /// Operates through a caller-owned transaction so multiple systems can be
 /// written atomically; if any write fails the caller can roll back all of them.
 ///
-/// State matrix and behaviour are identical to `record_successful_eval_result`.
+/// State matrix, POA&M finding locking, and behavior are identical to
+/// [`record_successful_eval_result`]. The caller holds the finding locks until
+/// it commits or rolls back the transaction.
+/// If the legacy global path constraint conflicts with another commit, this
+/// function records a separate commit-owned row without the path. This preserves
+/// evaluation and assessment identity but prevents that row from being built.
 pub async fn record_successful_eval_result_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     commit_id: Option<i32>,
@@ -572,7 +651,7 @@ pub async fn record_successful_eval_result_in_tx(
             scheduled_at
         )
         VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, $10, NULL, NOW(), NOW())
-        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
+        ON CONFLICT
         DO NOTHING
         RETURNING id
         "#,
@@ -590,8 +669,8 @@ pub async fn record_successful_eval_result_in_tx(
     .fetch_optional(&mut **tx)
     .await?;
 
-    match insert_result {
-        Some((id,)) => Ok(SuccessfulEvalWrite::Inserted { derivation_id: id }),
+    let result = match insert_result {
+        Some((id,)) => Ok::<_, anyhow::Error>(SuccessfulEvalWrite::Inserted { derivation_id: id }),
         None => {
             let existing = sqlx::query_as::<_, (i32, i32)>(
                 r#"
@@ -610,16 +689,65 @@ pub async fn record_successful_eval_result_in_tx(
             .await?;
 
             match existing {
-                Some((id, status_id)) => match status_id {
-                    // Build-active or build-terminal: preserve the build
-                    // status but still refresh policy metadata so that
-                    // re-evaluation after a policy change produces
-                    // up-to-date matrix results. Without this, a build
-                    // that was queued under old policy assignments would
-                    // retain stale policy_results forever.
-                    7 | 8 | 10 | 12 => {
+                Some((id, status_id)) => {
+                    let path_owned_by_other = sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS (SELECT 1 FROM derivations WHERE derivation_path = $1 AND id <> $2)",
+                    )
+                    .bind(derivation_path)
+                    .bind(id)
+                    .fetch_one(&mut **tx)
+                    .await?;
+                    if path_owned_by_other {
                         sqlx::query(
                             r#"
+                            UPDATE derivations
+                            SET status_id = $1,
+                                derivation_path = NULL,
+                                derivation_target = COALESCE($2, derivation_target),
+                                expected_store_path = $3,
+                                cf_agent_enabled = $4,
+                                policy_requirements_met = $5,
+                                policy_results = $6,
+                                error_message = $7,
+                                completed_at = NOW(),
+                                build_preparation_state = 'not_required'
+                            WHERE id = $8
+                            "#,
+                        )
+                        .bind(EvaluationStatus::DryRunComplete.as_id())
+                        .bind(derivation_target)
+                        .bind(expected_store_path)
+                        .bind(cf_agent_enabled)
+                        .bind(policy_requirements_met)
+                        .bind(policy_results)
+                        .bind(LEGACY_PATH_CONFLICT_ERROR)
+                        .bind(id)
+                        .execute(&mut **tx)
+                        .await?;
+                        Ok(SuccessfulEvalWrite::LegacyPathConflict { derivation_id: id })
+                    } else {
+                        crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+                            tx,
+                            id,
+                            &[],
+                        )
+                        .await?;
+                        sqlx::query(
+                            "DELETE FROM composite_policy_assessments WHERE derivation_id = $1",
+                        )
+                        .bind(id)
+                        .execute(&mut **tx)
+                        .await?;
+                        match status_id {
+                            // Build-active or build-terminal: preserve the build
+                            // status but still refresh policy metadata so that
+                            // re-evaluation after a policy change produces
+                            // up-to-date matrix results. Without this, a build
+                            // that was queued under old policy assignments would
+                            // retain stale policy_results forever.
+                            7 | 8 | 10 | 12 => {
+                                sqlx::query(
+                                    r#"
                             UPDATE derivations
                             SET cf_agent_enabled = $1,
                                 policy_requirements_met = $2,
@@ -632,20 +760,20 @@ pub async fn record_successful_eval_result_in_tx(
                                 -- time reporting and history ordering.
                             WHERE id = $4
                             "#,
-                        )
-                        .bind(cf_agent_enabled)
-                        .bind(policy_requirements_met)
-                        .bind(policy_results)
-                        .bind(id)
-                        .execute(&mut **tx)
-                        .await?;
-                        Ok(SuccessfulEvalWrite::PreservedBuildState {
-                            derivation_id: id,
-                            status_id,
-                        })
-                    }
-                    _ => {
-                        sqlx::query(
+                                )
+                                .bind(cf_agent_enabled)
+                                .bind(policy_requirements_met)
+                                .bind(policy_results)
+                                .bind(id)
+                                .execute(&mut **tx)
+                                .await?;
+                                Ok(SuccessfulEvalWrite::PreservedBuildState {
+                                    derivation_id: id,
+                                    status_id,
+                                })
+                            }
+                            _ => {
+                                sqlx::query(
                             r#"
                             UPDATE derivations
                             SET status_id = $1,
@@ -672,21 +800,88 @@ pub async fn record_successful_eval_result_in_tx(
                         .bind(id)
                         .execute(&mut **tx)
                         .await?;
-                        Ok(SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id: id })
+                                Ok(SuccessfulEvalWrite::UpdatedEvaluationState {
+                                    derivation_id: id,
+                                })
+                            }
+                        }
                     }
-                },
-                None => anyhow::bail!(
-                    "Concurrent race: row disappeared after INSERT ON CONFLICT DO NOTHING for {}",
-                    derivation_name
-                ),
+                }
+                None => {
+                    let path_owner_exists = sqlx::query_scalar::<_, bool>(
+                        "SELECT EXISTS (SELECT 1 FROM derivations WHERE derivation_path = $1)",
+                    )
+                    .bind(derivation_path)
+                    .fetch_one(&mut **tx)
+                    .await?;
+                    if !path_owner_exists {
+                        anyhow::bail!(
+                            "Concurrent race: no conflicting derivation remained after INSERT ON CONFLICT DO NOTHING for {}",
+                            derivation_name
+                        );
+                    }
+                    let id = sqlx::query_scalar::<_, i32>(
+                        r#"
+                        INSERT INTO derivations (
+                            commit_id, derivation_type, derivation_name,
+                            derivation_target, status_id, attempt_count,
+                            expected_store_path, cf_agent_enabled,
+                            policy_requirements_met, policy_results,
+                            error_message, completed_at, scheduled_at,
+                            build_preparation_state
+                        )
+                        VALUES ($1, $2, $3, $4, $5, 0, $6, $7, $8, $9, $10, NOW(), NOW(), 'not_required')
+                        ON CONFLICT (COALESCE(commit_id, -1), derivation_name, derivation_type)
+                        DO UPDATE SET
+                            derivation_path = NULL,
+                            derivation_target = COALESCE(EXCLUDED.derivation_target, derivations.derivation_target),
+                            status_id = EXCLUDED.status_id,
+                            expected_store_path = EXCLUDED.expected_store_path,
+                            cf_agent_enabled = EXCLUDED.cf_agent_enabled,
+                            policy_requirements_met = EXCLUDED.policy_requirements_met,
+                            policy_results = EXCLUDED.policy_results,
+                            error_message = EXCLUDED.error_message,
+                            completed_at = NOW(),
+                            build_preparation_state = 'not_required'
+                        RETURNING id
+                        "#,
+                    )
+                    .bind(commit_id)
+                    .bind(derivation_type)
+                    .bind(derivation_name)
+                    .bind(derivation_target)
+                    .bind(EvaluationStatus::DryRunComplete.as_id())
+                    .bind(expected_store_path)
+                    .bind(cf_agent_enabled)
+                    .bind(policy_requirements_met)
+                    .bind(policy_results)
+                    .bind(LEGACY_PATH_CONFLICT_ERROR)
+                    .fetch_one(&mut **tx)
+                    .await?;
+                    Ok(SuccessfulEvalWrite::LegacyPathConflict { derivation_id: id })
+                }
             }
         }
-    }
+    }?;
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        tx,
+        match &result {
+            SuccessfulEvalWrite::Inserted { derivation_id }
+            | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
+            | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
+            | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => *derivation_id,
+        },
+        &[],
+    )
+    .await?;
+    Ok(result)
 }
 
 /// Transaction-aware variant of `record_synthetic_eval_failure`.
 ///
 /// Operates through a caller-owned transaction for atomic multi-system writes.
+/// The caller holds the POA&M finding locks until it commits or rolls back the
+/// transaction.
 pub async fn record_synthetic_eval_failure_in_tx(
     tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
     commit_id: Option<i32>,
@@ -723,8 +918,10 @@ pub async fn record_synthetic_eval_failure_in_tx(
     .fetch_optional(&mut **tx)
     .await?;
 
-    match insert_result {
-        Some((id, _)) => Ok(SyntheticFailureWrite::Inserted { derivation_id: id }),
+    let result = match insert_result {
+        Some((id, _)) => {
+            Ok::<_, anyhow::Error>(SyntheticFailureWrite::Inserted { derivation_id: id })
+        }
         None => {
             let existing = sqlx::query_as::<_, (i32, i32)>(
                 r#"
@@ -743,10 +940,23 @@ pub async fn record_synthetic_eval_failure_in_tx(
             .await?;
 
             match existing {
-                Some((id, status_id)) => match status_id {
-                    3 | 4 | 5 | 6 => {
-                        sqlx::query(
-                            r#"
+                Some((id, status_id)) => {
+                    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+                        tx,
+                        id,
+                        &[],
+                    )
+                    .await?;
+                    sqlx::query(
+                        "DELETE FROM composite_policy_assessments WHERE derivation_id = $1",
+                    )
+                    .bind(id)
+                    .execute(&mut **tx)
+                    .await?;
+                    match status_id {
+                        3 | 4 | 5 | 6 => {
+                            sqlx::query(
+                                r#"
                             UPDATE derivations
                             SET status_id = $1,
                                 error_message = $2,
@@ -758,27 +968,49 @@ pub async fn record_synthetic_eval_failure_in_tx(
                                 policy_requirements_met = FALSE,
                                 policy_results = '{}'::jsonb
                             WHERE id = $3
-                            "#,
-                        )
-                        .bind(EvaluationStatus::DryRunFailed.as_id())
-                        .bind(error_message)
-                        .bind(id)
-                        .execute(&mut **tx)
-                        .await?;
-                        Ok(SyntheticFailureWrite::UpdatedPendingEvaluation { derivation_id: id })
+                                "#,
+                            )
+                            .bind(EvaluationStatus::DryRunFailed.as_id())
+                            .bind(error_message)
+                            .bind(id)
+                            .execute(&mut **tx)
+                            .await?;
+                            Ok(SyntheticFailureWrite::UpdatedPendingEvaluation {
+                                derivation_id: id,
+                            })
+                        }
+                        _ => {
+                            sqlx::query(
+                                "UPDATE derivations SET policy_requirements_met = FALSE, policy_results = '{}'::jsonb WHERE id = $1",
+                            )
+                            .bind(id)
+                            .execute(&mut **tx)
+                            .await?;
+                            Ok(SyntheticFailureWrite::PreservedExisting {
+                                derivation_id: id,
+                                status_id,
+                            })
+                        }
                     }
-                    _ => Ok(SyntheticFailureWrite::PreservedExisting {
-                        derivation_id: id,
-                        status_id,
-                    }),
-                },
+                }
                 None => anyhow::bail!(
                     "Concurrent race: row disappeared after INSERT ON CONFLICT DO NOTHING for {}",
                     derivation_name
                 ),
             }
         }
-    }
+    }?;
+    crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+        tx,
+        match &result {
+            SyntheticFailureWrite::Inserted { derivation_id }
+            | SyntheticFailureWrite::UpdatedPendingEvaluation { derivation_id }
+            | SyntheticFailureWrite::PreservedExisting { derivation_id, .. } => *derivation_id,
+        },
+        &[],
+    )
+    .await?;
+    Ok(result)
 }
 
 // Convenience function for the common case with a commit
@@ -2065,25 +2297,35 @@ pub async fn mark_target_failed(
     mark_derivation_failed(pool, target_id, phase, error_message).await
 }
 
-/// Persist closure package counts on a nixos-type derivation row.
-/// Called asynchronously after eval completes for a system.
+/// Persists closure package counts and an optional actual Nix byte measurement.
+///
+/// The byte value is `None` unless a complete recursive local Nix query
+/// succeeded. An unavailable later measurement does not erase a successful
+/// measurement. The function is called asynchronously after system evaluation.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot update the derivation row.
 pub async fn set_closure_counts(
     pool: &PgPool,
     derivation_id: i32,
     total: i32,
     cached: i32,
+    closure_size_bytes: Option<i64>,
 ) -> Result<()> {
-    sqlx::query!(
+    sqlx::query(
         r#"
         UPDATE derivations
            SET closure_total  = $2,
-               closure_cached = $3
+               closure_cached = $3,
+               closure_size_bytes = COALESCE($4, closure_size_bytes)
          WHERE id = $1
         "#,
-        derivation_id,
-        total,
-        cached,
     )
+    .bind(derivation_id)
+    .bind(total)
+    .bind(cached)
+    .bind(closure_size_bytes)
     .execute(pool)
     .await?;
     Ok(())
@@ -2272,17 +2514,35 @@ pub async fn clear_derivation_build_status(pool: &PgPool, derivation_id: i32) ->
     Ok(())
 }
 
+/// Holds the newest cache-published NixOS artifact for one requested configuration.
 #[derive(Debug, Clone)]
 pub struct HostLatestTarget {
+    /// Effective configuration name used to select this artifact.
     pub hostname: String,
+    /// Selected derivation for policy and CVE checks.
     pub derivation_id: i32,
+    /// Commit containing the selected derivation.
     pub commit_hash: String,
+    /// Agent target generated from the registered flake and selected commit.
     pub derivation_target: Option<String>,
+    /// Built store path that can be sent as the desired target.
     pub store_path: Option<String>,
+    /// Most recent completed cache push for the selected derivation.
     pub last_cache_completed_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Indicates that a newer flake commit exists but has not superseded this artifact.
+    pub newer_raw_commit_exists: bool,
 }
 
-// src/db/queries.rs
+/// Selects one newest deployable artifact per requested effective configuration.
+///
+/// The selection spans all commits of the registered flake. Source archival
+/// does not remove an existing cache-published, built artifact. Runtime
+/// approval, canary, time-window, CVE, and composite gates run after selection
+/// and do not change which artifact is deployable.
+///
+/// # Errors
+///
+/// Returns an error if PostgreSQL cannot read the candidate derivations.
 pub async fn get_latest_deployable_targets_for_flake_hosts(
     pool: &PgPool,
     flake_id: i32,
@@ -2292,61 +2552,65 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
         return Ok(vec![]);
     }
 
-    // NOTE: pass `hostnames` as a TEXT[] (Vec<String>) to $2
+    // INVARIANT: Match RESOLVE_SYSTEM_DEPLOYMENT_TARGET_SQL: the flake,
+    // NixOS type, exact configuration, nonblank store path, agent/policy flags,
+    // no derivation error, and a completed cache push of that exact store path
+    // define artifact eligibility. A stored
+    // derivation_target and runtime gates are not prerequisites.
     let rows = sqlx::query!(
         r#"
-        WITH latest_commit AS (
-          SELECT id, flake_id, git_commit_hash
-          FROM commits
-          WHERE flake_id = $1
-          ORDER BY commit_timestamp DESC
-          LIMIT 1
-        ),
-        per_host AS (
+        WITH per_host AS (
           SELECT
             d.derivation_name AS hostname,
             d.id              AS derivation_id,
-            d.derivation_target,
             d.store_path,
             f.repo_url        AS repo_url,
-            lc.git_commit_hash AS commit_hash,
-            MAX(cpj.completed_at) AS last_cache_completed_at,
+            c.git_commit_hash AS commit_hash,
+            c.flake_id,
+            c.commit_timestamp,
+            (SELECT MAX(cpj.completed_at)
+              FROM cache_push_jobs cpj
+              WHERE cpj.derivation_id = d.id
+                AND cpj.status = 'completed'
+                AND cpj.store_path = d.store_path) AS last_cache_completed_at,
             ROW_NUMBER() OVER (
               PARTITION BY d.derivation_name
-              ORDER BY
-                MAX(cpj.completed_at) DESC NULLS LAST,
-                MAX(d.completed_at)   DESC NULLS LAST,
-                MAX(d.id)             DESC
+              ORDER BY c.commit_timestamp DESC,
+                       d.completed_at DESC NULLS LAST,
+                       d.id DESC
             ) AS rn
           FROM derivations d
-          JOIN latest_commit lc
-            ON d.commit_id = lc.id
+          JOIN commits c
+            ON d.commit_id = c.id
           JOIN flakes f
-            ON lc.flake_id = f.id
-          JOIN cache_push_jobs cpj
-            ON cpj.derivation_id = d.id
-           AND cpj.status = 'completed'
-          WHERE d.derivation_type = 'nixos'
-            AND d.derivation_target IS NOT NULL
+            ON c.flake_id = f.id
+          WHERE c.flake_id = $1
+            AND d.derivation_type = 'nixos'
             AND d.derivation_name = ANY($2::text[])
+            AND d.store_path IS NOT NULL
+            AND BTRIM(d.store_path) <> ''
             AND d.cf_agent_enabled IS TRUE
             AND d.policy_requirements_met IS TRUE
-          GROUP BY
-            d.derivation_name,
-            d.id,
-            d.derivation_target,
-            d.store_path,
-            f.repo_url,
-            lc.git_commit_hash
+            AND d.error_message IS NULL
+            AND EXISTS (
+              SELECT 1 FROM cache_push_jobs cpj
+              WHERE cpj.derivation_id = d.id
+                AND cpj.status = 'completed'
+                AND cpj.store_path = d.store_path
+            )
         )
         SELECT
           hostname,
           derivation_id,
-          derivation_target,
           store_path,
           last_cache_completed_at,
           repo_url,
-          commit_hash
+          commit_hash,
+          EXISTS (
+            SELECT 1 FROM commits newer
+            WHERE newer.flake_id = per_host.flake_id
+              AND newer.commit_timestamp > per_host.commit_timestamp
+          ) AS "newer_raw_commit_exists!"
         FROM per_host
         WHERE rn = 1
         "#,
@@ -2362,7 +2626,7 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
             let hostname = r.hostname.clone();
             let commit_hash = r.commit_hash.clone();
             HostLatestTarget {
-                hostname: hostname,
+                hostname,
                 derivation_id: r.derivation_id,
                 commit_hash,
                 store_path: r.store_path,
@@ -2372,6 +2636,7 @@ pub async fn get_latest_deployable_targets_for_flake_hosts(
                     &r.hostname,
                 )),
                 last_cache_completed_at: r.last_cache_completed_at,
+                newer_raw_commit_exists: r.newer_raw_commit_exists,
             }
         })
         .collect();
@@ -2700,7 +2965,8 @@ pub async fn get_derivation_id_by_store_path(
 #[cfg(test)]
 mod tests {
     use super::{
-        SuccessfulEvalWrite, record_successful_eval_result, record_synthetic_eval_failure,
+        SuccessfulEvalWrite, record_successful_eval_result, record_successful_eval_result_in_tx,
+        record_synthetic_eval_failure,
     };
     use sqlx::PgPool;
 
@@ -2997,6 +3263,91 @@ mod tests {
             "stale error_message must be cleared on recovery"
         );
         assert_eq!(agent, Some(true), "cf_agent_enabled must be persisted");
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn cross_commit_shared_path_keeps_distinct_idempotent_rows() {
+        let pool = test_pool().await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let first_commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let second_commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let path = format!(
+            "/nix/store/{}-shared-system.drv",
+            uuid::Uuid::new_v4().simple()
+        );
+        let policy_results = serde_json::json!({"result": "pass"});
+
+        let mut first_tx = pool.begin().await.expect("begin first write");
+        let first = record_successful_eval_result_in_tx(
+            &mut first_tx,
+            Some(first_commit_id),
+            "shared-system",
+            "nixos",
+            Some("shared-system"),
+            &path,
+            Some("/nix/store/shared-system"),
+            Some(false),
+            true,
+            &policy_results,
+        )
+        .await
+        .expect("persist first path owner");
+        first_tx.commit().await.expect("commit first write");
+        assert!(matches!(first, SuccessfulEvalWrite::Inserted { .. }));
+
+        for retry in 0..2 {
+            let mut second_tx = pool.begin().await.expect("begin second write");
+            let second = record_successful_eval_result_in_tx(
+                &mut second_tx,
+                Some(second_commit_id),
+                "shared-system",
+                "nixos",
+                Some("shared-system"),
+                &path,
+                Some("/nix/store/shared-system"),
+                Some(false),
+                true,
+                &policy_results,
+            )
+            .await
+            .expect("persist commit-owned compatibility row");
+            second_tx.commit().await.expect("commit second write");
+            assert!(
+                matches!(second, SuccessfulEvalWrite::LegacyPathConflict { .. }),
+                "retry {retry} must retain the compatibility outcome"
+            );
+        }
+
+        let rows: Vec<(i32, Option<String>, Option<String>)> = sqlx::query_as(
+            r#"
+            SELECT commit_id, derivation_path, error_message
+            FROM derivations
+            WHERE commit_id IN ($1, $2)
+              AND derivation_name = 'shared-system'
+            ORDER BY commit_id
+            "#,
+        )
+        .bind(first_commit_id)
+        .bind(second_commit_id)
+        .fetch_all(&pool)
+        .await
+        .expect("load commit-owned rows");
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].1.as_deref(), Some(path.as_str()));
+        assert!(rows[0].2.is_none());
+        assert!(rows[1].1.is_none());
+        assert!(
+            rows[1]
+                .2
+                .as_deref()
+                .is_some_and(|error| error.contains("legacy global path constraint"))
+        );
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)

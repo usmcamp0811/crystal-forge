@@ -55,17 +55,18 @@ Split the backend along executable/process boundaries and make each production c
 
 The intended workspace shape is:
 
-```text
-packages/default/
-├── Cargo.toml
-├── Cargo.lock
-└── crates/
-    ├── cf-protocol/
-    ├── cf-config/
-    ├── cf-server/
-    ├── cf-builder/
-    ├── cf-agent/
-    └── cf-keygen/
+```mermaid
+%% diagram-id: backlog-task395-intended-workspace-tree
+flowchart TD
+    root["packages/default/"] --> manifest["Cargo.toml"]
+    root --> lock["Cargo.lock"]
+    root --> crates["crates/"]
+    crates --> protocol["cf-protocol/"]
+    crates --> config["cf-config/"]
+    crates --> server["cf-server/"]
+    crates --> builder["cf-builder/"]
+    crates --> agent["cf-agent/"]
+    crates --> keygen["cf-keygen/"]
 ```
 
 `test-agent` may remain a server/test-support target rather than becoming another production crate, provided it remains buildable by the appropriate test/check command.
@@ -192,17 +193,18 @@ Implementation complete on branch TASK-395-split-backend.
 
 ## Workspace shape achieved
 
-```
-packages/default/
-├── Cargo.toml          (virtual workspace)
-├── Cargo.lock
-└── crates/
-    ├── cf-protocol/    (wire types, no sqlx/axum/server deps)
-    ├── cf-config/      (config loading, no DB)
-    ├── cf-agent/       (deployment agent binary)
-    ├── cf-builder/     (remote build worker binary)
-    ├── cf-keygen/      (key generation utility binary)
-    └── cf-server/      (HTTP server, DB, migrations, tasks)
+```mermaid
+%% diagram-id: backlog-task395-achieved-workspace-tree
+flowchart TD
+    root["packages/default/"] --> manifest["Cargo.toml (virtual workspace)"]
+    root --> lock["Cargo.lock"]
+    root --> crates["crates/"]
+    crates --> protocol["cf-protocol/ (wire types, no sqlx/axum/server deps)"]
+    crates --> config["cf-config/ (config loading, no DB)"]
+    crates --> agent["cf-agent/ (deployment agent binary)"]
+    crates --> builder["cf-builder/ (remote build worker binary)"]
+    crates --> keygen["cf-keygen/ (key generation utility binary)"]
+    crates --> server["cf-server/ (HTTP server, DB, migrations, tasks)"]
 ```
 
 ## Forbidden deps verification

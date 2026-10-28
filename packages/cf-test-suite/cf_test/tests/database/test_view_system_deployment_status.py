@@ -34,9 +34,9 @@ DEPLOYMENT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-agent-restart",
-                "deployment_status": "up_to_date",  # Single commit, system matches
+                "deployment_status": "up_to_date",
                 "commits_behind": 0,
-                "status_description": "Running latest commit",
+                "status_description": "Running newest deployable system build",
             }
         ],
     },
@@ -46,9 +46,9 @@ DEPLOYMENT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-build-timeout",
-                "deployment_status": "up_to_date",  # Single commit scenario
+                "deployment_status": "unknown",
                 "commits_behind": 0,
-                "status_description": "Running latest commit",
+                "status_description": "Cannot determine deployable flake relationship",
             }
         ],
     },
@@ -58,9 +58,9 @@ DEPLOYMENT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-rollback",
-                "deployment_status": "behind",  # Rolled back to older commit
-                "commits_behind": 1,  # Behind by the newer problematic commit
-                "status_description": "Behind by 1 commit(s)",
+                "deployment_status": "behind",
+                "commits_behind": 1,
+                "status_description": "Running an older system build; a newer deployable build is available",
             }
         ],
     },
@@ -70,9 +70,9 @@ DEPLOYMENT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-partial-rebuild",
-                "deployment_status": "up_to_date",  # Single commit scenario
+                "deployment_status": "up_to_date",
                 "commits_behind": 0,
-                "status_description": "Running latest commit",
+                "status_description": "Running newest deployable system build",
             }
         ],
     },
@@ -82,8 +82,9 @@ DEPLOYMENT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-compliance-drift",
-                "deployment_status": "behind",  # Ancient commit with many newer ones
-                "commits_behind": 7,  # Exactly 7 newer commits created, but allow for flexibility
+                "deployment_status": "behind",
+                "commits_behind": 1,
+                "status_description": "Running an older system build; a newer deployable build is available",
             }
         ],
     },
@@ -93,9 +94,9 @@ DEPLOYMENT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-flaky-agent",
-                "deployment_status": "up_to_date",  # Single commit scenario
+                "deployment_status": "unknown",
                 "commits_behind": 0,
-                "status_description": "Running latest commit",
+                "status_description": "Cannot determine deployable flake relationship",
             }
         ],
     },
@@ -105,9 +106,9 @@ DEPLOYMENT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-never-seen",
-                "deployment_status": "up_to_date",  # System has deployment and should be current
+                "deployment_status": "up_to_date",
                 "commits_behind": 0,
-                "status_description": "Running latest commit",
+                "status_description": "Running newest deployable system build",
             }
         ],
     },
@@ -119,7 +120,7 @@ DEPLOYMENT_SCENARIO_CONFIGS = [
                 "hostname": "test-uptodate",
                 "deployment_status": "up_to_date",
                 "commits_behind": 0,
-                "status_description": "Running latest commit",
+                "status_description": "Running newest deployable system build",
             }
         ],
     },
@@ -130,7 +131,8 @@ DEPLOYMENT_SCENARIO_CONFIGS = [
             {
                 "hostname": "test-behind",
                 "deployment_status": "behind",
-                "status_description": "Behind by 1 commit(s)",
+                "commits_behind": 1,
+                "status_description": "Running an older system build; a newer deployable build is available",
             }
         ],
     },
@@ -140,22 +142,26 @@ DEPLOYMENT_SCENARIO_CONFIGS = [
         "expected": [
             {
                 "hostname": "test-eval-failed",
-                "deployment_status": "behind",  # Running older working commit, newer commit exists (even though it failed)
-                "commits_behind": 1,  # Behind by the failed commit
-                "status_description": "Behind by 1 commit(s)",
+                "deployment_status": "up_to_date",
+                "commits_behind": 0,
+                "status_description": "Running newest deployable system build",
             }
         ],
     },
     {
         "id": "mixed_commit_lag",
         "builder": scenario_mixed_commit_lag,
-        "expected": {
-            "count": 4,
-            "deployment_counts": {
-                "up_to_date": 3,  # test-mixed-1, 2, 4 (4 has current commit despite being offline)
-                "behind": 1,  # test-mixed-3 has old commit
+        "expected": [
+            {"hostname": "test-mixed-1", "deployment_status": "up_to_date", "commits_behind": 0},
+            {"hostname": "test-mixed-2", "deployment_status": "up_to_date", "commits_behind": 0},
+            {
+                "hostname": "test-mixed-3",
+                "deployment_status": "behind",
+                "commits_behind": 1,
+                "status_description": "Running an older system build; a newer deployable build is available",
             },
-        },
+            {"hostname": "test-mixed-4", "deployment_status": "up_to_date", "commits_behind": 0},
+        ],
     },
 ]
 
@@ -187,6 +193,51 @@ def cf_client(cf_config):
     return client
 
 
+@pytest.fixture
+def deployment_artifacts(cf_client, clean_test_data):
+    """Publish only this test's eligible builds; remove cache jobs before shared cleanup."""
+    cache_job_ids = []
+
+    def publish(derivation_id):
+        cf_client.execute_sql(
+            """UPDATE derivations SET cf_agent_enabled = TRUE,
+                      policy_requirements_met = TRUE, error_message = NULL
+               WHERE id = %s""",
+            (derivation_id,),
+        )
+        cache_job_ids.append(
+            _one_row(
+                cf_client,
+                """INSERT INTO cache_push_jobs (derivation_id, status, store_path)
+                   SELECT id, 'completed', store_path FROM derivations WHERE id = %s
+                   RETURNING id""",
+                (derivation_id,),
+            )["id"]
+        )
+
+    yield publish
+
+    if cache_job_ids:
+        cf_client.execute_sql(
+            "DELETE FROM cache_push_jobs WHERE id = ANY(%s)", (cache_job_ids,)
+        )
+
+
+def _add_deployable_build(cf_client, publish, commit_id, hostname, path):
+    derivation = _one_row(
+        cf_client,
+        """INSERT INTO derivations (
+               commit_id, derivation_type, derivation_name, derivation_path, store_path,
+               status_id, attempt_count, completed_at
+           ) VALUES (
+               %s, 'nixos', %s, %s, %s,
+               (SELECT id FROM derivation_statuses WHERE name = 'build-complete'), 0, NOW()
+           ) RETURNING id""",
+        (commit_id, hostname, path, path),
+    )
+    publish(derivation["id"])
+
+
 @pytest.mark.vm_internal
 @pytest.mark.views
 @pytest.mark.database
@@ -194,7 +245,7 @@ def cf_client(cf_config):
     "scenario_config", DEPLOYMENT_SCENARIO_CONFIGS, ids=lambda x: x["id"]
 )
 def test_deployment_status_scenarios(
-    cf_client: CFTestClient, clean_test_data, scenario_config: Dict[str, Any]
+    cf_client: CFTestClient, deployment_artifacts, scenario_config: Dict[str, Any]
 ):
     """Test deployment status view with all scenarios"""
     builder = scenario_config["builder"]
@@ -203,6 +254,63 @@ def test_deployment_status_scenarios(
 
     # Build the scenario
     scenario_data = builder(cf_client)
+
+    if scenario_id in {
+        "agent_restart", "partial_rebuild", "never_seen", "up_to_date", "eval_failed"
+    }:
+        deployment_artifacts(scenario_data["derivation_id"])
+    elif scenario_id == "rollback":
+        for derivation_id in scenario_data["derivation_ids"]:
+            deployment_artifacts(derivation_id)
+    elif scenario_id == "behind":
+        deployment_artifacts(scenario_data["derivation_id"])
+        _add_deployable_build(
+            cf_client,
+            deployment_artifacts,
+            scenario_data["additional_commit_ids"][0],
+            scenario_data["hostname"],
+            "/nix/store/new789co-nixos-system-test-behind.drv",
+        )
+    elif scenario_id == "compliance_drift":
+        cf_client.execute_sql(
+            """UPDATE derivations
+               SET status_id = (SELECT id FROM derivation_statuses WHERE name = 'build-complete')
+               WHERE id = %s""",
+            (scenario_data["derivation_id"],),
+        )
+        deployment_artifacts(scenario_data["derivation_id"])
+        _add_deployable_build(
+            cf_client,
+            deployment_artifacts,
+            scenario_data["recent_commit_ids"][-1],
+            scenario_data["hostname"],
+            "/nix/store/newest-compliance-drift-test.drv",
+        )
+    elif scenario_id == "mixed_commit_lag":
+        flake_id = _one_row(
+            cf_client, "SELECT flake_id FROM systems WHERE hostname = 'test-mixed-1'", ()
+        )["flake_id"]
+        for hostname in scenario_data["hostnames"]:
+            derivation_id = _one_row(
+                cf_client,
+                """SELECT d.id FROM derivations d JOIN commits c ON c.id = d.commit_id
+                   WHERE c.flake_id = %s AND d.derivation_name = %s
+                   ORDER BY d.id DESC LIMIT 1""",
+                (flake_id, hostname),
+            )["id"]
+            deployment_artifacts(derivation_id)
+        latest_commit = _one_row(
+            cf_client,
+            "SELECT id FROM commits WHERE flake_id = %s AND git_commit_hash = 'mix123current'",
+            (flake_id,),
+        )["id"]
+        _add_deployable_build(
+            cf_client,
+            deployment_artifacts,
+            latest_commit,
+            "test-mixed-3",
+            "/nix/store/mix123current-nixos-system-test-mixed-3.drv",
+        )
 
     # Determine hostnames to fetch from the view
     hostnames = _get_hostnames_from_deployment_scenario(scenario_data, scenario_id)
@@ -271,25 +379,6 @@ def test_deployment_status_scenarios(
                 if field == "hostname":
                     continue
                 actual_value = matching_row.get(field)
-
-                # Special handling for commits_behind - check if it's at least the expected value for "behind" scenarios
-                if (
-                    field == "commits_behind"
-                    and expected_system.get("deployment_status") == "behind"
-                ):
-                    if expected_value > 0:
-                        assert actual_value >= expected_value, (
-                            f"Field {field} for {expected_hostname}: "
-                            f"expected at least {expected_value}, got {actual_value}"
-                        )
-                        continue
-                elif field == "commits_behind":
-                    # For non-behind scenarios, allow exact match
-                    assert actual_value == expected_value, (
-                        f"Field mismatch for {expected_hostname}.{field}: "
-                        f"expected '{expected_value}', got '{actual_value}'"
-                    )
-                    continue
 
                 assert actual_value == expected_value, (
                     f"Field mismatch for {expected_hostname}.{field}: "
@@ -461,7 +550,7 @@ def test_deployment_unknown_status(cf_client: CFTestClient, clean_test_data):
 @pytest.mark.views
 @pytest.mark.database
 def test_deployment_commits_behind_calculation(
-    cf_client: CFTestClient, clean_test_data
+    cf_client: CFTestClient, deployment_artifacts
 ):
     """Test that commits_behind is calculated correctly"""
 
@@ -480,14 +569,30 @@ def test_deployment_commits_behind_calculation(
 
     flake_id = base_scenario["flake_id"]
 
+    cf_client.execute_sql(
+        """UPDATE derivations
+           SET status_id = (SELECT id FROM derivation_statuses WHERE name = 'build-complete')
+           WHERE id = %s""",
+        (base_scenario["derivation_id"],),
+    )
+    deployment_artifacts(base_scenario["derivation_id"])
+
     # Add 3 newer commits
     for i in range(1, 4):
-        cf_client.execute_sql(
+        commit = _one_row(
+            cf_client,
             """
             INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, attempt_count)
-            VALUES (%s, %s, %s, 0)
+            VALUES (%s, %s, %s, 0) RETURNING id
             """,
             (flake_id, f"newer-commit-{i}", now - timedelta(hours=24 * (3 - i))),
+        )
+        _add_deployable_build(
+            cf_client,
+            deployment_artifacts,
+            commit["id"],
+            "test-commits-behind",
+            f"/nix/store/newer-commit-{i}-test-commits-behind.drv",
         )
 
     # Query the view
@@ -505,10 +610,6 @@ def test_deployment_commits_behind_calculation(
     assert (
         row["commits_behind"] == 3
     ), f"Expected 3 commits behind, got {row['commits_behind']}"
-    assert "Behind by 3 commit(s)" == row["status_description"]
-
-    # Clean up
-    cf_client.cleanup_test_data(base_scenario["cleanup"])
-    cf_client.execute_sql(
-        "DELETE FROM commits WHERE git_commit_hash LIKE 'newer-commit-%'"
+    assert row["status_description"] == (
+        "Running an older system build; a newer deployable build is available"
     )

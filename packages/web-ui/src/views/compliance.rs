@@ -1,12 +1,22 @@
+//! Compliance catalog, evidence, assignment, and POA&M route.
+//!
+//! The view composes server-authoritative bundle, evidence, and remediation
+//! data. Route query state controls presentation only; server APIs enforce
+//! visibility, mutation authority, and immutable version identity.
+
+mod evaluation_evidence;
+mod evidence_controls;
+
+use std::collections::HashMap;
+
 use dioxus::prelude::*;
 
 use crate::api::client::{
-    create_bundle_draft, create_compliance_assignment, create_compliance_bundle,
-    delete_compliance_bundle, fetch_bundle_requirement_coverage,
-    fetch_bundle_version_policy_membership, fetch_bundle_version_requirement_membership,
+    create_bundle_draft, create_compliance_bundle, delete_compliance_bundle,
+    fetch_bundle_requirement_coverage, fetch_bundle_version_requirement_membership,
     fetch_compliance_bundle_systems, fetch_compliance_bundles, fetch_compliance_framework_versions,
     fetch_compliance_frameworks, fetch_compliance_system_evidence, fetch_environments,
-    fetch_framework_mapped_policy_versions, fetch_policies, fetch_systems, import_xccdf,
+    fetch_framework_mapped_policy_versions, fetch_policies, import_xccdf,
     preview_compliance_assignment, preview_xccdf, publish_bundle_version, search_requirements,
     trust_bundle_version, update_compliance_bundle,
 };
@@ -17,29 +27,213 @@ use crate::api::models::{
     CreateComplianceBundleRequest, DeploymentPolicySummary, EnvironmentSummary, ImportedBundlePlan,
     ImportedCustomCheck, ImportedCustomCheckRule, ImportedEvidenceRequirement,
     ImportedPolicyCustomization, PolicyValueOverride, PublishBundleVersionRequest,
-    RequirementCoverage, RequirementVersionSummary, SortOrder, SystemSummary, SystemsListParams,
-    TrustBundleVersionRequest, UpdateAssignmentRequest, UpdateComplianceBundleRequest,
-    XccdfDiagnostic, XccdfImportPlan, XccdfImportResponse, XccdfPreviewResponse,
-    XccdfRuleImportAction,
+    RequirementCoverage, RequirementVersionSummary, TrustBundleVersionRequest,
+    UpdateAssignmentRequest, UpdateComplianceBundleRequest, XccdfDiagnostic, XccdfImportPlan,
+    XccdfImportResponse, XccdfPreviewResponse, XccdfRuleImportAction,
 };
 use crate::components::compliance::{
-    action_to_import, mapping_semantics_for, BundleCatalog, BundleHeader, ComparisonOperator,
-    EvidenceDrawer, ImportReview, PolicyAssertionDraft, RefinePolicyStep, RefinedPolicyDraft,
-    RefinedRuleAction, RefinedStigRule, ScoreStrip, SourceCheck, SourceCheckBodyPart,
-    SourceStigRule, SystemsMatrix, TypedPolicyValue,
+    BundleCatalog, BundleHeader, ComparisonOperator, EvidenceDrawer, ImportReview,
+    PolicyAssertionDraft, RefinePolicyStep, RefinedPolicyDraft, RefinedRuleAction, RefinedStigRule,
+    ScoreStrip, SourceCheck, SourceCheckBodyPart, SourceStigRule, SystemsMatrix, TypedPolicyValue,
+    action_to_import, mapping_semantics_for,
+};
+use crate::components::dialog_focus::{
+    DialogFocusBoundary, DialogFocusRestore, DialogFocusSentinel,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::io_menu::{IOMenu, IOMenuItem};
 use crate::components::loading::DashboardLoadingSpinner;
+use crate::components::poam::{
+    AssignmentVersionCandidate, BundlePoamRollup, FindingPoamEvent, PoamDetailHost, PoamFilter,
+    PoamTable,
+};
 use crate::components::policy::{PolicyDefinition, PolicyFormat};
 use crate::export::{
-    build_cf_json, build_csv, build_oscal, build_sarif, download_print_html, trigger_download,
-    ExportPayload,
+    ExportPayload, build_cf_json, build_csv, build_oscal, build_sarif, download_print_html,
+    trigger_download,
 };
+use crate::routes::Route;
 use crate::state::{app_state::AppState, auth};
+use crate::views::poam_api::{
+    self, AssignmentRelationshipEntry, FindingView, PoamListQuery, PoamSummary, Rollup,
+};
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum BundleDrawerView {
+    #[default]
+    Overview,
+    Coverage,
+    Poam,
+}
+
+impl BundleDrawerView {
+    fn query_value(self) -> &'static str {
+        match self {
+            Self::Overview => "overview",
+            Self::Coverage => "coverage",
+            Self::Poam => "poam",
+        }
+    }
+
+    fn from_query(value: Option<&str>) -> Self {
+        match value {
+            Some("coverage") => Self::Coverage,
+            Some("poam") => Self::Poam,
+            _ => Self::Overview,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct ComplianceQueryTarget {
+    bundle: Option<uuid::Uuid>,
+    version: Option<uuid::Uuid>,
+    system: Option<uuid::Uuid>,
+    policy: Option<uuid::Uuid>,
+    poam: Option<uuid::Uuid>,
+    view: Option<String>,
+}
+
+const COMPLIANCE_QUERY_KEYS: [&str; 6] = ["bundle", "version", "system", "policy", "poam", "view"];
+
+fn parse_compliance_target(route: &str) -> ComplianceQueryTarget {
+    let query = route
+        .split_once('?')
+        .map(|(_, query)| query)
+        .unwrap_or_else(|| route.contains('=').then_some(route).unwrap_or_default());
+    let pairs = serde_urlencoded::from_str::<Vec<(String, String)>>(query).unwrap_or_default();
+    let value = |name: &str| {
+        pairs
+            .iter()
+            .rev()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.as_str())
+    };
+    ComplianceQueryTarget {
+        bundle: value("bundle").and_then(|value| uuid::Uuid::parse_str(value).ok()),
+        version: value("version").and_then(|value| uuid::Uuid::parse_str(value).ok()),
+        system: value("system").and_then(|value| uuid::Uuid::parse_str(value).ok()),
+        policy: value("policy").and_then(|value| uuid::Uuid::parse_str(value).ok()),
+        poam: value("poam").and_then(|value| uuid::Uuid::parse_str(value).ok()),
+        view: value("view").map(str::to_string),
+    }
+}
+
+fn compliance_route_with_target(route: &str, target: &ComplianceQueryTarget) -> String {
+    let path = route.split_once('?').map(|(path, _)| path).unwrap_or(route);
+    let query = route
+        .split_once('?')
+        .map(|(_, query)| query)
+        .unwrap_or_default();
+    let mut pairs = serde_urlencoded::from_str::<Vec<(String, String)>>(query).unwrap_or_default();
+    pairs.retain(|(key, _)| !COMPLIANCE_QUERY_KEYS.contains(&key.as_str()));
+    let mut push_uuid = |key: &str, value: Option<uuid::Uuid>| {
+        if let Some(value) = value {
+            pairs.push((key.to_string(), value.to_string()));
+        }
+    };
+    push_uuid("bundle", target.bundle);
+    push_uuid("version", target.version);
+    push_uuid("system", target.system);
+    push_uuid("policy", target.policy);
+    push_uuid("poam", target.poam);
+    if let Some(view) = target.view.as_ref() {
+        pairs.push(("view".to_string(), view.clone()));
+    }
+    let query = serde_urlencoded::to_string(pairs).unwrap_or_default();
+    if query.is_empty() {
+        path.to_string()
+    } else {
+        format!("{path}?{query}")
+    }
+}
+
+fn compliance_target_from_state(
+    bundle: Option<uuid::Uuid>,
+    version: Option<uuid::Uuid>,
+    drawer_open: bool,
+    drawer_view: BundleDrawerView,
+    evidence_system: Option<uuid::Uuid>,
+    policy: Option<uuid::Uuid>,
+    poam: Option<uuid::Uuid>,
+) -> ComplianceQueryTarget {
+    let bundle_scoped = drawer_open || evidence_system.is_some();
+    ComplianceQueryTarget {
+        bundle: bundle_scoped.then_some(bundle).flatten(),
+        version: bundle_scoped.then_some(version).flatten(),
+        system: evidence_system,
+        policy: evidence_system.and(policy),
+        poam,
+        view: if evidence_system.is_some() {
+            Some("evidence".to_string())
+        } else if drawer_open {
+            Some(drawer_view.query_value().to_string())
+        } else {
+            None
+        },
+    }
+}
+
+/// Renders compliance catalog browsing and server-backed workflow drawers.
+///
+/// The component owns route synchronization and transient selection state.
+/// Bundle administration is gated by authenticated role and enforced again by
+/// server APIs; evidence and POA&M identity always come from server responses.
+#[component]
+pub fn ComplianceView(
+    bundle: String,
+    version: String,
+    system: String,
+    policy: String,
+    poam: String,
+    view: String,
+) -> Element {
+    if view == "evaluation-evidence" {
+        // Legacy handoff URLs omit the attempt and cannot establish historical
+        // identity. Keep the catalog shell, but never resolve deployed evidence.
+        rsx! { ComplianceEvaluationView { commit_id: 0, attempt_id: uuid::Uuid::nil(), bundle, version, system, policy } }
+    } else {
+        rsx! { ComplianceCatalogView { bundle, version, system, policy, poam, view } }
+    }
+}
+
+/// Renders the normal Compliance workflow with a dedicated historical tray.
+///
+/// Path and query identity survive refresh; current catalog data never supplies
+/// missing historical membership or outcomes. The `policy` query identifies the
+/// exact policy version; the pinned response supplies the policy lineage.
+#[component]
+pub fn ComplianceEvaluationView(
+    commit_id: i32,
+    attempt_id: uuid::Uuid,
+    bundle: String,
+    version: String,
+    system: String,
+    policy: String,
+) -> Element {
+    rsx! {
+        ComplianceCatalogView {
+            bundle: String::new(), version: String::new(), system: String::new(),
+            policy: String::new(), poam: String::new(), view: String::new(),
+            historical: true,
+        }
+        evaluation_evidence::EvaluationEvidenceDrawer {
+            key: "{commit_id}-{attempt_id}-{bundle}-{version}-{system}-{policy}",
+            commit_id, attempt_id, bundle, version, system, policy,
+        }
+    }
+}
 
 #[component]
-pub fn ComplianceView() -> Element {
+fn ComplianceCatalogView(
+    bundle: String,
+    version: String,
+    system: String,
+    policy: String,
+    poam: String,
+    view: String,
+    #[props(default)] historical: bool,
+) -> Element {
     // ── RBAC ─────────────────────────────────────────────────────────────────
     // Read-only compliance browsing is available to all authenticated users.
     // Bundle management (create / edit / delete) and Import STIG are restricted
@@ -47,6 +241,15 @@ pub fn ComplianceView() -> Element {
     let app_state = use_context::<Signal<AppState>>();
     let auth_context = app_state.read().auth.clone();
     let is_admin = auth::is_admin(&auth_context);
+    let viewer = !auth::is_operator_or_above(&auth_context);
+    let initial_target = ComplianceQueryTarget {
+        bundle: uuid::Uuid::parse_str(&bundle).ok(),
+        version: uuid::Uuid::parse_str(&version).ok(),
+        system: uuid::Uuid::parse_str(&system).ok(),
+        policy: uuid::Uuid::parse_str(&policy).ok(),
+        poam: uuid::Uuid::parse_str(&poam).ok(),
+        view: (!view.is_empty()).then_some(view),
+    };
 
     // `fetch_started` prevents the effect from re-firing; `loaded` becomes true
     // only after the bundle fetch completes so we never show the empty state
@@ -64,6 +267,7 @@ pub fn ComplianceView() -> Element {
     // Separate Ok/Err state for evidence.
     let mut evidence = use_signal(|| None::<ComplianceEvidenceResponse>);
     let mut evidence_error = use_signal(|| None::<String>);
+    let mut evidence_loading = use_signal(|| false);
     let mut show_export = use_signal(|| false);
     let mut show_new_bundle = use_signal(|| false);
     let mut show_edit_bundle = use_signal(|| false);
@@ -78,7 +282,9 @@ pub fn ComplianceView() -> Element {
     let mut coverage_error = use_signal(|| None::<String>);
     let mut coverage_loading = use_signal(|| false);
     let mut coverage_expanded = use_signal(|| false);
-    let mut coverage_view = use_signal(|| false);
+    let mut bundle_drawer_expanded = use_signal(|| false);
+    let mut drawer_view =
+        use_signal(|| BundleDrawerView::from_query(initial_target.view.as_deref()));
     let mut revisions_open = use_signal(|| false);
     let mut coverage_gen = use_signal(|| 0u32);
     let mut coverage_requested_version = use_signal(|| None::<uuid::Uuid>);
@@ -86,11 +292,47 @@ pub fn ComplianceView() -> Element {
     let mut sys_filter = use_signal(|| "all".to_string());
     let mut selected_bundle_version_id = use_signal(|| None::<uuid::Uuid>);
     let mut export_version_pointers = use_signal(|| (None::<uuid::Uuid>, None::<uuid::Uuid>));
-    let mut show_assignment = use_signal(|| false);
     let mut policy_library = use_signal(Vec::<PolicyDefinition>::new);
     let mut policy_drawer = use_signal(|| None::<PolicyDefinition>);
     let mut policy_loading = use_signal(|| false);
     let mut policy_error = use_signal(|| None::<String>);
+    let mut target_policy_id = use_signal(|| initial_target.policy);
+    let mut bundle_rollups = use_signal(Vec::<Rollup>::new);
+    let mut bundle_rollups_loading = use_signal(|| false);
+    let mut bundle_rollups_error = use_signal(|| None::<String>);
+    let mut bundle_rollups_gen = use_signal(|| 0_u64);
+    let mut bundle_poams = use_signal(Vec::<PoamSummary>::new);
+    let mut bundle_poams_loading = use_signal(|| false);
+    let mut bundle_poams_error = use_signal(|| None::<String>);
+    let mut bundle_poams_gen = use_signal(|| 0_u64);
+    let mut poam_filter = use_signal(PoamFilter::default);
+    let mut open_poam_id = use_signal(|| initial_target.poam);
+    let mut ambiguous_finding = use_signal(|| None::<poam_api::FindingView>);
+    let mut evidence_assignments = use_signal(Vec::<crate::api::models::AssignmentResponse>::new);
+    let mut evidence_assignments_error = use_signal(|| None::<String>);
+    let initial_assignment_scope = initial_target.system;
+    let initial_evidence_open = initial_target.view.as_deref() == Some("evidence");
+    let mut assignment_scope = use_signal(move || initial_assignment_scope);
+    // Route identity is independent from the evidence request. This preserves
+    // deep links while the request is loading or displaying an error.
+    let mut evidence_route_system = use_signal(move || {
+        initial_evidence_open
+            .then_some(initial_target.system)
+            .flatten()
+    });
+    let mut last_synced_route = use_signal(String::new);
+
+    // Compliance opens the same unified policy editor as the policy catalog,
+    // for the exact policy version the coverage row refers to.
+    let mut policy_editor_open = use_signal(|| false);
+    let mut editing_policy: Signal<Option<PolicyDefinition>> = use_signal(|| None);
+    let mut editing_policy_id: Signal<Option<uuid::Uuid>> = use_signal(|| None);
+    let mut edit_name = use_signal(String::new);
+    let mut edit_description = use_signal(String::new);
+    let mut edit_body = use_signal(String::new);
+    let mut edit_format = use_signal(|| PolicyFormat::Json);
+    let mut edit_srg_ids = use_signal(String::new);
+    let mut edit_cci_ids = use_signal(String::new);
 
     use_effect(move || {
         stig_import_draft.set(load_stig_import_draft());
@@ -104,6 +346,51 @@ pub fn ComplianceView() -> Element {
     // Retry, create, update, and delete callbacks.
     let mut systems_gen = use_signal(|| 0u32);
     let mut evidence_gen = use_signal(|| 0u32);
+
+    let mut refresh_bundle_rollups = move |ids: Vec<uuid::Uuid>| {
+        bundle_rollups_gen += 1;
+        let requested = bundle_rollups_gen();
+        bundle_rollups_loading.set(true);
+        bundle_rollups_error.set(None);
+        spawn(async move {
+            match poam_api::bundle_rollups(&ids).await {
+                Ok(rollups) if bundle_rollups_gen() == requested => {
+                    bundle_rollups.set(rollups);
+                    bundle_rollups_loading.set(false);
+                }
+                Err(error) if bundle_rollups_gen() == requested => {
+                    bundle_rollups_error.set(Some(error.to_string()));
+                    bundle_rollups_loading.set(false);
+                }
+                _ => {}
+            }
+        });
+    };
+
+    let mut refresh_bundle_poams = move |bundle_id: uuid::Uuid| {
+        bundle_poams_gen += 1;
+        let requested = bundle_poams_gen();
+        bundle_poams_loading.set(true);
+        bundle_poams_error.set(None);
+        spawn(async move {
+            match poam_api::fetch_all_poams(&PoamListQuery {
+                bundle_id: Some(bundle_id),
+                ..Default::default()
+            })
+            .await
+            {
+                Ok(items) if bundle_poams_gen() == requested => {
+                    bundle_poams.set(items);
+                    bundle_poams_loading.set(false);
+                }
+                Err(error) if bundle_poams_gen() == requested => {
+                    bundle_poams_error.set(Some(error.to_string()));
+                    bundle_poams_loading.set(false);
+                }
+                _ => {}
+            }
+        });
+    };
 
     // Helper closures (moved into the component body) that bump a generation,
     // spawn the fetch, and only write state when the generation is current.
@@ -145,19 +432,66 @@ pub fn ComplianceView() -> Element {
         spawn(async move {
             match fetch_compliance_bundles().await {
                 Ok(items) => {
-                    let first_id = items.first().map(|b| b.id);
-                    let first_version_id = items.first().and_then(|b| {
-                        b.current_published_version_id
-                            .or(b.current_draft_version_id)
+                    let selected_id = initial_target
+                        .bundle
+                        .filter(|id| items.iter().any(|bundle| bundle.id == *id))
+                        .or_else(|| items.first().map(|bundle| bundle.id));
+                    let selected =
+                        selected_id.and_then(|id| items.iter().find(|bundle| bundle.id == id));
+                    let selected_version_id = selected.and_then(|bundle| {
+                        initial_target
+                            .version
+                            .filter(|id| bundle.versions.iter().any(|version| version.id == *id))
+                            .or(bundle.current_published_version_id)
+                            .or(bundle.current_draft_version_id)
                     });
+                    let bundle_ids = items.iter().map(|bundle| bundle.id).collect::<Vec<_>>();
                     bundles.set(items);
-                    selected_bundle_id.set(first_id);
-                    selected_bundle_version_id.set(first_version_id);
+                    selected_bundle_id.set(selected_id);
+                    selected_bundle_version_id.set(selected_version_id);
+                    drawer_open.set(initial_target.bundle.is_some() && !initial_evidence_open);
                     // loaded = true before the systems fetch so the bundle list
                     // renders immediately; systems has its own loading indicator.
                     loaded.set(true);
-                    if let Some(bundle_id) = first_id {
-                        start_systems_fetch(bundle_id, first_version_id);
+                    refresh_bundle_rollups(bundle_ids);
+                    if let Some(bundle_id) = selected_id {
+                        start_systems_fetch(bundle_id, selected_version_id);
+                        if drawer_view() == BundleDrawerView::Poam {
+                            refresh_bundle_poams(bundle_id);
+                        }
+                        if initial_evidence_open && let Some(system_id) = initial_target.system {
+                            evidence_loading.set(true);
+                            let gen_id = *evidence_gen.read() + 1;
+                            evidence_gen.set(gen_id);
+                            spawn(async move {
+                                let evidence_result = fetch_compliance_system_evidence(
+                                    &bundle_id,
+                                    &system_id,
+                                    selected_version_id.as_ref(),
+                                )
+                                .await;
+                                let assignments_result =
+                                    crate::api::client::fetch_system_assignments(&system_id).await;
+                                match evidence_result {
+                                    Ok(response) if *evidence_gen.read() == gen_id => {
+                                        evidence.set(Some(response));
+                                        match assignments_result {
+                                            Ok(assignments) => {
+                                                evidence_assignments.set(assignments)
+                                            }
+                                            Err(error) => evidence_assignments_error
+                                                .set(Some(error.to_string())),
+                                        }
+                                        evidence_loading.set(false);
+                                    }
+                                    Err(error) if *evidence_gen.read() == gen_id => {
+                                        evidence_error.set(Some(error.to_string()));
+                                        evidence_loading.set(false);
+                                    }
+                                    _ => {}
+                                }
+                            });
+                        }
                     }
                 }
                 Err(err) => {
@@ -191,29 +525,37 @@ pub fn ComplianceView() -> Element {
         })
         .unwrap_or_else(|| "unnamed benchmark".to_string());
 
-    let mut on_select_bundle = move |bundle_id: uuid::Uuid| {
-        selected_bundle_id.set(Some(bundle_id));
-        coverage_expanded.set(false);
-        coverage_view.set(false);
-        evidence.set(None);
-        evidence_error.set(None);
-        // Bump evidence_gen so any in-flight evidence fetch for the old bundle
-        // is invalidated even though we already cleared `evidence`.
-        let eg = *evidence_gen.read() + 1;
-        evidence_gen.set(eg);
-        sys_filter.set("all".to_string());
-        let version_id = bundles
-            .read()
-            .iter()
-            .find(|bundle| bundle.id == bundle_id)
-            .and_then(|bundle| {
-                bundle
-                    .current_published_version_id
-                    .or(bundle.current_draft_version_id)
+    let mut on_select_bundle =
+        move |bundle_id: uuid::Uuid, selected_version: Option<uuid::Uuid>| {
+            selected_bundle_id.set(Some(bundle_id));
+            coverage_expanded.set(false);
+            drawer_view.set(BundleDrawerView::Overview);
+            evidence.set(None);
+            evidence_route_system.set(None);
+            evidence_assignments.set(Vec::new());
+            evidence_assignments_error.set(None);
+            evidence_error.set(None);
+            // Bump evidence_gen so any in-flight evidence fetch for the old bundle
+            // is invalidated even though we already cleared `evidence`.
+            let eg = *evidence_gen.read() + 1;
+            evidence_gen.set(eg);
+            sys_filter.set("all".to_string());
+            let version_id = selected_version.or_else(|| {
+                bundles
+                    .read()
+                    .iter()
+                    .find(|bundle| bundle.id == bundle_id)
+                    .and_then(|bundle| {
+                        bundle
+                            .current_published_version_id
+                            .or(bundle.current_draft_version_id)
+                    })
             });
-        selected_bundle_version_id.set(version_id);
-        start_systems_fetch(bundle_id, version_id);
-    };
+            selected_bundle_version_id.set(version_id);
+            start_systems_fetch(bundle_id, version_id);
+            bundle_poams.set(Vec::new());
+            bundle_poams_error.set(None);
+        };
 
     use_effect(move || {
         let bundle_id = *selected_bundle_id.read();
@@ -306,25 +648,41 @@ pub fn ComplianceView() -> Element {
         });
     });
 
-    let on_evidence = move |system_id: uuid::Uuid| {
+    let mut on_evidence = move |system_id: uuid::Uuid| {
         if let Some(bundle_id) = *selected_bundle_id.read() {
+            drawer_open.set(false);
+            evidence_route_system.set(Some(system_id));
             evidence.set(None);
             evidence_error.set(None);
+            evidence_loading.set(true);
+            evidence_assignments.set(Vec::new());
+            evidence_assignments_error.set(None);
             let gen_id = *evidence_gen.read() + 1;
             evidence_gen.set(gen_id);
             let version_id = *selected_bundle_version_id.read();
             spawn(async move {
-                match fetch_compliance_system_evidence(&bundle_id, &system_id, version_id.as_ref())
-                    .await
-                {
+                let evidence_result =
+                    fetch_compliance_system_evidence(&bundle_id, &system_id, version_id.as_ref())
+                        .await;
+                let assignments_result =
+                    crate::api::client::fetch_system_assignments(&system_id).await;
+                match evidence_result {
                     Ok(resp) => {
                         if *evidence_gen.read() == gen_id {
                             evidence.set(Some(resp));
+                            match assignments_result {
+                                Ok(assignments) => evidence_assignments.set(assignments),
+                                Err(error) => {
+                                    evidence_assignments_error.set(Some(error.to_string()))
+                                }
+                            }
+                            evidence_loading.set(false);
                         }
                     }
                     Err(err) => {
                         if *evidence_gen.read() == gen_id {
                             evidence_error.set(Some(err.to_string()));
+                            evidence_loading.set(false);
                         }
                     }
                 }
@@ -333,6 +691,7 @@ pub fn ComplianceView() -> Element {
     };
 
     let mut on_open_policy = move |(policy_id, policy_version_id): (uuid::Uuid, uuid::Uuid)| {
+        target_policy_id.set(Some(policy_id));
         if let Some(policy) = policy_library
             .read()
             .iter()
@@ -378,26 +737,106 @@ pub fn ComplianceView() -> Element {
         });
     };
 
+    use_effect(move || {
+        // The historical tray owns its URL. Catalog selection must not rewrite
+        // that identity into a deployed-evidence or latest-version destination.
+        if historical {
+            return;
+        }
+        if !loaded() {
+            return;
+        }
+        let current = router().full_route_string();
+        if !last_synced_route.read().is_empty() && current != last_synced_route() {
+            let incoming = parse_compliance_target(&current);
+            let bundle_id = incoming
+                .bundle
+                .filter(|id| bundles.read().iter().any(|bundle| bundle.id == *id))
+                .or(*selected_bundle_id.read());
+            let version_id = bundle_id.and_then(|bundle_id| {
+                bundles
+                    .read()
+                    .iter()
+                    .find(|bundle| bundle.id == bundle_id)
+                    .and_then(|bundle| {
+                        incoming
+                            .version
+                            .filter(|id| bundle.versions.iter().any(|version| version.id == *id))
+                            .or(bundle.current_published_version_id)
+                            .or(bundle.current_draft_version_id)
+                    })
+            });
+            if bundle_id != *selected_bundle_id.read()
+                || version_id != *selected_bundle_version_id.read()
+            {
+                selected_bundle_id.set(bundle_id);
+                selected_bundle_version_id.set(version_id);
+                if let Some(bundle_id) = bundle_id {
+                    start_systems_fetch(bundle_id, version_id);
+                }
+            }
+            drawer_view.set(BundleDrawerView::from_query(incoming.view.as_deref()));
+            drawer_open
+                .set(incoming.bundle.is_some() && incoming.view.as_deref() != Some("evidence"));
+            open_poam_id.set(incoming.poam);
+            target_policy_id.set(incoming.policy);
+            if incoming.view.as_deref() == Some("evidence") {
+                if let (Some(bundle_id), Some(system_id)) = (bundle_id, incoming.system) {
+                    evidence_route_system.set(Some(system_id));
+                    selected_bundle_id.set(Some(bundle_id));
+                    on_evidence(system_id);
+                }
+            } else {
+                evidence_route_system.set(None);
+                if evidence.read().is_some()
+                    || evidence_loading()
+                    || evidence_error.read().is_some()
+                {
+                    evidence_gen += 1;
+                    evidence.set(None);
+                    evidence_error.set(None);
+                    evidence_loading.set(false);
+                    evidence_assignments.set(Vec::new());
+                    evidence_assignments_error.set(None);
+                }
+            }
+            last_synced_route.set(current);
+            return;
+        }
+        let target = compliance_target_from_state(
+            *selected_bundle_id.read(),
+            *selected_bundle_version_id.read(),
+            *drawer_open.read(),
+            drawer_view(),
+            *evidence_route_system.read(),
+            *target_policy_id.read(),
+            *open_poam_id.read(),
+        );
+        let next = compliance_route_with_target(&current, &target);
+        if last_synced_route.read().is_empty() {
+            last_synced_route.set(next.clone());
+            if next != current {
+                router().replace(next);
+            }
+            return;
+        }
+        if next != current {
+            last_synced_route.set(next.clone());
+            router().push(next);
+        }
+    });
+
     rsx! {
         div { class: "cf-compliance-view", style: "display:flex;flex-direction:column;gap:16px;",
             // ── Page head ──────────────────────────────────────────────────
-            div { class: "page-head",
-                div {
+            div { class: "page-head cf-bundles-head", "data-coach-target": "compliance-head",
+                div { class: "cf-bundles-head-copy",
                     h1 { class: "page-title", "Compliance" }
                     p { class: "page-subtitle",
                         "Walk through compliance bundles, review per-control evidence, export for auditors."
                     }
                 }
-                div { style: "display:flex;gap:8px;align-items:center;",
-                    // Admin-only bundle management
-                    if is_admin {
-                        button {
-                            class: "btn btn-primary focus-ring",
-                            onclick: move |_| show_new_bundle.set(true),
-                            Icon { name: IconName::Plus, size: 14 }
-                            " New bundle"
-                        }
-                    }
+                div { class: "cf-bundles-head-actions",
                     // Shared Import / Export menu (AC #25)
                     IOMenu {
                         trigger_label: "Import / Export".to_string(),
@@ -449,10 +888,6 @@ pub fn ComplianceView() -> Element {
                                     "Select a bundle first",
                                 )
                             });
-                            items.push(IOMenuItem::action_with_icon(
-                                "Export evidence report…",
-                                IconName::Download,
-                            ));
                             items
                         },
                         on_action: move |idx: usize| {
@@ -479,7 +914,6 @@ pub fn ComplianceView() -> Element {
                                             }
                                         }
                                     }
-                                    3 => show_export.set(true),
                                     _ => {}
                                 }
                             } else {
@@ -496,11 +930,26 @@ pub fn ComplianceView() -> Element {
                                             }
                                         }
                                     }
-                                    1 => show_export.set(true),
                                     _ => {}
                                 }
                             }
                         },
+                    }
+                    button {
+                        "data-coach-target": "compliance-export-evidence",
+                        class: "btn btn-ghost focus-ring",
+                        onclick: move |_| show_export.set(true),
+                        Icon { name: IconName::Download, size: 14 }
+                        " Export evidence package"
+                    }
+                    if is_admin {
+                        button {
+                            "data-coach-target": "bundle",
+                            class: "btn btn-primary focus-ring",
+                            onclick: move |_| show_new_bundle.set(true),
+                            Icon { name: IconName::Plus, size: 14 }
+                            " New bundle"
+                        }
                     }
                 }
             }
@@ -531,49 +980,60 @@ pub fn ComplianceView() -> Element {
                 BundleCatalog {
                     bundles: bundles.read().clone(),
                     selected_id: *selected_bundle_id.read(),
-                    on_select: move |bundle_id| { on_select_bundle(bundle_id); coverage_view.set(false); drawer_open.set(true); },
+                    on_select: move |bundle_id| { on_select_bundle(bundle_id, None); drawer_view.set(BundleDrawerView::Overview); drawer_open.set(true); },
                     selected_version_id: *selected_bundle_version_id.read(),
                     on_select_version: move |version_id| {
-                        selected_bundle_version_id.set(Some(version_id));
-                        drawer_open.set(true);
-                        if let Some(bundle_id) = *selected_bundle_id.read() { start_systems_fetch(bundle_id, Some(version_id)); }
+                        let bundle_id = bundles.read().iter().find(|bundle| bundle.versions.iter().any(|revision| revision.id == version_id)).map(|bundle| bundle.id);
+                        if let Some(bundle_id) = bundle_id {
+                            // A catalog revision opens its own immutable version, not
+                            // the lineage's current published/draft pointer.
+                            on_select_bundle(bundle_id, Some(version_id));
+                            drawer_open.set(true);
+                        }
                     },
                 }
                 if *drawer_open.read() && policy_drawer.read().is_none() {
                     if let Some(bundle) = selected_bundle {
                         div { class: "fl-tray-backdrop", onclick: move |_| drawer_open.set(false) }
-                        aside { class: "fl-tray", style: "width:min(900px,96vw);",
-                            if *coverage_view.read() {
+                        aside { id: "compliance-bundle-dialog", class: if bundle_drawer_expanded() { "fl-tray compliance-drawer-expanded" } else { "fl-tray" }, role: "dialog", aria_modal: "true", aria_labelledby: "compliance-bundle-drawer-title", tabindex: "-1", style: if bundle_drawer_expanded() { "" } else { "width:min(900px,96vw);" }, onkeydown: move |event| if event.key() == Key::Escape { drawer_open.set(false) },
+                            DialogFocusRestore {}
+                            DialogFocusSentinel { dialog_id: "compliance-bundle-dialog".to_string(), boundary: DialogFocusBoundary::Last }
+                            if *drawer_view.read() != BundleDrawerView::Overview {
                                 header { class: "fl-tray-head",
                                     div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;",
                                         button {
                                             class: "btn-icon focus-ring",
                                             "data-testid": "requirement-coverage-back",
-                                            onclick: move |_| coverage_view.set(false),
+                                            onclick: move |_| drawer_view.set(BundleDrawerView::Overview),
                                             Icon { name: IconName::ArrowLeft, size: 16 }
                                         }
                                         div {
-                                            div { style: "font-size:15px;font-weight:700;", "Requirement coverage" }
+                                            div { id: "compliance-bundle-drawer-title", style: "font-size:15px;font-weight:700;", if *drawer_view.read() == BundleDrawerView::Coverage { "Requirement coverage" } else { "Bundle POA&M" } }
                                             div { style: "font-size:11px;color:var(--cf-text-muted);margin-top:2px;", "{bundle.name}" }
                                         }
                                     }
-                                    button { class: "btn-icon focus-ring", onclick: move |_| drawer_open.set(false), Icon { name: IconName::X, size: 16 } }
+                                    div { style: "display:flex;gap:6px;align-items:center;",
+                                        button { class: "btn-icon focus-ring", aria_pressed: bundle_drawer_expanded(), aria_label: if bundle_drawer_expanded() { "Restore compliance bundle drawer" } else { "Expand compliance bundle drawer" }, title: if bundle_drawer_expanded() { "Restore compliance bundle drawer" } else { "Expand compliance bundle drawer" }, onclick: move |_| bundle_drawer_expanded.toggle(), Icon { name: if bundle_drawer_expanded() { IconName::Minimize } else { IconName::Maximize }, size: 15 } }
+                                        button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close bundle detail", onclick: move |_| drawer_open.set(false), Icon { name: IconName::X, size: 16 } }
+                                    }
                                 }
                             } else {
                                 header { class: "fl-tray-head",
-                                    div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;", Icon { name: IconName::Shield, size: 18 }, span { style: "font-size:11px;color:var(--cf-text-muted);", "Compliance bundle" } }
+                                    div { style: "display:flex;align-items:center;gap:12px;min-width:0;flex:1;", Icon { name: IconName::Shield, size: 18 }, span { id: "compliance-bundle-drawer-title", style: "font-size:11px;color:var(--cf-text-muted);", "Compliance bundle · {bundle.name}" } }
                                     div { style: "display:flex;gap:6px;",
-                                        if is_admin { button { class: "btn btn-ghost focus-ring xs", "data-testid": "compliance-edit-bundle", onclick: move |_| show_edit_bundle.set(true), Icon { name: IconName::Edit, size: 12 }, " Edit bundle" } }
+                                        button { class: "btn-icon focus-ring", aria_pressed: bundle_drawer_expanded(), aria_label: if bundle_drawer_expanded() { "Restore compliance bundle drawer" } else { "Expand compliance bundle drawer" }, title: if bundle_drawer_expanded() { "Restore compliance bundle drawer" } else { "Expand compliance bundle drawer" }, onclick: move |_| bundle_drawer_expanded.toggle(), Icon { name: if bundle_drawer_expanded() { IconName::Minimize } else { IconName::Maximize }, size: 15 } }
                                         button {
                                             class: "btn-icon focus-ring",
                                             "data-testid": "compliance-drawer-close",
+                                            autofocus: true,
+                                            aria_label: "Close bundle detail",
                                             onclick: move |_| drawer_open.set(false),
                                             Icon { name: IconName::X, size: 16 }
                                         }
                                     }
                                 }
                             }
-                            if *coverage_view.read() {
+                            if *drawer_view.read() == BundleDrawerView::Coverage {
                                 div { style: "padding:14px 18px;overflow:auto;flex:1;",
                                     if *coverage_loading.read() {
                                         DashboardLoadingSpinner { label: "Loading requirement coverage…".to_string() }
@@ -585,9 +1045,59 @@ pub fn ComplianceView() -> Element {
                                         div { class: "q-empty", "No requirement coverage is available for this revision." }
                                     }
                                 }
+                            } else if *drawer_view.read() == BundleDrawerView::Poam {
+                                div { "data-testid": "bundle-poam-view", style: "padding:14px 18px;overflow:auto;flex:1;display:flex;flex-direction:column;gap:12px;",
+                                    if let Some(rollup) = bundle_rollups.read().iter().find(|rollup| rollup.scope_id == bundle.id).cloned() {
+                                        BundlePoamRollup {
+                                            bundle_name: bundle.name.clone(),
+                                            rollup: rollup.clone(),
+                                            on_open_list: move |filter| poam_filter.set(filter),
+                                        }
+                                        if !bundle.id.is_nil() {
+                                            Link { class: "btn btn-ghost xs focus-ring", to: Route::PoamsView { query: format!("dim=bundle&bundle={}", bundle.id) }, Icon { name: IconName::ArrowRight, size: 11 } " View in POA&M register" }
+                                        }
+                                        div { class: "seg poam-filter", "data-testid": "bundle-poam-filters",
+                                            for option in [PoamFilter::Open, PoamFilter::Overdue, PoamFilter::Awaiting, PoamFilter::Closed, PoamFilter::All] {
+                                                {
+                                                    let count = match option {
+                                                        PoamFilter::Open => rollup.active,
+                                                        PoamFilter::Overdue => rollup.overdue,
+                                                        PoamFilter::Awaiting => rollup.awaiting_verification,
+                                                        PoamFilter::Closed => rollup.completed,
+                                                        PoamFilter::All => rollup.total,
+                                                    };
+                                                    rsx! { button { class: if poam_filter() == option { "active" } else { "" }, onclick: move |_| poam_filter.set(option), "{option.label()}" span { class: "mono", "{count}" } } }
+                                                }
+                                            }
+                                        }
+                                    } else if *bundle_rollups_loading.read() {
+                                        DashboardLoadingSpinner { label: "Loading authoritative POA&M roll-up…".to_string() }
+                                    } else if let Some(error) = bundle_rollups_error.read().as_ref() {
+                                        div { class: "sd-callout sd-callout-danger", "Could not load POA&M roll-up: {error}" }
+                                    } else {
+                                        div { class: "sd-callout sd-callout-warn", "No authoritative POA&M roll-up was returned for this bundle." }
+                                    }
+                                    if *bundle_poams_loading.read() {
+                                        DashboardLoadingSpinner { label: "Loading bundle POA&M items…".to_string() }
+                                    } else if let Some(error) = bundle_poams_error.read().as_ref() {
+                                        div { class: "sd-callout sd-callout-danger", "Could not load bundle POA&M items: {error}" }
+                                    } else {
+                                        PoamTable {
+                                            items: bundle_poams.read().iter().filter(|item| poam_filter().includes(item)).cloned().collect(),
+                                            on_open: move |id| open_poam_id.set(Some(id)),
+                                            empty_note: "No POA&M items match this authoritative bundle filter.".to_string(),
+                                        }
+                                    }
+                                }
                             } else {
                             div { style: "overflow:auto;flex:1;",
-                                div { style: "padding:14px 18px;", BundleHeader { bundle: bundle.clone(), on_edit: move |_| show_edit_bundle.set(true), is_admin, cardless: true } }
+                                div { style: "padding:14px 18px;", BundleHeader {
+                                    bundle: bundle.clone(),
+                                    selected_version: (*selected_bundle_version_id.read()).and_then(|id| bundle.versions.iter().find(|revision| revision.id == id).map(|revision| revision.version.clone())),
+                                    on_edit: move |_| show_edit_bundle.set(true),
+                                    is_admin,
+                                    cardless: true,
+                                } }
                                 if let Some(resp) = systems.read().as_ref() {
                                     ScoreStrip { totals: resp.totals.clone() }
                                 }
@@ -624,7 +1134,8 @@ pub fn ComplianceView() -> Element {
                                     RequirementCoverageCard {
                                         report,
                                         expanded: coverage_expanded,
-                                        on_open: move |_| { coverage_view.set(true); },
+                                        compact: true,
+                                        on_open: move |_| { drawer_view.set(BundleDrawerView::Coverage); },
                                         on_open_policy,
                                     }
                                 } else {
@@ -633,18 +1144,37 @@ pub fn ComplianceView() -> Element {
                                         div { class: "q-empty", "No requirement coverage is available for this revision." }
                                     }
                                 }
+                                if let Some(rollup) = bundle_rollups.read().iter().find(|rollup| rollup.scope_id == bundle.id).cloned() {
+                                    div { class: "cf-bundle-poam-overview",
+                                        BundlePoamRollup {
+                                            bundle_name: bundle.name.clone(),
+                                            rollup,
+                                            compact: true,
+                                            on_open_list: move |filter| {
+                                                poam_filter.set(filter);
+                                                drawer_view.set(BundleDrawerView::Poam);
+                                                refresh_bundle_poams(bundle.id);
+                                            },
+                                        }
+                                        if !bundle.id.is_nil() {
+                                            Link { class: "btn btn-ghost xs focus-ring", to: Route::PoamsView { query: format!("dim=bundle&bundle={}", bundle.id) }, Icon { name: IconName::ArrowRight, size: 11 } " Open in register" }
+                                        }
+                                    }
+                                } else if let Some(error) = bundle_rollups_error.read().as_ref() {
+                                    div { class: "sd-callout sd-callout-danger", style: "margin:12px 18px;", "Could not load authoritative POA&M roll-up: {error}" }
+                                }
                                 if let Some(err) = systems_error.read().as_ref() {
-                                    div { class: "card", "data-testid": "bundle-systems-card",
+                                    div { class: "card", "data-testid": "bundle-systems-card", "data-coach-target": "bundle-systems",
                                         h3 { style: "margin:0 0 8px;font-size:13px;font-weight:600;", "Systems" }
                                         div { class: "sd-callout sd-callout-danger", Icon { name: IconName::X, size: 13 }, div { "Failed to load systems: {err}" } }
                                     }
                                 } else if *systems_loading.read() {
-                                    div { class: "card", "data-testid": "bundle-systems-card",
+                                    div { class: "card", "data-testid": "bundle-systems-card", "data-coach-target": "bundle-systems",
                                         h3 { style: "margin:0 0 8px;font-size:13px;font-weight:600;", "Systems" }
                                         div { class: "sd-callout sd-callout-info", Icon { name: IconName::Shield, size: 13 }, div { "Loading systems rollup…" } }
                                     }
                                 } else if let Some(resp) = systems.read().as_ref() {
-                                    div { class: "card", "data-testid": "bundle-systems-card", style: "padding:0;overflow:hidden;",
+                                    div { class: "card", "data-testid": "bundle-systems-card", "data-coach-target": "bundle-systems", style: "padding:0;overflow:hidden;",
                                         SystemsMatrix {
                                             systems: resp.systems.clone(),
                                             selected_bundle_version_id: *selected_bundle_version_id.read(),
@@ -653,11 +1183,47 @@ pub fn ComplianceView() -> Element {
                                             filter: sys_filter.read().clone(),
                                             on_filter: move |filter| sys_filter.set(filter)
                                         }
+                                        if !resp.systems.is_empty() { div { style: "padding:12px 18px;border-top:1px solid var(--cf-divider);display:flex;flex-direction:column;gap:8px;",
+                                            strong { style: "font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--cf-text-muted);", "Assignment POA&M references" }
+                                            div { style: "display:flex;gap:6px;flex-wrap:wrap;",
+                                                for system in resp.systems.iter() {
+                                                    {
+                                                        let system_id = system.system_id;
+                                                        let selected = assignment_scope() == Some(system_id);
+                                                        rsx! {
+                                                            button {
+                                                                class: if selected { "btn btn-primary xs focus-ring" } else { "btn btn-ghost xs focus-ring" },
+                                                                aria_label: "Manage assignment references for {system.hostname}",
+                                                                onclick: move |_| assignment_scope.set(if selected { None } else { Some(system_id) }),
+                                                                "{system.hostname}"
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        } }
                                     }
                                 }
-                                XccdfVersionSelector { bundle: bundle.clone(), selected_version_id: *selected_bundle_version_id.read(), on_select: move |version_id| { selected_bundle_version_id.set(version_id); if let Some(bundle_id) = *selected_bundle_id.read() { start_systems_fetch(bundle_id, version_id); } } }
-                                if is_admin {
-                                    BundleVersionActions {
+                                if let Some(system_id) = assignment_scope() {
+                                    AssignmentListPanel {
+                                        key: "{system_id}",
+                                        scope_type: "system".to_string(),
+                                        scope_id: system_id,
+                                        on_open_finding: move |(bundle_id, bundle_version_id, finding): (uuid::Uuid, uuid::Uuid, FindingView)| {
+                                            selected_bundle_id.set(Some(bundle_id));
+                                            selected_bundle_version_id.set(Some(bundle_version_id));
+                                            drawer_open.set(true);
+                                            target_policy_id.set(Some(finding.policy_lineage_id));
+                                            open_poam_id.set(None);
+                                            assignment_scope.set(Some(finding.system_id));
+                                            on_evidence(finding.system_id);
+                                        },
+                                    }
+                                }
+                                details { class: "cf-bundle-version-tools",
+                                    summary { "Version management" }
+                                    XccdfVersionSelector { bundle: bundle.clone(), selected_version_id: *selected_bundle_version_id.read(), on_select: move |version_id| { selected_bundle_version_id.set(version_id); if let Some(bundle_id) = *selected_bundle_id.read() { start_systems_fetch(bundle_id, version_id); } } }
+                                    if is_admin { BundleVersionActions {
                                         bundle: bundle.clone(),
                                         selected_version_id: *selected_bundle_version_id.read(),
                                         busy: *version_action_busy.read(),
@@ -718,16 +1284,11 @@ pub fn ComplianceView() -> Element {
                                                 }
                                             });
                                         },
-                                    }
-                                }
-                                if is_admin {
-                                    if let Some(version_id) = *selected_bundle_version_id.read() {
-                                        button { class: "btn btn-primary focus-ring", onclick: move |_| show_assignment.set(true), "Assign bundle" }
-                                        if *show_assignment.read() { AssignmentCreatePanel { bundle: bundle.clone(), bundle_version_id: version_id, environments: environments.read().clone(), policies: policies.read().clone() } }
-                                    }
+                                    } }
                                 }
                             }
                             }
+                            DialogFocusSentinel { dialog_id: "compliance-bundle-dialog".to_string(), boundary: DialogFocusBoundary::First }
                         }
                     }
                 }
@@ -735,8 +1296,49 @@ pub fn ComplianceView() -> Element {
         }
 
         // ── Evidence drawer ────────────────────────────────────────────────
-        if let Some(ev) = evidence.read().as_ref() {
-            EvidenceDrawer {
+        if *evidence_loading.read() {
+            div { class: "fl-tray-backdrop" }
+            aside { id: "compliance-evidence-loading-dialog", class: "fl-tray", role: "dialog", aria_modal: "true", aria_label: "Loading compliance evidence", tabindex: "-1", autofocus: true, "data-testid": "composite-assessment-loading", style: "width:min(480px,96vw);padding:24px;",
+                DialogFocusRestore {}
+                DialogFocusSentinel { dialog_id: "compliance-evidence-loading-dialog".to_string(), boundary: DialogFocusBoundary::Last }
+                DashboardLoadingSpinner { label: "Loading composite assessments and evidence…".to_string() }
+                DialogFocusSentinel { dialog_id: "compliance-evidence-loading-dialog".to_string(), boundary: DialogFocusBoundary::First }
+            }
+        } else if let Some(ev) = evidence.read().as_ref() {
+            {
+                let assignment_versions = evidence_assignments
+                    .read()
+                    .iter()
+                    .map(|assignment| {
+                        let bundle_list = bundles.read();
+                        let bundle = bundle_list
+                            .iter()
+                            .find(|bundle| bundle.id == assignment.bundle_id);
+                        let bundle_name = bundle.map(|bundle| bundle.name.clone()).unwrap_or_else(|| assignment.bundle_id.to_string());
+                        let bundle_version = bundle
+                            .and_then(|bundle| bundle.versions.iter().find(|version| version.id == assignment.bundle_version_id))
+                            .map(|version| version.version.clone())
+                            .unwrap_or_else(|| assignment.bundle_version_id.to_string());
+                        AssignmentVersionCandidate {
+                            assignment_id: assignment.id,
+                            assignment_version_id: assignment.current_version_id,
+                            bundle_id: assignment.bundle_id,
+                            bundle_version_id: assignment.bundle_version_id,
+                            bundle_name,
+                            bundle_version,
+                            scope_label: format!("{}:{}", assignment.scope_type, assignment.scope_id),
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                let bundle_version = ev.bundle_version_id.and_then(|version_id| {
+                    bundles
+                        .read()
+                        .iter()
+                        .find(|bundle| bundle.id == ev.bundle_id)
+                        .and_then(|bundle| bundle.versions.iter().find(|version| version.id == version_id))
+                        .map(|version| version.version.clone())
+                });
+            rsx! { EvidenceDrawer {
                 evidence: ev.clone(),
                 bundle_name: selected_bundle_id.read()
                     .and_then(|id| bundles.read().iter().find(|b| b.id == id).map(|b| b.name.clone()))
@@ -744,23 +1346,62 @@ pub fn ComplianceView() -> Element {
                 system: systems.read().as_ref().and_then(|response| {
                     response.systems.iter().find(|system| system.system_id == ev.system_id).cloned()
                 }),
-                on_close: move |_| { evidence.set(None); evidence_error.set(None); },
+                bundle_version,
+                assignment_versions,
+                assignment_context_error: evidence_assignments_error.read().clone(),
+                viewer,
+                initial_policy_id: *target_policy_id.read(),
+                on_active_policy: move |policy_id| target_policy_id.set(Some(policy_id)),
+                on_poam_event: move |event| match event {
+                    FindingPoamEvent::Open(id) => open_poam_id.set(Some(id)),
+                    FindingPoamEvent::Created(detail) | FindingPoamEvent::Linked(detail) => {
+                        open_poam_id.set(Some(detail.poam.id));
+                        refresh_bundle_rollups(bundles.read().iter().map(|bundle| bundle.id).collect());
+                        if let Some(bundle_id) = *selected_bundle_id.read() {
+                            refresh_bundle_poams(bundle_id);
+                        }
+                    }
+                    FindingPoamEvent::InvalidateAssessment(_) => {}
+                },
+                on_close: move |_| {
+                    evidence_route_system.set(None);
+                    evidence.set(None);
+                    evidence_error.set(None);
+                    target_policy_id.set(None);
+                },
+            } }
             }
         } else if let Some(err) = evidence_error.read().as_ref() {
             // Evidence fetch failed: show an overlay error so the action
             // doesn't silently appear to do nothing.
             div {
                 class: "fl-tray-backdrop",
-                onclick: move |_| evidence_error.set(None),
+                onclick: move |_| {
+                    evidence_route_system.set(None);
+                    evidence_error.set(None);
+                },
             }
             aside {
+                id: "compliance-evidence-error-dialog",
                 class: "fl-tray",
+                role: "dialog",
+                aria_modal: "true",
+                aria_labelledby: "compliance-evidence-error-title",
+                tabindex: "-1",
+                "data-testid": "composite-assessment-load-error",
                 style: "width:min(480px,96vw);",
+                DialogFocusRestore {}
+                DialogFocusSentinel { dialog_id: "compliance-evidence-error-dialog".to_string(), boundary: DialogFocusBoundary::Last }
                 header { class: "fl-tray-head",
-                    span { style: "font-weight:600;", "Failed to load evidence" }
+                    span { id: "compliance-evidence-error-title", style: "font-weight:600;", "Failed to load evidence" }
                     button {
                         class: "btn-icon focus-ring",
-                        onclick: move |_| evidence_error.set(None),
+                        autofocus: true,
+                        aria_label: "Close evidence error",
+                        onclick: move |_| {
+                            evidence_route_system.set(None);
+                            evidence_error.set(None);
+                        },
                         Icon { name: IconName::X, size: 16 }
                     }
                 }
@@ -771,9 +1412,97 @@ pub fn ComplianceView() -> Element {
                     }
                     button {
                         class: "btn btn-ghost focus-ring",
-                        onclick: move |_| evidence_error.set(None),
+                        onclick: move |_| {
+                            evidence_route_system.set(None);
+                            evidence_error.set(None);
+                        },
                         "Dismiss"
                     }
+                }
+                DialogFocusSentinel { dialog_id: "compliance-evidence-error-dialog".to_string(), boundary: DialogFocusBoundary::First }
+            }
+        }
+
+        PoamDetailHost {
+            poam_id: *open_poam_id.read(),
+            viewer,
+            assignment_versions: Vec::new(),
+            on_close: move |_| open_poam_id.set(None),
+            on_open_finding: move |finding: poam_api::FindingView| {
+                let retained = match (*selected_bundle_id.read(), *selected_bundle_version_id.read()) {
+                    (Some(bundle_id), Some(version_id))
+                        if finding.bundle_ids.contains(&bundle_id)
+                            && finding.bundle_version_ids.contains(&version_id) => Some((bundle_id, version_id)),
+                    _ => None,
+                };
+                let mut candidates = Vec::new();
+                for bundle in bundles.read().iter().filter(|bundle| finding.bundle_ids.contains(&bundle.id)) {
+                    for version in bundle.versions.iter().filter(|version| finding.bundle_version_ids.contains(&version.id)) {
+                        candidates.push((bundle.id, version.id));
+                    }
+                }
+                let exact = retained.or_else(|| (candidates.len() == 1).then_some(candidates[0]));
+                if let Some((bundle_id, version_id)) = exact {
+                    selected_bundle_id.set(Some(bundle_id));
+                    selected_bundle_version_id.set(Some(version_id));
+                    target_policy_id.set(Some(finding.policy_lineage_id));
+                    drawer_open.set(true);
+                    drawer_view.set(BundleDrawerView::Overview);
+                    open_poam_id.set(None);
+                    start_systems_fetch(bundle_id, Some(version_id));
+                    on_evidence(finding.system_id);
+                } else {
+                    ambiguous_finding.set(Some(finding));
+                }
+            },
+            on_changed: move |_| {
+                refresh_bundle_rollups(bundles.read().iter().map(|bundle| bundle.id).collect());
+                if let Some(bundle_id) = *selected_bundle_id.read() {
+                    refresh_bundle_poams(bundle_id);
+                }
+            },
+        }
+        if let Some(finding) = ambiguous_finding.read().clone() {
+            div { class: "modal-backdrop", onclick: move |_| ambiguous_finding.set(None),
+                div { id: "compliance-evidence-source-dialog", class: "modal poam-modal", role: "dialog", aria_modal: "true", aria_labelledby: "compliance-evidence-source-title", tabindex: "-1", onclick: |event| event.stop_propagation(), onkeydown: move |event| {
+                    event.stop_propagation();
+                    if event.key() == Key::Escape {
+                        ambiguous_finding.set(None);
+                    }
+                },
+                    DialogFocusRestore {}
+                    DialogFocusSentinel { dialog_id: "compliance-evidence-source-dialog".to_string(), boundary: DialogFocusBoundary::Last }
+                    div { class: "modal-head", h2 { id: "compliance-evidence-source-title", "Choose evidence source" } button { class: "btn-icon focus-ring", autofocus: true, aria_label: "Close evidence source chooser", onclick: move |_| ambiguous_finding.set(None), Icon { name: IconName::X, size: 16 } } }
+                    div { class: "modal-body", style: "display:flex;flex-direction:column;gap:8px;",
+                        p { class: "poam-muted", "This finding is retained by more than one exact bundle revision. Choose the source to open; policy text search is not used." }
+                        for bundle in bundles.read().iter().filter(|bundle| finding.bundle_ids.contains(&bundle.id)) {
+                            for version in bundle.versions.iter().filter(|version| finding.bundle_version_ids.contains(&version.id)) {
+                                {
+                                    let bundle_id = bundle.id;
+                                    let version_id = version.id;
+                                    let system_id = finding.system_id;
+                                    let policy_id = finding.policy_lineage_id;
+                                    rsx! {
+                                        button { class: "poam-pick focus-ring", "data-testid": "poam-evidence-source", "data-bundle-id": "{bundle_id}", "data-version-id": "{version_id}", onclick: move |_| {
+                                            selected_bundle_id.set(Some(bundle_id));
+                                            selected_bundle_version_id.set(Some(version_id));
+                                            target_policy_id.set(Some(policy_id));
+                                            drawer_open.set(true);
+                                            drawer_view.set(BundleDrawerView::Overview);
+                                            open_poam_id.set(None);
+                                            ambiguous_finding.set(None);
+                                            start_systems_fetch(bundle_id, Some(version_id));
+                                            on_evidence(system_id);
+                                        },
+                                            strong { "{bundle.name} · {version.version}" }
+                                            small { class: "mono", "{bundle_id} / {version_id}" }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    DialogFocusSentinel { dialog_id: "compliance-evidence-source-dialog".to_string(), boundary: DialogFocusBoundary::First }
                 }
             }
         }
@@ -794,7 +1523,36 @@ pub fn ComplianceView() -> Element {
                 initial_revisions: false,
                 on_close: move |_| policy_drawer.set(None),
                 on_export: move |_| {},
-                on_edit: move |_| {},
+                on_edit: move |policy: PolicyDefinition| {
+                    policy_drawer.set(None);
+                    editing_policy.set(Some(policy.clone()));
+                    editing_policy_id.set(Some(policy.id));
+                    edit_name.set(policy.name.clone());
+                    edit_description.set(policy.description.clone());
+                    edit_body.set(policy.body.clone());
+                    edit_format.set(policy.format);
+                    edit_srg_ids.set(policy.srg_ids.join(", "));
+                    edit_cci_ids.set(policy.cci_ids.join(", "));
+                    policy_editor_open.set(true);
+                },
+            }
+        }
+
+        if *policy_editor_open.read() {
+            crate::components::policy::PolicyEditorModal {
+                editing_policy_id,
+                edit_name,
+                edit_description,
+                edit_body,
+                edit_format,
+                edit_srg_ids,
+                edit_cci_ids,
+                policy_library,
+                editing_policy: editing_policy.read().clone(),
+                on_close: move || {
+                    editing_policy.set(None);
+                    policy_editor_open.set(false);
+                },
             }
         }
 
@@ -891,14 +1649,20 @@ pub fn ComplianceView() -> Element {
                 environments: environments.read().clone(),
                 is_stig_import: *import_mode_stig.read(),
                 on_close: move |_| { show_import_stig.set(false); stig_import_draft.set(load_stig_import_draft()); },
-                on_success: move |_| {
+                on_success: move |imported_version_id: Option<uuid::Uuid>| {
                     clear_stig_import_draft();
                     stig_import_draft.set(None);
                     // Refresh the bundle catalog after a successful import.
                     spawn(async move {
                         if let Ok(items) = fetch_compliance_bundles().await {
-                            let first_id = items.first().map(|b| b.id);
-                            let first_version_id = items.first().and_then(|bundle| {
+                            let imported_bundle = imported_version_id
+                                .and_then(|version_id| items.iter().find(|bundle| {
+                                    bundle.current_published_version_id == Some(version_id)
+                                        || bundle.current_draft_version_id == Some(version_id)
+                                }))
+                                .or_else(|| items.first());
+                            let first_id = imported_bundle.map(|bundle| bundle.id);
+                            let first_version_id = imported_bundle.and_then(|bundle| {
                                 bundle.current_published_version_id.or(bundle.current_draft_version_id)
                             });
                             bundles.set(items);
@@ -1085,7 +1849,7 @@ fn EmptyComplianceState(props: EmptyComplianceStateProps) -> Element {
     }
 }
 
-// ─── Assignment creation panel ───────────────────────────────────────────────
+// ─── Assignment management helpers ──────────────────────────────────────────
 
 fn parse_uuid_list(value: &str) -> Result<Vec<uuid::Uuid>, ()> {
     value
@@ -1096,378 +1860,371 @@ fn parse_uuid_list(value: &str) -> Result<Vec<uuid::Uuid>, ()> {
         .collect()
 }
 
-/// Compact panel for creating a bundle assignment for a specific published version.
+/// Panel listing and managing existing assignments for the selected scope.
 #[derive(Props, Clone, PartialEq)]
-struct AssignmentCreatePanelProps {
-    bundle: ComplianceBundleSummary,
-    bundle_version_id: uuid::Uuid,
-    environments: Vec<EnvironmentSummary>,
-    policies: Vec<DeploymentPolicySummary>,
+struct AssignmentListPanelProps {
+    scope_type: String,
+    scope_id: uuid::Uuid,
+    #[props(default)]
+    on_open_finding: Option<EventHandler<(uuid::Uuid, uuid::Uuid, FindingView)>>,
+}
+
+#[derive(Props, Clone, PartialEq)]
+struct AssignmentCardProps {
+    assignment: crate::api::models::AssignmentResponse,
+    scope_type: String,
+    scope_id: uuid::Uuid,
+    viewer: bool,
+    assignments: Signal<Vec<crate::api::models::AssignmentResponse>>,
+    relationships: Signal<HashMap<uuid::Uuid, AssignmentRelationshipEntry>>,
+    relationships_loading: Signal<bool>,
+    relationships_error: Signal<Option<String>>,
+    effective_preview: Signal<Option<crate::api::models::EffectivePolicySetResponse>>,
+    preview_loading: Signal<bool>,
+    open_poam: Signal<Option<uuid::Uuid>>,
+    open_poam_assignment: Signal<Option<(uuid::Uuid, uuid::Uuid)>>,
+    link_assignment_version: Signal<Option<uuid::Uuid>>,
+    link_query: Signal<String>,
+    link_error: Signal<Option<String>>,
 }
 
 #[component]
-fn AssignmentCreatePanel(props: AssignmentCreatePanelProps) -> Element {
-    let mut scope_type = use_signal(|| "environment".to_string());
-    let mut scope_id = use_signal(|| String::new());
-    let mut system_search = use_signal(String::new);
-    let mut enforcement_mode = use_signal(|| "enforce".to_string());
-    let mut exclusions = use_signal(Vec::<uuid::Uuid>::new);
-    let mut additions = use_signal(Vec::<uuid::Uuid>::new);
-    let mut reason = use_signal(String::new);
-    let mut busy = use_signal(|| false);
-    let mut success = use_signal(|| false);
-    let mut error = use_signal(|| None::<String>);
-    let mut preview = use_signal(|| None::<crate::api::models::EffectivePolicySetResponse>);
-    let mut previewed_request = use_signal(|| None::<CreateAssignmentRequest>);
-    let mut preview_busy = use_signal(|| false);
-
-    let membership = use_resource({
-        let bundle_version_id = props.bundle_version_id;
-        move || async move { fetch_bundle_version_policy_membership(&bundle_version_id).await }
-    });
-
-    let systems = use_resource({
-        let scope_type = scope_type;
-        let system_search = system_search;
-        move || {
-            let scope_type = scope_type.read().clone();
-            let search = system_search.read().trim().to_string();
-            async move {
-                if scope_type != "system" {
-                    return Ok(Vec::<SystemSummary>::new());
-                }
-                fetch_systems(&SystemsListParams {
-                    page: Some(1),
-                    per_page: Some(200),
-                    search: (!search.is_empty()).then_some(search),
-                    health_status: None,
-                    deployment_status: None,
-                    environment: None,
-                    sort_by: Some("hostname".to_string()),
-                    sort_order: Some(SortOrder::Asc),
-                })
-                .await
-                .map(|response| response.items)
-            }
-        }
-    });
-
-    let selected_version = props
-        .bundle
-        .versions
-        .iter()
-        .find(|version| version.id == props.bundle_version_id);
-    let revision_is_current = selected_version
-        .is_some_and(|version| version.is_current_published || version.is_current_draft);
-    let revision_label = selected_version
-        .map(|version| version.version.clone())
-        .unwrap_or_else(|| props.bundle.version.clone());
-    let revision_state = selected_version
-        .map(|version| version.publication_state.clone())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    let request = move || {
-        let scope_id = uuid::Uuid::parse_str(scope_id.read().trim()).ok()?;
-        let reason_text = reason.read().clone();
-        let reason_value = reason_text.trim();
-        Some(CreateAssignmentRequest {
-            bundle_version_id: props.bundle_version_id,
-            scope_type: scope_type.read().clone(),
-            scope_id,
-            enforcement_mode: Some(enforcement_mode.read().clone()),
-            exclusions: (!exclusions.read().is_empty()).then_some(exclusions.read().clone()),
-            additions: (!additions.read().is_empty()).then_some(additions.read().clone()),
-            value_overrides: None,
-            reason: (!reason_value.is_empty()).then_some(reason_value.to_string()),
-        })
+fn AssignmentCard(props: AssignmentCardProps) -> Element {
+    use crate::api::client::{
+        compliance_assignment_xccdf_url, delete_compliance_assignment,
+        fetch_environment_assignments, fetch_system_assignments,
     };
 
-    let current_request = request();
-    let can_preview = current_request.is_some() && !*preview_busy.read() && !*busy.read();
-    let can_submit = current_request.is_some()
-        && previewed_request.read().as_ref() == current_request.as_ref()
-        && preview.read().is_some()
-        && !*busy.read();
-    let created_scope_id = uuid::Uuid::parse_str(scope_id.read().trim()).ok();
-    let created_scope_type = scope_type.read().clone();
-    let exact_members = membership
+    let AssignmentCardProps {
+        assignment,
+        scope_type,
+        scope_id,
+        viewer,
+        mut assignments,
+        relationships,
+        relationships_loading,
+        relationships_error,
+        mut effective_preview,
+        mut preview_loading,
+        mut open_poam,
+        mut open_poam_assignment,
+        mut link_assignment_version,
+        mut link_query,
+        mut link_error,
+    } = props;
+    let assignment_id = assignment.id;
+    let current_mode = assignment.enforcement_mode.clone();
+    let current_version = assignment.current_version_id;
+    let linked_poams = relationships
         .read()
-        .as_ref()
-        .and_then(|result| result.as_ref().ok())
-        .cloned()
+        .get(&current_version)
+        .map(|entry| entry.poams.clone())
         .unwrap_or_default();
+    let current_exclusions_text = assignment
+        .exclusions
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let current_additions_text = assignment
+        .additions
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ");
+    let current_overrides_text =
+        serde_json::to_string(&assignment.value_overrides).unwrap_or_else(|_| "[]".to_string());
+    let mut deleting = use_signal(|| false);
+    let mut editing = use_signal(|| false);
+    let mut edit_mode = use_signal(|| current_mode.clone());
+    let mut edit_exclusions = use_signal(|| current_exclusions_text.clone());
+    let mut edit_additions = use_signal(|| current_additions_text.clone());
+    let mut edit_overrides = use_signal(|| current_overrides_text.clone());
+    let original_reason = assignment.reason.clone().unwrap_or_default();
+    let mut edit_reason = use_signal(|| original_reason.clone());
+    let mut edit_busy = use_signal(|| false);
+    let mut edit_error = use_signal(|| None::<String>);
+    let mut delete_error = use_signal(|| None::<String>);
+    let edits_dirty = *edit_mode.read() != current_mode
+        || *edit_exclusions.read() != current_exclusions_text
+        || *edit_additions.read() != current_additions_text
+        || *edit_overrides.read() != current_overrides_text
+        || (*edit_reason.read() != original_reason);
 
     rsx! {
-        div { class: "card", style: "padding:14px 16px;display:flex;flex-direction:column;gap:12px;",
-                 div { style: "font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;color:var(--cf-text-muted);",
-                "Assign bundle revision {revision_label}"
+        div { class: "card", style: "padding:10px 14px;display:flex;flex-direction:column;gap:6px;",
+            div { style: "display:flex;justify-content:space-between;align-items:center;",
+                div { style: "font-size:12px;font-weight:600;",
+                    "Bundle version "
+                    span { class: "mono", style: "font-size:10px;", "{assignment.bundle_version_id}" }
+                    " · {assignment.enforcement_mode}"
+                }
+                div { style: "display:flex;gap:4px;",
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        style: "font-size:10px;",
+                        disabled: *deleting.read() || *editing.read(),
+                        onclick: move |_| {
+                            let url = compliance_assignment_xccdf_url(&assignment_id);
+                            if let Some(window) = web_sys::window() {
+                                let _ = window.location().set_href(&url);
+                            }
+                        },
+                        "Export effective assignment (XCCDF)"
+                    }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        style: "font-size:10px;",
+                        disabled: *deleting.read() || *editing.read(),
+                        onclick: move |_| editing.set(true),
+                        "Edit mode"
+                    }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        style: "font-size:10px;color:var(--cf-text-muted);",
+                        disabled: *deleting.read(),
+                        onclick: {
+                            let a_id = assignment_id;
+                            move |_| {
+                                deleting.set(true);
+                                delete_error.set(None);
+                                spawn(async move {
+                                    match delete_compliance_assignment(&a_id).await {
+                                        Ok(()) => assignments.with_mut(|list| list.retain(|a| a.id != a_id)),
+                                        Err(error) => {
+                                            deleting.set(false);
+                                            delete_error.set(Some(format!("Assignment deactivation failed: {error}")));
+                                        }
+                                    }
+                                });
+                            }
+                        },
+                        if *deleting.read() { "Deactivating…" } else { "Deactivate" }
+                    }
+                }
+            }
+            if let Some(error) = delete_error.read().as_ref() {
+                div { class: "alert alert-error", role: "alert", "{error}" }
             }
             div { style: "font-size:10px;color:var(--cf-text-muted);",
-                "Exact revision: " span { class: "mono", "{props.bundle_version_id}" }
-                " · {revision_state}"
+                "scope: {assignment.scope_type}:{assignment.scope_id}"
+                " · version: " span { class: "mono", "{assignment.current_version_id}" }
             }
-            if !revision_is_current {
-                div { class: "sd-callout sd-callout-warning", style: "font-size:11px;",
-                    Icon { name: IconName::Warn, size: 13 }
-                    "This is a non-current bundle revision. The assignment will use this exact revision, not the current pointer."
+            div { "data-testid": "assignment-poam-relationships", "data-assignment-version-id": "{current_version}", style: "display:flex;flex-direction:column;gap:5px;padding-top:5px;border-top:1px solid var(--cf-divider);",
+                div { style: "display:flex;justify-content:space-between;align-items:center;gap:8px;",
+                    strong { style: "font-size:10px;text-transform:uppercase;letter-spacing:.06em;color:var(--cf-text-muted);", "POA&M references · {linked_poams.len()}" }
+                    button { class: "btn btn-ghost xs focus-ring", "data-testid": "assignment-link-poam", "data-assignment-version-id": "{current_version}", disabled: viewer, onclick: move |_| {
+                        link_query.set(String::new());
+                        link_error.set(None);
+                        link_assignment_version.set(Some(current_version));
+                    }, Icon { name: IconName::Link, size: 11 } "Link POA&M" }
                 }
-            }
-
-            if *success.read() {
-                div { class: "sd-callout sd-callout-success", style: "font-size:12px;",
-                    Icon { name: IconName::Check, size: 13 }
-                    "Assignment created. The effective policy set is now active for the selected scope."
+                if linked_poams.is_empty() && !*relationships_loading.read() && relationships_error.read().is_none() {
+                    span { style: "font-size:10px;color:var(--cf-text-muted);", "No POA&M references on this exact immutable assignment version." }
                 }
-                if let Some(created_scope_id) = created_scope_id {
-                    AssignmentListPanel {
-                        scope_type: created_scope_type.clone(),
-                        scope_id: created_scope_id,
-                    }
-                }
-            } else {
-                if let Some(err) = error.read().as_ref() {
-                    div { class: "sd-callout sd-callout-danger", style: "font-size:12px;", "{err}" }
-                }
-
-                div { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px;",
-                    // Scope type
-                    div { class: "field",
-                        label { "Scope type" }
-                        select {
-                            class: "input focus-ring",
-                            value: "{scope_type.read()}",
-                            onchange: move |e| {
-                                scope_type.set(e.value());
-                                scope_id.set(String::new());
-                                preview.set(None);
-                                previewed_request.set(None);
-                            },
-                            option { value: "environment", "Environment" }
-                            option { value: "system", "System" }
-                        }
-                    }
-
-                    // Enforcement mode
-                    div { class: "field",
-                        label { "Enforcement mode" }
-                        select {
-                            class: "input focus-ring",
-                            value: "{enforcement_mode.read()}",
-                            onchange: move |e| {
-                                enforcement_mode.set(e.value());
-                                preview.set(None);
-                                previewed_request.set(None);
-                            },
-                            option { value: "enforce", "Enforce (default)" }
-                            option { value: "report_only", "Report only" }
-                        }
-                    }
-                }
-
-                // Reason / Justification field
-                div { class: "field",
-                    label { "Reason / Justification (optional)" }
-                    textarea {
-                        class: "input focus-ring",
-                        style: "resize:vertical;min-height:60px;font-family:monospace;font-size:12px;",
-                        placeholder: "Enter reason for this assignment (e.g., 'migration in progress', 'vendor validation')",
-                        value: "{reason.read()}",
-                        onchange: move |e| {
-                            reason.set(e.value());
-                            preview.set(None);
-                            previewed_request.set(None);
+                for poam in linked_poams.clone() {
+                    {
+                    let target_label = poam.target_date.map(|date| date.to_string()).unwrap_or_else(|| "Not set".to_string());
+                    rsx! {
+                        button { class: "poam-ref focus-ring", "data-testid": "assignment-poam-reference", onclick: move |_| {
+                            open_poam_assignment.set(Some((assignment.bundle_id, assignment.bundle_version_id)));
+                            open_poam.set(Some(poam.id));
                         },
-                    }
-                    div { style: "font-size:10px;color:var(--cf-text-muted);margin-top:4px;",
-                        "{reason.read().len()} / 2000 characters"
-                    }
-                }
-
-                div { style: "display:grid;grid-template-columns:1fr 1fr;gap:10px;",
-                    div { class: "field",
-                        label { "Exclude baseline policies" }
-                        div { style: "display:flex;flex-direction:column;gap:5px;max-height:130px;overflow:auto;",
-                            if exact_members.is_empty() {
-                                div { style: "font-size:11px;color:var(--cf-text-muted);", "Loading revision policies…" }
-                            } else {
-                                for member in exact_members.iter() {
-                                    {
-                                        let version_id = member.policy_version_id;
-                                        let name = member.name.clone();
-                                        rsx! {
-                                            label { style: "display:flex;gap:6px;align-items:center;font-size:11px;",
-                                                input {
-                                                    r#type: "checkbox",
-                                                    checked: exclusions.read().contains(&version_id),
-                                                    onchange: move |event| {
-                                                        if event.checked() {
-                                                            exclusions.with_mut(|ids| { if !ids.contains(&version_id) { ids.push(version_id); } });
-                                                        } else {
-                                                            exclusions.with_mut(|ids| ids.retain(|id| *id != version_id));
-                                                        }
-                                                        preview.set(None);
-                                                        previewed_request.set(None);
-                                                    },
-                                                }
-                                                "{name}"
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            span { class: "mono poam-human-id", "{poam.human_id}" }
+                            span { class: "poam-chip", "{poam.status.label()}" }
+                            span { class: "poam-chip", "{poam.risk.label()}" }
+                            span { class: "poam-muted", "Target {target_label}" }
                         }
                     }
-                    div { class: "field",
-                        label { "Add policies" }
-                        div { style: "display:flex;flex-direction:column;gap:5px;max-height:130px;overflow:auto;",
-                            for policy in props.policies.iter() {
-                                if let Some(version_id) = policy.version_id {
-                                    label { style: "display:flex;gap:6px;align-items:center;font-size:11px;",
-                                        input {
-                                            r#type: "checkbox",
-                                            checked: additions.read().contains(&version_id),
-                                            onchange: move |event| {
-                                                if event.checked() {
-                                                    additions.with_mut(|ids| { if !ids.contains(&version_id) { ids.push(version_id); } });
+                    }
+                }
+            }
+            if *editing.read() {
+                if let Some(err) = edit_error.read().as_ref() {
+                    div { class: "sd-callout sd-callout-danger", style: "font-size:11px;", "{err}" }
+                }
+                div { style: "display:flex;gap:6px;align-items:center;",
+                    select {
+                        class: "input xs",
+                        style: "flex:1;",
+                        value: "{edit_mode.read()}",
+                        onchange: move |e| edit_mode.set(e.value()),
+                        option { value: "enforce", "Enforce" }
+                        option { value: "report_only", "Report only" }
+                    }
+                    input {
+                        class: "input xs mono",
+                        style: "flex:1;",
+                        placeholder: "excluded version UUIDs",
+                        value: "{edit_exclusions.read()}",
+                        oninput: move |e| edit_exclusions.set(e.value()),
+                    }
+                    input {
+                        class: "input xs mono",
+                        style: "flex:1;",
+                        placeholder: "added version UUIDs",
+                        value: "{edit_additions.read()}",
+                        oninput: move |e| edit_additions.set(e.value()),
+                    }
+                    textarea {
+                        class: "input xs mono",
+                        style: "flex:1;",
+                        rows: "2",
+                        placeholder: "typed overrides JSON",
+                        value: "{edit_overrides.read()}",
+                        oninput: move |e| edit_overrides.set(e.value()),
+                    }
+                    textarea {
+                        class: "input xs",
+                        style: "flex:1;",
+                        rows: "2",
+                        placeholder: "reason (leave empty to preserve)",
+                        value: "{edit_reason.read()}",
+                        oninput: move |e| edit_reason.set(e.value()),
+                    }
+                    button {
+                        class: "btn btn-primary xs focus-ring",
+                        style: "font-size:10px;",
+                        disabled: *edit_busy.read() || !edits_dirty,
+                        onclick: {
+                            let a_id = assignment_id;
+                            let cm = current_version;
+                            let scope_type = scope_type.clone();
+                            let exclusions_text = edit_exclusions.read().clone();
+                            let additions_text = edit_additions.read().clone();
+                            let overrides_text = edit_overrides.read().clone();
+                            move |_| {
+                                let Ok(exclusions) = parse_uuid_list(&exclusions_text) else {
+                                    edit_error.set(Some("Exclusions must be comma-separated UUIDs".to_string()));
+                                    return;
+                                };
+                                let Ok(additions) = parse_uuid_list(&additions_text) else {
+                                    edit_error.set(Some("Additions must be comma-separated UUIDs".to_string()));
+                                    return;
+                                };
+                                let Ok(value_overrides) = serde_json::from_str::<Vec<PolicyValueOverride>>(&overrides_text) else {
+                                    edit_error.set(Some("Overrides must be a JSON array of typed values".to_string()));
+                                    return;
+                                };
+                                edit_busy.set(true);
+                                edit_error.set(None);
+
+                                let reason_val = edit_reason.read().clone();
+                                let reason_update = if reason_val == original_reason {
+                                    crate::api::models::FieldUpdate::Unset
+                                } else if !original_reason.is_empty() && reason_val.trim().is_empty() {
+                                    crate::api::models::FieldUpdate::Clear
+                                } else {
+                                    crate::api::models::FieldUpdate::Set(reason_val.trim().to_string())
+                                };
+
+                                let request = UpdateAssignmentRequest {
+                                    expected_version_id: cm,
+                                    enforcement_mode: Some((*edit_mode.read()).clone()),
+                                    exclusions: Some(exclusions),
+                                    additions: Some(additions),
+                                    value_overrides: Some(value_overrides),
+                                    reason: reason_update,
+                                };
+                                let st = scope_type.clone();
+                                let si = scope_id;
+                                spawn(async move {
+                                    match crate::api::client::update_compliance_assignment(&a_id, &request).await {
+                                        Ok(_) => {
+                                            edit_busy.set(false);
+                                            editing.set(false);
+                                            spawn(async move {
+                                                let result = if st == "environment" {
+                                                    fetch_environment_assignments(&si).await
                                                 } else {
-                                                    additions.with_mut(|ids| ids.retain(|id| *id != version_id));
+                                                    fetch_system_assignments(&si).await
+                                                };
+                                                if let Ok(list) = result {
+                                                    assignments.set(list);
                                                 }
-                                                preview.set(None);
-                                                previewed_request.set(None);
-                                            },
+                                            });
                                         }
-                                        "{policy.name}"
+                                        Err(e) => {
+                                            edit_busy.set(false);
+                                            edit_error.set(Some(format!("Update failed: {e}")));
+                                        }
                                     }
-                                }
+                                });
                             }
-                        }
-                        if props.policies.iter().all(|policy| policy.version_id.is_none()) {
-                            div { style: "font-size:11px;color:var(--cf-text-muted);", "No versioned policies available." }
-                        }
+                        },
+                        if *edit_busy.read() { "Saving…" } else { "Save" }
+                    }
+                    button {
+                        class: "btn btn-ghost xs focus-ring",
+                        style: "font-size:10px;",
+                        disabled: *edit_busy.read(),
+                        onclick: move |_| editing.set(false),
+                        "Cancel"
                     }
                 }
-
-                // Environment picker (when scope is environment)
-                if *scope_type.read() == "environment" {
-                    div { class: "field",
-                        label { "Environment" }
-                        select {
-                            class: "input focus-ring",
-                            value: "{scope_id.read()}",
-                            onchange: move |e| {
-                                scope_id.set(e.value());
-                                preview.set(None);
-                                previewed_request.set(None);
-                            },
-                            option { value: "", "Select an environment…" }
-                            for env in &props.environments {
-                                option { value: "{env.id}", "{env.name}" }
-                            }
-                        }
-                    }
-                } else {
-                    div { class: "field",
-                        label { "System" }
-                        input {
-                            class: "input focus-ring",
-                            placeholder: "Search by hostname",
-                            value: "{system_search.read()}",
-                            oninput: move |e| system_search.set(e.value()),
-                        }
-                        select {
-                            class: "input focus-ring",
-                            value: "{scope_id.read()}",
-                            onchange: move |e| {
-                                scope_id.set(e.value());
-                                preview.set(None);
-                                previewed_request.set(None);
-                            },
-                            option { value: "", "Select a system…" }
-                            match systems.read().as_ref() {
-                                Some(Ok(items)) => rsx! {
-                                    for system in items {
-                                        option { value: "{system.id}", "{system.hostname}" }
-                                    }
-                                },
-                                Some(Err(_)) => rsx! { option { value: "", "Unable to load systems" } },
-                                None => rsx! { option { value: "", "Loading systems…" } },
-                            }
-                        }
-                    }
-                }
-
-                button {
-                    class: "btn btn-ghost focus-ring xs",
-                    disabled: !can_preview,
-                    style: if !can_preview { "opacity:0.5;cursor:not-allowed;" } else { "" },
-                    onclick: move |_| {
-                        let Some(req) = request() else { return; };
-                        preview_busy.set(true);
-                        error.set(None);
+            }
+            button {
+                class: "btn btn-ghost xs focus-ring",
+                disabled: *preview_loading.read(),
+                onclick: {
+                    let bundle_version_id = assignment.bundle_version_id;
+                    let scope_type = assignment.scope_type.clone();
+                    let scope_id = assignment.scope_id;
+                    let mode = edit_mode.read().clone();
+                    let exclusions_text = edit_exclusions.read().clone();
+                    let additions_text = edit_additions.read().clone();
+                    let overrides_text = edit_overrides.read().clone();
+                    move |_| {
+                        let Ok(exclusions) = parse_uuid_list(&exclusions_text) else {
+                            edit_error.set(Some("Exclusions must be comma-separated UUIDs".to_string()));
+                            return;
+                        };
+                        let Ok(additions) = parse_uuid_list(&additions_text) else {
+                            edit_error.set(Some("Additions must be comma-separated UUIDs".to_string()));
+                            return;
+                        };
+                        let Ok(value_overrides) = serde_json::from_str::<Vec<PolicyValueOverride>>(&overrides_text) else {
+                            edit_error.set(Some("Overrides must be a JSON array of typed values".to_string()));
+                            return;
+                        };
+                        let request = CreateAssignmentRequest {
+                            bundle_version_id,
+                            scope_type: scope_type.clone(),
+                            scope_id,
+                            enforcement_mode: Some(mode.clone()),
+                            exclusions: Some(exclusions),
+                            additions: Some(additions),
+                            value_overrides: Some(value_overrides),
+                            reason: None,
+                        };
+                        preview_loading.set(true);
                         spawn(async move {
-                            match preview_compliance_assignment(&req).await {
-                                Ok(value) => {
-                                    preview.set(Some(value));
-                                    previewed_request.set(Some(req));
-                                }
-                                Err(err) => error.set(Some(format!("Preview failed: {err}"))),
+                            match preview_compliance_assignment(&request).await {
+                                Ok(value) => effective_preview.set(Some(value)),
+                                Err(error) => edit_error.set(Some(format!("Preview failed: {error}"))),
                             }
-                            preview_busy.set(false);
+                            preview_loading.set(false);
                         });
-                    },
-                    if *preview_busy.read() { "Previewing…" } else { "Preview effective set" }
-                }
-                if let Some(value) = preview.read().as_ref() {
-                    div { class: "sd-callout sd-callout-info", style: "font-size:11px;",
-                        "Preview: {value.policies.len()} effective policies · digest "
-                        span { class: "mono", "{value.effective_set_digest}" }
-                        if !value.warnings.is_empty() {
-                            div { "Warnings: {value.warnings.join(\"; \")}" }
-                        }
                     }
-                }
-                button {
-                    class: "btn btn-primary focus-ring xs",
-                    disabled: !can_submit,
-                    style: if !can_submit { "opacity:0.5;cursor:not-allowed;" } else { "" },
-                    onclick: move |_| {
-                        if !can_submit { return; }
-                         let Some(req) = request() else { return; };
-                         busy.set(true);
-                        error.set(None);
-                        spawn(async move {
-                            match create_compliance_assignment(&req).await {
-                                Ok(_) => {
-                                    busy.set(false);
-                                    success.set(true);
-                                }
-                                Err(err) => {
-                                    busy.set(false);
-                                    error.set(Some(format!("Assignment failed: {err}")));
-                                }
-                            }
-                        });
-                    },
-                    if *busy.read() { "Creating…" } else { "Create assignment" }
+                },
+                if *preview_loading.read() { "Previewing…" } else { "Preview unsaved effective set" }
+            }
+            if let Some(preview) = effective_preview.read().as_ref() {
+                div { class: "sd-callout sd-callout-info", style: "font-size:10px;",
+                    "Effective set: {preview.policies.len()} policies · digest "
+                    span { class: "mono", "{preview.effective_set_digest}" }
+                    if !preview.warnings.is_empty() {
+                        div { "Warnings: {preview.warnings.join(\"; \" )}" }
+                    }
                 }
             }
         }
     }
 }
 
-/// Panel listing and managing existing assignments for the selected scope.
-#[derive(Props, Clone, PartialEq)]
-struct AssignmentListPanelProps {
-    scope_type: String,
-    scope_id: uuid::Uuid,
-}
-
 #[component]
 fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
-    use crate::api::client::{
-        compliance_assignment_xccdf_url, delete_compliance_assignment,
-        fetch_environment_assignments, fetch_system_assignments,
-    };
+    use crate::api::client::{fetch_environment_assignments, fetch_system_assignments};
 
     let mut assignments = use_signal(Vec::<crate::api::models::AssignmentResponse>::new);
     let mut loading = use_signal(|| false);
@@ -1476,10 +2233,53 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
     let mut effective_preview =
         use_signal(|| None::<crate::api::models::EffectivePolicySetResponse>);
     let mut preview_loading = use_signal(|| false);
+    let app_state = use_context::<Signal<AppState>>();
+    let nav = navigator();
+    let viewer = !auth::is_operator_or_above(&app_state.read().auth);
+    let mut relationships = use_signal(HashMap::<uuid::Uuid, AssignmentRelationshipEntry>::new);
+    let mut relationships_loading = use_signal(|| false);
+    let mut relationships_error = use_signal(|| None::<String>);
+    let mut relationship_generation = use_signal(|| 0_u64);
+    let mut open_poam = use_signal(|| None::<uuid::Uuid>);
+    let mut open_poam_assignment = use_signal(|| None::<(uuid::Uuid, uuid::Uuid)>);
+    let mut link_assignment_version = use_signal(|| None::<uuid::Uuid>);
+    let mut link_query = use_signal(String::new);
+    let mut link_results = use_signal(Vec::<PoamSummary>::new);
+    let mut link_loading = use_signal(|| false);
+    let mut link_error = use_signal(|| None::<String>);
+    let mut link_pending = use_signal(|| None::<uuid::Uuid>);
+    let mut link_generation = use_signal(|| 0_u64);
+    let mut link_refresh_nonce = use_signal(|| 0_u64);
+
+    let mut refresh_relationships = move |version_ids: Vec<uuid::Uuid>| {
+        relationship_generation += 1;
+        let requested = relationship_generation();
+        relationships_loading.set(true);
+        relationships_error.set(None);
+        spawn(async move {
+            match poam_api::assignment_relationships(&version_ids).await {
+                Ok(entries) if relationship_generation() == requested => {
+                    relationships.set(
+                        entries
+                            .into_iter()
+                            .map(|entry| (entry.assignment_version_id, entry))
+                            .collect(),
+                    );
+                    relationships_loading.set(false);
+                }
+                Err(error) if relationship_generation() == requested => {
+                    relationships_error.set(Some(error.to_string()));
+                    relationships_loading.set(false);
+                }
+                _ => {}
+            }
+        });
+    };
 
     if !*fetched.read() {
         fetched.set(true);
         loading.set(true);
+        error.set(None);
         let scope_type = props.scope_type.clone();
         let scope_id = props.scope_id;
         spawn(async move {
@@ -1489,15 +2289,75 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
                 fetch_system_assignments(&scope_id).await
             };
             match result {
-                Ok(list) => assignments.set(list),
+                Ok(list) => {
+                    refresh_relationships(
+                        list.iter().map(|item| item.current_version_id).collect(),
+                    );
+                    assignments.set(list);
+                }
                 Err(err) => error.set(Some(err.to_string())),
             }
             loading.set(false);
         });
     }
 
+    use_effect(move || {
+        let Some(_) = link_assignment_version() else {
+            return;
+        };
+        let query = link_query();
+        let _ = link_refresh_nonce();
+        link_generation += 1;
+        let requested = link_generation();
+        spawn(async move {
+            link_loading.set(true);
+            gloo_timers::future::TimeoutFuture::new(300).await;
+            if link_generation() != requested {
+                return;
+            }
+            match poam_api::fetch_all_poams(&PoamListQuery {
+                q: (!query.trim().is_empty()).then_some(query.trim().to_string()),
+                ..Default::default()
+            })
+            .await
+            {
+                Ok(items) if link_generation() == requested => {
+                    link_results.set(
+                        items
+                            .into_iter()
+                            .filter(|item| item.status.is_active())
+                            .collect(),
+                    );
+                    link_error.set(None);
+                    link_loading.set(false);
+                }
+                Err(error) if link_generation() == requested => {
+                    link_results.set(Vec::new());
+                    link_error.set(Some(error.to_string()));
+                    link_loading.set(false);
+                }
+                _ => {}
+            }
+        });
+    });
+
     if *loading.read() {
         return rsx! { DashboardLoadingSpinner {} };
+    }
+
+    if let Some(message) = error.read().clone() {
+        return rsx! {
+            div { class: "card", style: "padding:10px 14px;display:flex;flex-direction:column;gap:8px;",
+                div { class: "sd-callout sd-callout-danger", role: "alert",
+                    "Could not load assignments for this scope: {message}"
+                }
+                button {
+                    class: "btn btn-ghost xs focus-ring",
+                    onclick: move |_| fetched.set(false),
+                    "Retry assignments"
+                }
+            }
+        };
     }
 
     let list = assignments.read().clone();
@@ -1512,287 +2372,129 @@ fn AssignmentListPanel(props: AssignmentListPanelProps) -> Element {
     }
 
     rsx! {
+        if *relationships_loading.read() {
+            div { class: "sd-callout sd-callout-info", "Loading assignment POA&M relationships…" }
+        } else if let Some(error) = relationships_error.read().as_ref() {
+            div { class: "sd-callout sd-callout-danger", "Could not load assignment POA&M relationships: {error}" }
+        }
         for assignment in list.iter() {
-            {
-                let assignment_id = assignment.id;
-                let current_mode = assignment.enforcement_mode.clone();
-                let current_version = assignment.current_version_id;
-                let current_exclusions_text = assignment
-                    .exclusions
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let current_additions_text = assignment
-                    .additions
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let current_overrides_text = serde_json::to_string(&assignment.value_overrides)
-                    .unwrap_or_else(|_| "[]".to_string());
-                let mut deleting = use_signal(|| false);
-                let mut editing = use_signal(|| false);
-                let mut edit_mode = use_signal(|| current_mode.clone());
-                let mut edit_exclusions = use_signal(|| {
-                    assignment
-                        .exclusions
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                });
-                let mut edit_additions = use_signal(|| {
-                    assignment
-                        .additions
-                        .iter()
-                        .map(ToString::to_string)
-                        .collect::<Vec<_>>()
-                        .join(", ")
-                });
-                 let mut edit_overrides = use_signal(|| current_overrides_text.clone());
-                  let original_reason = assignment.reason.clone().unwrap_or_default();
-                  let mut edit_reason = use_signal(|| original_reason.clone());
-                 let mut edit_busy = use_signal(|| false);
-                 let mut edit_error = use_signal(|| None::<String>);
-                 let edits_dirty = *edit_mode.read() != current_mode
-                     || *edit_exclusions.read() != current_exclusions_text
-                     || *edit_additions.read() != current_additions_text
-                     || *edit_overrides.read() != current_overrides_text
-                      || (*edit_reason.read() != original_reason);
-                rsx! {
-                    div { class: "card", style: "padding:10px 14px;display:flex;flex-direction:column;gap:6px;",
-                        div { style: "display:flex;justify-content:space-between;align-items:center;",
-                            div { style: "font-size:12px;font-weight:600;",
-                                "Bundle version "
-                                span { class: "mono", style: "font-size:10px;", "{assignment.bundle_version_id}" }
-                                " · {assignment.enforcement_mode}"
-                            }
-                            div { style: "display:flex;gap:4px;",
-                                button {
-                                    class: "btn btn-ghost xs focus-ring",
-                                    style: "font-size:10px;",
-                                    disabled: *deleting.read() || *editing.read(),
-                                    onclick: move |_| {
-                                        let url = compliance_assignment_xccdf_url(&assignment_id);
-                                        if let Some(window) = web_sys::window() {
-                                            let _ = window.location().set_href(&url);
-                                        }
-                                    },
-                                    "Export effective assignment (XCCDF)"
-                                }
-                                button {
-                                    class: "btn btn-ghost xs focus-ring",
-                                    style: "font-size:10px;",
-                                    disabled: *deleting.read() || *editing.read(),
-                                    onclick: move |_| editing.set(true),
-                                    "Edit mode"
-                                }
-                                button {
-                                    class: "btn btn-ghost xs focus-ring",
-                                    style: "font-size:10px;color:var(--cf-text-muted);",
-                                    disabled: *deleting.read(),
-                                    onclick: {
-                                        let a_id = assignment_id;
-                                        move |_| {
-                                            deleting.set(true);
-                                            spawn(async move {
-                                                let _ = delete_compliance_assignment(&a_id).await;
-                                                assignments.with_mut(|list| list.retain(|a| a.id != a_id));
-                                            });
-                                        }
-                                    },
-                                    if *deleting.read() { "Deactivating…" } else { "Deactivate" }
-                                }
-                            }
-                        }
-                        div { style: "font-size:10px;color:var(--cf-text-muted);",
-                            "scope: {assignment.scope_type}:{assignment.scope_id}"
-                            " · version: " span { class: "mono", "{assignment.current_version_id}" }
-                        }
-                        if *editing.read() {
-                            if let Some(err) = edit_error.read().as_ref() {
-                                div { class: "sd-callout sd-callout-danger", style: "font-size:11px;", "{err}" }
-                            }
-                            div { style: "display:flex;gap:6px;align-items:center;",
-                                select {
-                                    class: "input xs",
-                                    style: "flex:1;",
-                                    value: "{edit_mode.read()}",
-                                    onchange: move |e| edit_mode.set(e.value()),
-                                    option { value: "enforce", "Enforce" }
-                                    option { value: "report_only", "Report only" }
-                                }
-                                input {
-                                    class: "input xs mono",
-                                    style: "flex:1;",
-                                    placeholder: "excluded version UUIDs",
-                                    value: "{edit_exclusions.read()}",
-                                    oninput: move |e| edit_exclusions.set(e.value()),
-                                }
-                                input {
-                                    class: "input xs mono",
-                                    style: "flex:1;",
-                                    placeholder: "added version UUIDs",
-                                    value: "{edit_additions.read()}",
-                                    oninput: move |e| edit_additions.set(e.value()),
-                                }
-                                textarea {
-                                    class: "input xs mono",
-                                    style: "flex:1;",
-                                    rows: "2",
-                                    placeholder: "typed overrides JSON",
-                                    value: "{edit_overrides.read()}",
-                                    oninput: move |e| edit_overrides.set(e.value()),
-                                }
-                                textarea {
-                                    class: "input xs",
-                                    style: "flex:1;",
-                                    rows: "2",
-                                    placeholder: "reason (leave empty to preserve)",
-                                    value: "{edit_reason.read()}",
-                                    oninput: move |e| edit_reason.set(e.value()),
-                                }
-                                button {
-                                    class: "btn btn-primary xs focus-ring",
-                                    style: "font-size:10px;",
-                                    disabled: *edit_busy.read() || !edits_dirty,
-                                    onclick: {
-                                        let a_id = assignment_id;
-                                        let cm = current_version;
-                                        let scope_type = props.scope_type.clone();
-                                        let scope_id = props.scope_id;
-                                        let exclusions_text = edit_exclusions.read().clone();
-                                        let additions_text = edit_additions.read().clone();
-                                        let overrides_text = edit_overrides.read().clone();
-                                        move |_| {
-                                            let Ok(exclusions) = parse_uuid_list(&exclusions_text) else {
-                                                edit_error.set(Some("Exclusions must be comma-separated UUIDs".to_string()));
-                                                return;
-                                            };
-                                            let Ok(additions) = parse_uuid_list(&additions_text) else {
-                                                edit_error.set(Some("Additions must be comma-separated UUIDs".to_string()));
-                                                return;
-                                            };
-                                            let Ok(value_overrides) = serde_json::from_str::<Vec<PolicyValueOverride>>(&overrides_text) else {
-                                                edit_error.set(Some("Overrides must be a JSON array of typed values".to_string()));
-                                                return;
-                                            };
-                                            edit_busy.set(true);
-                                            edit_error.set(None);
-
-                                             let reason_val = edit_reason.read().clone();
-                                             let reason_update = if reason_val == original_reason {
-                                                 crate::api::models::FieldUpdate::Unset
-                                             } else if !original_reason.is_empty() && reason_val.trim().is_empty() {
-                                                 crate::api::models::FieldUpdate::Clear
-                                             } else {
-                                                 crate::api::models::FieldUpdate::Set(reason_val.trim().to_string())
-                                             };
-
-                                             let request = UpdateAssignmentRequest {
-                                                 expected_version_id: cm,
-                                                 enforcement_mode: Some((*edit_mode.read()).clone()),
-                                                 exclusions: Some(exclusions),
-                                                 additions: Some(additions),
-                                                 value_overrides: Some(value_overrides),
-                                                 reason: reason_update,
-                                             };
-                                            let st = scope_type.clone();
-                                            let si = scope_id;
-                                            spawn(async move {
-                                                match crate::api::client::update_compliance_assignment(&a_id, &request).await {
-                                                    Ok(_) => {
-                                                        edit_busy.set(false);
-                                                        editing.set(false);
-                                                        spawn(async move {
-                                                            let result = if st == "environment" {
-                                                                fetch_environment_assignments(&si).await
-                                                            } else {
-                                                                fetch_system_assignments(&si).await
-                                                            };
-                                                            if let Ok(list) = result {
-                                                                assignments.set(list);
-                                                            }
-                                                        });
-                                                    }
-                                                    Err(e) => {
-                                                        edit_busy.set(false);
-                                                        edit_error.set(Some(format!("Update failed: {e}")));
-                                                    }
+            AssignmentCard {
+                key: "{assignment.id}",
+                assignment: assignment.clone(),
+                scope_type: props.scope_type.clone(),
+                scope_id: props.scope_id,
+                viewer,
+                assignments,
+                relationships,
+                relationships_loading,
+                relationships_error,
+                effective_preview,
+                preview_loading,
+                open_poam,
+                open_poam_assignment,
+                link_assignment_version,
+                link_query,
+                link_error,
+            }
+        }
+        if let Some(assignment_version_id) = *link_assignment_version.read() {
+            div { class: "modal-backdrop", onclick: move |_| if link_pending().is_none() { link_assignment_version.set(None) },
+                div { id: "assignment-poam-link-dialog", class: "modal poam-modal", role: "dialog", aria_modal: "true", aria_labelledby: "assignment-poam-link-title", tabindex: "-1", onclick: |event| event.stop_propagation(), onkeydown: move |event| {
+                    event.stop_propagation();
+                    if event.key() == Key::Escape && link_pending().is_none() {
+                        link_assignment_version.set(None);
+                    }
+                },
+                    DialogFocusRestore {}
+                    DialogFocusSentinel { dialog_id: "assignment-poam-link-dialog".to_string(), boundary: DialogFocusBoundary::Last }
+                    div { class: "modal-head", div { h2 { id: "assignment-poam-link-title", "Link POA&M" } p { "Reference exact immutable assignment version {assignment_version_id}." } } button { class: "btn-icon focus-ring", aria_label: "Close assignment POA&M link dialog", disabled: link_pending().is_some(), onclick: move |_| link_assignment_version.set(None), Icon { name: IconName::X, size: 16 } } }
+                    div { class: "modal-body", style: "display:flex;flex-direction:column;gap:10px;",
+                        div { class: "filter-search poam-search", Icon { name: IconName::Search, size: 12 } input { class: "input focus-ring", "data-testid": "assignment-poam-search", autofocus: true, value: "{link_query}", placeholder: "Search active POA&M items by ID, title, or owner", disabled: link_pending().is_some(), oninput: move |event| link_query.set(event.value()) } }
+                        p { class: "poam-muted", "Search uses the server POA&M list query. Compatibility and assignment-version authorization are decided when the server links the reference." }
+                        if *link_loading.read() { div { class: "poam-empty", "Searching active POA&M items…" } }
+                        if let Some(error) = link_error.read().as_ref() { div { class: "sd-callout sd-callout-danger", "{error}" } }
+                        if !*link_loading.read() && link_error.read().is_none() && link_results.read().is_empty() { div { class: "poam-empty", "No active POA&M items match." } }
+                        for item in link_results.read().clone() {
+                            {
+                                let target_label = item.target_date.map(|date| date.to_string()).unwrap_or_else(|| "Not set".to_string());
+                                rsx! {
+                                    button { class: "poam-pick focus-ring", "data-testid": "assignment-poam-link-submit", "data-assignment-version-id": "{assignment_version_id}", "data-poam-revision": "{item.revision}", "data-endpoint": "/poams/{item.id}/assignments", disabled: link_pending().is_some(), onclick: move |_| {
+                                        link_pending.set(Some(item.id));
+                                        link_error.set(None);
+                                        let request = poam_api::AssignmentReferenceRequest { revision: item.revision, assignment_version_id };
+                                        spawn(async move {
+                                            match poam_api::link_poam_assignment(item.id, &request).await {
+                                                Ok(detail) => {
+                                                    link_pending.set(None);
+                                                    link_assignment_version.set(None);
+                                                    open_poam_assignment.set(assignments.read().iter().find(|assignment| assignment.current_version_id == assignment_version_id).map(|assignment| (assignment.bundle_id, assignment.bundle_version_id)));
+                                                    open_poam.set(Some(detail.poam.id));
+                                                    refresh_relationships(assignments.read().iter().map(|assignment| assignment.current_version_id).collect());
                                                 }
-                                            });
-                                        }
+                                                Err(error) => {
+                                                    let stale = error.is_stale();
+                                                    link_error.set(Some(if stale { "This POA&M changed while selected. Refreshed the current server results; retry the updated item.".to_string() } else { error.to_string() }));
+                                                    link_pending.set(None);
+                                                    if stale { link_refresh_nonce += 1; }
+                                                }
+                                            }
+                                        });
                                     },
-                                    if *edit_busy.read() { "Saving…" } else { "Save" }
-                                }
-                                button {
-                                    class: "btn btn-ghost xs focus-ring",
-                                    style: "font-size:10px;",
-                                    disabled: *edit_busy.read(),
-                                    onclick: move |_| editing.set(false),
-                                    "Cancel"
-                                }
-                            }
-                        }
-                        button {
-                            class: "btn btn-ghost xs focus-ring",
-                            disabled: *preview_loading.read(),
-                            onclick: {
-                                let bundle_version_id = assignment.bundle_version_id;
-                                let scope_type = assignment.scope_type.clone();
-                                let scope_id = assignment.scope_id;
-                                let mode = edit_mode.read().clone();
-                                let exclusions_text = edit_exclusions.read().clone();
-                                let additions_text = edit_additions.read().clone();
-                                let overrides_text = edit_overrides.read().clone();
-                                move |_| {
-                                    let Ok(exclusions) = parse_uuid_list(&exclusions_text) else {
-                                        edit_error.set(Some("Exclusions must be comma-separated UUIDs".to_string()));
-                                        return;
-                                    };
-                                    let Ok(additions) = parse_uuid_list(&additions_text) else {
-                                        edit_error.set(Some("Additions must be comma-separated UUIDs".to_string()));
-                                        return;
-                                    };
-                                    let Ok(value_overrides) = serde_json::from_str::<Vec<PolicyValueOverride>>(&overrides_text) else {
-                                        edit_error.set(Some("Overrides must be a JSON array of typed values".to_string()));
-                                        return;
-                                    };
-                                    let request = CreateAssignmentRequest {
-                                         bundle_version_id,
-                                         scope_type: scope_type.clone(),
-                                         scope_id,
-                                         enforcement_mode: Some(mode.clone()),
-                                         exclusions: Some(exclusions),
-                                         additions: Some(additions),
-                                         value_overrides: Some(value_overrides),
-                                         reason: None,
-                                     };
-                                    preview_loading.set(true);
-                                    spawn(async move {
-                                        match preview_compliance_assignment(&request).await {
-                                            Ok(value) => effective_preview.set(Some(value)),
-                                            Err(error) => edit_error.set(Some(format!("Preview failed: {error}"))),
-                                        }
-                                        preview_loading.set(false);
-                                    });
-                                }
-                            },
-                            if *preview_loading.read() { "Previewing…" } else { "Preview unsaved effective set" }
-                        }
-                        if let Some(preview) = effective_preview.read().as_ref() {
-                            div { class: "sd-callout sd-callout-info", style: "font-size:10px;",
-                                "Effective set: {preview.policies.len()} policies · digest "
-                                span { class: "mono", "{preview.effective_set_digest}" }
-                                if !preview.warnings.is_empty() {
-                                    div { "Warnings: {preview.warnings.join(\"; \" )}" }
+                                        div { class: "poam-pick-head", span { class: "mono poam-human-id", "{item.human_id}" } span { class: "poam-chip", "{item.status.label()}" } span { class: "poam-chip", "{item.risk.label()}" } }
+                                        strong { "{item.title}" }
+                                        small { "{item.owner} · target {target_label} · revision {item.revision}" }
+                                    }
                                 }
                             }
                         }
                     }
+                    DialogFocusSentinel { dialog_id: "assignment-poam-link-dialog".to_string(), boundary: DialogFocusBoundary::First }
                 }
             }
+        }
+        PoamDetailHost {
+            poam_id: *open_poam.read(),
+            viewer,
+            assignment_versions: assignments.read().iter().map(|assignment| AssignmentVersionCandidate {
+                assignment_id: assignment.id,
+                assignment_version_id: assignment.current_version_id,
+                bundle_id: assignment.bundle_id,
+                bundle_version_id: assignment.bundle_version_id,
+                bundle_name: assignment.bundle_id.to_string(),
+                bundle_version: assignment.bundle_version_id.to_string(),
+                scope_label: format!("{}:{}", assignment.scope_type, assignment.scope_id),
+            }).collect(),
+            on_close: move |_| {
+                open_poam.set(None);
+                open_poam_assignment.set(None);
+            },
+            on_open_finding: move |finding: FindingView| {
+                let Some((bundle_id, bundle_version_id)) = open_poam_assignment() else {
+                    link_error.set(Some("The originating assignment context is no longer available for exact evidence navigation.".to_string()));
+                    return;
+                };
+                if !finding.bundle_ids.contains(&bundle_id)
+                    || !finding.bundle_version_ids.contains(&bundle_version_id)
+                {
+                    link_error.set(Some("This finding is not present in the exact immutable assignment bundle revision.".to_string()));
+                    return;
+                }
+                open_poam.set(None);
+                open_poam_assignment.set(None);
+                if let Some(on_open_finding) = props.on_open_finding {
+                    on_open_finding.call((bundle_id, bundle_version_id, finding));
+                } else {
+                    nav.push(Route::ComplianceView {
+                        bundle: bundle_id.to_string(),
+                        version: bundle_version_id.to_string(),
+                        system: finding.system_id.to_string(),
+                        policy: finding.policy_lineage_id.to_string(),
+                        poam: String::new(),
+                        view: "evidence".to_string(),
+                    });
+                }
+            },
+            on_changed: move |_| refresh_relationships(assignments.read().iter().map(|assignment| assignment.current_version_id).collect()),
         }
     }
 }
@@ -2331,7 +3033,8 @@ fn refined_rules_from_rules(rules: &[StigRule]) -> Vec<RefinedStigRule> {
 struct ImportStigModalProps {
     environments: Vec<EnvironmentSummary>,
     on_close: EventHandler<()>,
-    on_success: EventHandler<()>,
+    /// Selects the imported bundle by its immutable version identity.
+    on_success: EventHandler<Option<uuid::Uuid>>,
     is_stig_import: bool,
 }
 
@@ -2830,10 +3533,11 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                                 };
                                                 match import_xccdf(&file_bytes.read(), "import.xccdf", &plan).await {
                                                     Ok(result) => {
+                                                        let bundle_version_id = result.bundle_version_id;
                                                         committing.set(false);
                                                         import_result.set(Some(result));
                                                         step.set("done".to_string());
-                                                        props.on_success.call(());
+                                                        props.on_success.call(bundle_version_id);
                                                     }
                                                     Err(err) => {
                                                         committing.set(false);
@@ -3140,12 +3844,13 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                     spawn(async move {
                                         match import_xccdf(&bytes, &fname, &plan).await {
                                             Ok(result) => {
+                                                let bundle_version_id = result.bundle_version_id;
                                                 let total = result.created_policy_count + result.reused_policy_versions;
                                                 done_total.set(total as usize);
                                                 import_result.set(Some(result));
                                                 committing.set(false);
                                                 step.set("done".to_string());
-                                                on_success.call(());
+                                                on_success.call(bundle_version_id);
                                             }
                                             Err(err) => {
                                                 committing.set(false);
@@ -3359,11 +4064,12 @@ fn ImportStigModal(props: ImportStigModalProps) -> Element {
                                 spawn(async move {
                                     match import_xccdf(&bytes, &filename, &plan).await {
                                         Ok(result) => {
+                                            let bundle_version_id = result.bundle_version_id;
                                             done_total.set((result.created_policy_count + result.reused_policy_versions) as usize);
                                             import_result.set(Some(result));
                                             committing.set(false);
                                             step.set("done".into());
-                                             props.on_success.call(());
+                                             props.on_success.call(bundle_version_id);
                                         }
                                         Err(error) => { committing.set(false); import_error.set(Some(format!("Import failed: {error}"))); }
                                     }
@@ -5252,6 +5958,61 @@ mod tests {
     use super::*;
 
     #[test]
+    fn compliance_route_target_round_trips_and_preserves_unrelated_query_values() {
+        let bundle = uuid::Uuid::new_v4();
+        let version = uuid::Uuid::new_v4();
+        let system = uuid::Uuid::new_v4();
+        let policy = uuid::Uuid::new_v4();
+        let poam = uuid::Uuid::new_v4();
+        let target = ComplianceQueryTarget {
+            bundle: Some(bundle),
+            version: Some(version),
+            system: Some(system),
+            policy: Some(policy),
+            poam: Some(poam),
+            view: Some("evidence".into()),
+        };
+
+        let route = compliance_route_with_target("/compliance?theme=dark&view=overview", &target);
+        assert!(route.contains("theme=dark"));
+        assert_eq!(parse_compliance_target(&route), target);
+    }
+
+    #[test]
+    fn empty_compliance_target_removes_only_owned_query_values() {
+        let route = compliance_route_with_target(
+            "/compliance?bundle=invalid&view=poam&theme=dark",
+            &ComplianceQueryTarget::default(),
+        );
+
+        assert_eq!(route, "/compliance?theme=dark");
+    }
+
+    #[test]
+    fn evidence_route_state_does_not_depend_on_loaded_evidence() {
+        let bundle = uuid::Uuid::new_v4();
+        let version = uuid::Uuid::new_v4();
+        let system = uuid::Uuid::new_v4();
+        let policy = uuid::Uuid::new_v4();
+
+        let target = compliance_target_from_state(
+            Some(bundle),
+            Some(version),
+            false,
+            BundleDrawerView::Overview,
+            Some(system),
+            Some(policy),
+            None,
+        );
+
+        assert_eq!(target.bundle, Some(bundle));
+        assert_eq!(target.version, Some(version));
+        assert_eq!(target.system, Some(system));
+        assert_eq!(target.policy, Some(policy));
+        assert_eq!(target.view.as_deref(), Some("evidence"));
+    }
+
+    #[test]
     fn preserves_all_ordered_preview_check_body_parts() {
         let check = serde_json::json!({
             "body_parts": [
@@ -5408,13 +6169,14 @@ mod tests {
 
 /// Renders the requirement coverage card for a selected bundle version.
 ///
-/// Matches the design from commit 861fd877: three summary chips (full/partial/
-/// unmapped), expandable to show individual requirement rows grouped by parent.
+/// Keeps three coverage counts compact in the overview and offers source-backed
+/// requirement rows in the exact-version detail view.
 #[component]
 fn RequirementCoverageCard(
     report: BundleCoverageReport,
     expanded: Signal<bool>,
     #[props(default)] detail: bool,
+    #[props(default)] compact: bool,
     #[props(default)] on_open: EventHandler<()>,
     #[props(default)] on_open_policy: EventHandler<(uuid::Uuid, uuid::Uuid)>,
 ) -> Element {
@@ -5425,7 +6187,7 @@ fn RequirementCoverageCard(
     let partial = report.partial;
     let unmapped = report.unmapped;
     let recovery_required = report.recovery_required;
-    let show_details = detail || *expanded.read();
+    let show_details = detail || (!compact && *expanded.read());
     let framework_label = if report.frameworks.is_empty() {
         report
             .source_framework
@@ -5557,11 +6319,14 @@ fn RequirementCoverageCard(
     }
 
     rsx! {
-        div { class: "card", "data-testid": "requirement-coverage-card", style: "display:flex;flex-direction:column;gap:10px;",
+        div {
+            class: if compact { "cf-coverage-compact" } else { "card" },
+            "data-testid": "requirement-coverage-card",
+            style: if compact { "display:flex;align-items:center;gap:12px;padding:10px 16px;border-top:1px solid var(--cf-divider);flex-wrap:wrap;" } else { "display:flex;flex-direction:column;gap:10px;" },
             button {
                 class: "focus-ring",
                 "data-testid": "requirement-coverage-open",
-                style: "display:flex;align-items:center;justify-content:space-between;width:100%;padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer;",
+                style: if compact { "display:flex;align-items:center;justify-content:space-between;flex:1 1 280px;min-width:0;padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer;" } else { "display:flex;align-items:center;justify-content:space-between;width:100%;padding:0;border:0;background:transparent;color:inherit;text-align:left;cursor:pointer;" },
                 onclick: move |_| {
                     if detail {
                         // Detail mode: no action on click
@@ -5583,15 +6348,15 @@ fn RequirementCoverageCard(
             div { style: "display:flex;gap:8px;align-items:center;flex-wrap:wrap;",
                 div { style: "display:flex;align-items:center;gap:4px;",
                     span { class: "chip chip-success", "{full}" }
-                    span { style: "font-size:11px;color:var(--cf-text-muted);", "Fully covered" }
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", if compact { "full" } else { "Fully covered" } }
                 }
                 div { style: "display:flex;align-items:center;gap:4px;",
                     span { class: "chip chip-warn", "{partial}" }
-                    span { style: "font-size:11px;color:var(--cf-text-muted);", "Partially covered" }
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", if compact { "partial" } else { "Partially covered" } }
                 }
                 div { style: "display:flex;align-items:center;gap:4px;",
                     span { class: "chip chip-neutral", "{unmapped}" }
-                    span { style: "font-size:11px;color:var(--cf-text-muted);", "Unmapped" }
+                    span { style: "font-size:11px;color:var(--cf-text-muted);", if compact { "unmapped" } else { "Unmapped" } }
                 }
                 if recovery_required > 0 {
                     div { style: "display:flex;align-items:center;gap:4px;",
@@ -5599,12 +6364,16 @@ fn RequirementCoverageCard(
                         span { style: "font-size:11px;color:var(--cf-text-muted);", "Recovery required" }
                     }
                 }
-                div { style: "display:flex;align-items:center;gap:4px;margin-left:auto;",
+                if !compact { div { style: "display:flex;align-items:center;gap:4px;margin-left:auto;",
                     span { style: "font-size:11px;color:var(--cf-text-muted);", "{total} total" }
-                }
+                } }
             }
             if total == 0 {
-                if disa_invariant {
+                if compact {
+                    span { style: if disa_invariant { "font-size:11px;color:var(--cf-error);" } else { "font-size:11px;color:var(--cf-text-muted);" },
+                        if disa_invariant { "Requirement membership needs recovery." } else { "No requirement catalog modeled yet." }
+                    }
+                } else if disa_invariant {
                     div {
                         class: "q-empty",
                         "data-testid": "coverage-invariant-error",

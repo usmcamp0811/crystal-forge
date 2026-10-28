@@ -117,11 +117,13 @@ in mkShell {
     postgresql
     sqlx-cli
     vulnix
+    pkgs.nix-eval-jobs.nix # Nix CLI linked against the evaluator's Nix version
     nix-eval-jobs # Required for commit evaluation
     python3
     python3Packages.pytest
     run-scenario
     pkgs.crystal-forge.devScripts.startBuilderApi
+    pkgs.crystal-forge.devScripts.webUiTest
 
     # UI development tooling (Dioxus web target)
     dioxus-cli-0_7_3 # dx CLI matching the resolved Dioxus 0.7.3 stack
@@ -196,6 +198,7 @@ in mkShell {
       echo "                       launches server (background) + Dioxus dev server (foreground)"
       echo "  run-ui-frontend    → Frontend only: pins wasm-bindgen + builds Tailwind,"
       echo "                       runs 'dx serve' from packages/web-ui (needs run-ui-dev's server)"
+      echo "  web-ui-test STEP   → Run a supported browser workflow against run-ui-dev"
       echo ""
       echo "🧪 Test Suite Available:"
       echo ""

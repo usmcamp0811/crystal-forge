@@ -21,9 +21,11 @@ use crate::api::models::{
     PublishPolicyVersionRequest, SystemComplianceBundle, SystemComplianceBundlesResponse,
     TrustBundleVersionRequest, TrustPolicyVersionRequest, UpdateComplianceBundleRequest,
 };
+// The handler keeps its own `validate_policy_interchange_document*` functions
+// below. They add server-side composite-policy validation that the database-
+// free `cf_compliance::policy_document` version intentionally does not have.
 use cf_compliance::policy_document::{
     NormalizedPolicyImport, normalize_policy_import, parse_policy_document,
-    validate_policy_interchange_document,
 };
 
 use crate::compliance::interchange::{InterchangeLimits, MAX_XCCDF_UPLOAD_BYTES};
@@ -41,34 +43,60 @@ use crate::compliance::xccdf::export_models::{
 };
 use crate::compliance::xccdf::import_models::XccdfImportPlan;
 use crate::compliance::xccdf::importer::{
-    build_policy_records, check_document_class, validate_cf_native_document, validate_import_plan,
-    validate_sha256_match,
+    build_policy_records, check_document_class, validate_cf_native_document_async,
+    validate_import_plan, validate_sha256_match,
 };
 use crate::compliance::xccdf::package::{ProcessingError, process_xccdf_bytes};
 use crate::compliance::xccdf::reconciliation::{NativeReconcileFailure, ReconcileConflict};
 use crate::compliance::xccdf::xml_writer::{XccdfWriterError, write_bundle_xccdf_export};
+use crate::handlers::api::auth_session::require_csrf;
 use crate::handlers::api::rbac::{authenticated_user_roles, has_admin_role};
 use crate::queries::compliance::{
     BundleDeleteOutcome, BundleDraftDerivationError, BundleDraftIntent, BundleValidationError,
     PolicyDraftDerivationError, PolicyDraftIntent, bundle_deletion_eligibility,
     create_bundle as create_bundle_row, create_grouping_scheme, delete_bundle as delete_bundle_row,
     delete_grouping_scheme, ensure_bundle_draft, ensure_policy_draft, get_system_evidence,
-    list_bundle_systems, list_bundle_systems_for_version, list_bundle_version_policy_membership,
+    get_system_evidence_in_tx, list_bundle_systems_for_locked_ids_in_tx,
+    list_bundle_systems_for_user, list_bundle_version_policy_membership,
     list_bundle_version_requirement_membership, list_bundles, list_grouping_schemes,
-    list_system_bundles, load_policy_version_usage, update_bundle as update_bundle_row,
-    update_grouping_scheme,
+    list_system_bundles, list_system_bundles_in_tx, load_policy_version_usage,
+    update_bundle as update_bundle_row, update_grouping_scheme,
 };
 use crate::queries::compliance_interchange;
 use crate::queries::framework_requirements::{
     find_policy_candidates, preview_framework_reconciliation_with_hierarchy,
     preview_requirement_reconciliation,
 };
+use crate::queries::systems::{find_system_access_row, get_user_environment_membership_ids};
 
 const MAX_GROUPING_SCHEME_NAME_BYTES: usize = 255;
 const MAX_GROUPING_GROUP_ID_BYTES: usize = 128;
 const MAX_GROUPING_GROUP_NAME_BYTES: usize = 255;
 const MAX_GROUPING_DESCRIPTION_BYTES: usize = 4_096;
 const MAX_GROUPING_QUERY_BYTES: usize = 4_096;
+
+/// Returns whether the caller can inspect data in an environment scope.
+///
+/// Admins have fleet-wide access. Other roles must have an explicit environment
+/// membership. A missing environment ID is inaccessible to non-admin callers.
+///
+/// # Errors
+///
+/// Returns an HTTP 500 response when environment memberships cannot be loaded.
+async fn can_view_environment_scope(
+    pool: &PgPool,
+    user_id: Uuid,
+    roles: &[crate::models::auth_identity::AuthRole],
+    environment_id: Option<Uuid>,
+) -> Result<bool, axum::response::Response> {
+    if has_admin_role(roles) {
+        return Ok(true);
+    }
+    let memberships = get_user_environment_membership_ids(pool, user_id)
+        .await
+        .map_err(|_| internal_error("Failed to load environment memberships"))?;
+    Ok(environment_id.is_some_and(|id| memberships.contains(&id)))
+}
 
 /// `GET /api/v1/compliance/grouping-schemes`
 pub async fn list_compliance_grouping_schemes(
@@ -330,11 +358,22 @@ pub async fn get_policy_version_usage(
     headers: HeaderMap,
     Path(version_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if authenticated_user_roles(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
-    }
+    };
+    // SECURITY: Policy usage contains hostnames and environment names. Admins
+    // can inspect the fleet, but other roles can inspect only their environment
+    // memberships. An empty membership list must therefore remain restrictive.
+    let visible_environment_ids = if has_admin_role(&roles) {
+        None
+    } else {
+        match get_user_environment_membership_ids(&pool, user_id).await {
+            Ok(ids) => Some(ids.into_iter().collect::<Vec<_>>()),
+            Err(_) => return internal_error("Failed to load environment memberships"),
+        }
+    };
 
-    match load_policy_version_usage(&pool, version_id).await {
+    match load_policy_version_usage(&pool, version_id, visible_environment_ids.as_deref()).await {
         Ok(Some(usage)) => (StatusCode::OK, Json(usage)).into_response(),
         Ok(None) => not_found(),
         Err(_) => internal_error("Failed to load policy version usage"),
@@ -358,23 +397,60 @@ pub async fn get_bundle_version_requirement_membership(
     }
 }
 
-/// `GET /api/v1/compliance/bundles/:id/systems`
+/// Returns bundle systems and totals within the caller's current environments.
+///
+/// `GET /api/v1/compliance/bundles/:id/systems` preserves global bundle/version
+/// identity. Non-admin callers see only systems in their current memberships;
+/// all evidence and totals derive from those systems. Admins retain fleet-wide
+/// access. A valid revision with no visible systems returns an empty collection.
+///
+/// # Concurrency
+/// Non-admin reads retain shared membership/system locks through response
+/// materialization and restrict candidates to the exact locked system IDs.
+/// All resolver and evidence queries reuse that writable REPEATABLE READ
+/// transaction. Commit failure discards the materialized response.
+///
+/// # Errors
+/// Missing bundles or mismatched versions return 404, authentication failures
+/// return 403, and database failures return 500.
 pub async fn get_compliance_bundle_systems(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(bundle_id): Path<Uuid>,
     Query(query): Query<BundleVersionQuery>,
 ) -> impl IntoResponse {
-    if authenticated_user_roles(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
     }
 
-    let result = match query.version_id {
-        Some(version_id) => list_bundle_systems_for_version(&pool, bundle_id, version_id).await,
-        None => list_bundle_systems(&pool, bundle_id).await,
+    let mut guard = if has_admin_role(&roles) {
+        None
+    } else {
+        match lock_receiver_read_scope(&pool, user_id, crate::auth::models::Role::Viewer, None)
+            .await
+        {
+            Ok(guard) => Some(guard),
+            Err(response) => return response,
+        }
+    };
+    let result = if let Some((tx, system_ids)) = &mut guard {
+        list_bundle_systems_for_locked_ids_in_tx(tx, bundle_id, query.version_id, system_ids).await
+    } else {
+        list_bundle_systems_for_user(&pool, bundle_id, query.version_id, None).await
     };
     match result {
-        Ok(Some(response)) => (StatusCode::OK, Json(response)).into_response(),
+        Ok(Some(response)) => {
+            let response = (StatusCode::OK, Json(response)).into_response();
+            if let Some((tx, _)) = guard {
+                if tx.commit().await.is_err() {
+                    return internal_error("Failed to commit read scope guard");
+                }
+            }
+            response
+        }
         Ok(None) => not_found(),
         Err(_) => internal_error("Failed to load compliance systems"),
     }
@@ -385,31 +461,199 @@ pub struct BundleVersionQuery {
     pub version_id: Option<Uuid>,
 }
 
-/// `GET /api/v1/systems/:system_id/compliance`
-/// Returns all compliance bundles applicable to the specified system with rollups.
+/// Locks a non-admin receiver's current authorization rows until release.
+///
+/// # Concurrency
+/// A target read locks the system first, then the user's membership rows in
+/// environment-ID order, and validates the locked environment with the role
+/// policy. A collection read locks memberships first, then authorized systems
+/// in system-ID order. Shared reader locks are compatible across both paths;
+/// sorted rows avoid opposite-order acquisition within each row class.
+/// PostgreSQL can abort a deadlock involving writers; callers must fail closed.
+/// Evidence that materializes findings must instead use
+/// `lock_evidence_read_scope` to acquire the POA&M sentinel before these rows.
+/// Scope-only readers do not acquire POA&M locks.
+///
+/// The returned transaction must remain open through response materialization.
+/// Collection callers must use the returned exact IDs, not a fresh membership
+/// predicate: systems created or moved into scope later are not locked.
+/// All response queries must reborrow this transaction or its connection. The
+/// writable REPEATABLE READ snapshot stabilizes resolver and evidence inputs
+/// without acquiring a second pool connection. Evidence may insert POA&M findings.
+/// Serialization and deadlock failures abort the request; never retry only a query.
+///
+/// # Errors
+///
+/// Returns the same 404 for missing and inaccessible targets. Returns 500 on
+/// transaction or lock-query failure. Dropping a failed guard rolls it back.
+pub(super) async fn lock_receiver_read_scope(
+    pool: &PgPool,
+    user_id: Uuid,
+    role: crate::auth::models::Role,
+    target: Option<Uuid>,
+) -> Result<(sqlx::Transaction<'_, sqlx::Postgres>, Vec<Uuid>), axum::response::Response> {
+    let tx = begin_receiver_read_scope(pool).await?;
+    lock_receiver_read_scope_in_tx(tx, user_id, role, target).await
+}
+
+// Establish isolation before any lock query creates the shared snapshot.
+async fn begin_receiver_read_scope(
+    pool: &PgPool,
+) -> Result<sqlx::Transaction<'_, sqlx::Postgres>, axum::response::Response> {
+    let mut tx = pool
+        .begin()
+        .await
+        .map_err(|_| internal_error("Failed to start read scope guard"))?;
+    // CONCURRENCY: Set isolation before the first authorization query so the
+    // complete resolver call graph uses the same snapshot. Keep it writable:
+    // the evidence receiver materializes stable POA&M finding identities.
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await
+        .map_err(|_| internal_error("Failed to set read scope isolation"))?;
+    Ok(tx)
+}
+
+// CONCURRENCY: Metadata writers acquire the POA&M system sentinel before
+// locking the system row. Evidence must use the same order, or its FOR SHARE
+// can deadlock with a writer's FOR UPDATE while waiting on the sentinel.
+// Keep the sentinel, authorization rows, and evidence in one writable RR
+// transaction. The evidence core may reacquire its own transaction's sentinel.
+async fn lock_evidence_read_scope(
+    pool: &PgPool,
+    user_id: Uuid,
+    system_id: Uuid,
+) -> Result<(sqlx::Transaction<'_, sqlx::Postgres>, Vec<Uuid>), axum::response::Response> {
+    let mut tx = begin_receiver_read_scope(pool).await?;
+    crate::services::composite_enforcement::lock_poam_system_key_tx(&mut tx, system_id)
+        .await
+        .map_err(|_| internal_error("Failed to lock system remediation scope"))?;
+    lock_receiver_read_scope_in_tx(
+        tx,
+        user_id,
+        crate::auth::models::Role::Viewer,
+        Some(system_id),
+    )
+    .await
+}
+
+// Retain the caller's transaction and any preceding sentinel while acquiring
+// the existing target/collection authorization locks. Failures drop all locks.
+async fn lock_receiver_read_scope_in_tx<'a>(
+    mut tx: sqlx::Transaction<'a, sqlx::Postgres>,
+    user_id: Uuid,
+    role: crate::auth::models::Role,
+    target: Option<Uuid>,
+) -> Result<(sqlx::Transaction<'a, sqlx::Postgres>, Vec<Uuid>), axum::response::Response> {
+    let environment = if let Some(system_id) = target {
+        let row: Option<(Option<Uuid>,)> =
+            sqlx::query_as("SELECT environment_id FROM systems WHERE id=$1 FOR SHARE")
+                .bind(system_id)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(|_| internal_error("Failed to lock system read scope"))?;
+        Some(row.ok_or_else(not_found)?.0)
+    } else {
+        None
+    };
+    // CONCURRENCY: FOR SHARE blocks membership deletion and reassignment, and
+    // blocks system moves/deletion (FOR KEY SHARE would permit environment
+    // updates). Keep these locks while this transaction assembles the body.
+    let environments: Vec<Uuid> = sqlx::query_scalar(
+        "SELECT environment_id FROM user_environment_memberships
+         WHERE user_id=$1 ORDER BY environment_id FOR SHARE",
+    )
+    .bind(user_id)
+    .fetch_all(&mut *tx)
+    .await
+    .map_err(|_| internal_error("Failed to lock environment memberships"))?;
+    let system_ids = if let Some(environment) = environment {
+        if !role.can_access_system_environment(environment, &environments.iter().copied().collect())
+        {
+            return Err(not_found());
+        }
+        target.into_iter().collect()
+    } else {
+        sqlx::query_scalar(
+            "SELECT id FROM systems WHERE environment_id=ANY($1)
+             ORDER BY id FOR SHARE",
+        )
+        .bind(&environments)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(|_| internal_error("Failed to lock system read scope"))?
+    };
+    Ok((tx, system_ids))
+}
+
+/// Returns applicable compliance bundles and rollups for an accessible system.
+///
+/// `GET /api/v1/systems/:system_id/compliance` requires current environment
+/// membership for non-admin callers, including for legacy direct-policy data.
+/// Administrators retain fleet-wide access.
+///
+/// # Concurrency
+/// Non-admin reads hold shared locks on the target and current memberships
+/// until the response body is materialized. Catalog aggregates, assignment
+/// snapshots, resolver inputs, and evidence all use the same writable
+/// REPEATABLE READ transaction. Commit failures discard the response.
 ///
 /// This endpoint uses set-based queries to avoid N+1 database patterns.
 /// All-or-nothing behavior: infrastructure failures return 500.
 ///
-/// Returns 404 if the system does not exist.
+/// # Errors
+/// Missing and inaccessible systems return the same 404 response.
+/// Authentication failures return 403; database failures return 500.
 pub async fn get_system_compliance_bundles(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    if authenticated_user_roles(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
     }
+    let mut guard = if has_admin_role(&roles) {
+        None
+    } else {
+        match lock_receiver_read_scope(
+            &pool,
+            user_id,
+            crate::auth::models::Role::Viewer,
+            Some(system_id),
+        )
+        .await
+        {
+            Ok((tx, _)) => Some(tx),
+            Err(response) => return response,
+        }
+    };
 
-    match list_system_bundles(&pool, system_id).await {
+    let result = if let Some(tx) = &mut guard {
+        list_system_bundles_in_tx(tx, system_id).await
+    } else {
+        list_system_bundles(&pool, system_id).await
+    };
+    match result {
         Ok(Some(bundle_rollups)) => {
+            let assignment_versions = bundle_rollups.assignment_versions;
             let bundles = bundle_rollups
                 .bundles
                 .into_iter()
-                .map(|(bundle, rollup)| SystemComplianceBundle { bundle, rollup })
+                .map(|(bundle, rollup)| {
+                    let assigned = assignment_versions.get(&bundle.id);
+                    SystemComplianceBundle {
+                        bundle,
+                        rollup,
+                        assigned_bundle_version_id: assigned.map(|version| version.id),
+                        assignment_mode: assigned.map(|version| version.enforcement_mode.clone()),
+                    }
+                })
                 .collect();
 
-            (
+            let response = (
                 StatusCode::OK,
                 Json(SystemComplianceBundlesResponse {
                     system_id,
@@ -418,26 +662,71 @@ pub async fn get_system_compliance_bundles(
                     overall_rollup: bundle_rollups.overall_rollup,
                 }),
             )
-                .into_response()
+                .into_response();
+            if let Some(tx) = guard {
+                if tx.commit().await.is_err() {
+                    return internal_error("Failed to commit read scope guard");
+                }
+            }
+            response
         }
         Ok(None) => not_found(),
         Err(_) => internal_error("Failed to load system compliance bundles"),
     }
 }
 
-/// `GET /api/v1/compliance/bundles/:id/systems/:system_id/evidence`
+/// Returns deployed compliance evidence only within the caller's current scope.
+///
+/// `GET /api/v1/compliance/bundles/:id/systems/:system_id/evidence` requires
+/// viewer-or-above access.
+///
+/// # Concurrency
+/// Non-admin scope locks, resolver reads, POA&M finding inserts, and assignment
+/// epoch checks share one writable REPEATABLE READ transaction. Locks remain
+/// held through response materialization; commit failures discard the response.
+/// The POA&M system sentinel precedes system and membership row locks, matching
+/// metadata writers. Assignment epoch locks follow during evidence loading.
+///
+/// # Errors
+/// Absent and inaccessible systems share a 404 response. Authentication or role
+/// failures return 403. Database, serialization, deadlock, and commit failures
+/// return 500 without partial evidence or query-only retries.
 pub async fn get_compliance_system_evidence(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path((bundle_id, system_id)): Path<(Uuid, Uuid)>,
     Query(query): Query<BundleVersionQuery>,
 ) -> impl IntoResponse {
-    if authenticated_user_roles(&pool, &headers).await.is_none() {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+        return forbidden();
+    };
+    if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
     }
+    let mut guard = if has_admin_role(&roles) {
+        None
+    } else {
+        match lock_evidence_read_scope(&pool, user_id, system_id).await {
+            Ok((tx, _)) => Some(tx),
+            Err(response) => return response,
+        }
+    };
 
-    match get_system_evidence(&pool, bundle_id, system_id, query.version_id).await {
-        Ok(Some(response)) => (StatusCode::OK, Json(response)).into_response(),
+    let result = if let Some(tx) = &mut guard {
+        get_system_evidence_in_tx(tx, bundle_id, system_id, query.version_id).await
+    } else {
+        get_system_evidence(&pool, bundle_id, system_id, query.version_id).await
+    };
+    match result {
+        Ok(Some(response)) => {
+            let response = (StatusCode::OK, Json(response)).into_response();
+            if let Some(tx) = guard {
+                if tx.commit().await.is_err() {
+                    return internal_error("Failed to commit read scope guard");
+                }
+            }
+            response
+        }
         Ok(None) => not_found(),
         Err(_) => internal_error("Failed to load compliance evidence"),
     }
@@ -911,6 +1200,9 @@ pub async fn trust_policy_version(
     if !has_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     let new_trust_state = if payload.trusted {
         "trusted"
@@ -1038,6 +1330,9 @@ pub async fn trust_bundle_version(
     if !has_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     let new_trust_state = if payload.trusted {
         "trusted"
@@ -1162,6 +1457,9 @@ pub async fn publish_policy_version(
 
     if !has_admin_role(&roles) {
         return forbidden();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     // Begin transaction immediately after RBAC
@@ -1308,6 +1606,9 @@ pub async fn create_policy_draft(
     if !has_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     let mut tx = match pool.begin().await {
         Ok(tx) => tx,
@@ -1423,6 +1724,9 @@ pub async fn publish_bundle_version(
 
     if !has_admin_role(&roles) {
         return forbidden();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     // Begin transaction immediately after RBAC
@@ -1814,6 +2118,9 @@ pub async fn create_bundle_draft(
 
     if !has_admin_role(&roles) {
         return forbidden();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     let mut tx = match pool.begin().await {
@@ -2315,20 +2622,21 @@ async fn persist_assignment_inner(
     // Assignment uniqueness is defined by bundle lineage + target, not by a
     // mutable/draft bundle-version row. Lock the target identity while checking
     // it so concurrent creates cannot silently create ambiguous assignments.
-    let duplicate_assignment: Option<Uuid> = sqlx::query_scalar(
-        r#"SELECT a.id
+    let duplicate_assignment: Option<(Uuid, Option<Uuid>, Option<Uuid>)> = sqlx::query_as(
+        r#"SELECT a.id, a.current_version_id, av.id
            FROM compliance_bundle_assignments a
-           JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
-           JOIN compliance_bundle_versions bv ON bv.id = av.bundle_version_id
+           LEFT JOIN compliance_bundle_assignment_versions av
+             ON av.id = a.current_version_id
+            AND av.assignment_id = a.id
            WHERE a.active
-             AND bv.bundle_id = (
+             AND a.bundle_id = (
                SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1
-           )
+            )
              AND a.scope_type = $2
              AND (($2 = 'environment' AND a.environment_id = $3)
                OR ($2 = 'system' AND a.system_id = $3))
               AND ($4::uuid IS NULL OR a.id <> $4)
-           FOR UPDATE"#,
+           FOR UPDATE OF a"#,
     )
     .bind(authoritative_bundle_version_id)
     .bind(scope_type)
@@ -2338,8 +2646,27 @@ async fn persist_assignment_inner(
     .await
     .map_err(|_| internal_error("Failed to validate assignment uniqueness"))?;
 
-    if duplicate_assignment.is_some() {
+    if let Some((lineage_id, current_version_id, authoritative_version_id)) = duplicate_assignment {
         let _ = tx.rollback().await;
+        if current_version_id.is_none() || authoritative_version_id.is_none() {
+            tracing::error!(
+                assignment_id = %lineage_id,
+                current_version_id = ?current_version_id,
+                bundle_id = %bundle_lineage_id,
+                scope_type,
+                scope_id = %payload.scope_id,
+                "active assignment lineage has no authoritative current version"
+            );
+            return Err((
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "Assignment lineage incomplete",
+                    "message": "The existing assignment lineage has no authoritative current version",
+                    "code": "ASSIGNMENT_LINEAGE_INCOMPLETE"
+                })),
+            )
+                .into_response());
+        }
         return Err((
             StatusCode::CONFLICT,
             Json(serde_json::json!({
@@ -2430,7 +2757,18 @@ async fn persist_assignment_inner(
         .await;
         if let Err(error) = inserted {
             let _ = tx.rollback().await;
-            tracing::error!("Failed to create assignment lineage: {error}");
+            if let Some(database_error) = error.as_database_error() {
+                let message: String = database_error.message().chars().take(512).collect();
+                tracing::error!(
+                    code = ?database_error.code(),
+                    message,
+                    constraint = ?database_error.constraint(),
+                    table = ?database_error.table(),
+                    "failed to create assignment lineage"
+                );
+            } else {
+                tracing::error!(error = %error, "failed to create assignment lineage");
+            }
             return Err(internal_error("Failed to create assignment"));
         }
         if failure_point == Some("after_lineage_insert") {
@@ -2721,6 +3059,9 @@ pub async fn create_assignment(
     if !has_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
 
     // Validate and normalize reason
     match validate_assignment_reason(&payload.reason) {
@@ -2748,6 +3089,9 @@ pub async fn update_assignment(
     };
     if !has_admin_role(&roles) {
         return forbidden();
+    }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
     // Load existing assignment and its current immutable snapshot atomically
@@ -2830,18 +3174,19 @@ pub async fn get_assignment(
     headers: HeaderMap,
     Path(assignment_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
     }
 
-    let row = sqlx::query_as::<_, (Uuid, Option<Uuid>, Option<Uuid>, Option<Uuid>, String, Option<Uuid>, Option<Uuid>, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, bool)>(
-            "SELECT a.id, av.id, bv.bundle_id, av.bundle_version_id, a.scope_type, a.environment_id, a.system_id, av.enforcement_mode, av.assignment_overlay_digest, a.created_at, a.updated_at, a.active \
+    let row = sqlx::query_as::<_, (Uuid, Option<Uuid>, Option<Uuid>, Option<Uuid>, String, Option<Uuid>, Option<Uuid>, Option<Uuid>, Option<String>, Option<String>, chrono::DateTime<chrono::Utc>, chrono::DateTime<chrono::Utc>, bool)>(
+            "SELECT a.id, av.id, bv.bundle_id, av.bundle_version_id, a.scope_type, a.environment_id, a.system_id, COALESCE(a.environment_id, s.environment_id), av.enforcement_mode, av.assignment_overlay_digest, a.created_at, a.updated_at, a.active \
          FROM compliance_bundle_assignments a \
          LEFT JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id \
          LEFT JOIN compliance_bundle_versions bv ON bv.id = av.bundle_version_id \
+         LEFT JOIN systems s ON s.id = a.system_id \
          WHERE a.id = $1",
     )
     .bind(assignment_id)
@@ -2856,6 +3201,7 @@ pub async fn get_assignment(
         scope_type,
         env_id,
         sys_id,
+        target_environment_id,
         mode,
         digest,
         created_at,
@@ -2869,6 +3215,15 @@ pub async fn get_assignment(
             return internal_error("Failed to load assignment");
         }
     };
+
+    // SECURITY: Assignment existence, inactive state, and policy overlays are
+    // sensitive. Return the same 404 as an unknown assignment when a scoped
+    // caller does not belong to the assignment target's environment.
+    match can_view_environment_scope(&pool, user_id, &roles, target_environment_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
+    }
 
     // Deactivated assignments have no current immutable snapshot.
     // Return a 410 Gone so the UI knows the assignment has been removed.
@@ -3122,6 +3477,9 @@ pub async fn delete_assignment(
     if !has_admin_role(&roles) {
         return forbidden();
     }
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
     deactivate_assignment_inner(
         &pool,
         user_id,
@@ -3270,11 +3628,30 @@ pub async fn list_environment_assignments(
     headers: HeaderMap,
     Path(environment_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
+    }
+
+    let exists = match sqlx::query_scalar::<_, bool>(
+        "SELECT EXISTS(SELECT 1 FROM environments WHERE id = $1)",
+    )
+    .bind(environment_id)
+    .fetch_one(&pool)
+    .await
+    {
+        Ok(exists) => exists,
+        Err(_) => return internal_error("Failed to load environment"),
+    };
+    if !exists {
+        return not_found();
+    }
+    match can_view_environment_scope(&pool, user_id, &roles, Some(environment_id)).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
     }
 
     match list_assignments_for_scope(&pool, "environment", environment_id).await {
@@ -3296,11 +3673,22 @@ pub async fn list_system_assignments(
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
+    }
+
+    let system = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(system)) => system,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    match can_view_environment_scope(&pool, user_id, &roles, system.environment_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
     }
 
     match list_assignments_for_scope(&pool, "system", system_id).await {
@@ -3327,11 +3715,22 @@ pub async fn get_system_effective_policies(
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
         return forbidden();
+    }
+
+    let access_row = match find_system_access_row(&pool, system_id).await {
+        Ok(Some(system)) => system,
+        Ok(None) => return not_found(),
+        Err(_) => return internal_error("Failed to load system"),
+    };
+    match can_view_environment_scope(&pool, user_id, &roles, access_row.environment_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
     }
 
     // Verify the system exists and load its health/environment data.
@@ -3373,6 +3772,10 @@ pub async fn get_system_effective_policies(
                 &pool,
                 &system,
                 &set.policies,
+                &set.effective_set_digest,
+                &crate::services::composite_enforcement::enforce_composite_authorization_digest(
+                    &set,
+                ),
                 assignment_status,
             )
             .await
@@ -3404,7 +3807,7 @@ pub async fn get_assignment_effective_policies(
     headers: HeaderMap,
     Path(assignment_id): Path<Uuid>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
@@ -3413,21 +3816,40 @@ pub async fn get_assignment_effective_policies(
 
     // Bundle version and enforcement mode are immutable snapshot fields. The
     // mutable lineage row only provides the target scope and active state.
-    let row = sqlx::query_as::<_, (Option<Uuid>, Option<Uuid>, Option<String>, String, Option<Uuid>, Option<Uuid>, bool)>(
-        "SELECT av.id, av.bundle_version_id, av.enforcement_mode, a.scope_type, a.environment_id, a.system_id, a.active \
+    let row = sqlx::query_as::<_, (Option<Uuid>, Option<Uuid>, Option<String>, String, Option<Uuid>, Option<Uuid>, Option<Uuid>, bool)>(
+        "SELECT av.id, av.bundle_version_id, av.enforcement_mode, a.scope_type, a.environment_id, a.system_id, COALESCE(a.environment_id, s.environment_id), a.active \
          FROM compliance_bundle_assignments a \
          LEFT JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id \
+         LEFT JOIN systems s ON s.id = a.system_id \
          WHERE a.id = $1",
     )
     .bind(assignment_id)
     .fetch_optional(&pool)
     .await;
 
-    let (current_version_id, bv_id, mode, scope_type, env_id, sys_id, active) = match row {
+    let (
+        current_version_id,
+        bv_id,
+        mode,
+        scope_type,
+        env_id,
+        sys_id,
+        target_environment_id,
+        active,
+    ) = match row {
         Ok(Some(r)) => r,
         Ok(None) => return not_found(),
         Err(_) => return internal_error("Failed to load assignment"),
     };
+
+    // SECURITY: Check scope before exposing whether the assignment is active or
+    // returning any immutable overlay data. Unknown and inaccessible IDs are
+    // intentionally indistinguishable.
+    match can_view_environment_scope(&pool, user_id, &roles, target_environment_id).await {
+        Ok(true) => {}
+        Ok(false) => return not_found(),
+        Err(response) => return response,
+    }
 
     let Some((current_version_id, bv_id, mode)) = current_version_id
         .zip(bv_id)
@@ -3555,7 +3977,7 @@ pub async fn preview_assignment(
     headers: HeaderMap,
     Json(payload): Json<crate::api::models::PreviewAssignmentRequest>,
 ) -> impl IntoResponse {
-    let Some((_user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
     if !crate::handlers::api::rbac::has_viewer_or_above_role(&roles) {
@@ -3575,29 +3997,29 @@ pub async fn preview_assignment(
             .into_response();
     }
 
-    let target_exists: bool = if scope_type == "environment" {
-        match sqlx::query_scalar::<_, bool>(
-            "SELECT EXISTS(SELECT 1 FROM environments WHERE id = $1)",
-        )
-        .bind(payload.scope_id)
-        .fetch_one(&pool)
-        .await
+    let target_environment_id: Option<Option<Uuid>> = if scope_type == "environment" {
+        match sqlx::query_scalar::<_, Uuid>("SELECT id FROM environments WHERE id = $1")
+            .bind(payload.scope_id)
+            .fetch_optional(&pool)
+            .await
         {
-            Ok(exists) => exists,
+            Ok(environment_id) => environment_id.map(Some),
             Err(_) => return internal_error("Failed to verify assignment environment"),
         }
     } else {
-        match sqlx::query_scalar::<_, bool>("SELECT EXISTS(SELECT 1 FROM systems WHERE id = $1)")
-            .bind(payload.scope_id)
-            .fetch_one(&pool)
-            .await
+        match sqlx::query_scalar::<_, Option<Uuid>>(
+            "SELECT environment_id FROM systems WHERE id = $1",
+        )
+        .bind(payload.scope_id)
+        .fetch_optional(&pool)
+        .await
         {
-            Ok(exists) => exists,
+            Ok(environment_id) => environment_id,
             Err(_) => return internal_error("Failed to verify assignment system"),
         }
     };
 
-    if !target_exists {
+    let Some(target_environment_id) = target_environment_id else {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
@@ -3607,6 +4029,21 @@ pub async fn preview_assignment(
             })),
         )
             .into_response();
+    };
+    match can_view_environment_scope(&pool, user_id, &roles, target_environment_id).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::NOT_FOUND,
+                Json(serde_json::json!({
+                    "error": "Target not found",
+                    "message": format!("{} {} does not exist", scope_type, payload.scope_id),
+                    "code": "ASSIGNMENT_TARGET_NOT_FOUND"
+                })),
+            )
+                .into_response();
+        }
+        Err(response) => return response,
     }
 
     let target = if scope_type == "environment" {
@@ -3761,10 +4198,24 @@ pub struct CfNativeReconciliationPreview {
     pub import_trust_state: String, // untrusted
 }
 
+#[cfg(test)]
+fn validate_imported_policy_configs(
+    records: &[crate::compliance::xccdf::import_models::ImportedPolicyRecord],
+) -> Result<(), String> {
+    for record in records {
+        crate::models::deployment_policies::validate_policy_type_config(
+            &record.policy_type,
+            &record.config,
+        )?;
+    }
+    Ok(())
+}
+
 /// Compute CF-native reconciliation data for preview.
 pub(crate) async fn compute_cf_native_reconciliation(
     pool: &PgPool,
     parsed: &crate::compliance::xccdf::models::ParsedXccdf,
+    policy_records: Option<Vec<crate::compliance::xccdf::import_models::ImportedPolicyRecord>>,
 ) -> Result<Option<CfNativeReconciliationPreview>, String> {
     use crate::compliance::xccdf::models::DocumentClass;
     use crate::compliance::xccdf::reconciliation::{
@@ -3777,8 +4228,15 @@ pub(crate) async fn compute_cf_native_reconciliation(
     }
 
     // Validate CF-native document to get policy records
-    let (_validated, policy_records) = validate_cf_native_document(parsed)
-        .map_err(|e| format!("CF-native validation failed: {}", e.message))?;
+    let policy_records = match policy_records {
+        Some(records) => records,
+        None => {
+            validate_cf_native_document_async(parsed)
+                .await
+                .map_err(|e| format!("CF-native validation failed: {}", e.message))?
+                .1
+        }
+    };
 
     let bundle_meta = match &parsed.cf_bundle_meta {
         Some(m) => m,
@@ -4396,10 +4854,37 @@ async fn compute_foreign_stig_reconciliation(
     })))
 }
 
-/// `POST /api/v1/compliance/xccdf/preview`
+/// Returns a classified XCCDF preview without durable writes.
 ///
-/// Accepts multipart XML upload, parses XCCDF 1.2 and CF-XCCDF content,
-/// classifies the document, and returns typed metadata without durable writes.
+/// Handles `POST /api/v1/compliance/xccdf/preview` for an authenticated
+/// administrator. Accepts one XML or supported ZIP upload in the `file`
+/// multipart field. HTTP 200 includes metadata and rule summaries; supported
+/// XCCDF 1.1 and 1.2 Benchmarks can have zero rules.
+///
+/// # Errors
+///
+/// Returns HTTP 403 for missing administrator authorization, 400 for malformed
+/// multipart fields or an empty file, 413 for upload limits, and 415 for an
+/// unsupported file type or content/extension mismatch. Blocking XML/package
+/// diagnostics retain HTTP 422 with diagnostic codes. A parsed
+/// [`UnsupportedPackage`](crate::compliance::xccdf::models::DocumentClass::UnsupportedPackage)
+/// returns HTTP 422 with `IMPORT_DOCUMENT_CLASS_UNSUPPORTED`, as committed
+/// import does. CF-native validation failures also return HTTP 422.
+/// Reconciliation failures return HTTP 500.
+///
+/// # Examples
+///
+/// An administrator can upload this XML as `file` with filename `empty.xml`:
+///
+/// ```xml
+/// <Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="empty">
+///   <title>Empty benchmark</title>
+/// </Benchmark>
+/// ```
+///
+/// The response is HTTP 200 with `document_class: "foreignxccdf"` and
+/// `rule_count: 0`. Replacing the XML with `<inventory/>` returns HTTP 422
+/// with `error: "IMPORT_DOCUMENT_CLASS_UNSUPPORTED"`.
 pub async fn xccdf_preview(
     State(pool): State<PgPool>,
     headers: HeaderMap,
@@ -4452,20 +4937,60 @@ pub async fn xccdf_preview(
             .into_response();
     }
 
-    // Compute CF-native reconciliation data for CfNativeExact documents
-    let cf_native_reconciliation = match compute_cf_native_reconciliation(&pool, &parsed).await {
-        Ok(recon) => recon,
-        Err(e) => {
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(serde_json::json!({
-                    "error": "CF-native reconciliation failed",
-                    "message": e,
-                })),
-            )
-                .into_response();
+    // Preserve the other preview classes and their diagnostics. Only this
+    // class needs the committed-import gate before reconciliation.
+    if matches!(
+        parsed.class,
+        crate::compliance::xccdf::models::DocumentClass::UnsupportedPackage
+    ) && let Some(error) = check_document_class(&parsed)
+    {
+        return (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(ApiError {
+                error: error.code.into(),
+                message: error.message,
+                details: None,
+            }),
+        )
+            .into_response();
+    }
+
+    let cf_native_policy_records = if matches!(
+        parsed.class,
+        crate::compliance::xccdf::models::DocumentClass::CfNativeExact
+    ) {
+        match validate_cf_native_document_async(&parsed).await {
+            Ok((_, records)) => Some(records),
+            Err(error) => {
+                return (
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    Json(serde_json::json!({
+                        "error": error.code,
+                        "message": error.message,
+                    })),
+                )
+                    .into_response();
+            }
         }
+    } else {
+        None
     };
+
+    // Compute CF-native reconciliation data for CfNativeExact documents
+    let cf_native_reconciliation =
+        match compute_cf_native_reconciliation(&pool, &parsed, cf_native_policy_records).await {
+            Ok(recon) => recon,
+            Err(e) => {
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": "CF-native reconciliation failed",
+                        "message": e,
+                    })),
+                )
+                    .into_response();
+            }
+        };
     let foreign_stig_reconciliation =
         match compute_foreign_stig_reconciliation(&pool, &parsed, &original_sha256).await {
             Ok(reconciliation) => reconciliation,
@@ -4750,7 +5275,11 @@ pub async fn xccdf_import(
             .into_response();
     }
 
-    if let Some(err) = check_document_class(&pkg.parsed) {
+    if !matches!(
+        pkg.parsed.class,
+        crate::compliance::xccdf::models::DocumentClass::CfNativeExact
+    ) && let Some(err) = check_document_class(&pkg.parsed)
+    {
         let status = if err.code == "CF_NATIVE_DIGEST_MISMATCH" {
             StatusCode::CONFLICT
         } else {
@@ -4771,7 +5300,8 @@ pub async fn xccdf_import(
         pkg.parsed.class,
         crate::compliance::xccdf::models::DocumentClass::CfNativeExact
     ) {
-        let (validated, policy_records) = match validate_cf_native_document(&pkg.parsed) {
+        let (validated, policy_records) = match validate_cf_native_document_async(&pkg.parsed).await
+        {
             Ok(value) => value,
             Err(err) => {
                 let status = if err.code == "CF_NATIVE_DIGEST_MISMATCH" {
@@ -6245,7 +6775,7 @@ pub async fn policy_interchange_import(
     };
 
     // Validate no duplicate version IDs within the document (shared validator)
-    if let Err(message) = validate_policy_interchange_document(&policies) {
+    if let Err(message) = validate_policy_interchange_document_async(&policies).await {
         return policy_interchange_invalid_response(&message).into_response();
     }
 
@@ -7005,7 +7535,7 @@ pub async fn policy_interchange_preview(
     };
 
     // Validate no duplicate version IDs within the document (shared validator)
-    if let Err(message) = validate_policy_interchange_document(&policies) {
+    if let Err(message) = validate_policy_interchange_document_async(&policies).await {
         return (
             StatusCode::UNPROCESSABLE_ENTITY,
             Json(serde_json::json!({
@@ -7071,6 +7601,57 @@ fn policy_interchange_invalid_response(message: &str) -> impl IntoResponse {
         })),
     )
         .into_response()
+}
+
+#[cfg(test)]
+fn validate_policy_interchange_document(policies: &[NormalizedPolicyImport]) -> Result<(), String> {
+    // Check for duplicate version IDs within the document
+    let mut seen_versions = std::collections::HashSet::new();
+    for policy in policies {
+        let composite = crate::models::deployment_policies::validate_policy_type_config(
+            &policy.policy_type,
+            &policy.config,
+        )?;
+        if composite.is_some() && policy.execution_phase != "multi-phase" {
+            return Err(format!(
+                "composite policy version {} must use execution_phase multi-phase",
+                policy.version_id
+            ));
+        }
+        if !seen_versions.insert(policy.version_id) {
+            return Err(format!(
+                "Duplicate version ID {} in import document",
+                policy.version_id
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn validate_policy_interchange_document_async(
+    policies: &[NormalizedPolicyImport],
+) -> Result<(), String> {
+    let mut seen_versions = std::collections::HashSet::new();
+    for policy in policies {
+        let composite = crate::models::deployment_policies::validate_policy_type_config_async(
+            &policy.policy_type,
+            &policy.config,
+        )
+        .await?;
+        if composite.is_some() && policy.execution_phase != "multi-phase" {
+            return Err(format!(
+                "composite policy version {} must use execution_phase multi-phase",
+                policy.version_id
+            ));
+        }
+        if !seen_versions.insert(policy.version_id) {
+            return Err(format!(
+                "Duplicate version ID {} in import document",
+                policy.version_id
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn parse_policy_interchange_upload_with_source(
@@ -7503,8 +8084,12 @@ fn is_body_limit_error(err: &axum::extract::multipart::MultipartError) -> bool {
 
 #[cfg(test)]
 mod tests {
+    mod receiver_security;
+
     use super::*;
-    use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
+    use crate::auth::session::{
+        CSRF_COOKIE_NAME, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, hash_token,
+    };
     use crate::compliance::canonical::{ImplementationState, PublicationState};
     use crate::compliance::interchange::{MAX_XCCDF_MULTIPART_BYTES, MAX_XCCDF_XML_BYTES};
     use crate::models::auth_identity::AuthRole;
@@ -7697,20 +8282,23 @@ mod tests {
             Utc::now() + chrono::Duration::hours(1),
             Some("test-agent".to_string()),
             Some("127.0.0.1".to_string()),
-            "test".to_string(),
+            "local".to_string(),
         )
         .await
         .expect("create_user_session should succeed");
         token
     }
 
-    /// Serve the preview route exactly as production wires it, including the
-    /// route-level body limit layer, and return the base URL.
+    /// Serves preview and import with their production route-level body limits.
     async fn spawn_preview_server(pool: PgPool) -> String {
         let app = Router::new()
             .route(
                 "/api/v1/compliance/xccdf/preview",
                 post(xccdf_preview).layer(DefaultBodyLimit::max(MAX_XCCDF_MULTIPART_BYTES)),
+            )
+            .route(
+                "/api/v1/compliance/xccdf/import",
+                post(xccdf_import).layer(DefaultBodyLimit::max(MAX_XCCDF_MULTIPART_BYTES)),
             )
             .with_state(pool);
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -8048,6 +8636,142 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
+    async fn preview_rejects_unsupported_document_class_consistently_with_import() {
+        use sha2::{Digest, Sha256};
+
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_preview_server(pool).await;
+        let csrf = format!("xccdf-class-csrf-{}", Uuid::new_v4().simple());
+        for xml in [
+            r#"<inventory xmlns="urn:assurance:inventory"><foreignRule id="not-xccdf"/></inventory>"#,
+            r#"<Benchmark xmlns="urn:wrong:xccdf" id="wrong"><Rule id="foreign-rule"/></Benchmark>"#,
+        ] {
+            let mut body = Vec::new();
+            push_file_field(&mut body, "file", "unsupported.xml", xml.as_bytes());
+            finish_multipart(&mut body);
+            let preview = post_multipart(&base, &token, body).await;
+            let preview_status = preview.status();
+            let preview_json: serde_json::Value = preview.json().await.expect("preview JSON");
+
+            // A matching digest and a well-formed plan must reach the real
+            // import class gate, rather than fail an earlier input check.
+            let plan = serde_json::json!({
+                "expected_sha256": hex::encode(Sha256::digest(xml.as_bytes())),
+                "selected_rule_ids": [],
+                "rule_actions": [],
+                "bundle": {"name": "Unsupported input", "framework": "test", "version": "1"}
+            });
+            let mut body = Vec::new();
+            push_file_field(&mut body, "file", "unsupported.xml", xml.as_bytes());
+            push_text_field(
+                &mut body,
+                "plan",
+                &serde_json::to_vec(&plan).expect("plan JSON"),
+            );
+            finish_multipart(&mut body);
+            let import = reqwest::Client::new()
+                .post(format!("{base}/api/v1/compliance/xccdf/import"))
+                .header(
+                    "content-type",
+                    format!("multipart/form-data; boundary={BOUNDARY}"),
+                )
+                .header(
+                    "cookie",
+                    format!("{SESSION_COOKIE_NAME}={token}; {CSRF_COOKIE_NAME}={csrf}"),
+                )
+                .header(CSRF_HEADER_NAME.as_str(), &csrf)
+                .body(body)
+                .send()
+                .await
+                .expect("import request completes");
+            assert_eq!(import.status().as_u16(), 422);
+            let import_json: serde_json::Value = import.json().await.expect("import JSON");
+            assert_eq!(import_json["error"], "IMPORT_DOCUMENT_CLASS_UNSUPPORTED");
+            assert_eq!(preview_status.as_u16(), 422, "unsupported XML: {xml}");
+            assert_eq!(preview_json, import_json);
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_preserves_supported_namespaces_and_embedded_benchmark() {
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_preview_server(pool).await;
+        for xml in [
+            minimal_xccdf().to_string(),
+            minimal_xccdf().replace("xccdf/1.2", "xccdf/1.1"),
+            r#"<x:Benchmark xmlns:x="http://checklists.nist.gov/xccdf/1.2" id="prefixed"><x:title>Prefixed</x:title><x:Rule id="xccdf_org.crystalforge_rule_test"><x:title>Test Rule</x:title></x:Rule></x:Benchmark>"#.to_string(),
+            format!("<inventory>{}</inventory>", minimal_xccdf().split_once("?>").expect("XML declaration").1),
+        ] {
+            let mut body = Vec::new();
+            push_file_field(&mut body, "file", "supported.xml", xml.as_bytes());
+            finish_multipart(&mut body);
+            let response = post_multipart(&base, &token, body).await;
+            assert_eq!(response.status().as_u16(), 200, "supported XML: {xml}");
+            let json: serde_json::Value = response.json().await.expect("preview JSON");
+            assert_eq!(json["document_class"], "foreignxccdf");
+            assert_eq!(json["rule_count"], 1);
+            assert_eq!(json["rules"][0]["id"], "xccdf_org.crystalforge_rule_test");
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_preserves_zero_rule_benchmarks() {
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_preview_server(pool).await;
+        for namespace in [
+            "http://checklists.nist.gov/xccdf/1.1",
+            "http://checklists.nist.gov/xccdf/1.2",
+        ] {
+            let xml = format!(
+                r#"<Benchmark xmlns="{namespace}" id="empty"><title>Empty</title></Benchmark>"#
+            );
+            let mut body = Vec::new();
+            push_file_field(&mut body, "file", "empty-benchmark.xml", xml.as_bytes());
+            finish_multipart(&mut body);
+            let response = post_multipart(&base, &token, body).await;
+            assert_eq!(response.status().as_u16(), 200);
+            let json: serde_json::Value = response.json().await.expect("preview JSON");
+            assert_eq!(json["document_class"], "foreignxccdf");
+            assert_eq!(json["rule_count"], 0);
+            assert_eq!(json["rules"], serde_json::json!([]));
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn preview_preserves_malformed_xml_and_empty_file_errors() {
+        let pool = test_pool_from_env().await;
+        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let base = spawn_preview_server(pool).await;
+        for (xml, status) in [("<Benchmark><Rule></Benchmark>", 422), ("", 400)] {
+            let mut body = Vec::new();
+            push_file_field(&mut body, "file", "test.xml", xml.as_bytes());
+            finish_multipart(&mut body);
+            let response = post_multipart(&base, &token, body).await;
+            assert_eq!(response.status().as_u16(), status);
+            let json: serde_json::Value = response.json().await.expect("error JSON");
+            if status == 422 {
+                assert_eq!(json["error"], "XCCDF validation failed");
+                assert!(
+                    json["errors"]
+                        .as_array()
+                        .expect("errors")
+                        .iter()
+                        .any(|e| e["blocking"] == true)
+                );
+            } else {
+                assert_eq!(json["error"], "Bad Request");
+            }
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
     async fn preview_rejects_blocking_validation_errors_with_422() {
         let pool = test_pool_from_env().await;
         let token = admin_session_token(&pool).await;
@@ -8193,6 +8917,10 @@ mod tests {
                 "/api/v1/compliance/bundle-versions/:version_id/publish",
                 post(publish_bundle_version),
             )
+            .route(
+                "/api/v1/compliance/bundle-versions/:version_id/xccdf",
+                get(export_bundle_xccdf),
+            )
             // Draft derivation
             .route(
                 "/api/v1/policies/:policy_id/drafts",
@@ -8276,15 +9004,35 @@ mod tests {
     /// Create a minimal draft policy and return (policy_id, version_id, digest).
     /// Does NOT insert a manual version — relies on the trigger to create '0.1.0'.
     async fn make_draft_policy(pool: &PgPool, name: &str) -> (Uuid, Uuid, String) {
+        make_draft_policy_with_config(
+            pool,
+            name,
+            &serde_json::json!({
+                "mode": "all",
+                "context": "nixos-configuration-v1",
+                "binding": "cfg",
+                "rules": []
+            }),
+        )
+        .await
+    }
+
+    /// Creates a minimal draft policy with the specified custom-check config.
+    async fn make_draft_policy_with_config(
+        pool: &PgPool,
+        name: &str,
+        config: &serde_json::Value,
+    ) -> (Uuid, Uuid, String) {
         use crate::compliance::digest::PolicyVersionCanonical;
 
         let policy_id = Uuid::new_v4();
         sqlx::query(
             r#"INSERT INTO deployment_policies (id, name, policy_type, enabled, config)
-               VALUES ($1, $2, 'custom_check', false, '{"mode":"all","context":"nixos-configuration-v1","binding":"cfg","rules":[]}')"#,
+               VALUES ($1, $2, 'custom_check', false, $3)"#,
         )
         .bind(policy_id)
         .bind(name)
+        .bind(config)
         .execute(pool)
         .await
         .expect("insert deployment_policy");
@@ -8346,25 +9094,80 @@ mod tests {
     }
 
     async fn make_draft_cve_policy(pool: &PgPool, name: &str) -> (Uuid, Uuid) {
+        make_draft_cve_policy_with_config(
+            pool,
+            name,
+            &serde_json::json!({
+                "max_critical": 0,
+                "max_high": null,
+                "require_high_justification": false,
+                "strict": true,
+                "when_no_scan": "block",
+            }),
+        )
+        .await
+    }
+
+    async fn make_draft_cve_policy_with_config(
+        pool: &PgPool,
+        name: &str,
+        config: &serde_json::Value,
+    ) -> (Uuid, Uuid) {
         let policy_id = Uuid::new_v4();
         sqlx::query(
             r#"INSERT INTO deployment_policies (id, name, policy_type, enabled, config)
-               VALUES ($1, $2, 'require_cve_check', false,
-                       '{"max_critical":0,"max_high":null,"require_high_justification":false,"strict":true,"when_no_scan":"block"}')"#,
+               VALUES ($1, $2, 'require_cve_check', false, $3)"#,
         )
         .bind(policy_id)
         .bind(name)
+        .bind(config)
         .execute(pool)
         .await
         .expect("insert cve deployment_policy");
-        let version_id: Uuid = sqlx::query_scalar(
-            "SELECT id FROM deployment_policy_versions WHERE policy_id = $1 AND version = '0.1.0'",
+        let version_row: (
+            Uuid,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+            serde_json::Value,
+            serde_json::Value,
+            serde_json::Value,
+            Option<String>,
+            Option<bool>,
+        ) = sqlx::query_as(
+            r#"SELECT id, name, description, policy_type, implementation_state,
+                      execution_phase, config, compliance_metadata, dependencies,
+                      opaque_xml, enabled_by_default
+               FROM deployment_policy_versions
+               WHERE policy_id = $1 AND version = '0.1.0'"#,
         )
         .bind(policy_id)
         .fetch_one(pool)
         .await
         .expect("fetch cve version");
-        (policy_id, version_id)
+        let canonical = crate::compliance::digest::PolicyVersionCanonical {
+            name: version_row.1,
+            description: version_row.2,
+            policy_type: version_row.3,
+            implementation_state: version_row.4,
+            execution_phase: version_row.5,
+            config: version_row.6,
+            compliance_metadata: version_row.7,
+            dependencies: version_row.8,
+            opaque_xml_digest: crate::compliance::digest::PolicyVersionCanonical::digest_opaque_xml(
+                version_row.9.as_deref(),
+            ),
+            enabled_by_default: version_row.10,
+        };
+        sqlx::query("UPDATE deployment_policy_versions SET semantic_digest = $1 WHERE id = $2")
+            .bind(canonical.compute_digest())
+            .bind(version_row.0)
+            .execute(pool)
+            .await
+            .expect("update CVE fixture digest");
+        (policy_id, version_row.0)
     }
 
     /// Publish the given policy version via direct DB write (used in fixture setup).
@@ -8407,6 +9210,42 @@ mod tests {
         .expect("set published pointer");
 
         tx.commit().await.expect("commit db_publish_policy_version");
+    }
+
+    /// Publishes a bundle version directly for assignment fixture setup.
+    async fn db_publish_bundle_version(pool: &PgPool, version_id: Uuid) {
+        let mut tx = pool.begin().await.expect("begin bundle publication");
+        sqlx::query(
+            "UPDATE compliance_bundles
+             SET current_draft_version_id = NULL
+             WHERE current_draft_version_id = $1",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("clear bundle draft pointer");
+        sqlx::query(
+            "UPDATE compliance_bundle_versions
+             SET publication_state = 'accepted', published_at = now(),
+                 trust_state = 'trusted', trusted_at = now()
+             WHERE id = $1",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("publish bundle version");
+        sqlx::query(
+            "UPDATE compliance_bundles
+             SET current_published_version_id = $1
+             WHERE id = (
+                 SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1
+             )",
+        )
+        .bind(version_id)
+        .execute(&mut *tx)
+        .await
+        .expect("set bundle published pointer");
+        tx.commit().await.expect("commit bundle publication");
     }
 
     /// Create a draft bundle with the given set of already-published policy version IDs.
@@ -9134,11 +9973,14 @@ mod tests {
         // Publish via API first
         let base = spawn_phase1_server(pool.clone()).await;
         let client = reqwest::Client::new();
+        let csrf = format!("policy-draft-csrf-{}", Uuid::new_v4().simple());
+        let cookie = format!("{SESSION_COOKIE_NAME}={token}; {CSRF_COOKIE_NAME}={csrf}");
         let pub_r = client
             .post(format!(
                 "{base}/api/v1/policy-versions/{version_id}/publish"
             ))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .json(&serde_json::json!({"expected_semantic_digest": digest}))
             .send()
             .await
@@ -9148,7 +9990,8 @@ mod tests {
         // Create draft
         let draft_r = client
             .post(format!("{base}/api/v1/policies/{policy_id}/drafts"))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .json(&serde_json::json!({"new_version": "2.0.0-draft"}))
             .send()
             .await
@@ -9275,7 +10118,8 @@ mod tests {
 
         let second = client
             .post(format!("{base}/api/v1/policies/{policy_id}/drafts"))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .json(&serde_json::json!({"new_version": "3.0.0-draft"}))
             .send()
             .await
@@ -9379,6 +10223,180 @@ mod tests {
         .expect("membership");
         assert_eq!(member_count, 1);
         assert_eq!(member_order, 0);
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn publish_bundle_with_seed_shaped_cve_policy_commits_and_exports() {
+        let pool = test_pool_from_env().await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let sparse_config = serde_json::json!({
+            "max_critical": 0,
+            "strict": true,
+            "when_no_scan": "block",
+        });
+        let (policy_id, policy_version_id) = make_draft_cve_policy_with_config(
+            &pool,
+            &format!("seed-cve-{}", Uuid::new_v4().simple()),
+            &sparse_config,
+        )
+        .await;
+        db_trust_policy_version(&pool, policy_version_id, admin_id).await;
+        db_publish_policy_version(&pool, policy_id, policy_version_id).await;
+        let (bundle_id, bundle_version_id, digest) = make_draft_bundle(
+            &pool,
+            &format!("seed-cve-bundle-{}", Uuid::new_v4().simple()),
+            &[policy_version_id],
+        )
+        .await;
+        db_trust_bundle_version(&pool, bundle_version_id, admin_id).await;
+
+        let base = spawn_phase1_server(pool.clone()).await;
+        let client = reqwest::Client::new();
+        let csrf = format!("seed-cve-csrf-{}", Uuid::new_v4().simple());
+        let cookie = format!("{SESSION_COOKIE_NAME}={token}; {CSRF_COOKIE_NAME}={csrf}");
+        let publish = client
+            .post(format!(
+                "{base}/api/v1/compliance/bundle-versions/{bundle_version_id}/publish"
+            ))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
+            .json(&serde_json::json!({"expected_semantic_digest": digest}))
+            .send()
+            .await
+            .expect("publish sparse CVE bundle");
+        let publish_status = publish.status().as_u16();
+        let publish_body = publish.text().await.expect("read publication response");
+        assert_eq!(publish_status, 200, "publication response: {publish_body}");
+
+        let persisted: (String, Option<Uuid>, Option<Uuid>, serde_json::Value) = sqlx::query_as(
+            r#"SELECT bv.publication_state, b.current_draft_version_id,
+                      b.current_published_version_id, pv.config
+               FROM compliance_bundle_versions bv
+               JOIN compliance_bundles b ON b.id = bv.bundle_id
+               JOIN compliance_bundle_version_policies bvp ON bvp.bundle_version_id = bv.id
+               JOIN deployment_policy_versions pv ON pv.id = bvp.policy_version_id
+               WHERE bv.id = $1"#,
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load committed publication state");
+        assert_eq!(persisted.0, "accepted");
+        assert_eq!(persisted.1, None);
+        assert_eq!(persisted.2, Some(bundle_version_id));
+        assert_eq!(
+            persisted.3, sparse_config,
+            "sparse config must remain exact"
+        );
+
+        let export = client
+            .get(format!(
+                "{base}/api/v1/compliance/bundle-versions/{bundle_version_id}/xccdf"
+            ))
+            .header("cookie", &cookie)
+            .send()
+            .await
+            .expect("export committed sparse CVE bundle");
+        assert_eq!(export.status().as_u16(), 200);
+        let xml = export.text().await.expect("read XCCDF export");
+        assert!(xml.contains("max-critical=\"0\""));
+        assert!(xml.contains("require-high-justification=\"false\""));
+        assert!(xml.contains("when-no-scan=\"block\""));
+        assert!(!xml.contains("<cf:max-high>"));
+
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_audit_events WHERE action = 'bundle_version_published' AND target = $1",
+        )
+        .bind(bundle_version_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("count committed publication audit");
+        assert_eq!(audit_count, 1);
+        let published_pointer: Option<Uuid> = sqlx::query_scalar(
+            "SELECT current_published_version_id FROM compliance_bundles WHERE id = $1",
+        )
+        .bind(bundle_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load published bundle pointer");
+        assert_eq!(published_pointer, Some(bundle_version_id));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn publish_bundle_with_malformed_cve_config_rolls_back() {
+        let pool = test_pool_from_env().await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (policy_id, policy_version_id) = make_draft_cve_policy_with_config(
+            &pool,
+            &format!("malformed-cve-{}", Uuid::new_v4().simple()),
+            &serde_json::json!({"strict": "true"}),
+        )
+        .await;
+        db_trust_policy_version(&pool, policy_version_id, admin_id).await;
+        db_publish_policy_version(&pool, policy_id, policy_version_id).await;
+        let (bundle_id, bundle_version_id, digest) = make_draft_bundle(
+            &pool,
+            &format!("malformed-cve-bundle-{}", Uuid::new_v4().simple()),
+            &[policy_version_id],
+        )
+        .await;
+        db_trust_bundle_version(&pool, bundle_version_id, admin_id).await;
+
+        let csrf = format!("malformed-cve-csrf-{}", Uuid::new_v4().simple());
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{}/api/v1/compliance/bundle-versions/{bundle_version_id}/publish",
+                spawn_phase1_server(pool.clone()).await
+            ))
+            .header(
+                "cookie",
+                format!("{SESSION_COOKIE_NAME}={token}; {CSRF_COOKIE_NAME}={csrf}"),
+            )
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
+            .json(&serde_json::json!({"expected_semantic_digest": digest}))
+            .send()
+            .await
+            .expect("publish malformed CVE bundle");
+        assert_eq!(response.status().as_u16(), 500);
+
+        let state: (
+            String,
+            Option<chrono::DateTime<Utc>>,
+            Option<Uuid>,
+            Option<Uuid>,
+        ) = sqlx::query_as(
+            r#"SELECT bv.publication_state, bv.published_at,
+                          b.current_draft_version_id, b.current_published_version_id
+                   FROM compliance_bundle_versions bv
+                   JOIN compliance_bundles b ON b.id = bv.bundle_id
+                   WHERE bv.id = $1"#,
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load rolled-back publication state");
+        assert_eq!(state.0, "draft");
+        assert_eq!(state.1, None);
+        assert_eq!(state.2, Some(bundle_version_id));
+        assert_eq!(state.3, None);
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_audit_events WHERE action = 'bundle_version_published' AND target = $1",
+        )
+        .bind(bundle_version_id.to_string())
+        .fetch_one(&pool)
+        .await
+        .expect("count rolled-back publication audits");
+        assert_eq!(audit_count, 0);
+        let draft_pointer: Option<Uuid> = sqlx::query_scalar(
+            "SELECT current_draft_version_id FROM compliance_bundles WHERE id = $1",
+        )
+        .bind(bundle_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load restored bundle draft pointer");
+        assert_eq!(draft_pointer, Some(bundle_version_id));
     }
 
     #[tokio::test]
@@ -10317,6 +11335,60 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         buf
     }
 
+    // Compares full import-owned rows and work queues, not just row counts:
+    // review suggestions must not persist, promote policies, or enqueue work.
+    // Hash artifact bytes with their size to keep the snapshot bounded. Exclude
+    // session activity and unrelated audit events from this no-write boundary.
+    async fn preview_import_snapshot(pool: &PgPool) -> serde_json::Value {
+        let tables = [
+            "deployment_policies",
+            "deployment_policy_versions",
+            "compliance_bundles",
+            "compliance_bundle_versions",
+            "compliance_bundle_version_policies",
+            "compliance_bundle_environments",
+            "compliance_frameworks",
+            "compliance_framework_versions",
+            "compliance_requirements",
+            "compliance_requirement_versions",
+            "policy_requirement_mappings",
+            "compliance_bundle_version_requirements",
+            "compliance_source_object_mappings",
+            "commits",
+            "derivations",
+            "evaluation_attempts",
+            "build_jobs",
+            "build_reservations",
+        ];
+        let mut selects: Vec<String> = tables
+            .iter()
+            .map(|table| {
+                format!("SELECT '{table}' AS table_name, to_jsonb(t) AS row FROM {table} t")
+            })
+            .collect();
+        selects.push(
+            "SELECT 'compliance_source_artifacts', (to_jsonb(t)-'content') || \
+             jsonb_build_object('content_sha256', encode(sha256(content),'hex'), \
+             'content_size', octet_length(content)) FROM compliance_source_artifacts t"
+                .to_owned(),
+        );
+        selects.push(
+            "SELECT 'admin_audit_events', to_jsonb(t) FROM admin_audit_events t \
+             WHERE action='xccdf_imported'"
+                .to_owned(),
+        );
+        // One statement gives every protected table the same MVCC snapshot.
+        let query = format!(
+            "SELECT COALESCE(jsonb_agg(to_jsonb(snapshot) ORDER BY table_name, row::text), \
+             '[]'::jsonb) FROM ({}) snapshot",
+            selects.join(" UNION ALL ")
+        );
+        sqlx::query_scalar(&query)
+            .fetch_one(pool)
+            .await
+            .expect("snapshot preview import and queue boundary")
+    }
+
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn preview_accepts_nixos_stig_structure() {
@@ -10333,7 +11405,7 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
 
         let pool = test_pool_from_env().await;
         let token = admin_session_token(&pool).await;
-        let base = spawn_preview_server(pool).await;
+        let base = spawn_preview_server(pool.clone()).await;
 
         let zip_bytes = if let Ok(path) = std::env::var("NIXOS_STIG_ZIP") {
             std::fs::read(&path).expect("NIXOS_STIG_ZIP path should be readable")
@@ -10351,6 +11423,8 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         push_file_field(&mut body, "file", zip_name, &zip_bytes);
         finish_multipart(&mut body);
 
+        // Authentication setup is outside the preview's no-write boundary.
+        let before = preview_import_snapshot(&pool).await;
         let response = post_multipart(&base, &token, body).await;
         assert_eq!(
             response.status().as_u16(),
@@ -10359,6 +11433,11 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         );
 
         let json: serde_json::Value = response.json().await.expect("json body");
+        assert_eq!(
+            preview_import_snapshot(&pool).await,
+            before,
+            "preview must preserve all import-owned rows and evaluation/build queues"
+        );
 
         // Document detected as foreign XCCDF (no CF extension elements).
         assert_eq!(json["document_class"], "foreignxccdf");
@@ -10453,9 +11532,28 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
                 "V-268078 check-content must contain firewall check text"
             );
 
-            assert!(
-                rule.get("inferred_assertions").is_none(),
-                "foreign preview must not turn fix prose into executable assertions"
+            // TASK-426 and the approved ImportStigModal permit reviewable
+            // suggestions, not automatic native trust or execution. The row
+            // snapshot above protects that no-promotion boundary.
+            assert_eq!(rule["is_native"], false);
+            let expected = serde_json::json!([{
+                "option_path": "networking.firewall.enable",
+                "expected_value": {"type": "boolean", "value": true},
+                "nix_expression": "config.networking.firewall.enable == true",
+                "description": "NixOS option networking.firewall.enable must be true"
+            }]);
+            assert_eq!(
+                rule["inferred_assertions"], expected,
+                "foreign firewall fix text should yield the exact reviewable suggestion"
+            );
+            eprintln!(
+                "preview firewall observation: {}",
+                serde_json::json!({
+                    "document_class": json["document_class"],
+                    "is_native": rule["is_native"],
+                    "inferred_assertions": rule["inferred_assertions"],
+                    "import_and_queue_rows_unchanged": true
+                })
             );
         } else {
             // When using the minimal fixture (no real ZIP), V-268078 is in the fixture
@@ -11961,33 +13059,26 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
     #[ignore = "requires live database connection"]
     async fn assignment_create_failure_points_roll_back_all_rows() {
         let pool = test_pool_from_env().await;
-        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (admin_id, _token) = session_token_for_role(&pool, AuthRole::Admin).await;
         let (baseline_a, baseline_a_version) =
             make_draft_cve_policy(&pool, &format!("rollback-a-{}", Uuid::new_v4().simple())).await;
         let (baseline_b, baseline_b_version) =
             make_draft_cve_policy(&pool, &format!("rollback-b-{}", Uuid::new_v4().simple())).await;
         let (addition, addition_version, _) =
             make_draft_policy(&pool, &format!("rollback-add-{}", Uuid::new_v4().simple())).await;
+        db_trust_policy_version(&pool, baseline_a_version, admin_id).await;
+        db_trust_policy_version(&pool, baseline_b_version, admin_id).await;
+        db_trust_policy_version(&pool, addition_version, admin_id).await;
         db_publish_policy_version(&pool, baseline_a, baseline_a_version).await;
         db_publish_policy_version(&pool, baseline_b, baseline_b_version).await;
         db_publish_policy_version(&pool, addition, addition_version).await;
-        let (_, bundle_version_id, bundle_digest) = make_draft_bundle(
+        let (_, bundle_version_id, _) = make_draft_bundle(
             &pool,
             &format!("rollback-bundle-{}", Uuid::new_v4().simple()),
             &[baseline_a_version, baseline_b_version],
         )
         .await;
-        let base = spawn_phase1_server(pool.clone()).await;
-        let publish = reqwest::Client::new()
-            .post(format!(
-                "{base}/api/v1/compliance/bundle-versions/{bundle_version_id}/publish"
-            ))
-            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
-            .json(&serde_json::json!({"expected_semantic_digest": bundle_digest}))
-            .send()
-            .await
-            .expect("publish bundle");
-        assert_eq!(publish.status(), 200);
+        db_publish_bundle_version(&pool, bundle_version_id).await;
         let environment_id = Uuid::new_v4();
         sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
             .bind(environment_id)
@@ -12052,8 +13143,7 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
 
         // ── Barrier-synchronized concurrent create ────────────────────────────
         // Two creates for the same target + bundle lineage. The barrier ensures
-        // both reach the critical section (after advisory locks, before the
-        // FOR UPDATE uniqueness check) simultaneously.
+        // both start the transaction and advisory-lock path simultaneously.
         let concurrent_environment_id = Uuid::new_v4();
         sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
             .bind(concurrent_environment_id)
@@ -12097,6 +13187,7 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
         } else {
             first.unwrap_err()
         };
+        assert_eq!(conflict_resp.status(), StatusCode::CONFLICT);
         // The failure must be a typed ASSIGNMENT_ALREADY_EXISTS, not an
         // unclassified 500 or raw SQL unique-constraint violation.
         let body = axum::body::to_bytes(conflict_resp.into_body(), usize::MAX)
@@ -12147,6 +13238,118 @@ If "networking.firewall.enable" is not set to "true", is commented out, or is mi
             create_audit_count, 1,
             "exactly one create audit event after concurrent create"
         );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn assignment_create_rejects_incomplete_active_lineage() {
+        let pool = test_pool_from_env().await;
+        let (admin_id, _token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (_, bundle_version_id, _) = make_draft_bundle(
+            &pool,
+            &format!("zombie-bundle-{}", Uuid::new_v4().simple()),
+            &[],
+        )
+        .await;
+        let mut publish_tx = pool.begin().await.expect("begin bundle publication");
+        sqlx::query(
+            "UPDATE compliance_bundle_versions
+             SET publication_state='accepted', published_at=now(),
+                 trust_state='trusted', trusted_at=now()
+             WHERE id=$1",
+        )
+        .bind(bundle_version_id)
+        .execute(&mut *publish_tx)
+        .await
+        .expect("publish bundle version");
+        sqlx::query(
+            "UPDATE compliance_bundles
+             SET current_published_version_id=$1, current_draft_version_id=NULL
+             WHERE id=(SELECT bundle_id FROM compliance_bundle_versions WHERE id=$1)",
+        )
+        .bind(bundle_version_id)
+        .execute(&mut *publish_tx)
+        .await
+        .expect("select published bundle version");
+        publish_tx
+            .commit()
+            .await
+            .expect("commit bundle publication");
+        let environment_id = Uuid::new_v4();
+        sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+            .bind(environment_id)
+            .bind(format!("zombie-{}", environment_id.simple()))
+            .execute(&pool)
+            .await
+            .expect("insert zombie environment");
+        let zombie_id: Uuid = sqlx::query_scalar(
+            r#"INSERT INTO compliance_bundle_assignments
+               (bundle_id, bundle_version_id, scope_type, environment_id,
+                enforcement_mode, assignment_overlay_digest)
+               VALUES ((SELECT bundle_id FROM compliance_bundle_versions WHERE id = $1),
+                       $1, 'environment', $2, 'enforce', 'pending')
+               RETURNING id"#,
+        )
+        .bind(bundle_version_id)
+        .bind(environment_id)
+        .fetch_one(&pool)
+        .await
+        .expect("insert incomplete lineage");
+        let payload = crate::api::models::CreateAssignmentRequest {
+            bundle_version_id,
+            scope_type: "environment".to_string(),
+            scope_id: environment_id,
+            enforcement_mode: None,
+            exclusions: None,
+            additions: None,
+            value_overrides: None,
+            reason: None,
+        };
+
+        let conflict = persist_assignment(&pool, admin_id, &payload, None, None)
+            .await
+            .expect_err("incomplete lineage must conflict");
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(conflict.into_body(), usize::MAX)
+            .await
+            .expect("read incomplete-lineage response");
+        let body_json: serde_json::Value =
+            serde_json::from_slice(&body).expect("parse incomplete-lineage response");
+        assert_eq!(body_json["code"], "ASSIGNMENT_LINEAGE_INCOMPLETE");
+
+        sqlx::query("UPDATE compliance_bundle_assignments SET active=false WHERE id=$1")
+            .bind(zombie_id)
+            .execute(&pool)
+            .await
+            .expect("deactivate incomplete lineage");
+        let replacement = persist_assignment(&pool, admin_id, &payload, None, None)
+            .await
+            .expect("create healthy replacement");
+        assert_ne!(replacement.id, zombie_id);
+        assert_ne!(replacement.current_version_id, Uuid::nil());
+
+        let update_payload = crate::api::models::CreateAssignmentRequest {
+            enforcement_mode: Some("report_only".to_string()),
+            ..payload
+        };
+        let updated = persist_assignment(
+            &pool,
+            admin_id,
+            &update_payload,
+            Some(replacement.id),
+            Some(replacement.current_version_id),
+        )
+        .await
+        .expect("update healthy replacement");
+        assert_ne!(updated.current_version_id, replacement.current_version_id);
+        let version_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM compliance_bundle_assignment_versions WHERE assignment_id=$1",
+        )
+        .bind(replacement.id)
+        .fetch_one(&pool)
+        .await
+        .expect("count immutable assignment versions");
+        assert_eq!(version_count, 2);
     }
 
     // ── Environment and system combined resolution tests ───────────────────────
@@ -13557,7 +14760,7 @@ packages = ["git"]
     #[ignore = "requires live database connection"]
     async fn assignment_list_contract_and_deactivation_safety() {
         let pool = test_pool_from_env().await;
-        let (_, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
 
         // Create two separate bundle+policy fixtures.
         let (p1, pv1, _) = make_draft_policy(
@@ -13565,6 +14768,7 @@ packages = ["git"]
             &format!("list-contract-p1-{}", Uuid::new_v4().simple()),
         )
         .await;
+        db_trust_policy_version(&pool, pv1, admin_id).await;
         db_publish_policy_version(&pool, p1, pv1).await;
         let (_, bv1, _) = make_draft_bundle(
             &pool,
@@ -13577,6 +14781,7 @@ packages = ["git"]
             &format!("list-contract-p2-{}", Uuid::new_v4().simple()),
         )
         .await;
+        db_trust_policy_version(&pool, pv2, admin_id).await;
         db_publish_policy_version(&pool, p2, pv2).await;
         let (_, bv2, _) = make_draft_bundle(
             &pool,
@@ -13611,12 +14816,17 @@ packages = ["git"]
         }
 
         let base = spawn_assignment_test_server(pool.clone()).await;
+        let csrf = format!("assignment-list-csrf-{}", Uuid::new_v4().simple());
+        let cookie = format!("{SESSION_COOKIE_NAME}={token}; {CSRF_COOKIE_NAME}={csrf}");
 
         // Create a unique system UUID for this test.
         let system_id = Uuid::new_v4();
         sqlx::query(
-            "INSERT INTO systems (id, hostname, environment_id, is_active, flake_id, deployment_policy)
-             VALUES ($1, $2, NULL, TRUE, NULL, 'manual')",
+            "INSERT INTO systems
+                 (id, hostname, environment_id, is_active, flake_id,
+                  deployment_policy, public_key, derivation)
+             VALUES ($1, $2, NULL, TRUE, NULL, 'manual', 'test-key',
+                     '/nix/store/test')",
         )
         .bind(system_id)
         .bind(format!("list-contract-sys-{}", Uuid::new_v4().simple()))
@@ -13633,7 +14843,8 @@ packages = ["git"]
         });
         let resp1 = reqwest::Client::new()
             .post(format!("{base}/api/v1/compliance/assignments"))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .json(&body1)
             .send()
             .await
@@ -13654,7 +14865,8 @@ packages = ["git"]
         });
         let resp2 = reqwest::Client::new()
             .post(format!("{base}/api/v1/compliance/assignments"))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .json(&body2)
             .send()
             .await
@@ -13668,7 +14880,7 @@ packages = ["git"]
             .get(format!(
                 "{base}/api/v1/systems/{system_id}/compliance-assignments"
             ))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
             .send()
             .await
             .expect("list assignments");
@@ -13695,7 +14907,8 @@ packages = ["git"]
         // Deactivate assignment 1.
         let deact_resp = reqwest::Client::new()
             .delete(format!("{base}/api/v1/compliance/assignments/{a1_id}"))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
             .query(&[("expected_version_id", a1_version_id.to_string())])
             .send()
             .await
@@ -13711,7 +14924,7 @@ packages = ["git"]
             .get(format!(
                 "{base}/api/v1/systems/{system_id}/compliance-assignments"
             ))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
             .send()
             .await
             .expect("list after deactivation");
@@ -13737,7 +14950,7 @@ packages = ["git"]
         // GET the deactivated assignment — must return 410, not 500.
         let deact_get = reqwest::Client::new()
             .get(format!("{base}/api/v1/compliance/assignments/{a1_id}"))
-            .header("cookie", format!("cf_session={token}"))
+            .header("cookie", &cookie)
             .send()
             .await
             .expect("get deactivated assignment");
@@ -13938,6 +15151,230 @@ packages = ["git"]
         // regressed to pool.begin(), the snapshot would fail to see the
         // auto-published member state in the SAME transaction, and the
         // validation would not have happened correctly.
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn bundle_publication_and_xccdf_export_support_custom_check_without_projection_fields() {
+        let pool = test_pool_from_env().await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let csrf = format!("legacy-xccdf-csrf-{}", Uuid::new_v4().simple());
+        let custom_check_config = serde_json::json!({
+            "expression": "config.networking.firewall.enable",
+            "description": "Firewall enabled",
+            "field_name": "firewallEnabled",
+            "strict": true
+        });
+        let (_, policy_version_id, policy_digest) = make_draft_policy_with_config(
+            &pool,
+            &format!("legacy-xccdf-{}", Uuid::new_v4().simple()),
+            &custom_check_config,
+        )
+        .await;
+        db_trust_policy_version(&pool, policy_version_id, admin_id).await;
+
+        let (_, bundle_version_id, bundle_digest) = make_draft_bundle(
+            &pool,
+            &format!("legacy-xccdf-bundle-{}", Uuid::new_v4().simple()),
+            &[policy_version_id],
+        )
+        .await;
+        db_trust_bundle_version(&pool, bundle_version_id, admin_id).await;
+
+        let publish_base = spawn_phase1_server(pool.clone()).await;
+        let publish = reqwest::Client::new()
+            .post(format!(
+                "{publish_base}/api/v1/compliance/bundle-versions/{bundle_version_id}/publish"
+            ))
+            .header(
+                "cookie",
+                format!("{SESSION_COOKIE_NAME}={token}; {CSRF_COOKIE_NAME}={csrf}"),
+            )
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
+            .json(&serde_json::json!({
+                "auto_publish_draft_policies": true,
+                "expected_semantic_digest": bundle_digest
+            }))
+            .send()
+            .await
+            .expect("publish legacy custom-check bundle");
+        let publish_status = publish.status();
+        let publish_body = publish.text().await.expect("publication response body");
+        assert_eq!(
+            publish_status.as_u16(),
+            200,
+            "publication must succeed: {publish_body}"
+        );
+
+        let (policy_state, stored_version_config, stored_policy_config, stored_policy_digest): (
+            String,
+            serde_json::Value,
+            serde_json::Value,
+            String,
+        ) = sqlx::query_as(
+            r#"SELECT dpv.publication_state, dpv.config, dp.config, dpv.semantic_digest
+               FROM deployment_policy_versions dpv
+               JOIN deployment_policies dp ON dp.id = dpv.policy_id
+               WHERE dpv.id = $1"#,
+        )
+        .bind(policy_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load published legacy policy");
+        let (bundle_state, stored_bundle_digest): (String, String) = sqlx::query_as(
+            "SELECT publication_state, semantic_digest FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load published legacy bundle");
+
+        assert_eq!(policy_state, "accepted");
+        assert_eq!(bundle_state, "accepted");
+        assert_eq!(stored_version_config, custom_check_config);
+        assert_eq!(stored_policy_config, custom_check_config);
+        assert_eq!(stored_policy_digest, policy_digest);
+        assert_eq!(stored_bundle_digest, bundle_digest);
+
+        let export_base = spawn_export_server(pool).await;
+        let export = reqwest::Client::new()
+            .get(format!(
+                "{export_base}/api/v1/compliance/bundle-versions/{bundle_version_id}/xccdf"
+            ))
+            .header("cookie", format!("{SESSION_COOKIE_NAME}={token}"))
+            .send()
+            .await
+            .expect("export published legacy custom-check bundle");
+        let export_status = export.status();
+        let xccdf = export.text().await.expect("XCCDF response body");
+        assert_eq!(
+            export_status.as_u16(),
+            200,
+            "XCCDF export must succeed: {xccdf}"
+        );
+        assert!(xccdf.contains("<cf:custom-check mode=\"all\""));
+        assert!(xccdf.contains("context=\"nixos-configuration-v2\" binding=\"config\""));
+        assert_eq!(xccdf.matches("<cf:rule ").count(), 1);
+        assert!(xccdf.contains("field-name=\"firewallEnabled\""));
+        assert!(xccdf.contains("strict=\"true\""));
+        assert!(xccdf.contains(
+            "<cf:expression language=\"nix\">config.networking.firewall.enable</cf:expression>"
+        ));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn bundle_publication_rolls_back_when_custom_check_xccdf_is_invalid() {
+        let pool = test_pool_from_env().await;
+        let (admin_id, token) = session_token_for_role(&pool, AuthRole::Admin).await;
+        let csrf = format!("invalid-xccdf-csrf-{}", Uuid::new_v4().simple());
+        let invalid_config = serde_json::json!({
+            "mode": "all",
+            "expression": "true",
+            "field_name": "enabled",
+            "strict": "invalid",
+            "context": "nixos-configuration-v1",
+            "binding": "cfg"
+        });
+        let (policy_id, policy_version_id, policy_digest) = make_draft_policy_with_config(
+            &pool,
+            &format!("invalid-xccdf-{}", Uuid::new_v4().simple()),
+            &invalid_config,
+        )
+        .await;
+        db_trust_policy_version(&pool, policy_version_id, admin_id).await;
+
+        let (bundle_id, bundle_version_id, bundle_digest) = make_draft_bundle(
+            &pool,
+            &format!("invalid-xccdf-bundle-{}", Uuid::new_v4().simple()),
+            &[policy_version_id],
+        )
+        .await;
+        db_trust_bundle_version(&pool, bundle_version_id, admin_id).await;
+        let audit_count_before: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_events WHERE target IN ($1, $2)")
+                .bind(policy_version_id.to_string())
+                .bind(bundle_version_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("count publication audits before failure");
+
+        let base = spawn_phase1_server(pool.clone()).await;
+        let response = reqwest::Client::new()
+            .post(format!(
+                "{base}/api/v1/compliance/bundle-versions/{bundle_version_id}/publish"
+            ))
+            .header(
+                "cookie",
+                format!("{SESSION_COOKIE_NAME}={token}; {CSRF_COOKIE_NAME}={csrf}"),
+            )
+            .header(CSRF_HEADER_NAME.as_str(), &csrf)
+            .json(&serde_json::json!({
+                "auto_publish_draft_policies": true,
+                "expected_semantic_digest": bundle_digest
+            }))
+            .send()
+            .await
+            .expect("publish invalid custom-check bundle");
+        assert_eq!(response.status().as_u16(), 500);
+
+        let (policy_state, policy_published_at, stored_policy_digest, stored_policy_config): (
+            String,
+            Option<chrono::DateTime<chrono::Utc>>,
+            String,
+            serde_json::Value,
+        ) = sqlx::query_as(
+            "SELECT publication_state, published_at, semantic_digest, config FROM deployment_policy_versions WHERE id = $1",
+        )
+        .bind(policy_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load rolled-back policy state");
+        let (bundle_state, bundle_published_at, stored_bundle_digest): (
+            String,
+            Option<chrono::DateTime<chrono::Utc>>,
+            String,
+        ) = sqlx::query_as(
+            "SELECT publication_state, published_at, semantic_digest FROM compliance_bundle_versions WHERE id = $1",
+        )
+        .bind(bundle_version_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load rolled-back bundle state");
+        let (policy_draft, policy_published): (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT current_draft_version_id, current_published_version_id FROM deployment_policies WHERE id = $1",
+        )
+        .bind(policy_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load rolled-back policy pointers");
+        let (bundle_draft, bundle_published): (Option<Uuid>, Option<Uuid>) = sqlx::query_as(
+            "SELECT current_draft_version_id, current_published_version_id FROM compliance_bundles WHERE id = $1",
+        )
+        .bind(bundle_id)
+        .fetch_one(&pool)
+        .await
+        .expect("load rolled-back bundle pointers");
+        let audit_count_after: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM admin_audit_events WHERE target IN ($1, $2)")
+                .bind(policy_version_id.to_string())
+                .bind(bundle_version_id.to_string())
+                .fetch_one(&pool)
+                .await
+                .expect("count publication audits after failure");
+
+        assert_eq!(policy_state, "draft");
+        assert_eq!(policy_published_at, None);
+        assert_eq!(stored_policy_digest, policy_digest);
+        assert_eq!(stored_policy_config, invalid_config);
+        assert_eq!(bundle_state, "draft");
+        assert_eq!(bundle_published_at, None);
+        assert_eq!(stored_bundle_digest, bundle_digest);
+        assert_eq!(policy_draft, Some(policy_version_id));
+        assert_eq!(policy_published, None);
+        assert_eq!(bundle_draft, Some(bundle_version_id));
+        assert_eq!(bundle_published, None);
+        assert_eq!(audit_count_after, audit_count_before);
     }
 
     /// Stale digest on accepted member should block bundle publication
@@ -15139,6 +16576,248 @@ packages = ["git"]
 
         let result = validate_policy_interchange_document(&policies);
         assert!(result.is_ok(), "should accept unique version IDs");
+    }
+
+    #[test]
+    fn generic_interchange_cannot_bypass_composite_validation() {
+        let policies = vec![NormalizedPolicyImport {
+            publication_state: "accepted".into(),
+            lineage_id: Uuid::new_v4(),
+            version_id: Uuid::new_v4(),
+            name: "invalid composite".into(),
+            description: None,
+            policy_type: "composite".into(),
+            implementation_state: "native".into(),
+            execution_phase: "multi-phase".into(),
+            config: serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": Uuid::nil(),
+                    "kind": "cve_block",
+                    "config": {"severity": "critical", "max_allowed": 0}
+                }]
+            }),
+            compliance_metadata: serde_json::json!({}),
+            dependencies: serde_json::json!([]),
+            opaque_xml: None,
+            enabled_by_default: Some(false),
+            semantic_digest: "not-reached".into(),
+            version: "1.0".into(),
+        }];
+
+        let error = validate_policy_interchange_document(&policies).unwrap_err();
+        assert!(error.contains("id must not be nil"));
+    }
+
+    #[test]
+    fn generic_interchange_accepts_target_specific_nixos_option_semantics() {
+        let policies = vec![NormalizedPolicyImport {
+            publication_state: "accepted".into(),
+            lineage_id: Uuid::new_v4(),
+            version_id: Uuid::new_v4(),
+            name: "target-specific composite".into(),
+            description: None,
+            policy_type: "composite".into(),
+            implementation_state: "native".into(),
+            execution_phase: "multi-phase".into(),
+            config: serde_json::json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "10000000-0000-0000-0000-000000000001",
+                    "kind": "nixos_option",
+                    "config": {
+                        "path": "networking.firewall.backend",
+                        "operator": "==",
+                        "value_type": "enum",
+                        "value": "target-specific-backend"
+                    }
+                }]
+            }),
+            compliance_metadata: serde_json::json!({}),
+            dependencies: serde_json::json!([]),
+            opaque_xml: None,
+            enabled_by_default: Some(false),
+            semantic_digest: "target-specific-digest".into(),
+            version: "1.0".into(),
+        }];
+
+        validate_policy_interchange_document(&policies)
+            .expect("interchange validation must not enforce the CF baseline enum domain");
+    }
+
+    #[test]
+    fn cf_native_validation_accepts_target_specific_nixos_option_semantics() {
+        let records = vec![
+            crate::compliance::xccdf::import_models::ImportedPolicyRecord {
+                policy_id: Uuid::new_v4(),
+                policy_version_id: Uuid::new_v4(),
+                publication_state: None,
+                source_rule_id: "target-specific-rule".into(),
+                source_rule_order: 0,
+                implementation_state: "native".into(),
+                policy_type: "composite".into(),
+                version: Some("1.0".into()),
+                execution_phase: "multi-phase".into(),
+                config: serde_json::json!({
+                    "schema_version": 1,
+                    "mode": "all",
+                    "rules": [{
+                        "id": "10000000-0000-0000-0000-000000000001",
+                        "kind": "nixos_option",
+                        "config": {
+                            "path": "networking.firewall.backend",
+                            "operator": "==",
+                            "value_type": "unknown",
+                            "value": "target-specific-backend"
+                        }
+                    }]
+                }),
+                dependencies: serde_json::json!([]),
+                enabled_by_default: false,
+                portable: true,
+                semantic_digest: Some("target-specific-digest".into()),
+                selected: true,
+                policy_order: 0,
+                name: "target-specific composite".into(),
+                description: None,
+                compliance_metadata: serde_json::json!({}),
+                opaque_xml: None,
+                mapped_policy_version_id: None,
+                mapped_policy_proof: None,
+                mapping_semantics: None,
+                evidence_requirements: vec![],
+            },
+        ];
+
+        validate_imported_policy_configs(&records)
+            .expect("CF-native validation must not enforce the CF baseline type");
+    }
+
+    fn all_supported_composite_rules() -> serde_json::Value {
+        serde_json::json!({
+            "schema_version": 1,
+            "mode": "all",
+            "rules": [
+                {"id": "50000000-0000-0000-0000-000000000001", "kind": "nixos_option", "config": {"path": "networking.firewall.enable", "operator": "==", "value_type": "boolean", "value": true}},
+                {"id": "50000000-0000-0000-0000-000000000002", "kind": "packages_installed", "config": {"packages": ["openssh"]}},
+                {"id": "50000000-0000-0000-0000-000000000003", "kind": "packages_absent", "config": {"packages": ["telnet"]}},
+                {"id": "50000000-0000-0000-0000-000000000004", "kind": "custom_eval", "config": {"expression": "config.networking.firewall.enable", "message": "firewall required"}},
+                {"id": "50000000-0000-0000-0000-000000000005", "kind": "cve_block", "config": {"severity": "critical", "max_allowed": 0}},
+                {"id": "50000000-0000-0000-0000-000000000006", "kind": "eval_passed", "config": {}},
+                {"id": "50000000-0000-0000-0000-000000000007", "kind": "pin_required", "config": {}},
+                {"id": "50000000-0000-0000-0000-000000000008", "kind": "time_window", "config": {"days": ["mon"], "from": "09:00", "to": "17:00", "tz": "UTC"}}
+            ]
+        })
+    }
+
+    #[test]
+    fn composite_json_toml_and_cf_native_interchange_preserve_all_supported_rules() {
+        let config = all_supported_composite_rules();
+        let expected_kinds = [
+            "nixos_option",
+            "packages_installed",
+            "packages_absent",
+            "custom_eval",
+            "cve_block",
+            "eval_passed",
+            "pin_required",
+            "time_window",
+        ];
+        let document = serde_json::json!({
+            "name": "all composite rules",
+            "policy_type": "composite",
+            "execution_phase": "multi-phase",
+            "config": config,
+        });
+        for (filename, bytes) in [
+            (
+                "policy.json",
+                serde_json::to_vec(&document).expect("JSON serialization"),
+            ),
+            (
+                "policy.toml",
+                json_to_toml(&document)
+                    .expect("TOML serialization")
+                    .into_bytes(),
+            ),
+        ] {
+            let parsed = parse_policy_interchange_upload(&MultipartUpload {
+                bytes,
+                filename: Some(filename.to_string()),
+            })
+            .expect("interchange parse");
+            validate_policy_interchange_document(&parsed).expect("interchange validation");
+            assert_eq!(parsed[0].config, config);
+            for (rule, expected_kind) in parsed[0].config["rules"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .zip(expected_kinds)
+            {
+                assert_eq!(
+                    rule["kind"], expected_kind,
+                    "AC3 import/export [{expected_kind}] via {filename}"
+                );
+            }
+        }
+
+        let records = vec![
+            crate::compliance::xccdf::import_models::ImportedPolicyRecord {
+                policy_id: Uuid::new_v4(),
+                policy_version_id: Uuid::new_v4(),
+                publication_state: None,
+                source_rule_id: "all-composite-rules".into(),
+                source_rule_order: 0,
+                implementation_state: "native".into(),
+                policy_type: "composite".into(),
+                version: Some("1.0".into()),
+                execution_phase: "multi-phase".into(),
+                config: config.clone(),
+                dependencies: serde_json::json!([]),
+                enabled_by_default: false,
+                portable: true,
+                semantic_digest: None,
+                selected: true,
+                policy_order: 0,
+                name: "all composite rules".into(),
+                description: None,
+                compliance_metadata: serde_json::json!({}),
+                opaque_xml: None,
+                mapped_policy_version_id: None,
+                mapped_policy_proof: None,
+                mapping_semantics: None,
+                evidence_requirements: vec![],
+            },
+        ];
+        validate_imported_policy_configs(&records).expect("CF-native validation");
+        assert_eq!(records[0].config, config);
+        for (rule, expected_kind) in records[0].config["rules"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .zip(expected_kinds)
+        {
+            assert_eq!(
+                rule["kind"], expected_kind,
+                "AC3 CF-native import/export [{expected_kind}]"
+            );
+        }
+    }
+
+    #[test]
+    fn composite_interchange_rejects_unsupported_approval_and_rollout_rules() {
+        for kind in ["approval_required", "rollout_percent"] {
+            let mut config = all_supported_composite_rules();
+            config["rules"][0]["kind"] = serde_json::json!(kind);
+            let error = crate::models::deployment_policies::validate_policy_type_config(
+                "composite",
+                &config,
+            )
+            .unwrap_err();
+            assert!(error.contains("unknown variant"), "{kind}: {error}");
+        }
     }
 
     // ──────────────────────────────────────────────────────────────────────────────

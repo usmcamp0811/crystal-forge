@@ -3,7 +3,7 @@
 //! These drive the same layers the CLI uses, over real export documents built
 //! by the fixture module (including real `cf-model-json-1` semantic digests).
 //! Evaluation of the generated Nix through the NixOS module system is covered
-//! by the `nixos-module-generation` flake check.
+//! by the `cf-nixos-module.tests.generation` package test.
 
 use cf_nixos_module::fixture::{bundle_xccdf_xml, policy_set_json};
 use cf_nixos_module::generate::{Generated, derive_baseline, generate};

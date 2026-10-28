@@ -1,11 +1,11 @@
 ---
 id: TASK-424
 title: Unify compliance system applicability around explicit versioned assignments
-status: In Progress
+status: Done
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-16 15:17'
-updated_date: '2026-08-16 15:48'
+updated_date: '2026-09-07 01:27'
 labels: []
 dependencies: []
 references:
@@ -57,6 +57,8 @@ Approved scope addition: inspect design commit 68bde218 and align the shared web
 Preflight completed: TASK-423 and TASK-424 are being implemented together because both correct the mixed legacy/versioned assignment model and both block MR !316. Dedicated worktree is /home/mcamp/code/crystal-forge/TASK-423-424-compliance-assignment-corrections on branch TASK-423-424-compliance-assignment-corrections from dev.
 
 Implemented and pushed commit 11836d03 on origin/TASK-423-424-compliance-assignment-corrections. Current and exact-version applicability now use active explicit assignments; empty legacy environment membership no longer means fleet-wide; system bundles and evidence use the same assignment scope. PolicyCard now matches design commit 68bde218 with two-line clamping and a full-description title. Server build passed; web-ui build passed with 172 tests; cargo fmt and git diff checks passed. Focused database/browser validation remains.
+
+Backlog grooming (2026-09-06): MR !316 confirmed merged to dev (TASK-424 was implemented together with TASK-423 to unblock that MR). Acceptance-criteria checkboxes in this task record were never checked off during implementation. Status is moved to Done per merged-MR confirmation; the AC list is left unchecked rather than checked retroactively without direct re-verification. Flag for a follow-up audit if a clean AC record is needed.
 <!-- SECTION:NOTES:END -->
 
 ## Comments

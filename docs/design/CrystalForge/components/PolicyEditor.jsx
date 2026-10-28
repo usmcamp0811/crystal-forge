@@ -98,7 +98,7 @@ function PolicyEditor({ mode, policy, onClose }) {
     };
     if (isEdit) Object.assign(policy, base);
     else {
-      window.__cfCoach?.complete("policy");
+      window.__cfCoach?.serverObserve("policy"); // mock: server sees a new policy lineage
       POLICIES.push({
         id: policyId, lineageId: policyId, revision: 1, publicationState: "current",
         publishedDate: new Date().toISOString().slice(0,10), type: "custom",

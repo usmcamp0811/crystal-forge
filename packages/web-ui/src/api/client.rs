@@ -8,7 +8,19 @@ use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 fn backend_origin_for_dev(window: &web_sys::Window, origin: &str) -> Option<String> {
-    if !(origin.contains(":8080") || origin.contains(":8000") || origin.contains(":8081")) {
+    // The devenv dev workflow (see devenv.nix) allocates the API server's
+    // port dynamically, so it is not known until build time and is not
+    // guaranteed to be one of the fixed Dioxus dev-server ports checked
+    // below. That workflow bakes its resolved port into this build via
+    // this compile-time environment variable. `run-ui-dev` and every other
+    // build never set it, so `devenv_port` is `None` there and the
+    // existing origin-port gate and hardcoded fallback port below are
+    // unchanged.
+    let devenv_port = option_env!("CF_UI_DEV_API_PORT");
+
+    if devenv_port.is_none()
+        && !(origin.contains(":8080") || origin.contains(":8000") || origin.contains(":8081"))
+    {
         return None;
     }
 
@@ -25,7 +37,8 @@ fn backend_origin_for_dev(window: &web_sys::Window, origin: &str) -> Option<Stri
         .location()
         .hostname()
         .unwrap_or_else(|_| "localhost".to_string());
-    Some(format!("http://{host}:3445"))
+    let port = devenv_port.unwrap_or("3445");
+    Some(format!("http://{host}:{port}"))
 }
 
 /// Base URL for the API. In production this is the same origin;
@@ -65,6 +78,30 @@ pub async fn fetch_dashboard() -> Result<DashboardSummary, ApiClientError> {
     fetch_json(&url).await
 }
 
+/// Fetch persisted deployment, build, and evaluation activity.
+pub async fn fetch_dashboard_activity(
+    limit: Option<i64>,
+) -> Result<Vec<DashboardActivity>, ApiClientError> {
+    let limit = limit.unwrap_or(30).clamp(1, 200);
+    let url = format!("{}/dashboard/activity?limit={limit}", base_url());
+    fetch_json(&url).await
+}
+
+/// Search the packaged NixOS option metadata index. The server clamps the
+/// limit too; clamping here keeps browser requests bounded by construction.
+pub async fn search_nixos_options(
+    query: &str,
+    limit: usize,
+) -> Result<Vec<NixosOptionMetadata>, ApiClientError> {
+    let url = format!(
+        "{}/nixos/options?query={}&limit={}",
+        base_url(),
+        js_sys::encode_uri_component(query),
+        limit.clamp(1, 50)
+    );
+    fetch_json(&url).await
+}
+
 /// Fetch admin-only CVE dashboard summary.
 pub async fn fetch_cve_dashboard_summary() -> Result<CveDashboardSummary, ApiClientError> {
     let url = format!("{}/cves/summary", base_url());
@@ -95,6 +132,113 @@ pub async fn fetch_scanning_queue(
     if let Some(limit) = limit {
         url.push_str(&format!("?limit={}", limit.clamp(1, 500)));
     }
+    fetch_json(&url).await
+}
+
+/// Fetches one bounded, server-filtered page of exact scan lifecycles.
+///
+/// The server owns search, status, revision, latest-revision, ordering, and
+/// archive visibility, so the returned counts and ordering describe the whole
+/// matching collection rather than the rows already loaded by the browser.
+/// Continuation requests pass the previous response's `next_cursor` in
+/// [`ScanningScanRecordQuery::after`].
+///
+/// This function sends [`ScanningScanRecordQuery::limit`] unchanged. It does
+/// not clamp the page size, because a silent clamp would let a caller believe
+/// it received a complete collection. The server answers a page size outside
+/// 1 through 500 with a validation error.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError::Status`] with code 400 when a parameter fails
+/// server validation or when the cursor does not belong to this exact request
+/// identity, 403 when the session is not an administrator, and the transport
+/// or decoding variants for any other failure.
+pub async fn fetch_scanning_scan_records(
+    query: &ScanningScanRecordQuery,
+) -> Result<ScanningScanRecordsResponse, ApiClientError> {
+    debug_assert!(
+        (1..=500).contains(&query.limit),
+        "scan-record page size must stay inside the server contract",
+    );
+    debug_assert!(
+        query.after.is_none() || query.collection.supports_cursor(),
+        "only the completed collection accepts a continuation cursor",
+    );
+    let url = scanning_scan_records_url(query);
+    fetch_json(&url).await
+}
+
+/// Fetches one scan-record page and aborts its browser request after a timeout.
+///
+/// This variant is for periodic live refreshes. Aborting the underlying browser
+/// request prevents stalled refreshes from accumulating across polling ticks.
+///
+/// # Errors
+///
+/// Returns the same errors as [`fetch_scanning_scan_records`]. A request that
+/// exceeds `timeout_ms` returns [`ApiClientError::Network`] after the browser
+/// aborts the fetch.
+pub async fn fetch_scanning_scan_records_with_timeout(
+    query: &ScanningScanRecordQuery,
+    timeout_ms: u32,
+) -> Result<ScanningScanRecordsResponse, ApiClientError> {
+    debug_assert!(
+        (1..=500).contains(&query.limit),
+        "scan-record page size must stay inside the server contract",
+    );
+    debug_assert!(
+        query.after.is_none() || query.collection.supports_cursor(),
+        "only the completed collection accepts a continuation cursor",
+    );
+    let url = scanning_scan_records_url(query);
+    fetch_json_with_timeout(&url, timeout_ms).await
+}
+
+fn scanning_scan_records_url(query: &ScanningScanRecordQuery) -> String {
+    let mut url = format!(
+        "{}/scanning/scans?collection={}&include_archived={}&limit={}&status={}&revision={}&latest_only={}&sort={}&direction={}",
+        base_url(),
+        query.collection.as_param(),
+        query.include_archived,
+        query.limit,
+        query.status.as_param(),
+        query.revision.as_param(),
+        query.latest_only,
+        query.sort.as_param(),
+        query.direction.as_param(),
+    );
+    if let Some(system_id) = query.system_id.as_ref() {
+        url.push_str(&format!("&system_id={system_id}"));
+    }
+    if let Some(search) = query
+        .search
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    {
+        url.push_str(&format!("&q={}", js_sys::encode_uri_component(search)));
+    }
+    if let Some(cursor) = query.after.as_deref() {
+        url.push_str(&format!("&after={}", js_sys::encode_uri_component(cursor)));
+    }
+    url
+}
+
+/// Archives or restores exact terminal scan lifecycles.
+pub async fn update_scanning_archive_state(
+    scan_ids: Vec<Uuid>,
+    archived: bool,
+) -> Result<UpdateScanningArchiveResponse, ApiClientError> {
+    let url = format!("{}/scanning/scans", base_url());
+    let request = UpdateScanningArchiveRequest { scan_ids, archived };
+    send_json_with_csrf("PATCH", &url, Some(&request)).await
+}
+
+pub async fn fetch_scanning_scan_detail(
+    scan_id: &Uuid,
+) -> Result<ScanningScanDetailResponse, ApiClientError> {
+    let url = format!("{}/scanning/scans/{}", base_url(), scan_id);
     fetch_json(&url).await
 }
 
@@ -435,6 +579,78 @@ fn cve_filter_query_parts(filters: &CveFilters) -> Vec<String> {
     parts
 }
 
+fn cve_inventory_url(query: &CveInventoryQuery, members: bool) -> String {
+    let endpoint = if members { "members" } else { "groups" };
+    let mut parts = vec![
+        format!("group_by={}", query.group_by),
+        format!("offset={}", query.offset),
+        format!("limit={}", query.limit),
+    ];
+    if let Some(id) = query.environment_id {
+        parts.push(format!("environment_id={id}"));
+    }
+    if let Some(id) = query.group_id {
+        parts.push(format!("group_id={id}"));
+    }
+    parts.extend(cve_filter_query_parts(&CveFilters {
+        sort: None,
+        limit: None,
+        ..query.filters.clone()
+    }));
+    format!(
+        "{}/cves/inventory/{endpoint}?{}",
+        base_url(),
+        parts.join("&")
+    )
+}
+
+/// Fetches one server-ordered scoped aggregate page without inferring missing groups.
+///
+/// # Errors
+/// Returns transport, authorization, validation, or decoding errors unchanged.
+pub async fn fetch_cve_inventory_groups(
+    query: &CveInventoryQuery,
+) -> Result<CveInventoryGroupPage, ApiClientError> {
+    fetch_json(&cve_inventory_url(query, false)).await
+}
+
+/// Fetches one exact group's bounded membership page, including historical evidence.
+///
+/// # Errors
+/// Returns transport, authorization, validation, or decoding errors unchanged.
+pub async fn fetch_cve_inventory_members(
+    query: &CveInventoryQuery,
+) -> Result<CveInventoryMemberPage, ApiClientError> {
+    fetch_json(&cve_inventory_url(query, true)).await
+}
+
+/// Fetches one server-filtered CVE/package pair page for the authorized scope.
+/// The server applies the environment and CVE filters before paging.
+///
+/// # Errors
+/// Returns transport, authorization, validation, or decoding errors unchanged.
+pub async fn fetch_cve_inventory_pairs(
+    query: &CveInventoryQuery,
+) -> Result<CveInventoryPairPage, ApiClientError> {
+    let mut parts = vec![
+        format!("offset={}", query.offset),
+        format!("limit={}", query.limit),
+    ];
+    if let Some(id) = query.environment_id {
+        parts.push(format!("environment_id={id}"));
+    }
+    parts.extend(cve_filter_query_parts(&CveFilters {
+        limit: None,
+        ..query.filters.clone()
+    }));
+    fetch_json(&format!(
+        "{}/cves/inventory/pairs?{}",
+        base_url(),
+        parts.join("&")
+    ))
+    .await
+}
+
 /// Fetch CVE list with filters.
 pub async fn fetch_cves(filters: &CveFilters) -> Result<Vec<CveListItem>, ApiClientError> {
     let parts = cve_filter_query_parts(filters);
@@ -536,6 +752,14 @@ pub async fn trigger_cve_fleet_rescan() -> Result<FleetRescanResponse, ApiClient
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Enqueues or reuses a CVE scan for one exact derivation.
+pub async fn trigger_cve_derivation_rescan(
+    derivation_id: i32,
+) -> Result<DerivationRescanResponse, ApiClientError> {
+    let url = format!("{}/cves/rescan/{derivation_id}", base_url());
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
 /// Export CVEs as CSV (triggers browser download).
 pub async fn export_cves_csv(filters: &CveFilters) -> Result<(), ApiClientError> {
     let parts = cve_filter_query_parts(filters);
@@ -575,11 +799,460 @@ pub async fn fetch_system(id: &uuid::Uuid) -> Result<SystemDetail, ApiClientErro
     fetch_json(&url).await
 }
 
-/// Fetch CVE vulnerabilities for a single system.
-pub async fn fetch_system_cves(
+/// Fetches one bounded page of cached evaluated options without launching evaluation.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`EvaluatedOptionsPage`].
+pub async fn fetch_system_evaluated_options(
     id: &uuid::Uuid,
-) -> Result<Vec<SystemVulnerability>, ApiClientError> {
-    let url = format!("{}/systems/{}/cves", base_url(), id);
+    request: &EvaluatedOptionsRequest,
+) -> Result<EvaluatedOptionsPage, ApiClientError> {
+    let mut parts = vec![
+        format!("revision={}", encode_query_value(&request.revision)),
+        format!("mode={}", request.mode.as_query_value()),
+        format!("filter={}", request.filter.as_query_value()),
+        format!("limit={}", request.limit.clamp(1, 100)),
+        format!("offset={}", request.offset.clamp(0, 100_000)),
+    ];
+    if let Some(generation) = request.generation {
+        parts.push(format!("generation={generation}"));
+    }
+    if !request.search.is_empty() {
+        parts.push(format!("search={}", encode_query_value(&request.search)));
+    }
+    if let Some(snapshot_token) = request.snapshot_token.as_deref() {
+        parts.push(format!(
+            "snapshot_token={}",
+            encode_query_value(snapshot_token)
+        ));
+    }
+    let url = format!(
+        "{}/systems/{}/evaluated-options?{}",
+        base_url(),
+        id,
+        parts.join("&")
+    );
+    fetch_json(&url).await
+}
+
+/// Fetches complete selected-revision module, evaluation, and drift metadata.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`SelectedEvaluationSummary`].
+pub async fn fetch_system_evaluation_summary(
+    id: &uuid::Uuid,
+    revision: &str,
+    generation: Option<i32>,
+    mode: SnapshotRevisionMode,
+    snapshot_token: Option<&str>,
+) -> Result<SelectedEvaluationSummary, ApiClientError> {
+    let mut parts = vec![
+        format!("revision={}", encode_query_value(revision)),
+        format!("mode={}", mode.as_query_value()),
+    ];
+    if let Some(generation) = generation {
+        parts.push(format!("generation={generation}"));
+    }
+    if let Some(snapshot_token) = snapshot_token {
+        parts.push(format!(
+            "snapshot_token={}",
+            encode_query_value(snapshot_token)
+        ));
+    }
+    let url = format!(
+        "{}/systems/{}/evaluation-summary?{}",
+        base_url(),
+        id,
+        parts.join("&")
+    );
+    fetch_json(&url).await
+}
+
+/// Fetches one bounded module-source page without launching evaluation.
+///
+/// Page zero omits `snapshot_token`. Continuation requests must send the token
+/// returned by page zero so the server can reject mixed-snapshot pages.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`EvaluationModuleSourcesPage`].
+pub async fn fetch_system_evaluation_module_sources(
+    id: &uuid::Uuid,
+    revision: &str,
+    generation: Option<i32>,
+    mode: SnapshotRevisionMode,
+    limit: i64,
+    offset: i64,
+    snapshot_token: Option<&str>,
+) -> Result<EvaluationModuleSourcesPage, ApiClientError> {
+    let mut parts = vec![
+        format!("revision={}", encode_query_value(revision)),
+        format!("mode={}", mode.as_query_value()),
+        format!("limit={}", limit.clamp(1, 100)),
+        format!("offset={}", offset.max(0)),
+    ];
+    if let Some(generation) = generation {
+        parts.push(format!("generation={generation}"));
+    }
+    if let Some(snapshot_token) = snapshot_token {
+        parts.push(format!(
+            "snapshot_token={}",
+            encode_query_value(snapshot_token)
+        ));
+    }
+    let url = format!(
+        "{}/systems/{}/evaluation-module-sources?{}",
+        base_url(),
+        id,
+        parts.join("&")
+    );
+    fetch_json(&url).await
+}
+
+/// Queues or reuses targeted Config Inspector work for a full revision SHA.
+///
+/// # Errors
+///
+/// Returns [`QueueConfigInspectionError::Prerequisite`] when primary evaluation
+/// has not persisted the exact carrier. Other request failures return
+/// [`QueueConfigInspectionError::Request`].
+pub async fn queue_system_config_inspection(
+    id: &uuid::Uuid,
+    revision: &str,
+) -> Result<QueueConfigInspectionResponse, QueueConfigInspectionError> {
+    let url = format!(
+        "{}/systems/{}/config-inspections/{}",
+        base_url(),
+        id,
+        encode_uri_component(revision)
+    );
+    let (status, text) = send_request_with_csrf("POST", &url, None)
+        .await
+        .map_err(QueueConfigInspectionError::Request)?;
+    if status == 409
+        && let Ok(error) = serde_json::from_str::<ApiError>(&text)
+        && error.error == "config_inspection_prerequisite"
+    {
+        return Err(QueueConfigInspectionError::Prerequisite(error.message));
+    }
+    if !(200..300).contains(&status) {
+        return Err(QueueConfigInspectionError::Request(
+            ApiClientError::Status {
+                code: status,
+                body: decode_api_error_message(&text),
+            },
+        ));
+    }
+    serde_json::from_str(&text).map_err(|error| {
+        QueueConfigInspectionError::Request(ApiClientError::Deserialize(error.to_string()))
+    })
+}
+
+/// Creates or reuses one exact scoped Config Explorer request.
+///
+/// This mutation uses the shared credential and CSRF helper. A successful
+/// response can be active (`202`) or already complete (`200`).
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`ConfigObservationRequestResponse`].
+pub async fn create_system_config_observation(
+    id: &uuid::Uuid,
+    revision: &str,
+    request: &CreateConfigObservationRequest,
+) -> Result<ConfigObservationRequestResponse, ApiClientError> {
+    let url = format!(
+        "{}/systems/{}/config-observations/{}",
+        base_url(),
+        id,
+        encode_uri_component(revision)
+    );
+    send_json_with_csrf("POST", &url, Some(request)).await
+}
+
+/// Fetches the read-only lifecycle for one durable observation request.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`ConfigObservationRequestResponse`].
+pub async fn fetch_system_config_observation_request(
+    id: &uuid::Uuid,
+    request_id: &uuid::Uuid,
+) -> Result<ConfigObservationRequestResponse, ApiClientError> {
+    let url = format!(
+        "{}/systems/{}/config-observation-requests/{}",
+        base_url(),
+        id,
+        request_id
+    );
+    fetch_json(&url).await
+}
+
+/// Fetches one immutable scoped Config Explorer observation by identity.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the response cannot be
+/// decoded as [`ConfigObservationResponse`].
+pub async fn fetch_system_config_observation(
+    id: &uuid::Uuid,
+    observation_id: &uuid::Uuid,
+) -> Result<ConfigObservationResponse, ApiClientError> {
+    let url = format!(
+        "{}/systems/{}/config-observations/by-id/{}",
+        base_url(),
+        id,
+        observation_id
+    );
+    fetch_json(&url).await
+}
+
+fn validate_config_observation_request_identity(
+    response: &ConfigObservationRequestResponse,
+    request_id: Option<uuid::Uuid>,
+    revision: &str,
+    request: &CreateConfigObservationRequest,
+) -> Result<(), ApiClientError> {
+    if request_id.is_some_and(|request_id| response.request_id != request_id)
+        || response.revision != revision
+        || response.kind != request.kind
+        || response.path_components != request.path_components
+        || response.child_offset != request.child_offset
+    {
+        return Err(ApiClientError::Deserialize(
+            "Config observation request identity changed while polling".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+fn config_observation_payload_identity(
+    payload: &ConfigObservationPayload,
+) -> (ConfigObservationKind, &[String], u32) {
+    match payload {
+        ConfigObservationPayload::Root {
+            path_components,
+            child_offset,
+            ..
+        } => (ConfigObservationKind::Root, path_components, *child_offset),
+        ConfigObservationPayload::Prefix {
+            path_components,
+            child_offset,
+            ..
+        } => (
+            ConfigObservationKind::Prefix,
+            path_components,
+            *child_offset,
+        ),
+        ConfigObservationPayload::Option {
+            path_components, ..
+        } => (ConfigObservationKind::Option, path_components, 0),
+        ConfigObservationPayload::Provenance {
+            path_components, ..
+        } => (ConfigObservationKind::Provenance, path_components, 0),
+        ConfigObservationPayload::ConfiguredIndex {
+            path_components, ..
+        } => (ConfigObservationKind::ConfiguredIndex, path_components, 0),
+    }
+}
+
+fn config_observation_poll_delay_ms(
+    lifecycle: ConfigObservationLifecycle,
+    first_poll: bool,
+) -> Option<u32> {
+    match lifecycle {
+        ConfigObservationLifecycle::Queued | ConfigObservationLifecycle::WaitingForCapacity => {
+            Some(if first_poll { 250 } else { 1_000 })
+        }
+        ConfigObservationLifecycle::Running => Some(if first_poll { 250 } else { 500 }),
+        ConfigObservationLifecycle::Succeeded | ConfigObservationLifecycle::Failed => None,
+    }
+}
+
+/// Posts once, polls only the durable request, and fetches its immutable result.
+///
+/// `on_lifecycle` receives the initial POST response and each later lifecycle
+/// response. The first nonterminal response polls after 250 ms so a short
+/// interactive evaluation does not incur a fixed multi-second UI delay. Later
+/// queued or capacity-waiting responses poll every second. Running requests
+/// poll every 500 ms. The loader does not synthesize a percentage or re-POST
+/// while it waits. `should_continue` stops obsolete polling without changing or
+/// cancelling the durable server request.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] for transport, status, decoding, failed-request,
+/// missing-observation, or exact-identity errors.
+pub async fn load_system_config_observation<F, C>(
+    id: &uuid::Uuid,
+    revision: &str,
+    request: CreateConfigObservationRequest,
+    mut on_lifecycle: F,
+    mut should_continue: C,
+) -> Result<Option<ConfigObservationResponse>, ApiClientError>
+where
+    F: FnMut(&ConfigObservationRequestResponse),
+    C: FnMut() -> bool,
+{
+    if !should_continue() {
+        return Ok(None);
+    }
+    let mut lifecycle = create_system_config_observation(id, revision, &request).await?;
+    if !should_continue() {
+        return Ok(None);
+    }
+    validate_config_observation_request_identity(&lifecycle, None, revision, &request)?;
+    let request_id = lifecycle.request_id;
+    on_lifecycle(&lifecycle);
+    let mut first_poll = true;
+
+    loop {
+        match lifecycle.lifecycle {
+            ConfigObservationLifecycle::Succeeded => {
+                if !should_continue() {
+                    return Ok(None);
+                }
+                let observation_id = lifecycle.observation_id.ok_or_else(|| {
+                    ApiClientError::Deserialize(
+                        "Succeeded Config observation request omitted observation_id".to_string(),
+                    )
+                })?;
+                let observation = fetch_system_config_observation(id, &observation_id).await?;
+                if !should_continue() {
+                    return Ok(None);
+                }
+                let (payload_kind, payload_path, payload_child_offset) =
+                    config_observation_payload_identity(&observation.payload);
+                if observation.observation_id != observation_id
+                    || observation.revision != revision
+                    || observation.kind != request.kind
+                    || observation.path_components != request.path_components
+                    || observation.child_offset != request.child_offset
+                    || payload_kind != request.kind
+                    || payload_path != request.path_components
+                    || payload_child_offset != request.child_offset
+                {
+                    return Err(ApiClientError::Deserialize(
+                        "Immutable Config observation identity did not match its request"
+                            .to_string(),
+                    ));
+                }
+                return Ok(Some(observation));
+            }
+            ConfigObservationLifecycle::Failed => {
+                return Err(ApiClientError::Status {
+                    code: 422,
+                    body: lifecycle
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "Config observation failed".to_string()),
+                });
+            }
+            ConfigObservationLifecycle::Queued
+            | ConfigObservationLifecycle::WaitingForCapacity
+            | ConfigObservationLifecycle::Running => {
+                if let Some(delay) =
+                    config_observation_poll_delay_ms(lifecycle.lifecycle, first_poll)
+                {
+                    gloo_timers::future::TimeoutFuture::new(delay).await;
+                }
+            }
+        }
+        first_poll = false;
+
+        if !should_continue() {
+            return Ok(None);
+        }
+        lifecycle = fetch_system_config_observation_request(id, &request_id).await?;
+        if !should_continue() {
+            return Ok(None);
+        }
+        validate_config_observation_request_identity(
+            &lifecycle,
+            Some(request_id),
+            revision,
+            &request,
+        )?;
+        on_lifecycle(&lifecycle);
+    }
+}
+
+const SYSTEM_CVE_INVENTORY_PAGE_SIZE: u16 = 100;
+
+#[derive(serde::Serialize)]
+struct SystemCveInventoryPageQuery<'a> {
+    limit: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    after: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_id: Option<&'a str>,
+}
+
+fn system_cve_inventory_url(
+    base: &str,
+    id: &Uuid,
+    after: Option<&str>,
+    selection: SystemCveInventorySelection,
+) -> Result<String, ApiClientError> {
+    let target_id = match selection {
+        SystemCveInventorySelection::Current => None,
+        SystemCveInventorySelection::RetainedGeneration {
+            generation_snapshot_id,
+        } => Some(generation_snapshot_id.to_string()),
+        SystemCveInventorySelection::ExactDerivation { derivation_id } => {
+            Some(derivation_id.to_string())
+        }
+    };
+    let target = match selection {
+        SystemCveInventorySelection::Current => None,
+        SystemCveInventorySelection::RetainedGeneration { .. } => Some("retained_generation"),
+        SystemCveInventorySelection::ExactDerivation { .. } => Some("exact_derivation"),
+    };
+    let query = serde_urlencoded::to_string(SystemCveInventoryPageQuery {
+        limit: SYSTEM_CVE_INVENTORY_PAGE_SIZE,
+        after,
+        target,
+        target_id: target_id.as_deref(),
+    })
+    .map_err(|error| ApiClientError::Deserialize(error.to_string()))?;
+    Ok(format!("{base}/systems/{id}/cve-inventory-page?{query}"))
+}
+
+/// Fetches one bounded page of the typed read-only CVE inventory for a system.
+///
+/// Callers must treat `after` as opaque and pass only a server-issued
+/// [`SystemCveInventoryPageResponse::next_cursor`] value.
+pub async fn fetch_system_cve_inventory(
+    id: &Uuid,
+    after: Option<&str>,
+) -> Result<SystemCveInventoryPageResponse, ApiClientError> {
+    fetch_system_cve_inventory_for_target(id, after, SystemCveInventorySelection::Current).await
+}
+
+/// Fetches one source-bound page for a server-authorized inventory target.
+pub async fn fetch_system_cve_inventory_for_target(
+    id: &Uuid,
+    after: Option<&str>,
+    selection: SystemCveInventorySelection,
+) -> Result<SystemCveInventoryPageResponse, ApiClientError> {
+    let url = system_cve_inventory_url(&base_url(), id, after, selection)?;
+    fetch_json(&url).await
+}
+
+/// Fetches factual server-owned candidates for a future revision selector.
+pub async fn fetch_system_cve_inventory_candidates(
+    id: &Uuid,
+) -> Result<SystemCveInventoryCandidatesResponse, ApiClientError> {
+    let url = format!("{}/systems/{id}/cve-inventory-sources", base_url());
     fetch_json(&url).await
 }
 
@@ -588,6 +1261,45 @@ pub async fn fetch_system_hardening(
 ) -> Result<Vec<HardeningServiceResultResponse>, ApiClientError> {
     let url = format!("{}/systems/{}/hardening", base_url(), id);
     fetch_json(&url).await
+}
+
+/// Fetches hardening evidence for one server-authorized revision target.
+///
+/// The browser sends only the opaque identity from
+/// [`SystemCveInventoryCandidatesResponse`]. It never submits a derivation path
+/// or derives a target identity from display metadata.
+pub async fn fetch_system_hardening_inventory_for_target(
+    id: &Uuid,
+    selection: SystemCveInventorySelection,
+) -> Result<SystemHardeningInventoryResponse, ApiClientError> {
+    let url = system_hardening_inventory_url(&base_url(), id, selection);
+    fetch_json(&url).await
+}
+
+fn system_hardening_inventory_url(
+    base: &str,
+    id: &Uuid,
+    selection: SystemCveInventorySelection,
+) -> String {
+    let target_id = match selection {
+        SystemCveInventorySelection::Current => None,
+        SystemCveInventorySelection::RetainedGeneration {
+            generation_snapshot_id,
+        } => Some(generation_snapshot_id.to_string()),
+        SystemCveInventorySelection::ExactDerivation { derivation_id } => {
+            Some(derivation_id.to_string())
+        }
+    };
+    let target = match selection {
+        SystemCveInventorySelection::Current => "current",
+        SystemCveInventorySelection::RetainedGeneration { .. } => "retained_generation",
+        SystemCveInventorySelection::ExactDerivation { .. } => "exact_derivation",
+    };
+    let mut url = format!("{base}/systems/{id}/hardening-inventory?target={target}");
+    if let Some(target_id) = target_id {
+        url.push_str(&format!("&target_id={target_id}"));
+    }
+    url
 }
 
 pub async fn fetch_system_hardening_justifications(
@@ -722,9 +1434,27 @@ pub async fn request_system_sync(
 pub async fn deploy_system(
     id: &uuid::Uuid,
     request: &crate::api::models::DeploySystemRequest,
-) -> Result<SystemMutationResponse, ApiClientError> {
+) -> Result<crate::api::models::ManualDeploymentResponse, ApiClientError> {
     let url = format!("{}/systems/{}/deploy", base_url(), id);
-    send_json_with_csrf("POST", &url, Some(request)).await
+    let body = serde_json::to_string(request)
+        .map_err(|error| ApiClientError::Deserialize(error.to_string()))?;
+    let (status, response_body) = send_request_with_csrf("POST", &url, Some(&body)).await?;
+    if let Ok(response) =
+        serde_json::from_str::<crate::api::models::ManualDeploymentResponse>(&response_body)
+    {
+        // A non-2xx response can still report a successful persisted policy
+        // conversion followed by a deployment failure.
+        return Ok(response);
+    }
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: decode_api_error_message(&response_body),
+        });
+    }
+    Err(ApiClientError::Deserialize(
+        "invalid manual deployment response".to_string(),
+    ))
 }
 
 pub async fn fetch_system_commits(
@@ -819,9 +1549,11 @@ pub async fn cancel_commit_evaluation(commit_id: i32) -> Result<(), ApiClientErr
 }
 
 /// Trigger manual re-evaluation for a commit (resets attempt count and re-queues).
-pub async fn re_evaluate_commit(commit_id: i32) -> Result<(), ApiClientError> {
+pub async fn re_evaluate_commit(
+    commit_id: i32,
+) -> Result<ReEvaluateCommitResponse, ApiClientError> {
     let url = format!("{}/commits/{}/re-evaluate", base_url(), commit_id);
-    send_empty_with_csrf("POST", &url, None::<&()>).await
+    send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
 /// Force-cancel an evaluation stuck in 'cancelling' state.
@@ -848,6 +1580,10 @@ pub async fn fetch_eval_logs(commit_id: i32) -> Result<Vec<EvalLogEntry>, ApiCli
     fetch_json(&url).await
 }
 
+/// Fetches latest scoped evaluation evidence.
+///
+/// # Errors
+/// Returns transport, authorization, or response decoding failures.
 pub async fn fetch_eval_policy_matrix(
     commit_id: i32,
 ) -> Result<EvalPolicyMatrixResponse, ApiClientError> {
@@ -858,6 +1594,21 @@ pub async fn fetch_eval_policy_matrix(
         js_sys::Date::now()
     );
     fetch_json(&url).await
+}
+
+/// Fetches one exact attempt without falling back to the latest attempt.
+///
+/// # Errors
+/// Returns transport, authorization, not-found, or decoding failures.
+pub async fn fetch_eval_attempt_policy_matrix(
+    commit_id: i32,
+    attempt_id: uuid::Uuid,
+) -> Result<EvalPolicyMatrixResponse, ApiClientError> {
+    fetch_json(&format!(
+        "{}/commits/{commit_id}/eval/attempts/{attempt_id}/policy-matrix",
+        base_url()
+    ))
+    .await
 }
 
 pub async fn fetch_eval_dependency_graph(
@@ -904,7 +1655,8 @@ fn encode_query_value(value: &str) -> String {
 }
 
 /// URL-encode a path component (e.g., CVE ID) for safe interpolation into URL paths.
-fn encode_uri_component(value: &str) -> String {
+/// Percent-encodes one path segment or query value for an API URL.
+pub(crate) fn encode_uri_component(value: &str) -> String {
     js_sys::encode_uri_component(value).into()
 }
 
@@ -977,6 +1729,20 @@ pub async fn fetch_build_queue_paginated(
     fetch_json(&url).await
 }
 
+/// Fetches one exact build attempt in the current user's visibility scope.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails, the server rejects the
+/// request, or the response cannot be decoded as
+/// [`crate::api::models::BuildAttemptLookupResponse`].
+pub async fn fetch_build_attempt(
+    attempt_id: &uuid::Uuid,
+) -> Result<crate::api::models::BuildAttemptLookupResponse, ApiClientError> {
+    let url = format!("{}/build-jobs/{}", base_url(), attempt_id);
+    fetch_json(&url).await
+}
+
 /// Move a queued build job to the front of the queue (admin/operator).
 pub async fn prioritize_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
     let url = format!("{}/build-jobs/{}/prioritize", base_url(), job_id);
@@ -1021,9 +1787,38 @@ pub async fn cancel_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError>
 ///
 /// Creates a new queued build attempt row for the same derivation/context while
 /// preserving immutable history on prior attempts.
-pub async fn requeue_build_job(job_id: &uuid::Uuid) -> Result<(), ApiClientError> {
+pub async fn requeue_build_job(
+    job_id: &uuid::Uuid,
+) -> Result<RequeueBuildJobResponse, RequeueBuildJobError> {
     let url = format!("{}/build-jobs/{}/requeue", base_url(), job_id);
-    send_empty_with_csrf("POST", &url, None::<&()>).await
+    let (status, body) = send_request_with_csrf("POST", &url, None)
+        .await
+        .map_err(RequeueBuildJobError::Request)?;
+    if (200..300).contains(&status) {
+        return serde_json::from_str(&body).map_err(|error| {
+            RequeueBuildJobError::Request(ApiClientError::Deserialize(error.to_string()))
+        });
+    }
+
+    if status == 409
+        && let Ok(error) = serde_json::from_str::<RequeueBuildJobErrorResponse>(&body)
+    {
+        if error.error == "evaluator_contract_obsolete"
+            && let Some(commit_id) = error.commit_id
+        {
+            return Err(RequeueBuildJobError::EvaluatorContractObsolete { commit_id });
+        }
+        if error.error == "build_job_not_terminal" {
+            return Err(RequeueBuildJobError::LifecycleConflict {
+                status: error.status.unwrap_or_else(|| "unknown".to_string()),
+            });
+        }
+    }
+
+    Err(RequeueBuildJobError::Request(ApiClientError::Status {
+        code: status,
+        body: decode_api_error_message(&body),
+    }))
 }
 
 /// Force-cancel a build job stuck in 'cancelling' state (admin-only).
@@ -1359,9 +2154,91 @@ pub async fn fetch_policy_deletion_eligibility(
     fetch_json(&url).await
 }
 
+/// Bulk-delete multiple deployment policies (Admin only) from the catalog's
+/// multi-select toolbar. The response always resolves every requested id
+/// into either `deleted` or `skipped` — it never fails outright because one
+/// policy is blocked.
+pub async fn bulk_delete_deployment_policies(
+    policy_ids: &[Uuid],
+) -> Result<BulkDeletePoliciesResponse, ApiClientError> {
+    let url = format!("{}/deployment-policies/bulk-delete", base_url());
+    send_json_with_csrf(
+        "POST",
+        &url,
+        Some(&BulkDeletePoliciesRequest {
+            policy_ids: policy_ids.to_vec(),
+        }),
+    )
+    .await
+}
+
 /// Fetch all flakes from registry.
 pub async fn fetch_flakes() -> Result<Vec<FlakeRegistryItem>, ApiClientError> {
     let url = format!("{}/flakes", base_url());
+    fetch_json(&url).await
+}
+
+/// Fetches one bounded collection page for an exact full flake revision.
+///
+/// `limit` and `offset` apply to each top-level output collection. Callers must
+/// merge continuation pages while retaining the response's authoritative
+/// revision-wide totals. Page zero omits `snapshot_token`; continuations must
+/// send the token returned by page zero.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails or the server response
+/// cannot be decoded as [`FlakeOutputSnapshotResponse`].
+pub async fn fetch_flake_revision_outputs(
+    flake_id: i32,
+    revision: &str,
+    system_filter: FlakeSystemFilter,
+    limit: usize,
+    offset: usize,
+    snapshot_token: Option<&str>,
+) -> Result<FlakeOutputSnapshotResponse, ApiClientError> {
+    let mut url = format!(
+        "{}/flakes/{}/revisions/{}/outputs?system_filter={}&limit={limit}&offset={offset}",
+        base_url(),
+        flake_id,
+        encode_uri_component(revision),
+        system_filter.as_query_value(),
+    );
+    if let Some(snapshot_token) = snapshot_token {
+        url.push_str("&snapshot_token=");
+        url.push_str(&encode_uri_component(snapshot_token));
+    }
+    fetch_json(&url).await
+}
+
+/// Fetches one stable declaration page for an exported module and exact revision.
+///
+/// Page one omits `snapshot_token`. Every continuation request must reuse the
+/// token returned by page one so the server can reject mixed-snapshot pages.
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request fails, the snapshot changed, or
+/// the response cannot be decoded as [`FlakeModuleDeclarationsPage`].
+pub async fn fetch_flake_module_declarations(
+    flake_id: i32,
+    revision: &str,
+    module_name: &str,
+    limit: usize,
+    offset: usize,
+    snapshot_token: Option<&str>,
+) -> Result<FlakeModuleDeclarationsPage, ApiClientError> {
+    let mut url = format!(
+        "{}/flakes/{}/revisions/{}/modules/{}/declarations?limit={limit}&offset={offset}",
+        base_url(),
+        flake_id,
+        encode_uri_component(revision),
+        encode_uri_component(module_name)
+    );
+    if let Some(token) = snapshot_token {
+        url.push_str("&snapshot_token=");
+        url.push_str(&encode_uri_component(token));
+    }
     fetch_json(&url).await
 }
 
@@ -1631,6 +2508,15 @@ pub async fn mark_all_user_notifications_read() -> Result<(), ApiClientError> {
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 
+/// Dismisses all notifications visible to the current authenticated user.
+///
+/// The server applies the visibility policy and an execution-time cutoff, so
+/// notifications that arrive after the action starts remain in the feed.
+pub async fn dismiss_all_user_notifications() -> Result<(), ApiClientError> {
+    let url = format!("{}/user/notifications/dismiss-all", base_url());
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
 pub async fn dismiss_user_notification(notification_id: Uuid) -> Result<(), ApiClientError> {
     let url = format!("{}/user/notifications/{}", base_url(), notification_id);
     send_empty_with_csrf("DELETE", &url, None::<&()>).await
@@ -1870,6 +2756,47 @@ pub async fn fetch_cache_destination(id: i32) -> Result<CacheDestination, ApiCli
     fetch_json(&url).await
 }
 
+/// Fetches one request-local provider inventory observation without mutation.
+/// Callers must bound concurrent requests and must not poll indefinitely.
+/// The server owns provider authorization, retained TLS and target policy.
+/// Aborts the browser request after twelve seconds or when the owning future
+/// is cancelled. GET bypasses browser HTTP caches through the shared transport.
+///
+/// # Errors
+/// Returns an error for authentication, missing destinations, transport failures
+/// or malformed responses. Presentation must not display raw error bodies.
+pub async fn fetch_cache_storage_metrics(id: i32) -> Result<CacheStorageMetrics, ApiClientError> {
+    let url = format!("{}/caches/{id}/metrics", base_url());
+    // CONCURRENCY: Resource cancellation must abort the browser fetch, not
+    // leave an old observation pass running beside its replacement.
+    struct AbortOnDrop(web_sys::AbortController);
+    impl Drop for AbortOnDrop {
+        fn drop(&mut self) {
+            self.0.abort();
+        }
+    }
+    let controller = web_sys::AbortController::new()
+        .map_err(|_| ApiClientError::Network("Metrics request unavailable".into()))?;
+    let _owner = AbortOnDrop(controller.clone());
+    // The server observation budget is eight seconds. Four additional seconds
+    // cover API transport and response delivery without an indefinite spinner.
+    let timeout = gloo_timers::callback::Timeout::new(12_000, {
+        let controller = controller.clone();
+        move || controller.abort()
+    });
+    let response = send_request_with_signal("GET", &url, None, Some(&controller.signal())).await;
+    timeout.cancel();
+    let (status, text) = response?;
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: "Metrics unavailable".into(),
+        });
+    }
+    serde_json::from_str(&text)
+        .map_err(|_| ApiClientError::Deserialize("Invalid metrics response".into()))
+}
+
 /// Create a new cache destination
 pub async fn create_cache_destination(
     data: &CreateCacheDestination,
@@ -1878,15 +2805,230 @@ pub async fn create_cache_destination(
     send_json_with_csrf("POST", &url, Some(data)).await
 }
 
-/// Test cache destination credentials/configuration
+/// Tests unsaved cache configuration through the existing CSRF transport.
+/// Structured Attic policy rejections remain failed probe results, not success.
+///
+/// # Errors
+/// Returns errors for API authorization, malformed responses, unsupported
+/// rejections or transport failures. Use [`cache_probe_error_message`] for local
+/// allowlisted guidance; callers must not display response bodies.
 pub async fn test_cache_destination_credentials(
     data: &CreateCacheDestination,
 ) -> Result<CacheCredentialTestResult, ApiClientError> {
     let url = format!("{}/caches/test-credentials", base_url());
-    send_json_with_csrf("POST", &url, Some(data)).await
+    send_cache_probe(&url, data).await
 }
 
-/// Update an existing cache destination
+/// Tests a stored destination with the same replacement patch used by Save.
+///
+/// The server resolves omitted credentials by ID. This request does not save
+/// configuration, credentials, environment assignments or usage timestamps.
+/// The request body is an unwrapped [`UpdateCacheDestination`].
+///
+/// # Errors
+/// Returns an error for authorization, missing destinations, invalid overrides,
+/// unsupported target-policy rejection or network failures. Allowlisted Attic
+/// HTTP 400 policy envelopes return failed results. Callers must display a static
+/// failure message from [`cache_probe_error_message`] rather than echo response
+/// bodies or submitted credentials.
+pub async fn test_stored_cache_destination_credentials(
+    id: i32,
+    data: &UpdateCacheDestination,
+) -> Result<CacheCredentialTestResult, ApiClientError> {
+    let url = format!("{}/caches/{id}/test-credentials", base_url());
+    send_cache_probe(&url, data).await
+}
+
+// SECURITY: Only cache-probe responses get this decoder. HTTP API authorization
+// and CSRF errors remain errors even if their bodies imitate Attic evidence.
+async fn send_cache_probe<B: serde::Serialize>(
+    url: &str,
+    data: &B,
+) -> Result<CacheCredentialTestResult, ApiClientError> {
+    let payload = serde_json::to_string(data)
+        .map_err(|_| ApiClientError::Deserialize("Invalid cache probe request".into()))?;
+    let (status, text) = send_request_with_csrf("POST", url, Some(&payload))
+        .await
+        .map_err(|_| ApiClientError::Network(CACHE_PROBE_FAILURE_MESSAGE.into()))?;
+    decode_cache_probe(status, &text)
+}
+
+fn decode_cache_probe(
+    status: u16,
+    text: &str,
+) -> Result<CacheCredentialTestResult, ApiClientError> {
+    if status == 400 {
+        let envelope = serde_json::from_str::<serde_json::Value>(text).ok();
+        let parsed = serde_json::from_str::<CacheCredentialTestResult>(text).ok();
+        if let (Some(envelope), Some(mut result)) = (envelope, parsed) {
+            let null_fields = [
+                "status_code",
+                "cache_access_valid",
+                "token_auth_valid",
+                "write_auth_valid",
+                "details",
+            ];
+            if result.probe_kind == Some(CacheProbeKind::AtticCacheConfig)
+                && result.stage == Some(CacheProbeStage::TargetPolicy)
+                && !result.ok
+                && envelope.get("ok") == Some(&serde_json::Value::Bool(false))
+                && matches!(
+                    result.error,
+                    Some(
+                        CacheProbePolicyError::InvalidCacheTestConfig
+                            | CacheProbePolicyError::LegacyQueryCredentialsUnsupported
+                    )
+                )
+                && null_fields
+                    .iter()
+                    .all(|field| envelope.get(*field) == Some(&serde_json::Value::Null))
+            {
+                result.message.clear();
+                result.tested_url = None;
+                result.diagnostic_code = result
+                    .diagnostic_code
+                    .filter(|code| cache_diagnostic_message(code).is_some());
+                return Ok(result);
+            }
+        }
+    } else if (200..300).contains(&status) {
+        let mut result: CacheCredentialTestResult = serde_json::from_str(text)
+            .map_err(|_| ApiClientError::Deserialize("Invalid cache probe response".into()))?;
+        if result.probe_kind == Some(CacheProbeKind::AtticCacheConfig) {
+            result.message.clear();
+            result.tested_url = None;
+        } else {
+            // SECURITY: Even HTTP 200 failure prose can contain upstream URLs,
+            // PEM or credentials. Retain only locally mapped guidance.
+            result.message = if result.ok {
+                "Cache connection test completed.".into()
+            } else {
+                result.failure_message().into()
+            };
+            result.tested_url = None;
+        }
+        result.diagnostic_code = result
+            .diagnostic_code
+            .filter(|code| cache_diagnostic_message(code).is_some());
+        return Ok(result);
+    }
+    Err(ApiClientError::Status {
+        code: status,
+        // Cache errors stay opaque. Preserve status for auth/CSRF handling,
+        // but do not retain arbitrary server or upstream prose in this API.
+        body: cache_probe_rejection_message(status, text).into(),
+    })
+}
+
+fn cache_probe_rejection_message(status: u16, text: &str) -> &'static str {
+    // Authorization, CSRF and unsupported statuses cannot supply diagnostics.
+    if status == 400 {
+        #[derive(serde::Deserialize)]
+        struct Diagnostic {
+            diagnostic_code: Option<String>,
+        }
+        if let Ok(value) = serde_json::from_str::<Diagnostic>(text)
+            && let Some(message) = value
+                .diagnostic_code
+                .as_deref()
+                .and_then(cache_diagnostic_message)
+        {
+            return message;
+        }
+    }
+    "Cache probe request rejected"
+}
+
+/// Returns static cache-probe error guidance for UI presentation.
+///
+/// Only exact local diagnostic messages produced by the cache decoder are
+/// accepted. Network exceptions, response bodies, URLs, raw status codes and
+/// decoding details never enter the displayed fallback.
+pub fn cache_probe_error_message(error: &ApiClientError) -> &'static str {
+    if let ApiClientError::Status { code: 400, body } = error {
+        for code in CACHE_DIAGNOSTIC_CODES {
+            if let Some(message) = cache_diagnostic_message(code)
+                && body == message
+            {
+                return message;
+            }
+        }
+    }
+    CACHE_PROBE_FAILURE_MESSAGE
+}
+
+const CACHE_DIAGNOSTIC_CODES: [&str; 18] = [
+    "ca_bundle_framing_invalid",
+    "ca_certificate_invalid",
+    "ca_bundle_content_unsupported",
+    "ca_bundle_trust_ambiguous",
+    "ca_bundle_empty",
+    "ca_bundle_too_large",
+    "client_identity_invalid",
+    "client_certificate_invalid",
+    "client_private_key_invalid",
+    "client_identity_mismatch",
+    "tls_verification_failed",
+    "dns_or_connection_failed",
+    "http_response_failed",
+    "invalid_niks3_metadata",
+    "signing_key_mismatch",
+    "target_policy_rejected",
+    "probe_timeout",
+    "probe_failed",
+];
+
+/// Discovers public Niks3 endpoints and signing keys without saving changes.
+/// Uses only the selected write TLS transport; tokens and read identities are
+/// excluded from [`Niks3DiscoverRequest`].
+///
+/// # Errors
+/// Returns an error for authorization, target-policy, network, or metadata failures.
+pub async fn discover_niks3(data: &Niks3DiscoverRequest) -> Result<Niks3Discovery, ApiClientError> {
+    let url = format!("{}/caches/niks3/discover", base_url());
+    send_cache_discovery(&url, data).await
+}
+
+/// Discovers a stored Niks3 destination through an unwrapped write-transport patch.
+/// Omitted write identity is resolved by ID on the server. No state is persisted.
+/// The caller must project out tokens and read credentials before calling.
+///
+/// # Errors
+/// Returns an opaque authorization, validation, transport or metadata error.
+pub async fn discover_stored_niks3(
+    id: i32,
+    data: &UpdateCacheDestination,
+) -> Result<Niks3Discovery, ApiClientError> {
+    let url = format!("{}/caches/{id}/niks3/discover", base_url());
+    send_cache_discovery(&url, data).await
+}
+
+async fn send_cache_discovery<B: serde::Serialize>(
+    url: &str,
+    data: &B,
+) -> Result<Niks3Discovery, ApiClientError> {
+    let payload = serde_json::to_string(data)
+        .map_err(|_| ApiClientError::Deserialize("Invalid discovery request".into()))?;
+    let (status, text) = send_request_with_csrf("POST", url, Some(&payload))
+        .await
+        .map_err(|_| ApiClientError::Network(CACHE_PROBE_FAILURE_MESSAGE.into()))?;
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: cache_probe_rejection_message(status, &text).into(),
+        });
+    }
+    serde_json::from_str(&text)
+        .map_err(|_| ApiClientError::Deserialize("Invalid discovery response".into()))
+}
+
+/// Updates a cache destination with replacements and explicit credential clears.
+///
+/// Omitted credentials retain server-side values. Authentication mode changes
+/// remove incompatible credentials atomically. The response redacts secrets.
+///
+/// # Errors
+/// Returns an error for authorization, validation, network, or persistence failures.
 pub async fn update_cache_destination(
     id: i32,
     data: &UpdateCacheDestination,
@@ -2033,7 +3175,7 @@ async fn send_empty_with_csrf<B: serde::Serialize>(
     Ok(())
 }
 
-async fn send_request_with_csrf(
+pub(crate) async fn send_request_with_csrf(
     method: &str,
     url: &str,
     body: Option<&str>,
@@ -2121,6 +3263,41 @@ pub enum ApiClientError {
     Deserialize(String),
 }
 
+/// Classifies targeted Config Inspector mutation failures.
+#[derive(Debug, Clone)]
+pub enum QueueConfigInspectionError {
+    /// Primary evaluation has not persisted an exact carrier for the target.
+    Prerequisite(String),
+    /// The mutation failed for another API, transport, or decoding reason.
+    Request(ApiClientError),
+}
+
+/// Classifies actionable build requeue failures.
+#[derive(Debug, Clone)]
+pub enum RequeueBuildJobError {
+    /// The exact source revision requires administrator-triggered evaluation.
+    EvaluatorContractObsolete { commit_id: i32 },
+    /// The visible source changed to a non-terminal lifecycle state.
+    LifecycleConflict { status: String },
+    /// The request failed for another HTTP, transport, or decoding reason.
+    Request(ApiClientError),
+}
+
+impl std::fmt::Display for RequeueBuildJobError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EvaluatorContractObsolete { commit_id } => write!(
+                formatter,
+                "commit {commit_id} requires authoritative re-evaluation"
+            ),
+            Self::LifecycleConflict { status } => {
+                write!(formatter, "build is no longer terminal (status: {status})")
+            }
+            Self::Request(error) => write!(formatter, "{error}"),
+        }
+    }
+}
+
 impl std::fmt::Display for ApiClientError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -2189,6 +3366,15 @@ async fn send_request(
     url: &str,
     body: Option<&str>,
 ) -> Result<(u16, String), ApiClientError> {
+    send_request_with_signal(method, url, body, None).await
+}
+
+async fn send_request_with_signal(
+    method: &str,
+    url: &str,
+    body: Option<&str>,
+    signal: Option<&web_sys::AbortSignal>,
+) -> Result<(u16, String), ApiClientError> {
     use wasm_bindgen::JsCast;
     use wasm_bindgen::JsValue;
     use wasm_bindgen_futures::JsFuture;
@@ -2212,6 +3398,7 @@ async fn send_request(
     if let Some(payload) = body {
         opts.set_body(&JsValue::from_str(payload));
     }
+    opts.set_signal(signal);
 
     let request = web_sys::Request::new_with_str_and_init(url, &opts)
         .map_err(|e| ApiClientError::Network(format!("{e:?}")))?;
@@ -2246,6 +3433,28 @@ async fn send_request(
     let body = text.as_string().unwrap_or_default();
 
     Ok((status as u16, body))
+}
+
+async fn fetch_json_with_timeout<T: serde::de::DeserializeOwned>(
+    url: &str,
+    timeout_ms: u32,
+) -> Result<T, ApiClientError> {
+    let controller = web_sys::AbortController::new()
+        .map_err(|error| ApiClientError::Network(format!("{error:?}")))?;
+    let abort_controller = controller.clone();
+    let timeout = gloo_timers::callback::Timeout::new(timeout_ms, move || {
+        abort_controller.abort();
+    });
+    let result = send_request_with_signal("GET", url, None, Some(&controller.signal())).await;
+    timeout.cancel();
+    let (status, text) = result?;
+    if !(200..300).contains(&status) {
+        return Err(ApiClientError::Status {
+            code: status,
+            body: decode_api_error_message(&text),
+        });
+    }
+    serde_json::from_str(&text).map_err(|error| ApiClientError::Deserialize(error.to_string()))
 }
 
 fn decode_api_error_message(body: &str) -> String {
@@ -2408,17 +3617,31 @@ pub async fn trust_policy_version(
 }
 
 /// Publish a policy version (makes it immutable / accepted).
+///
+/// # Errors
+///
+/// Returns an error when request serialization, transport, or publication
+/// fails.
 pub async fn publish_policy_version(
     version_id: &Uuid,
+    request: &PublishPolicyVersionRequest,
 ) -> Result<serde_json::Value, ApiClientError> {
     let url = format!("{}/policy-versions/{}/publish", base_url(), version_id);
-    send_json_with_csrf("POST", &url, None::<&()>).await
+    send_json_with_csrf("POST", &url, Some(request)).await
 }
 
 /// Create a new mutable draft from a published policy version.
-pub async fn create_policy_draft(policy_id: &Uuid) -> Result<serde_json::Value, ApiClientError> {
+///
+/// # Errors
+///
+/// Returns [`ApiClientError`] when the request cannot be sent or the server
+/// rejects the draft creation.
+pub async fn create_policy_draft(
+    policy_id: &Uuid,
+    request: &CreatePolicyDraftRequest,
+) -> Result<CreatePolicyDraftResponse, ApiClientError> {
     let url = format!("{}/policies/{}/drafts", base_url(), policy_id);
-    send_json_with_csrf("POST", &url, None::<&()>).await
+    send_json_with_csrf("POST", &url, Some(request)).await
 }
 
 /// Trust or reject a bundle version.
@@ -2682,4 +3905,386 @@ pub async fn delete_policy_mapping(
         mapping_id
     );
     send_empty_with_csrf("DELETE", &url, None::<&()>).await
+}
+
+#[cfg(test)]
+mod cache_probe_tests {
+    use super::*;
+
+    fn policy() -> serde_json::Value {
+        serde_json::json!({
+            "ok": false, "status_code": null, "message": "fixture-untrusted-message",
+            "tested_url": "https://fixture-untrusted-url", "error": "invalid_cache_test_config",
+            "details": null, "probe_kind": "attic_cache_config", "stage": "target_policy",
+            "cache_access_valid": null, "token_auth_valid": null, "write_auth_valid": null
+        })
+    }
+
+    #[test]
+    fn attic_policy_400_is_a_failed_typed_result_without_prose_or_url() {
+        for code in [
+            "invalid_cache_test_config",
+            "legacy_query_credentials_unsupported",
+        ] {
+            let mut value = policy();
+            value["error"] = code.into();
+            let result = decode_cache_probe(400, &value.to_string()).unwrap();
+            assert!(!result.ok);
+            assert_eq!(result.stage, Some(CacheProbeStage::TargetPolicy));
+            assert!(result.message.is_empty());
+            assert!(result.tested_url.is_none());
+            assert!(result.cache_access_valid.is_none());
+            assert!(result.token_auth_valid.is_none());
+            assert!(result.write_auth_valid.is_none());
+        }
+    }
+
+    #[test]
+    fn api_authentication_and_csrf_statuses_never_become_probe_outcomes() {
+        for status in [400, 401, 403, 404, 500] {
+            let value = if status == 400 {
+                serde_json::json!({"error":"forbidden","message":"Admin role required"})
+            } else {
+                policy()
+            };
+            match decode_cache_probe(status, &value.to_string()) {
+                Err(ApiClientError::Status { code, body }) => {
+                    assert_eq!(code, status);
+                    assert_eq!(body, "Cache probe request rejected");
+                }
+                _ => panic!("API authorization or unsupported errors must remain errors"),
+            }
+        }
+    }
+
+    #[test]
+    fn policy_decoder_requires_exact_allowlisted_failed_evidence() {
+        for (field, invalid) in [
+            ("probe_kind", serde_json::json!("unsupported")),
+            ("stage", serde_json::json!("authentication")),
+            ("stage", serde_json::json!("unsupported")),
+            ("error", serde_json::json!("unsupported")),
+            ("ok", serde_json::json!(true)),
+            ("status_code", serde_json::json!(200)),
+            ("cache_access_valid", serde_json::json!(true)),
+            ("token_auth_valid", serde_json::json!(true)),
+            ("write_auth_valid", serde_json::json!(true)),
+            ("details", serde_json::json!({"upstream":"untrusted"})),
+        ] {
+            let mut value = policy();
+            value[field] = invalid;
+            assert!(
+                matches!(
+                    decode_cache_probe(400, &value.to_string()),
+                    Err(ApiClientError::Status { code: 400, .. })
+                ),
+                "reject {field}"
+            );
+        }
+        let mut value = policy();
+        value.as_object_mut().unwrap().remove("details");
+        assert!(decode_cache_probe(400, &value.to_string()).is_err());
+        assert!(decode_cache_probe(400, "not JSON").is_err());
+    }
+
+    #[test]
+    fn successful_responses_drop_untrusted_prose_and_preserve_legacy_evidence() {
+        let mut value = policy();
+        value["ok"] = true.into();
+        value["stage"] = "complete".into();
+        value["status_code"] = 200.into();
+        value["cache_access_valid"] = true.into();
+        value.as_object_mut().unwrap().remove("error");
+        let result = decode_cache_probe(200, &value.to_string()).unwrap();
+        assert!(result.message.is_empty());
+        assert!(result.tested_url.is_none());
+        let legacy = decode_cache_probe(200, r#"{"success":true,"message":"legacy"}"#).unwrap();
+        assert!(legacy.ok);
+        assert_eq!(legacy.message, "Cache connection test completed.");
+        assert!(legacy.probe_kind.is_none());
+    }
+
+    #[test]
+    fn exact_diagnostics_map_locally_for_http_errors_and_failed_200_results() {
+        let mut messages = std::collections::HashSet::new();
+        for code in CACHE_DIAGNOSTIC_CODES {
+            let message = cache_diagnostic_message(code).unwrap();
+            assert!(
+                messages.insert(message),
+                "diagnostics must remain distinguishable"
+            );
+            let payload = serde_json::json!({
+                "ok": false, "diagnostic_code": code,
+                "message": "-----BEGIN PRIVATE KEY----- fixture-sensitive-body",
+                "tested_url": "https://fixture-user:fixture-password@invalid.example/?token=fixture-token",
+                "probe_scope": "write", "write_api_reachable": false,
+                "write_authn_valid": null, "write_authorization_valid": null,
+                "write_auth_valid": null
+            }).to_string();
+            let error = decode_cache_probe(400, &payload).unwrap_err();
+            assert_eq!(cache_probe_error_message(&error), message);
+            assert!(!format!("{error:?}").contains("fixture-"));
+            let result = decode_cache_probe(200, &payload).unwrap();
+            assert!(!result.ok);
+            assert_eq!(result.message, message);
+            assert_eq!(result.failure_message(), message);
+            assert!(result.tested_url.is_none());
+            assert_eq!(result.probe_scope, Some(Niks3ProbeScope::Write));
+            assert_eq!(result.write_api_reachable, Some(false));
+            assert!(result.write_authn_valid.is_none());
+            assert!(result.write_authorization_valid.is_none());
+            assert!(result.write_auth_valid.is_none());
+        }
+    }
+
+    #[test]
+    fn unknown_missing_decorated_and_malformed_diagnostics_fail_closed() {
+        for diagnostic in [
+            serde_json::Value::Null,
+            serde_json::json!("unknown-fixture-secret"),
+            serde_json::json!(" tls_verification_failed"),
+            serde_json::json!("tls_verification_failed\nfixture-secret"),
+            serde_json::json!("TLS_VERIFICATION_FAILED"),
+            serde_json::json!({"code":"tls_verification_failed"}),
+            serde_json::json!(["tls_verification_failed"]),
+        ] {
+            let payload = serde_json::json!({"ok":false, "message":"fixture-secret", "diagnostic_code":diagnostic}).to_string();
+            let error = decode_cache_probe(400, &payload).unwrap_err();
+            assert_eq!(
+                cache_probe_error_message(&error),
+                CACHE_PROBE_FAILURE_MESSAGE
+            );
+            if let Ok(result) = decode_cache_probe(200, &payload) {
+                assert_eq!(result.message, CACHE_PROBE_FAILURE_MESSAGE);
+                assert!(result.diagnostic_code.is_none());
+            }
+        }
+        for payload in [
+            "not JSON fixture-secret",
+            r#"{"message":"fixture-secret"}"#,
+            r#"{"diagnostic_code":17}"#,
+        ] {
+            let error = decode_cache_probe(400, payload).unwrap_err();
+            assert_eq!(
+                cache_probe_error_message(&error),
+                CACHE_PROBE_FAILURE_MESSAGE
+            );
+        }
+        let result = decode_cache_probe(200, r#"{"ok":false,"message":"fixture-secret"}"#).unwrap();
+        assert_eq!(result.message, CACHE_PROBE_FAILURE_MESSAGE);
+        assert!(result.diagnostic_code.is_none());
+    }
+
+    #[test]
+    fn spoofed_codes_on_unsupported_statuses_never_supply_guidance() {
+        for status in [401, 403, 404, 409, 422, 500, 502, 503] {
+            let payload =
+                r#"{"diagnostic_code":"tls_verification_failed","message":"fixture-secret"}"#;
+            let error = decode_cache_probe(status, payload).unwrap_err();
+            assert_eq!(
+                cache_probe_error_message(&error),
+                CACHE_PROBE_FAILURE_MESSAGE
+            );
+        }
+        for error in [
+            ApiClientError::Network("https://fixture-secret.invalid".into()),
+            ApiClientError::Deserialize("fixture-secret".into()),
+            ApiClientError::Status {
+                code: 400,
+                body: "tls_verification_failed fixture-secret".into(),
+            },
+        ] {
+            assert_eq!(
+                cache_probe_error_message(&error),
+                CACHE_PROBE_FAILURE_MESSAGE
+            );
+        }
+    }
+
+    #[test]
+    fn successful_niks3_diagnostics_do_not_promote_untested_authorization() {
+        let result = decode_cache_probe(200, r#"{"ok":true,"message":"fixture-secret","diagnostic_code":"tls_verification_failed","probe_scope":"write","write_api_reachable":true,"write_authn_valid":null,"write_authorization_valid":null}"#).unwrap();
+        assert_eq!(result.message, "Cache connection test completed.");
+        assert_eq!(result.write_api_reachable, Some(true));
+        assert!(result.write_authn_valid.is_none());
+        assert!(result.write_authorization_valid.is_none());
+    }
+}
+
+#[cfg(test)]
+mod config_observation_tests {
+    use super::*;
+
+    #[test]
+    fn system_cve_inventory_url_bounds_pages_and_encodes_opaque_cursor() {
+        let id = Uuid::from_u128(440);
+        assert_eq!(
+            system_cve_inventory_url(
+                "https://example.test/api/v1",
+                &id,
+                None,
+                SystemCveInventorySelection::Current,
+            )
+            .expect("page URL should serialize"),
+            format!("https://example.test/api/v1/systems/{id}/cve-inventory-page?limit=100")
+        );
+        assert_eq!(
+            system_cve_inventory_url(
+                "https://example.test/api/v1",
+                &id,
+                Some("opaque+/= cursor&scope"),
+                SystemCveInventorySelection::Current,
+            )
+            .expect("cursor URL should serialize"),
+            format!(
+                "https://example.test/api/v1/systems/{id}/cve-inventory-page?limit=100&after=opaque%2B%2F%3D+cursor%26scope"
+            )
+        );
+
+        let generation_snapshot_id = Uuid::from_u128(441);
+        assert_eq!(
+            system_cve_inventory_url(
+                "https://example.test/api/v1",
+                &id,
+                None,
+                SystemCveInventorySelection::RetainedGeneration {
+                    generation_snapshot_id,
+                },
+            )
+            .expect("historical page URL should serialize"),
+            format!(
+                "https://example.test/api/v1/systems/{id}/cve-inventory-page?limit=100&target=retained_generation&target_id={generation_snapshot_id}"
+            )
+        );
+    }
+
+    #[test]
+    fn hardening_inventory_url_uses_only_server_issued_target_identity() {
+        let id = Uuid::from_u128(440);
+        let generation_snapshot_id = Uuid::from_u128(441);
+        assert_eq!(
+            system_hardening_inventory_url(
+                "https://example.test/api/v1",
+                &id,
+                SystemCveInventorySelection::RetainedGeneration {
+                    generation_snapshot_id,
+                },
+            ),
+            format!(
+                "https://example.test/api/v1/systems/{id}/hardening-inventory?target=retained_generation&target_id={generation_snapshot_id}"
+            )
+        );
+        assert_eq!(
+            system_hardening_inventory_url(
+                "https://example.test/api/v1",
+                &id,
+                SystemCveInventorySelection::ExactDerivation { derivation_id: 42 },
+            ),
+            format!(
+                "https://example.test/api/v1/systems/{id}/hardening-inventory?target=exact_derivation&target_id=42"
+            )
+        );
+    }
+
+    fn request(
+        kind: ConfigObservationKind,
+        path_components: Vec<String>,
+    ) -> CreateConfigObservationRequest {
+        CreateConfigObservationRequest {
+            kind,
+            path_components,
+            child_offset: 0,
+            automatic: false,
+        }
+    }
+
+    #[test]
+    fn observation_request_identity_rejects_revision_kind_path_and_request_changes() {
+        let expected = request(ConfigObservationKind::Prefix, vec!["services".into()]);
+        let response = ConfigObservationRequestResponse {
+            request_id: uuid::Uuid::from_u128(440),
+            revision: "a".repeat(40),
+            configuration_name: "atlas-01".into(),
+            kind: ConfigObservationKind::Prefix,
+            path_components: vec!["services".into()],
+            child_offset: 0,
+            lifecycle: ConfigObservationLifecycle::Running,
+            observation_id: None,
+            error: None,
+            attempts: 1,
+            heartbeat_at: None,
+            reused: false,
+        };
+        assert!(
+            validate_config_observation_request_identity(
+                &response,
+                Some(response.request_id),
+                &response.revision,
+                &expected,
+            )
+            .is_ok()
+        );
+
+        for (request_id, revision, request) in [
+            (
+                Some(uuid::Uuid::from_u128(441)),
+                response.revision.as_str(),
+                expected.clone(),
+            ),
+            (Some(response.request_id), "b", expected.clone()),
+            (
+                Some(response.request_id),
+                response.revision.as_str(),
+                request(ConfigObservationKind::Option, vec!["services".into()]),
+            ),
+            (
+                Some(response.request_id),
+                response.revision.as_str(),
+                request(ConfigObservationKind::Prefix, vec!["networking".into()]),
+            ),
+        ] {
+            assert!(
+                validate_config_observation_request_identity(
+                    &response, request_id, revision, &request,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn observation_payload_identity_uses_structured_components() {
+        let payload = ConfigObservationPayload::Option {
+            path_components: vec!["services".into(), "openssh".into(), "enable".into()],
+            key: "a".repeat(64),
+            declared_type: Some("boolean".into()),
+            is_defined: true,
+            highest_prio: Some(100),
+            value: SafeOptionValue::Scalar(serde_json::Value::Bool(true)),
+        };
+        let (kind, path, child_offset) = config_observation_payload_identity(&payload);
+        assert_eq!(kind, ConfigObservationKind::Option);
+        assert_eq!(path, ["services", "openssh", "enable"]);
+        assert_eq!(child_offset, 0);
+    }
+
+    #[test]
+    fn observation_polling_has_no_fixed_multi_second_initial_delay() {
+        assert_eq!(
+            config_observation_poll_delay_ms(ConfigObservationLifecycle::Queued, true),
+            Some(250)
+        );
+        assert_eq!(
+            config_observation_poll_delay_ms(ConfigObservationLifecycle::WaitingForCapacity, false),
+            Some(1_000)
+        );
+        assert_eq!(
+            config_observation_poll_delay_ms(ConfigObservationLifecycle::Running, false),
+            Some(500)
+        );
+        assert_eq!(
+            config_observation_poll_delay_ms(ConfigObservationLifecycle::Succeeded, true),
+            None
+        );
+    }
 }

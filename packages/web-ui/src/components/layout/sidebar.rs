@@ -10,12 +10,17 @@ use crate::state::app_state::AppState;
 use crate::state::auth;
 use crate::state::preferences;
 use crate::theme;
+use crate::views::poam_api;
 
 /// Context for sidebar state shared between components
 #[derive(Clone, Copy)]
 pub struct SidebarContext {
+    /// Indicates whether the mobile navigation drawer is open.
     pub is_mobile_drawer_open: Signal<bool>,
+    /// Indicates whether the desktop navigation rail is collapsed.
     pub is_collapsed: Signal<bool>,
+    /// Holds the server-scoped count of overdue remediation plans when known.
+    pub poam_overdue: Signal<Option<i64>>,
 }
 
 /// Shared UI preference signals (density, default systems view).
@@ -86,6 +91,7 @@ pub fn SidebarNav() -> Element {
     let prefs_ctx = use_context::<PreferencesContext>();
     let is_collapsed = (sidebar_ctx.is_collapsed)();
     let mut collapsed_signal = sidebar_ctx.is_collapsed;
+    let mut poam_overdue = sidebar_ctx.poam_overdue;
 
     // Match design-example sizing for sidebar and rail mode.
     let nav_width = if is_collapsed { "64px" } else { "240px" };
@@ -153,6 +159,9 @@ pub fn SidebarNav() -> Element {
                 badges.systems_fingerprint = fresh.systems_fingerprint.clone();
                 badges.environments_fingerprint = fresh.environments_fingerprint.clone();
             }
+            // This count is not an attention notification. Use the actor-scoped
+            // POA&M dashboard, never loaded register rows or design fixtures.
+            poam_overdue.set(poam_api::dashboard_summary().await.ok().map(|s| s.overdue));
             gloo_timers::future::TimeoutFuture::new(30_000).await;
         }
     });
@@ -171,6 +180,7 @@ pub fn SidebarNav() -> Element {
     let builds_failed = badges.builds_failed_new;
     let evals_failed = badges.evals_failed_new;
     let cves_critical = badges.cves_critical_new;
+    let overdue_plans = poam_overdue().unwrap_or(0);
 
     // Get user data for profile section
     let user_initials = if let Some(name) = auth::user_short_name(&auth_context) {
@@ -282,7 +292,7 @@ pub fn SidebarNav() -> Element {
                 }
                 NavLink {
                     collapsed: is_collapsed,
-                    to: Route::SystemsView {},
+                    to: Route::SystemsView { query: String::new() },
                     label: "Systems",
                     badge_count: if systems_attention > 0 { Some(systems_attention) } else { None },
                     badge_attention: systems_attention > 0,
@@ -303,7 +313,7 @@ pub fn SidebarNav() -> Element {
                 }
                 NavLink {
                     collapsed: is_collapsed,
-                    to: Route::FlakesView {},
+                    to: Route::FlakesView { query: String::new() },
                     label: "Flakes",
                     badge_count: if flakes_errored > 0 { Some(flakes_errored) } else { None },
                     badge_attention: flakes_errored > 0,
@@ -328,7 +338,7 @@ pub fn SidebarNav() -> Element {
                 }
                 NavLink {
                     collapsed: is_collapsed,
-                    to: Route::EnvironmentsView {},
+                    to: Route::EnvironmentsView { query: String::new() },
                     label: "Environments",
                     badge_count: if environments_attention > 0 { Some(environments_attention) } else { None },
                     badge_attention: environments_attention > 0,
@@ -379,7 +389,9 @@ pub fn SidebarNav() -> Element {
                 }
                 NavLink {
                     collapsed: is_collapsed,
-                    to: Route::BuildsView {},
+                    to: Route::BuildsView {
+                        query: String::new(),
+                    },
                     label: "Builds",
                     // Builds badge is acknowledged only when the failures tab is opened (not on mount).
                     // The view itself calls acknowledge("builds") when the completed/failed tab opens.
@@ -418,26 +430,24 @@ pub fn SidebarNav() -> Element {
 
                 // ── Compliance ────────────────────────────────────────────
                 NavSection { collapsed: is_collapsed, label: "Compliance" }
-                if show_admin {
-                    NavLink {
-                        collapsed: is_collapsed,
-                        to: Route::CvesView {},
-                        label: "CVEs",
-                        badge_count: if cves_critical > 0 { Some(cves_critical) } else { None },
-                        badge_attention: cves_critical > 0,
-                        badge_hidden: !badge_visible("cves", cves_critical, cves_critical > 0),
-                        badge_title: Some(format!("{} new critical CVE{} since you last checked", cves_critical, if cves_critical == 1 { "" } else { "s" })),
-                        icon: rsx!(
-                            svg {
-                                class: "w-4 h-4",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "1.75",
-                                view_box: "0 0 24 24",
-                                path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
-                            }
-                        )
-                    }
+                NavLink {
+                    collapsed: is_collapsed,
+                    to: Route::CvesView { query: String::new() },
+                    label: "CVEs",
+                    badge_count: if cves_critical > 0 { Some(cves_critical) } else { None },
+                    badge_attention: cves_critical > 0,
+                    badge_hidden: !badge_visible("cves", cves_critical, cves_critical > 0),
+                    badge_title: Some(format!("{} new critical CVE{} since you last checked", cves_critical, if cves_critical == 1 { "" } else { "s" })),
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
+                        }
+                    )
                 }
                 NavLink {
                     collapsed: is_collapsed,
@@ -456,8 +466,8 @@ pub fn SidebarNav() -> Element {
                 }
                 NavLink {
                     collapsed: is_collapsed,
-                    to: Route::ComplianceView {},
-                    label: "Compliance",
+                    to: Route::ComplianceView { bundle: String::new(), version: String::new(), system: String::new(), policy: String::new(), poam: String::new(), view: String::new() },
+                    label: "Bundles",
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -469,6 +479,16 @@ pub fn SidebarNav() -> Element {
                             path { d: "M9 12l2 2 4-4" }
                         }
                     )
+                }
+                NavLink {
+                    collapsed: is_collapsed,
+                    to: Route::PoamsView { query: String::new() },
+                    label: "POA&M",
+                    badge_count: if overdue_plans > 0 { Some(overdue_plans) } else { None },
+                    badge_attention: overdue_plans > 0,
+                    badge_hidden: !badge_visible("poams", overdue_plans, overdue_plans > 0),
+                    badge_title: Some(format!("{overdue_plans} POA&M plan{} past the target date", if overdue_plans == 1 { "" } else { "s" })),
+                    icon: rsx!(svg { class: "w-4 h-4", fill: "none", stroke: "currentColor", stroke_width: "1.75", view_box: "0 0 24 24", path { d: "M8 4h8l4 4v12H4V4h4zM8 12h8M8 16h6M15 4v4h5" } })
                 }
 
                 // ── System ────────────────────────────────────────────────
@@ -585,6 +605,8 @@ pub fn MobileDrawer() -> Element {
 
     let sidebar_ctx = use_context::<SidebarContext>();
     let mut is_mobile_drawer_open = sidebar_ctx.is_mobile_drawer_open;
+    let badges = NAV_BADGES();
+    let overdue_plans = (sidebar_ctx.poam_overdue)().unwrap_or(0);
 
     #[cfg(debug_assertions)]
     let show_dev_tools = true;
@@ -617,18 +639,21 @@ pub fn MobileDrawer() -> Element {
     }
 
     rsx! {
-        // Backdrop overlay
+        // Preserve the intended viewport overlay even when the packaged utility
+        // sheet omits fixed/inset-0. The drawer remains above it at z-index 50.
         div {
             "data-testid": "mobile-drawer-backdrop",
             class: "cf-mobile-overlay fixed inset-0 bg-black/50 z-40",
+            style: "position: fixed; inset: 0; z-index: 40;",
             onclick: move |_| is_mobile_drawer_open.set(false),
         }
 
-        // Drawer
+        // Keep the drawer positioned above the viewport backdrop independently
+        // of the omitted positioning and stacking utility classes.
         nav {
             "data-testid": "mobile-drawer",
             class: "cf-mobile-drawer fixed left-0 top-0 bottom-0 w-64 {theme::surface::SIDEBAR_BG} z-50 flex flex-col transform transition-transform duration-300",
-            style: "border-right: 1px solid var(--cf-card-border);",
+            style: "position: fixed; left: 0; top: 0; bottom: 0; z-index: 50; border-right: 1px solid var(--cf-card-border);",
 
             // Header with close button
             div {
@@ -649,11 +674,16 @@ pub fn MobileDrawer() -> Element {
                 }
                 button {
                     "data-testid": "mobile-drawer-close",
-                    class: "p-2 rounded-lg {theme::interactive::HOVER_BG} {theme::text::SECONDARY}",
+                    // The packaged utility sheet omits p-2 and w-6/h-6.
+                    // Preserve their intended padding and icon size locally so
+                    // this icon-only close control retains its hit area.
+                    class: "rounded-lg {theme::interactive::HOVER_BG} {theme::text::SECONDARY}",
+                    style: "padding: calc(var(--spacing) * 2);",
                     onclick: move |_| is_mobile_drawer_open.set(false),
                     "aria-label": "Close menu",
                     svg {
-                        class: "w-6 h-6",
+                        width: "24",
+                        height: "24",
                         fill: "none",
                         stroke: "currentColor",
                         stroke_width: "2",
@@ -687,8 +717,10 @@ pub fn MobileDrawer() -> Element {
                 }
                 NavLink {
                     collapsed: false,
-                    to: Route::SystemsView {},
+                    to: Route::SystemsView { query: String::new() },
                     label: "Systems",
+                    badge_count: (badges.systems_attention > 0).then_some(badges.systems_attention),
+                    badge_attention: badges.systems_attention > 0,
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -704,8 +736,10 @@ pub fn MobileDrawer() -> Element {
                 }
                 NavLink {
                     collapsed: false,
-                    to: Route::FlakesView {},
+                    to: Route::FlakesView { query: String::new() },
                     label: "Flakes",
+                    badge_count: (badges.flakes_errored > 0).then_some(badges.flakes_errored),
+                    badge_attention: badges.flakes_errored > 0,
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -721,8 +755,10 @@ pub fn MobileDrawer() -> Element {
                 }
                 NavLink {
                     collapsed: false,
-                    to: Route::EnvironmentsView {},
+                    to: Route::EnvironmentsView { query: String::new() },
                     label: "Environments",
+                    badge_count: (badges.environments_attention > 0).then_some(badges.environments_attention),
+                    badge_attention: badges.environments_attention > 0,
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -743,6 +779,8 @@ pub fn MobileDrawer() -> Element {
                     collapsed: false,
                     to: Route::EvaluationsView {},
                     label: "Evaluations",
+                    badge_count: (badges.evals_failed_new > 0).then_some(badges.evals_failed_new),
+                    badge_attention: badges.evals_failed_new > 0,
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -758,8 +796,12 @@ pub fn MobileDrawer() -> Element {
                 }
                 NavLink {
                     collapsed: false,
-                    to: Route::BuildsView {},
+                    to: Route::BuildsView {
+                        query: String::new(),
+                    },
                     label: "Builds",
+                    badge_count: (badges.builds_failed_new > 0).then_some(badges.builds_failed_new),
+                    badge_attention: badges.builds_failed_new > 0,
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -790,22 +832,22 @@ pub fn MobileDrawer() -> Element {
                 }
 
                 NavSection { collapsed: false, label: "Compliance" }
-                if show_admin {
-                    NavLink {
-                        collapsed: false,
-                        to: Route::CvesView {},
-                        label: "CVEs",
-                        icon: rsx!(
-                            svg {
-                                class: "w-4 h-4",
-                                fill: "none",
-                                stroke: "currentColor",
-                                stroke_width: "1.75",
-                                view_box: "0 0 24 24",
-                                path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
-                            }
-                        )
-                    }
+                NavLink {
+                    collapsed: false,
+                    to: Route::CvesView { query: String::new() },
+                    label: "CVEs",
+                    badge_count: (badges.cves_critical_new > 0).then_some(badges.cves_critical_new),
+                    badge_attention: badges.cves_critical_new > 0,
+                    icon: rsx!(
+                        svg {
+                            class: "w-4 h-4",
+                            fill: "none",
+                            stroke: "currentColor",
+                            stroke_width: "1.75",
+                            view_box: "0 0 24 24",
+                            path { d: "M12 3l7 3v6c0 5-3 7.5-7 9-4-1.5-7-4-7-9V6l7-3z" }
+                        }
+                    )
                 }
                 NavLink {
                     collapsed: false,
@@ -824,8 +866,8 @@ pub fn MobileDrawer() -> Element {
                 }
                 NavLink {
                     collapsed: false,
-                    to: Route::ComplianceView {},
-                    label: "Compliance",
+                    to: Route::ComplianceView { bundle: String::new(), version: String::new(), system: String::new(), policy: String::new(), poam: String::new(), view: String::new() },
+                    label: "Bundles",
                     icon: rsx!(
                         svg {
                             class: "w-4 h-4",
@@ -837,6 +879,14 @@ pub fn MobileDrawer() -> Element {
                             path { d: "M9 12l2 2 4-4" }
                         }
                     )
+                }
+                NavLink {
+                    collapsed: false,
+                    to: Route::PoamsView { query: String::new() },
+                    label: "POA&M",
+                    badge_count: (overdue_plans > 0).then_some(overdue_plans),
+                    badge_attention: overdue_plans > 0,
+                    icon: rsx!(svg { class: "w-4 h-4", fill: "none", stroke: "currentColor", stroke_width: "1.75", view_box: "0 0 24 24", path { d: "M8 4h8l4 4v12H4V4h4zM8 12h8M8 16h6M15 4v4h5" } })
                 }
 
                 NavSection { collapsed: false, label: "System" }

@@ -1,0 +1,412 @@
+{
+  "reviewed_revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+  "companion_application_revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+  "repository": "https://gitlab.com/crystal-forge/crystal-forge",
+  "merge_request": 329,
+  "comparison": {
+    "from": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+    "to": "931e36229ed548b0c62b560fc99f9415e3829cef",
+    "straight": true,
+    "compare_timeout": false,
+    "intervening_commits": [
+      "5df4b6cd3f20fc33eb339ecdaa6d0b8a0d9420d4",
+      "931e36229ed548b0c62b560fc99f9415e3829cef"
+    ],
+    "change_class": "Only Systems and CVEs documentation bundles added",
+    "application_test_or_migration_changes": false
+  },
+  "last_observed_head": {
+    "tool": "GitLab.get_merge_request_head_pipeline",
+    "project_path": "crystal-forge/crystal-forge",
+    "merge_request_iid": 329,
+    "diff_head_sha": "931e36229ed548b0c62b560fc99f9415e3829cef",
+    "head_pipeline": {
+      "id": 2875630862,
+      "project_id": 70402481,
+      "status": "failed"
+    },
+    "observed_date": "2026-09-23",
+    "meaning": "Point-in-time connector read during final packaging. No job investigation or Compliance-specific attribution was performed."
+  },
+  "source_hashes": "Not collected. Sources were read through the GitLab connector; no source-byte hash claim is made.",
+  "entries": [
+    {
+      "id": "P01",
+      "path": "packages/web-ui/src/views/compliance.rs",
+      "title": "Production Compliance view and local tests",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/web-ui/src/views/compliance.rs",
+      "inspection": "Full file read. Navigation, bundle selection, export, import, coverage, assignment panels and callbacks inspected.",
+      "inspected_line_ranges": [],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P02",
+      "path": "packages/web-ui/src/components/compliance/mod.rs",
+      "title": "Shared Compliance presentation and evidence drawer",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/web-ui/src/components/compliance/mod.rs",
+      "inspection": "Full file read. Catalog, score strip, systems matrix, evidence grouping, finding context and relationship refresh inspected.",
+      "inspected_line_ranges": [],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P03",
+      "path": "packages/web-ui/src/components/poam/mod.rs",
+      "title": "Shared POA&M components and local tests",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/web-ui/src/components/poam/mod.rs",
+      "inspection": "Full file read. Create/link dialogs, table, count strips, detail tray, lifecycle, history and navigation inspected.",
+      "inspected_line_ranges": [],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P04",
+      "path": "docs/design/CrystalForge/components/ComplianceView.jsx",
+      "title": "Compliance design reference",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/docs/design/CrystalForge/components/ComplianceView.jsx",
+      "inspection": "Full file read. Structural comparison only; not rendered.",
+      "inspected_line_ranges": [],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P05",
+      "path": "docs/design/CrystalForge/components/PoamViews.jsx",
+      "title": "POA&M design reference",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/docs/design/CrystalForge/components/PoamViews.jsx",
+      "inspection": "Full file read. Structural comparison only; demo state is not persistence authority.",
+      "inspected_line_ranges": [],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P06",
+      "path": "packages/default/crates/cf-server/src/handlers/api/compliance.rs",
+      "title": "Compliance read and basic bundle handlers",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/default/crates/cf-server/src/handlers/api/compliance.rs",
+      "inspection": "Selected contiguous ranges read. Function inventory located for other handlers; not a complete handler-module security audit.",
+      "inspected_line_ranges": [
+        [
+          1,
+          592
+        ],
+        [
+          2800,
+          2943
+        ]
+      ],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P07",
+      "path": "packages/default/crates/cf-server/src/queries/compliance.rs",
+      "title": "Compliance selection, evidence and aggregation queries",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/default/crates/cf-server/src/queries/compliance.rs",
+      "inspection": "Selected contiguous ranges read; function and test inventory located.",
+      "inspected_line_ranges": [
+        [
+          2083,
+          3032
+        ],
+        [
+          3474,
+          3599
+        ],
+        [
+          3841,
+          4330
+        ],
+        [
+          4415,
+          4864
+        ]
+      ],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P08",
+      "path": "packages/default/crates/cf-server/src/services/poam.rs",
+      "title": "Policy POA&M creation transaction",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/default/crates/cf-server/src/services/poam.rs#L1330-1522",
+      "inspection": "Selected contiguous range read.",
+      "inspected_line_ranges": [
+        [
+          1330,
+          1522
+        ]
+      ],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P09",
+      "path": "packages/default/crates/cf-server/src/services/poam.rs",
+      "title": "Policy waiver creation and administrative decision entry",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/default/crates/cf-server/src/services/poam.rs#L6330-6529",
+      "inspection": "Selected contiguous range read. Full decision implementation outside this range was not independently audited.",
+      "inspected_line_ranges": [
+        [
+          6330,
+          6529
+        ]
+      ],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P10",
+      "path": "packages/default/crates/cf-server/src/services/poam.rs",
+      "title": "Exact-CVE verification and immutable baseline",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/default/crates/cf-server/src/services/poam.rs#L6666-6885",
+      "inspection": "Selected contiguous range read.",
+      "inspected_line_ranges": [
+        [
+          6666,
+          6885
+        ]
+      ],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P11",
+      "path": "packages/default/crates/cf-server/src/services/poam.rs",
+      "title": "Current policy-finding verification resolver",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/default/crates/cf-server/src/services/poam.rs#L7205-7612",
+      "inspection": "Selected contiguous range read. Full helper closure and all producer paths were not audited.",
+      "inspected_line_ranges": [
+        [
+          7205,
+          7612
+        ]
+      ],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P12",
+      "path": "packages/default/crates/cf-server/src/services/poam.rs",
+      "title": "Verification, atomic closure and reopen entry",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/default/crates/cf-server/src/services/poam.rs#L7800-8190",
+      "inspection": "Selected contiguous range read. Reopen entry and documented contract read; not the complete reopen body.",
+      "inspected_line_ranges": [
+        [
+          7800,
+          8190
+        ]
+      ],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P13",
+      "path": "packages/default/crates/cf-server/src/services/poam.rs",
+      "title": "System and bundle POA&M rollup services",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/default/crates/cf-server/src/services/poam.rs#L8490-8720",
+      "inspection": "Selected contiguous range read. Bundle membership construction read; remaining final accumulation outside range not independently read.",
+      "inspected_line_ranges": [
+        [
+          8490,
+          8720
+        ]
+      ],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P14",
+      "path": "packages/web-ui/src/export/mod.rs",
+      "title": "Client-side evidence export generators",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/web-ui/src/export/mod.rs",
+      "inspection": "Full file read. Native JSON, CSV, SARIF, OSCAL and HTML generators inspected; no schema validation run.",
+      "inspected_line_ranges": [],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P15",
+      "path": "packages/default/crates/cf-server/src/queries/framework_requirements.rs",
+      "title": "Requirement coverage calculation",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/default/crates/cf-server/src/queries/framework_requirements.rs#L615-892",
+      "inspection": "Coverage implementation read; requirement search and reconciliation functions located.",
+      "inspected_line_ranges": [
+        [
+          615,
+          892
+        ]
+      ],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P16",
+      "path": "packages/default/crates/cf-server/src/bin/server.rs",
+      "title": "Route registration and final router layers",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/default/crates/cf-server/src/bin/server.rs",
+      "inspection": "Compliance routes located through scoped source search; final router composition read.",
+      "inspected_line_ranges": [
+        [
+          636,
+          814
+        ],
+        [
+          1190,
+          1360
+        ]
+      ],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P17",
+      "path": "docs/task-433-design-parity-review.md",
+      "title": "Earlier design-parity review and demo exclusions",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/docs/task-433-design-parity-review.md",
+      "inspection": "Full document read. Historical claims are not current execution evidence.",
+      "inspected_line_ranges": [],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P18",
+      "path": "checks/web-ui/tests/integration-test.js",
+      "title": "Existing export, new-bundle and error browser workflows",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/checks/web-ui/tests/integration-test.js#L19248-19400",
+      "inspection": "Selected bodies read; assignment test entry also visible. No workflow executed.",
+      "inspected_line_ranges": [
+        [
+          19248,
+          19400
+        ]
+      ],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P19",
+      "path": "checks/web-ui/coverage-manifest.json",
+      "title": "Declared Compliance and POA&M browser coverage",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/checks/web-ui/coverage-manifest.json",
+      "inspection": "Scoped source search located named workflows; not all workflow bodies inspected.",
+      "inspected_line_ranges": [
+        [
+          1673,
+          1789
+        ],
+        [
+          2064,
+          2228
+        ]
+      ],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P20",
+      "path": "packages/default/crates/cf-server/src/models/poam.rs",
+      "title": "Distinct policy and CVE finding counts",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/default/crates/cf-server/src/models/poam.rs#L570-582",
+      "inspection": "Focused search result read; no full model-module audit.",
+      "inspected_line_ranges": [
+        [
+          570,
+          582
+        ]
+      ],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P21",
+      "path": "packages/default/crates/cf-server/src/queries/poam.rs",
+      "title": "POA&M summary count projection",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/default/crates/cf-server/src/queries/poam.rs#L1-95",
+      "inspection": "Focused search results read for separate policy/CVE counts and closure-link counting.",
+      "inspected_line_ranges": [
+        [
+          1,
+          95
+        ]
+      ],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P22",
+      "path": "packages/default/crates/cf-server/tests/poam_workflows.rs",
+      "title": "Database workflow inventory and exact-CVE count assertions",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/packages/default/crates/cf-server/tests/poam_workflows.rs",
+      "inspection": "Named tests and focused assertion snippets located. No tests executed; broad workflow adequacy remains unverified.",
+      "inspected_line_ranges": [
+        [
+          5058,
+          5073
+        ],
+        [
+          5275,
+          5293
+        ]
+      ],
+      "secondary": false,
+      "executed": false
+    },
+    {
+      "id": "P23",
+      "path": "docs/design/CrystalForge/docs/crystal-forge-systems-design/systems-view-design-v0.1.md",
+      "title": "Companion Systems architecture draft",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/docs/design/CrystalForge/docs/crystal-forge-systems-design/systems-view-design-v0.1.md",
+      "inspection": "Companion retrieved from conversation files. Repository addition confirmed in direct comparison. Its application inspection is pinned to 58006084, not a new Systems audit.",
+      "inspected_line_ranges": [],
+      "secondary": true,
+      "executed": false
+    },
+    {
+      "id": "P24",
+      "path": "docs/design/CrystalForge/docs/crystal-forge-cves-design/cves-view-design-v0.1.md",
+      "title": "Companion fleet CVEs architecture draft",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/docs/design/CrystalForge/docs/crystal-forge-cves-design/cves-view-design-v0.1.md",
+      "inspection": "Companion retrieved from conversation files. Repository addition confirmed in direct comparison. Its application inspection is pinned to 58006084.",
+      "inspected_line_ranges": [],
+      "secondary": true,
+      "executed": false
+    },
+    {
+      "id": "P25",
+      "path": "docs/design/CrystalForge/cve-poam-evidence-continuity-design-spec.md",
+      "title": "Existing CVE continuity proposal",
+      "revision": "931e36229ed548b0c62b560fc99f9415e3829cef",
+      "url": "https://gitlab.com/crystal-forge/crystal-forge/-/blob/931e36229ed548b0c62b560fc99f9415e3829cef/docs/design/CrystalForge/cve-poam-evidence-continuity-design-spec.md",
+      "inspection": "Referenced through companion CVEs review, Section 15. Not independently reread in this Compliance pass; do not treat as approved or implemented.",
+      "inspected_line_ranges": [],
+      "secondary": true,
+      "executed": false
+    }
+  ]
+}

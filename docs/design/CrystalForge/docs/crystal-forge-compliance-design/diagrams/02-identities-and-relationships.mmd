@@ -1,0 +1,20 @@
+flowchart LR
+  FW["Framework lineage"] --> FWR["Framework release"]
+  FWR --> R["Requirement version"]
+  B["Bundle lineage"] --> BV["Bundle version"]
+  BV -->|"selected baseline"| R
+  BV -->|"selected policy membership"| PV["Policy version"]
+  PV -->|"trusted mapping"| R
+  PL["Policy lineage"] --> PV
+  A["Assignment lineage"] --> AV["Assignment version"]
+  AV --> BV
+  AV --> Scope["System or environment scope"]
+  AV --> Overrides["Exclusions additions overrides and mode"]
+  S["System identity"] --> PF["Policy finding: system plus lineage"]
+  S --> CF["CVE finding: system plus CVE plus package"]
+  PF --> Link["Policy finding link"]
+  CF --> CLink["Exact CVE link with immutable baseline"]
+  Link --> P["POAM identity and revision"]
+  CLink --> P
+  AV -.->|"reference, not finding ownership"| P
+  P --> V["Sealed verification attempts"]

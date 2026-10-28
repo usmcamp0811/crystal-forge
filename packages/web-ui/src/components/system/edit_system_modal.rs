@@ -4,7 +4,11 @@
 
 use crate::api::models::{CommitInfo, FieldUpdate, SystemDetail, UpdateSystemRequest};
 use crate::components::icon::{Icon, IconName};
-use crate::components::modals::RemoveSystemDialog;
+use crate::components::modals::{GeneratedKeyPair, RemoveSystemDialog, generate_key_pair};
+use crate::components::system::key_rotation;
+use crate::systems::adapter::{
+    SystemPublicKeyRotationOutcome, update_system_public_key_and_reconcile,
+};
 use dioxus::prelude::*;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -13,6 +17,47 @@ enum Tab {
     Deployment,
     Security,
     Danger,
+}
+
+/// How the operator supplies the replacement agent public key.
+#[derive(Clone, Copy, PartialEq)]
+enum KeyMode {
+    /// Generate a fresh Ed25519 keypair in the browser.
+    Generate,
+    /// Paste a public key generated on the host.
+    Paste,
+}
+
+/// Copy the generated private key to the clipboard.
+///
+/// Best effort: the private key stays on screen either way, and no failure path
+/// here may be reported to the operator as a successful copy.
+async fn copy_to_clipboard(value: &str) -> Result<(), String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen_futures::JsFuture;
+
+        let window = web_sys::window().ok_or_else(|| {
+            "Clipboard access is unavailable in this browser context.".to_string()
+        })?;
+        JsFuture::from(window.navigator().clipboard().write_text(value))
+            .await
+            .map_err(|_| {
+                "Copy failed. Select and copy the private key manually before rotating.".to_string()
+            })?;
+        Ok(())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = value;
+        Err("Clipboard access is available only in a browser.".to_string())
+    }
+}
+
+#[derive(Clone, PartialEq)]
+struct RotationError {
+    message: String,
+    outcome_unknown: bool,
 }
 
 /// Branch options for the flake branch field.
@@ -45,6 +90,7 @@ pub fn EditSystemModal(
     on_close: EventHandler<()>,
     on_save: EventHandler<UpdateSystemRequest>,
     on_delete: EventHandler<()>,
+    on_key_rotated: EventHandler<SystemDetail>,
 ) -> Element {
     let mut hostname = use_signal(|| system.hostname.clone());
     let mut environment = use_signal(|| system.environment.clone().unwrap_or_default());
@@ -98,6 +144,121 @@ pub fn EditSystemModal(
     // Tab state
     let mut active_tab = use_signal(|| Tab::General);
 
+    // ── Agent identity / key rotation state (TASK-435) ──────────────────────
+    // All of this is local to the open modal. The generated private key never
+    // leaves this component and is dropped when the modal unmounts, so it is
+    // unrecoverable once the operator closes the modal.
+    let system_id = system.id;
+    let mut current_fingerprint = use_signal(|| system.public_key_fingerprint.clone());
+    let mut rotating_key = use_signal(|| false);
+    let mut key_mode = use_signal(|| KeyMode::Generate);
+    let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
+    let mut pasted_public_key = use_signal(String::new);
+    let mut private_key_copied = use_signal(|| false);
+    let mut copy_in_flight = use_signal(|| false);
+    let mut copy_error = use_signal(|| None::<String>);
+    let mut rotate_in_flight = use_signal(|| false);
+    let mut rotate_error = use_signal(|| None::<RotationError>);
+    let mut rotate_warning = use_signal(|| None::<String>);
+    let mut rotated = use_signal(|| false);
+
+    // Leaving the rotate flow discards local key material only; the stored key,
+    // its fingerprint, and the audit log are untouched because no request was sent.
+    let mut cancel_rotation = move || {
+        rotating_key.set(false);
+        key_mode.set(KeyMode::Generate);
+        generated_keys.set(None);
+        pasted_public_key.set(String::new());
+        private_key_copied.set(false);
+        copy_in_flight.set(false);
+        copy_error.set(None);
+        rotate_error.set(None);
+        rotate_warning.set(None);
+    };
+
+    // The public key that would be submitted, if there is a valid one.
+    let candidate_public_key: Option<String> = match *key_mode.read() {
+        KeyMode::Generate => generated_keys
+            .read()
+            .as_ref()
+            .map(|keys| keys.public_key.clone()),
+        KeyMode::Paste => key_rotation::validate_public_key_input(&pasted_public_key.read()).ok(),
+    };
+    let candidate_fingerprint = candidate_public_key
+        .as_deref()
+        .and_then(key_rotation::public_key_fingerprint);
+
+    let confirm_rotation = {
+        let candidate = candidate_public_key.clone();
+        move |_| {
+            // Duplicate-submit guard: one click sequence must produce one request.
+            if *rotate_in_flight.read() {
+                return;
+            }
+            let Some(new_public_key) = candidate.clone() else {
+                return;
+            };
+
+            rotate_in_flight.set(true);
+            rotate_error.set(None);
+            rotate_warning.set(None);
+
+            spawn(async move {
+                // Same endpoint the Systems-list "Update Key" action uses.
+                // Only the public half is ever sent.
+                let Some(expected_fingerprint) =
+                    key_rotation::public_key_fingerprint(&new_public_key)
+                else {
+                    rotate_error.set(Some(RotationError {
+                        message: "Public key is not a valid Ed25519 public key".to_string(),
+                        outcome_unknown: false,
+                    }));
+                    rotate_in_flight.set(false);
+                    return;
+                };
+                match update_system_public_key_and_reconcile(
+                    system_id,
+                    new_public_key,
+                    expected_fingerprint,
+                )
+                .await
+                {
+                    Ok(outcome) => {
+                        let (detail, warning) = match outcome {
+                            SystemPublicKeyRotationOutcome::Confirmed(detail) => (detail, None),
+                            SystemPublicKeyRotationOutcome::ConfirmedAfterAmbiguousResponse {
+                                detail,
+                                warning,
+                            } => (detail, Some(warning)),
+                        };
+                        current_fingerprint.set(detail.public_key_fingerprint.clone());
+                        rotated.set(true);
+                        rotating_key.set(false);
+                        // The private key is shown exactly once and is dropped here.
+                        generated_keys.set(None);
+                        pasted_public_key.set(String::new());
+                        private_key_copied.set(false);
+                        copy_error.set(None);
+                        rotate_error.set(None);
+                        rotate_warning.set(warning);
+                        on_key_rotated.call(detail);
+                    }
+                    Err(error) => {
+                        // Never present a failure as a rotation. The generated
+                        // keypair stays on screen so the operator — who may
+                        // already be installing that exact private key — can
+                        // retry without regenerating.
+                        rotate_error.set(Some(RotationError {
+                            message: error.to_string(),
+                            outcome_unknown: error.outcome_unknown(),
+                        }));
+                    }
+                }
+                rotate_in_flight.set(false);
+            });
+        }
+    };
+
     // Sync FQDN when hostname or environment changes
     {
         let hostname_clone = hostname.clone();
@@ -123,6 +284,9 @@ pub fn EditSystemModal(
     }
 
     let handle_save = move |_| {
+        if rotate_in_flight() {
+            return;
+        }
         is_saving.set(true);
 
         // FieldUpdate semantics for heartbeat_interval_secs:
@@ -173,10 +337,17 @@ pub fn EditSystemModal(
     rsx! {
         div {
             class: "modal-backdrop",
-            onclick: move |_| on_close.call(()),
+            "data-testid": "edit-system-modal-backdrop",
+            onclick: move |_| {
+                if !rotate_in_flight() {
+                    on_close.call(());
+                }
+            },
 
             div {
                 class: "modal",
+                "data-testid": "edit-system-modal",
+                "aria-busy": rotate_in_flight(),
                 style: "width:min(620px,96vw); max-height:92vh;",
                 onclick: move |e| e.stop_propagation(),
 
@@ -201,7 +372,12 @@ pub fn EditSystemModal(
                         style: "width: fit-content; margin: 0;",
                         button {
                             class: if *active_tab.read() == Tab::General { "active" } else { "" },
-                            onclick: move |_| active_tab.set(Tab::General),
+                            disabled: rotate_in_flight(),
+                            onclick: move |_| {
+                                if !rotate_in_flight() {
+                                    active_tab.set(Tab::General);
+                                }
+                            },
                             span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
                                 Icon { name: IconName::Gear, size: 12 }
                             }
@@ -209,7 +385,12 @@ pub fn EditSystemModal(
                         }
                         button {
                             class: if *active_tab.read() == Tab::Deployment { "active" } else { "" },
-                            onclick: move |_| active_tab.set(Tab::Deployment),
+                            disabled: rotate_in_flight(),
+                            onclick: move |_| {
+                                if !rotate_in_flight() {
+                                    active_tab.set(Tab::Deployment);
+                                }
+                            },
                             span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
                                 Icon { name: IconName::Git, size: 12 }
                             }
@@ -217,7 +398,12 @@ pub fn EditSystemModal(
                         }
                         button {
                             class: if *active_tab.read() == Tab::Security { "active" } else { "" },
-                            onclick: move |_| active_tab.set(Tab::Security),
+                            disabled: rotate_in_flight(),
+                            onclick: move |_| {
+                                if !rotate_in_flight() {
+                                    active_tab.set(Tab::Security);
+                                }
+                            },
                             span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
                                 Icon { name: IconName::Key, size: 12 }
                             }
@@ -225,7 +411,12 @@ pub fn EditSystemModal(
                         }
                         button {
                             class: if *active_tab.read() == Tab::Danger { "active" } else { "" },
-                            onclick: move |_| active_tab.set(Tab::Danger),
+                            disabled: rotate_in_flight(),
+                            onclick: move |_| {
+                                if !rotate_in_flight() {
+                                    active_tab.set(Tab::Danger);
+                                }
+                            },
                             span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
                                 Icon { name: IconName::Warn, size: 12 }
                             }
@@ -529,22 +720,322 @@ pub fn EditSystemModal(
                     if *active_tab.read() == Tab::Security {
                         div {
                             div {
+                                "data-testid": "agent-identity-section",
                                 style: "margin-top: 8px; padding: 14px; border: 1px solid var(--cf-divider); border-radius: 10px; background: color-mix(in oklab, var(--cf-page-bg) 50%, var(--cf-card-bg));",
                                 div {
                                     style: "display: flex; align-items: center; gap: 6px; margin-bottom: 10px; font-size: 13px; font-weight: 600;",
                                     Icon { name: IconName::Key, size: 13 }
                                     " Agent identity"
                                 }
-                                div {
-                                    class: "sd-callout sd-callout-warning",
-                                    div { style: "font-size: 12px;",
-                                        "SSH key rotation is unavailable in this modal until it is wired to the real key-generation and public-key update flow."
+
+                                if !rotating_key() {
+                                    div {
+                                        class: "field",
+                                        label { "Current public key fingerprint" }
+                                        div {
+                                            class: "mono",
+                                            "data-testid": "agent-key-fingerprint",
+                                            style: "font-size: 12px; word-break: break-all; padding: 8px 10px; background: var(--cf-subtle-bg); border-radius: 6px;",
+                                            {
+                                                current_fingerprint
+                                                    .read()
+                                                    .clone()
+                                                    .unwrap_or_else(|| "Unavailable".to_string())
+                                            }
+                                        }
+                                        if current_fingerprint.read().is_none() {
+                                            p {
+                                                class: "help",
+                                                "Crystal Forge could not read a valid Ed25519 public key for this system. Rotating installs a fresh key."
+                                            }
+                                        }
                                     }
-                                }
-                                p {
-                                    class: "help",
-                                    style: "margin-top: 10px;",
-                                    "Use the existing system key update flow from the Systems view to generate or replace agent keys with the backend-backed workflow."
+
+                                    if rotated() {
+                                        if let Some(warning) = rotate_warning.read().clone() {
+                                            div {
+                                                class: "sd-callout sd-callout-warn",
+                                                "data-testid": "rotate-confirmed-warning-callout",
+                                                style: "margin-top: 8px;",
+                                                Icon { name: IconName::Warn, size: 13 }
+                                                div { style: "font-size: 12px;",
+                                                    "{warning}"
+                                                }
+                                            }
+                                        } else {
+                                            div {
+                                                class: "sd-callout sd-callout-healthy",
+                                                "data-testid": "rotate-success-callout",
+                                                style: "margin-top: 8px;",
+                                                Icon { name: IconName::Check, size: 13 }
+                                                div { style: "font-size: 12px;",
+                                                    "Key rotated. The old key is revoked immediately — the agent will authenticate with the new key on its next heartbeat."
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        button {
+                                            class: "btn btn-ghost focus-ring",
+                                            "data-testid": "rotate-key-button",
+                                            style: "margin-top: 4px;",
+                                            onclick: move |_| {
+                                                rotate_error.set(None);
+                                                rotate_warning.set(None);
+                                                copy_error.set(None);
+                                                rotating_key.set(true);
+                                            },
+                                            span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
+                                                Icon { name: IconName::Sync, size: 12 }
+                                            }
+                                            "Rotate key"
+                                        }
+                                    }
+                                } else {
+                                    div {
+                                        class: "seg",
+                                        style: "width: fit-content; margin-bottom: 12px;",
+                                        button {
+                                            class: if *key_mode.read() == KeyMode::Generate { "active" } else { "" },
+                                            "data-testid": "key-mode-generate",
+                                            disabled: rotate_in_flight(),
+                                            onclick: move |_| key_mode.set(KeyMode::Generate),
+                                            "Generate new keypair"
+                                        }
+                                        button {
+                                            class: if *key_mode.read() == KeyMode::Paste { "active" } else { "" },
+                                            "data-testid": "key-mode-paste",
+                                            disabled: rotate_in_flight(),
+                                            onclick: move |_| {
+                                                key_mode.set(KeyMode::Paste);
+                                                // Switching away discards any generated
+                                                // material so the private key is never
+                                                // left dangling out of view.
+                                                generated_keys.set(None);
+                                                private_key_copied.set(false);
+                                                copy_error.set(None);
+                                            },
+                                            "Paste existing public key"
+                                        }
+                                    }
+
+                                    if *key_mode.read() == KeyMode::Generate {
+                                        div {
+                                            class: "field",
+                                            if let Some(keys) = generated_keys.read().clone() {
+                                                label {
+                                                    "Public key "
+                                                    span { style: "color: var(--cf-text-muted); font-weight: 400;", "· registered with Crystal Forge" }
+                                                }
+                                                div {
+                                                    class: "mono",
+                                                    "data-testid": "generated-public-key",
+                                                    style: "font-size: 11px; word-break: break-all; padding: 8px 10px; background: var(--cf-subtle-bg); border-radius: 6px; margin-bottom: 10px;",
+                                                    "{keys.public_key}"
+                                                }
+                                                label {
+                                                    "Private key "
+                                                    span { style: "color: #f87171; font-weight: 600;", "· shown once, copy it now" }
+                                                }
+                                                div {
+                                                    style: "position: relative;",
+                                                    pre {
+                                                        class: "mono",
+                                                        "data-testid": "generated-private-key",
+                                                        style: "margin: 0; font-size: 10.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-all; padding: 8px 10px; background: var(--cf-subtle-bg); border-radius: 6px; border: 1px solid rgba(248,113,113,0.3);",
+                                                        "{keys.private_key}"
+                                                    }
+                                                    button {
+                                                        class: "btn btn-ghost focus-ring xs",
+                                                        "data-testid": "copy-private-key-button",
+                                                        style: "position: absolute; top: 6px; right: 6px;",
+                                                        disabled: copy_in_flight() || rotate_in_flight(),
+                                                        onclick: {
+                                                            let private_key = keys.private_key.clone();
+                                                            move |_| {
+                                                                let private_key = private_key.clone();
+                                                                private_key_copied.set(false);
+                                                                copy_error.set(None);
+                                                                copy_in_flight.set(true);
+                                                                spawn(async move {
+                                                                    match copy_to_clipboard(&private_key).await {
+                                                                        Ok(()) => private_key_copied.set(true),
+                                                                        Err(message) => copy_error.set(Some(message)),
+                                                                    }
+                                                                    copy_in_flight.set(false);
+                                                                });
+                                                            }
+                                                        },
+                                                        span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
+                                                            Icon {
+                                                                name: if private_key_copied() { IconName::Check } else { IconName::File },
+                                                                size: 11,
+                                                            }
+                                                        }
+                                                        if copy_in_flight() {
+                                                            "Copying…"
+                                                        } else if private_key_copied() {
+                                                            "Copied"
+                                                        } else {
+                                                            "Copy"
+                                                        }
+                                                    }
+                                                }
+                                                if let Some(message) = copy_error.read().clone() {
+                                                    p {
+                                                        "data-testid": "copy-private-key-error",
+                                                        style: "margin-top: 8px; color: #fca5a5; font-size: 11.5px;",
+                                                        "{message}"
+                                                    }
+                                                }
+                                                p {
+                                                    class: "help",
+                                                    style: "margin-top: 8px;",
+                                                    "Write the private key to "
+                                                    span { class: "mono", "/var/lib/crystal-forge/host.key" }
+                                                    " on the host before confirming. Crystal Forge never receives or stores it, and it cannot be shown again."
+                                                }
+                                            } else {
+                                                p {
+                                                    class: "help",
+                                                    style: "margin-top: 0;",
+                                                    "Generates a new Ed25519 keypair in your browser. The private key is shown once for you to install on the host — Crystal Forge does not keep a copy."
+                                                }
+                                                button {
+                                                    class: "btn btn-ghost focus-ring",
+                                                    "data-testid": "generate-keypair-button",
+                                                    style: "margin-top: 8px;",
+                                                    disabled: rotate_in_flight(),
+                                                    onclick: move |_| {
+                                                        private_key_copied.set(false);
+                                                        copy_error.set(None);
+                                                        rotate_error.set(None);
+                                                        match generate_key_pair() {
+                                                            Ok(keys) => generated_keys.set(Some(keys)),
+                                                            Err(message) => rotate_error.set(Some(RotationError {
+                                                                message,
+                                                                outcome_unknown: false,
+                                                            })),
+                                                        }
+                                                    },
+                                                    span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
+                                                        Icon { name: IconName::Key, size: 12 }
+                                                    }
+                                                    "Generate keypair"
+                                                }
+                                            }
+                                        }
+                                    } else {
+                                        div {
+                                            class: "field",
+                                            label {
+                                                "New agent public key "
+                                                span { style: "color: #f87171;", "*" }
+                                            }
+                                            textarea {
+                                                class: "input focus-ring mono",
+                                                "data-testid": "paste-public-key-input",
+                                                rows: "3",
+                                                style: "font-size: 11px; resize: vertical;",
+                                                placeholder: "Base64 Ed25519 public key, e.g. 1Vw4kQ0PPk1zzO9Lp0kD2P7lqQ0N8f0O0m2VGmYb1yM=",
+                                                value: "{pasted_public_key}",
+                                                disabled: rotate_in_flight(),
+                                                oninput: move |e| pasted_public_key.set(e.value().clone()),
+                                            }
+                                            p {
+                                                class: "help",
+                                                "Generate a keypair on the host and paste the base64 public half here. The old key is revoked the moment you confirm — the agent must present the new key on its next heartbeat or it will be rejected."
+                                            }
+                                            if !pasted_public_key.read().trim().is_empty() {
+                                                if let Some(fingerprint) = candidate_fingerprint.clone() {
+                                                    div {
+                                                        "data-testid": "new-key-fingerprint",
+                                                        style: "margin-top: 10px; padding: 9px 12px; border-radius: 8px; border: 1px solid rgba(52,211,153,0.3); background: rgba(52,211,153,0.06);",
+                                                        div {
+                                                            style: "font-size: 10px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--cf-text-muted); font-weight: 600;",
+                                                            "New fingerprint"
+                                                        }
+                                                        div {
+                                                            class: "mono",
+                                                            style: "font-size: 11.5px; color: var(--cf-text-primary); word-break: break-all;",
+                                                            "{fingerprint}"
+                                                        }
+                                                    }
+                                                } else {
+                                                    div {
+                                                        "data-testid": "paste-key-invalid",
+                                                        style: "margin-top: 10px; padding: 9px 12px; border-radius: 8px; border: 1px solid rgba(248,113,113,0.35); background: rgba(248,113,113,0.06);",
+                                                        span {
+                                                            style: "font-size: 11.5px; color: #fca5a5;",
+                                                            {
+                                                                key_rotation::validate_public_key_input(
+                                                                        &pasted_public_key.read(),
+                                                                    )
+                                                                    .err()
+                                                                    .unwrap_or_default()
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+
+                                    div {
+                                        class: "sd-callout sd-callout-warn",
+                                        "data-testid": "rotate-warning-callout",
+                                        style: "margin-top: 10px;",
+                                        Icon { name: IconName::Warn, size: 13 }
+                                        div { style: "font-size: 12px;",
+                                            "Rotating revokes the current key immediately. Install the new private key on the host first — until you do, the agent's next heartbeat will be rejected."
+                                        }
+                                    }
+
+                                    if let Some(error) = rotate_error.read().clone() {
+                                        div {
+                                            class: "sd-callout sd-callout-danger",
+                                            "data-testid": "rotate-error-callout",
+                                            "data-outcome": if error.outcome_unknown { "unknown" } else { "failed" },
+                                            style: "margin-top: 8px;",
+                                            div { style: "font-size: 12px;",
+                                                if error.outcome_unknown {
+                                                    strong { "Key rotation outcome unknown. " }
+                                                } else {
+                                                    strong { "Key rotation failed. " }
+                                                }
+                                                "{error.message}"
+                                            }
+                                        }
+                                    }
+
+                                    div {
+                                        style: "display: flex; gap: 8px; margin-top: 10px;",
+                                        button {
+                                            class: "btn btn-ghost focus-ring",
+                                            "data-testid": "rotate-cancel-button",
+                                            disabled: rotate_in_flight(),
+                                            onclick: move |_| cancel_rotation(),
+                                            "Cancel"
+                                        }
+                                        button {
+                                            class: "btn focus-ring",
+                                            "data-testid": "rotate-confirm-button",
+                                            disabled: rotate_in_flight() || candidate_public_key.is_none(),
+                                            style: if candidate_public_key.is_some() && !rotate_in_flight() {
+                                                "background: #dc2626; color: white;"
+                                            } else {
+                                                "background: var(--cf-subtle-bg); color: var(--cf-text-muted);"
+                                            },
+                                            onclick: confirm_rotation,
+                                            span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
+                                                Icon { name: IconName::Key, size: 12 }
+                                            }
+                                            if rotate_in_flight() {
+                                                "Rotating…"
+                                            } else {
+                                                "Revoke old key & rotate"
+                                            }
+                                        }
+                                    }
                                 }
                             }
                         }
@@ -583,15 +1074,23 @@ pub fn EditSystemModal(
 
                     button {
                         class: "btn btn-ghost focus-ring",
-                        onclick: move |_| on_close.call(()),
-                        disabled: is_saving(),
+                        "data-testid": "edit-system-footer-cancel",
+                        onclick: move |_| {
+                            if !rotate_in_flight() {
+                                on_close.call(());
+                            }
+                        },
+                        disabled: is_saving() || rotate_in_flight(),
                         "Cancel"
                     }
 
                     button {
                         class: "btn btn-primary focus-ring disabled:opacity-50 disabled:cursor-not-allowed",
+                        "data-testid": "edit-system-save",
                         onclick: handle_save,
-                        disabled: is_saving() || hostname.read().trim().is_empty(),
+                        disabled: is_saving()
+                            || rotate_in_flight()
+                            || hostname.read().trim().is_empty(),
 
                         if is_saving() {
                             "Saving…"

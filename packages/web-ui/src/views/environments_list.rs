@@ -15,16 +15,19 @@ use crate::components::environments::{
     EnvironmentItem, EnvironmentTable, NewEnvironmentDraft, PolicyOption, RemoveEnvironmentDialog,
     environment_name_for_id, normalize_color_hex, normalize_optional, policy_library,
     required_agent_policy_id, validate_environment, validate_environment_form,
+    validate_optional_policy_ids,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::environments::adapter::{
-    create_environment_via_api, delete_environment_via_api, load_environments_with_fallback,
-    load_policies_with_fallback, update_environment_policies_via_api, update_environment_via_api,
+    create_environment_via_api, delete_environment_via_api, load_assignable_environment_policies,
+    load_environments_with_fallback, load_policies_with_fallback,
+    update_environment_policies_via_api, update_environment_via_api,
 };
 use crate::routes::Route;
 use crate::state::app_state::AppState;
 use crate::state::auth;
+use crate::state::navigation_focus::{FlakeNavigation, current_query, update_query};
 use crate::theme;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,14 +50,43 @@ fn came_from_setup() -> bool {
     false
 }
 
+fn environment_panel_from_query(search: &str) -> Option<Uuid> {
+    search
+        .trim_start_matches('?')
+        .split('&')
+        .filter_map(|part| part.split_once('='))
+        .find_map(|(key, value)| {
+            (key == "panel")
+                .then(|| Uuid::parse_str(value).ok())
+                .flatten()
+        })
+}
+
+fn without_environment_panel(search: &str) -> String {
+    let parts = search
+        .trim_start_matches('?')
+        .split('&')
+        .filter(|part| !part.is_empty())
+        .filter(|part| {
+            part.split_once('=')
+                .map_or(*part != "panel", |(key, _)| key != "panel")
+        })
+        .collect::<Vec<_>>();
+    if parts.is_empty() {
+        String::new()
+    } else {
+        format!("?{}", parts.join("&"))
+    }
+}
+
+/// Renders environment state and restores a URL-selected detail panel after loading.
 #[component]
-pub fn EnvironmentsListView() -> Element {
+pub fn EnvironmentsListView(initial_query: String) -> Element {
     let app_state = use_context::<Signal<AppState>>();
     let is_admin_user = auth::is_admin(&app_state.read().auth);
     let config_health = app_state.read().config_health.clone();
 
     let mut policy_library_state = use_signal(policy_library);
-    let default_required_policy = required_agent_policy_id(&policy_library_state.read());
 
     let mut environments = use_signal(Vec::<EnvironmentItem>::new);
     let mut bundle_catalog = use_signal(Vec::<crate::api::models::ComplianceBundleSummary>::new);
@@ -136,6 +168,30 @@ pub fn EnvironmentsListView() -> Element {
     let mut view_env = use_signal(|| None::<EnvironmentItem>);
 
     let items = environments.read().clone();
+    let initial_panel = environment_panel_from_query(&format!("?{initial_query}"));
+    {
+        let items = items.clone();
+        let environments = environments;
+        use_effect(move || {
+            let _ = environments.read();
+            if view_env.read().is_none() {
+                if let Some(panel_id) =
+                    initial_panel.or_else(|| environment_panel_from_query(&current_query()))
+                {
+                    // Keep the signal unchanged while the resource is empty.
+                    // Repeatedly setting None schedules a render loop before
+                    // the requested environment becomes available.
+                    if let Some(environment) = items
+                        .iter()
+                        .find(|environment| environment.id == panel_id)
+                        .cloned()
+                    {
+                        view_env.set(Some(environment));
+                    }
+                }
+            }
+        });
+    }
     let filtered = filtered_environments(&items, &query());
     let totals = EnvironmentTotals::from(&items);
 
@@ -183,16 +239,6 @@ pub fn EnvironmentsListView() -> Element {
 
     rsx! {
         div { style: "display:flex; flex-direction:column; gap:16px;",
-            if from_setup() {
-                div { "data-testid": "setup-coach-environments-callout", class: "sd-callout sd-callout-info",
-                    Icon { name: IconName::Plus, size: 13 }
-                    div {
-                        div { style: "font-size:12px; font-weight:700; text-transform:uppercase; letter-spacing:0.03em;", "Setup Tour - Step 1 of 6" }
-                        div { style: "font-size:13px;", "Create your first environment using Add environment." }
-                    }
-                }
-            }
-
             if let Some(notice) = api_notice.read().clone() {
                 div { class: "flex items-center gap-2 px-4 py-3 rounded-lg border text-yellow-100 text-sm cf-chip-olive",
                     span { class: "shrink-0", "⚠" }
@@ -221,7 +267,7 @@ pub fn EnvironmentsListView() -> Element {
                 }
             }
 
-            div { class: "page-head",
+            div { class: "page-head", "data-coach-target": "env-page-head",
                 div {
                     h1 { class: "page-title", "Environments" }
                     p { class: "page-subtitle", "{items.len()} tiers · {totals.systems} systems · {totals.caches} caches configured" }
@@ -232,7 +278,7 @@ pub fn EnvironmentsListView() -> Element {
                         "data-coach-target": "env",
                         onclick: move |_| {
                             form_error.set(None);
-                            form_draft.set(Some(new_environment_form_draft(default_required_policy)));
+                            form_draft.set(Some(new_environment_form_draft()));
                         },
                         Icon { name: IconName::Plus, size: 14 }
                         " Add environment"
@@ -339,7 +385,10 @@ pub fn EnvironmentsListView() -> Element {
             if let Some(env) = view_env.read().clone() {
                 EnvPanel {
                     env: env.clone(),
-                    on_close: move |_| view_env.set(None),
+                    on_close: move |_| {
+                        view_env.set(None);
+                        update_query(&without_environment_panel(&current_query()), false);
+                    },
                     on_edit: move |env: EnvironmentItem| {
                         // dismiss from within panel too (in case user re-opens edit from panel
                         // without having clicked the card first).
@@ -388,7 +437,6 @@ pub fn EnvironmentsListView() -> Element {
                         form_draft.clone(),
                         form_error.clone(),
                         api_notice.clone(),
-                        default_required_policy,
                     );
                 }
             }
@@ -509,13 +557,15 @@ fn filtered_environments(items: &[EnvironmentItem], query: &str) -> Vec<Environm
         .collect()
 }
 
-fn new_environment_form_draft(default_required_policy: Uuid) -> EnvironmentFormDraft {
+fn new_environment_form_draft() -> EnvironmentFormDraft {
     EnvironmentFormDraft {
         id: None,
         name: String::new(),
         description: String::new(),
         color_hex: "#2563eb".to_string(),
-        required_policy_ids: vec![default_required_policy],
+        // Optional gates start empty in the approved EnvironmentsView design.
+        // The mandatory CF-agent invariant is enforced globally by the server.
+        required_policy_ids: Vec::new(),
         // Matches the design's declared defaults for a freshly created
         // environment (docs/design/CrystalForge/components/EnvironmentsView.jsx):
         // manual deploys, auto-sync on, approval required, not production.
@@ -594,9 +644,22 @@ fn save_environment_form(
     mut form_draft: Signal<Option<EnvironmentFormDraft>>,
     mut form_error: Signal<Option<String>>,
     mut api_notice: Signal<Option<String>>,
-    default_required_policy: Uuid,
 ) {
     spawn(async move {
+        // Validate the exact draft against a fresh authoritative catalog before
+        // either metadata write. Do not silently remove stale selections. The
+        // assignment endpoint still revalidates within its own transaction.
+        let policies = match load_assignable_environment_policies().await {
+            Ok(policies) => policies,
+            Err(message) => {
+                form_error.set(Some(message));
+                return;
+            }
+        };
+        if let Err(message) = validate_optional_policy_ids(&next.required_policy_ids, &policies) {
+            form_error.set(Some(message));
+            return;
+        }
         let result = if let Some(environment_id) = next.id {
             update_environment_via_api(
                 environment_id,
@@ -607,7 +670,7 @@ fn save_environment_form(
                 next.auto_sync,
                 next.requires_approval,
                 next.is_production,
-                default_required_policy,
+                next.required_policy_ids.clone(),
             )
             .await
         } else {
@@ -617,8 +680,7 @@ fn save_environment_form(
                 color_hex: next.color_hex.clone(),
                 required_policy_ids: next.required_policy_ids.clone(),
             };
-            if let Err(err) = validate_environment(&draft, &environments.read(), &policy_library())
-            {
+            if let Err(err) = validate_environment(&draft, &environments.read(), &policies) {
                 form_error.set(Some(err));
                 return;
             }
@@ -631,7 +693,7 @@ fn save_environment_form(
                 next.auto_sync,
                 next.requires_approval,
                 next.is_production,
-                default_required_policy,
+                next.required_policy_ids.clone(),
             )
             .await
         };
@@ -765,6 +827,15 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
             }
 
             div { class: "panel-body",
+                if !env.id.is_nil() {
+                    Link {
+                        class: "btn btn-ghost xs focus-ring",
+                        to: Route::PoamsView { query: format!("dim=environment&environment={}", env.id) },
+                        title: "Open {env.name} in the POA&M register",
+                        Icon { name: IconName::ArrowRight, size: 11 }
+                        " View in POA&M register"
+                    }
+                }
                 if display_policy.is_some()
                     || display_auto_sync.is_some()
                     || display_requires_approval.is_some()
@@ -886,7 +957,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
                                                 class: "chip chip-info sd-commit-sha-link",
                                                 style: "background:unset;",
                                                 title: "{a.bundle_name} · {a.bundle_version} — open Compliance",
-                                                onclick: move |_| { nav.push(Route::ComplianceView {}); },
+                                                onclick: move |_| { nav.push(Route::ComplianceView { bundle: String::new(), version: String::new(), system: String::new(), policy: String::new(), poam: String::new(), view: String::new() }); },
                                                 Icon { name: IconName::Shield, size: 9 }
                                                 " {a.framework}"
                                             }
@@ -926,7 +997,28 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
                     } else {
                         div { style: "display:flex; gap:6px; flex-wrap:wrap;",
                             for flake in &env.flake_names {
-                                span { class: "chip chip-unknown mono", style: "font-size:11px;", "{flake}" }
+                                button {
+                                    class: "chip chip-unknown mono focus-ring",
+                                    style: "font-size:11px;cursor:pointer;",
+                                    onclick: {
+                                        let flake_name = flake.clone();
+                                        let environment_id = env.id.to_string();
+                                        move |_| {
+                                            let target = FlakeNavigation {
+                                                flake_name: Some(flake_name.clone()),
+                                                return_environment: Some(environment_id.clone()),
+                                                ..Default::default()
+                                            };
+                                            nav.push(Route::FlakesView {
+                                                query: target
+                                                    .to_query("")
+                                                    .trim_start_matches('?')
+                                                    .to_string(),
+                                            });
+                                        }
+                                    },
+                                    "{flake}"
+                                }
                             }
                         }
                     }
@@ -993,7 +1085,7 @@ fn EnvPanelSystems(props: EnvPanelSystemsProps) -> Element {
                                     let nav = nav.clone();
                                     let system_id = system.id.to_string();
                                     move |_| {
-                                        nav.push(Route::SystemDetailView { id: system_id.clone() });
+                                        nav.push(Route::SystemDetailView { id: system_id.clone(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() });
                                     }
                                 },
                                 span { class: "status-dot", style: "--status-color: {system_status_color(&system.health_status)};" }
@@ -1052,6 +1144,24 @@ fn plural_s(count: usize) -> &'static str {
 mod tests {
     use super::*;
 
+    #[test]
+    fn optional_policy_new_draft_is_empty_and_edit_preserves_exact_assignments() {
+        let draft = new_environment_form_draft();
+        assert!(draft.required_policy_ids.is_empty());
+        let new = NewEnvironmentDraft {
+            name: "zero-optional-gates".into(),
+            description: String::new(),
+            color_hex: draft.color_hex,
+            required_policy_ids: draft.required_policy_ids,
+        };
+        assert!(validate_environment(&new, &[], &[]).is_ok());
+        let mut existing = test_env("existing");
+        existing.required_policy_ids = vec![Uuid::from_u128(2), Uuid::from_u128(3)];
+        let edit = form_draft_from_environment(&existing);
+        assert_eq!(edit.id, Some(existing.id));
+        assert_eq!(edit.required_policy_ids, existing.required_policy_ids);
+    }
+
     fn test_env(name: &str) -> EnvironmentItem {
         EnvironmentItem {
             id: Uuid::from_u128(42),
@@ -1106,5 +1216,19 @@ mod tests {
         assert_eq!(saved.auto_sync, None);
         assert_eq!(saved.requires_approval, None);
         assert_eq!(saved.is_production, None);
+    }
+
+    #[test]
+    fn environment_return_panel_parsing_is_exact_and_clear_preserves_other_state() {
+        let id = Uuid::from_u128(42);
+        assert_eq!(
+            environment_panel_from_query(&format!("?view=cards&panel={id}")),
+            Some(id)
+        );
+        assert_eq!(environment_panel_from_query("?subpanel=not-a-panel"), None);
+        assert_eq!(
+            without_environment_panel(&format!("?view=cards&panel={id}&sort=name")),
+            "?view=cards&sort=name"
+        );
     }
 }

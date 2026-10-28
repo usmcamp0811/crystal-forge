@@ -248,7 +248,7 @@ function SystemPanel({ sys, onClose, onEdit, onOpenDetail, onTagClick, pendingDe
             <section className="panel-section" style={{ paddingTop: 0 }}>
               <PendingDeployBanner
                 stage={deployStage}
-                stages={["queued", "picked-up", "applying", "activated"]}
+                stages={["queued", "picked-up", "copying", "applying", "activated"]}
                 commit={pendingDeploy?.commit}
                 sys={sys}
                 onDismiss={onClearPending}

@@ -2,9 +2,17 @@ use serde::Serialize;
 
 pub const ALLOWED_RETRY_BACKOFF_SECONDS: [i32; 6] = [0, 10, 30, 60, 120, 300];
 
+/// Classifies server-owned retry decisions without changing builder wire types.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RetryFailureClass {
     Transient,
+    /// Identifies exhausted, bounded server-side evaluation resource recovery.
+    ///
+    /// This internal class is not a builder wire value. PostgreSQL retains the
+    /// existing `transient` class; diagnostics carry `resource_pressure`.
+    /// Whole-flake automatic retry is forbidden because a new attempt would
+    /// invalidate completed outcomes retained by the same-attempt recovery.
+    ResourceFailure,
     Deterministic,
     Authorization,
     Cancelled,
@@ -12,10 +20,24 @@ pub enum RetryFailureClass {
     Unknown,
 }
 
+/// Returns whether a failure class permits an automatic child attempt.
+///
+/// The caller must separately check the finite retry budget. Exhausted resource
+/// recovery never retries the whole flake, even when deterministic retries are
+/// enabled, because starting a child would invalidate retained completed evidence.
+///
+/// # Examples
+///
+/// ```
+/// use crystal_forge::models::retry_policy::{RetryFailureClass, automatic_retry_eligible};
+/// assert!(automatic_retry_eligible(true, RetryFailureClass::Transient));
+/// assert!(!automatic_retry_eligible(false, RetryFailureClass::ResourceFailure));
+/// ```
 pub fn automatic_retry_eligible(transient_only: bool, class: RetryFailureClass) -> bool {
     match class {
         RetryFailureClass::Authorization
         | RetryFailureClass::Cancelled
+        | RetryFailureClass::ResourceFailure
         | RetryFailureClass::DerivationMismatch => false,
         RetryFailureClass::Transient => true,
         RetryFailureClass::Deterministic | RetryFailureClass::Unknown => !transient_only,
@@ -138,6 +160,7 @@ mod tests {
                 (RetryFailureClass::Authorization, false),
                 (RetryFailureClass::Cancelled, false),
                 (RetryFailureClass::DerivationMismatch, false),
+                (RetryFailureClass::ResourceFailure, false),
             ] {
                 assert_eq!(automatic_retry_eligible(transient_only, class), expected);
             }
@@ -150,5 +173,24 @@ mod tests {
         assert!(automatic_retry_budget_remaining(0, 1));
         assert!(!automatic_retry_budget_remaining(1, 1));
         assert!(!automatic_retry_budget_remaining(2, 1));
+    }
+
+    #[test]
+    fn resource_failure_never_retries_whole_flake_despite_available_budget() {
+        let policy = AutomaticRetryPolicy::default();
+        assert!(automatic_retry_budget_remaining(
+            0,
+            i32::from(policy.max_evaluation_retries),
+        ));
+        for transient_only in [true, false] {
+            assert!(automatic_retry_eligible(
+                transient_only,
+                RetryFailureClass::Transient
+            ));
+            assert!(!automatic_retry_eligible(
+                transient_only,
+                RetryFailureClass::ResourceFailure
+            ));
+        }
     }
 }

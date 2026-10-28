@@ -59,9 +59,15 @@ pub fn empty_dashboard_summary() -> DashboardSummary {
         build_queue: Some(BuildQueueSummary {
             building_count: 0,
             queued_count: 0,
+            failed_24h_count: 0,
+            active_workers: 0,
+            total_workers: 0,
+            used_slots: 0,
+            total_slots: 0,
             items: vec![],
             timestamp: now,
         }),
+        cache_health: None,
         recent_deployments: vec![],
         timestamp: now,
     }

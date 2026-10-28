@@ -1,0 +1,8 @@
+{
+  "note": "Existing local companion documents were read for context and not written by this build. These hashes record the delivered companion copies available during packaging.",
+  "companion_application_revision": "58006084aa699b84bcb1d02d6f911d4d4ee94ea3",
+  "sha256": {
+    "systems-view-design-v0.1.md": "e642855c44afbb4a7a20866c2dab96c4094e02c6e31ce4a38e02fa08540643b9",
+    "cves-view-design-v0.1.md": "0f0aeb905923014f51ea8c8788eba080a044dc33cc6b3d532749101876a333a3"
+  }
+}

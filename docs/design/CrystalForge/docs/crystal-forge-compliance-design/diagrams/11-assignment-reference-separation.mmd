@@ -1,0 +1,11 @@
+flowchart TB
+  Assign["Assignment lineage"] --> Old["Immutable assignment version A"]
+  Assign --> Current["Current assignment version B"]
+  Old --> BaselineA["Bundle version and effective choices A"]
+  Current --> BaselineB["Bundle version and effective choices B"]
+  P["POAM"] --> Ref["Reference to assignment version A"]
+  Ref --> Old
+  P --> Finding["Active policy or CVE finding links"]
+  Ref -.->|"does not create"| Waiver["Waiver or risk acceptance"]
+  Ref -.->|"does not change"| Current
+  Current --> Recompute["Recompute effective evidence and affected rollups"]

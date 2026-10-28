@@ -1,0 +1,19 @@
+flowchart TD
+    A["Visible active system"] --> B["Read latest state first"]
+    B --> C{"Current lineage and schema-1 scan valid?"}
+    C -->|Yes| D["Current authority; zero or more findings"]
+    C -->|No| E["Current evidence unavailable"]
+    A --> F["Select newest live pending deployment"]
+    F --> G{"Exact target binding and schema-1 scan valid?"}
+    G -->|Yes| H["Scheduled authority; zero or more findings"]
+    G -->|No| I["No usable scheduled source"]
+    D --> J["Suppress compatibility fallback for host"]
+    H --> J
+    E --> K{"Neither Current nor scheduled authority?"}
+    I --> K
+    K -->|Yes| L["Latest compatibility inventory, if present"]
+    K -->|No| J
+    L --> M["Historical, read-only findings"]
+    D --> N["Current exact subjects may enter triage"]
+    H --> O["No fleet triage authority"]
+    M --> O

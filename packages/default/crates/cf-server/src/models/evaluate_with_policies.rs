@@ -11,10 +11,27 @@ use tokio::sync::Semaphore;
 use tokio::task::JoinSet;
 use tokio::time::{Duration, Instant};
 
+#[path = "evaluation_pressure.rs"]
+mod evaluation_pressure;
+#[path = "evaluation_recovery.rs"]
+mod evaluation_recovery;
+#[path = "evaluation_watchdog.rs"]
+mod evaluation_watchdog;
+#[path = "mock_persistence.rs"]
+mod mock_persistence;
+#[path = "required_inventory_persistence.rs"]
+mod required_inventory_persistence;
+use evaluation_pressure::{PressureHysteresis, PressureSampler};
+use evaluation_recovery::{
+    EvaluationProgress, PhaseStop, RecoveryController, solo_budget, solo_budget_exhausted,
+};
+use evaluation_watchdog::{EvaluationWatchdog, Expiry, OutputStream, cancellation_ticker};
+use required_inventory_persistence::persist_required_inventory;
+
 const MOCK_EVAL_TOTAL_DURATION_MS: u64 = 30_000;
 const MOCK_EVAL_MIN_PER_SYSTEM_MS: u64 = 5_000;
 const MOCK_EVAL_STAGE_COUNT: u64 = 5;
-const EVAL_OUTPUT_IDLE_TIMEOUT_SECS: u64 = 300;
+/// Diagnostic cadence in seconds; independent of evaluator timeout deadlines.
 const EVAL_PROGRESS_HEARTBEAT_SECS: u64 = 30;
 /// Maximum number of missing systems to attempt individual fallback evaluation
 /// for. Beyond this threshold, treat as a likely process-wide evaluator failure
@@ -104,7 +121,7 @@ impl CappedOutput {
                 self.total_bytes
             ));
         }
-        text
+        crate::security::snapshot_redaction::redact_text(&text)
     }
 }
 
@@ -112,9 +129,188 @@ pub(crate) async fn read_capped<R>(mut reader: R, limit: usize) -> std::io::Resu
 where
     R: tokio::io::AsyncRead + Unpin,
 {
+    read_capped_with_progress(&mut reader, limit, None).await
+}
+
+// SECURITY: Only a boolean leaves the pipe reader. Stderr markers record Nix
+// resolution reports, not proof of a fetch. Elapsed time establishes no stage.
+tokio::task_local! {
+    static DISCOVERY_INPUT_PROGRESS: tokio::sync::watch::Sender<bool>;
+    static DISCOVERY_CANCELLATION: tokio::sync::watch::Receiver<bool>;
+}
+
+// A diagnostic write must not delay child deadlines or cancellation. This is a
+// best-effort persistence budget, not an extension of the discovery deadline.
+const DISCOVERY_LOG_BUDGET: Duration = Duration::from_millis(250);
+// Match the bulk evaluator's polling interval. Bound each database query so a
+// stalled connection cannot block discovery or its final cancellation check.
+const DISCOVERY_CANCEL_POLL: Duration = Duration::from_secs(2);
+const DISCOVERY_CANCEL_QUERY_BUDGET: Duration = Duration::from_millis(500);
+// The artifact row is presentation-only. A stalled write must not delay the
+// discovery-to-evaluation handoff; retain the verified inventory in memory.
+const DISCOVERY_INVENTORY_WRITE_BUDGET: Duration = Duration::from_millis(250);
+
+async fn wait_discovery_cancellation(mut requested: Option<tokio::sync::watch::Receiver<bool>>) {
+    if let Some(requested) = &mut requested {
+        loop {
+            if *requested.borrow_and_update() {
+                return;
+            }
+            if requested.changed().await.is_err() {
+                break;
+            }
+        }
+    }
+    std::future::pending::<()>().await;
+}
+
+// CONCURRENCY: One borrowed logging future runs alongside discovery. No task or
+// queue outlives this invocation. Discovery completion drops unfinished logging.
+async fn with_discovery_progress<T>(
+    operation: impl std::future::Future<Output = Result<T>>,
+    mut progress: tokio::sync::watch::Receiver<bool>,
+    log: impl std::future::Future<Output = ()>,
+) -> Result<T> {
+    let logging = async {
+        if !*progress.borrow_and_update() && progress.changed().await.is_err() {
+            return;
+        }
+        if *progress.borrow_and_update() {
+            let _ = tokio::time::timeout(DISCOVERY_LOG_BUDGET, log).await;
+        }
+    };
+    tokio::pin!(operation);
+    tokio::pin!(logging);
+    tokio::select! {
+        biased;
+        result = &mut operation => result,
+        _ = &mut logging => operation.await,
+    }
+}
+
+// CONCURRENCY: Cancellation queries are polled alongside admission and child
+// execution. On a request, signal the runner and keep polling it for bounded
+// foreground cleanup; dropping it after that budget transfers both leases to
+// guard quarantine. Successful return requires a final bounded request check.
+async fn with_discovery_cancellation<T, Check, CheckFuture>(
+    operation: impl std::future::Future<Output = Result<T>>,
+    check: Check,
+) -> Result<T>
+where
+    Check: FnMut() -> CheckFuture,
+    CheckFuture: std::future::Future<Output = Result<bool>>,
+{
+    with_preflight_cancellation(operation, check, BOUNDED_PROCESS_CLEANUP_ACK_TIMEOUT).await
+}
+
+// Childless inventory/admission operations use zero acknowledgement time: a
+// known request drops the operation immediately instead of polling a cancelled
+// waiter into acquisition. Child discovery retains its foreground reap budget.
+async fn with_preflight_cancellation<T, Check, CheckFuture>(
+    operation: impl std::future::Future<Output = Result<T>>,
+    mut check: Check,
+    cleanup_acknowledgement: Duration,
+) -> Result<T>
+where
+    Check: FnMut() -> CheckFuture,
+    CheckFuture: std::future::Future<Output = Result<bool>>,
+{
+    let (requested, receiver) = tokio::sync::watch::channel(false);
+    let operation = DISCOVERY_CANCELLATION.scope(receiver, operation);
+    tokio::pin!(operation);
+    let outcome = {
+        let monitor = async {
+            loop {
+                if matches!(
+                    tokio::time::timeout(DISCOVERY_CANCEL_QUERY_BUDGET, check()).await,
+                    Ok(Ok(true))
+                ) {
+                    return;
+                }
+                tokio::time::sleep(DISCOVERY_CANCEL_POLL).await;
+            }
+        };
+        tokio::pin!(monitor);
+        tokio::select! {
+            biased;
+            _ = &mut monitor => None,
+            result = &mut operation => Some(result),
+        }
+    };
+    match outcome {
+        None => {
+            requested.send_replace(true);
+            if !cleanup_acknowledgement.is_zero() {
+                let _ = tokio::time::timeout(cleanup_acknowledgement, &mut operation).await;
+            }
+            Err(EvaluationCancelled.into())
+        }
+        Some(Ok(result)) => {
+            if tokio::time::timeout(DISCOVERY_CANCEL_QUERY_BUDGET, check())
+                .await
+                .context("discovery final cancellation check timed out")??
+            {
+                Err(EvaluationCancelled.into())
+            } else {
+                Ok(result)
+            }
+        }
+        Some(Err(error)) => {
+            if matches!(
+                tokio::time::timeout(DISCOVERY_CANCEL_QUERY_BUDGET, check()).await,
+                Ok(Ok(true))
+            ) {
+                Err(EvaluationCancelled.into())
+            } else {
+                // Query unavailability cannot replace the original timeout or
+                // genuine Nix failure. This branch never authorizes bulk work.
+                Err(error)
+            }
+        }
+    }
+}
+
+#[derive(Default)]
+struct InputResolutionEvidence {
+    carry: Vec<u8>,
+    observed: bool,
+}
+
+impl InputResolutionEvidence {
+    fn observe(&mut self, chunk: &[u8]) -> bool {
+        const MARKERS: [&[u8]; 2] = [b"unpacking '", b"fetching git repository"];
+        // The longest marker bounds carry independently of line/output size.
+        const CARRY_LIMIT: usize = b"fetching git repository".len();
+        if self.observed {
+            return false;
+        }
+        for byte in chunk {
+            if self.carry.len() == CARRY_LIMIT {
+                self.carry.remove(0);
+            }
+            self.carry.push(*byte);
+            if MARKERS.iter().any(|marker| self.carry.ends_with(marker)) {
+                self.observed = true;
+                self.carry.clear();
+                return true;
+            }
+        }
+        false
+    }
+}
+
+async fn read_capped_with_progress<R>(
+    mut reader: R,
+    limit: usize,
+    progress: Option<tokio::sync::watch::Sender<bool>>,
+) -> std::io::Result<CappedOutput>
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
     use tokio::io::AsyncReadExt;
 
     let mut output = CappedOutput::default();
+    let mut evidence = InputResolutionEvidence::default();
     let mut chunk = [0u8; 8192];
     loop {
         let count = reader.read(&mut chunk).await?;
@@ -122,68 +318,188 @@ where
             return Ok(output);
         }
         output.push(&chunk[..count], limit);
-    }
-}
-
-/// Terminate an entire Nix evaluator process *group* (direct child + all
-/// descendants) then reap the direct child.
-///
-/// On Linux/macOS the child is spawned as the leader of a new process group
-/// (`cmd.process_group(0)` before `spawn()`).  Its PGID equals its PID, so
-/// `killpg(pgid, SIGKILL)` reaches every process in the subtree atomically,
-/// including sub-evaluators and helper processes that `nix eval` may fork.
-///
-/// After signalling the group, `child.wait()` reaps the direct child so that
-/// no zombie lingers.  Descendants that are not direct children of the server
-/// are reparented to init/systemd and reaped by it after SIGKILL.
-///
-/// On non-Unix targets falls back to killing only the direct child (same as
-/// before), which is safe because those platforms do not fork the way Nix
-/// does on Linux.
-#[cfg(unix)]
-async fn kill_nix_process_tree(child: &mut tokio::process::Child, pgid: libc::pid_t) {
-    // SAFETY: killpg is a pure syscall with no memory-safety requirements.
-    // ESRCH means the group already exited — treat as success.
-    let kill_result = unsafe { libc::killpg(pgid, libc::SIGKILL) };
-    if kill_result != 0 {
-        let errno = std::io::Error::last_os_error();
-        if errno.raw_os_error() != Some(libc::ESRCH) {
-            warn!(pgid, "killpg(SIGKILL) failed: {errno}");
+        // Continue observing beyond the output cap while draining both pipes.
+        // watch retains one value and never makes pipe draining wait for logs.
+        if let Some(progress) = &progress {
+            if evidence.observe(&chunk[..count]) {
+                progress.send_replace(true);
+            }
         }
     }
-    // Reap the direct child.  Grandchildren are reaped by init after SIGKILL.
-    let _ = child.wait().await;
 }
 
-#[cfg(not(unix))]
-async fn kill_nix_process_tree(child: &mut tokio::process::Child, _pgid: i32) {
-    let _ = child.kill().await;
-    let _ = child.wait().await;
+/// Identifies a runner-owned deadline expiry independently of child stderr.
+#[derive(Debug, Clone)]
+struct BoundedProcessTimeout {
+    process_name: String,
+    deadline: Duration,
+    cleanup_confirmed: bool,
 }
 
-/// RAII guard that kills the nix-eval-jobs process group when dropped,
-/// unless the child has been successfully reaped.  Used by the bulk
-/// evaluation path to ensure the entire evaluator subtree is terminated
-/// on any abnormal return (`bail!`, `?`, or panic) without requiring an
-/// explicit kill call at every error path.
+impl std::fmt::Display for BoundedProcessTimeout {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "{} timed out after {}s; cleanup confirmed={}",
+            self.process_name,
+            self.deadline.as_secs(),
+            self.cleanup_confirmed
+        )
+    }
+}
+
+impl std::error::Error for BoundedProcessTimeout {}
+
+/// Complete bounded output from one external evaluation or source helper.
+#[derive(Debug)]
+pub(crate) struct BoundedProcessOutput {
+    /// Child exit status.
+    pub(crate) status: std::process::ExitStatus,
+    /// Standard output retained up to the caller's byte ceiling.
+    pub(crate) stdout: CappedOutput,
+    /// Standard error retained up to the caller's byte ceiling.
+    pub(crate) stderr: CappedOutput,
+}
+
+/// Runs an external evaluation or source child under one deadline and bounded
+/// output buffers.
 ///
-/// The normal path calls `wait()`, drains inherited stdout/stderr pipes, then
-/// calls `disarm_after_output_drained()`. `wait()` deliberately leaves the
-/// guard armed because descendants can outlive the direct child while holding
-/// those pipes open.
-///   - `terminate()` is for explicit cancellation/timeout: it kills the
-///     process group and reaps the child, then disarms the guard so
-///     `Drop` does not attempt a second (redundant) `killpg` — process
-///     group IDs can be reused by the OS, so killing twice is unsafe.
+/// The function starts a new process group, drains both pipes concurrently, and
+/// keeps draining after each retention ceiling so a verbose child cannot block.
+/// The deadline covers execution and pipe draining. A timed-out child gets a
+/// separate two-second cleanup acknowledgement opportunity. Enclosing legacy
+/// preparation deadlines can still cancel that opportunity; discovery scopes
+/// let the child finish it before returning.
+/// Within a discovery progress scope, exact stderr fetch markers set a one-shot
+/// boolean while pipes drain. No output text enters that progress channel.
+/// Cleanup signals the inherited process group once and confirms child reap and
+/// group absence. Unconfirmed cleanup remains guard-owned after return. Within
+/// an evaluation preparation scope, the guard inherits the heavy-Nix locks and
+/// shared invocation ceiling. This function performs no network access itself.
 ///
-/// If neither is called (an abnormal return via `?`/`bail!`/panic),
-/// `Drop` performs the `killpg` syscall *synchronously* — it must not be
-/// deferred to a spawned task, because the caller may release the
-/// commit-evaluation semaphore (or the runtime may be shutting down)
-/// immediately after this function returns, before a spawned task would
-/// get a chance to run. Only the (non-critical) reaping of the direct
-/// child after the group is already dead is deferred to a background
-/// task.
+/// # Errors
+///
+/// Returns an error when the child cannot start, wait, or drain its pipes, or
+/// when the execution deadline expires.
+pub(crate) async fn run_nix_command_bounded(
+    command: &mut Command,
+    process_name: &str,
+    deadline: Duration,
+    stdout_limit: usize,
+    stderr_limit: usize,
+) -> Result<BoundedProcessOutput> {
+    let cancellation = DISCOVERY_CANCELLATION.try_with(Clone::clone).ok();
+    if cancellation
+        .as_ref()
+        .is_some_and(|requested| *requested.borrow())
+    {
+        return Err(EvaluationCancelled.into());
+    }
+    let inherited_cleanup = EVALUATION_CLEANUP.try_with(Clone::clone).ok();
+    if inherited_cleanup
+        .as_ref()
+        .is_some_and(|ownership| Instant::now() >= ownership.deadline)
+    {
+        bail!("bounded process invocation deadline expired before spawn");
+    }
+    command
+        .kill_on_drop(true)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    #[cfg(unix)]
+    command.process_group(0);
+
+    let child = command
+        .spawn()
+        .with_context(|| format!("failed to spawn {process_name}"))?;
+    let spawned_at = Instant::now();
+    let mut guard = NixEvalProcessGuard::from_spawned_child(child, process_name)?;
+    guard.cleanup_ownership = inherited_cleanup;
+    let mut expires_at = spawned_at
+        .checked_add(deadline)
+        .context("bounded process deadline is out of range")?;
+    if let Some(ownership) = &guard.cleanup_ownership {
+        expires_at = expires_at.min(ownership.deadline);
+    }
+    let stdout = guard
+        .child_mut()
+        .stdout
+        .take()
+        .context("bounded child stdout was not piped")?;
+    let stderr = guard
+        .child_mut()
+        .stderr
+        .take()
+        .context("bounded child stderr was not piped")?;
+    let mut stdout_task = tokio::spawn(read_capped(stdout, stdout_limit));
+    let progress = DISCOVERY_INPUT_PROGRESS.try_with(Clone::clone).ok();
+    let mut stderr_task = tokio::spawn(read_capped_with_progress(stderr, stderr_limit, progress));
+
+    let collection = async {
+        let status = guard
+            .wait()
+            .await
+            .with_context(|| format!("failed to wait for {process_name}"))?;
+        let stdout = (&mut stdout_task)
+            .await
+            .context("bounded stdout reader task failed")?
+            .context("failed to read bounded stdout")?;
+        let stderr = (&mut stderr_task)
+            .await
+            .context("bounded stderr reader task failed")?
+            .context("failed to read bounded stderr")?;
+        Ok::<_, anyhow::Error>((status, stdout, stderr))
+    };
+    let collected = tokio::select! {
+        biased;
+        _ = wait_discovery_cancellation(cancellation) => Ok(Err(EvaluationCancelled.into())),
+        result = tokio::time::timeout_at(expires_at, collection) => result,
+    };
+    if !matches!(&collected, Ok(Ok(_))) {
+        stdout_task.abort();
+        stderr_task.abort();
+    }
+    let cancelled = matches!(&collected, Ok(Err(error)) if error.is::<EvaluationCancelled>());
+    let mut cleanup_deadline = if collected.is_err() || cancelled {
+        Instant::now() + BOUNDED_PROCESS_CLEANUP_ACK_TIMEOUT
+    } else {
+        expires_at
+    };
+    if let Some(ownership) = &guard.cleanup_ownership {
+        cleanup_deadline =
+            cleanup_deadline.min(ownership.deadline + BOUNDED_PROCESS_CLEANUP_ACK_TIMEOUT);
+    }
+    let cleanup = guard.terminate_until(cleanup_deadline).await;
+    let (status, stdout, stderr) = match collected {
+        Ok(result) => {
+            let output = result?;
+            cleanup.with_context(|| format!("{process_name} cleanup unconfirmed"))?;
+            output
+        }
+        Err(_) => {
+            return Err(BoundedProcessTimeout {
+                process_name: process_name.to_string(),
+                deadline,
+                cleanup_confirmed: cleanup.is_ok(),
+            }
+            .into());
+        }
+    };
+
+    Ok(BoundedProcessOutput {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
+/// Owns one evaluator process group and its cleanup acknowledgement.
+///
+/// Drop sends at most one group SIGKILL synchronously. Invocation-owned bulk,
+/// fallback, and preparation guards retain both heavy-Nix locks until reap and
+/// group absence are confirmed. SIGKILL delivery alone is not completion proof:
+/// D-state tasks and orphan zombies can keep the group present. The Nix worker
+/// contract uses the inherited group; escaped processes are outside this proof.
 pub(crate) struct NixEvalProcessGuard {
     child: Option<tokio::process::Child>,
     #[cfg(unix)]
@@ -192,6 +508,411 @@ pub(crate) struct NixEvalProcessGuard {
     pgid: i32,
     child_reaped: bool,
     armed: bool,
+    signal_sent: bool,
+    signal_failed: bool,
+    cleanup_ownership: Option<CleanupOwnership>,
+}
+
+/// Keeps both heavy-Nix locks with a quarantined process group.
+#[derive(Clone)]
+struct CleanupOwnership {
+    _permit: Arc<tokio::sync::OwnedSemaphorePermit>,
+    _transaction: SharedEvaluationLock,
+    deadline: Instant,
+}
+
+tokio::task_local! {
+    // Invocation-owned preparation processes inherit this lease in the bounded
+    // runner. Task locals do not propagate into spawned tasks automatically;
+    // the evaluator explicitly scopes every preparation task before execution.
+    static EVALUATION_CLEANUP: CleanupOwnership;
+}
+
+type SharedEvaluationLock =
+    Arc<tokio::sync::Mutex<Option<sqlx::Transaction<'static, sqlx::Postgres>>>>;
+
+// Cleanup gets executor time after an execution timeout, but never authorizes
+// replacement work without direct-child reap and process-group absence.
+const BOUNDED_PROCESS_CLEANUP_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
+// Resource-terminal repair is a separate maintenance operation. Its two-minute
+// ceiling covers admission and execution, so quarantine cannot strand the
+// recovery loop indefinitely while still preventing overlapping Nix children.
+const RESOURCE_TERMINAL_PREPARATION_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// Runs resource-terminal root preparation under both heavy-Nix locks.
+///
+/// Acquires the PostgreSQL advisory lock before the in-process permit. The
+/// 120-second deadline includes lock waiting and operation execution. The future
+/// is polled only after admission and inside the evaluation cleanup scope.
+/// Callers MUST spawn children through [`run_nix_command_bounded`] inside that
+/// future and MUST NOT spawn the operation into another task outside the scope.
+/// Borrowed futures are supported; neither the operation nor its output must
+/// have a `'static` lifetime. Queue activation retains its later transactional
+/// identity and policy recheck after this root preparation operation returns.
+///
+/// Cleanup reapers retain both locks when a child group remains unconfirmed.
+/// Timeout or cancellation cannot release the locks ahead of those reapers.
+///
+/// # Errors
+/// Returns admission, operation, deadline, or cleanup-acknowledgement failures.
+pub(crate) async fn run_resource_terminal_preparation<T>(
+    pool: &PgPool,
+    operation: impl std::future::Future<Output = Result<T>>,
+) -> Result<T> {
+    run_resource_terminal_preparation_until(
+        pool,
+        operation,
+        Instant::now() + RESOURCE_TERMINAL_PREPARATION_TIMEOUT,
+    )
+    .await
+}
+
+async fn run_resource_terminal_preparation_until<T>(
+    pool: &PgPool,
+    operation: impl std::future::Future<Output = Result<T>>,
+    deadline: Instant,
+) -> Result<T> {
+    run_heavy_nix_preflight_until(pool, operation, deadline, false).await
+}
+
+// CONCURRENCY: Discovery completes this scope before bulk admission. Both modes
+// preserve advisory-before-permit ordering and child-owned quarantine. Only
+// discovery lets its runner acknowledge timeout after the execution deadline.
+// Legacy repair retains its original outer cancellation deadline.
+async fn run_heavy_nix_preflight_until<T>(
+    pool: &PgPool,
+    operation: impl std::future::Future<Output = Result<T>>,
+    deadline: Instant,
+    child_controls_deadline: bool,
+) -> Result<T> {
+    if EVALUATION_CLEANUP.try_with(|_| ()).is_ok() {
+        bail!("nested heavy Nix preflight admission is forbidden");
+    }
+    if Instant::now() >= deadline {
+        bail!("resource-terminal preparation deadline expired before admission");
+    }
+    let mut transaction = tokio::time::timeout_at(deadline, pool.begin())
+        .await
+        .context("resource-terminal preparation database admission timed out")??;
+    tokio::time::timeout_at(
+        deadline,
+        sqlx::query("SELECT pg_advisory_xact_lock($1)")
+            .bind(HEAVY_NIX_ADVISORY_LOCK)
+            .execute(&mut *transaction),
+    )
+    .await
+    .context("resource-terminal preparation advisory admission timed out")??;
+    let permit = tokio::time::timeout_at(deadline, heavy_nix_limiter().acquire_owned())
+        .await
+        .context("resource-terminal preparation capacity admission timed out")?
+        .context("heavy Nix preparation limiter was closed")?;
+    if Instant::now() >= deadline {
+        bail!("resource-terminal preparation deadline expired before execution");
+    }
+    let transaction = Arc::new(tokio::sync::Mutex::new(Some(transaction)));
+    let ownership = CleanupOwnership {
+        _permit: Arc::new(permit),
+        _transaction: transaction.clone(),
+        deadline,
+    };
+    let output = run_preflight_operation(ownership, operation, child_controls_deadline).await;
+    let acknowledgement_deadline = if child_controls_deadline {
+        deadline + BOUNDED_PROCESS_CLEANUP_ACK_TIMEOUT
+    } else {
+        (Instant::now() + PREPARATION_ABORT_ACK_TIMEOUT).min(deadline)
+    };
+    // A returned operation error can still have a pending child reaper. Do not
+    // commit/release the advisory transaction until every inherited lease ends.
+    if let Err(cleanup_error) =
+        confirm_preparation_leases_until(&transaction, acknowledgement_deadline).await
+    {
+        // Preserve the typed operation cause. Extra leases still own both locks;
+        // this path MUST NOT commit the transaction while cleanup is pending.
+        return match output {
+            Err(error) => Err(error.context(cleanup_error)),
+            Ok(_) => Err(cleanup_error),
+        };
+    }
+    let transaction = transaction
+        .lock()
+        .await
+        .take()
+        .context("resource-terminal preparation transaction missing")?;
+    let release_deadline = if child_controls_deadline {
+        acknowledgement_deadline
+    } else {
+        deadline
+    };
+    tokio::time::timeout_at(release_deadline, transaction.commit())
+        .await
+        .context("resource-terminal preparation lock release timed out")??;
+    output
+}
+
+// The discovery operation is a single bounded child plus bounded JSON parsing.
+// Do not wrap it in an execution timeout: dropping it at the same deadline as
+// its child would skip foreground cleanup acknowledgement. Cancellation still
+// drops the scoped guard, which transfers both locks to its quarantine reaper.
+async fn run_preflight_operation<T>(
+    ownership: CleanupOwnership,
+    operation: impl std::future::Future<Output = Result<T>>,
+    child_controls_deadline: bool,
+) -> Result<T> {
+    let deadline = ownership.deadline;
+    let scoped = EVALUATION_CLEANUP.scope(ownership, operation);
+    if child_controls_deadline {
+        scoped.await
+    } else {
+        tokio::time::timeout_at(deadline, scoped)
+            .await
+            .context("resource-terminal preparation execution timed out")?
+    }
+}
+
+/// Discovers the complete configuration inventory under heavy-Nix admission.
+///
+/// The caller MUST materialize an immutable source before calling and supply its
+/// exact NAR-qualified reference. Discovery uses pure evaluation and IFD=true,
+/// matching bulk policy evaluation. Artifact-cache names have no source/lock
+/// provenance and MUST NOT replace this discovery. Nix's own warm cache remains
+/// available. Admission acquires the advisory lock before the semaphore, with
+/// one configured discovery budget for admission and child execution. Timeout
+/// permits at most two additional seconds for cleanup acknowledgement and lock
+/// release. Cancellation or unconfirmed cleanup retains both locks through the
+/// child guard's quarantine until direct-child reap and process-group absence.
+/// Callers MUST finish this scope before acquiring bulk evaluation admission.
+///
+/// # Errors
+/// Returns errors for invalid evaluator configuration, nested admission, lock
+/// admission timeout, discovery failure, or unconfirmed cleanup/lock release.
+///
+/// # Examples
+/// ```ignore
+/// let names = run_configuration_discovery_preflight(
+///     pool, &verified_source_ref, credentials.as_ref(), &server_config,
+/// ).await?;
+/// ```
+pub(crate) async fn run_configuration_discovery_preflight(
+    pool: &PgPool,
+    source_ref: &str,
+    creds: Option<&FlakeCredentialEnv>,
+    server_config: &ServerConfig,
+) -> Result<Vec<String>> {
+    server_config
+        .validate_evaluator_policy()
+        .map_err(anyhow::Error::msg)?;
+    let deadline = Instant::now() + Duration::from_secs(server_config.eval_discovery_timeout_secs);
+    run_heavy_nix_preflight_until(
+        pool,
+        crate::flake::commits::load_nixos_configurations_from_verified_source(
+            source_ref,
+            creds,
+            true,
+            Some(server_config),
+        ),
+        deadline,
+        true,
+    )
+    .await
+}
+
+/// Discovers configuration names while honoring API cancellation during admission
+/// and child execution.
+///
+/// The caller MUST supply the exact verified NAR-qualified policy source.
+/// Admission acquires the advisory lock before in-process capacity.
+/// Cancellation returns [`EvaluationCancelled`] for the existing attempt-scoped
+/// terminal finalizer. Cleanup gets at most two seconds of foreground polling;
+/// unconfirmed groups keep both leases in quarantine. Success requires a final
+/// bounded cancellation query before the caller can proceed to bulk work.
+///
+/// # Errors
+/// Returns discovery/admission errors, cancellation, or an unavailable final
+/// cancellation check. Callers MUST NOT treat query failure as permission to run.
+///
+/// # Examples
+/// ```ignore
+/// let names = run_cancellable_configuration_discovery_preflight(
+///     pool, commit_id, &verified_source_ref, credentials.as_ref(), &server_config,
+/// ).await?;
+/// ```
+pub(crate) async fn run_cancellable_configuration_discovery_preflight(
+    pool: &PgPool,
+    commit_id: i32,
+    source_ref: &str,
+    creds: Option<&FlakeCredentialEnv>,
+    server_config: &ServerConfig,
+) -> Result<Vec<String>> {
+    server_config
+        .validate_evaluator_policy()
+        .map_err(anyhow::Error::msg)?;
+    run_cancellable_discovery_preflight_until(
+        pool,
+        commit_id,
+        crate::flake::commits::load_nixos_configurations_from_verified_source(
+            source_ref,
+            creds,
+            true,
+            Some(server_config),
+        ),
+        Instant::now() + Duration::from_secs(server_config.eval_discovery_timeout_secs),
+    )
+    .await
+}
+
+// Admission and cancellation form one semantic boundary. The operation must
+// use the bounded runner in this borrowed scope; tests can exercise this same
+// production boundary with deterministic child fixtures instead of network Nix.
+async fn run_cancellable_discovery_preflight_until<T>(
+    pool: &PgPool,
+    commit_id: i32,
+    operation: impl std::future::Future<Output = Result<T>>,
+    deadline: Instant,
+) -> Result<T> {
+    with_discovery_cancellation(
+        run_heavy_nix_preflight_until(pool, operation, deadline, true),
+        || crate::queries::commits::check_cancellation_requested(pool, commit_id),
+    )
+    .await
+}
+
+// Cancellation and its final check remain authoritative even when the optional
+// inventory write fails or times out. Both futures are borrowed and bounded.
+async fn persist_discovery_inventory<Check, CheckFuture>(
+    write: impl std::future::Future<Output = Result<()>>,
+    check: Check,
+) -> Result<()>
+where
+    Check: FnMut() -> CheckFuture,
+    CheckFuture: std::future::Future<Output = Result<bool>>,
+{
+    with_preflight_cancellation(
+        async {
+            match tokio::time::timeout(DISCOVERY_INVENTORY_WRITE_BUDGET, write).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => {
+                    warn!("discovery inventory persistence failed; using verified inventory")
+                }
+                Err(_) => {
+                    warn!("discovery inventory persistence timed out; using verified inventory")
+                }
+            }
+            Ok(())
+        },
+        check,
+        Duration::ZERO,
+    )
+    .await
+}
+
+// CONCURRENCY: Admission returns the actual transaction and permit to the bulk
+// owner. It acquires PostgreSQL before capacity, never commits on success, and
+// starts no child. The independent admission ceiling includes pool waiting and
+// the final cancellation query. The execution overall budget starts afterward.
+async fn acquire_bulk_evaluation_admission_until(
+    pool: &PgPool,
+    commit_id: i32,
+    deadline: Instant,
+) -> Result<(
+    sqlx::Transaction<'static, sqlx::Postgres>,
+    tokio::sync::OwnedSemaphorePermit,
+)> {
+    if EVALUATION_CLEANUP.try_with(|_| ()).is_ok() {
+        bail!("nested bulk evaluation admission is forbidden");
+    }
+    tokio::time::timeout_at(
+        deadline,
+        with_preflight_cancellation(
+            async {
+                let mut transaction = pool.begin().await?;
+                sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                    .bind(HEAVY_NIX_ADVISORY_LOCK)
+                    .execute(&mut *transaction)
+                    .await?;
+                let permit = heavy_nix_limiter()
+                    .acquire_owned()
+                    .await
+                    .context("heavy Nix evaluation limiter was closed")?;
+                Ok((transaction, permit))
+            },
+            || crate::queries::commits::check_cancellation_requested(pool, commit_id),
+            Duration::ZERO,
+        ),
+    )
+    .await
+    .context("bulk evaluation admission timed out")?
+}
+
+// Abort acknowledgement is executor work, not a process reap allowance. Two
+// seconds bounds terminal-response work; process guards retain locks beyond
+// this allowance when group cleanup has not completed.
+const PREPARATION_ABORT_ACK_TIMEOUT: Duration = Duration::from_secs(2);
+
+struct PreparationAcknowledgement(Option<SharedEvaluationLock>);
+
+impl Drop for PreparationAcknowledgement {
+    fn drop(&mut self) {
+        if let Some(ownership) = self.0.take() {
+            std::mem::forget(ownership);
+        }
+    }
+}
+
+// CONCURRENCY: An abort request is not an acknowledgement that a task's child
+// guard ran. The bridge owns the advisory lease until every task has dropped;
+// bounded-child reapers then retain their own lease until group absence.
+async fn abort_preparations_until(
+    preparations: &mut JoinSet<anyhow::Result<()>>,
+    transaction: &SharedEvaluationLock,
+    deadline: Instant,
+) -> Result<()> {
+    preparations.abort_all();
+    let acknowledgement_deadline = (Instant::now() + PREPARATION_ABORT_ACK_TIMEOUT).min(deadline);
+    let acknowledged = tokio::time::timeout_at(acknowledgement_deadline, async {
+        while preparations.join_next().await.is_some() {}
+    })
+    .await
+    .is_ok();
+    if !acknowledged {
+        let mut pending = std::mem::take(preparations);
+        let mut ownership = PreparationAcknowledgement(Some(transaction.clone()));
+        warn!("build preparation abort acknowledgement pending; retaining advisory lock");
+        tokio::spawn(async move {
+            while pending.join_next().await.is_some() {}
+            drop(ownership.0.take());
+        });
+        bail!("build preparation abort acknowledgement unconfirmed");
+    }
+    confirm_preparation_leases_until(transaction, acknowledgement_deadline).await
+}
+
+async fn confirm_preparation_leases_until(
+    transaction: &SharedEvaluationLock,
+    deadline: Instant,
+) -> Result<()> {
+    // The caller owns the sole base reference. Every extra reference belongs
+    // to a scoped preparation, bounded child, or cleanup reaper. The transaction
+    // must not be committed while any of those owners can still have a child.
+    while Arc::strong_count(transaction) != 1 {
+        if Instant::now() >= deadline {
+            bail!("preparation child cleanup unconfirmed; heavy Nix locks retained");
+        }
+        tokio::time::sleep_until((Instant::now() + Duration::from_millis(25)).min(deadline)).await;
+    }
+    Ok(())
+}
+
+// CONCURRENCY: Runtime cancellation of the reaper cannot acknowledge cleanup.
+// Retain lock ownership unless the reaper explicitly observes group absence.
+struct QuarantinedCleanup(Option<CleanupOwnership>);
+
+impl Drop for QuarantinedCleanup {
+    fn drop(&mut self) {
+        if let Some(ownership) = self.0.take() {
+            std::mem::forget(ownership);
+        }
+    }
 }
 
 impl NixEvalProcessGuard {
@@ -206,6 +927,9 @@ impl NixEvalProcessGuard {
             pgid,
             child_reaped: false,
             armed: true,
+            signal_sent: false,
+            signal_failed: false,
+            cleanup_ownership: None,
         })
     }
 
@@ -257,10 +981,95 @@ impl NixEvalProcessGuard {
     /// not perform a second, potentially-unsafe `killpg` on a
     /// possibly-reused PGID.
     pub(crate) async fn terminate(&mut self) {
-        self.armed = false;
-        if let Some(mut child) = self.child.take() {
-            kill_nix_process_tree(&mut child, self.pgid).await;
+        self.signal_once();
+        if self.child.is_some() {
+            let _ = self.wait().await;
+            self.armed = false;
+            self.child.take();
         }
+    }
+
+    // CONCURRENCY: Signal once before releasing ownership. An interrupted
+    // cleanup retains the child and lock tuple in this guard for its reaper.
+    fn signal_once(&mut self) {
+        if self.signal_sent {
+            return;
+        }
+        self.signal_sent = true;
+        #[cfg(unix)]
+        {
+            // SAFETY: The positive PGID belongs to the guarded child group.
+            // No pointers cross this syscall boundary.
+            if unsafe { libc::killpg(self.pgid, libc::SIGKILL) } != 0 {
+                let error = std::io::Error::last_os_error();
+                if error.raw_os_error() != Some(libc::ESRCH) {
+                    self.signal_failed = true;
+                    warn!(
+                        pgid = self.pgid,
+                        "evaluator group signal failed; cleanup quarantined"
+                    );
+                }
+            }
+        }
+        #[cfg(not(unix))]
+        {
+            self.signal_failed = self.child_mut().start_kill().is_err();
+        }
+    }
+
+    /// Confirms direct-child reap and process-group absence by the deadline.
+    ///
+    /// The controlled Nix worker contract keeps workers in the inherited group.
+    /// This does not prove termination of a process that escapes that group.
+    /// On failure the guard remains armed and retains cleanup ownership.
+    ///
+    /// # Errors
+    /// Returns an error for signal/wait failure or unconfirmed group cleanup.
+    async fn terminate_until(&mut self, deadline: Instant) -> Result<()> {
+        // Normal bounded completion must not send a new signal to a group that
+        // already vanished after its leader was reaped: PGIDs can be reused.
+        if self.child_reaped && process_group_absent(self.pgid) {
+            self.armed = false;
+            self.child.take();
+            if self.signal_failed {
+                bail!("evaluator cleanup signal failed; no replacement authorized");
+            }
+            return Ok(());
+        }
+        self.signal_once();
+        loop {
+            if !self.child_reaped && self.child_mut().try_wait()?.is_some() {
+                self.child_reaped = true;
+            }
+            if self.child_reaped && process_group_absent(self.pgid) {
+                self.armed = false;
+                self.child.take();
+                if self.signal_failed {
+                    bail!("evaluator cleanup signal failed; no replacement authorized");
+                }
+                return Ok(());
+            }
+            if Instant::now() >= deadline {
+                bail!("evaluator cleanup unconfirmed at invocation deadline; group quarantined");
+            }
+            tokio::time::sleep_until((Instant::now() + Duration::from_millis(25)).min(deadline))
+                .await;
+        }
+    }
+}
+
+fn process_group_absent(pgid: i32) -> bool {
+    #[cfg(unix)]
+    {
+        // SAFETY: Signal zero checks existence without signalling a process.
+        // Only ESRCH proves absence; EPERM and unknown errors fail closed.
+        (unsafe { libc::killpg(pgid, 0) }) != 0
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pgid;
+        true
     }
 }
 
@@ -270,9 +1079,41 @@ impl Drop for NixEvalProcessGuard {
             return;
         }
 
+        self.signal_once();
         let Some(mut child) = self.child.take() else {
             return;
         };
+
+        if let Some(ownership) = self.cleanup_ownership.take() {
+            let pgid = self.pgid;
+            let mut reaped = self.child_reaped;
+            warn!(
+                pgid,
+                "evaluator cleanup quarantined; retaining heavy Nix locks"
+            );
+            if let Ok(handle) = tokio::runtime::Handle::try_current() {
+                let mut ownership = QuarantinedCleanup(Some(ownership));
+                handle.spawn(async move {
+                    loop {
+                        if !reaped {
+                            reaped = matches!(child.try_wait(), Ok(Some(_)));
+                        }
+                        if reaped && process_group_absent(pgid) {
+                            info!(pgid, "evaluator quarantine cleanup confirmed");
+                            drop(ownership.0.take());
+                            break;
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    }
+                });
+            } else {
+                // Shutdown has no executor to acknowledge cleanup. Retain the
+                // permit/connection rather than authorizing another child.
+                std::mem::forget(ownership);
+                std::mem::forget(child);
+            }
+            return;
+        }
 
         // The critical, safety-relevant action — sending SIGKILL to the
         // entire process group — must happen synchronously, before this
@@ -282,34 +1123,28 @@ impl Drop for NixEvalProcessGuard {
         // which would let the next evaluation start concurrently with
         // this orphaned subtree, or let the subtree survive shutdown
         // entirely.
-        #[cfg(unix)]
-        {
-            // SAFETY: killpg is a pure syscall with no memory-safety
-            // requirements. ESRCH (already exited) is not an error we
-            // need to report here; best-effort logging only.
-            let kill_result = unsafe { libc::killpg(self.pgid, libc::SIGKILL) };
-            if kill_result != 0 {
-                let errno = std::io::Error::last_os_error();
-                if errno.raw_os_error() != Some(libc::ESRCH) {
-                    warn!(pgid = self.pgid, "killpg(SIGKILL) failed: {errno}");
-                }
-            }
-        }
-        #[cfg(not(unix))]
-        {
-            let _ = child.start_kill();
-        }
+        // signal_once above owns the one process-group signal.
 
-        // Reaping the direct child (waitpid) is not safety-critical —
-        // the group has already been signalled — so it is fine to defer
-        // this to a background task when a runtime is available.
-        if self.child_reaped {
+        // Generic helpers have no heavy-Nix tuple, but their reaper still
+        // acknowledges the whole inherited group, including after leader exit.
+        if self.child_reaped && process_group_absent(self.pgid) {
             return;
         }
 
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            let pgid = self.pgid;
+            let mut reaped = self.child_reaped;
             handle.spawn(async move {
-                let _ = child.wait().await;
+                loop {
+                    if !reaped {
+                        reaped = matches!(child.try_wait(), Ok(Some(_)));
+                    }
+                    if reaped && process_group_absent(pgid) {
+                        debug!(pgid, "bounded process group cleanup confirmed");
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                }
             });
         } else {
             // No runtime available (e.g. dropped during shutdown):
@@ -321,33 +1156,48 @@ impl Drop for NixEvalProcessGuard {
     }
 }
 
+use cf_protocol::builder::nar_qualified_store_flake_ref;
 use tracing::{debug, error, info, warn};
 
 use crate::config::{BuildConfig, ServerConfig};
 use crate::derivations::utils::{build_flake_reference, count_closure_packages};
 use crate::flake::credentials::FlakeCredentialEnv;
+use crate::flake::verified_source::materialize_immutable_source;
 use crate::models::commits::Commit;
 use crate::models::deployment_policies::{
-    AssignedPolicy, DeploymentPolicy, PoliciesByConfiguration, PolicyCheckResult,
-    build_nix_eval_expression, policies_for_config, policy_requirements_met, policy_results_json,
+    AssignedPolicy, EvaluationTerminalOutcome, PoliciesByConfiguration, PolicyCheckResult,
+    build_nix_eval_expression_for_source, build_nix_eval_expression_for_source_configurations,
+    policies_for_config, policy_requirements_met, policy_results_json,
 };
+use crate::models::evaluation_snapshots::EvaluatedOption;
 use crate::models::flakes::Flake;
 use crate::models::retry_policy::RetryFailureClass;
 use crate::queries::build_jobs::{
     BuildJobInsertOutcome, QueuedBuild, create_build_job_for_derivation_tx,
 };
-use crate::queries::commits_artifacts::CachedSystemsState;
-use crate::queries::derivations::{
-    insert_derivation_with_target, mark_derivation_dry_run_complete, set_closure_counts,
-    set_expected_store_path,
-};
 use crate::queries::systems::list_configuration_names_for_flake;
 use crate::queue::QueueNotifier;
 
-#[derive(Debug)]
+/// Reports classified failure with optional validated current-attempt state.
 pub struct EvaluationFailure {
     source: anyhow::Error,
+    /// Failure class used by the outer attempt lifecycle.
     pub class: RetryFailureClass,
+    /// Validated current-attempt outcomes for failure-only partial publication.
+    /// The lifecycle MUST NOT mark the commit complete when publishing this plan.
+    pub partial_plan: Option<Box<EvaluationPlan>>,
+}
+
+impl std::fmt::Debug for EvaluationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // SECURITY: Partial plans include source identities and option data.
+        // Debug exposes only finite classification and bounded outcome counts.
+        f.debug_struct("EvaluationFailure")
+            .field("class", &self.class)
+            .field("resource_failure", &self.resource_failure())
+            .field("has_partial_plan", &self.partial_plan.is_some())
+            .finish()
+    }
 }
 
 impl std::fmt::Display for EvaluationFailure {
@@ -357,6 +1207,22 @@ impl std::fmt::Display for EvaluationFailure {
 }
 
 impl std::error::Error for EvaluationFailure {}
+
+impl EvaluationFailure {
+    /// Returns typed resource evidence without parsing diagnostic text.
+    pub fn resource_failure(&self) -> Option<&PartialEvaluationResourceFailure> {
+        self.source.downcast_ref()
+    }
+    /// Returns the complete contextual diagnostic chain for this failure.
+    ///
+    /// Callers that persist or expose this text MUST redact and bound it before
+    /// crossing their trust boundary. [`Display`](std::fmt::Display) retains
+    /// only the outer context, which is insufficient to diagnose source
+    /// materialization failures.
+    pub(crate) fn diagnostic_chain(&self) -> String {
+        format!("{:#}", self.source)
+    }
+}
 
 fn classify_evaluation_failure(message: &str) -> RetryFailureClass {
     let message = message.to_ascii_lowercase();
@@ -379,6 +1245,16 @@ fn classify_evaluation_failure(message: &str) -> RetryFailureClass {
         "does not exist",
         "infinite recursion",
         "syntax error",
+        // Lock and source integrity failures are a property of the exact
+        // pinned revision's `flake.lock`, not of transient infrastructure.
+        // Retrying the same revision re-fetches the same locked input and
+        // recomputes the same hash, so an automatic retry can never succeed.
+        // These needles stay specific: a bare "hash" substring also appears in
+        // ordinary store paths and unrelated diagnostics.
+        "nar hash mismatch",
+        "hash mismatch in fixed-output derivation",
+        "lock file contains",
+        "cannot update locked input",
     ]
     .iter()
     .any(|needle| message.contains(needle))
@@ -403,9 +1279,407 @@ fn classify_evaluation_failure(message: &str) -> RetryFailureClass {
     }
 }
 
-fn structured_evaluation_failure(source: anyhow::Error) -> EvaluationFailure {
-    let class = classify_evaluation_failure(&format!("{source:#}"));
-    EvaluationFailure { source, class }
+/// Maximum characters retained from a preflight failure in the evaluation log.
+///
+/// The drawer needs one actionable line. Nix traces can reach megabytes, and
+/// `eval_logs` rows are streamed to every connected client, so the excerpt is
+/// bounded well below the evaluator's own stderr caps.
+const PREFLIGHT_LOG_EXCERPT_MAX_CHARS: usize = 350;
+
+/// Returns one bounded terminal evaluation-log line for a preflight failure.
+///
+/// The caller must pass the error from expected-system discovery or source
+/// materialization, which both run before `nix-eval-jobs` emits any result.
+/// Typed child timeouts retain their deadline and cleanup state across context.
+/// Other failures retain a repository-redacted excerpt capped at
+/// [`PREFLIGHT_LOG_EXCERPT_MAX_CHARS`]. The persistence boundary applies the
+/// shared credential redactor again before broadcast or storage.
+fn preflight_discovery_failure_log(error: &anyhow::Error) -> String {
+    if let Some(timeout) = error.downcast_ref::<BoundedProcessTimeout>() {
+        let cleanup = if timeout.cleanup_confirmed {
+            "confirmed"
+        } else {
+            "pending; heavy Nix locks retained"
+        };
+        return format!(
+            "❌ Evaluation preflight failed: Discovery timed out after {}s; cleanup {cleanup}. Locked input fetching or evaluation did not finish within the discovery budget.",
+            timeout.deadline.as_secs()
+        );
+    }
+    let rendered = bounded_preflight_error(error);
+    // Collapse the trace to its first informative line. Nix prints the useful
+    // `error: ...` summary after banner and warning lines.
+    let summary = rendered
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("error:") && line.len() > "error:".len())
+        .unwrap_or_else(|| {
+            rendered
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .unwrap_or("evaluation preflight failed")
+        });
+    let summary = error
+        .downcast_ref::<crate::flake::commits::DiscoveryNixFailure>()
+        .map_or(summary, |failure| failure.diagnostic.as_str());
+    let summary = redact_preflight_repository_urls(summary.trim_start_matches("error:").trim());
+
+    let mut excerpt: String = summary
+        .chars()
+        .take(PREFLIGHT_LOG_EXCERPT_MAX_CHARS)
+        .collect();
+    if summary.chars().count() > PREFLIGHT_LOG_EXCERPT_MAX_CHARS {
+        excerpt.push('…');
+    }
+
+    if error
+        .downcast_ref::<crate::flake::commits::DiscoveryNixFailure>()
+        .is_some()
+    {
+        format!(
+            "❌ Evaluation preflight failed: Nix discovery failed; cleanup confirmed. Check locked-input access, lock integrity and evaluation errors. {excerpt}"
+        )
+    } else {
+        format!("❌ Evaluation preflight failed: {excerpt}")
+    }
+}
+
+/// Removes repository addresses and credentials before excerpt truncation.
+///
+/// The shared redactor preserves URL paths, which can identify private inputs.
+/// This stricter preflight boundary removes complete URL-bearing words, including
+/// forge shorthand and SCP Git addresses. Line boundaries remain available for
+/// fatal-error selection; other control characters are removed.
+pub(crate) fn redact_preflight_repository_urls(text: &str) -> String {
+    let without_urls = text
+        .lines()
+        .map(|line| {
+            line.split_whitespace()
+                .map(|word| {
+                    if word.contains("://")
+                        || [
+                            "gitlab:",
+                            "github:",
+                            "sourcehut:",
+                            "git@",
+                            "ssh:",
+                            "git+",
+                            "path:",
+                            "file:",
+                        ]
+                        .iter()
+                        .any(|prefix| word.contains(prefix))
+                        || (word.contains('@') && word.contains(':'))
+                    {
+                        "[repository URL redacted]"
+                    } else {
+                        word
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    crate::security::snapshot_redaction::redact_text(&without_urls)
+        .chars()
+        .filter(|character| !character.is_control() || *character == '\n')
+        .collect()
+}
+
+// Bound chain rendering before allocation. A hostile trace must not allocate
+// its complete text just to produce a short terminal diagnostic.
+fn bounded_preflight_error(error: &anyhow::Error) -> String {
+    struct LimitedDiagnostic(String);
+    impl std::fmt::Write for LimitedDiagnostic {
+        fn write_str(&mut self, text: &str) -> std::fmt::Result {
+            const LIMIT: usize = 16 * 1024;
+            let remaining = LIMIT.saturating_sub(self.0.len());
+            let mut end = remaining.min(text.len());
+            while !text.is_char_boundary(end) {
+                end -= 1;
+            }
+            self.0.push_str(&text[..end]);
+            if end < text.len() {
+                Err(std::fmt::Error)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    let mut output = LimitedDiagnostic(String::new());
+    let _ = std::fmt::write(&mut output, format_args!("{error:#}"));
+    output.0
+}
+
+// SECURITY: Lifecycle diagnostics must not retain the raw source error as an
+// alternate chain. Keep retry policy and typed materialization evidence in a
+// safe carrier; cancellation remains the existing terminal control type.
+#[derive(Debug)]
+struct SanitizedMaterializationFailure {
+    diagnostic: String,
+    retry_class: RetryFailureClass,
+    source_class: Option<crate::flake::verified_source::MaterializationFailureClass>,
+}
+
+impl std::fmt::Display for SanitizedMaterializationFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some(class) = self.source_class {
+            write!(f, "source materialization {class:?}: {}", self.diagnostic)
+        } else {
+            write!(f, "source materialization: {}", self.diagnostic)
+        }
+    }
+}
+
+impl std::error::Error for SanitizedMaterializationFailure {}
+
+fn sanitize_materialization_failure(error: anyhow::Error, repo_url: &str) -> anyhow::Error {
+    use crate::flake::verified_source::{MaterializationError, MaterializationFailureClass};
+    let source_class = error
+        .downcast_ref::<MaterializationError>()
+        .map(|error| error.class);
+    if error.is::<EvaluationCancelled>()
+        || source_class == Some(MaterializationFailureClass::Cancelled)
+    {
+        return EvaluationCancelled.into();
+    }
+    if error.is::<EvaluationSuperseded>() {
+        return EvaluationSuperseded.into();
+    }
+    // Preserve the existing retry decision before diagnostic truncation or URL
+    // removal. Neither sanitization nor an excerpt limit can change retry policy.
+    let retry_class = classify_evaluation_failure(&format!("{error:#}"));
+    let diagnostic = bounded_preflight_error(&error);
+    let diagnostic = redact_preflight_repository_urls(
+        &diagnostic.replace(repo_url, "[repository URL redacted]"),
+    );
+    let safe = SanitizedMaterializationFailure {
+        diagnostic,
+        retry_class,
+        source_class,
+    };
+    if let Some(timeout) = error.downcast_ref::<BoundedProcessTimeout>() {
+        anyhow::Error::new(timeout.clone()).context(safe)
+    } else {
+        safe.into()
+    }
+}
+
+fn structured_evaluation_failure(mut source: anyhow::Error) -> EvaluationFailure {
+    let resource = source.downcast_mut::<PartialEvaluationResourceFailure>();
+    let (class, partial_plan) = match resource {
+        Some(resource) => (
+            RetryFailureClass::ResourceFailure,
+            resource.retained_plan.take(),
+        ),
+        None => (
+            source
+                .downcast_ref::<SanitizedMaterializationFailure>()
+                .map_or_else(
+                    || classify_evaluation_failure(&format!("{source:#}")),
+                    |error| error.retry_class,
+                ),
+            None,
+        ),
+    };
+    EvaluationFailure {
+        source,
+        class,
+        partial_plan,
+    }
+}
+
+/// Identifies exhausted resource work, distinct from a deterministic Nix error.
+#[derive(Debug, Clone)]
+pub struct ConfigurationResourceFailure {
+    /// Exact configuration selected from the verified source inventory.
+    pub system_name: String,
+    /// Bounded, redacted evidence; worker SIGKILL does not establish OOM cause.
+    pub error: String,
+}
+
+/// Carries checked evaluator data whose persistence completion was not observed.
+///
+/// This candidate is not completion authority. The runtime or lifecycle owner
+/// MUST verify exact current-attempt durable identity and policy evidence before
+/// publishing the result or its captures as completed. A COMMIT can reach
+/// PostgreSQL before deadline cancellation drops the pending persistence future.
+#[derive(Clone)]
+pub(crate) struct UnacknowledgedCompletion {
+    /// Checked derivation identity from this invocation's verified source.
+    pub(crate) result: SuccessfulSystemResult,
+    /// Policy evidence parsed with this invocation's assigned policy context.
+    pub(crate) policy_check: PolicyCheckResult,
+    /// Redacted captured options, including a valid empty available snapshot.
+    pub(crate) snapshot: Option<Vec<EvaluatedOption>>,
+    /// Redacted capture diagnostic, distinct from a failed Nix evaluation.
+    pub(crate) snapshot_capture_failure: Option<String>,
+}
+
+impl std::fmt::Debug for UnacknowledgedCompletion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // SECURITY: Source targets, policy details, and captures can contain
+        // private identities or data. Debug reveals capture counts only.
+        f.debug_struct("UnacknowledgedCompletion")
+            .field("snapshot_count", &self.snapshot.as_ref().map(Vec::len))
+            .field(
+                "has_capture_failure",
+                &self.snapshot_capture_failure.is_some(),
+            )
+            .finish()
+    }
+}
+
+/// Carries current-attempt partial outcomes after bounded resource recovery.
+pub struct PartialEvaluationResourceFailure {
+    /// Validated persisted configurations, including policy-failed outcomes.
+    pub completed_systems: Vec<String>,
+    /// Selected configurations with neither completion nor confirmed Nix error.
+    pub remaining_systems: Vec<String>,
+    /// Resource diagnostics for unresolved configurations.
+    pub resource_failures: Vec<ConfigurationResourceFailure>,
+    /// Candidates excluded from completed outcomes until durable reconciliation.
+    /// The finalizer MUST use the same proof as runtime catch-up, not trust these
+    /// identities or infer completion from the presence of a capture.
+    pub(crate) unacknowledged_completions: Vec<UnacknowledgedCompletion>,
+    retained_plan: Option<Box<EvaluationPlan>>,
+    diagnostic: String,
+}
+
+impl std::fmt::Debug for PartialEvaluationResourceFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PartialEvaluationResourceFailure")
+            .field("completed_count", &self.completed_systems.len())
+            .field("remaining_count", &self.remaining_systems.len())
+            .field("resource_failure_count", &self.resource_failures.len())
+            .field(
+                "unacknowledged_count",
+                &self.unacknowledged_completions.len(),
+            )
+            .finish()
+    }
+}
+
+impl std::fmt::Display for PartialEvaluationResourceFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "bounded evaluation resource recovery exhausted: {} completed, {} remaining; {}",
+            self.completed_systems.len(),
+            self.remaining_systems.len(),
+            self.diagnostic
+        )
+    }
+}
+
+impl std::error::Error for PartialEvaluationResourceFailure {}
+
+const PERSISTENCE_ACKNOWLEDGEMENT_UNAVAILABLE: &str =
+    "persistence acknowledgement unavailable; infrastructure cause unknown";
+
+// This typed boundary identifies returned persistence failures without trusting
+// evaluator-controlled text. The underlying chain retains infrastructure and
+// authorization classification; no diagnostic here attributes an OOM cause.
+struct EvaluationPersistenceFailure(anyhow::Error);
+
+impl std::fmt::Debug for EvaluationPersistenceFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("EvaluationPersistenceFailure")
+    }
+}
+
+impl std::fmt::Display for EvaluationPersistenceFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("evaluation persistence acknowledgement failed")
+    }
+}
+
+impl std::error::Error for EvaluationPersistenceFailure {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(self.0.as_ref())
+    }
+}
+
+fn persistence_failure(error: anyhow::Error) -> anyhow::Error {
+    EvaluationPersistenceFailure(error).into()
+}
+
+fn is_lineage_failure(error: &anyhow::Error) -> bool {
+    error
+        .chain()
+        .any(|cause| cause.is::<EvaluationCancelled>() || cause.is::<EvaluationSuperseded>())
+}
+
+fn defer_persistence_failure(error: anyhow::Error) -> Result<anyhow::Error> {
+    if is_lineage_failure(&error)
+        || classify_evaluation_failure(&format!("{error:#}")) == RetryFailureClass::Authorization
+        || error
+            .downcast_ref::<EvaluationPersistenceFailure>()
+            .is_none()
+    {
+        Err(error)
+    } else {
+        Ok(error)
+    }
+}
+
+// Positive durable proof permits at most one returned-acknowledgement
+// continuation. An unrelated error or an unproven candidate cannot restart Nix.
+fn acknowledgement_continuation_allowed(
+    pending_count: usize,
+    proven_count: usize,
+    continuation_used: bool,
+) -> bool {
+    pending_count > 0 && pending_count == proven_count && !continuation_used
+}
+
+// INVARIANT: The caller supplies the lifecycle owner's exact-attempt durable
+// proof verdict. A false verdict changes no completed state. This publishes
+// checked data only; it neither
+// repeats persistence nor starts preparation or optional root publication.
+fn retain_reconciled_completion(
+    candidate: UnacknowledgedCompletion,
+    durable_proof: bool,
+    seen_systems: &mut HashSet<String>,
+    successful_results: &mut Vec<SuccessfulSystemResult>,
+    policy_checks: &mut Vec<PolicyCheckResult>,
+    results: &mut Vec<NixEvalJobResult>,
+    evaluation_snapshots: &mut HashMap<String, Vec<EvaluatedOption>>,
+    snapshot_capture_failures: &mut HashMap<String, String>,
+) -> bool {
+    if !durable_proof {
+        return false;
+    }
+    let name = candidate.result.system_name.clone();
+    let raw_result = NixEvalJobResult {
+        attr: name.clone(),
+        attr_path: vec![name.clone()],
+        name: Some(name.clone()),
+        drv_path: Some(candidate.result.drv_path.clone()),
+        error: None,
+        fatal: false,
+        cache_status: None,
+        outputs: None,
+        extra_value: None,
+        meta: None,
+    };
+    seen_systems.insert(name.clone());
+    successful_results.retain(|result| result.system_name != name);
+    successful_results.push(candidate.result);
+    policy_checks.retain(|check| check.system_name != name);
+    policy_checks.push(candidate.policy_check);
+    results.retain(|result| result.attr_path.last() != Some(&name));
+    results.push(raw_result);
+    evaluation_snapshots.remove(&name);
+    snapshot_capture_failures.remove(&name);
+    if let Some(snapshot) = candidate.snapshot {
+        evaluation_snapshots.insert(name, snapshot);
+    } else if let Some(reason) = candidate.snapshot_capture_failure {
+        snapshot_capture_failures.insert(name, reason);
+    }
+    true
 }
 
 /// NixEvalJobResult with meta field
@@ -419,13 +1693,123 @@ pub struct NixEvalJobResult {
     #[serde(rename = "drvPath")]
     pub drv_path: Option<String>,
     pub error: Option<String>,
+    /// Fatal evaluator protocol error; absent in older evaluator output.
+    #[serde(default)]
+    pub fatal: bool,
     #[serde(rename = "cacheStatus")]
     pub cache_status: Option<String>,
     pub outputs: Option<serde_json::Value>,
 
+    /// Value emitted by the `nix-eval-jobs --apply` policy extractor.
+    #[serde(rename = "extraValue")]
+    pub extra_value: Option<serde_json::Value>,
+
     /// Meta field (only present with --meta flag)
-    /// Contains our policy check results in meta.policies
+    /// Retains compatibility with evaluator versions that expose custom
+    /// derivation metadata directly.
     pub meta: Option<serde_json::Value>,
+}
+
+#[derive(Debug)]
+struct PrimaryConfigRootPublication {
+    commit_id: i32,
+    derivation_id: i32,
+    configuration_name: String,
+    carrier_drv_path: String,
+    payload: Option<serde_json::Value>,
+}
+
+fn spawn_primary_config_root_publisher(
+    pool: PgPool,
+) -> tokio::sync::mpsc::Sender<PrimaryConfigRootPublication> {
+    // CONCURRENCY: The bounded channel prevents optional observation writes
+    // from creating one task per configuration. The evaluator never waits for
+    // in-band payload persistence and does not join this enrichment worker
+    // during primary finalization. Derivation persistence creates a durable
+    // fallback before any publication enters this channel.
+    let (sender, mut receiver) = tokio::sync::mpsc::channel::<PrimaryConfigRootPublication>(256);
+    tokio::spawn(async move {
+        let mut commit_ids = HashSet::new();
+        while let Some(publication) = receiver.recv().await {
+            commit_ids.insert(publication.commit_id);
+            if let Err(error) =
+                crate::queries::config_observations::publish_or_queue_primary_config_root(
+                    &pool,
+                    publication.commit_id,
+                    publication.derivation_id,
+                    &publication.configuration_name,
+                    &publication.carrier_drv_path,
+                    publication.payload.as_ref(),
+                )
+                .await
+            {
+                warn!(
+                    commit_id = publication.commit_id,
+                    derivation_id = publication.derivation_id,
+                    system = %publication.configuration_name,
+                    %error,
+                    "primary_config_root_publication_failed"
+                );
+            }
+        }
+        for commit_id in commit_ids {
+            if let Err(error) =
+                crate::queries::config_observations::queue_missing_primary_config_roots(
+                    &pool, commit_id,
+                )
+                .await
+            {
+                warn!(
+                    commit_id,
+                    %error,
+                    "primary_config_root_fallback_catchup_failed"
+                );
+            }
+        }
+    });
+    sender
+}
+
+fn normalize_policy_metadata(result: &mut NixEvalJobResult) {
+    // COMPATIBILITY: Current nix-eval-jobs versions emit the explicit apply
+    // result as `extraValue`. Older evaluator output that already contains
+    // `meta.policies` remains accepted.
+    if let Some(extra_value) = result.extra_value.take() {
+        let meta = result.meta.get_or_insert_with(|| serde_json::json!({}));
+        if let Some(fields) = meta.as_object_mut() {
+            if let Some(extra) = extra_value.as_object()
+                && let Some(policies) = extra.get("policies")
+            {
+                fields.insert("policies".to_string(), policies.clone());
+                if let Some(root) = extra.get("configObservationRoot") {
+                    fields.insert("configObservationRoot".to_string(), root.clone());
+                }
+            } else {
+                // COMPATIBILITY: Older evaluator expressions return the policy
+                // object directly as `extraValue`.
+                fields.insert("policies".to_string(), extra_value);
+            }
+        } else {
+            result.meta = Some(serde_json::json!({ "policies": extra_value }));
+        }
+    }
+}
+
+fn parse_authoritative_result(line: &str) -> Result<NixEvalJobResult> {
+    let mut result: NixEvalJobResult = serde_json::from_str(line)?;
+    result.error = result
+        .error
+        .take()
+        .map(|error| crate::security::snapshot_redaction::redact_evaluation_error(&error));
+    normalize_policy_metadata(&mut result);
+    Ok(result)
+}
+
+fn captured_config_root(result: &NixEvalJobResult) -> Option<serde_json::Value> {
+    let capture = result.meta.as_ref()?.get("configObservationRoot")?;
+    (capture.get("status").and_then(serde_json::Value::as_str) == Some("available"))
+        .then(|| capture.get("payload").cloned())
+        .flatten()
 }
 
 fn parse_expected_store_path_from_outputs(outputs: &serde_json::Value) -> Option<String> {
@@ -474,7 +1858,9 @@ async fn resolve_expected_store_path(
     };
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let stderr = crate::security::snapshot_redaction::redact_text(
+            String::from_utf8_lossy(&output.stderr).trim(),
+        );
         warn!(
             "Failed to resolve expected store path via nix-store for drv {}: {}",
             drv_path,
@@ -547,12 +1933,13 @@ fn spawn_closure_counting(pool: PgPool, finalized: FinalizedDerivation) {
         };
 
         match count_closure_packages(&drv_cc).await {
-            Ok((total, cached)) => {
+            Ok((total, cached, closure_size_bytes)) => {
                 if let Err(err) = crate::queries::derivations::set_closure_counts(
                     &pool_cc,
                     derivation_id_cc,
                     total,
                     cached,
+                    closure_size_bytes,
                 )
                 .await
                 {
@@ -571,7 +1958,24 @@ fn spawn_closure_counting(pool: PgPool, finalized: FinalizedDerivation) {
     });
 }
 
-/// Helper function to broadcast eval log via WebSocket AND persist to database.
+// The sequence carries immutable ownership even when no WebSocket state exists.
+// Do not recover an owner from the current commit when flushing old stderr.
+struct EvalLogSequence {
+    owner: crate::queries::eval_logs::EvalLogOwner,
+    next: i32,
+}
+
+impl EvalLogSequence {
+    async fn for_attempt(pool: &PgPool, commit_id: i32, attempt: i32) -> Result<Self> {
+        let mut tx = pool.begin().await?;
+        let owner =
+            crate::queries::eval_logs::claimed_owner_in_tx(&mut tx, commit_id, attempt).await?;
+        tx.commit().await?;
+        Ok(Self { owner, next: 1 })
+    }
+}
+
+/// Broadcasts and persists diagnostics using the original producer ownership.
 ///
 /// This ensures logs are both:
 /// - Streamed in real-time to connected WebSocket clients
@@ -580,18 +1984,20 @@ async fn broadcast_and_persist_eval_log(
     pool: &PgPool,
     state: Option<&crate::handlers::agent_request::CFState>,
     commit_id: i32,
-    sequence: &mut i32,
+    sequence: &mut EvalLogSequence,
     message: String,
 ) {
+    // SECURITY: This is the common boundary for evaluator diagnostics. Redact
+    // before broadcast, in-memory history, persistence, or log-level parsing.
+    let message = crate::security::snapshot_redaction::redact_text(&message);
     let lower = message.to_ascii_lowercase();
 
-    // Broadcast via WebSocket (existing infrastructure)
+    // The producer-state clone retains its original owner and generation.
     if let Some(state) = state {
         crate::handlers::api::commits::broadcast_eval_log(state, commit_id, message.clone()).await;
     }
 
-    // Persist to database (new functionality)
-    // Parse log level from message format if possible
+    // Persistence separately fences the exact owner against queued successors.
     let log_level = if message.starts_with("❌") || lower.contains("error") {
         Some("error")
     } else if message.starts_with("⚠️") || lower.contains("warning") {
@@ -604,14 +2010,19 @@ async fn broadcast_and_persist_eval_log(
         Some("info")
     };
 
-    if let Err(e) =
-        crate::queries::eval_logs::insert_eval_log(pool, commit_id, *sequence, log_level, &message)
-            .await
+    if let Err(e) = crate::queries::eval_logs::insert_eval_log(
+        pool,
+        sequence.owner,
+        sequence.next,
+        log_level,
+        &message,
+    )
+    .await
     {
         warn!("Failed to persist eval log for commit {}: {}", commit_id, e);
     }
 
-    *sequence += 1;
+    sequence.next += 1;
 }
 
 /// Outcome of a standalone fallback evaluation for a single system.
@@ -684,8 +2095,62 @@ pub enum StandaloneSystemOutcome {
     },
 }
 
+fn isolate_authoritative_evaluator_credentials(command: &mut tokio::process::Command) {
+    // SECURITY: The evaluator consumes only the verified store source. It must
+    // not inherit credentials that could authorize any network source access.
+    command.env_remove("NETRC");
+    command.env_remove("GIT_SSH_COMMAND");
+}
+
+fn authoritative_evaluator_args(
+    nix_expression: &str,
+    workers: usize,
+    max_memory_mb: usize,
+    check_cache: bool,
+) -> Vec<String> {
+    let mut arguments = vec![
+        "--expr".to_string(),
+        nix_expression.to_string(),
+        "--option".to_string(),
+        "pure-eval".to_string(),
+        "true".to_string(),
+        "--option".to_string(),
+        "allow-import-from-derivation".to_string(),
+        "true".to_string(),
+        "--meta".to_string(),
+        "--apply".to_string(),
+        "derivation: { policies = derivation.meta.policies; configObservationRoot = derivation.meta.crystalForgeConfigRoot or { status = \"failed\"; code = \"root_capture_missing\"; }; }".to_string(),
+        "--workers".to_string(),
+        workers.to_string(),
+        "--max-memory-size".to_string(),
+        max_memory_mb.to_string(),
+    ];
+    if check_cache {
+        arguments.push("--check-cache-status".to_string());
+    }
+    arguments
+}
+
 pub(crate) fn build_single_system_eval_expression(
     flake_ref: &str,
+    system_name: &str,
+    assigned: &[crate::models::deployment_policies::AssignedPolicy],
+) -> String {
+    let requested_revision =
+        crate::derivations::utils::flake_reference_revision(flake_ref).unwrap_or("");
+    build_single_system_eval_expression_for_source(
+        flake_ref,
+        requested_revision,
+        None,
+        system_name,
+        assigned,
+    )
+}
+
+fn build_single_system_eval_expression_for_source(
+    flake_ref: &str,
+    requested_revision: &str,
+    resolved_revision_override: Option<&str>,
     system_name: &str,
     assigned: &[crate::models::deployment_policies::AssignedPolicy],
 ) -> String {
@@ -699,7 +2164,9 @@ pub(crate) fn build_single_system_eval_expression(
     } else {
         format!("\n{}", field_lines.join("\n"))
     };
-
+    let resolved_revision_override = resolved_revision_override
+        .map(nix_string_pub)
+        .unwrap_or_else(|| "null".to_string());
     format!(
         r#"
 let
@@ -710,7 +2177,11 @@ let
   policyResults = {{
     cfAgentEnabled = (config.systemd.services.crystal-forge-agent.enable or false)
       || ((config.services.crystal-forge.enable or false)
-          && (config.services.crystal-forge.client.enable or false));{policy_fields}
+          && (config.services.crystal-forge.client.enable or false));
+    requestedSourceRevision = {requested_revision};
+    resolvedSourceRevision = if {resolved_revision_override} != null
+      then {resolved_revision_override}
+      else flake.sourceInfo.rev or null;{policy_fields}
   }};
 in {{
   drvPath = drv.drvPath;
@@ -720,6 +2191,8 @@ in {{
 "#,
         flake_ref = nix_string_pub(flake_ref),
         system_name = nix_string_pub(system_name),
+        requested_revision = nix_string_pub(requested_revision),
+        resolved_revision_override = resolved_revision_override,
         policy_fields = policy_fields,
     )
 }
@@ -734,32 +2207,95 @@ struct StandaloneEvalJson {
     policies: serde_json::Value,
 }
 
+/// Evaluates one system from a verified store flake with its assigned policies.
+///
+/// The caller MUST verify that `flake_ref` identifies the tracked tree for
+/// `commit_hash`. `repo_url` is retained only in the persisted derivation target;
+/// this function does not access the repository URL or apply Git credentials
+/// during Nix evaluation.
+///
+/// # Errors
+///
+/// Returns an error if the evaluator slot is unavailable, Nix cannot start, the
+/// evaluation times out, or Nix returns malformed or unsuccessful output.
 pub async fn evaluate_single_system_with_policies(
+    flake_ref: &str,
     repo_url: &str,
     commit_hash: &str,
     system_name: &str,
     assigned: &[crate::models::deployment_policies::AssignedPolicy],
-    creds: Option<&FlakeCredentialEnv>,
-    build_config: &BuildConfig,
+    _creds: Option<&FlakeCredentialEnv>,
+    _build_config: &BuildConfig,
 ) -> Result<StandaloneSystemOutcome> {
-    let flake_ref = build_flake_reference(repo_url, commit_hash);
-    let nix_expr = build_single_system_eval_expression(&flake_ref, system_name, assigned);
+    evaluate_single_system_with_policies_owned(
+        flake_ref,
+        repo_url,
+        commit_hash,
+        system_name,
+        assigned,
+        Instant::now() + Duration::from_secs(120),
+        None,
+        None,
+        None,
+    )
+    .await
+}
+
+// The runtime passes shared lock ownership so fallback cancellation retains
+// cross-process exclusion until the group reaper acknowledges cleanup.
+async fn evaluate_single_system_with_policies_owned(
+    flake_ref: &str,
+    repo_url: &str,
+    commit_hash: &str,
+    system_name: &str,
+    assigned: &[AssignedPolicy],
+    invocation_deadline: Instant,
+    transaction: Option<SharedEvaluationLock>,
+    attempt: Option<(&PgPool, i32, i32)>,
+    return_lease: Option<&mut Option<CleanupOwnership>>,
+) -> Result<StandaloneSystemOutcome> {
+    let nix_expr = build_single_system_eval_expression_for_source(
+        flake_ref,
+        commit_hash,
+        Some(commit_hash),
+        system_name,
+        assigned,
+    );
 
     // Acquire the process-wide standalone eval slot before spawning.
     // This semaphore caps total concurrent `nix eval` processes across all
     // commits and fallback phases, preventing memory exhaustion on large flakes.
-    let _nix_permit = match heavy_nix_limiter().acquire_owned().await {
-        Ok(p) => p,
-        Err(_) => {
-            return Ok(StandaloneSystemOutcome::InfrastructureFailure {
-                system_name: system_name.to_string(),
-                error: "standalone Nix eval limiter was closed".to_string(),
-            });
-        }
-    };
+    let _nix_permit =
+        match tokio::time::timeout_at(invocation_deadline, heavy_nix_limiter().acquire_owned())
+            .await
+        {
+            Ok(Ok(p)) => p,
+            Ok(Err(_)) | Err(_) => {
+                return Ok(StandaloneSystemOutcome::InfrastructureFailure {
+                    system_name: system_name.to_string(),
+                    error: "standalone Nix eval limiter was closed".to_string(),
+                });
+            }
+        };
+
+    if let Some((pool, commit_id, expected_attempt)) = attempt {
+        verify_evaluation_launch(pool, commit_id, expected_attempt, invocation_deadline).await?;
+    }
 
     let mut cmd = tokio::process::Command::new("nix");
-    cmd.args(["eval", "--impure", "--json", "--expr", &nix_expr]);
+    cmd.args([
+        "eval",
+        "--json",
+        "--no-write-lock-file",
+        "--option",
+        "pure-eval",
+        "true",
+        "--option",
+        "allow-import-from-derivation",
+        "true",
+        "--expr",
+        &nix_expr,
+    ]);
     cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
     // Spawn the evaluator in a new process group so that a SIGKILL on timeout
     // reaches nix and every subprocess it forks (sub-evaluators, builders,
@@ -767,10 +2303,6 @@ pub async fn evaluate_single_system_with_policies(
     // is used.
     #[cfg(unix)]
     cmd.process_group(0);
-    build_config.apply_to_command(&mut cmd);
-    if let Some(c) = creds {
-        c.apply_to_nix_command(&mut cmd);
-    }
 
     let child = match cmd.spawn() {
         Ok(c) => c,
@@ -796,6 +2328,11 @@ pub async fn evaluate_single_system_with_policies(
         }
     };
     let pgid = guard.pgid();
+    guard.cleanup_ownership = Some(CleanupOwnership {
+        _permit: Arc::new(_nix_permit),
+        _transaction: transaction.unwrap_or_else(|| Arc::new(tokio::sync::Mutex::new(None))),
+        deadline: invocation_deadline,
+    });
     let mut stdout_buf = guard
         .child_mut()
         .stdout
@@ -807,53 +2344,73 @@ pub async fn evaluate_single_system_with_policies(
         .take()
         .map(|stderr| tokio::spawn(read_capped(stderr, EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES)));
 
-    let status = tokio::select! {
-        result = guard.wait() => {
-            match result {
-                Ok(s) => s,
-                Err(e) => {
-                    return Ok(StandaloneSystemOutcome::InfrastructureFailure {
-                        system_name: system_name.to_string(),
-                        error: format!("Failed to wait on standalone eval: {}", e),
-                    });
-                }
-            }
+    let child_deadline = (Instant::now() + Duration::from_secs(120)).min(invocation_deadline);
+    let collection = async {
+        let status = guard.wait().await?;
+        let stdout = stdout_buf
+            .as_mut()
+            .context("standalone stdout missing")?
+            .await??;
+        let stderr = stderr_buf
+            .as_mut()
+            .context("standalone stderr missing")?
+            .await??;
+        Ok::<_, anyhow::Error>((status, stdout, stderr))
+    };
+    let collected = tokio::time::timeout_at(child_deadline, collection).await;
+    if let Err(error) = guard.terminate_until(invocation_deadline).await {
+        if let Some(t) = stdout_buf.take() {
+            t.abort();
         }
-        _ = tokio::time::sleep(Duration::from_secs(120)) => {
-            warn!(system = %system_name, pgid, "standalone nix eval timed out; killing process group");
-            guard.terminate().await;
-            if let Some(t) = stdout_buf.take() { t.abort(); }
-            if let Some(t) = stderr_buf.take() { t.abort(); }
+        if let Some(t) = stderr_buf.take() {
+            t.abort();
+        }
+        return Ok(StandaloneSystemOutcome::InfrastructureFailure {
+            system_name: system_name.to_string(),
+            error: error.to_string(),
+        });
+    }
+    let (status, stdout, stderr) = match collected {
+        Ok(Ok(output)) => output,
+        Ok(Err(error)) => {
             return Ok(StandaloneSystemOutcome::InfrastructureFailure {
                 system_name: system_name.to_string(),
-                error: format!("Standalone eval timed out for {}", system_name),
+                error: error.to_string(),
+            });
+        }
+        Err(_) => {
+            warn!(pgid, "standalone evaluator deadline exhausted");
+            if let Some(t) = stdout_buf.take() {
+                t.abort();
+            }
+            if let Some(t) = stderr_buf.take() {
+                t.abort();
+            }
+            return Ok(StandaloneSystemOutcome::InfrastructureFailure {
+                system_name: system_name.to_string(),
+                error: "standalone evaluator deadline exhausted; cause unknown".into(),
             });
         }
     };
 
-    let stdout = match stdout_buf.take() {
-        Some(t) => t
-            .await
-            .unwrap_or_else(|_| Ok(CappedOutput::default()))
-            .unwrap_or_default(),
-        None => CappedOutput::default(),
-    };
-    let stderr = match stderr_buf.take() {
-        Some(t) => t
-            .await
-            .unwrap_or_else(|_| Ok(CappedOutput::default()))
-            .unwrap_or_default(),
-        None => CappedOutput::default(),
-    };
-    guard.disarm_after_output_drained();
-
     if !status.success() {
-        let stderr = stderr.diagnostic_excerpt(500);
+        let stderr =
+            crate::security::snapshot_redaction::redact_text(&stderr.diagnostic_excerpt(500));
         let error = if stderr.trim().is_empty() {
             "System evaluation failed with no error output".to_string()
         } else {
             stderr
         };
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            if status.signal().is_some() {
+                return Ok(StandaloneSystemOutcome::InfrastructureFailure {
+                    system_name: system_name.to_string(),
+                    error,
+                });
+            }
+        }
         return Ok(StandaloneSystemOutcome::ConfirmedSystemFailure {
             system_name: system_name.to_string(),
             error,
@@ -893,6 +2450,12 @@ pub async fn evaluate_single_system_with_policies(
             }
         };
 
+    if let Some(return_lease) = return_lease {
+        // Transfer, rather than reacquire, the child permit for preparation.
+        // Reacquisition would deadlock against a buffered outcome whose child
+        // future owns the permit but cannot be polled during this handler.
+        *return_lease = guard.cleanup_ownership.take();
+    }
     Ok(StandaloneSystemOutcome::Success {
         result: SuccessfulSystemResult {
             system_name: system_name.to_string(),
@@ -917,14 +2480,12 @@ pub async fn evaluate_single_system_with_policies(
 /// `CommandFailed` outcome as a confirmed system failure.
 #[allow(dead_code)]
 async fn fallback_eval_single_system(
-    repo_url: &str,
-    commit_hash: &str,
+    flake_ref: &str,
+    _commit_hash: &str,
     system_name: &str,
-    creds: Option<&FlakeCredentialEnv>,
-    build_config: &BuildConfig,
+    _creds: Option<&FlakeCredentialEnv>,
+    _build_config: &BuildConfig,
 ) -> FallbackEvalOutcome {
-    let flake_ref = build_flake_reference(repo_url, commit_hash);
-
     // Use --argstr to pass flakeRef and systemName safely instead of
     // interpolating values into a Nix expression string. This avoids
     // escaping issues with dots, backslashes, ${...}, etc.
@@ -940,23 +2501,22 @@ in
     let mut cmd = tokio::process::Command::new("nix");
     cmd.args([
         "eval",
-        "--impure",
+        "--no-write-lock-file",
+        "--option",
+        "pure-eval",
+        "true",
+        "--option",
+        "allow-import-from-derivation",
+        "true",
         "--expr",
         nix_expr.trim(),
         "--argstr",
         "flakeRef",
-        &flake_ref,
+        flake_ref,
         "--argstr",
         "systemName",
         system_name,
     ]);
-
-    // Apply the same Nix configuration as the main evaluator.
-    build_config.apply_to_command(&mut cmd);
-
-    if let Some(c) = creds {
-        c.apply_to_nix_command(&mut cmd);
-    }
 
     // Acquire the process-wide standalone eval slot before spawning.
     let _nix_permit = match heavy_nix_limiter().acquire_owned().await {
@@ -1063,7 +2623,7 @@ in
         };
     }
 
-    let stderr = stderr.diagnostic_excerpt(500);
+    let stderr = crate::security::snapshot_redaction::redact_text(&stderr.diagnostic_excerpt(500));
     let error = if stderr.trim().is_empty() {
         "System evaluation failed with no error output".to_string()
     } else {
@@ -1084,7 +2644,7 @@ in
 /// phase races the entire buffered stream, not individual steps).
 #[allow(dead_code)]
 async fn evaluate_and_verify_missing_system(
-    repo_url: &str,
+    flake_ref: &str,
     commit_hash: &str,
     system_name: &str,
     control_system: Option<&str>,
@@ -1092,7 +2652,7 @@ async fn evaluate_and_verify_missing_system(
     build_config: &BuildConfig,
 ) -> VerifiedFallbackOutcome {
     let target =
-        fallback_eval_single_system(repo_url, commit_hash, system_name, creds, build_config).await;
+        fallback_eval_single_system(flake_ref, commit_hash, system_name, creds, build_config).await;
 
     match target {
         FallbackEvalOutcome::StandaloneEvaluationSucceeded { system_name } => {
@@ -1114,7 +2674,7 @@ async fn evaluate_and_verify_missing_system(
             };
 
             match fallback_eval_single_system(
-                repo_url,
+                flake_ref,
                 commit_hash,
                 control_name,
                 creds,
@@ -1154,6 +2714,18 @@ async fn evaluate_and_verify_missing_system(
 #[derive(Debug)]
 pub struct EvaluationCancelled;
 
+/// Identifies a stale invocation whose attempt can no longer publish results.
+#[derive(Debug)]
+pub(crate) struct EvaluationSuperseded;
+
+impl std::fmt::Display for EvaluationSuperseded {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("evaluation attempt was superseded")
+    }
+}
+
+impl std::error::Error for EvaluationSuperseded {}
+
 impl std::fmt::Display for EvaluationCancelled {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "evaluation cancelled by user")
@@ -1162,9 +2734,9 @@ impl std::fmt::Display for EvaluationCancelled {
 
 impl std::error::Error for EvaluationCancelled {}
 
-/// A single successfully-evaluated system result collected during the
-/// streaming phase.  Durable DB writes are deferred until after the
-/// entire attempt is validated.
+/// Contains one checked derivation identity and its build-scope eligibility.
+/// Evaluation persistence commits incrementally; this data alone does not prove
+/// persistence when the caller has not observed its completion acknowledgement.
 #[derive(Debug, Clone)]
 pub struct SuccessfulSystemResult {
     pub system_name: String,
@@ -1198,21 +2770,65 @@ pub struct FinalizedDerivation {
 }
 
 /// In-memory evaluation plan produced by `evaluate_with_nix_eval_jobs`.
-/// Contains no DB state — all writes are deferred to `finalize_evaluation_attempt`.
+/// Successful derivations and policy evidence are persisted incrementally.
+/// Synthetic failures and snapshot selection are published by the finalizer.
 #[derive(Debug)]
 pub struct EvaluationPlan {
     /// Raw nix-eval-jobs results (for broadcasting / summary).
     pub results: Vec<NixEvalJobResult>,
     /// Per-system policy check outcomes.
     pub policy_checks: Vec<PolicyCheckResult>,
-    /// Systems that succeeded and need derivation rows.
+    /// Valid evaluated systems whose derivation and policy evidence was persisted.
     pub successful_systems: Vec<SuccessfulSystemResult>,
     /// Systems confirmed as failures by the fallback phase.
     pub confirmed_failures: Vec<ConfirmedSystemFailure>,
+    /// Pre-persistence-redacted NixOS options keyed by configuration name.
+    ///
+    /// Presence of a key means the evaluator produced a trustworthy snapshot.
+    /// An empty vector is a valid snapshot that states the configuration
+    /// declares no inspectable options.
+    pub evaluation_snapshots: HashMap<String, Vec<EvaluatedOption>>,
+    /// Configurations whose Nix evaluation succeeded but whose configuration
+    /// snapshot could not be captured, keyed by configuration name with a
+    /// short diagnostic.
+    ///
+    /// INVARIANT: A key here is never also present in `evaluation_snapshots`,
+    /// and never contributes to `had_system_eval_errors`. Snapshot capture
+    /// failure is an observability gap, not a Nix system evaluation failure,
+    /// so it must not block builds or deployments.
+    pub snapshot_capture_failures: HashMap<String, String>,
+    /// Exploration artifact from a separate targeted inspection.
+    ///
+    /// PRIMARY does not populate this field. It remains `None` until targeted
+    /// inspection provides an artifact, and finalization records the flake
+    /// output snapshot as unavailable.
+    pub flake_output_snapshot: Option<serde_json::Value>,
     /// True when any result has a Nix evaluation error.
     pub had_system_eval_errors: bool,
     #[cfg(test)]
     pub force_build_job_insert_failure: bool,
+}
+
+fn record_missing_snapshot_captures(
+    successful_results: &[SuccessfulSystemResult],
+    evaluation_snapshots: &HashMap<String, Vec<EvaluatedOption>>,
+    snapshot_capture_failures: &mut HashMap<String, String>,
+) {
+    // INVARIANT: Every successful system advances snapshot selection. The
+    // primary evaluator does not capture Config data, and fallback results do
+    // not pass through the streaming metadata parser. Record the inventory gap;
+    // finalization preserves deployment-only identity only for this exact
+    // successful attempt. Otherwise it advances an unavailable selector so
+    // older evidence cannot authorize the new attempt.
+    for successful in successful_results {
+        if !evaluation_snapshots.contains_key(&successful.system_name) {
+            snapshot_capture_failures
+                .entry(successful.system_name.clone())
+                .or_insert_with(|| {
+                    "Configuration snapshot was not captured separately".to_string()
+                });
+        }
+    }
 }
 
 /// Outcome of `finalize_evaluation_attempt`.
@@ -1316,6 +2932,9 @@ pub enum SystemNotQueuedReason {
     /// active Crystal Forge system).  The derivation is still recorded
     /// for accounting and total-system-count accuracy.
     BuildScopeExcluded,
+    /// Another commit owns the same path while the legacy global uniqueness
+    /// constraint remains. The commit-owned evaluation row must not build.
+    LegacyDerivationPathConflict,
 }
 
 fn system_not_queued_reason(
@@ -1358,13 +2977,34 @@ fn system_not_queued_reason(
     None
 }
 
-/// Phase 1: persist an evaluated system's derivation without inserting a
-/// build job.  The build job is created later by `activate_evaluated_system_build`,
-/// after the GC root has been established.
+/// Persists an evaluated system's derivation before build activation.
+///
+/// Phase 1 does not insert a build job. `activate_evaluated_system_build`
+/// creates that job after the GC root exists. Evaluation persists exact
+/// composite assessments for both `report_only` and `enforce`; only enforced
+/// results participate in deployment gating.
 ///
 /// Returns [`SystemPersistenceOutcome`] which tells the caller whether build
 /// activation is needed, or if the system was recorded without a build, or
 /// if the evaluation was cancelled/superseded.
+/// An existing failed build with the server-owned obsolete-contract code
+/// returns [`SystemPersistenceOutcome::NeedsBuildPreparation`]. The later
+/// activation transaction preserves that row and creates a replacement attempt.
+/// Other existing build jobs return [`SystemPersistenceOutcome::ExistingBuildJob`].
+/// Retains native terminal flags and policy results in an immutable exact-attempt
+/// sidecar in this transaction. Requires selected Native discovery inventory;
+/// mutable derivation updates on a later retry cannot erase this evidence.
+/// Publishes schema-3 deployment identity in the same transaction when selected
+/// Native ownership, deployment gates, full commit, and the actual derivation
+/// row, `.drv`, and expected output all match. Excluded or incomplete results
+/// publish no authority. This manifest contains no Config option inventory.
+///
+/// # Errors
+///
+/// Returns an error when policy resolution, selected Native inventory proof,
+/// artifact certification, or database persistence fails, or when terminal
+/// evidence differs from the first write for this attempt/configuration. Errors
+/// roll back this transaction.
 pub async fn persist_evaluated_system(
     pool: &PgPool,
     commit_id: i32,
@@ -1377,48 +3017,84 @@ pub async fn persist_evaluated_system(
     use crate::queries::derivations::{SuccessfulEvalWrite, record_successful_eval_result_in_tx};
 
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: Successful evaluation persistence can take attempt, POA&M,
+    // commit, derivation, system, and deployment locks. The snapshot-writer lock
+    // is the global first lock for every evaluation finalization transaction.
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await?;
 
-    #[derive(sqlx::FromRow)]
-    struct CommitState {
-        evaluation_status: Option<String>,
-        evaluation_attempt_count: Option<i32>,
-        cancellation_requested: Option<bool>,
+    // CONCURRENCY: Retain exact latest attempt ownership before policy,
+    // derivation, and build locks. A queued retry supersedes this writer too.
+    if let Err(error) = crate::queries::evaluation_native_outcomes::lock_native_owner_tx(
+        &mut tx,
+        commit_id,
+        expected_attempt,
+    )
+    .await
+    {
+        tx.rollback().await?;
+        if error.is::<EvaluationSuperseded>() {
+            return Ok(SystemPersistenceOutcome::Superseded);
+        }
+        if error.is::<EvaluationCancelled>() {
+            return Ok(SystemPersistenceOutcome::Cancelled);
+        }
+        return Err(error);
     }
 
-    let state = sqlx::query_as::<_, CommitState>(
+    let system_id = sqlx::query_scalar::<_, uuid::Uuid>(
         r#"
-        SELECT evaluation_status, evaluation_attempt_count, cancellation_requested
-        FROM commits
-        WHERE id = $1
-        FOR UPDATE
+        SELECT s.id
+        FROM systems s
+        JOIN commits c ON c.id = $1 AND c.flake_id = s.flake_id
+        WHERE COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = $2
         "#,
     )
     .bind(commit_id)
+    .bind(&result.system_name)
     .fetch_optional(&mut *tx)
     .await?;
-
-    let Some(state) = state else {
-        tx.rollback().await?;
-        return Ok(SystemPersistenceOutcome::Superseded);
+    let resolved_policies = match system_id {
+        Some(system_id) => {
+            match crate::compliance::resolver::resolve_system_effective_policies_in_tx(
+                &mut tx, system_id,
+            )
+            .await?
+            {
+                crate::compliance::resolver::ResolutionOutcome::Resolved(resolved) => {
+                    Some((system_id, resolved))
+                }
+                crate::compliance::resolver::ResolutionOutcome::Conflict(conflicts) => bail!(
+                    "Effective policy conflict while persisting {}: {}",
+                    result.system_name,
+                    conflicts
+                        .into_iter()
+                        .map(|conflict| conflict.message)
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            }
+        }
+        None => None,
     };
-
-    let attempt_count = state.evaluation_attempt_count.unwrap_or(0);
-    let status = state.evaluation_status.as_deref().unwrap_or("pending");
-    let cancellation = state.cancellation_requested.unwrap_or(false);
-
-    if attempt_count != expected_attempt || !matches!(status, "in_progress" | "cancelling") {
-        tx.rollback().await?;
-        return Ok(SystemPersistenceOutcome::Superseded);
-    }
-
-    if cancellation || status == "cancelling" {
-        tx.rollback().await?;
-        return Ok(SystemPersistenceOutcome::Cancelled);
-    }
 
     let drv_path = result.drv_path.clone();
     let policy_requirements_met = policy_requirements_met(policy_check);
-    let policy_results = policy_results_json(policy_check, assigned_policies);
+    let mut policy_results = policy_results_json(policy_check, assigned_policies);
+    // INVARIANT: Failure-only partial publication accepts only this exact
+    // attempt's persisted result, never a success inherited from an older run.
+    policy_results["evaluation_attempt"] = serde_json::json!(expected_attempt);
+    crate::queries::evaluation_native_outcomes::persist_native_outcome_tx(
+        &mut tx,
+        commit_id,
+        expected_attempt,
+        &result.system_name,
+        crate::queries::evaluation_native_outcomes::NativeEvalState::Evaluated,
+        result.cf_agent_enabled,
+        Some(policy_requirements_met),
+        &policy_results,
+        None,
+    )
+    .await?;
     let write = record_successful_eval_result_in_tx(
         &mut tx,
         Some(commit_id),
@@ -1434,9 +3110,83 @@ pub async fn persist_evaluated_system(
     .await
     .with_context(|| format!("Failed to write derivation for {}", result.system_name))?;
 
+    let assessment_derivation_id = match &write {
+        SuccessfulEvalWrite::Inserted { derivation_id }
+        | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
+        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => *derivation_id,
+    };
+    let has_exact_config_carrier =
+        !matches!(&write, SuccessfulEvalWrite::LegacyPathConflict { .. });
+    // PERSISTENCE: Native deployment identity comes from this actual result and
+    // row in the active-owner transaction, never from historical outcome data.
+    if has_exact_config_carrier && build_eligible && policy_requirements_met {
+        crate::queries::evaluation_snapshots::persist_native_deployment_identity_tx(
+            &mut tx,
+            commit_id,
+            expected_attempt,
+            assessment_derivation_id,
+            result,
+        )
+        .await?;
+    }
+    if system_id.is_some() && has_exact_config_carrier {
+        // FAILURE ISOLATION: Queue the cheap root fallback in the same
+        // transaction as its exact derivation. Optional in-band publication
+        // can upgrade this row asynchronously, but a restart or full channel
+        // cannot leave the configuration without durable root work. A legacy
+        // global path conflict has no commit-owned carrier and cannot satisfy
+        // the observation foreign-key identity.
+        crate::queries::config_observations::queue_primary_config_root_fallback_tx(
+            &mut tx,
+            commit_id,
+            assessment_derivation_id,
+            &result.system_name,
+            &result.drv_path,
+        )
+        .await?;
+    }
+    if let Some((system_id, resolved)) = resolved_policies.as_ref() {
+        crate::services::composite_enforcement::persist_eval_passed_for_system_in_tx(
+            &mut tx,
+            commit_id,
+            expected_attempt,
+            *system_id,
+            policy_check,
+        )
+        .await?;
+        // Assessment is evidence, not a deployment decision. Report-only
+        // composites need the same exact-target result as enforced composites.
+        let has_composite = resolved
+            .policies
+            .iter()
+            .any(|policy| policy.policy_type == "composite");
+        if has_composite {
+            let target_store_path = result.expected_store_path.as_deref().context(
+                "Composite assessment requires the evaluator's exact expected store path",
+            )?;
+            crate::services::composite_enforcement::persist_evaluation_assessments_in_tx(
+                &mut tx,
+                *system_id,
+                assessment_derivation_id,
+                target_store_path,
+                &policy_results,
+                resolved,
+            )
+            .await?;
+        }
+    }
+
     let derivation_id = match write {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id } => derivation_id,
+        SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => {
+            tx.commit().await?;
+            return Ok(SystemPersistenceOutcome::RecordedWithoutBuild {
+                derivation_id,
+                reason: SystemNotQueuedReason::LegacyDerivationPathConflict,
+            });
+        }
         SuccessfulEvalWrite::PreservedBuildState {
             derivation_id: existing_deriv_id,
             status_id: _,
@@ -1484,21 +3234,29 @@ pub async fn persist_evaluated_system(
                     // not a build failure and must not raise a false
                     // build-failure alert.
                     if build_job_status == "queued" {
+                        let cancellation_reason =
+                            format!("Policy no longer satisfied for {}", result.system_name,);
                         sqlx::query(
                             "UPDATE build_jobs \
                              SET status = 'cancelled', \
-                                 error_message = $1, \
+                                 logs = COALESCE(logs, '') || E'\n\nCancelled: ' || $1, \
                                  completed_at = NOW(), \
                                  updated_at = NOW() \
                              WHERE id = $2 AND status = 'queued'",
                         )
-                        .bind(format!(
-                            "Policy no longer satisfied for {}",
-                            result.system_name,
-                        ))
+                        .bind(&cancellation_reason)
                         .bind(build_job_id)
                         .execute(&mut *tx)
                         .await?;
+                        crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+                            &mut tx,
+                            build_job_id,
+                            Some(&cancellation_reason),
+                        )
+                        .await
+                        .context(
+                            "Failed to terminalize post-build scan after policy cancellation",
+                        )?;
                     }
                     // For already-building (or any other non-queued)
                     // jobs, leave them in place but do NOT return
@@ -1549,14 +3307,26 @@ pub async fn persist_evaluated_system(
 
     // Check if a build job already exists (e.g. from a concurrent or
     // prior activation that succeeded between our steps).
-    let existing: Option<(uuid::Uuid, String)> = sqlx::query_as(
-        "SELECT id, status FROM build_jobs WHERE derivation_id = $1 ORDER BY created_at ASC LIMIT 1",
+    let existing: Option<(uuid::Uuid, String, Option<String>)> = sqlx::query_as(
+        r#"
+        SELECT id, status, server_failure_code
+        FROM build_jobs
+        WHERE derivation_id = $1
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
     )
     .bind(derivation_id)
     .fetch_optional(&mut *tx)
     .await?;
 
-    if let Some((build_job_id, build_job_status)) = existing {
+    // SECURITY: Only a latest attempt with the server-owned obsolete-contract
+    // code lets successful authoritative evaluation create a replacement.
+    // Older immutable markers cannot reactivate a completed retry lineage.
+    if let Some((build_job_id, build_job_status, server_failure_code)) = existing
+        && server_failure_code.as_deref()
+            != Some(crate::models::builders::SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+    {
         // Already has a build job; mark as queued so the state is consistent.
         sqlx::query(
             r#"
@@ -1617,6 +3387,13 @@ pub async fn persist_evaluated_system(
 /// (claimable) after this function commits.  Re-validates attempt number
 /// and cancellation under `FOR UPDATE` to handle races with cancellation
 /// or supersession.
+/// Exact completed evidence from a resource-terminal attempt can also authorize
+/// preparation through the shared admission predicate. Ordinary failed attempts,
+/// newer attempts, and targets without matching policy evidence remain rejected.
+///
+/// # Errors
+/// Returns database or build-admission failures. The caller MUST establish the
+/// exact derivation GC root before invoking this function.
 pub async fn activate_evaluated_system_build(
     pool: &PgPool,
     commit_id: i32,
@@ -1624,6 +3401,9 @@ pub async fn activate_evaluated_system_build(
     derivation_id: i32,
 ) -> Result<SystemBuildActivationOutcome> {
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: Build activation is the second successful finalization phase.
+    // Keep the global writer lock ahead of its commit and derivation locks.
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await?;
 
     #[derive(sqlx::FromRow)]
     struct CommitState {
@@ -1653,7 +3433,7 @@ pub async fn activate_evaluated_system_build(
     let status = state.evaluation_status.as_deref().unwrap_or("pending");
     let cancellation = state.cancellation_requested.unwrap_or(false);
 
-    if attempt_count != expected_attempt || !matches!(status, "in_progress" | "cancelling") {
+    if attempt_count != expected_attempt {
         tx.rollback().await?;
         return Ok(SystemBuildActivationOutcome::Superseded);
     }
@@ -1661,6 +3441,20 @@ pub async fn activate_evaluated_system_build(
     if cancellation || status == "cancelling" {
         tx.rollback().await?;
         return Ok(SystemBuildActivationOutcome::Cancelled);
+    }
+
+    if status != "in_progress"
+        && !(status == "failed"
+            && crate::queries::build_jobs::resource_terminal_build_preparation_allowed_in_tx(
+                &mut tx,
+                commit_id,
+                expected_attempt,
+                derivation_id,
+            )
+            .await?)
+    {
+        tx.rollback().await?;
+        return Ok(SystemBuildActivationOutcome::Superseded);
     }
 
     let build_outcome = create_build_job_for_derivation_tx(&mut tx, derivation_id).await?;
@@ -1794,7 +3588,7 @@ async fn handle_system_build_activation(
     commit_id: i32,
     system_name: &str,
     outcome: &SystemBuildActivationOutcome,
-    log_sequence: Option<&mut i32>,
+    log_sequence: Option<&mut EvalLogSequence>,
 ) -> Result<()> {
     use crate::handlers::api::commits::SystemEvalStatus;
     match outcome {
@@ -1968,12 +3762,15 @@ pub(crate) async fn record_preparation_failure(
     }
 }
 
-/// Full combined helper that persists, roots, activates, and notifies.
+/// Persists, roots, and activates one evaluated system.
 ///
-/// Used by the fallback evaluation path and tests.  The bulk streaming
-/// path uses the split `persist_evaluated_system` → GC root →
-/// `activate_evaluated_system_build` flow instead, to avoid blocking
-/// the stdout reader.
+/// Returns the outcome for caller-owned queue notifications. Persistence commits
+/// before GC-root preparation; a preparation failure does not undo evaluation.
+/// Invocation-owned callers split persistence from preparation to retain durable
+/// results when a shared deadline cancels a preparation await.
+///
+/// # Errors
+/// Returns database or policy-resolution failures from evaluation persistence.
 pub async fn finalize_evaluated_system(
     pool: &PgPool,
     commit_id: i32,
@@ -1991,7 +3788,17 @@ pub async fn finalize_evaluated_system(
         assigned_policies,
     )
     .await?;
+    prepare_persisted_evaluated_system(pool, commit_id, expected_attempt, persisted).await
+}
 
+// Reuses the combined helper's downstream behavior without a second persistence
+// transaction. Callers can publish completion ownership before these awaits.
+async fn prepare_persisted_evaluated_system(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+    persisted: SystemPersistenceOutcome,
+) -> Result<SystemFinalizeOutcome> {
     match persisted {
         SystemPersistenceOutcome::NeedsBuildPreparation {
             derivation_id,
@@ -2154,25 +3961,40 @@ pub async fn finalize_evaluated_system(
 /// Atomically finalize a validated evaluation attempt.
 ///
 /// Acquires a `FOR UPDATE` lock on the commit row, checks the attempt number
-/// and cancellation flag, writes all successful derivations and synthetic
-/// failures under that lock, and marks the commit complete — all in a single
-/// PostgreSQL transaction.
+/// and cancellation flag, publishes synthetic failures, snapshots, and terminal
+/// policy evidence, and marks the commit complete in one transaction. Successful
+/// derivations and policy metadata were already persisted incrementally.
 ///
 /// Because the commit row is locked for the duration:
 /// - A concurrent cancellation API call blocks until this transaction commits
 ///   or rolls back. If cancellation already won the lock, this returns
 ///   `EvaluationFinalizeOutcome::Cancelled`.
-/// - If any derivation write fails the entire transaction is rolled back, the
+/// - If any finalization write fails the transaction is rolled back, the
 ///   commit remains `in_progress`, and the ordinary failure-CAS path retries.
+///
+/// Confirmed failures carry the expected attempt and diagnostic in
+/// `policy_results` in the same transaction. This evidence does not replace
+/// an irreversible build status or its artifact paths.
+/// Each confirmed failure also creates immutable native sidecar evidence after
+/// exact selected Native inventory proof. Missing discovery is not a failure
+/// outcome. A newer queued attempt supersedes the finalizer before publication.
+///
+/// # Errors
+/// Returns database, snapshot, terminal-policy, native inventory proof, or
+/// immutable outcome conflict errors. Earlier incremental success transactions
+/// are not rolled back by this finalizer.
 pub async fn finalize_evaluation_attempt(
     pool: &PgPool,
     commit_id: i32,
     expected_attempt: i32,
     plan: &EvaluationPlan,
 ) -> Result<EvaluationFinalizeOutcome> {
-    use crate::queries::derivations::record_synthetic_eval_failure_in_tx;
+    use crate::queries::derivations::{SyntheticFailureWrite, record_synthetic_eval_failure_in_tx};
 
     let mut tx = pool.begin().await?;
+    // CONCURRENCY: All evaluation finalization paths acquire the snapshot writer
+    // lock before the commit, POA&M, derivation, system, or deployment rows.
+    crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx).await?;
 
     // Lock the commit row for the duration of this transaction.  This
     // serialises finalization against the cancellation API: whichever
@@ -2211,9 +4033,47 @@ pub async fn finalize_evaluation_attempt(
         return Ok(EvaluationFinalizeOutcome::Superseded);
     }
 
+    // INVARIANT: A commit can be finalized only by its one matching active
+    // attempt. Lock it before publishing snapshots so missing or stale worker
+    // lineage cannot leave a terminal commit with an active attempt row.
+    let active_attempt_id: Option<uuid::Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT a.id
+        FROM evaluation_attempts a
+        WHERE a.commit_id = $1 AND a.attempt_number = $2 AND a.status = 'in_progress'
+          AND NOT EXISTS (SELECT 1 FROM evaluation_attempts newer
+              WHERE newer.commit_id = a.commit_id AND newer.attempt_number > a.attempt_number)
+        FOR UPDATE OF a
+        "#,
+    )
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if active_attempt_id.is_none() {
+        tx.rollback().await?;
+        return Ok(EvaluationFinalizeOutcome::Superseded);
+    }
+
     // Cancellation won the race — finalize as cancelled inside this tx.
     if cancellation || status == "cancelling" {
-        sqlx::query(
+        let attempt_rows = sqlx::query(
+            r#"
+            UPDATE evaluation_attempts
+            SET status = 'cancelled', completed_at = COALESCE(completed_at, NOW()),
+                updated_at = NOW()
+            WHERE commit_id = $1 AND attempt_number = $2 AND status = 'in_progress'
+            "#,
+        )
+        .bind(commit_id)
+        .bind(expected_attempt)
+        .execute(&mut *tx)
+        .await?;
+        anyhow::ensure!(
+            attempt_rows.rows_affected() == 1,
+            "cancellation finalization did not terminalize exactly one evaluation attempt"
+        );
+        let commit_rows = sqlx::query(
             r#"
             UPDATE commits
             SET evaluation_status = 'cancelled',
@@ -2226,6 +4086,10 @@ pub async fn finalize_evaluation_attempt(
         .bind(commit_id)
         .execute(&mut *tx)
         .await?;
+        anyhow::ensure!(
+            commit_rows.rows_affected() == 1,
+            "cancellation finalization did not terminalize exactly one commit"
+        );
         tx.commit().await?;
         return Ok(EvaluationFinalizeOutcome::Cancelled);
     }
@@ -2237,7 +4101,25 @@ pub async fn finalize_evaluation_attempt(
     sorted_failures.sort_by(|a, b| a.system_name.cmp(&b.system_name));
 
     for cf in &sorted_failures {
-        record_synthetic_eval_failure_in_tx(
+        // Only confirmed post-discovery failures become historical evidence.
+        // The writer proves exact selected Native inventory in this same tx.
+        crate::queries::evaluation_native_outcomes::persist_native_outcome_tx(
+            &mut tx,
+            commit_id,
+            expected_attempt,
+            &cf.system_name,
+            crate::queries::evaluation_native_outcomes::NativeEvalState::EvalFailed,
+            None,
+            None,
+            &serde_json::json!({
+                "evaluation_attempt": expected_attempt,
+                "evaluation_failure": true,
+                "evaluation_failure_error": cf.error,
+            }),
+            Some(&cf.error),
+        )
+        .await?;
+        let write = record_synthetic_eval_failure_in_tx(
             &mut tx,
             Some(commit_id),
             &cf.system_name,
@@ -2247,6 +4129,96 @@ pub async fn finalize_evaluation_attempt(
         )
         .await
         .with_context(|| format!("Failed to write synthetic failure for {}", cf.system_name))?;
+        let derivation_id = match write {
+            SyntheticFailureWrite::Inserted { derivation_id }
+            | SyntheticFailureWrite::UpdatedPendingEvaluation { derivation_id }
+            | SyntheticFailureWrite::PreservedExisting { derivation_id, .. } => derivation_id,
+        };
+        // CONCURRENCY: The helper retains the derivation lock and decides which
+        // build state and paths must survive. Stamp only evaluation evidence in
+        // this attempt-owned transaction, including for preserved build rows.
+        sqlx::query("UPDATE derivations SET policy_results = $1 WHERE id = $2")
+            .bind(serde_json::json!({
+                "evaluation_attempt": expected_attempt,
+                "evaluation_failure": true,
+                "evaluation_failure_error": cf.error,
+            }))
+            .bind(derivation_id)
+            .execute(&mut *tx)
+            .await
+            .with_context(|| {
+                format!("Failed to stamp evaluation failure for {}", cf.system_name)
+            })?;
+        crate::queries::evaluation_snapshots::persist_failed_snapshot_deferred_tx(
+            &mut tx,
+            commit_id,
+            &cf.system_name,
+            &cf.error,
+        )
+        .await
+        .with_context(|| format!("Failed to persist failed snapshot for {}", cf.system_name))?;
+    }
+
+    // SECURITY: Evaluator metadata was recursively redacted before it entered
+    // the plan. Persist it in this transaction so a commit cannot become
+    // complete without its corresponding reusable configuration snapshots.
+    for (configuration_name, options) in &plan.evaluation_snapshots {
+        crate::queries::evaluation_snapshots::persist_available_snapshot_deferred_tx(
+            &mut tx,
+            commit_id,
+            configuration_name,
+            options.clone(),
+        )
+        .await
+        .with_context(|| {
+            format!("Failed to persist evaluation snapshot for {configuration_name}")
+        })?;
+    }
+    // Successful Native results can have certified deployment identity without
+    // Config inventory. Preserve only the exact attempt's selected manifest.
+    // Other inventory gaps advance an unavailable selector rather than leaving
+    // an older success selected. Config reads never treat a manifest as empty
+    // inventory or comparison evidence.
+    for (configuration_name, reason) in &plan.snapshot_capture_failures {
+        if crate::queries::evaluation_snapshots::selected_native_deployment_identity_tx(
+            &mut tx,
+            commit_id,
+            configuration_name,
+            expected_attempt,
+        )
+        .await?
+        {
+            continue;
+        }
+        crate::queries::evaluation_snapshots::persist_unavailable_snapshot_deferred_tx(
+            &mut tx,
+            commit_id,
+            configuration_name,
+            reason,
+        )
+        .await
+        .with_context(|| {
+            format!("Failed to persist unavailable evaluation snapshot for {configuration_name}")
+        })?;
+    }
+    // INVARIANT: Every snapshot mutation and this complete-corpus recomputation
+    // share the finalization transaction. Readers see either the old corpus and
+    // metrics or the complete new corpus and metrics, never an intermediate mix.
+    crate::queries::evaluation_snapshots::recompute_host_deltas_tx(&mut tx, commit_id)
+        .await
+        .context("Failed to recompute finalized evaluation host deltas")?;
+    if let Some(payload) = &plan.flake_output_snapshot {
+        crate::queries::evaluation_snapshots::persist_flake_output_snapshot_tx(
+            &mut tx, commit_id, payload,
+        )
+        .await
+        .context("Failed to persist flake output snapshot")?;
+    } else {
+        crate::queries::evaluation_snapshots::persist_unavailable_flake_output_snapshot_tx(
+            &mut tx, commit_id,
+        )
+        .await
+        .context("Failed to mark flake output snapshot unavailable")?;
     }
 
     #[cfg(test)]
@@ -2300,6 +4272,15 @@ pub async fn finalize_evaluation_attempt(
     .await
     .context("Failed to update commit metadata cache")?;
 
+    crate::services::composite_enforcement::persist_eval_passed_terminal_checks_in_tx(
+        &mut tx,
+        commit_id,
+        expected_attempt,
+        &plan.policy_checks,
+    )
+    .await
+    .context("Failed to persist terminal eval_passed outcomes")?;
+
     // Mark the commit complete inside the same transaction.
     let rows = sqlx::query(
         r#"
@@ -2327,8 +4308,30 @@ pub async fn finalize_evaluation_attempt(
         return Ok(EvaluationFinalizeOutcome::Superseded);
     }
 
+    let attempt_rows = sqlx::query(
+        r#"
+        UPDATE evaluation_attempts
+        SET status = 'complete', completed_at = NOW(), error_message = NULL,
+            updated_at = NOW()
+        WHERE commit_id = $1 AND attempt_number = $2 AND status = 'in_progress'
+        "#,
+    )
+    .bind(commit_id)
+    .bind(expected_attempt)
+    .execute(&mut *tx)
+    .await
+    .context("Failed to mark evaluation attempt complete")?;
+    anyhow::ensure!(
+        attempt_rows.rows_affected() == 1,
+        "successful finalization did not terminalize exactly one evaluation attempt"
+    );
+
     tx.commit().await?;
     Ok(EvaluationFinalizeOutcome::Completed {
+        // Keep derivation side effects owned by the established streaming and
+        // fallback success paths. Config Inspector scheduling resolves its
+        // own exact targets from the validated evaluation plan instead of
+        // replaying GC-root or closure-count work here.
         derivations: Vec::new(),
         queued_builds: Vec::new(),
     })
@@ -2348,7 +4351,7 @@ async fn handle_system_finalize_outcome(
     commit_id: i32,
     system_name: &str,
     outcome: SystemFinalizeOutcome,
-    log_sequence: &mut i32,
+    log_sequence: &mut EvalLogSequence,
 ) -> Result<SystemFinalizeAction> {
     match outcome {
         SystemFinalizeOutcome::Queued {
@@ -2484,9 +4487,53 @@ enum SystemFinalizeAction {
     Superseded,
 }
 
-/// FIXED: Now properly:
-/// 1. Stores derivation_path from nix-eval-jobs
-/// 2. Updates status to DryRunComplete after successful evaluation
+/// Evaluates the verified commit source and finalizes its assigned policies.
+///
+/// Resolves one capacity snapshot after heavy-Nix locking. One absolute deadline
+/// covers bulk children, bounded recovery, small fallback, and preparation drain.
+/// Nonblank output advances only idle activity. At idle expiry, timely complete
+/// CPU evidence permits continued collection; unknown evidence cannot establish
+/// healthy work. The independent 30-second pressure monitor runs during handler
+/// awaits and never manufactures output or extends the absolute deadline.
+///
+/// Recovery uses the same source, revision, policy parser, and persistence path.
+/// Each unresolved configuration gets at most one isolated CF child. Configured
+/// parallelism can resume once after solo completion and three clear samples;
+/// a second parallel stall keeps recovery serial. Upstream solo exhaustion is
+/// terminal even with child exit 0. Valid policy-failed results are completed
+/// evaluations and never re-enter a recovery expression.
+///
+/// Checked results whose COMMIT acknowledgement was interrupted remain separate
+/// from completed outcomes. Recovery uses the lifecycle owner's durable proof
+/// before selecting another expression. Catch-up uses the same absolute deadline;
+/// expiry hands candidates and captures to failure finalization without granting
+/// completion authority or repeating derivation persistence/root publication.
+/// Returned persistence errors use the same proof path. One positively proven
+/// acknowledgement failure can continue unresolved work; negative or unavailable
+/// proof aborts with retained partial state and an infrastructure-unknown cause.
+/// Cancellation, supersession, and authorization failures are never resource-adapted.
+///
+/// A replacement requires direct-child reap and process-group absence. Cleanup
+/// runs outside collection but within the same absolute deadline. Unconfirmed
+/// cleanup transfers heavy-Nix locks to the guard reaper and returns partial
+/// resource failure without starting another child. Nix workers inherit the
+/// group; this barrier does not cover escaped processes. Cancellation polling
+/// during discovery is concurrent and query-bounded. Bulk cancellation polling
+/// is cooperative; a pending bulk handler can delay its next two-second poll.
+///
+/// Logs bind to the claimed `expected_attempt` before source work. All direct
+/// statuses, fallback helpers, stderr batches, final flushes, and spawned build
+/// preparation clones retain that owner. Superseded publications cannot create
+/// or retarget a channel. Persisted logs retain prior attempts; new sequences
+/// belong to the exact attempt rather than replacing commit-wide history.
+///
+/// # Errors
+///
+/// Returns a classified failure for invalid resource policy, source discovery,
+/// process or database failures, or cancellation. Exhausted resource recovery
+/// returns typed partial state for failure-only lifecycle publication. Small
+/// fallback keeps its four-system, concurrency-two, 180-second limits, clipped
+/// by the invocation deadline.
 pub async fn evaluate_with_nix_eval_jobs(
     pool: &PgPool,
     commit: &Commit,
@@ -2533,12 +4580,17 @@ async fn evaluate_with_nix_eval_jobs_inner(
     cf_state: Option<&crate::handlers::agent_request::CFState>,
     queue_notifier: Option<&QueueNotifier>,
 ) -> Result<EvaluationPlan> {
-    // Re-evaluation safety: clear previous persisted logs for this commit so
-    // (commit_id, log_sequence) uniqueness cannot collide on subsequent runs.
-    crate::queries::eval_logs::delete_eval_logs_by_commit(pool, commit.id).await?;
-
-    // Sequence counter for log persistence (1-indexed)
-    let mut log_sequence = 1i32;
+    // SECURITY: Bind once from the claimed expected attempt. Every direct
+    // status, fallback helper, and spawned preparation clone retains this token.
+    let producer_state = match cf_state {
+        Some(state) => Some(
+            crate::handlers::api::commits::bind_eval_producer(state, commit.id, expected_attempt)
+                .await?,
+        ),
+        None => None,
+    };
+    let cf_state = producer_state.as_ref();
+    let mut log_sequence = EvalLogSequence::for_attempt(pool, commit.id, expected_attempt).await?;
 
     // Bounded preparation pipeline: GC root + build activation for each
     // streaming system.  A semaphore limits concurrent nix-store subprocess
@@ -2551,7 +4603,6 @@ async fn evaluate_with_nix_eval_jobs_inner(
     // queued for build preparation and must not be included in this count.
     let mut build_prep_count: usize = 0;
 
-    let flake_ref = build_flake_reference(repo_url, commit_hash);
     let allowed_systems = load_allowed_systems(pool, flake, target_system).await?;
 
     // Load per-flake credentials (may be None for public flakes).
@@ -2565,8 +4616,86 @@ async fn evaluate_with_nix_eval_jobs_inner(
             }),
     );
 
+    // SECURITY: Git materialization and Nix discovery input fetchers receive
+    // repository credentials. Bulk evaluation still consumes the verified store
+    // tree in its isolated environment; host credentials cannot affect drvPath.
+    let _ = tokio::time::timeout(
+        DISCOVERY_LOG_BUDGET,
+        broadcast_and_persist_eval_log(
+            pool,
+            cf_state,
+            commit.id,
+            &mut log_sequence,
+            "⏳ Materializing verified source...".to_string(),
+        ),
+    )
+    .await;
+    let immutable_source = match materialize_immutable_source(
+        pool,
+        commit.id,
+        &server_config.source_archive_root,
+        repo_url,
+        commit_hash,
+        creds.as_ref().as_ref(),
+    )
+    .await
+    .context("failed to materialize authoritative immutable source")
+    {
+        Ok(source) => source,
+        Err(error) => {
+            let error = sanitize_materialization_failure(error, repo_url);
+            let _ = tokio::time::timeout(
+                DISCOVERY_LOG_BUDGET,
+                broadcast_and_persist_eval_log(
+                    pool,
+                    cf_state,
+                    commit.id,
+                    &mut log_sequence,
+                    format!(
+                        "Source materialization failed. {}",
+                        preflight_discovery_failure_log(&error)
+                    ),
+                ),
+            )
+            .await;
+            return Err(error);
+        }
+    };
+    let _ = tokio::time::timeout(
+        DISCOVERY_LOG_BUDGET,
+        broadcast_and_persist_eval_log(
+            pool,
+            cf_state,
+            commit.id,
+            &mut log_sequence,
+            "✅ Verified source materialization complete".to_string(),
+        ),
+    )
+    .await;
+    // Pure `builtins.getFlake` accepts a path reference only when the reference
+    // carries its verified NAR hash. The hash also prevents resolution from
+    // observing a different tree if the expression is reused incorrectly.
+    let flake_ref = nar_qualified_store_flake_ref(
+        &immutable_source.server_store_path,
+        &immutable_source.nar_hash,
+    );
+
     // Build ONE Nix expression with per-configuration policy checkers.
-    let nix_expr = build_nix_eval_expression(&flake_ref, policies_by_configuration);
+    // PERFORMANCE: `cf_systems_only` is an evaluation boundary, not only a
+    // build-queue filter. Evaluating every unmanaged declaration consumed all
+    // workers before managed systems became claimable on large flakes. The
+    // artifact cache still retains the complete declared-system inventory.
+    let nix_expr = match allowed_systems.as_deref() {
+        Some(configuration_names) => build_nix_eval_expression_for_source_configurations(
+            &flake_ref,
+            commit_hash,
+            configuration_names,
+            policies_by_configuration,
+        ),
+        None => {
+            build_nix_eval_expression_for_source(&flake_ref, commit_hash, policies_by_configuration)
+        }
+    };
 
     // Compute summary counts for logging.
     let unique_policy_count: std::collections::BTreeSet<_> = policies_by_configuration
@@ -2585,29 +4714,38 @@ async fn evaluate_with_nix_eval_jobs_inner(
     // Broadcast detailed start information
     if let Some(state) = cf_state {
         let start_msg = format!(
-            "🚀 Starting evaluation for flake: {}\n   Commit: {}\n   Target: {}\n   Workers: {}",
+            "🚀 Starting evaluation for flake: {}\n   Commit: {}\n   Target: {}\n   Requested workers: {}",
             flake.name,
             &commit_hash[..8.min(commit_hash.len())],
             target_system,
             server_config.eval_workers
         );
-        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, start_msg)
-            .await;
+        let _ = tokio::time::timeout(
+            DISCOVERY_LOG_BUDGET,
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
+                start_msg,
+            ),
+        )
+        .await;
 
         let policy_msg = format!(
             "📋 Loaded {} unique enabled policies across {} configurations with assigned policies",
             unique_policy_count.len(),
             configs_with_policies,
         );
-        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, policy_msg)
-            .await;
-
-        broadcast_and_persist_eval_log(
-            pool,
-            Some(state),
-            commit.id,
-            &mut log_sequence,
-            "⏳ Evaluating nixosConfigurations...".to_string(),
+        let _ = tokio::time::timeout(
+            DISCOVERY_LOG_BUDGET,
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
+                policy_msg,
+            ),
         )
         .await;
     }
@@ -2620,45 +4758,107 @@ async fn evaluate_with_nix_eval_jobs_inner(
         );
     }
 
-    debug!("📝 Nix expression:\n{}", nix_expr);
+    debug!(
+        selected_count = allowed_systems.as_ref().map(Vec::len),
+        "prepared authoritative evaluator expression"
+    );
 
-    // ── Establish expected system set BEFORE spawning the evaluator ───
-    // This must happen now so that discovery failures fail the evaluation
-    // before any child process starts, preventing orphan evaluators.
-    // Load known system names from the artifact cache so we can detect systems
-    // that nix-eval-jobs silently drops (no JSON line at all, not even an error).
-    let known_cache =
-        crate::queries::commits_artifacts::get_commit_nixos_configurations_from_cache(
-            pool, commit.id,
-        )
-        .await?;
-
-    let known_systems: Vec<String> = match known_cache {
-        CachedSystemsState::Ready(systems) => systems,
-        CachedSystemsState::Missing | CachedSystemsState::HydrationFailed => {
-            // No cache row exists, or last hydration failed — hydrate inline now.
-            // Use the credential-aware variant so private flake discovery works.
-            let systems = crate::flake::commits::load_commit_nixos_configurations_with_creds(
-                repo_url,
-                commit_hash,
-                creds.as_ref().as_ref(),
-                Some(build_config),
+    // INVARIANT: Establish the inventory from the exact policy source before
+    // bulk admission. Legacy artifact rows have no source/lock provenance and
+    // can include names from CLI lock reconciliation. Always rediscover; Nix's
+    // warm fetch/evaluation cache, not those rows, supplies the inexpensive path.
+    let _ = tokio::time::timeout(
+        DISCOVERY_LOG_BUDGET,
+        broadcast_and_persist_eval_log(
+            pool,
+            cf_state,
+            commit.id,
+            &mut log_sequence,
+            "⏳ Discovery starts: evaluating nixosConfigurations".to_string(),
+        ),
+    )
+    .await;
+    let (progress, observed) = tokio::sync::watch::channel(false);
+    let discovery = DISCOVERY_INPUT_PROGRESS.scope(
+        progress,
+        run_cancellable_configuration_discovery_preflight(
+            pool,
+            commit.id,
+            &flake_ref,
+            creds.as_ref().as_ref(),
+            server_config,
+        ),
+    );
+    let result = with_discovery_progress(
+        discovery,
+        observed,
+        broadcast_and_persist_eval_log(
+            pool,
+            cf_state,
+            commit.id,
+            &mut log_sequence,
+            "⏳ Nix reports input resolution (stderr marker observed)".to_string(),
+        ),
+    )
+    .await;
+    let known_systems = match result {
+        Ok(systems) => systems,
+        Err(error) => {
+            // Discovery precedes nix-eval-jobs, so no per-system result can
+            // report this failure. The attempt error remains authoritative.
+            let _ = tokio::time::timeout(
+                DISCOVERY_LOG_BUDGET,
+                broadcast_and_persist_eval_log(
+                    pool,
+                    cf_state,
+                    commit.id,
+                    &mut log_sequence,
+                    preflight_discovery_failure_log(&error),
+                ),
             )
-            .await?;
-
-            // Persist discovered systems (including legitimately empty set)
-            // without overwriting changed_files. This also marks
-            // nixos_configurations_populated = true.
-            if let Err(e) = crate::queries::commits_artifacts::upsert_commit_artifact_systems(
-                pool, commit.id, &systems,
-            )
-            .await
-            {
-                warn!("Failed to persist inline artifact cache: {}", e);
-            }
-            systems
+            .await;
+            return Err(error);
         }
     };
+    let _ = tokio::time::timeout(
+        DISCOVERY_LOG_BUDGET,
+        broadcast_and_persist_eval_log(
+            pool,
+            cf_state,
+            commit.id,
+            &mut log_sequence,
+            format!(
+                "✅ Discovery complete: {} systems; cleanup confirmed",
+                known_systems.len()
+            ),
+        ),
+    )
+    .await;
+    // INVARIANT: Every replacement expression selects only this original
+    // verified inventory/build-scope intersection. Terminal outcomes never
+    // re-enter a later child, even when their policies prohibit building.
+    let expected_systems = systems_selected_for_evaluation(&known_systems, &allowed_systems);
+    // INVARIANT: Required exact-attempt persistence precedes evaluator admission.
+    // The mutable artifact cache below remains non-authoritative and optional.
+    persist_required_inventory(
+        pool,
+        commit.id,
+        expected_attempt,
+        &known_systems,
+        &expected_systems,
+        crate::queries::evaluation_inventory::InventoryExecutionMode::Native,
+    )
+    .await?;
+    // Preserve changed_files and publish the full inventory, including empty.
+    persist_discovery_inventory(
+        crate::queries::commits_artifacts::upsert_commit_artifact_systems(
+            pool,
+            commit.id,
+            &known_systems,
+        ),
+        || crate::queries::commits::check_cancellation_requested(pool, commit.id),
+    )
+    .await?;
     let has_known_systems = !known_systems.is_empty();
     let mut seen_systems: HashSet<String> = HashSet::new();
     // Systems for which nix-eval-jobs emitted a JSON line with an `error`
@@ -2675,10 +4875,13 @@ async fn evaluate_with_nix_eval_jobs_inner(
     info!("Expected system names: {:?}", known_systems);
     info!("Build-scope excluded systems: {:?}", excluded_systems);
 
-    // Run nix-eval-jobs with --meta flag to get policy results.
-    // --impure is required because the Nix expression uses builtins.getFlake with a
-    // remote git+ssh ref (e.g. git+git@github.com:...?rev=<hash>), which is only
-    // permitted in impure evaluation mode.
+    // Run nix-eval-jobs with an explicit apply function to get policy results.
+    // Nixpkgs derivations can sanitize custom `meta` fields before
+    // nix-eval-jobs serializes them. `extraValue` preserves the policy payload
+    // while the returned value remains the unchanged system derivation.
+    // The expression uses an immutable store path. It MUST remain pure. An
+    // impure evaluator can observe host nix.conf paths and authorize a drvPath
+    // that a clean API builder cannot reproduce.
 
     // ── Cross-process heavy-Nix serialization ───────────────────────────────
     // Acquire the PostgreSQL advisory lock BEFORE the in-process semaphore.
@@ -2693,1120 +4896,1832 @@ async fn evaluate_with_nix_eval_jobs_inner(
     // IMPORTANT: Do not remove this lock or shorten its scope without also
     // updating `services/hardening_scans.rs::run_hardening_scan` and verifying
     // that hardening evals can never overlap bulk evaluation.
-    let mut heavy_nix_db_lock = pool.begin().await?;
-    sqlx::query("SELECT pg_advisory_xact_lock($1)")
-        .bind(HEAVY_NIX_ADVISORY_LOCK)
-        .execute(&mut *heavy_nix_db_lock)
-        .await?;
-    let heavy_nix_permit = heavy_nix_limiter()
-        .acquire_owned()
-        .await
-        .context("heavy Nix evaluation limiter was closed")?;
-    let mut cmd = Command::new("nix-eval-jobs");
-    // Kill the child process if this future is dropped (e.g. cancellation,
-    // discovery failure would no longer trigger this, but it is still a
-    // valuable safety net for any other early-return path).
-    cmd.kill_on_drop(true);
-    // Spawn nix-eval-jobs in a new process group so that a SIGKILL on
-    // cancellation, timeout, or error reaches every process in the
-    // evaluator subtree (workers, sub-evaluators, helpers), not just
-    // the direct nix-eval-jobs process. Without this, orphan worker
-    // processes can accumulate and progressively degrade host RAM/CPU.
-    #[cfg(unix)]
-    cmd.process_group(0);
-    cmd.args([
-        "--expr",
-        &nix_expr,
-        "--impure", // Required: builtins.getFlake with remote git refs needs impure mode
-        "--meta",   // CRITICAL: Include meta so we get policies in output!
-        "--workers",
-        &server_config.eval_workers.to_string(),
-        "--max-memory-size",
-        &server_config.eval_max_memory_mb.to_string(),
-    ]);
-
-    if server_config.eval_check_cache {
-        cmd.arg("--check-cache-status");
-    }
-    build_config.apply_to_command(&mut cmd);
-
-    // Inject per-flake credentials so Nix can access private repos.
-    // Deref the Arc to get the inner Option for pattern matching.
-    if let Some(c) = Option::as_ref(creds.as_ref()) {
-        c.apply_to_nix_command(&mut cmd);
-    }
-
-    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
-
-    let child = cmd
-        .spawn()
-        .with_context(|| "Failed to spawn nix-eval-jobs")?;
-    // Wrap the child in an RAII guard that will kill the entire process
-    // group when dropped unless disarmed after child exit and pipe drain.
-    // This ensures cleanup on any abnormal return path (bail!, ?, panic).
-    let mut guard = NixEvalProcessGuard::from_spawned_child(child, "nix-eval-jobs")?;
-    // Access the child through the guard for the remainder of this function.
-    let stdout = guard.child_mut().stdout.take().unwrap();
-    let stderr = guard.child_mut().stderr.take().unwrap();
-
-    let mut stdout_reader = BufReader::new(stdout).lines();
-    let mut stderr_reader = BufReader::new(stderr).lines();
-
-    let mut results = Vec::new();
-    let mut policy_checks = Vec::new();
+    // Admission gets its own bounded wait using the configured overall ceiling.
+    // Do not subtract that wait from the established execution budget below.
+    let admission_deadline = Instant::now()
+        .checked_add(Duration::from_secs(server_config.eval_overall_timeout_secs))
+        .context("bulk evaluation admission deadline is out of range")?;
+    let (heavy_nix_db_lock, heavy_nix_permit) =
+        acquire_bulk_evaluation_admission_until(pool, commit.id, admission_deadline).await?;
+    // Resolve current runtime resources only after waiting for both locks.
+    // The plan is immutable for this child; output cannot alter its budget.
+    let resource_plan =
+        cf_config::evaluator_resources::EvaluatorResourcePlan::resolve(server_config)
+            .map_err(anyhow::Error::msg)?;
+    let resource_mode = match resource_plan.mode {
+        cf_config::evaluator_resources::EvaluatorResourceMode::Auto => "auto",
+        cf_config::evaluator_resources::EvaluatorResourceMode::Fixed => "fixed",
+        cf_config::evaluator_resources::EvaluatorResourceMode::Fallback => "fallback",
+    };
+    // SECURITY: Log only parsed numeric capacities and the finite mode label.
+    // Never render the configuration, environment, or raw detection files.
+    info!(
+        mode = resource_mode,
+        requested_workers = resource_plan.requested_workers,
+        effective_workers = resource_plan.effective_workers,
+        physical_memory_mb = resource_plan.physical_memory_mb,
+        cgroup_memory_mb = resource_plan.cgroup_memory_mb,
+        cgroup_memory_high_mb = resource_plan.cgroup_memory_high_mb,
+        effective_limit_mb = resource_plan.effective_limit_mb,
+        reserve_mb = resource_plan.reserve_mb,
+        max_memory_percent = resource_plan.max_memory_percent,
+        total_budget_mb = resource_plan.total_budget_mb,
+        per_worker_mb = resource_plan.per_worker_mb,
+        "evaluator_resource_plan"
+    );
+    let overall_deadline = Instant::now()
+        .checked_add(Duration::from_secs(server_config.eval_overall_timeout_secs))
+        .context("evaluation invocation deadline is out of range")?;
+    let mut cleanup_ownership = Some(CleanupOwnership {
+        _permit: Arc::new(heavy_nix_permit),
+        _transaction: Arc::new(tokio::sync::Mutex::new(Some(heavy_nix_db_lock))),
+        deadline: overall_deadline,
+    });
+    let mut results: Vec<NixEvalJobResult> = Vec::new();
+    let mut policy_checks: Vec<PolicyCheckResult> = Vec::new();
+    let mut evaluation_snapshots = HashMap::new();
+    let mut snapshot_capture_failures: HashMap<String, String> = HashMap::new();
+    let mut flake_output_snapshot = None;
     let mut found_target = false;
-    let mut stderr_diagnostic = CappedOutput::default();
-    let mut stderr_log_batch: Vec<(i32, Option<String>, String)> = Vec::new();
-    const STDERR_LOG_BATCH_SIZE: usize = 100;
-    let mut stdout_done = false;
-    let mut stderr_done = false;
-
-    // Collect successful system results during streaming; all durable DB
-    // writes are deferred until the attempt is fully validated (child exit +
-    // fallback outcome checks).
     let mut successful_results: Vec<SuccessfulSystemResult> = Vec::new();
+    let mut unacknowledged_completions: HashMap<String, UnacknowledgedCompletion> = HashMap::new();
+    let root_publication_tx = spawn_primary_config_root_publisher(pool.clone());
+    let mut recovery = RecoveryController::new();
+    let mut resource_failures: HashMap<String, String> = HashMap::new();
+    let mut recovering = false;
+    let mut acknowledgement_continuation_used = false;
+    let mut reported_serial_mode = false;
+    let mut phase_names = expected_systems.clone();
+    let mut phase_expr = nix_expr;
+    let mut phase_workers = resource_plan.effective_workers;
+    let mut phase_memory = resource_plan.per_worker_mb;
+    let mut child_status;
+    let mut stderr_diagnostic = CappedOutput::default();
+    let mut hysteresis = PressureHysteresis::new();
+    let (completion_tx, completion_rx) = tokio::sync::watch::channel(EvaluationProgress::new(
+        expected_systems.len(),
+        Instant::now(),
+    ));
 
-    // Cancellation poll interval: check the DB every 2 seconds while eval runs.
-    let mut cancel_ticker = tokio::time::interval(Duration::from_secs(2));
-    cancel_ticker.tick().await; // consume the immediate first tick
-    let mut progress_ticker =
-        tokio::time::interval(Duration::from_secs(EVAL_PROGRESS_HEARTBEAT_SECS));
-    progress_ticker.tick().await; // consume immediate first tick
-    let mut last_output_at = Instant::now();
+    // Only validated current-attempt outcomes enter the partial plan. Optional
+    // root publication remains independently durable and is not re-enqueued.
+    macro_rules! partial_resource_error {
+        ($reason:expr) => {{
+            let reason = crate::security::snapshot_redaction::redact_evaluation_error($reason);
+            let mut completed_systems: Vec<String> = seen_systems.iter().cloned().collect();
+            completed_systems.sort();
+            let remaining_systems: Vec<String> = expected_systems
+                .iter()
+                .filter(|name| {
+                    !seen_systems.contains(*name)
+                        && !error_line_failures.iter().any(|f| &f.system_name == *name)
+                })
+                .cloned()
+                .collect();
+            let failures = remaining_systems
+                .iter()
+                .map(|name| ConfigurationResourceFailure {
+                    system_name: name.clone(),
+                    error: resource_failures
+                        .get(name)
+                        .cloned()
+                        .unwrap_or_else(|| reason.clone())
+                        .chars()
+                        .take(500)
+                        .collect(),
+                })
+                .collect();
+            record_missing_snapshot_captures(
+                &successful_results,
+                &evaluation_snapshots,
+                &mut snapshot_capture_failures,
+            );
+            successful_results.retain(|s| seen_systems.contains(&s.system_name));
+            for failure in &error_line_failures {
+                if !policy_checks
+                    .iter()
+                    .any(|check| check.system_name == failure.system_name)
+                {
+                    policy_checks.push(PolicyCheckResult::for_evaluation_terminal(
+                        failure.system_name.clone(),
+                        policies_for_config(policies_by_configuration, &failure.system_name),
+                        EvaluationTerminalOutcome::ConfirmedFailure,
+                        &failure.error,
+                    ));
+                }
+            }
+            let retained_names: HashSet<String> = seen_systems
+                .iter()
+                .cloned()
+                .chain(error_line_failures.iter().map(|f| f.system_name.clone()))
+                .collect();
+            results.retain(|r| {
+                r.attr_path
+                    .last()
+                    .is_some_and(|name| retained_names.contains(name))
+            });
+            policy_checks.retain(|check| retained_names.contains(&check.system_name));
+            evaluation_snapshots.retain(|name, _| seen_systems.contains(name));
+            snapshot_capture_failures.retain(|name, _| seen_systems.contains(name));
+            let had_errors = !error_line_failures.is_empty();
+            let retained = EvaluationPlan {
+                results: std::mem::take(&mut results),
+                policy_checks: std::mem::take(&mut policy_checks),
+                successful_systems: std::mem::take(&mut successful_results),
+                confirmed_failures: std::mem::take(&mut error_line_failures),
+                evaluation_snapshots: std::mem::take(&mut evaluation_snapshots),
+                snapshot_capture_failures: std::mem::take(&mut snapshot_capture_failures),
+                flake_output_snapshot: flake_output_snapshot.take(),
+                had_system_eval_errors: had_errors,
+                #[cfg(test)]
+                force_build_job_insert_failure: false,
+            };
+            anyhow::Error::new(PartialEvaluationResourceFailure {
+                completed_systems,
+                remaining_systems,
+                resource_failures: failures,
+                unacknowledged_completions: {
+                    let mut candidates: Vec<_> = std::mem::take(&mut unacknowledged_completions)
+                        .into_values()
+                        .collect();
+                    candidates.sort_by(|a, b| a.result.system_name.cmp(&b.result.system_name));
+                    candidates
+                },
+                retained_plan: Some(Box::new(retained)),
+                diagnostic: reason.chars().take(500).collect(),
+            })
+        }};
+    }
 
     loop {
-        tokio::select! {
-            // Third arm: cooperative cancellation poll
-            _ = cancel_ticker.tick() => {
-                match crate::queries::commits::check_cancellation_requested(pool, commit.id).await {
-                    Ok(true) => {
-                        warn!("🚫 Cancellation requested for commit {} — killing nix-eval-jobs process group", commit.id);
-                        guard.terminate().await;
-                        // Do NOT call force_cancel_commit_evaluation here — the
-                        // outer handler (process_pending_commits) is the single
-                        // authority that atomically transitions the state and
-                        // broadcasts the cancelled event.  We just return a
-                        // typed error.
-                        return Err(EvaluationCancelled.into());
-                    }
-                    Ok(false) => {} // not cancelled, continue
-                    Err(e) => {
-                        warn!("Failed to check cancellation flag for commit {}: {e}", commit.id);
-                    }
-                }
+        // Lifecycle checks are mandatory before each child, not just at stdout
+        // persistence. Database uncertainty is fatal and cannot authorize launch.
+        if let Err(error) =
+            verify_evaluation_launch(pool, commit.id, expected_attempt, overall_deadline).await
+        {
+            if Instant::now() >= overall_deadline {
+                return Err(partial_resource_error!(
+                    "evaluation lifecycle check exceeded invocation deadline"
+                ));
             }
-            _ = progress_ticker.tick() => {
-                let idle_for = Instant::now().duration_since(last_output_at);
-                if idle_for >= Duration::from_secs(EVAL_OUTPUT_IDLE_TIMEOUT_SECS) {
-                    let timeout_msg = format!(
-                        "❌ Evaluation produced no output for {}s; terminating nix-eval-jobs",
-                        EVAL_OUTPUT_IDLE_TIMEOUT_SECS
-                    );
-                    error!("{} (commit_id={})", timeout_msg, commit.id);
+            return Err(error);
+        }
+        if Instant::now() >= overall_deadline {
+            return Err(partial_resource_error!(
+                "evaluation invocation overall deadline exhausted"
+            ));
+        }
+        let mut cmd = Command::new("nix-eval-jobs");
+        // Kill the child process if this future is dropped (e.g. cancellation,
+        // discovery failure would no longer trigger this, but it is still a
+        // valuable safety net for any other early-return path).
+        cmd.kill_on_drop(true);
+        // Spawn nix-eval-jobs in a new process group so that a SIGKILL on
+        // cancellation, timeout, or error reaches every process in the
+        // evaluator subtree (workers, sub-evaluators, helpers), not just
+        // the direct nix-eval-jobs process. Without this, orphan worker
+        // processes can accumulate and progressively degrade host RAM/CPU.
+        #[cfg(unix)]
+        cmd.process_group(0);
+        // Evaluator semantics must match the builder's explicit `nix eval`
+        // invocation. BuildConfig controls realization, not source re-evaluation.
+        // Worker count, memory limits, and cache-status reporting can affect
+        // resource failure or diagnostics, but cannot change a successful drvPath.
+        cmd.args(authoritative_evaluator_args(
+            &phase_expr,
+            phase_workers,
+            phase_memory,
+            server_config.eval_check_cache,
+        ));
+        isolate_authoritative_evaluator_credentials(&mut cmd);
 
-                    if let Some(state) = cf_state {
-                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, timeout_msg)
-                            .await;
+        cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+
+        let child = cmd
+            .spawn()
+            .with_context(|| "Failed to spawn nix-eval-jobs")?;
+        let spawned_at = Instant::now();
+        // Arm cleanup before any fallible timer or pipe setup.
+        let mut guard = NixEvalProcessGuard::from_spawned_child(child, "nix-eval-jobs")?;
+        guard.cleanup_ownership = cleanup_ownership.take();
+        let phase_cleanup = guard
+            .cleanup_ownership
+            .as_ref()
+            .context("evaluation cleanup ownership missing at spawn")?
+            .clone();
+        let watchdog = EvaluationWatchdog::with_deadline(
+            spawned_at,
+            Duration::from_secs(server_config.eval_output_idle_timeout_secs),
+            overall_deadline,
+        )?;
+        let evaluator_pid = guard.pgid() as u32;
+        let mut sampler = PressureSampler::new(guard.pgid(), evaluator_pid);
+        sampler.set_cgroup_directories(
+            cf_config::evaluator_resources::CgroupMemoryHierarchy::resolve()
+                .ok()
+                .map(|hierarchy| hierarchy.directories().to_vec()),
+        );
+        let mut pressure_cleared = false;
+        let mut phase_resource_signal = false;
+        // Wrap the child in an RAII guard that will kill the entire process
+        // group when dropped unless disarmed after child exit and pipe drain.
+        // This ensures cleanup on any abnormal return path (bail!, ?, panic).
+        // Access the child through the guard for the remainder of this function.
+        let stdout = guard
+            .child_mut()
+            .stdout
+            .take()
+            .context("evaluator stdout was not piped")?;
+        let stderr = guard
+            .child_mut()
+            .stderr
+            .take()
+            .context("evaluator stderr was not piped")?;
+
+        let mut stdout_reader = BufReader::new(stdout).lines();
+        let mut stderr_reader = BufReader::new(stderr).lines();
+
+        let mut stderr_log_batch: Vec<(i32, Option<String>, String)> = Vec::new();
+        const STDERR_LOG_BATCH_SIZE: usize = 100;
+        let mut stdout_done = false;
+        let mut stderr_done = false;
+        // Successful derivations/policies commit during streaming. Synthetic
+        // failures and snapshot selection remain finalizer-owned.
+
+        // Cancellation polls are eligible every two seconds at loop boundaries.
+        // A pending output-handler await can delay the next cooperative poll.
+        let mut cancel_ticker = cancellation_ticker().await;
+        let mut progress_ticker =
+            tokio::time::interval(Duration::from_secs(EVAL_PROGRESS_HEARTBEAT_SECS));
+        progress_ticker.tick().await; // consume immediate first tick
+
+        // INVARIANT: The independent outer monitor bounds every collection await
+        // with idle and overall deadlines. Collection never terminates the guard:
+        // cleanup runs outside the monitor so expiry cannot interrupt explicit reap.
+        let collection = async {
+            loop {
+                tokio::select! {
+                    // Third arm: cooperative cancellation poll
+                    _ = cancel_ticker.tick() => {
+                        match crate::queries::commits::check_cancellation_requested(pool, commit.id).await {
+                            Ok(true) => {
+                                warn!("🚫 Cancellation requested for commit {} — killing nix-eval-jobs process group", commit.id);
+                                // Do NOT call force_cancel_commit_evaluation here — the
+                                // outer handler (process_pending_commits) is the single
+                                // authority that atomically transitions the state and
+                                // broadcasts the cancelled event.  We just return a
+                                // typed error.
+                                return Err(EvaluationCancelled.into());
+                            }
+                            Ok(false) => {} // not cancelled, continue
+                            Err(e) => {
+                                warn!("Failed to check cancellation flag for commit {}: {e}", commit.id);
+                            }
+                        }
                     }
-
-                    guard.terminate().await;
-                    bail!(
-                        "evaluation timed out after {}s without nix-eval-jobs output",
-                        EVAL_OUTPUT_IDLE_TIMEOUT_SECS
-                    );
-                }
-
-                debug!(
-                    "nix-eval-jobs still running for commit {} (idle {}s)",
-                    commit.id,
-                    idle_for.as_secs()
-                );
-            }
-            line_result = stdout_reader.next_line(), if !stdout_done => {
-                match line_result? {
-                    Some(line) if !line.trim().is_empty() => {
-                        last_output_at = Instant::now();
-                        match serde_json::from_str::<NixEvalJobResult>(&line) {
-                            Ok(result) => {
-                                let system_name = result
-                                    .attr_path
-                                    .last()
-                                    .cloned()
-                                    .unwrap_or_else(|| result.attr.clone());
-                                let build_eligible = match &allowed_systems {
-                                    Some(systems) => systems.iter().any(|c| c == &system_name),
-                                    None => true,
-                                };
-                                if !build_eligible {
-                                    debug!(
-                                        "System {} is not eligible for build jobs under flake build_scope={} (will be recorded but not queued)",
-                                        system_name,
-                                        flake.build_scope,
-                                    );
-                                }
-                                let has_error = result.error.is_some();
-                                let drv_path = result.drv_path.clone();
-                                // Resolve the expected store path from nix-eval-jobs
-                                // JSON outputs (fast, no subprocess).  This avoids
-                                // blocking the stdout reader on a nix-store query
-                                // before the build job can be created.
-                                let expected_store_path = if !has_error {
-                                    result
-                                        .outputs
-                                        .as_ref()
-                                        .and_then(parse_expected_store_path_from_outputs)
-                                } else {
-                                    None
-                                };
-
-                                info!(
-                                    commit_id = commit.id,
-                                    expected_attempt,
-                                    system = %system_name,
-                                    has_error,
-                                    has_drv = drv_path.is_some(),
-                                    "system_result_received"
-                                );
-
-                                // Broadcast system evaluation result to logs
-                                if let Some(state) = cf_state {
-                                    if has_error {
-                                        let error_msg = result.error.as_ref()
-                                            .map(|e| {
-                                                // Truncate long errors for readability
-                                                if e.len() > 200 {
-                                                    format!("{}...", &e[..200])
-                                                } else {
-                                                    e.clone()
-                                                }
-                                            })
-                                            .unwrap_or_else(|| "Unknown error".to_string());
-                                        let log_msg = format!("❌ {}: {}", system_name, error_msg);
-                                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
-                                    } else {
-                                        let log_msg = format!(
-                                            "🔍 {}: Nix evaluation succeeded; checking assigned policies",
-                                            system_name
-                                        );
-                                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
-                                    }
-
-                                    // Broadcast in-progress status to WebSocket clients.
-                                    crate::handlers::api::commits::broadcast_system_status(
-                                        state,
-                                        commit.id,
-                                        system_name.clone(),
-                                        crate::handlers::api::commits::SystemEvalStatus::Evaluating,
-                                        None,
-                                    )
-                                    .await;
-                                }
-
-                                // Resolve this configuration's assigned policies from the map.
-                                let assigned_policies: &[AssignedPolicy] =
-                                    policies_for_config(policies_by_configuration, &system_name);
-
-                                // Extract policy check results from meta.policies
-                                let mut cf_agent_enabled = None;
-                                let mut policy_check_for_system: Option<PolicyCheckResult> = None;
-                                let mut policy_metadata_error: Option<String> = None;
-                                if let Some(meta) = &result.meta {
-                                    if let Some(policies_json) = meta.get("policies") {
-                                        // Parse policy results using this configuration's assigned
-                                        // policies only (stable-key path).
-                                        let check_result = PolicyCheckResult::from_assigned(
-                                            system_name.clone(),
-                                            policies_json,
-                                            assigned_policies,
-                                        );
-
-                                        match check_result {
-                                            Ok(check) => {
-                                                cf_agent_enabled = check.cf_agent_enabled;
-
-                                                // Log policy results
-                                                if !check.meets_requirements {
-                                                    let has_strict = check.failed_policies.iter().any(|(_, s)| *s);
-                                                    for warning in &check.warnings {
-                                                        if has_strict {
-                                                            error!("❌ {}", warning);
-                                                        } else {
-                                                            warn!("⚠️  {}", warning);
-                                                        }
-                                                        if let Some(state) = cf_state {
-                                                            let log_msg = format!("⚠️  {}: {}", system_name, warning);
-                                                            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
-                                                        }
-                                                    }
-                                                } else if assigned_policies.is_empty() {
-                                                    debug!("✅ {}: no assigned policies — passes evaluation", system_name);
-                                                } else {
-                                                    info!("✅ {}: all assigned policies passed", system_name);
-                                                    if let Some(state) = cf_state {
-                                                        let log_msg = format!("✅ {}: all assigned policies passed", system_name);
-                                                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
-                                                    }
-                                                }
-
-                                                policy_check_for_system = Some(check.clone());
-                                                policy_checks.push(check);
+                    _ = progress_ticker.tick() => {
+                        debug!(
+                            "nix-eval-jobs still running for commit {} (idle {}s)",
+                            commit.id,
+                            watchdog.idle_elapsed(Instant::now()).as_secs()
+                        );
+                    }
+                    line_result = stdout_reader.next_line(), if !stdout_done => {
+                        match line_result? {
+                            Some(line) if !line.trim().is_empty() => {
+                                watchdog.record_output(OutputStream::Stdout, &line, Instant::now());
+                                    match parse_authoritative_result(&line) {
+                                        Ok(result) => {
+                                        let system_name = result
+                                            .attr_path
+                                            .last()
+                                            .cloned()
+                                            .unwrap_or_else(|| result.attr.clone());
+                                        if system_name == "__crystalForgeFlakeOutput" {
+                                            if flake_output_snapshot.is_none() && !recovering {
+                                            flake_output_snapshot = result
+                                                .meta
+                                                .as_ref()
+                                                .and_then(|meta| meta.get("flakeOutputSnapshot"))
+                                                .map(crate::security::snapshot_redaction::redact_json);
                                             }
-                                            Err(mismatch) => {
-                                                // Expression-generation/parser mismatch — treat as
-                                                // infrastructure error for this configuration.
-                                                error!(
-                                                    system = %system_name,
-                                                    "Policy metadata key mismatch: {}", mismatch
-                                                );
-                                                if let Some(state) = cf_state {
-                                                    let log_msg = format!("❌ {}: policy metadata mismatch: {}", system_name, mismatch);
-                                                    broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
-                                                }
-                                                policy_metadata_error = Some(format!(
-                                                    "Policy metadata mismatch: {}",
-                                                    mismatch
-                                                ));
+                                            continue;
+                                        }
+                                        if result.attr_path.len() != 1 || !phase_names.contains(&system_name) {
+                                            bail!("evaluator emitted an unexpected configuration identity");
+                                        }
+                                    if seen_systems.contains(&system_name)
+                                            || error_line_failures.iter().any(|f| f.system_name == system_name) {
+                                        continue;
+                                    }
+                                    // Replacement children update one unresolved identity;
+                                    // stale raw metadata cannot inflate summary accounting.
+                                    results.retain(|r: &NixEvalJobResult| r.attr_path.last() != Some(&system_name));
+                                    policy_checks.retain(|c: &PolicyCheckResult| c.system_name != system_name);
+                                    evaluation_snapshots.remove(&system_name);
+                                    snapshot_capture_failures.remove(&system_name);
+                                        if let Some(error) = result.error.as_deref() {
+                                            if solo_budget_exhausted(error) {
+                                                resource_failures.insert(system_name.clone(), error.chars().take(500).collect());
+                                                recovery.exclude(&system_name);
+                                                phase_resource_signal = true;
+                                                // Upstream already exhausted its isolated retry. Keep
+                                                // collecting other valid outcomes even with exit 0.
+                                                continue;
+                                            }
+                                            if result.fatal {
+                                                bail!("fatal evaluator protocol failure: {}", error);
                                             }
                                         }
-                                    } else {
-                                        let msg = format!(
-                                            "{}: evaluator did not emit policy metadata",
-                                            system_name
-                                        );
-                                        debug!("⚠️  {msg}");
-                                        policy_metadata_error = Some(msg);
-                                    }
-                                } else {
-                                    let msg = format!(
-                                        "{}: evaluator did not emit derivation metadata",
-                                        system_name
-                                    );
-                                    debug!("⚠️  {msg}");
-                                    policy_metadata_error = Some(msg);
-                                }
-
-                                // Configurations with no assigned policies still receive
-                                // unconditional cfAgentEnabled metadata from the evaluator.
-                                // Synthesize a passing check only when that metadata is present;
-                                // otherwise leave policy_check_for_system as None so the system
-                                // is not incorrectly persisted with a null cf_agent_enabled.
-                                if policy_check_for_system.is_none()
-                                    && policy_metadata_error.is_none()
-                                    && assigned_policies.is_empty()
-                                {
-                                    let cf_agent_enabled = result
-                                        .meta
-                                        .as_ref()
-                                        .and_then(|m| m.get("policies"))
-                                        .and_then(|p| p.get("cfAgentEnabled"))
-                                        .and_then(|v| v.as_bool());
-                                    if cf_agent_enabled.is_none() {
-                                        policy_metadata_error = Some(format!(
-                                            "{}: evaluator did not emit cfAgentEnabled metadata",
-                                            system_name
-                                        ));
-                                    } else {
-                                        let check = PolicyCheckResult {
-                                            system_name: system_name.clone(),
-                                            cf_agent_enabled,
-                                            assigned_results: BTreeMap::new(),
-                                            has_required_packages: None,
-                                            custom_checks: HashMap::new(),
-                                            meets_requirements: cf_agent_enabled == Some(true),
-                                            warnings: Vec::new(),
-                                            failed_policies: Vec::new(),
-                                            cve_checks: Vec::new(),
+                                        let build_eligible = match &allowed_systems {
+                                            Some(systems) => systems.iter().any(|c| c == &system_name),
+                                            None => true,
                                         };
-                                        policy_check_for_system = Some(check.clone());
-                                        policy_checks.push(check);
-                                    }
-                                }
-
-                                // Broadcast post-policy status to WebSocket clients.
-                                if let Some(state) = cf_state {
-                                    if has_error {
-                                        let error_msg = result
-                                            .error
-                                            .clone()
-                                            .unwrap_or_else(|| "Unknown error".to_string());
-                                        crate::handlers::api::commits::broadcast_system_status(
-                                            state,
-                                            commit.id,
-                                            system_name.clone(),
-                                            crate::handlers::api::commits::SystemEvalStatus::Failed,
-                                            Some(error_msg.clone()),
-                                        )
-                                        .await;
-                                        broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
-                                            format!("❌ {}: {}", system_name, error_msg),
-                                        )
-                                        .await;
-                                    } else if let Some(metadata_error) = policy_metadata_error.as_ref() {
-                                        crate::handlers::api::commits::broadcast_system_status(
-                                            state,
-                                            commit.id,
-                                            system_name.clone(),
-                                            crate::handlers::api::commits::SystemEvalStatus::Failed,
-                                            Some(metadata_error.clone()),
-                                        )
-                                        .await;
-                                    } else {
-                                        // Use the actual policy check result to determine status.
-                                        let passes = policy_check_for_system
-                                            .as_ref()
-                                            .map(|c| c.meets_requirements)
-                                            .unwrap_or(false);
-                                        if passes {
-                                            // QueuedForBuild broadcast deferred to post-finalization.
-                                            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
-                                                format!("✅ {}: evaluation and policies passed", system_name),
-                                            )
-                                            .await;
+                                        if !build_eligible {
+                                            debug!(
+                                                "System {} is not eligible for build jobs under flake build_scope={}",
+                                                system_name,
+                                                flake.build_scope,
+                                            );
+                                        }
+                                        let has_error = result.error.is_some();
+                                        let drv_path = result.drv_path.clone();
+                                        let config_root = captured_config_root(&result);
+                                        // Resolve the expected store path from nix-eval-jobs
+                                        // JSON outputs (fast, no subprocess).  This avoids
+                                        // blocking the stdout reader on a nix-store query
+                                        // before the build job can be created.
+                                        let expected_store_path = if !has_error {
+                                            result
+                                                .outputs
+                                                .as_ref()
+                                                .and_then(parse_expected_store_path_from_outputs)
                                         } else {
-                                            let reason = policy_check_for_system
-                                                .as_ref()
-                                                .and_then(|c| c.warnings.first())
-                                                .map(|d| d.as_str())
-                                                .or_else(|| {
-                                                    policy_check_for_system
-                                                        .as_ref()
-                                                        .and_then(|c| c.failed_policies.first())
-                                                        .map(|(d, _)| d.as_str())
-                                                })
-                                                .unwrap_or("policy failed");
-                                            let has_strict = policy_check_for_system
-                                                .as_ref()
-                                                .map(|c| {
-                                                    c.failed_policies.iter().any(|(_, strict)| *strict)
-                                                })
-                                                .unwrap_or(true);
-                                            let terminal_log = if has_strict {
-                                                format!(
-                                                    "❌ {}: strict policy failed — {}",
-                                                    system_name, reason
-                                                )
+                                            None
+                                        };
+
+                                        info!(
+                                            commit_id = commit.id,
+                                            expected_attempt,
+                                            system = %system_name,
+                                            has_error,
+                                            has_drv = drv_path.is_some(),
+                                            "system_result_received"
+                                        );
+
+                                        // Broadcast system evaluation result to logs
+                                        if let Some(state) = cf_state {
+                                            if has_error {
+                                                let error_msg = result.error.as_ref()
+                                                    .map(|e| {
+                                                        // Truncate long errors for readability
+                                                        if e.len() > 200 {
+                                                            format!("{}...", &e[..200])
+                                                        } else {
+                                                            e.clone()
+                                                        }
+                                                    })
+                                                    .unwrap_or_else(|| "Unknown error".to_string());
+                                                let log_msg = format!("❌ {}: {}", system_name, error_msg);
+                                                broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
                                             } else {
-                                                format!(
-                                                    "⚠️  {}: non-strict policy warning — {}",
-                                                    system_name, reason
-                                                )
-                                            };
-                                            broadcast_and_persist_eval_log(
-                                                pool,
-                                                Some(state),
-                                                commit.id,
-                                                &mut log_sequence,
-                                                terminal_log,
-                                            )
-                                            .await;
-                                            let reason = policy_check_for_system
-                                                .as_ref()
-                                                .and_then(|c| c.failed_policies.first())
-                                                .map(|(d, _)| d.as_str())
-                                                .unwrap_or("policy failed");
+                                                let log_msg = format!(
+                                                    "🔍 {}: Nix evaluation succeeded; checking assigned policies",
+                                                    system_name
+                                                );
+                                                broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
+                                            }
+
+                                            // Broadcast in-progress status to WebSocket clients.
                                             crate::handlers::api::commits::broadcast_system_status(
                                                 state,
                                                 commit.id,
                                                 system_name.clone(),
-                                                crate::handlers::api::commits::SystemEvalStatus::PolicyFailed,
-                                                Some(reason.to_string()),
+                                                crate::handlers::api::commits::SystemEvalStatus::Evaluating,
+                                                None,
                                             )
                                             .await;
                                         }
-                                    }
-                                }
 
-                                // ── Incrementally persist successful systems ──────────
-                                // A healthy system must be queued as soon as its own eval,
-                                // policy check, derivation write, and build-job insertion commit.
-                                if let Some(system_name) = result.attr_path.last() {
-                                    if !has_error && drv_path.is_some() && policy_metadata_error.is_none() {
-                                        let drv = drv_path.clone().unwrap();
-                                        let derivation_target = build_agent_target(
-                                            &flake.repo_url,
-                                            &commit.git_commit_hash,
-                                            system_name,
-                                        );
-                                        let successful = SuccessfulSystemResult {
-                                            system_name: system_name.clone(),
-                                            derivation_target,
-                                            drv_path: drv,
-                                            expected_store_path: expected_store_path.clone(),
-                                            cf_agent_enabled,
-                                            build_eligible,
-                                        };
+                                        // Resolve this configuration's assigned policies from the map.
+                                        let assigned_policies: &[AssignedPolicy] =
+                                            policies_for_config(policies_by_configuration, &system_name);
 
-                                        let default_check;
-                                        let policy_check = match policy_check_for_system.as_ref() {
-                                            Some(check) => check,
-                                            None => {
-                                                default_check = PolicyCheckResult {
+                                        // Extract policy check results from meta.policies
+                                        let mut cf_agent_enabled = None;
+                                        let mut policy_check_for_system: Option<PolicyCheckResult> = None;
+                                        let mut policy_metadata_error: Option<String> = None;
+                                        if has_error {
+                                            // Error lines are converted to confirmed target failures below.
+                                            // They have no successful policy metadata contract to parse.
+                                        } else if let Some(meta) = &result.meta {
+                                            // The evaluator reports snapshot capture
+                                            // separately from the derivation result. A
+                                            // configuration whose Nix evaluation
+                                            // succeeded must stay successful even when
+                                            // no snapshot artifact could be produced,
+                                            // so every branch here records observability
+                                            // state only and never a system failure.
+                                            //
+                                            // The primary evaluator intentionally does
+                                            // not capture snapshots. Missing snapshot
+                                            // metadata therefore means unavailable,
+                                            // not an empty available snapshot and not a
+                                            // failed system evaluation.
+                                            let captured = meta
+                                                .get("evaluationSnapshotCaptured")
+                                                .and_then(serde_json::Value::as_bool)
+                                                .unwrap_or(false);
+                                            if !captured {
+                                                snapshot_capture_failures.insert(
+                                                    system_name.clone(),
+                                                    "Configuration snapshot was not captured separately"
+                                                        .to_string(),
+                                                );
+                                            } else if let Some(snapshot) =
+                                                meta.get("evaluationSnapshot")
+                                            {
+                                                match serde_json::from_value::<Vec<EvaluatedOption>>(
+                                                    snapshot.clone(),
+                                                ) {
+                                                    Ok(parsed) => {
+                                                        let options = parsed
+                                                            .into_iter()
+                                                            .map(EvaluatedOption::redacted)
+                                                            .collect();
+                                                        evaluation_snapshots
+                                                            .insert(system_name.clone(), options);
+                                                        snapshot_capture_failures.remove(&system_name);
+                                                    }
+                                                    // A snapshot the server cannot parse
+                                                    // is not a trustworthy artifact, but
+                                                    // it is also not a Nix evaluation
+                                                    // failure. Record the gap instead of
+                                                    // aborting the whole commit.
+                                                    Err(parse_error) => {
+                                                        warn!(
+                                                            commit_id = commit.id,
+                                                            system = %system_name,
+                                                            error = %parse_error,
+                                                            "evaluation_snapshot_metadata_unparsable"
+                                                        );
+                                                        snapshot_capture_failures.insert(
+                                                            system_name.clone(),
+                                                            "Configuration snapshot metadata could not be \
+                                                             interpreted"
+                                                                .to_string(),
+                                                        );
+                                                    }
+                                                }
+                                            }
+                                            // Override provenance is reconstructed from
+                                            // the raw module graph. A degraded graph
+                                            // still yields a usable snapshot, so report
+                                            // it without changing the lifecycle.
+                                            if meta
+                                                .get("evaluationSnapshotModulesCaptured")
+                                                .and_then(serde_json::Value::as_bool)
+                                                == Some(false)
+                                            {
+                                                warn!(
+                                                    commit_id = commit.id,
+                                                    system = %system_name,
+                                                    "evaluation_snapshot_module_graph_degraded"
+                                                );
+                                            }
+                                            if let Some(policies_json) = meta.get("policies") {
+                                                // Parse policy results using this configuration's assigned
+                                                // policies only (stable-key path).
+                                                let check_result = PolicyCheckResult::from_assigned(
+                                                    system_name.clone(),
+                                                    policies_json,
+                                                    assigned_policies,
+                                                );
+
+                                                match check_result {
+                                                    Ok(check) => {
+                                                        cf_agent_enabled = check.cf_agent_enabled;
+
+                                                        // Log policy results
+                                                        if !check.meets_requirements {
+                                                            let has_strict = check.failed_policies.iter().any(|(_, s)| *s);
+                                                            for warning in &check.warnings {
+                                                                if has_strict {
+                                                                    error!("❌ {}", warning);
+                                                                } else {
+                                                                    warn!("⚠️  {}", warning);
+                                                                }
+                                                                if let Some(state) = cf_state {
+                                                                    let log_msg = format!("⚠️  {}: {}", system_name, warning);
+                                                                    broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
+                                                                }
+                                                            }
+                                                        } else if assigned_policies.is_empty() {
+                                                            debug!("✅ {}: no assigned policies — passes evaluation", system_name);
+                                                        } else {
+                                                            info!("✅ {}: all assigned policies passed", system_name);
+                                                            if let Some(state) = cf_state {
+                                                                let log_msg = format!("✅ {}: all assigned policies passed", system_name);
+                                                                broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
+                                                            }
+                                                        }
+
+                                                        policy_check_for_system = Some(check.clone());
+                                                        policy_checks.push(check);
+                                                    }
+                                                    Err(mismatch) => {
+                                                        // Expression-generation/parser mismatch — treat as
+                                                        // infrastructure error for this configuration.
+                                                        error!(
+                                                            system = %system_name,
+                                                            "Policy metadata key mismatch: {}", mismatch
+                                                        );
+                                                        if let Some(state) = cf_state {
+                                                            let log_msg = format!("❌ {}: policy metadata mismatch: {}", system_name, mismatch);
+                                                            broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence, log_msg).await;
+                                                        }
+                                                        policy_metadata_error = Some(format!(
+                                                            "Policy metadata mismatch: {}",
+                                                            mismatch
+                                                        ));
+                                                    }
+                                                }
+                                            } else {
+                                                let msg = format!(
+                                                    "{}: evaluator did not emit policy metadata",
+                                                    system_name
+                                                );
+                                                debug!("⚠️  {msg}");
+                                                policy_metadata_error = Some(msg);
+                                            }
+                                        } else {
+                                            let msg = format!(
+                                                "{}: evaluator did not emit derivation metadata",
+                                                system_name
+                                            );
+                                            debug!("⚠️  {msg}");
+                                            policy_metadata_error = Some(msg);
+                                        }
+
+                                        // Configurations with no assigned policies still receive
+                                        // unconditional cfAgentEnabled metadata from the evaluator.
+                                        // Synthesize a passing check only when that metadata is present;
+                                        // otherwise leave policy_check_for_system as None so the system
+                                        // is not incorrectly persisted with a null cf_agent_enabled.
+                                        if policy_check_for_system.is_none()
+                                            && policy_metadata_error.is_none()
+                                            && !has_error
+                                            && assigned_policies.is_empty()
+                                        {
+                                            let cf_agent_enabled = result
+                                                .meta
+                                                .as_ref()
+                                                .and_then(|m| m.get("policies"))
+                                                .and_then(|p| p.get("cfAgentEnabled"))
+                                                .and_then(|v| v.as_bool());
+                                            if cf_agent_enabled.is_none() {
+                                                policy_metadata_error = Some(format!(
+                                                    "{}: evaluator did not emit cfAgentEnabled metadata",
+                                                    system_name
+                                                ));
+                                            } else {
+                                                let check = PolicyCheckResult {
                                                     system_name: system_name.clone(),
                                                     cf_agent_enabled,
                                                     assigned_results: BTreeMap::new(),
                                                     has_required_packages: None,
                                                     custom_checks: HashMap::new(),
-                                                    meets_requirements: cf_agent_enabled != Some(false),
+                                                    meets_requirements: cf_agent_enabled == Some(true),
                                                     warnings: Vec::new(),
                                                     failed_policies: Vec::new(),
                                                     cve_checks: Vec::new(),
                                                 };
-                                                &default_check
+                                                policy_check_for_system = Some(check.clone());
+                                                policy_checks.push(check);
                                             }
-                                        };
+                                        }
 
-                                        // ── Phase 1: persist derivation (no build job) ──
-                                        let persisted = persist_evaluated_system(
-                                            pool,
-                                            commit.id,
-                                            expected_attempt,
-                                            &successful,
-                                            policy_check,
-                                            assigned_policies,
-                                        )
-                                        .await?;
+                                    if !has_error && drv_path.as_deref().is_some_and(|path| {
+                                        !path.starts_with("/nix/store/") || !path.ends_with(".drv")
+                                    }) {
+                                        policy_metadata_error = Some("evaluator emitted an invalid derivation path".into());
+                                    }
 
-                                        match persisted {
-                                            SystemPersistenceOutcome::NeedsBuildPreparation {
-                                                derivation_id,
-                                                drv_path,
-                                            } => {
-                                                build_prep_count += 1;
-                                                // Spawn bounded preparation: GC root → activate → notify.
-                                                // This keeps the stdout pipe unblocked while the
-                                                // nix-store subprocess and second transaction run.
-                                                let build_preparation_limit =
-                                                    build_preparation_limit.clone();
-                                                let pool = pool.clone();
-                                                let commit_id = commit.id;
-                                                let attempt = expected_attempt;
-                                                let system_name = system_name.clone();
-                                                let finalized = FinalizedDerivation {
-                                                    derivation_id,
-                                                    drv_path: drv_path.clone(),
-                                                    system_name: system_name.clone(),
-                                                    cf_agent_enabled: successful.cf_agent_enabled,
-                                                };
-                                                let successful = successful.clone();
-                                                let cf_state_owned = cf_state.cloned();
-                                                let queue_notifier_owned = queue_notifier.cloned();
+                                    // Broadcast post-policy status to WebSocket clients.
+                                        if let Some(state) = cf_state {
+                                            if has_error {
+                                                let error_msg = result
+                                                    .error
+                                                    .clone()
+                                                    .unwrap_or_else(|| "Unknown error".to_string());
+                                                crate::handlers::api::commits::broadcast_system_status(
+                                                    state,
+                                                    commit.id,
+                                                    system_name.clone(),
+                                                    crate::handlers::api::commits::SystemEvalStatus::Failed,
+                                                    Some(error_msg.clone()),
+                                                )
+                                                .await;
+                                                broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+                                                    format!("❌ {}: {}", system_name, error_msg),
+                                                )
+                                                .await;
+                                            } else if let Some(metadata_error) = policy_metadata_error.as_ref() {
+                                                crate::handlers::api::commits::broadcast_system_status(
+                                                    state,
+                                                    commit.id,
+                                                    system_name.clone(),
+                                                    crate::handlers::api::commits::SystemEvalStatus::Failed,
+                                                    Some(metadata_error.clone()),
+                                                )
+                                                .await;
+                                            } else {
+                                                // Use the actual policy check result to determine status.
+                                                let passes = policy_check_for_system
+                                                    .as_ref()
+                                                    .map(|c| c.meets_requirements)
+                                                    .unwrap_or(false);
+                                                if passes {
+                                                    // QueuedForBuild broadcast deferred to post-finalization.
+                                                    broadcast_and_persist_eval_log(pool, Some(state), commit.id, &mut log_sequence,
+                                                        format!("✅ {}: evaluation and policies passed", system_name),
+                                                    )
+                                                    .await;
+                                                } else {
+                                                    let reason = policy_check_for_system
+                                                        .as_ref()
+                                                        .and_then(|c| c.warnings.first())
+                                                        .map(|d| d.as_str())
+                                                        .or_else(|| {
+                                                            policy_check_for_system
+                                                                .as_ref()
+                                                                .and_then(|c| c.failed_policies.first())
+                                                                .map(|(d, _)| d.as_str())
+                                                        })
+                                                        .unwrap_or("policy failed");
+                                                    let has_strict = policy_check_for_system
+                                                        .as_ref()
+                                                        .map(|c| {
+                                                            c.failed_policies.iter().any(|(_, strict)| *strict)
+                                                        })
+                                                        .unwrap_or(true);
+                                                    let terminal_log = if has_strict {
+                                                        format!(
+                                                            "❌ {}: strict policy failed — {}",
+                                                            system_name, reason
+                                                        )
+                                                    } else {
+                                                        format!(
+                                                            "⚠️  {}: non-strict policy warning — {}",
+                                                            system_name, reason
+                                                        )
+                                                    };
+                                                    broadcast_and_persist_eval_log(
+                                                        pool,
+                                                        Some(state),
+                                                        commit.id,
+                                                        &mut log_sequence,
+                                                        terminal_log,
+                                                    )
+                                                    .await;
+                                                    let reason = policy_check_for_system
+                                                        .as_ref()
+                                                        .and_then(|c| c.failed_policies.first())
+                                                        .map(|(d, _)| d.as_str())
+                                                        .unwrap_or("policy failed");
+                                                    crate::handlers::api::commits::broadcast_system_status(
+                                                        state,
+                                                        commit.id,
+                                                        system_name.clone(),
+                                                        crate::handlers::api::commits::SystemEvalStatus::PolicyFailed,
+                                                        Some(reason.to_string()),
+                                                    )
+                                                    .await;
+                                                }
+                                            }
+                                        }
 
-                                                info!(
-                                                    commit_id,
-                                                    expected_attempt,
-                                                    derivation_id,
-                                                    system = %system_name,
-                                                    "build_preparation_spawned"
+                                        // ── Incrementally persist successful systems ──────────
+                                        // A healthy system must be queued as soon as its own eval,
+                                        // policy check, derivation write, and build-job insertion commit.
+                                        if let Some(system_name) = result.attr_path.last() {
+                                            if !has_error && drv_path.is_some() && policy_metadata_error.is_none() {
+                                                let drv = drv_path.clone().unwrap();
+                                                let derivation_target = build_agent_target(
+                                                    &flake.repo_url,
+                                                    &commit.git_commit_hash,
+                                                    system_name,
                                                 );
+                                                let successful = SuccessfulSystemResult {
+                                                    system_name: system_name.clone(),
+                                                    derivation_target,
+                                                    drv_path: drv,
+                                                    expected_store_path: expected_store_path.clone(),
+                                                    cf_agent_enabled,
+                                                    build_eligible,
+                                                };
 
-                                                build_preparations.spawn(async move {
-                                                    let _permit = build_preparation_limit
-                                                        .acquire_owned()
-                                                        .await
-                                                        .context(
-                                                            "Build preparation semaphore closed",
-                                                        )?;
+                                                let default_check;
+                                                let policy_check = match policy_check_for_system.as_ref() {
+                                                    Some(check) => check,
+                                                    None => {
+                                                        default_check = PolicyCheckResult {
+                                                            system_name: system_name.clone(),
+                                                            cf_agent_enabled,
+                                                            assigned_results: BTreeMap::new(),
+                                                            has_required_packages: None,
+                                                            custom_checks: HashMap::new(),
+                                                            meets_requirements: cf_agent_enabled != Some(false),
+                                                            warnings: Vec::new(),
+                                                            failed_policies: Vec::new(),
+                                                            cve_checks: Vec::new(),
+                                                        };
+                                                        &default_check
+                                                    }
+                                                };
 
-                                                    info!(
-                                                        commit_id,
-                                                        expected_attempt = attempt,
+                                                // ── Phase 1: persist derivation (no build job) ──
+                                            // Stage only checked evaluator data. The candidate
+                                            // remains separate from completed state until the
+                                            // caller observes persistence or durable catch-up
+                                            // verifies the exact current-attempt evidence.
+                                            unacknowledged_completions.insert(system_name.clone(), UnacknowledgedCompletion {
+                                                result: successful.clone(), policy_check: policy_check.clone(),
+                                                snapshot: evaluation_snapshots.get(system_name).cloned(),
+                                                snapshot_capture_failure: snapshot_capture_failures.get(system_name).cloned(),
+                                            });
+                                            let persisted = persist_evaluated_system(
+                                                    pool,
+                                                    commit.id,
+                                                    expected_attempt,
+                                                    &successful,
+                                                    policy_check,
+                                                    assigned_policies,
+                                                )
+                                            .await.map_err(persistence_failure)?;
+                                            let exact_carrier = !matches!(&persisted,
+                                                SystemPersistenceOutcome::RecordedWithoutBuild {
+                                                    reason: SystemNotQueuedReason::LegacyDerivationPathConflict, ..
+                                                });
+                                            // Record durable completion before optional root/status
+                                            // awaits. Deadline cancellation after the transaction
+                                            // commits must retain its captures and policy evidence.
+                                            if exact_carrier && !matches!(&persisted,
+                                                SystemPersistenceOutcome::Cancelled | SystemPersistenceOutcome::Superseded) {
+                                                successful_results.push(successful.clone());
+                                                results.push(result.clone());
+                                                seen_systems.insert(system_name.clone());
+                                                resource_failures.remove(system_name);
+                                                completion_tx.send_modify(|progress| progress.record_completion(
+                                                    seen_systems.len() + error_line_failures.len(), system_name, Instant::now()));
+                                            }
+                                            // No await separates the completion checkpoint from
+                                            // removing its candidate. Cancelled, superseded, and
+                                            // legacy-conflict outcomes also remove the intent,
+                                            // without granting completed status.
+                                            unacknowledged_completions.remove(system_name);
+
+                                                let observation_derivation_id = match &persisted {
+                                                    SystemPersistenceOutcome::NeedsBuildPreparation { derivation_id, .. }
+                                                    | SystemPersistenceOutcome::ExistingBuildJob { derivation_id, .. }
+                                                    | SystemPersistenceOutcome::RecordedWithoutBuild { derivation_id, .. } => Some(*derivation_id),
+                                                    SystemPersistenceOutcome::Cancelled
+                                                    | SystemPersistenceOutcome::Superseded => None,
+                                                };
+                                                if let Some(derivation_id) = observation_derivation_id
+                                                    && let Err(error) = root_publication_tx.try_send(
+                                                        PrimaryConfigRootPublication {
+                                                            commit_id: commit.id,
+                                                            derivation_id,
+                                                            configuration_name: system_name.clone(),
+                                                            carrier_drv_path: successful.drv_path.clone(),
+                                                            payload: config_root.clone(),
+                                                        },
+                                                    )
+                                                {
+                                                    // FAILURE ISOLATION: Optional Config data cannot
+                                                    // roll back a valid derivation or delay build
+                                                    // preparation for this configuration. A full
+                                                    // bounded channel is reported instead of creating
+                                                    // unbounded publication tasks.
+                                                    warn!(
+                                                        commit_id = commit.id,
+                                                        expected_attempt,
                                                         derivation_id,
                                                         system = %system_name,
-                                                        "build_preparation_started"
+                                                        %error,
+                                                        "primary_config_root_publication_queue_full"
                                                     );
+                                                }
 
-                                                    // Phase 2: GC root (required — bail on failure)
-                                                    let gc_root_result = crate::builder::create_drv_gc_root(
+                                                match persisted {
+                                                    SystemPersistenceOutcome::NeedsBuildPreparation {
+                                                        derivation_id,
+                                                        drv_path,
+                                                    } => {
+                                                        build_prep_count += 1;
+                                                        // Spawn bounded preparation: GC root → activate → notify.
+                                                        // This keeps the stdout pipe unblocked while the
+                                                        // nix-store subprocess and second transaction run.
+                                                        let build_preparation_limit =
+                                                            build_preparation_limit.clone();
+                                                        let pool = pool.clone();
+                                                        let commit_id = commit.id;
+                                                        let attempt = expected_attempt;
+                                                        let system_name = system_name.clone();
+                                                        let finalized = FinalizedDerivation {
+                                                            derivation_id,
+                                                            drv_path: drv_path.clone(),
+                                                            system_name: system_name.clone(),
+                                                            cf_agent_enabled: successful.cf_agent_enabled,
+                                                        };
+                                                        let cf_state_owned = cf_state.cloned();
+                                                        let queue_notifier_owned = queue_notifier.cloned();
+
+                                                        info!(
+                                                            commit_id,
+                                                            expected_attempt,
+                                                            derivation_id,
+                                                            system = %system_name,
+                                                            "build_preparation_spawned"
+                                                        );
+
+                                                        let preparation_cleanup = phase_cleanup.clone();
+                                                        build_preparations.spawn(EVALUATION_CLEANUP.scope(preparation_cleanup, async move {
+                                                            let _permit = build_preparation_limit
+                                                                .acquire_owned()
+                                                                .await
+                                                                .context(
+                                                                    "Build preparation semaphore closed",
+                                                                )?;
+
+                                                            info!(
+                                                                commit_id,
+                                                                expected_attempt = attempt,
+                                                                derivation_id,
+                                                                system = %system_name,
+                                                                "build_preparation_started"
+                                                            );
+
+                                                            // Phase 2: GC root (required — bail on failure)
+                                                            let gc_root_result = crate::builder::create_drv_gc_root(
+                                                                &drv_path,
+                                                                derivation_id,
+                                                            )
+                                                            .await
+                                                            .with_context(|| {
+                                                                format!(
+                                                                    "Failed to create GC root for derivation {}",
+                                                                    derivation_id,
+                                                                )
+                                                            });
+                                                            let rooted = match gc_root_result {
+                                                                Ok(r) => r,
+                                                                Err(err) => {
+                                                                    let msg = format!(
+                                                                        "build_prep_gc_root_error derivation_id={}: {err:#}",
+                                                                        derivation_id,
+                                                                    );
+                                                                    record_preparation_failure(
+                                                                        &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
+                                                                    )
+                                                                    .await;
+                                                                    return Err(err);
+                                                                }
+                                                            };
+                                                            if !rooted {
+                                                                #[cfg(not(test))]
+                                                                {
+                                                                    let msg = format!(
+                                                                        "build_prep_not_valid derivation_id={} drv_path={}",
+                                                                        derivation_id, drv_path,
+                                                                    );
+                                                                    record_preparation_failure(
+                                                                        &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
+                                                                    )
+                                                                    .await;
+                                                                    bail!(
+                                                                        "Derivation {} (drv={}) is not valid \
+                                                                         in the server store; build activation aborted",
+                                                                        derivation_id,
+                                                                        drv_path,
+                                                                    );
+                                                                }
+                                                                #[cfg(test)]
+                                                                warn!(
+                                                                    "⚠️  Skipping GC-root requirement for \
+                                                                     derivation {} (drv={}) in test mode",
+                                                                    derivation_id, drv_path,
+                                                                );
+                                                            }
+
+                                                            info!(
+                                                                commit_id,
+                                                                expected_attempt = attempt,
+                                                                derivation_id,
+                                                                system = %system_name,
+                                                                "build_gc_root_created"
+                                                            );
+
+                                                            // Phase 3: activate build job (second transaction)
+                                                            let activation = match
+                                                                activate_evaluated_system_build(
+                                                                    &pool,
+                                                                    commit_id,
+                                                                    attempt,
+                                                                    derivation_id,
+                                                                )
+                                                                .await
+                                                            {
+                                                                Ok(a) => a,
+                                                                Err(err) => {
+                                                                    let msg = format!(
+                                                                        "build_prep_activation_error derivation_id={derivation_id}: {err:#}",
+                                                                    );
+                                                                    record_preparation_failure(
+                                                                        &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
+                                                                    )
+                                                                    .await;
+                                                                    return Err(err);
+                                                                }
+                                                            };
+
+                                                            match &activation {
+                                                                SystemBuildActivationOutcome::Queued { .. }
+                                                                | SystemBuildActivationOutcome::AlreadyExists { .. } => {
+                                                                    handle_system_build_activation(
+                                                                        &pool,
+                                                                        cf_state_owned.as_ref(),
+                                                                        queue_notifier_owned.as_ref(),
+                                                                        commit_id,
+                                                                        &system_name,
+                                                                        &activation,
+                                                                        None, // skip eval-log persistence from tasks
+                                                                    )
+                                                                    .await?;
+
+                                                                    spawn_closure_counting(pool, finalized);
+                                                                }
+                                                                SystemBuildActivationOutcome::Cancelled => {
+                                                                    // Task completed after cancellation —
+                                                                    // nothing further to do.
+                                                                }
+                                                                SystemBuildActivationOutcome::Superseded => {
+                                                                    // Build activation was superseded
+                                                                    // (attempt changed or commit no longer
+                                                                    // in_progress).
+                                                                }
+                                                            }
+
+                                                            info!(
+                                                                commit_id,
+                                                                expected_attempt = attempt,
+                                                                derivation_id,
+                                                                system = %system_name,
+                                                                "build_preparation_completed"
+                                                            );
+
+                                                            Ok(())
+                                                        }));
+
+                                                    }
+
+                                                    SystemPersistenceOutcome::ExistingBuildJob {
+                                                        derivation_id,
+                                                        build_job_id,
+                                                        build_job_status,
+                                                        drv_path,
+                                                    } => {
+                                                        // Best-effort GC root for existing build; the
+                                                        // build job is already claimable.
+                                                    match EVALUATION_CLEANUP.scope(phase_cleanup.clone(), crate::builder::create_drv_gc_root(
                                                         &drv_path,
                                                         derivation_id,
+                                                    ))
+                                                        .await
+                                                        {
+                                                            Ok(true) => debug!(
+                                                                "📌 Rooted existing drv (id={}, drv={})",
+                                                                derivation_id, drv_path
+                                                            ),
+                                                            Ok(false) => warn!(
+                                                                "⚠️  Existing drv (id={}, drv={}) not valid \
+                                                                 in the server store",
+                                                                derivation_id, drv_path
+                                                            ),
+                                                            Err(err) => warn!(
+                                                                "⚠️  Failed to create GC root for existing \
+                                                                 drv {} (id={}): {}",
+                                                                drv_path, derivation_id, err
+                                                            ),
+                                                        }
+
+                                                        // Re-notify queue if the existing job is still queued.
+                                                        if build_job_status == "queued" {
+                                                            if let Some(notifier) = queue_notifier {
+                                                                notifier.notify_build_queue();
+                                                            }
+                                                            if let Some(state) = cf_state {
+                                                                crate::handlers::api::commits::broadcast_system_status(
+                                                                    state,
+                                                                    commit.id,
+                                                                    system_name.to_string(),
+                                                                    crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
+                                                                    None,
+                                                                )
+                                                                .await;
+                                                                broadcast_and_persist_eval_log(
+                                                                    pool,
+                                                                    Some(state),
+                                                                    commit.id,
+                                                                    &mut log_sequence,
+                                                                    format!(
+                                                                        "🚀 {}: build job already queued ({})",
+                                                                        system_name, build_job_id
+                                                                    ),
+                                                                )
+                                                                .await;
+                                                            }
+                                                        } else {
+                                                            if let Some(state) = cf_state {
+                                                                broadcast_and_persist_eval_log(
+                                                                    pool,
+                                                                    Some(state),
+                                                                    commit.id,
+                                                                    &mut log_sequence,
+                                                                    format!(
+                                                                        "ℹ️  {}: build job exists (status={})",
+                                                                        system_name, build_job_status
+                                                                    ),
+                                                                )
+                                                                .await;
+                                                            }
+                                                        }
+
+                                                    }
+
+                                                SystemPersistenceOutcome::RecordedWithoutBuild {
+                                                    ..
+                                                } => {}
+
+                                                    SystemPersistenceOutcome::Cancelled => {
+                                                        return Err(EvaluationCancelled.into());
+                                                    }
+
+                                                    SystemPersistenceOutcome::Superseded => {
+                                                        return Err(EvaluationSuperseded.into());
+                                                    }
+                                                }
+                                            } else if let Some(metadata_error) = policy_metadata_error.as_ref() {
+                                                let derivation_target = build_agent_target(
+                                                    &flake.repo_url,
+                                                    &commit.git_commit_hash,
+                                                    system_name,
+                                                );
+                                                let error_check = PolicyCheckResult::for_evaluation_terminal(
+                                                    system_name.clone(),
+                                                    assigned_policies,
+                                                    EvaluationTerminalOutcome::Error,
+                                                    metadata_error,
+                                                );
+                                                if let Some(drv_path) = drv_path.clone() {
+                                                    let failed = SuccessfulSystemResult {
+                                                        system_name: system_name.clone(),
+                                                        derivation_target,
+                                                        drv_path,
+                                                        expected_store_path: expected_store_path.clone(),
+                                                        cf_agent_enabled: None,
+                                                        build_eligible: false,
+                                                    };
+                                                    let persisted = persist_evaluated_system(
+                                                        pool,
+                                                        commit.id,
+                                                        expected_attempt,
+                                                        &failed,
+                                                        &error_check,
+                                                        assigned_policies,
+                                                    )
+                                                    .await?;
+                                                    let observation_derivation_id = match &persisted {
+                                                        SystemPersistenceOutcome::RecordedWithoutBuild { derivation_id, .. }
+                                                        | SystemPersistenceOutcome::ExistingBuildJob { derivation_id, .. } => Some(*derivation_id),
+                                                        _ => None,
+                                                    };
+                                                    if let Some(derivation_id) = observation_derivation_id
+                                                        && let Err(error) = root_publication_tx.try_send(
+                                                            PrimaryConfigRootPublication {
+                                                                commit_id: commit.id,
+                                                                derivation_id,
+                                                                configuration_name: system_name.clone(),
+                                                                carrier_drv_path: failed.drv_path.clone(),
+                                                                payload: config_root.clone(),
+                                                            },
+                                                        )
+                                                    {
+                                                        warn!(
+                                                            commit_id = commit.id,
+                                                            expected_attempt,
+                                                            derivation_id,
+                                                            system = %system_name,
+                                                            %error,
+                                                            "policy_failed_config_root_publication_queue_full"
+                                                        );
+                                                    }
+                                                    match persisted {
+                                                        SystemPersistenceOutcome::RecordedWithoutBuild { .. }
+                                                        | SystemPersistenceOutcome::ExistingBuildJob { .. } => {}
+                                                        SystemPersistenceOutcome::Cancelled => {
+                                                            return Err(EvaluationCancelled.into());
+                                                        }
+                                                    SystemPersistenceOutcome::Superseded => {
+                                                        return Err(EvaluationSuperseded.into());
+                                                        }
+                                                        SystemPersistenceOutcome::NeedsBuildPreparation { .. } => {
+                                                            bail!("policy parser failure unexpectedly authorized build preparation for {system_name}");
+                                                        }
+                                                    }
+                                                } else {
+                                                    crate::queries::derivations::record_synthetic_eval_failure(
+                                                        pool,
+                                                        Some(commit.id),
+                                                        system_name,
+                                                        "nixos",
+                                                        Some(&derivation_target),
+                                                        metadata_error,
                                                     )
                                                     .await
                                                     .with_context(|| {
                                                         format!(
-                                                            "Failed to create GC root for derivation {}",
-                                                            derivation_id,
+                                                            "Failed to record policy metadata failure for {}",
+                                                            system_name
                                                         )
-                                                    });
-                                                    let rooted = match gc_root_result {
-                                                        Ok(r) => r,
-                                                        Err(err) => {
-                                                            let msg = format!(
-                                                                "build_prep_gc_root_error derivation_id={}: {err:#}",
-                                                                derivation_id,
-                                                            );
-                                                            record_preparation_failure(
-                                                                &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
-                                                            )
-                                                            .await;
-                                                            return Err(err);
-                                                        }
-                                                    };
-                                                    if !rooted {
-                                                        #[cfg(not(test))]
-                                                        {
-                                                            let msg = format!(
-                                                                "build_prep_not_valid derivation_id={} drv_path={}",
-                                                                derivation_id, drv_path,
-                                                            );
-                                                            record_preparation_failure(
-                                                                &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
-                                                            )
-                                                            .await;
-                                                            bail!(
-                                                                "Derivation {} (drv={}) is not valid \
-                                                                 in the server store; build activation aborted",
-                                                                derivation_id,
-                                                                drv_path,
-                                                            );
-                                                        }
-                                                        #[cfg(test)]
-                                                        warn!(
-                                                            "⚠️  Skipping GC-root requirement for \
-                                                             derivation {} (drv={}) in test mode",
-                                                            derivation_id, drv_path,
-                                                        );
-                                                    }
-
-                                                    info!(
-                                                        commit_id,
-                                                        expected_attempt = attempt,
-                                                        derivation_id,
-                                                        system = %system_name,
-                                                        "build_gc_root_created"
-                                                    );
-
-                                                    // Phase 3: activate build job (second transaction)
-                                                    let activation = match
-                                                        activate_evaluated_system_build(
-                                                            &pool,
-                                                            commit_id,
-                                                            attempt,
-                                                            derivation_id,
-                                                        )
-                                                        .await
-                                                    {
-                                                        Ok(a) => a,
-                                                        Err(err) => {
-                                                            let msg = format!(
-                                                                "build_prep_activation_error derivation_id={derivation_id}: {err:#}",
-                                                            );
-                                                            record_preparation_failure(
-                                                                &pool, derivation_id, commit_id, attempt, &drv_path, &msg,
-                                                            )
-                                                            .await;
-                                                            return Err(err);
-                                                        }
-                                                    };
-
-                                                    match &activation {
-                                                        SystemBuildActivationOutcome::Queued { .. }
-                                                        | SystemBuildActivationOutcome::AlreadyExists { .. } => {
-                                                            handle_system_build_activation(
-                                                                &pool,
-                                                                cf_state_owned.as_ref(),
-                                                                queue_notifier_owned.as_ref(),
-                                                                commit_id,
-                                                                &system_name,
-                                                                &activation,
-                                                                None, // skip eval-log persistence from tasks
-                                                            )
-                                                            .await?;
-
-                                                            spawn_closure_counting(pool, finalized);
-                                                        }
-                                                        SystemBuildActivationOutcome::Cancelled => {
-                                                            // Task completed after cancellation —
-                                                            // nothing further to do.
-                                                        }
-                                                        SystemBuildActivationOutcome::Superseded => {
-                                                            // Build activation was superseded
-                                                            // (attempt changed or commit no longer
-                                                            // in_progress).
-                                                        }
-                                                    }
-
-                                                    info!(
-                                                        commit_id,
-                                                        expected_attempt = attempt,
-                                                        derivation_id,
-                                                        system = %system_name,
-                                                        "build_preparation_completed"
-                                                    );
-
-                                                    Ok(())
-                                                });
-
-                                                // Track in main results immediately so the
-                                                // plan is correct even if preparation is pending.
-                                                successful_results.push(successful);
-                                            }
-
-                                            SystemPersistenceOutcome::ExistingBuildJob {
-                                                derivation_id,
-                                                build_job_id,
-                                                build_job_status,
-                                                drv_path,
-                                            } => {
-                                                // Best-effort GC root for existing build; the
-                                                // build job is already claimable.
-                                                match crate::builder::create_drv_gc_root(
-                                                    &drv_path,
-                                                    derivation_id,
-                                                )
-                                                .await
-                                                {
-                                                    Ok(true) => debug!(
-                                                        "📌 Rooted existing drv (id={}, drv={})",
-                                                        derivation_id, drv_path
-                                                    ),
-                                                    Ok(false) => warn!(
-                                                        "⚠️  Existing drv (id={}, drv={}) not valid \
-                                                         in the server store",
-                                                        derivation_id, drv_path
-                                                    ),
-                                                    Err(err) => warn!(
-                                                        "⚠️  Failed to create GC root for existing \
-                                                         drv {} (id={}): {}",
-                                                        drv_path, derivation_id, err
-                                                    ),
+                                                    })?;
                                                 }
-
-                                                // Re-notify queue if the existing job is still queued.
-                                                if build_job_status == "queued" {
-                                                    if let Some(notifier) = queue_notifier {
-                                                        notifier.notify_build_queue();
-                                                    }
-                                                    if let Some(state) = cf_state {
-                                                        crate::handlers::api::commits::broadcast_system_status(
-                                                            state,
-                                                            commit.id,
-                                                            system_name.to_string(),
-                                                            crate::handlers::api::commits::SystemEvalStatus::QueuedForBuild,
-                                                            None,
-                                                        )
-                                                        .await;
-                                                        broadcast_and_persist_eval_log(
-                                                            pool,
-                                                            Some(state),
-                                                            commit.id,
-                                                            &mut log_sequence,
-                                                            format!(
-                                                                "🚀 {}: build job already queued ({})",
-                                                                system_name, build_job_id
-                                                            ),
-                                                        )
-                                                        .await;
-                                                    }
-                                                } else {
-                                                    if let Some(state) = cf_state {
-                                                        broadcast_and_persist_eval_log(
-                                                            pool,
-                                                            Some(state),
-                                                            commit.id,
-                                                            &mut log_sequence,
-                                                            format!(
-                                                                "ℹ️  {}: build job exists (status={})",
-                                                                system_name, build_job_status
-                                                            ),
-                                                        )
-                                                        .await;
-                                                    }
+                                                policy_checks.push(error_check);
+                                            } else {
+                                                if has_error {
+                                                    debug!("⚠️  {} has evaluation error, will not be persisted as success", system_name);
                                                 }
-
-                                                successful_results.push(successful.clone());
-                                            }
-
-                                            SystemPersistenceOutcome::RecordedWithoutBuild {
-                                                ..
-                                            } => {
-                                                successful_results.push(successful);
-                                            }
-
-                                            SystemPersistenceOutcome::Cancelled => {
-                                                return Err(EvaluationCancelled.into());
-                                            }
-
-                                            SystemPersistenceOutcome::Superseded => {
-                                                bail!(
-                                                    "evaluation attempt was superseded while finalizing {}",
-                                                    system_name
-                                                );
+                                                if drv_path.is_none() && !has_error {
+                                                    warn!("⚠️  {} missing drv_path, not marking complete", system_name);
+                                                }
                                             }
                                         }
-                                    } else if let Some(metadata_error) = policy_metadata_error.as_ref() {
-                                        let derivation_target = build_agent_target(
-                                            &flake.repo_url,
-                                            &commit.git_commit_hash,
-                                            system_name,
-                                        );
-                                        crate::queries::derivations::record_synthetic_eval_failure(
+
+                                        if result.attr_path.last() == Some(&target_system.to_string()) || target_system == "all" {
+                                            found_target = true;
+                                            if target_system != "all" {
+                                                info!("✅ Found target system: {}", target_system);
+                                            }
+                                        }
+
+                                        if let Some(error) = &result.error {
+                                            warn!("⚠️  Evaluation error for {}: {}", result.attr, error);
+
+                                            // When we have an authoritative expected-system set, record
+                                            // the error-line system as a confirmed failure immediately.
+                                            // nix-eval-jobs already provided the error message — no
+                                            // need for an expensive standalone re-evaluation.
+                                            // These systems are NOT added to seen_systems so that
+                                            // they appear correctly in accounting (not "seen" = not
+                                            // successfully evaluated), but they ARE tracked in
+                                            // error_line_failures so they are excluded from
+                                            // missing_systems (no redundant standalone fallback).
+                                            if has_known_systems {
+                                                let derivation_target = build_agent_target(
+                                                    &flake.repo_url,
+                                                    &commit.git_commit_hash,
+                                                    &system_name,
+                                                );
+                                                error_line_failures.push(ConfirmedSystemFailure {
+                                                    system_name: system_name.clone(),
+                                                    derivation_target,
+                                                    error: error.chars().take(500).collect(),
+                                                });
+                                                completion_tx.send_modify(|progress| progress.record_completion(
+                                                    seen_systems.len() + error_line_failures.len(), &system_name, Instant::now()));
+                                                // Do NOT push to results here; confirmed failures
+                                                // are added to results after the fallback phase.
+                                            } else {
+                                                results.push(result);
+                                            }
+                                    } else {
+                                        // Successful evaluation.
+                                        if !seen_systems.contains(&system_name) {
+                                            results.push(result);
+                                        }
+                                        }
+                                    }
+                                    Err(e) => {
+                                        let line = crate::security::snapshot_redaction::redact_text(&line);
+                                        warn!("Failed to parse nix-eval-jobs output: {}\nLine: {}", e, line);
+                                    }
+                                }
+                            }
+                            Some(_) => {},
+                            None => stdout_done = true,
+                        }
+                    }
+                    line_result = stderr_reader.next_line(), if !stderr_done => {
+                        match line_result? {
+                            Some(line) => {
+                                watchdog.record_output(OutputStream::Stderr, &line, Instant::now());
+                                let line = crate::security::snapshot_redaction::redact_text(&line);
+                                if line.contains("error:") {
+                                    error!("nix-eval-jobs stderr: {}", line);
+                                } else {
+                                    debug!("nix-eval-jobs stderr: {}", line);
+                                }
+
+                                // Broadcast stderr to WebSocket clients
+                                if let Some(state) = cf_state {
+                                    // Keep live streaming immediate.
+                                    crate::handlers::api::commits::broadcast_eval_log(state, commit.id, line.clone()).await;
+
+                                    // Persist stderr logs in batches to avoid per-line DB latency on hot path.
+                                    let level = if line.to_ascii_lowercase().contains("error") {
+                                        Some("error".to_string())
+                                    } else if line.to_ascii_lowercase().contains("warn") {
+                                        Some("warn".to_string())
+                                    } else {
+                                        Some("debug".to_string())
+                                    };
+                                    stderr_log_batch.push((log_sequence.next, level, line.clone()));
+                                    log_sequence.next += 1;
+
+                                    if stderr_log_batch.len() >= STDERR_LOG_BATCH_SIZE {
+                                        if let Err(e) = crate::queries::eval_logs::insert_eval_logs_batch(
                                             pool,
-                                            Some(commit.id),
-                                            system_name,
-                                            "nixos",
-                                            Some(&derivation_target),
-                                            metadata_error,
+                                            log_sequence.owner,
+                                            &stderr_log_batch,
                                         )
                                         .await
-                                        .with_context(|| {
-                                            format!(
-                                                "Failed to record policy metadata failure for {}",
-                                                system_name
-                                            )
-                                        })?;
-                                    } else {
-                                        if has_error {
-                                            debug!("⚠️  {} has evaluation error, will not be persisted as success", system_name);
+                                        {
+                                            warn!(
+                                                "Failed to batch-persist stderr logs for commit {}: {}",
+                                                commit.id, e
+                                            );
                                         }
-                                        if drv_path.is_none() && !has_error {
-                                            warn!("⚠️  {} missing drv_path, not marking complete", system_name);
-                                        }
+                                        stderr_log_batch.clear();
                                     }
                                 }
 
-                                if result.attr_path.last() == Some(&target_system.to_string()) || target_system == "all" {
-                                    found_target = true;
-                                    if target_system != "all" {
-                                        info!("✅ Found target system: {}", target_system);
-                                    }
-                                }
-
-                                if let Some(error) = &result.error {
-                                    warn!("⚠️  Evaluation error for {}: {}", result.attr, error);
-
-                                    // When we have an authoritative expected-system set, record
-                                    // the error-line system as a confirmed failure immediately.
-                                    // nix-eval-jobs already provided the error message — no
-                                    // need for an expensive standalone re-evaluation.
-                                    // These systems are NOT added to seen_systems so that
-                                    // they appear correctly in accounting (not "seen" = not
-                                    // successfully evaluated), but they ARE tracked in
-                                    // error_line_failures so they are excluded from
-                                    // missing_systems (no redundant standalone fallback).
-                                    if has_known_systems {
-                                        let derivation_target = build_agent_target(
-                                            &flake.repo_url,
-                                            &commit.git_commit_hash,
-                                            &system_name,
-                                        );
-                                        error_line_failures.push(ConfirmedSystemFailure {
-                                            system_name: system_name.clone(),
-                                            derivation_target,
-                                            error: error.chars().take(500).collect(),
-                                        });
-                                        // Do NOT push to results here; confirmed failures
-                                        // are added to results after the fallback phase.
-                                    } else {
-                                        results.push(result);
-                                    }
-                                } else {
-                                    // Successful evaluation.
-                                    if has_known_systems {
-                                        seen_systems.insert(system_name.clone());
-                                    }
-                                    results.push(result);
-                                }
+                                stderr_diagnostic.push(line.as_bytes(), EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES);
+                                stderr_diagnostic.push(b"\n", EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES);
                             }
-                            Err(e) => {
-                                warn!("Failed to parse nix-eval-jobs output: {}\nLine: {}", e, line);
-                            }
+                            None => stderr_done = true,
                         }
                     }
-                    Some(_) => {},
-                    None => stdout_done = true,
+                }
+
+                if stdout_done && stderr_done {
+                    break;
                 }
             }
-            line_result = stderr_reader.next_line(), if !stderr_done => {
-                match line_result? {
-                    Some(line) => {
-                        last_output_at = Instant::now();
-                        if line.contains("error:") {
-                            error!("nix-eval-jobs stderr: {}", line);
-                        } else {
-                            debug!("nix-eval-jobs stderr: {}", line);
-                        }
 
-                        // Broadcast stderr to WebSocket clients
-                        if let Some(state) = cf_state {
-                            // Keep live streaming immediate.
-                            crate::handlers::api::commits::broadcast_eval_log(state, commit.id, line.clone()).await;
-
-                            // Persist stderr logs in batches to avoid per-line DB latency on hot path.
-                            let level = if line.to_ascii_lowercase().contains("error") {
-                                Some("error".to_string())
-                            } else if line.to_ascii_lowercase().contains("warn") {
-                                Some("warn".to_string())
-                            } else {
-                                Some("debug".to_string())
-                            };
-                            stderr_log_batch.push((log_sequence, level, line.clone()));
-                            log_sequence += 1;
-
-                            if stderr_log_batch.len() >= STDERR_LOG_BATCH_SIZE {
-                                if let Err(e) = crate::queries::eval_logs::insert_eval_logs_batch(
-                                    pool,
-                                    commit.id,
-                                    &stderr_log_batch,
-                                )
-                                .await
-                                {
-                                    warn!(
-                                        "Failed to batch-persist stderr logs for commit {}: {}",
-                                        commit.id, e
-                                    );
-                                }
-                                stderr_log_batch.clear();
-                            }
-                        }
-
-                        stderr_diagnostic.push(line.as_bytes(), EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES);
-                        stderr_diagnostic.push(b"\n", EVALUATOR_STDERR_DIAGNOSTIC_MAX_BYTES);
-                    }
-                    None => stderr_done = true,
-                }
-            }
-        }
-
-        if stdout_done && stderr_done {
-            break;
-        }
-    }
-
-    // Flush any remaining buffered stderr logs.
-    if !stderr_log_batch.is_empty() {
-        if let Err(e) =
-            crate::queries::eval_logs::insert_eval_logs_batch(pool, commit.id, &stderr_log_batch)
-                .await
-        {
-            warn!(
-                "Failed to flush batched stderr logs for commit {}: {}",
-                commit.id, e
-            );
-        }
-    }
-
-    // ── Capture child exit status after consuming both streams ─────────
-    // Important: do NOT bail before synthesis — we must account for every
-    // expected system even when nix-eval-jobs crashed partway through.
-    // Both streams reached EOF before this wait, so it is now safe to disarm
-    // after reaping the direct child. If wait errors, Drop still performs
-    // process-group cleanup for this `?` early-return path.
-    let child_status = guard.wait().await?;
-    guard.disarm_after_output_drained();
-    drop(heavy_nix_permit);
-
-    // ── Detect systems that nix-eval-jobs silently dropped ─────────────────
-    // When a system fails evaluation catastrophically, nix-eval-jobs may not
-    // produce any JSON line for it at all (not even one with an error field).
-    // Such systems silently disappear from the results. By comparing against
-    // the known systems from the artifact cache, we detect these dropouts and
-    // synthesize a failed result for each.
-    //
-    // This runs regardless of the child exit status so that a partial
-    // evaluator crash still creates persisted failure records for all
-    // expected-but-unseen systems.
-    let expected_systems: Vec<String> = if has_known_systems {
-        // Include every discovered system as "expected" regardless of
-        // build_scope filtering.  Systems excluded by cf_systems_only
-        // must still be accounted for in expected/missing/fallback logic
-        // so the total count is accurate and silent drops are detected.
-        // Build-eligibility filtering now happens at finalization time
-        // (see build_eligible in SuccessfulSystemResult).
-        known_systems.clone()
-    } else {
-        Vec::new()
-    };
-
-    // Systems already confirmed as failures via nix-eval-jobs error lines.
-    // These do not need standalone fallback — the error message is known.
-    let error_line_system_names: HashSet<&str> = error_line_failures
-        .iter()
-        .map(|f| f.system_name.as_str())
-        .collect();
-
-    // Collect missing systems that need fallback evaluation.
-    // Exclude both successfully-seen systems AND error-line failures —
-    // only truly silent-drop systems (no JSON line at all) go to fallback.
-    let missing_systems: Vec<&str> = expected_systems
-        .iter()
-        .filter(|s| {
-            !seen_systems.contains(s.as_str()) && !error_line_system_names.contains(s.as_str())
-        })
-        .map(|s| s.as_str())
-        .collect();
-    let unexpected_systems: Vec<String> = seen_systems
-        .iter()
-        .filter(|seen| !expected_systems.iter().any(|expected| expected == *seen))
-        .cloned()
-        .collect();
-    info!("Seen systems (successful): {:?}", seen_systems);
-    info!(
-        "Error-line failures (confirmed from bulk output): {:?}",
-        error_line_system_names
-    );
-    info!(
-        "Missing systems (no output at all, need fallback): {:?}",
-        missing_systems
-    );
-    info!("Unexpected systems: {:?}", unexpected_systems);
-    // Seed confirmed_failures with error-line systems already collected from
-    // the bulk evaluator output. Standalone fallback adds more if any systems
-    // were silently dropped (no JSON line at all).
-    let mut confirmed_failures: Vec<ConfirmedSystemFailure> = error_line_failures;
-
-    if missing_systems.len() > MAX_INDIVIDUAL_FALLBACKS {
-        bail!(
-            "nix-eval-jobs silently dropped {} systems (max {}); likely process-wide failure",
-            missing_systems.len(),
-            MAX_INDIVIDUAL_FALLBACKS,
-        );
-    }
-
-    // Also bail if a large *fraction* of expected systems are missing — even
-    // if the absolute count is within MAX_INDIVIDUAL_FALLBACKS — because
-    // launching multiple full-flake Nix evaluations when most systems are
-    // missing indicates a systemic evaluator failure, not individual breakage.
-    // The percent guard only fires when >= MIN_MISSING_FOR_PERCENT_GUARD
-    // systems are absent, so a single broken config in a small flake (e.g.
-    // 1 of 3) does not disable fallback for the healthy systems.
-    // Use multiplication to avoid integer-division rounding surprises.
-    if missing_systems.len() >= MIN_MISSING_FOR_PERCENT_GUARD
-        && !expected_systems.is_empty()
-        && missing_systems.len() * 100 > expected_systems.len() * MAX_FALLBACK_MISSING_PERCENT
-    {
-        bail!(
-            "nix-eval-jobs silently dropped {} of {} expected systems (>{:.0}%); \
-             refusing standalone fallback — likely process-wide evaluator failure",
-            missing_systems.len(),
-            expected_systems.len(),
-            MAX_FALLBACK_MISSING_PERCENT,
-        );
-    }
-
-    info!(
-        "Main evaluator exit status for commit {}: {}",
-        commit.id, child_status
-    );
-    if !child_status.success() {
-        let stderr_text = stderr_diagnostic.diagnostic_excerpt(500);
-        warn!(
-            "nix-eval-jobs failed with exit code: {}\nStderr:\n{}",
-            child_status.code().unwrap_or(-1),
-            stderr_text,
-        );
-    }
-
-    // Track fallback-outcome counts for diagnostic logging and the combined
-    // error message below.
-    let mut infra_failure_count: usize = 0;
-
-    // ── Fallback phase: evaluate missing systems concurrently ──
-    //
-    // Control verification is INSIDE each buffered future so that the
-    // overall timeout and cancellation race wraps target + control together.
-    // The control system is selected once before building the stream.
-    //
-    // The entire collection is raced against an actual cancellation future
-    // (polling every 2 seconds) and an encompassing FALLBACK_PHASE_TIMEOUT.
-    // This ensures that:
-    //   1. A control evaluation that takes 120 seconds cannot exceed the
-    //      180-second phase timeout by nearly 120 seconds.
-    //   2. Cancellation cannot be starved by an outcome-ready stream.
-    //   3. Orphan nix processes are killed (kill_on_drop(true)) when the
-    //      fallback future is dropped due to timeout or cancellation.
-    if !missing_systems.is_empty() {
-        warn!(
-            "⚠️  {} systems were expected but never appeared in nix-eval-jobs output. Running fallback evaluations...",
-            missing_systems.len()
-        );
-
-        // Build owned futures for each missing system.  Each future performs
-        // a complete standalone eval with the same policies and Nix config as
-        // the bulk evaluator.
-        let creds_arc = Arc::clone(&creds);
-        let build_config_owned = build_config.clone();
-        let mut fallback_futures = Vec::with_capacity(missing_systems.len());
-        for system_name in &missing_systems {
-            let repo_url = repo_url.to_string();
-            let commit_hash = commit_hash.to_string();
-            let system_name = system_name.to_string();
-            let creds = Arc::clone(&creds_arc);
-            let build_config = build_config_owned.clone();
-            // Pass only this configuration's assigned policies to the fallback evaluator.
-            let assigned: Vec<AssignedPolicy> =
-                policies_for_config(policies_by_configuration, &system_name)
-                    .iter()
-                    .cloned()
-                    .collect();
-            fallback_futures.push(async move {
-                evaluate_single_system_with_policies(
-                    &repo_url,
-                    &commit_hash,
-                    &system_name,
-                    &assigned,
-                    creds.as_ref().as_ref(),
-                    &build_config,
+            // Flush any remaining buffered stderr logs.
+            if !stderr_log_batch.is_empty() {
+                if let Err(e) = crate::queries::eval_logs::insert_eval_logs_batch(
+                    pool,
+                    log_sequence.owner,
+                    &stderr_log_batch,
                 )
                 .await
-                .unwrap_or_else(|err| {
-                    StandaloneSystemOutcome::InfrastructureFailure {
-                        system_name,
-                        error: err.to_string(),
-                    }
-                })
-            });
-        }
-
-        // Cancellation future: polls the DB flag every 2 seconds.
-        let cancellation = async {
-            let mut interval = tokio::time::interval(Duration::from_secs(2));
-            // Skip the immediate first tick (0-second check) to avoid a
-            // hot loop that pounds the DB.
-            interval.tick().await;
-
-            loop {
-                interval.tick().await;
-                if crate::queries::commits::check_cancellation_requested(pool, commit.id).await? {
-                    return Ok::<(), anyhow::Error>(());
-                }
-            }
-        };
-
-        tokio::pin!(cancellation);
-
-        // Process fallback outcomes incrementally as each one completes,
-        // rather than collecting the entire batch first.  This means a
-        // fast-evaluating system's build job is committed and notified
-        // immediately, even if another fallback is still running.
-        let deadline = tokio::time::Instant::now() + FALLBACK_PHASE_TIMEOUT;
-        let deadline_sleep = tokio::time::sleep_until(deadline);
-        tokio::pin!(deadline_sleep);
-
-        let outcome_stream = stream::iter(fallback_futures).buffer_unordered(FALLBACK_CONCURRENCY);
-        tokio::pin!(outcome_stream);
-
-        // ── Classify fallback outcomes. Successful recovered systems are
-        // finalized immediately just like streaming bulk successes.
-        loop {
-            tokio::select! {
-                biased;
-
-                cancellation_result = &mut cancellation => {
-                    cancellation_result?;
-                    return Err(EvaluationCancelled.into());
-                }
-
-                _ = &mut deadline_sleep => {
-                    bail!(
-                        "Fallback evaluation phase timed out after {}s",
-                        FALLBACK_PHASE_TIMEOUT.as_secs()
+                {
+                    warn!(
+                        "Failed to flush batched stderr logs for commit {}: {}",
+                        commit.id, e
                     );
                 }
+            }
 
-                outcome = outcome_stream.next() => {
-                    let Some(outcome) = outcome else {
+            // ── Capture child exit status after consuming both streams ─────────
+            // Important: do NOT bail before synthesis — we must account for every
+            // expected system even when nix-eval-jobs crashed partway through.
+            // Both streams reached EOF before this wait, so it is now safe to disarm
+            // after reaping the direct child. EOF is not process exit: the outer
+            // monitor keeps both deadlines active through flush and final wait.
+            guard
+                .wait()
+                .await
+                .context("failed to wait for nix-eval-jobs")
+                .map(Some)
+        };
+        let collected = {
+            let monitor = evaluation_recovery::monitor(
+                &watchdog,
+                evaluator_pid,
+                &mut sampler,
+                &mut hysteresis,
+                completion_rx.clone(),
+                &mut pressure_cleared,
+            );
+            tokio::pin!(monitor);
+            tokio::select! {
+                biased;
+                stop = &mut monitor => Err(stop),
+                result = collection => Ok(result),
+            }
+        };
+        drop(phase_cleanup);
+        // A replacement is authorized only after reap AND group absence. At the
+        // shared deadline the armed guard transfers both locks to quarantine.
+        if let Err(error) = guard.terminate_until(overall_deadline).await {
+            return Err(partial_resource_error!(&format!("{error:#}")));
+        }
+        cleanup_ownership = guard.cleanup_ownership.take();
+        let mut returned_persistence_error = None;
+        let pending_before_reconciliation = unacknowledged_completions.len();
+        let mut proven_acknowledgements = 0usize;
+        let mut stopped = match collected {
+            Ok(Ok(status)) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::process::ExitStatusExt;
+                    if status
+                        .as_ref()
+                        .is_some_and(|status| status.signal() == Some(libc::SIGKILL))
+                    {
+                        phase_resource_signal = true;
+                    }
+                }
+                child_status = status;
+                phase_resource_signal
+            }
+            Ok(Err(error)) => {
+                child_status = None;
+                returned_persistence_error = Some(defer_persistence_failure(error)?);
+                false
+            }
+            Err(PhaseStop::Expired(Expiry::Overall)) => {
+                return Err(partial_resource_error!(
+                    "evaluation invocation overall deadline exhausted"
+                ));
+            }
+            Err(PhaseStop::Pressure(reason)) => {
+                warn!(commit_id = commit.id, expected_attempt, reason = ?reason,
+                    "sustained evaluator pressure; assessing bounded recovery");
+                child_status = None;
+                true
+            }
+            Err(PhaseStop::Expired(Expiry::Idle)) => {
+                child_status = None;
+                true
+            }
+        };
+        if pressure_cleared {
+            recovery.cleared();
+        }
+        // A COMMIT whose response was interrupted can already be durable. Use
+        // the lifecycle proof before selecting another expression; a candidate
+        // alone cannot suppress evaluation or authorize snapshot publication.
+        let mut pending_names: Vec<String> = unacknowledged_completions.keys().cloned().collect();
+        pending_names.sort();
+        for name in pending_names {
+            let candidate = unacknowledged_completions
+                .get(&name)
+                .context("unacknowledged evaluation candidate disappeared")?;
+            if candidate.result.system_name != name || !expected_systems.contains(&name) {
+                bail!("unacknowledged evaluation candidate has an unexpected identity");
+            }
+            let proof = {
+                let reconciliation = crate::queries::commits::reconcile_unacknowledged_completion(
+                    pool,
+                    commit.id,
+                    expected_attempt,
+                    candidate,
+                );
+                tokio::pin!(reconciliation);
+                tokio::select! {
+                    biased;
+                    _ = tokio::time::sleep_until(overall_deadline) => None,
+                    proof = &mut reconciliation => Some(proof),
+                }
+            };
+            let verified = match proof {
+                Some(Ok(verified)) => verified,
+                Some(Err(error)) => {
+                    if is_lineage_failure(&error)
+                        || classify_evaluation_failure(&format!("{error:#}"))
+                            == RetryFailureClass::Authorization
+                    {
+                        unacknowledged_completions.clear();
+                        return Err(error);
+                    }
+                    // Cancellation or supersession is never adapted into a
+                    // resource failure. Query the current lineage rather than
+                    // classify a database/helper message by substring.
+                    let lineage = verify_evaluation_launch(
+                        pool,
+                        commit.id,
+                        expected_attempt,
+                        overall_deadline,
+                    )
+                    .await;
+                    if let Err(lineage_error) = lineage {
+                        if is_lineage_failure(&lineage_error) {
+                            unacknowledged_completions.clear();
+                            return Err(lineage_error);
+                        }
+                    }
+                    let _ = error;
+                    return Err(partial_resource_error!(
+                        PERSISTENCE_ACKNOWLEDGEMENT_UNAVAILABLE
+                    ));
+                }
+                None => {
+                    return Err(partial_resource_error!(
+                        PERSISTENCE_ACKNOWLEDGEMENT_UNAVAILABLE
+                    ));
+                }
+            };
+            if !verified && returned_persistence_error.is_some() {
+                // A genuine returned persistence failure cannot authorize
+                // another launch. Retain its candidate for terminal proof,
+                // separately from the successfully validated checkpoint.
+                continue;
+            }
+            let candidate = unacknowledged_completions
+                .remove(&name)
+                .context("unacknowledged evaluation candidate disappeared after proof")?;
+            if retain_reconciled_completion(
+                candidate,
+                verified,
+                &mut seen_systems,
+                &mut successful_results,
+                &mut policy_checks,
+                &mut results,
+                &mut evaluation_snapshots,
+                &mut snapshot_capture_failures,
+            ) {
+                proven_acknowledgements += 1;
+                resource_failures.remove(&name);
+                completion_tx.send_modify(|progress| {
+                    progress.record_completion(
+                        seen_systems.len() + error_line_failures.len(),
+                        &name,
+                        Instant::now(),
+                    )
+                });
+                // Persistence already created durable preparation/root work.
+                // Existing jobs can wake now; pending preparation is recovered
+                // by the established terminal-attempt reconciler without a
+                // second persistence transaction or root publication here.
+                if let Some(notifier) = queue_notifier {
+                    notifier.notify_build_queue();
+                }
+            }
+        }
+        if let Some(error) = returned_persistence_error {
+            if acknowledgement_continuation_allowed(
+                pending_before_reconciliation,
+                proven_acknowledgements,
+                acknowledgement_continuation_used,
+            ) {
+                acknowledgement_continuation_used = true;
+                stopped = true;
+            } else if seen_systems.is_empty()
+                && unacknowledged_completions.is_empty()
+                && pending_before_reconciliation == 0
+            {
+                return Err(error);
+            } else {
+                return Err(partial_resource_error!(
+                    PERSISTENCE_ACKNOWLEDGEMENT_UNAVAILABLE
+                ));
+            }
+        }
+        let unresolved: Vec<String> = expected_systems
+            .iter()
+            .filter(|name| {
+                !seen_systems.contains(*name)
+                    && !error_line_failures.iter().any(|f| &f.system_name == *name)
+                    && !resource_failures.contains_key(*name)
+            })
+            .cloned()
+            .collect();
+        if recovering && recovery.serial() {
+            if phase_names.iter().any(|name| seen_systems.contains(name)) {
+                recovery.completed_solo();
+            }
+            for name in &phase_names {
+                if unresolved.contains(name) {
+                    resource_failures.insert(
+                        name.clone(),
+                        "isolated evaluator did not produce a validated outcome; cause unknown"
+                            .into(),
+                    );
+                }
+            }
+        } else if stopped
+            || (child_status
+                .as_ref()
+                .is_some_and(|status| !status.success())
+                && !unresolved.is_empty())
+            || evaluation_recovery::large_dropout(unresolved.len(), expected_systems.len())
+            || (recovering && !unresolved.is_empty())
+        {
+            recovery.stalled();
+            recovering = true;
+        }
+        if !recovering && !stopped {
+            break;
+        }
+        // A replacement cannot overlap preparation children from an aborted
+        // resource phase. Abort acknowledgement is bounded separately from
+        // descendant cleanup, whose guard leases remain fail-closed.
+        if let Err(error) = abort_preparations_until(
+            &mut build_preparations,
+            &cleanup_ownership
+                .as_ref()
+                .context("evaluation cleanup lease missing")?
+                ._transaction,
+            overall_deadline,
+        )
+        .await
+        {
+            return Err(partial_resource_error!(&format!("{error:#}")));
+        }
+        let remaining: Vec<String> = unresolved
+            .into_iter()
+            .filter(|name| !resource_failures.contains_key(name))
+            .collect();
+        if remaining.is_empty() {
+            break;
+        }
+        let Some(next) = recovery.next(&remaining) else {
+            break;
+        };
+        phase_names = next;
+        phase_workers = if recovery.serial() {
+            1
+        } else {
+            resource_plan.effective_workers
+        };
+        phase_memory = if recovery.serial() {
+            match solo_budget(&resource_plan) {
+                Some(memory) => memory,
+                None => {
+                    return Err(partial_resource_error!(
+                        "no positive safe isolated evaluator budget"
+                    ));
+                }
+            }
+        } else {
+            resource_plan.per_worker_mb
+        };
+        phase_expr = build_nix_eval_expression_for_source_configurations(
+            &flake_ref,
+            commit_hash,
+            &phase_names,
+            policies_by_configuration,
+        );
+        if reported_serial_mode != recovery.serial() {
+            reported_serial_mode = recovery.serial();
+            let mode = if reported_serial_mode {
+                "isolated"
+            } else {
+                "configured"
+            };
+            let transition = format!(
+                "Evaluation recovery switched to {mode} mode: {} workers; {} selected configurations remaining",
+                phase_workers,
+                remaining.len(),
+            );
+            if tokio::time::timeout_at(
+                overall_deadline,
+                broadcast_and_persist_eval_log(
+                    pool,
+                    cf_state,
+                    commit.id,
+                    &mut log_sequence,
+                    transition,
+                ),
+            )
+            .await
+            .is_err()
+            {
+                return Err(partial_resource_error!(
+                    "invocation deadline exhausted while reporting recovery transition"
+                ));
+            }
+        }
+        info!(
+            commit_id = commit.id,
+            expected_attempt,
+            workers = phase_workers,
+            memory_mb = phase_memory,
+            remaining = remaining.len(),
+            "bounded evaluator recovery phase"
+        );
+    }
+    // Standalone small-fallback children acquire the in-process permit. Keep
+    // the database advisory lock, but release this permit after all bulk phases.
+    let CleanupOwnership {
+        _permit,
+        _transaction,
+        ..
+    } = cleanup_ownership
+        .take()
+        .context("evaluation cleanup ownership missing after confirmed reap")?;
+    drop(_permit);
+    let heavy_nix_db_lock = _transaction;
+    let mut confirmed_failures = error_line_failures.clone();
+    let downstream = async {
+        // ── Detect systems that nix-eval-jobs silently dropped ─────────────────
+        // When a system fails evaluation catastrophically, nix-eval-jobs may not
+        // produce any JSON line for it at all (not even one with an error field).
+        // Such systems silently disappear from the results. By comparing against
+        // the inventory discovered from the exact verified policy source, we
+        // detect these dropouts and synthesize a failed result for each.
+        //
+        // This runs regardless of the child exit status so that a partial
+        // evaluator crash still creates persisted failure records for all
+        // expected-but-unseen systems.
+        // Systems already confirmed as failures via nix-eval-jobs error lines.
+        // These do not need standalone fallback — the error message is known.
+        let error_line_system_names: HashSet<&str> = error_line_failures
+            .iter()
+            .map(|f| f.system_name.as_str())
+            .collect();
+
+        // Collect missing systems that need fallback evaluation.
+        // Exclude both successfully-seen systems AND error-line failures —
+        // only truly silent-drop systems (no JSON line at all) go to fallback.
+        let missing_systems: Vec<&str> = expected_systems
+            .iter()
+            .filter(|s| {
+                !recovering
+                    && !resource_failures.contains_key(s.as_str())
+                    && !seen_systems.contains(s.as_str())
+                    && !error_line_system_names.contains(s.as_str())
+            })
+            .map(|s| s.as_str())
+            .collect();
+        let unexpected_systems: Vec<String> = seen_systems
+            .iter()
+            .filter(|seen| !expected_systems.iter().any(|expected| expected == *seen))
+            .cloned()
+            .collect();
+        info!("Seen systems (successful): {:?}", seen_systems);
+        info!(
+            "Error-line failures (confirmed from bulk output): {:?}",
+            error_line_system_names
+        );
+        info!(
+            "Missing systems (no output at all, need fallback): {:?}",
+            missing_systems
+        );
+        info!("Unexpected systems: {:?}", unexpected_systems);
+        // Seed confirmed_failures with error-line systems already collected from
+        // the bulk evaluator output. Standalone fallback adds more if any systems
+        // were silently dropped (no JSON line at all).
+
+        if missing_systems.len() > MAX_INDIVIDUAL_FALLBACKS {
+            bail!(
+                "nix-eval-jobs silently dropped {} systems (max {}); likely process-wide failure",
+                missing_systems.len(),
+                MAX_INDIVIDUAL_FALLBACKS,
+            );
+        }
+
+        // Also bail if a large *fraction* of expected systems are missing — even
+        // if the absolute count is within MAX_INDIVIDUAL_FALLBACKS — because
+        // launching multiple full-flake Nix evaluations when most systems are
+        // missing indicates a systemic evaluator failure, not individual breakage.
+        // The percent guard only fires when >= MIN_MISSING_FOR_PERCENT_GUARD
+        // systems are absent, so a single broken config in a small flake (e.g.
+        // 1 of 3) does not disable fallback for the healthy systems.
+        // Use multiplication to avoid integer-division rounding surprises.
+        if missing_systems.len() >= MIN_MISSING_FOR_PERCENT_GUARD
+            && !expected_systems.is_empty()
+            && missing_systems.len() * 100 > expected_systems.len() * MAX_FALLBACK_MISSING_PERCENT
+        {
+            bail!(
+                "nix-eval-jobs silently dropped {} of {} expected systems (>{:.0}%); \
+             refusing standalone fallback — likely process-wide evaluator failure",
+                missing_systems.len(),
+                expected_systems.len(),
+                MAX_FALLBACK_MISSING_PERCENT,
+            );
+        }
+
+        info!(commit_id = commit.id, status = ?child_status, "Main evaluator exit status");
+        if child_status
+            .as_ref()
+            .is_some_and(|status| !status.success())
+        {
+            let stderr_text = crate::security::snapshot_redaction::redact_text(
+                &stderr_diagnostic.diagnostic_excerpt(500),
+            );
+            warn!(
+                "nix-eval-jobs failed with exit code: {}\nStderr:\n{}",
+                child_status
+                    .as_ref()
+                    .and_then(|status| status.code())
+                    .unwrap_or(-1),
+                stderr_text,
+            );
+        }
+
+        // Track fallback-outcome counts for diagnostic logging and the combined
+        // error message below.
+        let mut infra_failure_count: usize = 0;
+
+        // ── Fallback phase: evaluate missing systems concurrently ──
+        //
+        // Control verification is INSIDE each buffered future so that the
+        // overall timeout and cancellation race wraps target + control together.
+        // The control system is selected once before building the stream.
+        //
+        // The entire collection is raced against an actual cancellation future
+        // (polling every 2 seconds) and an encompassing FALLBACK_PHASE_TIMEOUT.
+        // This ensures that:
+        //   1. A control evaluation that takes 120 seconds cannot exceed the
+        //      180-second phase timeout by nearly 120 seconds.
+        //   2. Cancellation cannot be starved by an outcome-ready stream.
+        //   3. Orphan nix processes are killed (kill_on_drop(true)) when the
+        //      fallback future is dropped due to timeout or cancellation.
+        if !missing_systems.is_empty() {
+            warn!(
+                "⚠️  {} systems were expected but never appeared in nix-eval-jobs output. Running fallback evaluations...",
+                missing_systems.len()
+            );
+
+            // Build owned futures for each missing system.  Each future performs
+            // a complete standalone eval with the same policies and Nix config as
+            // the bulk evaluator.
+            let mut fallback_futures = Vec::with_capacity(missing_systems.len());
+            for system_name in &missing_systems {
+                let flake_ref = flake_ref.clone();
+                let commit_hash = commit_hash.to_string();
+                let system_name = system_name.to_string();
+                let transaction = heavy_nix_db_lock.clone();
+                // Pass only this configuration's assigned policies to the fallback evaluator.
+                let assigned: Vec<AssignedPolicy> =
+                    policies_for_config(policies_by_configuration, &system_name)
+                        .iter()
+                        .cloned()
+                        .collect();
+                fallback_futures.push(async move {
+                    let mut preparation_cleanup = None;
+                    let outcome = evaluate_single_system_with_policies_owned(
+                        &flake_ref,
+                        repo_url,
+                        &commit_hash,
+                        &system_name,
+                        &assigned,
+                        overall_deadline,
+                        Some(transaction),
+                        Some((pool, commit.id, expected_attempt)),
+                        Some(&mut preparation_cleanup),
+                    )
+                    .await;
+                    (outcome, preparation_cleanup)
+                });
+            }
+
+            // Cancellation future: polls the DB flag every 2 seconds.
+            let cancellation = async {
+                let mut interval = tokio::time::interval(Duration::from_secs(2));
+                // Skip the immediate first tick (0-second check) to avoid a
+                // hot loop that pounds the DB.
+                interval.tick().await;
+
+                loop {
+                    interval.tick().await;
+                    if crate::queries::commits::check_cancellation_requested(pool, commit.id)
+                        .await?
+                    {
+                        return Ok::<(), anyhow::Error>(());
+                    }
+                }
+            };
+
+            tokio::pin!(cancellation);
+
+            // Process fallback outcomes incrementally as each one completes,
+            // rather than collecting the entire batch first.  This means a
+            // fast-evaluating system's build job is committed and notified
+            // immediately, even if another fallback is still running.
+            let deadline =
+                (tokio::time::Instant::now() + FALLBACK_PHASE_TIMEOUT).min(overall_deadline);
+            let deadline_sleep = tokio::time::sleep_until(deadline);
+            tokio::pin!(deadline_sleep);
+
+            let outcome_stream =
+                stream::iter(fallback_futures).buffer_unordered(FALLBACK_CONCURRENCY);
+            tokio::pin!(outcome_stream);
+
+            // ── Classify fallback outcomes. Successful recovered systems are
+            // finalized immediately just like streaming bulk successes.
+            let fallback_collection = async {
+                loop {
+                    let Some(outcome) = outcome_stream.next().await else {
                         break; // stream exhausted
                     };
+                    let (outcome, preparation_cleanup) = outcome;
+                    let outcome = outcome?;
 
                     match outcome {
                         StandaloneSystemOutcome::ConfirmedSystemFailure { system_name, error } => {
@@ -3814,7 +6729,8 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                 "⚠️  System {} was expected but never appeared in nix-eval-jobs output (confirmed failure).",
                                 system_name
                             );
-                            let derivation_target = build_agent_target(repo_url, commit_hash, &system_name);
+                            let derivation_target =
+                                build_agent_target(repo_url, commit_hash, &system_name);
                             confirmed_failures.push(ConfirmedSystemFailure {
                                 system_name,
                                 derivation_target,
@@ -3837,6 +6753,8 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                 error: None,
                                 cache_status: None,
                                 outputs: None,
+                                extra_value: None,
+                                fatal: false,
                                 meta: None,
                             };
                             // Re-resolve this configuration's assigned policies so the
@@ -3846,7 +6764,18 @@ async fn evaluate_with_nix_eval_jobs_inner(
                             let fallback_assigned: Vec<AssignedPolicy> =
                                 policies_for_config(policies_by_configuration, &result.system_name)
                                     .to_vec();
-                            let finalize_outcome = finalize_evaluated_system(
+                            unacknowledged_completions.insert(
+                                result.system_name.clone(),
+                                UnacknowledgedCompletion {
+                                    result: result.clone(),
+                                    policy_check: policy_check.clone(),
+                                    snapshot: None,
+                                    snapshot_capture_failure: Some(
+                                        "Configuration snapshot was not captured separately".into(),
+                                    ),
+                                },
+                            );
+                            let persisted = persist_evaluated_system(
                                 pool,
                                 commit.id,
                                 expected_attempt,
@@ -3854,15 +6783,38 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                 &policy_check,
                                 &fallback_assigned,
                             )
-                            .await?;
+                            .await
+                            .map_err(persistence_failure)?;
+                            if !matches!(
+                                &persisted,
+                                SystemPersistenceOutcome::Cancelled
+                                    | SystemPersistenceOutcome::Superseded
+                                    | SystemPersistenceOutcome::RecordedWithoutBuild {
+                                        reason: SystemNotQueuedReason::LegacyDerivationPathConflict,
+                                        ..
+                                    }
+                            ) {
+                                seen_systems.insert(result.system_name.clone());
+                                successful_results.push(result.clone());
+                                policy_checks.push(policy_check.clone());
+                                results.retain(|r| r.attr_path.last() != Some(&result.system_name));
+                                results.push(nix_result);
+                            }
+                            unacknowledged_completions.remove(&result.system_name);
+                            let finalize_outcome = prepare_persisted_evaluated_system(
+                                pool,
+                                commit.id,
+                                expected_attempt,
+                                persisted,
+                            );
+                            let preparation_cleanup = preparation_cleanup
+                                .context("standalone completion lacks cleanup lease")?;
+                            let finalize_outcome = EVALUATION_CLEANUP
+                                .scope(preparation_cleanup, finalize_outcome)
+                                .await?;
 
-                            // finalize_evaluated_system already performs:
-                            //   Phase 1: persist derivation (transaction)
-                            //   Phase 2: GC root (required — bails on failure)
-                            //   Phase 3: activate build job (second transaction)
-                            //
-                            // Here we only need to notify the queue, broadcast
-                            // via WebSocket, and spawn background side effects.
+                            // Persistence and preparation share the normal helpers.
+                            // Completion ownership precedes downstream awaits.
                             match handle_system_finalize_outcome(
                                 pool,
                                 cf_state,
@@ -3874,14 +6826,8 @@ async fn evaluate_with_nix_eval_jobs_inner(
                             )
                             .await?
                             {
-                                SystemFinalizeAction::Queued {
-                                    derivation_id,
-                                    ..
-                                }
-                                | SystemFinalizeAction::AlreadyExists {
-                                    derivation_id,
-                                    ..
-                                } => {
+                                SystemFinalizeAction::Queued { derivation_id, .. }
+                                | SystemFinalizeAction::AlreadyExists { derivation_id, .. } => {
                                     let finalized = FinalizedDerivation {
                                         derivation_id,
                                         drv_path: result.drv_path.clone(),
@@ -3895,14 +6841,9 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                     return Err(EvaluationCancelled.into());
                                 }
                                 SystemFinalizeAction::Superseded => {
-                                    bail!(
-                                        "evaluation attempt was superseded while finalizing fallback system"
-                                    );
+                                    return Err(EvaluationSuperseded.into());
                                 }
                             }
-                            successful_results.push(result);
-                            policy_checks.push(policy_check);
-                            results.push(nix_result);
                         }
                         StandaloneSystemOutcome::InfrastructureFailure { system_name, error } => {
                             warn!(
@@ -3910,402 +6851,561 @@ async fn evaluate_with_nix_eval_jobs_inner(
                                 system_name, error
                             );
                             infra_failure_count += 1;
+                            resource_failures.insert(
+                                system_name,
+                                crate::security::snapshot_redaction::redact_evaluation_error(
+                                    &error,
+                                ),
+                            );
                         }
+                    }
+                }
+                Ok::<(), anyhow::Error>(())
+            };
+            let fallback_result = {
+                tokio::pin!(fallback_collection);
+                tokio::select! {
+                    biased;
+                    result = &mut cancellation => {
+                        result?;
+                        return Err(EvaluationCancelled.into());
+                    }
+                    _ = &mut deadline_sleep => None,
+                    result = &mut fallback_collection => Some(result),
+                }
+            };
+            match fallback_result {
+                Some(result) => result?,
+                None => {
+                    for name in &missing_systems {
+                        if !seen_systems.contains(*name)
+                            && !confirmed_failures.iter().any(|f| f.system_name == *name)
+                        {
+                            resource_failures.insert(
+                                (*name).to_owned(),
+                                "bounded standalone fallback deadline exhausted; cause unknown"
+                                    .into(),
+                            );
+                        }
+                    }
+                    bail!(
+                        "Fallback evaluation phase timed out after {}s",
+                        FALLBACK_PHASE_TIMEOUT.as_secs()
+                    );
+                }
+            }
+
+            // Exhausted standalone work remains infrastructure/resource evidence,
+            // never a synthetic deterministic configuration failure.
+            if infra_failure_count > 0 {
+                bail!(
+                    "bounded standalone evaluations exhausted due to infrastructure/evaluator issues"
+                );
+            }
+
+            // Validation passed — add synthetic results to the in-memory plan.
+            // Durable synthetic failure rows are written later by
+            // `finalize_evaluation_attempt`, in the same transaction as the
+            // commit-complete CAS and successful derivation writes.
+            for failure in &confirmed_failures {
+                if let Some(state) = cf_state {
+                    let log_msg = format!("❌ {}: {}", failure.system_name, failure.error);
+                    broadcast_and_persist_eval_log(
+                        pool,
+                        Some(state),
+                        commit.id,
+                        &mut log_sequence,
+                        log_msg,
+                    )
+                    .await;
+                }
+
+                results.push(NixEvalJobResult {
+                    attr: failure.system_name.clone(),
+                    attr_path: vec![failure.system_name.clone()],
+                    name: Some(failure.system_name.clone()),
+                    drv_path: None,
+                    error: Some(failure.error.clone()),
+                    cache_status: None,
+                    outputs: None,
+                    extra_value: None,
+                    fatal: false,
+                    meta: None,
+                });
+
+                policy_checks.push(PolicyCheckResult::for_evaluation_terminal(
+                    failure.system_name.clone(),
+                    policies_for_config(policies_by_configuration, &failure.system_name),
+                    EvaluationTerminalOutcome::ConfirmedFailure,
+                    &failure.error,
+                ));
+            }
+        }
+
+        // Error-line failures do not enter the fallback block when no system was
+        // silently dropped. Account for them here as well so terminal rule evidence
+        // is complete for every confirmed target evaluation failure.
+        for failure in &confirmed_failures {
+            if !results
+                .iter()
+                .any(|result| result.attr == failure.system_name)
+            {
+                results.push(NixEvalJobResult {
+                    attr: failure.system_name.clone(),
+                    attr_path: vec![failure.system_name.clone()],
+                    name: Some(failure.system_name.clone()),
+                    drv_path: None,
+                    error: Some(failure.error.clone()),
+                    cache_status: None,
+                    outputs: None,
+                    extra_value: None,
+                    fatal: false,
+                    meta: None,
+                });
+            }
+            if !policy_checks
+                .iter()
+                .any(|check| check.system_name == failure.system_name)
+            {
+                policy_checks.push(PolicyCheckResult::for_evaluation_terminal(
+                    failure.system_name.clone(),
+                    policies_for_config(policies_by_configuration, &failure.system_name),
+                    EvaluationTerminalOutcome::ConfirmedFailure,
+                    &failure.error,
+                ));
+            }
+        }
+
+        // If a specific target was requested, validate after synthesis so that
+        // synthetic failed results count as "accounted for".
+        if !found_target && target_system != "all" && resource_failures.is_empty() {
+            let target_was_expected = expected_systems.iter().any(|s| s == target_system);
+            let target_was_accounted_for = results.iter().any(|r| r.attr == target_system);
+            if !target_was_expected || !target_was_accounted_for {
+                bail!(
+                    "nix-eval-jobs did not evaluate target system: {}\nEvaluated systems: {:?}",
+                    target_system,
+                    results.iter().map(|r| r.attr.as_str()).collect::<Vec<_>>()
+                );
+            }
+        }
+
+        // ── Log systems that failed evaluation vs policy failures ──────────
+        // Split into four groups: passed, evaluation_errors, strict_policy_failures,
+        // non_strict_policy_failures. Evaluation errors are checks with
+        // meets_requirements=false and failed_policies.is_empty().
+        let mut passed_systems = Vec::new();
+        let mut evaluation_errors = Vec::new();
+        let mut strict_policy_failures = Vec::new();
+        let mut non_strict_policy_failures = Vec::new();
+
+        for check in &policy_checks {
+            if check.meets_requirements {
+                passed_systems.push(check);
+            } else if check.failed_policies.is_empty() {
+                evaluation_errors.push(check);
+            } else if check.failed_policies.iter().any(|(_, strict)| *strict) {
+                strict_policy_failures.push(check);
+            } else {
+                non_strict_policy_failures.push(check);
+            }
+        }
+
+        // Log systems that failed evaluation
+        if !evaluation_errors.is_empty() {
+            error!("❌ {} systems failed evaluation:", evaluation_errors.len());
+            for failure in &evaluation_errors {
+                error!("  - {}", failure.system_name);
+                for warning in &failure.warnings {
+                    error!("    {}", warning);
+                }
+            }
+        }
+
+        // Log systems that failed strict policies
+        if !strict_policy_failures.is_empty() {
+            error!(
+                "⚠️  {} systems failed strict deployment policies (will not be queued for build):",
+                strict_policy_failures.len()
+            );
+            for failure in &strict_policy_failures {
+                error!("  - {}", failure.system_name);
+                for (policy_desc, is_strict) in &failure.failed_policies {
+                    if *is_strict {
+                        error!("    • [STRICT] {}", policy_desc);
                     }
                 }
             }
         }
 
-        // ── Reject attempt if fallback had infrastructure failures ───
-        // Do this BEFORE persisting confirmed_failures so no synthetic rows
-        // are written for a run we are about to retry.
-        if infra_failure_count > 0 {
-            bail!(
-                "One or more fallback evaluations failed due to infrastructure/evaluator issues; \
-                 evaluation should be retried"
+        // Log systems that failed only non-strict policies
+        if !non_strict_policy_failures.is_empty() {
+            warn!(
+                "⚠️  {} systems failed non-strict deployment policies:",
+                non_strict_policy_failures.len()
+            );
+            for failure in &non_strict_policy_failures {
+                warn!("  - {}", failure.system_name);
+                for (policy_desc, _) in &failure.failed_policies {
+                    warn!("    • {}", policy_desc);
+                }
+            }
+        }
+
+        // Log systems that passed all policies
+        if !passed_systems.is_empty() {
+            info!(
+                "✅ {} systems passed all deployment policies",
+                passed_systems.len()
             );
         }
 
-        // Validation passed — add synthetic results to the in-memory plan.
-        // Durable synthetic failure rows are written later by
-        // `finalize_evaluation_attempt`, in the same transaction as the
-        // commit-complete CAS and successful derivation writes.
-        for failure in &confirmed_failures {
-            if let Some(state) = cf_state {
-                let log_msg = format!("❌ {}: {}", failure.system_name, failure.error);
+        // Log overall summary
+        let total_policy_checks = policy_checks.len();
+        if total_policy_checks > 0 {
+            info!(
+                "📊 Policy evaluation summary: {} passed, {} eval errors, {} strict failures, {} non-strict failures",
+                passed_systems.len(),
+                evaluation_errors.len(),
+                strict_policy_failures.len(),
+                non_strict_policy_failures.len(),
+            );
+        }
+
+        if successful_results.is_empty() {
+            warn!("⚠️  No derivations successfully evaluated (all had errors or missing paths)");
+        } else {
+            info!(
+                "✅ {} derivations will be persisted as DryRunComplete",
+                successful_results.len()
+            );
+        }
+
+        info!("✅ Evaluated {} configurations in parallel", results.len());
+
+        // Calculate statistics for summary
+        // `results` includes both stdout results and synthesized entries for
+        // systems that nix-eval-jobs silently dropped, so results.len() is the
+        // authoritative total.
+        let successful = results.iter().filter(|r| r.error.is_none()).count();
+        let failed = results.iter().filter(|r| r.error.is_some()).count();
+        let total_systems = if !expected_systems.is_empty() {
+            expected_systems.len()
+        } else {
+            successful + failed
+        };
+
+        let with_agent = policy_checks
+            .iter()
+            .filter(|c| c.cf_agent_enabled == Some(true))
+            .count();
+        let coverage = if policy_checks.len() > 0 {
+            (with_agent as f64 / policy_checks.len() as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        if !policies_by_configuration.is_empty() && !policy_checks.is_empty() {
+            info!(
+                "   CF agent: {}/{} systems enabled ({:.1}%)",
+                with_agent,
+                policy_checks.len(),
+                coverage
+            );
+        }
+
+        // Broadcast comprehensive summary to WebSocket clients
+        if let Some(state) = cf_state {
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
+                "".to_string(), // Blank line for readability
+            )
+            .await;
+
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
+                "═══════════════════════════════════════".to_string(),
+            )
+            .await;
+
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
+                "📊 Evaluation Summary".to_string(),
+            )
+            .await;
+
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
+                "═══════════════════════════════════════".to_string(),
+            )
+            .await;
+
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
+                format!("✅ Successful: {} systems", successful),
+            )
+            .await;
+
+            if failed > 0 {
                 broadcast_and_persist_eval_log(
                     pool,
                     Some(state),
                     commit.id,
                     &mut log_sequence,
-                    log_msg,
+                    format!("❌ Failed: {} systems", failed),
                 )
                 .await;
             }
 
-            results.push(NixEvalJobResult {
-                attr: failure.system_name.clone(),
-                attr_path: vec![failure.system_name.clone()],
-                name: Some(failure.system_name.clone()),
-                drv_path: None,
-                error: Some(failure.error.clone()),
-                cache_status: None,
-                outputs: None,
-                meta: None,
-            });
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
+                format!("📦 Total: {} nixosConfigurations", total_systems),
+            )
+            .await;
 
-            policy_checks.push(PolicyCheckResult {
-                system_name: failure.system_name.clone(),
-                cf_agent_enabled: None,
-                assigned_results: BTreeMap::new(),
-                has_required_packages: None,
-                custom_checks: HashMap::new(),
-                meets_requirements: false,
-                warnings: vec![
-                    "System failed to evaluate (no output from nix-eval-jobs)".to_string(),
-                ],
-                failed_policies: vec![],
-                cve_checks: vec![],
-            });
-        }
-    }
+            if !policy_checks.is_empty() {
+                broadcast_and_persist_eval_log(
+                    pool,
+                    Some(state),
+                    commit.id,
+                    &mut log_sequence,
+                    "".to_string(),
+                )
+                .await;
 
-    // If a specific target was requested, validate after synthesis so that
-    // synthetic failed results count as "accounted for".
-    if !found_target && target_system != "all" {
-        let target_was_expected = expected_systems.iter().any(|s| s == target_system);
-        let target_was_accounted_for = results.iter().any(|r| r.attr == target_system);
-        if !target_was_expected || !target_was_accounted_for {
-            bail!(
-                "nix-eval-jobs did not evaluate target system: {}\nEvaluated systems: {:?}",
-                target_system,
-                results.iter().map(|r| r.attr.as_str()).collect::<Vec<_>>()
-            );
-        }
-    }
-
-    // ── Log systems that failed evaluation vs policy failures ──────────
-    // Split into four groups: passed, evaluation_errors, strict_policy_failures,
-    // non_strict_policy_failures. Evaluation errors are checks with
-    // meets_requirements=false and failed_policies.is_empty().
-    let mut passed_systems = Vec::new();
-    let mut evaluation_errors = Vec::new();
-    let mut strict_policy_failures = Vec::new();
-    let mut non_strict_policy_failures = Vec::new();
-
-    for check in &policy_checks {
-        if check.meets_requirements {
-            passed_systems.push(check);
-        } else if check.failed_policies.is_empty() {
-            evaluation_errors.push(check);
-        } else if check.failed_policies.iter().any(|(_, strict)| *strict) {
-            strict_policy_failures.push(check);
-        } else {
-            non_strict_policy_failures.push(check);
-        }
-    }
-
-    // Log systems that failed evaluation
-    if !evaluation_errors.is_empty() {
-        error!("❌ {} systems failed evaluation:", evaluation_errors.len());
-        for failure in &evaluation_errors {
-            error!("  - {}", failure.system_name);
-            for warning in &failure.warnings {
-                error!("    {}", warning);
+                broadcast_and_persist_eval_log(
+                    pool,
+                    Some(state),
+                    commit.id,
+                    &mut log_sequence,
+                    format!(
+                        "🔐 Policy Compliance: {:.1}% ({}/{})",
+                        coverage,
+                        with_agent,
+                        policy_checks.len()
+                    ),
+                )
+                .await;
             }
-        }
-    }
 
-    // Log systems that failed strict policies
-    if !strict_policy_failures.is_empty() {
-        error!(
-            "⚠️  {} systems failed strict deployment policies (will not be queued for build):",
-            strict_policy_failures.len()
+            if build_prep_count > 0 {
+                broadcast_and_persist_eval_log(
+                    pool,
+                    Some(state),
+                    commit.id,
+                    &mut log_sequence,
+                    "".to_string(),
+                )
+                .await;
+
+                broadcast_and_persist_eval_log(
+                    pool,
+                    Some(state),
+                    commit.id,
+                    &mut log_sequence,
+                    format!(
+                        "🚀 {} derivations eligible for build queue preparation",
+                        build_prep_count
+                    ),
+                )
+                .await;
+            }
+
+            broadcast_and_persist_eval_log(
+                pool,
+                Some(state),
+                commit.id,
+                &mut log_sequence,
+                "═══════════════════════════════════════".to_string(),
+            )
+            .await;
+        }
+
+        info!(
+            commit_id = commit.id,
+            expected_attempt, "build_preparation_drain_started"
         );
-        for failure in &strict_policy_failures {
-            error!("  - {}", failure.system_name);
-            for (policy_desc, is_strict) in &failure.failed_policies {
-                if *is_strict {
-                    error!("    • [STRICT] {}", policy_desc);
+        // Drain all pending build preparations before returning. Build
+        // preparation is downstream of evaluation: a GC-root or build-queue
+        // activation problem must be visible in logs, but it must not rewrite a
+        // partially successful evaluation as a failed attempt after individual
+        // system results have already been persisted. The finalizer below records
+        // actual Nix eval failures separately.
+        while let Some(result) = build_preparations.join_next().await {
+            match result {
+                Ok(Ok(())) => {}
+                Ok(Err(err)) => {
+                    let message = format!("⚠️  Build queue preparation failed: {err:#}");
+                    warn!(commit_id = commit.id, expected_attempt, "{}", message);
+                    if let Some(state) = cf_state {
+                        broadcast_and_persist_eval_log(
+                            pool,
+                            Some(state),
+                            commit.id,
+                            &mut log_sequence,
+                            message,
+                        )
+                        .await;
+                    }
+                }
+                Err(err) => {
+                    let message = format!("⚠️  Build queue preparation task panicked: {err:#}");
+                    warn!(commit_id = commit.id, expected_attempt, "{}", message);
+                    if let Some(state) = cf_state {
+                        broadcast_and_persist_eval_log(
+                            pool,
+                            Some(state),
+                            commit.id,
+                            &mut log_sequence,
+                            message,
+                        )
+                        .await;
+                    }
                 }
             }
         }
-    }
-
-    // Log systems that failed only non-strict policies
-    if !non_strict_policy_failures.is_empty() {
-        warn!(
-            "⚠️  {} systems failed non-strict deployment policies:",
-            non_strict_policy_failures.len()
+        info!(
+            commit_id = commit.id,
+            expected_attempt, "build_preparation_drain_completed"
         );
-        for failure in &non_strict_policy_failures {
-            warn!("  - {}", failure.system_name);
-            for (policy_desc, _) in &failure.failed_policies {
-                warn!("    • {}", policy_desc);
+        record_missing_snapshot_captures(
+            &successful_results,
+            &evaluation_snapshots,
+            &mut snapshot_capture_failures,
+        );
+        // Release the cross-process advisory lock now that all build preparations
+        // are drained.  Committing the transaction releases the lock atomically.
+        // The hardening worker can begin its next scan only after this commit.
+        confirm_preparation_leases_until(
+            &heavy_nix_db_lock,
+            (Instant::now() + PREPARATION_ABORT_ACK_TIMEOUT).min(overall_deadline),
+        )
+        .await?;
+        heavy_nix_db_lock
+            .lock()
+            .await
+            .take()
+            .context("evaluation advisory transaction missing")?
+            .commit()
+            .await?;
+        Ok::<(), anyhow::Error>(())
+    };
+    let downstream_result = tokio::time::timeout_at(overall_deadline, downstream).await;
+    error_line_failures = confirmed_failures.clone();
+    match downstream_result {
+        Ok(Ok(())) => {}
+        Ok(Err(error)) => {
+            let cleanup = abort_preparations_until(
+                &mut build_preparations,
+                &heavy_nix_db_lock,
+                overall_deadline,
+            )
+            .await;
+            if let Err(cleanup_error) = cleanup {
+                return Err(partial_resource_error!(&format!("{cleanup_error:#}")));
             }
+            if error
+                .downcast_ref::<EvaluationPersistenceFailure>()
+                .is_some()
+                && classify_evaluation_failure(&format!("{error:#}"))
+                    != RetryFailureClass::Authorization
+            {
+                return Err(partial_resource_error!(
+                    PERSISTENCE_ACKNOWLEDGEMENT_UNAVAILABLE
+                ));
+            }
+            if resource_failures.is_empty() || is_lineage_failure(&error) {
+                return Err(error);
+            }
+            return Err(partial_resource_error!("bounded resource fallback failed"));
+        }
+        Err(_) => {
+            let _ = abort_preparations_until(
+                &mut build_preparations,
+                &heavy_nix_db_lock,
+                overall_deadline,
+            )
+            .await;
+            return Err(partial_resource_error!(
+                "evaluation downstream phase failed or invocation deadline exhausted"
+            ));
         }
     }
-
-    // Log systems that passed all policies
-    if !passed_systems.is_empty() {
-        info!(
-            "✅ {} systems passed all deployment policies",
-            passed_systems.len()
-        );
+    if !resource_failures.is_empty()
+        || (recovering
+            && expected_systems.iter().any(|name| {
+                !seen_systems.contains(name)
+                    && !confirmed_failures.iter().any(|f| &f.system_name == name)
+            }))
+    {
+        return Err(partial_resource_error!(
+            "bounded isolated evaluation exhausted; cause unknown"
+        ));
     }
-
-    // Log overall summary
-    let total_policy_checks = policy_checks.len();
-    if total_policy_checks > 0 {
-        info!(
-            "📊 Policy evaluation summary: {} passed, {} eval errors, {} strict failures, {} non-strict failures",
-            passed_systems.len(),
-            evaluation_errors.len(),
-            strict_policy_failures.len(),
-            non_strict_policy_failures.len(),
-        );
-    }
-
-    if successful_results.is_empty() {
-        warn!("⚠️  No derivations successfully evaluated (all had errors or missing paths)");
-    } else {
-        info!(
-            "✅ {} derivations will be persisted as DryRunComplete",
-            successful_results.len()
-        );
-    }
-
-    info!("✅ Evaluated {} configurations in parallel", results.len());
-
     let had_system_eval_errors = results.iter().any(|r| r.error.is_some());
-
-    // Calculate statistics for summary
-    // `results` includes both stdout results and synthesized entries for
-    // systems that nix-eval-jobs silently dropped, so results.len() is the
-    // authoritative total.
-    let successful = results.iter().filter(|r| r.error.is_none()).count();
-    let failed = results.iter().filter(|r| r.error.is_some()).count();
-    let total_systems = if !expected_systems.is_empty() {
-        expected_systems.len()
-    } else {
-        successful + failed
-    };
-
-    let with_agent = policy_checks
-        .iter()
-        .filter(|c| c.cf_agent_enabled == Some(true))
-        .count();
-    let coverage = if policy_checks.len() > 0 {
-        (with_agent as f64 / policy_checks.len() as f64) * 100.0
-    } else {
-        0.0
-    };
-
-    if !policies_by_configuration.is_empty() && !policy_checks.is_empty() {
-        info!(
-            "   CF agent: {}/{} systems enabled ({:.1}%)",
-            with_agent,
-            policy_checks.len(),
-            coverage
-        );
-    }
-
-    // Broadcast comprehensive summary to WebSocket clients
-    if let Some(state) = cf_state {
-        broadcast_and_persist_eval_log(
-            pool,
-            Some(state),
-            commit.id,
-            &mut log_sequence,
-            "".to_string(), // Blank line for readability
-        )
-        .await;
-
-        broadcast_and_persist_eval_log(
-            pool,
-            Some(state),
-            commit.id,
-            &mut log_sequence,
-            "═══════════════════════════════════════".to_string(),
-        )
-        .await;
-
-        broadcast_and_persist_eval_log(
-            pool,
-            Some(state),
-            commit.id,
-            &mut log_sequence,
-            "📊 Evaluation Summary".to_string(),
-        )
-        .await;
-
-        broadcast_and_persist_eval_log(
-            pool,
-            Some(state),
-            commit.id,
-            &mut log_sequence,
-            "═══════════════════════════════════════".to_string(),
-        )
-        .await;
-
-        broadcast_and_persist_eval_log(
-            pool,
-            Some(state),
-            commit.id,
-            &mut log_sequence,
-            format!("✅ Successful: {} systems", successful),
-        )
-        .await;
-
-        if failed > 0 {
-            broadcast_and_persist_eval_log(
-                pool,
-                Some(state),
-                commit.id,
-                &mut log_sequence,
-                format!("❌ Failed: {} systems", failed),
-            )
-            .await;
-        }
-
-        broadcast_and_persist_eval_log(
-            pool,
-            Some(state),
-            commit.id,
-            &mut log_sequence,
-            format!("📦 Total: {} nixosConfigurations", total_systems),
-        )
-        .await;
-
-        if !policy_checks.is_empty() {
-            broadcast_and_persist_eval_log(
-                pool,
-                Some(state),
-                commit.id,
-                &mut log_sequence,
-                "".to_string(),
-            )
-            .await;
-
-            broadcast_and_persist_eval_log(
-                pool,
-                Some(state),
-                commit.id,
-                &mut log_sequence,
-                format!(
-                    "🔐 Policy Compliance: {:.1}% ({}/{})",
-                    coverage,
-                    with_agent,
-                    policy_checks.len()
-                ),
-            )
-            .await;
-        }
-
-        if build_prep_count > 0 {
-            broadcast_and_persist_eval_log(
-                pool,
-                Some(state),
-                commit.id,
-                &mut log_sequence,
-                "".to_string(),
-            )
-            .await;
-
-            broadcast_and_persist_eval_log(
-                pool,
-                Some(state),
-                commit.id,
-                &mut log_sequence,
-                format!(
-                    "🚀 {} derivations eligible for build queue preparation",
-                    build_prep_count
-                ),
-            )
-            .await;
-        }
-
-        broadcast_and_persist_eval_log(
-            pool,
-            Some(state),
-            commit.id,
-            &mut log_sequence,
-            "═══════════════════════════════════════".to_string(),
-        )
-        .await;
-    }
-
-    info!(
-        commit_id = commit.id,
-        expected_attempt, "build_preparation_drain_started"
-    );
-    // Drain all pending build preparations before returning. Build
-    // preparation is downstream of evaluation: a GC-root or build-queue
-    // activation problem must be visible in logs, but it must not rewrite a
-    // partially successful evaluation as a failed attempt after individual
-    // system results have already been persisted. The finalizer below records
-    // actual Nix eval failures separately.
-    while let Some(result) = build_preparations.join_next().await {
-        match result {
-            Ok(Ok(())) => {}
-            Ok(Err(err)) => {
-                let message = format!("⚠️  Build queue preparation failed: {err:#}");
-                warn!(commit_id = commit.id, expected_attempt, "{}", message);
-                if let Some(state) = cf_state {
-                    broadcast_and_persist_eval_log(
-                        pool,
-                        Some(state),
-                        commit.id,
-                        &mut log_sequence,
-                        message,
-                    )
-                    .await;
-                }
-            }
-            Err(err) => {
-                let message = format!("⚠️  Build queue preparation task panicked: {err:#}");
-                warn!(commit_id = commit.id, expected_attempt, "{}", message);
-                if let Some(state) = cf_state {
-                    broadcast_and_persist_eval_log(
-                        pool,
-                        Some(state),
-                        commit.id,
-                        &mut log_sequence,
-                        message,
-                    )
-                    .await;
-                }
-            }
-        }
-    }
-    info!(
-        commit_id = commit.id,
-        expected_attempt, "build_preparation_drain_completed"
-    );
-    // Release the cross-process advisory lock now that all build preparations
-    // are drained.  Committing the transaction releases the lock atomically.
-    // The hardening worker can begin its next scan only after this commit.
-    heavy_nix_db_lock.commit().await?;
-
     Ok(EvaluationPlan {
         results,
         policy_checks,
         successful_systems: successful_results,
         confirmed_failures,
+        evaluation_snapshots,
+        snapshot_capture_failures,
+        flake_output_snapshot,
         had_system_eval_errors,
         #[cfg(test)]
         force_build_job_insert_failure: false,
     })
 }
 
-/// Dev-only deterministic mock evaluation path.
+/// Simulates evaluation and persists labelled, attempt-owned mock outcomes.
 ///
-/// This simulates nix-eval-jobs behavior while preserving queue/log/policy/derivation
-/// transitions so UI and process workflows can be validated quickly.
+/// The caller MUST enable mock execution mode and pass the claimed attempt.
+/// Configuration outcomes use the supplied captured assignments. Isolated
+/// mock evidence has no derivation, store path, or output identity. Persistence
+/// locks the commit and rejects cancellation or lost attempt ownership. Mock
+/// outcome writes do not queue config observations, prepare or enqueue builds,
+/// create GC roots, or publish composite assessments. No expected output store
+/// path is fabricated. The caller retains ordinary attempt finalization.
+/// Stream and persistent logs use the same claimed exact-attempt ownership as
+/// native evaluation. A retry retains previous logs and cannot inherit their
+/// replay buffer, producer capability, or sequence namespace.
+///
+/// # Errors
+/// Returns an [`EvaluationFailure`] for database or configuration errors, or
+/// typed cancellation/supersession through the existing lifecycle convention.
+///
+/// # Examples
+/// ```ignore
+/// let plan = evaluate_with_mock_eval_jobs(
+///     pool, &commit, attempt, &flake, &flake.repo_url,
+///     &commit.git_commit_hash, "all", &build_config, &server_config,
+///     &captured_policies, &configured_systems, Some(&cf_state),
+///     Some(&queue_notifier),
+/// ).await?;
+/// ```
 #[allow(clippy::too_many_arguments)]
 pub async fn evaluate_with_mock_eval_jobs(
     pool: &PgPool,
     commit: &Commit,
+    expected_attempt: i32,
     flake: &Flake,
     repo_url: &str,
     commit_hash: &str,
@@ -4320,6 +7420,7 @@ pub async fn evaluate_with_mock_eval_jobs(
     evaluate_with_mock_eval_jobs_inner(
         pool,
         commit,
+        expected_attempt,
         flake,
         repo_url,
         commit_hash,
@@ -4338,25 +7439,48 @@ pub async fn evaluate_with_mock_eval_jobs(
 async fn evaluate_with_mock_eval_jobs_inner(
     pool: &PgPool,
     commit: &Commit,
+    expected_attempt: i32,
     flake: &Flake,
-    repo_url: &str,
+    _repo_url: &str,
     commit_hash: &str,
     target_system: &str,
     _build_config: &BuildConfig,
     _server_config: &ServerConfig,
-    _policies_by_configuration: &Arc<PoliciesByConfiguration>,
+    policies_by_configuration: &Arc<PoliciesByConfiguration>,
     configured_systems: &[String],
     cf_state: Option<&crate::handlers::agent_request::CFState>,
     _queue_notifier: Option<&QueueNotifier>,
 ) -> Result<EvaluationPlan> {
-    // Re-evaluation safety: clear previous persisted logs for this commit so
-    // (commit_id, log_sequence) uniqueness cannot collide on subsequent runs.
-    crate::queries::eval_logs::delete_eval_logs_by_commit(pool, commit.id).await?;
+    mock_persistence::verify_active(pool, commit.id, expected_attempt).await?;
+    let producer_state = match cf_state {
+        Some(state) => Some(
+            crate::handlers::api::commits::bind_eval_producer(state, commit.id, expected_attempt)
+                .await?,
+        ),
+        None => None,
+    };
+    let cf_state = producer_state.as_ref();
+    let mut log_sequence = EvalLogSequence::for_attempt(pool, commit.id, expected_attempt).await?;
 
-    // Sequence counter for persisted/mock streamed logs (1-indexed)
-    let mut log_sequence = 1i32;
-
-    let systems = resolve_mock_systems(&flake.name, target_system, configured_systems)?;
+    // MOCK ONLY: The policy plan captured for this attempt is keyed by the
+    // configuration names of active registered systems. Mock results use
+    // the same names so captured plan rows can find their outcomes. The
+    // `configured_systems` list remains the fallback for a flake without
+    // registered systems.
+    let planned_systems = list_configuration_names_for_flake(pool, flake.id).await?;
+    let candidate_systems = select_mock_system_names(planned_systems, configured_systems);
+    let systems = resolve_mock_systems(&flake.name, target_system, &candidate_systems)?;
+    // Mock inventory is exactly the resolved synthetic list, never native
+    // discovery evidence. Persist before simulated stages or outcome publication.
+    persist_required_inventory(
+        pool,
+        commit.id,
+        expected_attempt,
+        &systems,
+        &systems,
+        crate::queries::evaluation_inventory::InventoryExecutionMode::Mock,
+    )
+    .await?;
     let stage_delay = mock_eval_stage_delay(systems.len());
 
     crate::queries::commits_artifacts::upsert_commit_artifact_cache(pool, commit.id, &systems, &[])
@@ -4380,7 +7504,6 @@ async fn evaluate_with_mock_eval_jobs_inner(
 
     let mut results = Vec::with_capacity(systems.len());
     let mut checks = Vec::with_capacity(systems.len());
-    let mut successful_systems = Vec::with_capacity(systems.len());
 
     for (idx, system_name) in systems.iter().enumerate() {
         if let Some(state) = cf_state {
@@ -4412,8 +7535,9 @@ async fn evaluate_with_mock_eval_jobs_inner(
             (30, "checking nixosConfigurations outputs"),
             (55, "expanding module graph"),
             (80, "running policy prechecks"),
-            (95, "finalizing derivation metadata"),
+            (95, "finalizing mock policy outcomes"),
         ] {
+            mock_persistence::verify_active(pool, commit.id, expected_attempt).await?;
             if let Some(state) = cf_state {
                 broadcast_and_persist_eval_log(
                     pool,
@@ -4427,67 +7551,45 @@ async fn evaluate_with_mock_eval_jobs_inner(
             tokio::time::sleep(stage_delay).await;
         }
 
-        let flake_ref = build_flake_reference(repo_url, commit_hash);
-        let drv_path = format!(
-            "/nix/store/mock-{}-{}.drv",
-            &commit_hash[..8.min(commit_hash.len())],
-            system_name
-                .chars()
-                .map(|c| if c.is_ascii_alphanumeric() || c == '-' {
-                    c
-                } else {
-                    '-'
-                })
-                .collect::<String>()
-        );
-        let derivation_target = format!("{}#nixosConfigurations.{}", flake_ref, system_name);
-
         let policy_failed = should_mock_policy_fail(systems.len(), idx);
 
-        let cf_agent_enabled = Some(!policy_failed);
-        successful_systems.push(SuccessfulSystemResult {
-            system_name: system_name.clone(),
-            derivation_target,
-            drv_path: drv_path.clone(),
-            expected_store_path: None,
-            cf_agent_enabled,
-            build_eligible: true,
-        });
-
-        let check = PolicyCheckResult {
-            system_name: system_name.clone(),
-            cf_agent_enabled: Some(!policy_failed),
-            assigned_results: BTreeMap::new(),
-            has_required_packages: None,
-            custom_checks: HashMap::new(),
-            meets_requirements: !policy_failed,
-            warnings: if policy_failed {
-                vec!["Mock policy failure for UI validation".to_string()]
-            } else {
-                vec![]
-            },
-            failed_policies: if policy_failed {
-                vec![("Crystal Forge agent must be enabled".to_string(), true)]
-            } else {
-                vec![]
-            },
-            cve_checks: vec![],
-        };
+        // MOCK ONLY: Outcomes for the configuration's captured assigned
+        // policies are synthesized from a stable hash so the evaluation policy
+        // matrix shows pass and fail cells without running Nix.
+        let check = mock_policy_check(
+            system_name,
+            policies_for_config(policies_by_configuration, system_name),
+            policy_failed,
+        );
+        // CONCURRENCY: The write rechecks ownership under the commit lock after
+        // simulated work. Cancellation or supersession stops the entire mock
+        // invocation before publishing this configuration's result.
+        mock_persistence::persist_outcome(
+            pool,
+            commit.id,
+            expected_attempt,
+            &check,
+            policies_for_config(policies_by_configuration, system_name),
+        )
+        .await?;
+        let requirements_met = check.meets_requirements;
         checks.push(check);
 
         results.push(NixEvalJobResult {
             attr: system_name.clone(),
             attr_path: vec!["nixosConfigurations".to_string(), system_name.clone()],
             name: Some(system_name.clone()),
-            drv_path: Some(drv_path),
+            drv_path: None,
             error: None,
             cache_status: Some("unknown".to_string()),
             outputs: None,
+            extra_value: None,
+            fatal: false,
             meta: None,
         });
 
         if let Some(state) = cf_state {
-            if policy_failed {
+            if !requirements_met {
                 crate::handlers::api::commits::broadcast_system_status(
                     state,
                     commit.id,
@@ -4525,8 +7627,13 @@ async fn evaluate_with_mock_eval_jobs_inner(
     Ok(EvaluationPlan {
         results,
         policy_checks: checks,
-        successful_systems,
+        // INVARIANT: Mock policy evidence never enters native artifact or option
+        // snapshot publication through the ordinary attempt finalizer.
+        successful_systems: Vec::new(),
         confirmed_failures: Vec::new(),
+        evaluation_snapshots: HashMap::new(),
+        snapshot_capture_failures: HashMap::new(),
+        flake_output_snapshot: None,
         had_system_eval_errors,
         #[cfg(test)]
         force_build_job_insert_failure: false,
@@ -4536,6 +7643,35 @@ async fn evaluate_with_mock_eval_jobs_inner(
 fn build_agent_target(repo_url: &str, commit_hash: &str, system_name: &str) -> String {
     let flake_ref = build_flake_reference(repo_url, commit_hash);
     format!("{}#nixosConfigurations.{}", flake_ref, system_name)
+}
+
+// CONCURRENCY: Recheck after capacity admission and before every invocation-
+// owned bulk or fallback spawn. Query failure cannot authorize a new child.
+async fn verify_evaluation_launch(
+    pool: &PgPool,
+    commit_id: i32,
+    expected_attempt: i32,
+    deadline: Instant,
+) -> Result<()> {
+    let active: Option<(Option<String>, Option<i32>, Option<bool>)> = tokio::time::timeout_at(deadline,
+        sqlx::query_as("SELECT evaluation_status, evaluation_attempt_count, cancellation_requested FROM commits WHERE id = $1")
+            .bind(commit_id).fetch_optional(pool),
+    ).await.context("evaluation lifecycle check exceeded invocation deadline")??;
+    match active {
+        Some((status, attempt, cancelled))
+            if attempt == Some(expected_attempt)
+                && status.as_deref() == Some("in_progress")
+                && cancelled != Some(true) =>
+        {
+            Ok(())
+        }
+        Some((status, _, cancelled))
+            if cancelled == Some(true) || status.as_deref() == Some("cancelling") =>
+        {
+            Err(EvaluationCancelled.into())
+        }
+        _ => Err(EvaluationSuperseded.into()),
+    }
 }
 
 #[cfg(test)]
@@ -4580,6 +7716,17 @@ fn should_skip_system(allowed_systems: &Option<Vec<String>>, system_name: &str) 
     }
 }
 
+fn systems_selected_for_evaluation(
+    known_systems: &[String],
+    allowed_systems: &Option<Vec<String>>,
+) -> Vec<String> {
+    known_systems
+        .iter()
+        .filter(|system| !should_skip_system(allowed_systems, system))
+        .cloned()
+        .collect()
+}
+
 fn resolve_mock_systems(
     flake_name: &str,
     target_system: &str,
@@ -4620,6 +7767,153 @@ fn mock_eval_stage_delay(system_count: usize) -> std::time::Duration {
 
 fn should_mock_policy_fail(system_count: usize, idx: usize) -> bool {
     system_count > 1 && idx == 1
+}
+
+/// Selects the candidate configuration names for mock evaluation.
+///
+/// MOCK ONLY. `planned` holds
+/// `COALESCE(NULLIF(BTRIM(system_configuration_name), ''), hostname)` for the
+/// active registered systems of the flake. This is the key set of the
+/// evaluation policy plan. When `planned` is not empty, the function returns
+/// it sorted and deduplicated, because two active systems can share one
+/// configuration name and evaluation produces one result per configuration.
+/// When `planned` is empty, the function returns `configured` unchanged, so
+/// [`resolve_mock_systems`] keeps its configured or invented fallback.
+fn select_mock_system_names(mut planned: Vec<String>, configured: &[String]) -> Vec<String> {
+    if planned.is_empty() {
+        return configured.to_vec();
+    }
+    planned.sort();
+    planned.dedup();
+    planned
+}
+
+/// Returns whether a mock assigned-policy outcome passes.
+///
+/// MOCK ONLY. The outcome is a pure function of the configuration name and
+/// the policy version ID, so repeated mock evaluations of one plan produce
+/// the same matrix. About one outcome in
+/// [`MOCK_ASSIGNED_POLICY_FAILURE_MODULUS`] fails.
+fn mock_assigned_policy_passes(configuration_name: &str, policy_id: uuid::Uuid) -> bool {
+    mock_outcome_hash(configuration_name, policy_id) % MOCK_ASSIGNED_POLICY_FAILURE_MODULUS != 0
+}
+
+/// Sets the mock failure rate to one outcome in this many (about 10%).
+const MOCK_ASSIGNED_POLICY_FAILURE_MODULUS: u64 = 10;
+
+// INVARIANT: The hash must stay stable across processes, platforms, and Rust
+// releases. `std::hash::DefaultHasher` does not give that guarantee, so this
+// uses 64-bit FNV-1a with its published offset basis and prime. The 0xff
+// separator byte cannot occur in UTF-8 text, so different
+// (configuration, policy) pairs cannot produce the same byte sequence.
+fn mock_outcome_hash(configuration_name: &str, policy_id: uuid::Uuid) -> u64 {
+    const FNV_OFFSET_BASIS: u64 = 0xcbf2_9ce4_8422_2325;
+    const FNV_PRIME: u64 = 0x0000_0100_0000_01b3;
+    configuration_name
+        .as_bytes()
+        .iter()
+        .chain(std::iter::once(&0xff))
+        .chain(policy_id.as_bytes().iter())
+        .fold(FNV_OFFSET_BASIS, |hash, byte| {
+            (hash ^ u64::from(*byte)).wrapping_mul(FNV_PRIME)
+        })
+}
+
+/// Builds the mock policy check for one configuration.
+///
+/// MOCK ONLY. The result has the same structure that
+/// [`PolicyCheckResult::from_assigned`] produces for real evaluator output,
+/// so [`policy_results_json`] persists the same JSON shape:
+///
+/// - The unconditional agent gate follows `agent_failed`, the existing
+///   [`should_mock_policy_fail`] pattern. An assigned
+///   `RequireCrystalForgeAgent` policy agrees with that gate and always
+///   blocks when it fails, as in the real path.
+/// - Every other Nix-evaluated assigned policy takes its outcome from
+///   [`mock_assigned_policy_passes`]. A failure blocks only when
+///   `enforcement_mode.blocks(policy.is_strict())` is true. A report-only
+///   failure is recorded but is never blocking.
+/// - Policies that are not Nix-evaluated get no entry, as in the real path.
+/// - `meets_requirements` is true only when the agent gate passes and no
+///   failed policy is blocking.
+///
+/// Each failed assigned policy adds a warning that starts with `[MOCK]` and
+/// names the policy.
+fn mock_policy_check(
+    system_name: &str,
+    assigned: &[AssignedPolicy],
+    agent_failed: bool,
+) -> PolicyCheckResult {
+    use crate::models::deployment_policies::{AssignedPolicyCheckResult, DeploymentPolicy};
+
+    let mut assigned_results = BTreeMap::new();
+    let mut has_required_packages = None;
+    let mut warnings = Vec::new();
+    // COMPATIBILITY: Keep the pre-existing mock agent failure entry so mock
+    // queue counters and build gating are unchanged.
+    let mut failed_policies = if agent_failed {
+        warnings.push("Mock policy failure for UI validation".to_string());
+        vec![("Crystal Forge agent must be enabled".to_string(), true)]
+    } else {
+        Vec::new()
+    };
+
+    for assigned_policy in assigned.iter().filter(|ap| ap.policy.is_nix_evaluated()) {
+        let is_agent_policy = matches!(
+            assigned_policy.policy,
+            DeploymentPolicy::RequireCrystalForgeAgent { .. }
+        );
+        let (passed, blocking) = if is_agent_policy {
+            // SECURITY: The real path rejects an assigned agent result that
+            // disagrees with the unconditional gate, and the agent gate always
+            // blocks. The failure is already recorded above.
+            (!agent_failed, agent_failed)
+        } else {
+            let passed = mock_assigned_policy_passes(system_name, assigned_policy.policy_id);
+            let blocking = !passed
+                && assigned_policy
+                    .enforcement_mode
+                    .blocks(assigned_policy.policy.is_strict());
+            (passed, blocking)
+        };
+        if matches!(
+            assigned_policy.policy,
+            DeploymentPolicy::RequirePackages { .. }
+        ) {
+            has_required_packages = Some(passed);
+        }
+        if !passed {
+            warnings.push(format!(
+                "[MOCK] Policy {} failed for {} (deterministic mock outcome)",
+                assigned_policy.policy_name, system_name
+            ));
+            if !is_agent_policy {
+                failed_policies.push((assigned_policy.policy.description(), blocking));
+            }
+        }
+        assigned_results.insert(
+            assigned_policy.policy_id,
+            AssignedPolicyCheckResult {
+                passed: Some(passed),
+                blocking,
+                evaluation_error: None,
+                composite_outcomes: Vec::new(),
+            },
+        );
+    }
+
+    let meets_requirements = !agent_failed && !failed_policies.iter().any(|(_, blocks)| *blocks);
+    PolicyCheckResult {
+        system_name: system_name.to_string(),
+        cf_agent_enabled: Some(!agent_failed),
+        assigned_results,
+        has_required_packages,
+        custom_checks: HashMap::new(),
+        meets_requirements,
+        warnings,
+        failed_policies,
+        cve_checks: vec![],
+    }
 }
 
 /// Update commit metadata cache with evaluation summary statistics
@@ -4750,8 +8044,167 @@ fn summarize_commit_metadata(
 
 #[cfg(test)]
 mod tests {
-    use super::classify_evaluation_failure;
+    use super::{
+        PREFLIGHT_LOG_EXCERPT_MAX_CHARS, authoritative_evaluator_args, classify_evaluation_failure,
+        isolate_authoritative_evaluator_credentials, preflight_discovery_failure_log,
+        structured_evaluation_failure, systems_selected_for_evaluation,
+    };
     use crate::models::retry_policy::RetryFailureClass;
+
+    #[test]
+    fn evaluator_server_config_serde_defaults_drive_watchdog() {
+        use super::evaluation_watchdog::{EvaluationWatchdog, Expiry};
+
+        let config: crate::config::ServerConfig = serde_json::from_value(serde_json::json!({
+            "host": "127.0.0.1", "port": 3445
+        }))
+        .unwrap();
+        assert_eq!(config.eval_max_memory_mb, None);
+        assert_eq!(config.eval_memory_reserve_mb, 4096);
+        assert_eq!(config.eval_memory_max_percent, 85);
+        assert_eq!(config.eval_output_idle_timeout_secs, 900);
+        assert_eq!(config.eval_overall_timeout_secs, 3600);
+        config.validate_evaluator_policy().unwrap();
+        let spawn = tokio::time::Instant::now();
+        let watchdog = EvaluationWatchdog::new(
+            spawn,
+            std::time::Duration::from_secs(config.eval_output_idle_timeout_secs),
+            std::time::Duration::from_secs(config.eval_overall_timeout_secs),
+        )
+        .unwrap();
+        assert_eq!(
+            watchdog.expired(spawn + std::time::Duration::from_secs(301)),
+            None
+        );
+        assert_eq!(
+            watchdog.expired(spawn + std::time::Duration::from_secs(900)),
+            Some(Expiry::Idle)
+        );
+    }
+
+    #[test]
+    fn evaluator_server_config_serde_honors_timeout_names_and_policy_ranges() {
+        let input = serde_json::json!({
+            "host": "127.0.0.1", "port": 3445,
+            "eval_workers": 3, "eval_max_memory_mb": 12288,
+            "eval_memory_reserve_mb": 1024, "eval_memory_max_percent": 100,
+            "eval_output_idle_timeout_secs": 7, "eval_overall_timeout_secs": 11
+        });
+        let config: crate::config::ServerConfig = serde_json::from_value(input.clone()).unwrap();
+        assert_eq!(config.eval_output_idle_timeout_secs, 7);
+        assert_eq!(config.eval_overall_timeout_secs, 11);
+        assert_eq!(config.eval_max_memory_mb, Some(12288));
+        assert_eq!(config.eval_workers, 3);
+        config.validate_evaluator_policy().unwrap();
+        for (field, value) in [
+            ("eval_max_memory_mb", 0),
+            ("eval_memory_reserve_mb", 0),
+            ("eval_memory_max_percent", 0),
+            ("eval_memory_max_percent", 101),
+            ("eval_output_idle_timeout_secs", 0),
+            ("eval_overall_timeout_secs", 0),
+        ] {
+            let mut invalid = input.clone();
+            invalid[field] = serde_json::json!(value);
+            let config: crate::config::ServerConfig = serde_json::from_value(invalid).unwrap();
+            assert!(
+                config.validate_evaluator_policy().is_err(),
+                "must reject {field}={value}"
+            );
+        }
+    }
+
+    #[test]
+    fn scoped_expected_systems_match_the_primary_expression_boundary() {
+        let known = vec![
+            "managed-b".to_string(),
+            "unmanaged".to_string(),
+            "managed-a".to_string(),
+        ];
+
+        assert_eq!(
+            systems_selected_for_evaluation(
+                &known,
+                &Some(vec!["managed-a".to_string(), "managed-b".to_string()]),
+            ),
+            vec!["managed-b".to_string(), "managed-a".to_string()]
+        );
+        assert!(systems_selected_for_evaluation(&known, &Some(Vec::new())).is_empty());
+        assert_eq!(systems_selected_for_evaluation(&known, &None), known);
+    }
+
+    #[test]
+    fn evaluation_failure_diagnostic_chain_retains_source_materialization_cause() {
+        let failure = structured_evaluation_failure(
+            anyhow::anyhow!("authorized Git commit lookup failed: missing object")
+                .context("failed to materialize authoritative immutable source"),
+        );
+
+        assert_eq!(
+            failure.to_string(),
+            "failed to materialize authoritative immutable source"
+        );
+        assert!(
+            failure
+                .diagnostic_chain()
+                .contains("authorized Git commit lookup failed: missing object")
+        );
+    }
+
+    #[tokio::test]
+    async fn authoritative_evaluator_removes_inherited_source_credentials() {
+        let mut command = tokio::process::Command::new("env");
+        command.env("NETRC", "/secret/netrc");
+        command.env("GIT_SSH_COMMAND", "ssh -i /secret/key");
+        isolate_authoritative_evaluator_credentials(&mut command);
+
+        let removed = command
+            .as_std()
+            .get_envs()
+            .filter_map(|(key, value)| value.is_none().then_some(key.to_string_lossy().to_string()))
+            .collect::<std::collections::BTreeSet<_>>();
+        assert!(removed.contains("NETRC"));
+        assert!(removed.contains("GIT_SSH_COMMAND"));
+
+        let environment = command
+            .output()
+            .await
+            .expect("credential-isolation probe should run");
+        assert!(environment.status.success());
+        let environment = String::from_utf8(environment.stdout)
+            .expect("credential-isolation probe should return UTF-8");
+        assert!(!environment.lines().any(|line| line.starts_with("NETRC=")));
+        assert!(
+            !environment
+                .lines()
+                .any(|line| line.starts_with("GIT_SSH_COMMAND="))
+        );
+    }
+
+    #[test]
+    fn authoritative_evaluator_uses_only_explicit_semantic_options() {
+        assert_eq!(
+            authoritative_evaluator_args("expression", 2, 4096, true),
+            vec![
+                "--expr",
+                "expression",
+                "--option",
+                "pure-eval",
+                "true",
+                "--option",
+                "allow-import-from-derivation",
+                "true",
+                "--meta",
+                "--apply",
+                "derivation: { policies = derivation.meta.policies; configObservationRoot = derivation.meta.crystalForgeConfigRoot or { status = \"failed\"; code = \"root_capture_missing\"; }; }",
+                "--workers",
+                "2",
+                "--max-memory-size",
+                "4096",
+                "--check-cache-status",
+            ]
+        );
+    }
 
     #[test]
     fn evaluation_failures_are_classified_at_source() {
@@ -4783,28 +8236,1948 @@ mod tests {
         }
     }
 
+    /// Locked-input integrity failures must not consume transient retries.
+    ///
+    /// A `flake.lock` entry that records a `narHash` which disagrees with the
+    /// pinned revision's real tree fails identically on every attempt, so the
+    /// class must be [`RetryFailureClass::Deterministic`].
+    #[test]
+    fn lock_integrity_failures_are_deterministic_not_transient() {
+        let observed = "nix eval failed for bfd3b68f09c5: error: NAR hash mismatch in \
+             input 'gitlab:owner/repo/465d6913e1fd8d6fb3e4459c57cee486c7d8ed14?narHash=\
+             sha256-AAAA%3D', expected 'sha256-BBBB=' but got 'sha256-AAAA='";
+        assert_eq!(
+            classify_evaluation_failure(observed),
+            RetryFailureClass::Deterministic
+        );
+
+        assert_eq!(
+            classify_evaluation_failure(
+                "error: hash mismatch in fixed-output derivation '/nix/store/x.drv'"
+            ),
+            RetryFailureClass::Deterministic
+        );
+    }
+
+    /// Classification must stay specific instead of matching any "hash" text.
+    ///
+    /// Store paths and unrelated diagnostics routinely contain `hash`, so a
+    /// broad substring rule would wrongly suppress legitimate retries.
+    #[test]
+    fn unrelated_hash_text_is_not_classified_deterministic() {
+        for message in [
+            "copying '/nix/store/abc-hash-tool' failed: connection reset",
+            "could not resolve host while fetching hash-utils",
+        ] {
+            assert_eq!(
+                classify_evaluation_failure(message),
+                RetryFailureClass::Transient,
+                "{message}"
+            );
+        }
+
+        assert_eq!(
+            classify_evaluation_failure("computed hash digest for artifact"),
+            RetryFailureClass::Unknown
+        );
+    }
+
+    /// A preflight failure must produce one bounded, actionable log line.
+    ///
+    /// The drawer otherwise ends at "Evaluating nixosConfigurations..." and
+    /// hides the persisted cause from operators.
+    #[test]
+    fn preflight_failure_log_is_terminal_bounded_and_actionable() {
+        let error = anyhow::anyhow!(
+            "nix eval failed for bfd3b68f09c5: warning: ignoring untrusted \
+             extra-substituters\nerror: NAR hash mismatch in input \
+             'gitlab:owner/repo/465d6913?narHash=sha256-AAAA%3D', expected \
+             'sha256-BBBB=' but got 'sha256-AAAA='\n       at /nix/store/x/flake.nix:3"
+        );
+
+        let line = preflight_discovery_failure_log(&error);
+
+        assert!(line.starts_with("❌ Evaluation preflight failed: "));
+        assert!(line.contains("NAR hash mismatch in input"));
+        // The untrusted-substituter warning is not the fatal cause and must not
+        // displace the real error in a single-line summary.
+        assert!(!line.contains("ignoring untrusted"));
+        assert!(!line.contains('\n'));
+        assert!(line.chars().count() <= PREFLIGHT_LOG_EXCERPT_MAX_CHARS + 64);
+    }
+
+    /// An unbounded evaluator trace must be truncated before it reaches clients.
+    #[test]
+    fn preflight_failure_log_truncates_unbounded_traces() {
+        let error = anyhow::anyhow!("error: {}", "x".repeat(200_000));
+
+        let line = preflight_discovery_failure_log(&error);
+
+        assert!(line.ends_with('…'));
+        assert!(line.chars().count() <= PREFLIGHT_LOG_EXCERPT_MAX_CHARS + 64);
+    }
+
+    #[test]
+    fn preflight_progress_evidence_is_bounded_exact_and_cross_chunk() {
+        for marker in [
+            b"unpacking '".as_slice(),
+            b"fetching git repository".as_slice(),
+        ] {
+            for split in 1..marker.len() {
+                let mut evidence = super::InputResolutionEvidence::default();
+                assert!(!evidence.observe(&[b'x'; 1024]));
+                assert!(evidence.carry.len() <= b"fetching git repository".len());
+                assert!(!evidence.observe(&marker[..split]));
+                assert!(evidence.observe(&marker[split..]));
+                assert!(!evidence.observe(marker), "signal must be one-shot");
+                assert!(evidence.carry.is_empty());
+            }
+        }
+        let mut evidence = super::InputResolutionEvidence::default();
+        assert!(!evidence.observe(b"unpacking archive; fetching Git repository; 300s elapsed"));
+    }
+
+    #[tokio::test]
+    async fn preflight_progress_is_live_past_caps_without_time_inference() {
+        use tokio::io::AsyncWriteExt;
+        let (mut writer, reader) = tokio::io::duplex(32);
+        let (progress, mut observed) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(super::read_capped_with_progress(reader, 2, Some(progress)));
+        writer.write_all(&[b'x'; 64]).await.unwrap();
+        tokio::task::yield_now().await;
+        assert!(
+            !*observed.borrow(),
+            "elapsed execution is not fetch evidence"
+        );
+        writer.write_all(b"fetching git repo").await.unwrap();
+        writer
+            .write_all(b"sitory 'https://private.invalid/secret'")
+            .await
+            .unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(1), observed.changed())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(*observed.borrow_and_update());
+        assert!(!task.is_finished(), "progress precedes pipe EOF");
+        writer.write_all(b" unpacking 'again'").await.unwrap();
+        drop(writer);
+        let output = task.await.unwrap().unwrap();
+        assert_eq!(output.bytes, b"xx");
+        assert!(output.is_truncated());
+        assert!(!observed.has_changed().unwrap_or(false), "only one signal");
+    }
+
+    #[test]
+    fn preflight_timeout_keeps_typed_cause_and_cleanup_through_context() {
+        for cleanup_confirmed in [false, true] {
+            let error = anyhow::Error::new(super::BoundedProcessTimeout {
+                process_name: "fixture".to_string(),
+                deadline: std::time::Duration::from_secs(300),
+                cleanup_confirmed,
+            })
+            .context("failed to evaluate configurations")
+            .context("preparation child cleanup unconfirmed; heavy Nix locks retained");
+            let log = preflight_discovery_failure_log(&error);
+            assert!(log.contains("Discovery timed out after 300s"));
+            assert!(log.contains(if cleanup_confirmed {
+                "cleanup confirmed"
+            } else {
+                "cleanup pending; heavy Nix locks retained"
+            }));
+            assert!(log.chars().count() < 512);
+        }
+    }
+
+    #[test]
+    fn preflight_real_nix_failure_cannot_impersonate_timeout_and_hides_urls() {
+        let error = anyhow::Error::new(crate::flake::commits::DiscoveryNixFailure {
+            diagnostic: "error: timed out fetching https://user:password@private.invalid/team/root?token=secret gitlab:private/team git@private.invalid:root\n  underlying fatal detail".to_string(),
+        }).context("outer context");
+        let log = preflight_discovery_failure_log(&error);
+        assert!(log.contains("Nix discovery failed; cleanup confirmed"));
+        assert!(log.contains("timed out fetching"));
+        assert!(log.contains("underlying fatal detail"));
+        assert!(!log.contains("Discovery timed out"));
+        for secret in [
+            "private.invalid",
+            "password",
+            "token=",
+            "private/team",
+            "untrusted cache",
+        ] {
+            assert!(!log.contains(secret), "leaked {secret}");
+        }
+        assert!(log.chars().count() < 512);
+        let long_failure = anyhow::Error::new(crate::flake::commits::DiscoveryNixFailure {
+            diagnostic: format!("error: {}", "x".repeat(10_000)),
+        });
+        assert!(
+            preflight_discovery_failure_log(&long_failure)
+                .chars()
+                .count()
+                < 512
+        );
+        let huge = anyhow::anyhow!("error: {}", "é".repeat(200_000));
+        assert!(super::bounded_preflight_error(&huge).len() <= 16 * 1024);
+    }
+
+    #[tokio::test]
+    async fn preflight_runner_observes_only_stderr_and_keeps_typed_timeout() {
+        for stderr in [false, true] {
+            let (progress, observed) = tokio::sync::watch::channel(false);
+            let mut command = Command::new("sh");
+            command.args([
+                "-c",
+                if stderr {
+                    "printf 'fetching git repository' >&2; exit 7"
+                } else {
+                    "printf 'fetching git repository'; exit 7"
+                },
+            ]);
+            let output = super::DISCOVERY_INPUT_PROGRESS
+                .scope(
+                    progress,
+                    run_nix_command_bounded(
+                        &mut command,
+                        "progress fixture",
+                        std::time::Duration::from_secs(2),
+                        0,
+                        0,
+                    ),
+                )
+                .await
+                .unwrap();
+            assert_eq!(*observed.borrow(), stderr);
+            assert_eq!(output.status.code(), Some(7));
+        }
+        let (progress, observed) = tokio::sync::watch::channel(false);
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 60"]);
+        let error = super::DISCOVERY_INPUT_PROGRESS
+            .scope(
+                progress,
+                run_nix_command_bounded(
+                    &mut command,
+                    "timeout fixture",
+                    std::time::Duration::from_millis(50),
+                    16,
+                    16,
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(!*observed.borrow());
+        assert!(
+            error
+                .downcast_ref::<super::BoundedProcessTimeout>()
+                .is_some()
+        );
+        assert!(preflight_discovery_failure_log(&error).contains("cleanup confirmed"));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn preflight_stalled_progress_logger_does_not_delay_child_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("logger-child");
+        let (progress, observed) = tokio::sync::watch::channel(false);
+        let logged = std::sync::atomic::AtomicBool::new(false);
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "printf '%s' \"$$\" > \"$1\"; printf \"unpacking '\" >&2; exec sleep 60",
+                "--",
+            ])
+            .arg(&pid_file);
+        let started = tokio::time::Instant::now();
+        let operation = super::DISCOVERY_INPUT_PROGRESS.scope(
+            progress,
+            run_nix_command_bounded(
+                &mut command,
+                "stalled log fixture",
+                std::time::Duration::from_millis(100),
+                16,
+                16,
+            ),
+        );
+        let error = super::with_discovery_progress(operation, observed, async {
+            logged.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::future::pending::<()>().await;
+        })
+        .await
+        .unwrap_err();
+        assert!(logged.load(std::sync::atomic::Ordering::SeqCst));
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(
+            error
+                .downcast_ref::<super::BoundedProcessTimeout>()
+                .is_some()
+        );
+        let pgid = tokio::fs::read_to_string(pid_file)
+            .await
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(super::process_group_absent(pgid));
+    }
+
+    #[tokio::test]
+    async fn preflight_stalled_cancellation_query_does_not_delay_child_deadline() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 60"]);
+        let started = tokio::time::Instant::now();
+        let error = super::with_discovery_cancellation(
+            run_nix_command_bounded(
+                &mut command,
+                "stalled query fixture",
+                std::time::Duration::from_millis(50),
+                16,
+                16,
+            ),
+            || std::future::pending::<anyhow::Result<bool>>(),
+        )
+        .await
+        .unwrap_err();
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        assert!(
+            error
+                .downcast_ref::<super::BoundedProcessTimeout>()
+                .is_some()
+        );
+    }
+
+    #[tokio::test]
+    async fn preflight_success_requires_final_cancellation_check() {
+        let mut checks = 0;
+        let error = super::with_discovery_cancellation(async { Ok(()) }, || {
+            checks += 1;
+            std::future::ready(Ok(checks > 1))
+        })
+        .await
+        .unwrap_err();
+        assert!(error.is::<super::EvaluationCancelled>());
+        let error = super::with_discovery_cancellation(async { Ok(()) }, || {
+            std::future::pending::<anyhow::Result<bool>>()
+        })
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("final cancellation check timed out")
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn preflight_requested_cancellation_acknowledges_child_and_keeps_terminal_type() {
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("requested-cancel-child");
+        let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let transaction = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let ownership = super::CleanupOwnership {
+            _permit: std::sync::Arc::new(limiter.clone().acquire_owned().await.unwrap()),
+            _transaction: transaction.clone(),
+            deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+        };
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "printf '%s' \"$$\" > \"$1\"; exec sleep 60", "--"])
+            .arg(&pid_file);
+        let error = super::with_discovery_cancellation(
+            super::run_preflight_operation(
+                ownership,
+                run_nix_command_bounded(
+                    &mut command,
+                    "requested cancellation fixture",
+                    std::time::Duration::from_secs(30),
+                    16,
+                    16,
+                ),
+                true,
+            ),
+            || async {
+                loop {
+                    if tokio::fs::read_to_string(&pid_file)
+                        .await
+                        .is_ok_and(|text| text.parse::<i32>().is_ok())
+                    {
+                        return Ok(true);
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            },
+        )
+        .await
+        .unwrap_err();
+        assert!(error.is::<super::EvaluationCancelled>());
+        let pgid = tokio::fs::read_to_string(pid_file)
+            .await
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(super::process_group_absent(pgid));
+        assert_eq!(std::sync::Arc::strong_count(&transaction), 1);
+        assert!(limiter.try_acquire_owned().is_ok());
+    }
+
+    #[tokio::test]
+    async fn preflight_inventory_stalled_write_is_bounded_and_api_cancellable() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        struct WriteGuard<'a>(&'a AtomicBool);
+        impl Drop for WriteGuard<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+        for cancel in [false, true] {
+            let requested = AtomicBool::new(false);
+            let write_dropped = AtomicBool::new(false);
+            let observed_during_write = AtomicBool::new(false);
+            let (started, observed) = tokio::sync::oneshot::channel();
+            let started_at = tokio::time::Instant::now();
+            let operation = super::persist_discovery_inventory(
+                async {
+                    let _guard = WriteGuard(&write_dropped);
+                    started.send(()).unwrap();
+                    std::future::pending::<anyhow::Result<()>>().await
+                },
+                || async {
+                    if cancel {
+                        while !requested.load(Ordering::SeqCst) {
+                            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                        }
+                        observed_during_write
+                            .store(!write_dropped.load(Ordering::SeqCst), Ordering::SeqCst);
+                        Ok(true)
+                    } else {
+                        Ok(false)
+                    }
+                },
+            );
+            let (result, ()) = tokio::join!(operation, async {
+                observed.await.unwrap();
+                requested.store(cancel, Ordering::SeqCst);
+            });
+            assert!(started_at.elapsed() < std::time::Duration::from_secs(2));
+            assert!(write_dropped.load(Ordering::SeqCst));
+            if cancel {
+                assert!(observed_during_write.load(Ordering::SeqCst));
+                assert!(result.unwrap_err().is::<super::EvaluationCancelled>());
+            } else {
+                result.unwrap();
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn preflight_inventory_failure_is_best_effort_but_cancel_check_is_fail_closed() {
+        super::persist_discovery_inventory(
+            async { anyhow::bail!("inventory fixture failed") },
+            || std::future::ready(Ok(false)),
+        )
+        .await
+        .unwrap();
+        let error = super::persist_discovery_inventory(
+            async { anyhow::bail!("inventory fixture failed") },
+            || std::future::pending::<anyhow::Result<bool>>(),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("final cancellation check timed out")
+        );
+    }
+
+    #[test]
+    fn preflight_materialization_lifecycle_error_is_safe_and_keeps_classification() {
+        let root = "ssh://private.invalid/team/root";
+        for message in ["connection reset", "unauthorized", "syntax error"] {
+            let raw = anyhow::anyhow!(
+                "{message}: root {root}; input https://user:secret@private.invalid/locked?token=hidden"
+            );
+            let expected = super::structured_evaluation_failure(anyhow::anyhow!("{raw:#}")).class;
+            let safe = super::sanitize_materialization_failure(raw, root);
+            let failure = super::structured_evaluation_failure(safe);
+            assert_eq!(failure.class, expected);
+            let diagnostic = failure.diagnostic_chain();
+            for secret in ["private.invalid", "secret", "hidden", "team/root"] {
+                assert!(!diagnostic.contains(secret));
+            }
+        }
+        let safe = super::sanitize_materialization_failure(super::EvaluationCancelled.into(), root);
+        assert!(safe.is::<super::EvaluationCancelled>());
+        let late_cause = anyhow::anyhow!("{} unauthorized: {root}", "x".repeat(20_000));
+        let safe = super::sanitize_materialization_failure(late_cause, root);
+        assert_eq!(
+            super::structured_evaluation_failure(safe).class,
+            RetryFailureClass::Authorization
+        );
+        let timeout = anyhow::Error::new(super::BoundedProcessTimeout {
+            process_name: "source fixture".to_string(),
+            deadline: std::time::Duration::from_secs(1),
+            cleanup_confirmed: false,
+        })
+        .context(format!("private root {root}"));
+        let safe = super::sanitize_materialization_failure(timeout, root);
+        assert!(
+            safe.downcast_ref::<super::BoundedProcessTimeout>()
+                .is_some()
+        );
+        assert!(!format!("{safe:#}").contains(root));
+    }
+
     use super::{
         CappedOutput, ConfirmedSystemFailure, EvaluationFinalizeOutcome, EvaluationPlan,
         NixEvalJobResult, NixEvalProcessGuard, SuccessfulSystemResult,
         SystemBuildActivationOutcome, SystemFinalizeOutcome, SystemNotQueuedReason,
-        SystemPersistenceOutcome, activate_evaluated_system_build, finalize_evaluated_system,
-        finalize_evaluation_attempt, mock_eval_stage_delay, persist_evaluated_system, read_capped,
-        resolve_mock_systems, should_mock_policy_fail, summarize_commit_metadata,
+        SystemPersistenceOutcome, activate_evaluated_system_build, captured_config_root,
+        finalize_evaluated_system, finalize_evaluation_attempt, mock_assigned_policy_passes,
+        mock_eval_stage_delay, mock_policy_check, normalize_policy_metadata,
+        persist_evaluated_system, read_capped, record_missing_snapshot_captures,
+        resolve_mock_systems, run_nix_command_bounded, select_mock_system_names,
+        should_mock_policy_fail, summarize_commit_metadata,
     };
     use crate::api::models::CancelEvalOutcome;
     use crate::models::deployment_policies::{
         AssignedPolicy, DeploymentPolicy, PolicyCheckResult, policy_result_key, policy_results_json,
     };
+    use crate::models::evaluation_snapshots::{EvaluatedOption, SafeOptionValue};
     use crate::queries::commits::{
         EvalFailureOutcome, EvalStartOutcome, cancel_commit_evaluation,
         mark_commit_evaluation_failed, mark_commit_evaluation_started,
     };
+    use crate::queries::evaluation_snapshots::{SNAPSHOT_WRITER_LOCK_KEY, lock_snapshot_writer_tx};
     use sqlx::PgPool;
     use std::collections::BTreeMap;
     use std::process::Stdio;
     use tokio::process::Command;
 
+    #[test]
+    fn apply_result_normalizes_into_policy_metadata() {
+        let mut result: NixEvalJobResult = serde_json::from_value(serde_json::json!({
+            "attr": "chesty",
+            "attrPath": ["chesty"],
+            "name": "chesty",
+            "drvPath": "/nix/store/example.drv",
+            "error": null,
+            "cacheStatus": null,
+            "outputs": null,
+            "extraValue": { "architectureGate": true },
+            "meta": { "description": "system" }
+        }))
+        .expect("nix-eval-jobs output should deserialize");
+
+        normalize_policy_metadata(&mut result);
+
+        assert!(result.extra_value.is_none());
+        assert_eq!(
+            result.meta,
+            Some(serde_json::json!({
+                "description": "system",
+                "policies": { "architectureGate": true }
+            }))
+        );
+    }
+
+    #[test]
+    fn apply_result_keeps_policy_and_optional_root_metadata_separate() {
+        let root = serde_json::json!({
+            "kind": "root",
+            "path_components": [],
+            "child_offset": 0,
+            "children": [],
+            "children_truncated": false,
+            "total_children": 0
+        });
+        let mut result: NixEvalJobResult = serde_json::from_value(serde_json::json!({
+            "attr": "chesty",
+            "attrPath": ["chesty"],
+            "name": "chesty",
+            "drvPath": "/nix/store/example.drv",
+            "error": null,
+            "cacheStatus": null,
+            "outputs": null,
+            "extraValue": {
+                "policies": { "architectureGate": true },
+                "configObservationRoot": { "status": "available", "payload": root }
+            },
+            "meta": null
+        }))
+        .expect("nix-eval-jobs output should deserialize");
+
+        normalize_policy_metadata(&mut result);
+
+        assert_eq!(
+            result.meta.as_ref().unwrap()["policies"]["architectureGate"],
+            true
+        );
+        assert_eq!(captured_config_root(&result), Some(root));
+    }
+
     // ── NixEvalProcessGuard regression tests ────────────────────────────
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn recovery_fake_child_uses_actual_parser_and_retains_optional_root() {
+        use tokio::io::AsyncBufReadExt;
+        let success = serde_json::json!({
+            "attr": "healthy", "attrPath": ["healthy"],
+            "drvPath": "/nix/store/healthy.drv",
+            "extraValue": {
+                "policies": {"cfAgentEnabled": true},
+                "configObservationRoot": {"status": "available", "payload": {"children": []}}
+            }
+        })
+        .to_string();
+        let exhausted = serde_json::json!({
+            "attr": "large", "attrPath": ["large"],
+            "error": "evaluation exceeded the memory budget of 4096 MiB (workers * max-memory-size) even when run alone"
+        }).to_string();
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "printf '%s\\n' \"$1\" \"$2\"; exec sleep 60",
+                "--",
+                &success,
+                &exhausted,
+            ])
+            .process_group(0)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let child = command.spawn().unwrap();
+        let mut guard = NixEvalProcessGuard::from_spawned_child(child, "fake evaluator").unwrap();
+        let mut lines = tokio::io::BufReader::new(guard.child_mut().stdout.take().unwrap()).lines();
+        let healthy =
+            super::parse_authoritative_result(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let policy = PolicyCheckResult::from_assigned(
+            "healthy".into(),
+            &healthy.meta.as_ref().unwrap()["policies"],
+            &[],
+        )
+        .unwrap();
+        assert!(policy.meets_requirements);
+        assert_eq!(
+            captured_config_root(&healthy),
+            Some(serde_json::json!({"children": []}))
+        );
+        let large =
+            super::parse_authoritative_result(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert!(!large.fatal, "older DTOs default fatal to false");
+        assert!(super::solo_budget_exhausted(
+            large.error.as_deref().unwrap()
+        ));
+        guard
+            .terminate_until(tokio::time::Instant::now() + std::time::Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert!(super::process_group_absent(guard.pgid()));
+    }
+
+    #[tokio::test]
+    async fn recovery_throw_and_trace_signal_words_remain_configuration_errors() {
+        let error_line = serde_json::json!({
+            "attr": "broken", "attrPath": ["broken"],
+            "error": "was killed by signal 9", "fatal": false,
+        })
+        .to_string();
+        let mut command = Command::new("sh");
+        command.args(["-c", "printf '%s\\n' \"$1\"; printf '%s\\n' 'trace: evaluation worker got killed by SIGKILL, maybe memory limit reached?' >&2; exit 0", "--", &error_line]);
+        let output = run_nix_command_bounded(
+            &mut command,
+            "literal error fixture",
+            std::time::Duration::from_secs(2),
+            4096,
+            4096,
+        )
+        .await
+        .unwrap();
+        assert!(output.status.success());
+        assert!(output.stderr.diagnostic_excerpt(500).contains("trace:"));
+        let result = super::parse_authoritative_result(
+            std::str::from_utf8(&output.stdout.bytes).unwrap().trim(),
+        )
+        .unwrap();
+        assert_eq!(result.error.as_deref(), Some("was killed by signal 9"));
+        assert!(!result.fatal);
+        assert!(!super::solo_budget_exhausted(
+            result.error.as_deref().unwrap()
+        ));
+        let check = PolicyCheckResult::for_evaluation_terminal(
+            "broken".into(),
+            &[],
+            super::EvaluationTerminalOutcome::ConfirmedFailure,
+            result.error.as_deref().unwrap(),
+        );
+        assert!(!check.meets_requirements);
+        assert!(
+            check.failed_policies.is_empty(),
+            "Nix error is not a policy failure"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn recovery_preparation_abort_retains_runner_lease_until_group_acknowledged() {
+        use tokio::time::{Duration, Instant};
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("preparation-pgid");
+        let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let transaction = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let cleanup = super::CleanupOwnership {
+            _permit: std::sync::Arc::new(limiter.clone().acquire_owned().await.unwrap()),
+            _transaction: transaction.clone(),
+            deadline: Instant::now() + Duration::from_secs(10),
+        };
+        let owned_pid_file = pid_file.clone();
+        let mut preparations = tokio::task::JoinSet::new();
+        preparations.spawn(super::EVALUATION_CLEANUP.scope(cleanup, async move {
+            let mut command = Command::new("sh");
+            command
+                .args(["-c", "printf '%s' \"$$\" > \"$1\"; exec sleep 60", "--"])
+                .arg(owned_pid_file);
+            run_nix_command_bounded(
+                &mut command,
+                "owned preparation fixture",
+                Duration::from_secs(60),
+                4096,
+                4096,
+            )
+            .await?;
+            Ok::<(), anyhow::Error>(())
+        }));
+        let pgid: i32 = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(pid) = tokio::fs::read_to_string(&pid_file).await {
+                    if let Ok(pid) = pid.parse() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(!super::process_group_absent(pgid));
+        assert!(std::sync::Arc::strong_count(&transaction) > 1);
+        assert!(limiter.clone().try_acquire_owned().is_err());
+        let result =
+            super::abort_preparations_until(&mut preparations, &transaction, Instant::now()).await;
+        // A ready acknowledgement can win even at an expired Tokio timeout.
+        // Actual group absence, not elapsed time, authorizes lease release.
+        if result.is_ok() {
+            assert!(super::process_group_absent(pgid));
+            assert_eq!(std::sync::Arc::strong_count(&transaction), 1);
+        }
+        if !super::process_group_absent(pgid) {
+            assert!(result.is_err());
+            assert!(std::sync::Arc::strong_count(&transaction) > 1);
+            assert!(limiter.clone().try_acquire_owned().is_err());
+        }
+        let permit = tokio::time::timeout(Duration::from_secs(3), limiter.acquire_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(super::process_group_absent(pgid));
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while std::sync::Arc::strong_count(&transaction) != 1 {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(permit);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn recovery_two_worker_pressure_selects_only_unresolved_verified_source() {
+        use super::evaluation_pressure::{
+            CgroupSample, MemoryEvents, MemoryLimit, PressureHysteresis, ProcessKey, ProcessSample,
+            PsiLine, PsiSample, ResourceSample, SignalReason, StallDecision,
+        };
+        use tokio::io::AsyncBufReadExt;
+        use tokio::time::{Duration, Instant};
+        let successful = serde_json::json!({
+            "attr": "healthy", "attrPath": ["healthy"], "drvPath": "/nix/store/healthy.drv",
+            "extraValue": {"policies": {"cfAgentEnabled": true}}
+        })
+        .to_string();
+        let mut command = Command::new("sh");
+        command
+            .args([
+                "-c",
+                "(printf '%s\\n' \"$1\") & sleep 60 & wait",
+                "--",
+                &successful,
+            ])
+            .process_group(0)
+            .stdout(Stdio::piped());
+        let child = command.spawn().unwrap();
+        let mut guard = NixEvalProcessGuard::from_spawned_child(child, "two fake workers").unwrap();
+        let mut lines = tokio::io::BufReader::new(guard.child_mut().stdout.take().unwrap()).lines();
+        let result =
+            super::parse_authoritative_result(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        let check = PolicyCheckResult::from_assigned(
+            "healthy".into(),
+            &result.meta.unwrap()["policies"],
+            &[],
+        )
+        .unwrap();
+        assert!(check.meets_requirements);
+
+        let psi = PsiLine {
+            avg10: 2.0,
+            total_us: 900_000,
+            delta_us: Some(600_000),
+        };
+        let quiet = PsiLine {
+            avg10: 0.0,
+            total_us: 0,
+            delta_us: Some(0),
+        };
+        let mut sample = ResourceSample {
+            now: Instant::now(),
+            interval: Some(Duration::from_secs(30)),
+            complete: true,
+            ticks_per_second: Some(100),
+            worker_replacements: Some(1),
+            processes: vec![ProcessSample {
+                key: ProcessKey {
+                    pid: guard.pgid() as u32,
+                    start_ticks: 1,
+                },
+                parent_pid: std::process::id(),
+                state: 'S',
+                cpu_ticks: 0,
+                cpu_delta_ticks: Some(0),
+                rss_bytes: 95,
+            }],
+            cgroups: vec![CgroupSample {
+                index: 0,
+                memory_current: 95,
+                memory_high: MemoryLimit::Bytes(100),
+                memory_max: MemoryLimit::Unlimited,
+                events: MemoryEvents::default(),
+                event_delta: Some(MemoryEvents {
+                    high: 1,
+                    ..Default::default()
+                }),
+                memory_psi: PsiSample {
+                    some: psi,
+                    full: psi,
+                },
+                io_psi: PsiSample {
+                    some: quiet,
+                    full: quiet,
+                },
+            }],
+        };
+        let mut pressure = PressureHysteresis::new();
+        for _ in 0..2 {
+            assert_eq!(
+                pressure.update(&sample, 1, Duration::from_secs(180)),
+                StallDecision::Observe
+            );
+            sample.now += Duration::from_secs(30);
+        }
+        assert_eq!(
+            pressure.update(&sample, 1, Duration::from_secs(180)),
+            StallDecision::Recover(SignalReason::WorkerReplacement)
+        );
+        guard
+            .terminate_until(Instant::now() + Duration::from_secs(2))
+            .await
+            .unwrap();
+        let mut controller = super::RecoveryController::new();
+        controller.stalled();
+        let selected = controller.next(&["remaining".into()]).unwrap();
+        let verified_source = "path:/nix/store/source?narHash=sha256-example";
+        let expression = super::build_nix_eval_expression_for_source_configurations(
+            verified_source,
+            "exact-revision",
+            &selected,
+            &Default::default(),
+        );
+        assert!(expression.contains(verified_source));
+        assert!(expression.contains("requestedRevision = \"exact-revision\""));
+        assert!(expression.contains("configurationNames = [ \"remaining\" ]"));
+        assert!(!expression.contains("\"healthy\""));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn recovery_unconfirmed_cleanup_retains_permit_until_reaper_acknowledges_group() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec sleep 60"]).process_group(0);
+        let child = command.spawn().unwrap();
+        let mut guard =
+            NixEvalProcessGuard::from_spawned_child(child, "cleanup ownership test").unwrap();
+        let pgid = guard.pgid();
+        let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let transaction = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        guard.cleanup_ownership = Some(super::CleanupOwnership {
+            _permit: std::sync::Arc::new(limiter.clone().acquire_owned().await.unwrap()),
+            _transaction: transaction.clone(),
+            deadline: tokio::time::Instant::now(),
+        });
+        // Inject a signal already issued but not yet effective. This exercises
+        // the same ownership branch as D-state without manufacturing kernel I/O.
+        guard.signal_sent = true;
+        assert!(
+            guard
+                .terminate_until(tokio::time::Instant::now())
+                .await
+                .is_err()
+        );
+        drop(guard);
+        assert!(limiter.clone().try_acquire_owned().is_err());
+        assert_eq!(std::sync::Arc::strong_count(&transaction), 2);
+        // SAFETY: This test owns the live positive process group exclusively.
+        assert_eq!(unsafe { libc::killpg(pgid, libc::SIGKILL) }, 0);
+        let permit =
+            tokio::time::timeout(std::time::Duration::from_secs(3), limiter.acquire_owned())
+                .await
+                .unwrap()
+                .unwrap();
+        assert!(super::process_group_absent(pgid));
+        super::confirm_preparation_leases_until(
+            &transaction,
+            tokio::time::Instant::now() + std::time::Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        drop(permit);
+    }
+
+    #[test]
+    fn recovery_typed_failure_preserves_partial_plan_and_does_not_disclose_source() {
+        let plan = EvaluationPlan {
+            results: Vec::new(),
+            policy_checks: Vec::new(),
+            successful_systems: Vec::new(),
+            confirmed_failures: Vec::new(),
+            evaluation_snapshots: Default::default(),
+            snapshot_capture_failures: Default::default(),
+            flake_output_snapshot: Some(serde_json::json!({"available": true})),
+            had_system_eval_errors: false,
+            force_build_job_insert_failure: false,
+        };
+        let source = super::PartialEvaluationResourceFailure {
+            completed_systems: vec!["healthy".into()],
+            remaining_systems: vec!["large".into()],
+            resource_failures: vec![super::ConfigurationResourceFailure {
+                system_name: "large".into(),
+                error: "private diagnostic".into(),
+            }],
+            unacknowledged_completions: Vec::new(),
+            retained_plan: Some(Box::new(plan)),
+            diagnostic: "bounded resource work exhausted".into(),
+        };
+        let failure = super::structured_evaluation_failure(anyhow::Error::new(source));
+        assert_eq!(
+            failure.class,
+            crate::models::retry_policy::RetryFailureClass::ResourceFailure
+        );
+        assert_eq!(
+            failure.resource_failure().unwrap().completed_systems,
+            ["healthy"]
+        );
+        assert!(
+            failure
+                .partial_plan
+                .as_ref()
+                .unwrap()
+                .flake_output_snapshot
+                .is_some()
+        );
+        assert!(!format!("{failure:?}").contains("private diagnostic"));
+    }
+
+    fn unacknowledged_completion_fixture() -> super::UnacknowledgedCompletion {
+        let name = "private-system-identity".to_string();
+        let check = PolicyCheckResult::from_assigned(
+            name.clone(),
+            &serde_json::json!({"cfAgentEnabled": false}),
+            &[],
+        )
+        .unwrap();
+        super::UnacknowledgedCompletion {
+            result: SuccessfulSystemResult {
+                system_name: name,
+                derivation_target: "git+https://private-user:private-token@example.test/repo?rev=exact#nixosConfigurations.private-system-identity".into(),
+                drv_path: "/nix/store/private-identity.drv".into(),
+                expected_store_path: None, cf_agent_enabled: Some(false), build_eligible: true,
+            },
+            policy_check: check,
+            snapshot: Some(Vec::new()), snapshot_capture_failure: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn recovery_returned_commit_error_is_deferred_until_durable_proof() {
+        let candidate = unacknowledged_completion_fixture();
+        let mut commit_sent = false;
+        // Unlike cancellation of a pending future, this operation RETURNS Err
+        // after the injected server-side COMMIT boundary.
+        let persisted = async {
+            commit_sent = true;
+            Err::<(), anyhow::Error>(super::persistence_failure(anyhow::anyhow!(
+                "connection reset after COMMIT"
+            )))
+        }
+        .await;
+        assert!(commit_sent);
+        let deferred = super::defer_persistence_failure(persisted.unwrap_err()).unwrap();
+        assert!(
+            deferred
+                .downcast_ref::<super::EvaluationPersistenceFailure>()
+                .is_some()
+        );
+        assert!(!super::acknowledgement_continuation_allowed(1, 0, false));
+        assert!(super::acknowledgement_continuation_allowed(1, 1, false));
+        assert!(!super::acknowledgement_continuation_allowed(1, 1, true));
+        assert!(!super::acknowledgement_continuation_allowed(0, 0, false));
+        let mut seen = Default::default();
+        let mut successes = Vec::new();
+        let mut checks = Vec::new();
+        let mut results = Vec::new();
+        let mut snapshots = Default::default();
+        let mut gaps = Default::default();
+        assert!(super::retain_reconciled_completion(
+            candidate,
+            true,
+            &mut seen,
+            &mut successes,
+            &mut checks,
+            &mut results,
+            &mut snapshots,
+            &mut gaps
+        ));
+        assert_eq!(successes.len(), 1);
+        assert_eq!(snapshots.len(), 1);
+    }
+
+    #[test]
+    fn recovery_returned_lineage_auth_and_unrelated_errors_are_not_resource_adapted() {
+        for error in [
+            anyhow::Error::new(super::EvaluationCancelled),
+            anyhow::Error::new(super::EvaluationSuperseded),
+            super::persistence_failure(anyhow::Error::new(super::EvaluationCancelled)),
+            super::persistence_failure(anyhow::Error::new(super::EvaluationSuperseded)),
+            super::persistence_failure(anyhow::anyhow!("permission denied")),
+            anyhow::anyhow!("unrelated collection parser failure"),
+        ] {
+            assert!(super::defer_persistence_failure(error).is_err());
+        }
+    }
+
+    #[tokio::test]
+    async fn resource_terminal_preparation_expired_admission_does_not_poll_borrowed_operation() {
+        // connect_lazy allocates pool configuration without opening a database.
+        let pool = sqlx::PgPool::connect_lazy("postgresql://unused@127.0.0.1/unused").unwrap();
+        let mut polled = false;
+        let operation = async {
+            polled = true;
+            Ok::<_, anyhow::Error>(())
+        };
+        let error = super::run_resource_terminal_preparation_until(
+            &pool,
+            operation,
+            tokio::time::Instant::now(),
+        )
+        .await
+        .unwrap_err();
+        assert!(!polled, "preparation cannot run before heavy-Nix admission");
+        assert!(error.to_string().contains("before admission"));
+    }
+
+    #[tokio::test]
+    async fn discovery_public_preflight_rejects_invalid_budget_before_admission() {
+        let pool = sqlx::PgPool::connect_lazy("postgresql://unused@127.0.0.1/unused").unwrap();
+        for budget in [0, 1801] {
+            let config = crate::config::ServerConfig {
+                eval_discovery_timeout_secs: budget,
+                ..Default::default()
+            };
+            let error = super::run_configuration_discovery_preflight(
+                &pool,
+                "path:/unused-source?narHash=sha256-unused",
+                None,
+                &config,
+            )
+            .await
+            .unwrap_err();
+            assert!(error.to_string().contains("eval_discovery_timeout_secs"));
+        }
+    }
+
+    #[tokio::test]
+    async fn discovery_expired_admission_and_nested_scope_do_not_poll_operation() {
+        use super::{CleanupOwnership, EVALUATION_CLEANUP, run_heavy_nix_preflight_until};
+        use tokio::time::{Duration, Instant};
+        let pool = sqlx::PgPool::connect_lazy("postgresql://unused@127.0.0.1/unused").unwrap();
+        let mut polled = false;
+        let error = run_heavy_nix_preflight_until(
+            &pool,
+            async {
+                polled = true;
+                Ok::<_, anyhow::Error>(())
+            },
+            Instant::now(),
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(!polled);
+        assert!(error.to_string().contains("before admission"));
+        let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let transaction = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let ownership = CleanupOwnership {
+            _permit: std::sync::Arc::new(limiter.clone().acquire_owned().await.unwrap()),
+            _transaction: transaction.clone(),
+            deadline: Instant::now() + Duration::from_secs(2),
+        };
+        let error = EVALUATION_CLEANUP
+            .scope(
+                ownership,
+                run_heavy_nix_preflight_until(
+                    &pool,
+                    async {
+                        polled = true;
+                        Ok::<_, anyhow::Error>(())
+                    },
+                    Instant::now() + Duration::from_secs(2),
+                    true,
+                ),
+            )
+            .await
+            .unwrap_err();
+        assert!(!polled);
+        assert!(error.to_string().contains("nested"));
+        assert_eq!(std::sync::Arc::strong_count(&transaction), 1);
+        assert!(limiter.try_acquire_owned().is_ok());
+    }
+
+    // These tests use sqlx-created disposable databases only. The official
+    // server-regressions sandbox supplies PostgreSQL; normal package tests keep
+    // them ignored. Never use the shared live-database test_pool helper here.
+    mod discovery_database_tests {
+        use super::super::{
+            EVALUATION_CLEANUP, HEAVY_NIX_ADVISORY_LOCK, heavy_nix_limiter,
+            run_heavy_nix_preflight_until,
+        };
+        use super::*;
+        use tokio::time::{Duration, Instant};
+
+        async fn advisory_available(pool: &PgPool) -> bool {
+            let mut transaction = pool.begin().await.unwrap();
+            let acquired = sqlx::query_scalar::<_, bool>("SELECT pg_try_advisory_xact_lock($1)")
+                .bind(HEAVY_NIX_ADVISORY_LOCK)
+                .fetch_one(&mut *transaction)
+                .await
+                .unwrap();
+            transaction.rollback().await.unwrap();
+            acquired
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "official server-regressions sandbox PostgreSQL only"]
+        #[cfg(unix)]
+        async fn discovery_api_cancellation_stops_active_child_and_finalizes_original_attempt(
+            pool: PgPool,
+        ) {
+            let flake_id = insert_throwaway_flake(&pool).await;
+            let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+            let attempt = start_eval(&pool, commit_id).await;
+            let directory = tempfile::tempdir().unwrap();
+            let pid_file = directory.path().join("api-cancel-child");
+            let worker_pid_file = pid_file.clone();
+            let worker_pool = pool.clone();
+            let worker = tokio::spawn(async move {
+                super::super::run_cancellable_discovery_preflight_until(
+                    &worker_pool,
+                    commit_id,
+                    async {
+                        let mut command = Command::new("sh");
+                        command
+                            .args(["-c", "printf '%s' \"$$\" > \"$1\"; exec sleep 60", "--"])
+                            .arg(worker_pid_file);
+                        run_nix_command_bounded(
+                            &mut command,
+                            "API cancellation fixture",
+                            Duration::from_secs(30),
+                            16,
+                            16,
+                        )
+                        .await
+                    },
+                    Instant::now() + Duration::from_secs(30),
+                )
+                .await
+            });
+            let pgid: i32 = tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    if let Ok(text) = tokio::fs::read_to_string(&pid_file).await {
+                        if let Ok(pid) = text.parse() {
+                            break pid;
+                        }
+                    }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(!super::super::process_group_absent(pgid));
+            assert!(!advisory_available(&pool).await);
+            assert!(heavy_nix_limiter().try_acquire_owned().is_err());
+            cancel_commit_evaluation(&pool, commit_id).await.unwrap();
+            let error = tokio::time::timeout(Duration::from_secs(6), worker)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap_err();
+            assert!(error.is::<super::super::EvaluationCancelled>());
+            let capacity =
+                tokio::time::timeout(Duration::from_secs(3), heavy_nix_limiter().acquire_owned())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(super::super::process_group_absent(pgid));
+            assert!(advisory_available(&pool).await);
+            drop(capacity);
+            let outcome =
+                crate::queries::commits::finalize_requested_commit_evaluation_cancellation(
+                    &pool, commit_id, attempt,
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                outcome,
+                crate::queries::commits::EvalCancellationOutcome::Cancelled
+            );
+            let terminal: bool = sqlx::query_scalar("SELECT c.evaluation_status = 'cancelled' AND a.status = 'cancelled' AND a.completed_at IS NOT NULL FROM commits c JOIN evaluation_attempts a ON a.commit_id = c.id AND a.attempt_number = $2 WHERE c.id = $1")
+                .bind(commit_id).bind(attempt).fetch_one(&pool).await.unwrap();
+            assert!(terminal);
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "official server-regressions sandbox PostgreSQL only"]
+        async fn discovery_api_cancellation_interrupts_advisory_and_capacity_admission(
+            pool: PgPool,
+        ) {
+            for (bulk, block_capacity) in
+                [(false, false), (false, true), (true, false), (true, true)]
+            {
+                let flake_id = insert_throwaway_flake(&pool).await;
+                let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+                let attempt = start_eval(&pool, commit_id).await;
+                let mut blocker = pool.begin().await.unwrap();
+                let capacity = if block_capacity {
+                    Some(heavy_nix_limiter().acquire_owned().await.unwrap())
+                } else {
+                    sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                        .bind(HEAVY_NIX_ADVISORY_LOCK)
+                        .execute(&mut *blocker)
+                        .await
+                        .unwrap();
+                    None
+                };
+                let worker_pool = pool.clone();
+                let worker = tokio::spawn(async move {
+                    if bulk {
+                        super::super::acquire_bulk_evaluation_admission_until(
+                            &worker_pool,
+                            commit_id,
+                            Instant::now() + Duration::from_secs(30),
+                        )
+                        .await
+                        .map(|_ownership| ())
+                    } else {
+                        super::super::run_cancellable_discovery_preflight_until::<()>(
+                            &worker_pool,
+                            commit_id,
+                            async { panic!("cancelled admission must not start discovery") },
+                            Instant::now() + Duration::from_secs(30),
+                        )
+                        .await
+                    }
+                });
+                tokio::time::timeout(Duration::from_secs(5), async {
+                    loop {
+                        let admitted_or_waiting = if block_capacity {
+                            !advisory_available(&pool).await
+                        } else {
+                            sqlx::query_scalar::<_, bool>("SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory' AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) AND classid::bigint = $1 AND objid::bigint = $2 AND NOT granted)")
+                                .bind(HEAVY_NIX_ADVISORY_LOCK >> 32)
+                                .bind(HEAVY_NIX_ADVISORY_LOCK & 0xffff_ffff)
+                                .fetch_one(&pool).await.unwrap()
+                        };
+                        if admitted_or_waiting { break; }
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                }).await.unwrap();
+                cancel_commit_evaluation(&pool, commit_id).await.unwrap();
+                let error = tokio::time::timeout(Duration::from_secs(6), worker)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap_err();
+                assert!(error.is::<super::super::EvaluationCancelled>());
+                blocker.rollback().await.unwrap();
+                drop(capacity);
+                tokio::time::timeout(Duration::from_secs(3), async {
+                    while !advisory_available(&pool).await {
+                        tokio::time::sleep(Duration::from_millis(10)).await;
+                    }
+                })
+                .await
+                .unwrap();
+                assert!(heavy_nix_limiter().try_acquire_owned().is_ok());
+                crate::queries::commits::finalize_requested_commit_evaluation_cancellation(
+                    &pool, commit_id, attempt,
+                )
+                .await
+                .unwrap();
+            }
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "official server-regressions sandbox PostgreSQL only"]
+        async fn bulk_admission_preserves_owned_leases_and_bounds_pool_wait(pool: PgPool) {
+            let flake_id = insert_throwaway_flake(&pool).await;
+            let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+            start_eval(&pool, commit_id).await;
+            let (transaction, capacity) = super::super::acquire_bulk_evaluation_admission_until(
+                &pool,
+                commit_id,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await
+            .unwrap();
+            // No scoped helper released either lease or reacquired a nested lock.
+            assert!(!advisory_available(&pool).await);
+            assert!(heavy_nix_limiter().try_acquire_owned().is_err());
+            transaction.commit().await.unwrap();
+            assert!(advisory_available(&pool).await);
+            assert!(heavy_nix_limiter().try_acquire_owned().is_err());
+            drop(capacity);
+            assert!(heavy_nix_limiter().try_acquire_owned().is_ok());
+
+            // Exhaust only this disposable test database's new one-connection
+            // pool. Both admission and cancellation queries now stall on pool
+            // acquisition, so only the independent admission ceiling can finish.
+            let limited = sqlx::postgres::PgPoolOptions::new()
+                .max_connections(1)
+                .connect_with((*pool.connect_options()).clone())
+                .await
+                .unwrap();
+            let connection = limited.acquire().await.unwrap();
+            let started = Instant::now();
+            let error = super::super::acquire_bulk_evaluation_admission_until(
+                &limited,
+                commit_id,
+                started + Duration::from_millis(50),
+            )
+            .await
+            .unwrap_err();
+            assert!(
+                error
+                    .to_string()
+                    .contains("bulk evaluation admission timed out")
+            );
+            assert!(started.elapsed() < Duration::from_secs(1));
+            assert!(heavy_nix_limiter().try_acquire_owned().is_ok());
+            drop(connection);
+            limited.close().await;
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "official server-regressions sandbox PostgreSQL only"]
+        async fn discovery_advisory_precedes_semaphore_and_releases_before_bulk(pool: PgPool) {
+            let mut blocker = pool.begin().await.unwrap();
+            sqlx::query("SELECT pg_advisory_xact_lock($1)")
+                .bind(HEAVY_NIX_ADVISORY_LOCK)
+                .execute(&mut *blocker)
+                .await
+                .unwrap();
+            let (started, mut observed) = tokio::sync::oneshot::channel();
+            let worker_pool = pool.clone();
+            let worker = tokio::spawn(async move {
+                run_heavy_nix_preflight_until(
+                    &worker_pool,
+                    async {
+                        assert_eq!(heavy_nix_limiter().available_permits(), 0);
+                        assert!(!advisory_available(&worker_pool).await);
+                        started.send(()).unwrap();
+                        Ok(())
+                    },
+                    Instant::now() + Duration::from_secs(10),
+                    true,
+                )
+                .await
+            });
+            tokio::time::timeout(Duration::from_secs(5), async {
+                loop {
+                    let waiting: bool = sqlx::query_scalar(
+                        "SELECT EXISTS (SELECT 1 FROM pg_locks WHERE locktype = 'advisory'
+                         AND database = (SELECT oid FROM pg_database WHERE datname = current_database())
+                         AND classid::bigint = $1 AND objid::bigint = $2 AND NOT granted)",
+                    )
+                    .bind(HEAVY_NIX_ADVISORY_LOCK >> 32)
+                    .bind(HEAVY_NIX_ADVISORY_LOCK & 0xffff_ffff)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+                    if waiting { break; }
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            }).await.unwrap();
+            // An advisory waiter MUST NOT consume in-process capacity.
+            let capacity = heavy_nix_limiter().try_acquire_owned().unwrap();
+            blocker.rollback().await.unwrap();
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while advisory_available(&pool).await {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            assert!(matches!(
+                observed.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            drop(capacity);
+            observed.await.unwrap();
+            worker.await.unwrap().unwrap();
+            assert!(advisory_available(&pool).await);
+            assert!(heavy_nix_limiter().try_acquire_owned().is_ok());
+            // A second admission completes instead of retaining a nested lease.
+            run_heavy_nix_preflight_until(
+                &pool,
+                async { Ok(()) },
+                Instant::now() + Duration::from_secs(2),
+                true,
+            )
+            .await
+            .unwrap();
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "official server-regressions sandbox PostgreSQL only"]
+        #[cfg(unix)]
+        async fn discovery_quarantine_retains_real_advisory_and_capacity(pool: PgPool) {
+            let (group_sent, group_received) = tokio::sync::oneshot::channel();
+            let error = run_heavy_nix_preflight_until(
+                &pool,
+                async {
+                    let mut command = Command::new("sh");
+                    command.args(["-c", "exec sleep 60"]).process_group(0);
+                    let mut guard = NixEvalProcessGuard::from_spawned_child(
+                        command.spawn().unwrap(),
+                        "quarantined discovery fixture",
+                    )
+                    .unwrap();
+                    guard.cleanup_ownership = Some(EVALUATION_CLEANUP.with(Clone::clone));
+                    group_sent.send(guard.pgid()).unwrap();
+                    // Model a signal that has not become effective, as with a
+                    // D-state child. Only this fixture's explicit kill ends it.
+                    guard.signal_sent = true;
+                    guard
+                        .terminate_until(Instant::now())
+                        .await
+                        .map_err(|cleanup_error| {
+                            anyhow::Error::new(super::super::BoundedProcessTimeout {
+                                process_name: "quarantined discovery fixture".to_string(),
+                                deadline: Duration::from_millis(100),
+                                cleanup_confirmed: false,
+                            })
+                            .context(cleanup_error)
+                        })?;
+                    Ok::<_, anyhow::Error>(())
+                },
+                Instant::now() + Duration::from_millis(100),
+                true,
+            )
+            .await
+            .unwrap_err();
+            let pgid = group_received.await.unwrap();
+            assert!(error.to_string().contains("cleanup unconfirmed"));
+            assert!(
+                error
+                    .downcast_ref::<super::super::BoundedProcessTimeout>()
+                    .is_some()
+            );
+            assert!(
+                super::super::preflight_discovery_failure_log(&error)
+                    .contains("cleanup pending; heavy Nix locks retained")
+            );
+            assert!(!super::super::process_group_absent(pgid));
+            assert!(!advisory_available(&pool).await);
+            assert!(heavy_nix_limiter().try_acquire_owned().is_err());
+            // SAFETY: This fixture exclusively owns the positive live PGID.
+            assert_eq!(unsafe { libc::killpg(pgid, libc::SIGKILL) }, 0);
+            let capacity =
+                tokio::time::timeout(Duration::from_secs(5), heavy_nix_limiter().acquire_owned())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert!(super::super::process_group_absent(pgid));
+            tokio::time::timeout(Duration::from_secs(5), async {
+                while !advisory_available(&pool).await {
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            drop(capacity);
+        }
+
+        #[sqlx::test(migrations = "./migrations")]
+        #[ignore = "official server-regressions sandbox PostgreSQL only"]
+        async fn discovery_failures_and_cancellation_terminalize_exact_attempt(pool: PgPool) {
+            use crate::queries::commits::{
+                EvalFailureOutcome, finalize_requested_commit_evaluation_cancellation,
+            };
+            sqlx::query("UPDATE automatic_retry_policy SET max_evaluation_retries = 1, backoff_seconds = 10, transient_only = TRUE WHERE id = 1")
+                .execute(&pool).await.unwrap();
+            for (script, budget, expected_status) in [
+                ("exec sleep 60", Duration::from_millis(100), "pending"),
+                (
+                    "printf 'syntax error in fixture' >&2; exit 1",
+                    Duration::from_secs(2),
+                    "failed",
+                ),
+            ] {
+                let flake_id = insert_throwaway_flake(&pool).await;
+                let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+                let attempt = start_eval(&pool, commit_id).await;
+                let error = run_heavy_nix_preflight_until(
+                    &pool,
+                    async {
+                        let mut command = Command::new("sh");
+                        command.args(["-c", script]);
+                        let output = run_nix_command_bounded(
+                            &mut command,
+                            "terminal discovery fixture",
+                            budget,
+                            4096,
+                            4096,
+                        )
+                        .await?;
+                        if !output.status.success() {
+                            anyhow::bail!("{}", output.stderr.diagnostic_excerpt(4096));
+                        }
+                        Ok(())
+                    },
+                    Instant::now() + budget,
+                    true,
+                )
+                .await
+                .unwrap_err();
+                let failure = super::super::structured_evaluation_failure(error);
+                let outcome = mark_commit_evaluation_failed(
+                    &pool,
+                    commit_id,
+                    &failure.diagnostic_chain(),
+                    attempt,
+                    failure.class,
+                )
+                .await
+                .unwrap();
+                assert_eq!(
+                    outcome,
+                    if expected_status == "pending" {
+                        EvalFailureOutcome::RetryScheduled
+                    } else {
+                        EvalFailureOutcome::PermanentlyFailed
+                    }
+                );
+                let status: String =
+                    sqlx::query_scalar("SELECT evaluation_status FROM commits WHERE id = $1")
+                        .bind(commit_id)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                assert_eq!(status, expected_status);
+                let terminal: bool = sqlx::query_scalar("SELECT status = 'failed' AND completed_at IS NOT NULL FROM evaluation_attempts WHERE commit_id = $1 AND attempt_number = $2")
+                    .bind(commit_id).bind(attempt).fetch_one(&pool).await.unwrap();
+                assert!(terminal);
+            }
+            let flake_id = insert_throwaway_flake(&pool).await;
+            let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+            let attempt = start_eval(&pool, commit_id).await;
+            cancel_commit_evaluation(&pool, commit_id).await.unwrap();
+            finalize_requested_commit_evaluation_cancellation(&pool, commit_id, attempt)
+                .await
+                .unwrap();
+            let terminal: bool = sqlx::query_scalar("SELECT c.evaluation_status = 'cancelled' AND a.status = 'cancelled' AND a.completed_at IS NOT NULL FROM commits c JOIN evaluation_attempts a ON a.commit_id = c.id AND a.attempt_number = $2 WHERE c.id = $1")
+                .bind(commit_id).bind(attempt).fetch_one(&pool).await.unwrap();
+            assert!(terminal);
+        }
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn discovery_scope_timeout_acknowledges_reap_before_next_admission() {
+        use tokio::time::{Duration, Instant};
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("discovery-pgid");
+        let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let transaction = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let started = Instant::now();
+        let deadline = started + Duration::from_millis(150);
+        let ownership = super::CleanupOwnership {
+            _permit: std::sync::Arc::new(limiter.clone().acquire_owned().await.unwrap()),
+            _transaction: transaction.clone(),
+            deadline,
+        };
+        let error = super::run_preflight_operation(
+            ownership,
+            async {
+                assert!(limiter.clone().try_acquire_owned().is_err());
+                assert!(std::sync::Arc::strong_count(&transaction) > 1);
+                let mut command = Command::new("sh");
+                command
+                    .args(["-c", "printf '%s' \"$$\" > \"$1\"; exec sleep 60", "--"])
+                    .arg(&pid_file);
+                run_nix_command_bounded(
+                    &mut command,
+                    "discovery timeout fixture",
+                    Duration::from_secs(60),
+                    64,
+                    64,
+                )
+                .await
+            },
+            true,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(error.to_string().contains("cleanup confirmed=true"));
+        assert!(
+            started.elapsed()
+                <= Duration::from_millis(150) + super::BOUNDED_PROCESS_CLEANUP_ACK_TIMEOUT
+        );
+        let pgid: i32 = tokio::fs::read_to_string(pid_file)
+            .await
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(super::process_group_absent(pgid));
+        // SAFETY: waitpid only probes the fixture's positive direct-child PID.
+        assert_eq!(
+            unsafe { libc::waitpid(pgid, std::ptr::null_mut(), libc::WNOHANG) },
+            -1
+        );
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        super::confirm_preparation_leases_until(
+            &transaction,
+            deadline + super::BOUNDED_PROCESS_CLEANUP_ACK_TIMEOUT,
+        )
+        .await
+        .unwrap();
+        let next = limiter.acquire_owned().await.unwrap();
+        assert_eq!(std::sync::Arc::strong_count(&transaction), 1);
+        drop(next);
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn discovery_scope_completion_and_nix_error_release_before_bulk_admission() {
+        use tokio::time::{Duration, Instant};
+        for exit_code in [0, 7] {
+            let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+            let transaction = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+            let ownership = super::CleanupOwnership {
+                _permit: std::sync::Arc::new(limiter.clone().acquire_owned().await.unwrap()),
+                _transaction: transaction.clone(),
+                deadline: Instant::now() + Duration::from_secs(2),
+            };
+            let output = super::run_preflight_operation(
+                ownership,
+                async {
+                    let mut command = Command::new("sh");
+                    command.args([
+                        "-c",
+                        "printf '%s' '[\"fixture\"]'; printf '%s' 'genuine nix error' >&2; exit \"$1\"",
+                        "--",
+                        &exit_code.to_string(),
+                    ]);
+                    let output = run_nix_command_bounded(
+                        &mut command,
+                        "discovery completion fixture",
+                        Duration::from_secs(2),
+                        4096,
+                        4096,
+                    )
+                    .await?;
+                    if !output.status.success() {
+                        anyhow::bail!("{}", output.stderr.diagnostic_excerpt(4096));
+                    }
+                    Ok(output)
+                },
+                true,
+            )
+            .await;
+            if exit_code == 0 {
+                assert_eq!(output.unwrap().stdout.bytes, b"[\"fixture\"]");
+            } else {
+                assert_eq!(output.unwrap_err().to_string(), "genuine nix error");
+            }
+            assert!(super::EVALUATION_CLEANUP.try_with(|_| ()).is_err());
+            super::confirm_preparation_leases_until(
+                &transaction,
+                Instant::now() + Duration::from_secs(1),
+            )
+            .await
+            .unwrap();
+            assert!(limiter.try_acquire_owned().is_ok());
+        }
+    }
+
+    #[tokio::test]
+    async fn resource_terminal_preparation_scope_keeps_original_execution_deadline() {
+        use tokio::time::{Duration, Instant};
+        let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let transaction = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let ownership = super::CleanupOwnership {
+            _permit: std::sync::Arc::new(limiter.clone().acquire_owned().await.unwrap()),
+            _transaction: transaction.clone(),
+            deadline: Instant::now() + Duration::from_millis(20),
+        };
+        let error = tokio::time::timeout(
+            Duration::from_secs(1),
+            super::run_preflight_operation(
+                ownership,
+                std::future::pending::<anyhow::Result<()>>(),
+                false,
+            ),
+        )
+        .await
+        .unwrap()
+        .unwrap_err();
+        assert!(error.to_string().contains("execution timed out"));
+        assert_eq!(std::sync::Arc::strong_count(&transaction), 1);
+        assert!(limiter.try_acquire_owned().is_ok());
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn discovery_scope_cancellation_transfers_both_leases_until_group_absence() {
+        use tokio::time::{Duration, Instant};
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("cancel-discovery-pgid");
+        let limiter = std::sync::Arc::new(tokio::sync::Semaphore::new(1));
+        let transaction = std::sync::Arc::new(tokio::sync::Mutex::new(None));
+        let ownership = super::CleanupOwnership {
+            _permit: std::sync::Arc::new(limiter.clone().acquire_owned().await.unwrap()),
+            _transaction: transaction.clone(),
+            deadline: Instant::now() + Duration::from_secs(60),
+        };
+        let child_pid_file = pid_file.clone();
+        let task = tokio::spawn(super::run_preflight_operation(
+            ownership,
+            async move {
+                let mut command = Command::new("sh");
+                command
+                    .args(["-c", "printf '%s' \"$$\" > \"$1\"; exec sleep 60", "--"])
+                    .arg(child_pid_file);
+                run_nix_command_bounded(
+                    &mut command,
+                    "cancel discovery fixture",
+                    Duration::from_secs(60),
+                    64,
+                    64,
+                )
+                .await
+            },
+            true,
+        ));
+        let pgid: i32 = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(text) = tokio::fs::read_to_string(&pid_file).await {
+                    if let Ok(pid) = text.parse() {
+                        break pid;
+                    }
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(limiter.clone().try_acquire_owned().is_err());
+        assert!(std::sync::Arc::strong_count(&transaction) > 1);
+        task.abort();
+        assert!(task.await.unwrap_err().is_cancelled());
+        if !super::process_group_absent(pgid) {
+            assert!(limiter.clone().try_acquire_owned().is_err());
+            assert!(std::sync::Arc::strong_count(&transaction) > 1);
+        }
+        let next = tokio::time::timeout(Duration::from_secs(3), limiter.acquire_owned())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(super::process_group_absent(pgid));
+        super::confirm_preparation_leases_until(
+            &transaction,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+        drop(next);
+    }
+
+    #[tokio::test]
+    async fn recovery_interrupted_commit_ack_hands_off_candidate_without_completion_authority() {
+        let candidate = unacknowledged_completion_fixture();
+        let name = candidate.result.system_name.clone();
+        let mut pending = std::collections::HashMap::from([(name.clone(), candidate)]);
+        let mut seen = std::collections::HashSet::new();
+        let (commit_sent, commit_observed) = tokio::sync::oneshot::channel();
+        {
+            // Inject the server-side COMMIT boundary before the caller observes
+            // persistence completion. The lifecycle SQLx tests prove durability;
+            // this regression exercises cancellation and the runtime handoff.
+            let persistence = async {
+                commit_sent.send(()).unwrap();
+                std::future::pending::<()>().await;
+                seen.insert(name.clone());
+                pending.remove(&name);
+            };
+            tokio::pin!(persistence);
+            tokio::select! {
+                result = commit_observed => result.unwrap(),
+                _ = &mut persistence => panic!("COMMIT acknowledgement should remain pending"),
+            }
+        }
+        assert!(seen.is_empty());
+        assert_eq!(pending.len(), 1);
+        let plan = EvaluationPlan {
+            results: Vec::new(),
+            policy_checks: Vec::new(),
+            successful_systems: Vec::new(),
+            confirmed_failures: Vec::new(),
+            evaluation_snapshots: Default::default(),
+            snapshot_capture_failures: Default::default(),
+            flake_output_snapshot: None,
+            had_system_eval_errors: false,
+            force_build_job_insert_failure: false,
+        };
+        let failure = super::structured_evaluation_failure(anyhow::Error::new(
+            super::PartialEvaluationResourceFailure {
+                completed_systems: Vec::new(),
+                remaining_systems: vec![name],
+                resource_failures: Vec::new(),
+                unacknowledged_completions: pending.into_values().collect(),
+                retained_plan: Some(Box::new(plan)),
+                diagnostic: "deadline exhausted during COMMIT acknowledgement".into(),
+            },
+        ));
+        assert!(
+            failure
+                .partial_plan
+                .as_ref()
+                .unwrap()
+                .successful_systems
+                .is_empty()
+        );
+        assert!(
+            failure
+                .partial_plan
+                .as_ref()
+                .unwrap()
+                .evaluation_snapshots
+                .is_empty()
+        );
+        let candidates = &failure
+            .resource_failure()
+            .unwrap()
+            .unacknowledged_completions;
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].snapshot, Some(Vec::new()));
+        let debug = format!("{failure:?} {candidates:?}");
+        for private in [
+            "private-system-identity",
+            "private-user",
+            "private-token",
+            "example.test",
+            "private-identity.drv",
+        ] {
+            assert!(
+                !debug.contains(private),
+                "candidate Debug must not disclose identities"
+            );
+        }
+    }
+
+    #[test]
+    fn recovery_candidate_requires_durable_verdict_and_retains_policy_failed_snapshot() {
+        let candidate = unacknowledged_completion_fixture();
+        let name = candidate.result.system_name.clone();
+        let mut seen = std::collections::HashSet::new();
+        let mut successful = Vec::new();
+        let mut checks = Vec::new();
+        let mut results = Vec::new();
+        let mut snapshots = std::collections::HashMap::new();
+        let mut gaps = std::collections::HashMap::new();
+        assert!(!super::retain_reconciled_completion(
+            candidate.clone(),
+            false,
+            &mut seen,
+            &mut successful,
+            &mut checks,
+            &mut results,
+            &mut snapshots,
+            &mut gaps
+        ));
+        assert!(
+            seen.is_empty()
+                && successful.is_empty()
+                && checks.is_empty()
+                && results.is_empty()
+                && snapshots.is_empty()
+                && gaps.is_empty()
+        );
+        assert!(super::retain_reconciled_completion(
+            candidate.clone(),
+            true,
+            &mut seen,
+            &mut successful,
+            &mut checks,
+            &mut results,
+            &mut snapshots,
+            &mut gaps
+        ));
+        assert!(seen.contains(&name));
+        assert!(
+            !checks[0].meets_requirements,
+            "completed does not mean policy pass"
+        );
+        assert_eq!(snapshots.get(&name), Some(&Vec::new()));
+        assert!(gaps.is_empty());
+        // An idempotent reconciliation cannot duplicate summary evidence.
+        assert!(super::retain_reconciled_completion(
+            candidate,
+            true,
+            &mut seen,
+            &mut successful,
+            &mut checks,
+            &mut results,
+            &mut snapshots,
+            &mut gaps
+        ));
+        assert_eq!((successful.len(), checks.len(), results.len()), (1, 1, 1));
+    }
     //
     // These spawn a real `sh` subprocess that itself backgrounds a
     // descendant `sleep` process, both sharing one process group (via
@@ -4939,6 +10312,26 @@ mod tests {
 
     #[tokio::test]
     #[cfg(unix)]
+    async fn bounded_cleanup_does_not_signal_a_reaped_absent_group() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "exit 0"]).process_group(0);
+        let child = command.spawn().unwrap();
+        let mut guard =
+            NixEvalProcessGuard::from_spawned_child(child, "normal cleanup fixture").unwrap();
+        assert!(guard.wait().await.unwrap().success());
+        assert!(super::process_group_absent(guard.pgid()));
+        guard
+            .terminate_until(tokio::time::Instant::now() + std::time::Duration::from_secs(1))
+            .await
+            .unwrap();
+        assert!(
+            !guard.signal_sent,
+            "normal completion cannot signal a reusable PGID"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
     async fn guard_rejects_non_positive_process_group_id() {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "exit 0"]);
@@ -5034,6 +10427,254 @@ mod tests {
         assert!(output.is_truncated());
     }
 
+    #[tokio::test]
+    async fn bounded_process_collection_limits_both_output_streams() {
+        let mut command = Command::new("sh");
+        command.args([
+            "-c",
+            "i=0; while [ $i -lt 4096 ]; do printf x; printf y >&2; i=$((i+1)); done",
+        ]);
+
+        let output = run_nix_command_bounded(
+            &mut command,
+            "bounded-output test",
+            std::time::Duration::from_secs(2),
+            64,
+            32,
+        )
+        .await
+        .expect("bounded child should complete");
+
+        assert!(output.status.success());
+        assert_eq!(output.stdout.bytes.len(), 64);
+        assert_eq!(output.stdout.total_bytes, 4096);
+        assert!(output.stdout.is_truncated());
+        assert_eq!(output.stderr.bytes.len(), 32);
+        assert_eq!(output.stderr.total_bytes, 4096);
+        assert!(output.stderr.is_truncated());
+    }
+
+    #[tokio::test]
+    async fn bounded_process_collection_enforces_overall_deadline() {
+        let mut command = Command::new("sh");
+        command.args(["-c", "sleep 60"]);
+
+        let started = std::time::Instant::now();
+        let error = run_nix_command_bounded(
+            &mut command,
+            "deadline test",
+            std::time::Duration::from_millis(100),
+            64,
+            64,
+        )
+        .await
+        .expect_err("long-running child must time out");
+
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn bounded_process_deadline_does_not_wait_unbounded_for_inherited_pipe_cleanup() {
+        use tokio::time::{Duration, Instant};
+        let directory = tempfile::tempdir().unwrap();
+        let pid_file = directory.path().join("bounded-pgid");
+        let mut command = Command::new("sh");
+        command
+            .args(["-c", "printf '%s' \"$$\" > \"$1\"; sleep 60 & exit 0", "--"])
+            .arg(&pid_file);
+        let started = Instant::now();
+        let error = run_nix_command_bounded(
+            &mut command,
+            "inherited pipe fixture",
+            Duration::from_millis(100),
+            4096,
+            4096,
+        )
+        .await
+        .unwrap_err();
+        assert!(error.to_string().contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let pgid: i32 = tokio::fs::read_to_string(&pid_file)
+            .await
+            .unwrap()
+            .parse()
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while !super::process_group_absent(pgid) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn watchdog_timeout_kills_and_reaps_process_group() {
+        use super::evaluation_watchdog::{EvaluationWatchdog, Expiry};
+
+        let (child, pgid, descendant_pid) = spawn_process_group_with_descendant().await;
+        let mut guard = NixEvalProcessGuard::new(child, pgid).unwrap();
+        let watchdog = EvaluationWatchdog::new(
+            tokio::time::Instant::now(),
+            std::time::Duration::from_millis(20),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        let started = std::time::Instant::now();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            tokio::select! {
+                expiry = watchdog.wait() => assert_eq!(expiry, Expiry::Idle),
+                status = guard.wait() => panic!("child exited before watchdog: {status:?}"),
+            }
+            guard.terminate().await;
+            assert!(!process_is_alive(pgid), "direct child must be reaped");
+            while process_is_alive(descendant_pid) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("watchdog must kill and reap the group promptly");
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[tokio::test]
+    async fn watchdog_overall_bounds_closed_pipes_and_slow_output_handler() {
+        use super::evaluation_watchdog::{EvaluationWatchdog, Expiry, within_deadlines};
+
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec 1>&- 2>&-; sleep 60"]);
+        command.kill_on_drop(true);
+        #[cfg(unix)]
+        command.process_group(0);
+        let child = command.spawn().unwrap();
+        let spawned_at = tokio::time::Instant::now();
+        let mut guard = NixEvalProcessGuard::from_spawned_child(child, "closed-pipe test").unwrap();
+        let watchdog = EvaluationWatchdog::new(
+            spawned_at,
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_millis(30),
+        )
+        .unwrap();
+        // The same outer deadline used by the runtime includes awaits inside
+        // output handlers and the final wait after both streams reach EOF.
+        let result = within_deadlines(&watchdog, async {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            guard.wait().await
+        })
+        .await;
+        assert!(matches!(result, Err(Expiry::Overall)));
+        guard.terminate().await;
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn watchdog_idle_applies_after_both_pipes_close() {
+        use super::evaluation_watchdog::{EvaluationWatchdog, Expiry, within_deadlines};
+
+        let mut command = Command::new("sh");
+        command.args(["-c", "exec 1>&- 2>&-; sleep 60"]);
+        command
+            .kill_on_drop(true)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        command.process_group(0);
+        let child = command.spawn().unwrap();
+        let spawned_at = tokio::time::Instant::now();
+        let mut guard =
+            NixEvalProcessGuard::from_spawned_child(child, "idle-after-EOF test").unwrap();
+        let pgid = guard.pgid();
+        let stdout = guard.child_mut().stdout.take().unwrap();
+        let stderr = guard.child_mut().stderr.take().unwrap();
+        let watchdog = EvaluationWatchdog::new(
+            spawned_at,
+            std::time::Duration::from_millis(30),
+            std::time::Duration::from_secs(1),
+        )
+        .unwrap();
+        let result = within_deadlines(&watchdog, async {
+            let (stdout, stderr) = tokio::join!(read_capped(stdout, 64), read_capped(stderr, 64));
+            assert_eq!(stdout.unwrap().total_bytes, 0);
+            assert_eq!(stderr.unwrap().total_bytes, 0);
+            guard.wait().await
+        })
+        .await;
+        assert!(matches!(result, Err(Expiry::Idle)));
+        guard.terminate().await;
+        assert!(
+            !process_is_alive(pgid),
+            "idle timeout must reap the direct child"
+        );
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn watchdog_drops_collection_before_cleanup_and_cannot_interrupt_reap() {
+        use super::evaluation_watchdog::{EvaluationWatchdog, Expiry, within_deadlines};
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        struct CollectionDrop<'a>(&'a AtomicBool);
+        impl Drop for CollectionDrop<'_> {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::SeqCst);
+            }
+        }
+
+        for returns_error in [false, true] {
+            let (child, pgid, descendant_pid) = spawn_process_group_with_descendant().await;
+            let mut guard = NixEvalProcessGuard::new(child, pgid).unwrap();
+            let watchdog = EvaluationWatchdog::new(
+                tokio::time::Instant::now(),
+                std::time::Duration::from_millis(20),
+                std::time::Duration::from_millis(40),
+            )
+            .unwrap();
+            let dropped = AtomicBool::new(false);
+            let result = within_deadlines(&watchdog, async {
+                let _collection_drop = CollectionDrop(&dropped);
+                if returns_error {
+                    return Err(anyhow::anyhow!("collection failed"));
+                }
+                guard.wait().await.map_err(anyhow::Error::from)
+            })
+            .await;
+            if returns_error {
+                assert!(matches!(result, Ok(Err(_))));
+            } else {
+                assert!(matches!(result, Err(Expiry::Idle)));
+            }
+            assert!(
+                dropped.load(Ordering::SeqCst),
+                "collection must drop before cleanup owns the guard"
+            );
+            assert!(
+                guard.armed && guard.child.is_some(),
+                "collection must not start termination or take the child"
+            );
+            // Cross the other evaluation deadline after collection ends. No
+            // monitor remains to interrupt scheduling or reaping in cleanup.
+            tokio::time::sleep_until(
+                watchdog.overall_deadline() + std::time::Duration::from_millis(10),
+            )
+            .await;
+            guard.terminate().await;
+            assert!(!guard.armed && guard.child.is_none());
+            assert!(
+                !process_is_alive(pgid),
+                "cleanup must reap the direct child"
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(2), async {
+                while process_is_alive(descendant_pid) {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .expect("cleanup must kill the descendant without a second evaluation timer");
+        }
+    }
+
     fn test_database_url() -> String {
         std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
             .or_else(|_| std::env::var("DATABASE_URL"))
@@ -5089,6 +10730,21 @@ mod tests {
             EvalStartOutcome::Started { attempt } => attempt,
             EvalStartOutcome::NoLongerPending => panic!("commit should be pending"),
         }
+    }
+
+    // Native producer fixtures model completed discovery, not cached names.
+    async fn native_inventory(pool: &PgPool, commit_id: i32, attempt: i32, names: &[&str]) {
+        let names: Vec<String> = names.iter().map(|name| (*name).to_string()).collect();
+        crate::queries::evaluation_inventory::persist_inventory(
+            pool,
+            commit_id,
+            attempt,
+            &names,
+            &names,
+            crate::queries::evaluation_inventory::InventoryExecutionMode::Native,
+        )
+        .await
+        .expect("verified native fixture inventory should persist");
     }
 
     fn successful_system(system_name: &str) -> SuccessfulSystemResult {
@@ -5176,6 +10832,8 @@ mod tests {
                 error: None,
                 cache_status: None,
                 outputs: None,
+                extra_value: None,
+                fatal: false,
                 meta: None,
             });
             policy_checks.push(check(&success.system_name, true));
@@ -5192,6 +10850,8 @@ mod tests {
                 error: Some(failure.error.clone()),
                 cache_status: None,
                 outputs: None,
+                extra_value: None,
+                fatal: false,
                 meta: None,
             });
             policy_checks.push(check(&failure.system_name, false));
@@ -5201,9 +10861,43 @@ mod tests {
             policy_checks,
             successful_systems: successes,
             confirmed_failures: failures,
+            evaluation_snapshots: std::collections::HashMap::new(),
+            snapshot_capture_failures: std::collections::HashMap::new(),
+            flake_output_snapshot: None,
             had_system_eval_errors: false,
             force_build_job_insert_failure: false,
         }
+    }
+
+    #[test]
+    fn successful_bulk_and_fallback_results_without_snapshots_become_unavailable() {
+        let successes = vec![
+            successful_system("bulk-success"),
+            successful_system("fallback-success"),
+            successful_system("captured-success"),
+        ];
+        let evaluation_snapshots =
+            std::collections::HashMap::from([("captured-success".to_string(), Vec::new())]);
+        let mut failures = std::collections::HashMap::from([(
+            "fallback-success".to_string(),
+            "Targeted inspector returned no artifact".to_string(),
+        )]);
+
+        record_missing_snapshot_captures(&successes, &evaluation_snapshots, &mut failures);
+
+        assert_eq!(
+            failures.get("bulk-success").map(String::as_str),
+            Some("Configuration snapshot was not captured separately")
+        );
+        assert_eq!(
+            failures.get("fallback-success").map(String::as_str),
+            Some("Targeted inspector returned no artifact"),
+            "a more specific capture diagnostic must be preserved"
+        );
+        assert!(
+            !failures.contains_key("captured-success"),
+            "an empty captured snapshot is available and must not be downgraded"
+        );
     }
 
     async fn derivation_count(pool: &PgPool, commit_id: i32) -> i64 {
@@ -5268,6 +10962,127 @@ mod tests {
         assert!(!should_mock_policy_fail(3, 0));
         assert!(should_mock_policy_fail(3, 1));
         assert!(!should_mock_policy_fail(3, 2));
+    }
+
+    #[test]
+    fn mock_system_names_prefer_planned_configurations() {
+        let configured = vec!["configured-only".to_string()];
+        let planned = vec![
+            "web-02".to_string(),
+            "web-01".to_string(),
+            "web-02".to_string(),
+        ];
+        let selected = select_mock_system_names(planned, &configured);
+        assert_eq!(selected, vec!["web-01".to_string(), "web-02".to_string()]);
+
+        let resolved = resolve_mock_systems("demo", "all", &selected).expect("planned systems");
+        assert_eq!(resolved, vec!["web-01".to_string(), "web-02".to_string()]);
+        let filtered = resolve_mock_systems("demo", "web-02", &selected).expect("target filter");
+        assert_eq!(filtered, vec!["web-02".to_string()]);
+
+        // Without registered systems, the configured and invented fallbacks
+        // remain in effect.
+        assert_eq!(
+            select_mock_system_names(Vec::new(), &configured),
+            configured
+        );
+        let invented = resolve_mock_systems("demo", "all", &select_mock_system_names(vec![], &[]))
+            .expect("fallback systems");
+        assert_eq!(invented[0], "demo-control-0");
+    }
+
+    fn mock_assigned(
+        id: u128,
+        mode: crate::models::deployment_policies::AssignedPolicyEnforcementMode,
+    ) -> AssignedPolicy {
+        AssignedPolicy {
+            policy_id: uuid::Uuid::from_u128(id),
+            policy_name: format!("policy-{id}"),
+            enforcement_mode: mode,
+            policy: DeploymentPolicy::RequirePackages {
+                packages: vec!["grafana".to_string()],
+                strict: true,
+            },
+        }
+    }
+
+    #[test]
+    fn mock_assigned_policy_outcome_is_stable_and_mixed() {
+        let ids: Vec<uuid::Uuid> = (1..=50u128).map(uuid::Uuid::from_u128).collect();
+        let first: Vec<bool> = ids
+            .iter()
+            .map(|id| mock_assigned_policy_passes("web-01", *id))
+            .collect();
+        let second: Vec<bool> = ids
+            .iter()
+            .map(|id| mock_assigned_policy_passes("web-01", *id))
+            .collect();
+        assert_eq!(first, second, "mock outcomes must be deterministic");
+
+        let failures = first.iter().filter(|passed| !**passed).count();
+        assert!(failures > 0, "50 ids must produce at least one failure");
+        assert!(
+            failures <= 15,
+            "failure rate must stay near 10%: {failures}"
+        );
+    }
+
+    #[test]
+    fn mock_policy_check_matches_real_blocking_semantics() {
+        use crate::models::deployment_policies::AssignedPolicyEnforcementMode;
+
+        let enforce: Vec<AssignedPolicy> = (1..=50u128)
+            .map(|id| mock_assigned(id, AssignedPolicyEnforcementMode::Enforce))
+            .collect();
+        let report_only: Vec<AssignedPolicy> = (1..=50u128)
+            .map(|id| mock_assigned(id, AssignedPolicyEnforcementMode::ReportOnly))
+            .collect();
+
+        let enforced = mock_policy_check("web-01", &enforce, false);
+        assert_eq!(enforced.assigned_results.len(), 50);
+        assert!(enforced.failed_policies.iter().all(|(_, blocks)| *blocks));
+        assert!(!enforced.failed_policies.is_empty());
+        assert!(!enforced.meets_requirements);
+        assert!(
+            enforced
+                .warnings
+                .iter()
+                .all(|warning| warning.starts_with("[MOCK] Policy policy-"))
+        );
+
+        let reported = mock_policy_check("web-01", &report_only, false);
+        assert!(!reported.failed_policies.is_empty());
+        assert!(reported.failed_policies.iter().all(|(_, blocks)| !*blocks));
+        assert!(reported.assigned_results.values().all(|r| !r.blocking));
+        assert!(
+            reported
+                .assigned_results
+                .values()
+                .any(|r| r.passed == Some(false))
+        );
+        assert!(reported.meets_requirements);
+
+        // The persisted document has the same shape as real evaluation.
+        let persisted = policy_results_json(&reported, &report_only);
+        let failed = report_only
+            .iter()
+            .find(|ap| reported.assigned_results[&ap.policy_id].passed == Some(false))
+            .expect("one report-only failure");
+        let entry = &persisted["assigned"][failed.policy_id.to_string()];
+        assert_eq!(entry["passed"], false);
+        assert_eq!(entry["blocking"], false);
+        assert_eq!(entry["enforcement_mode"], "report_only");
+        assert_eq!(entry["strict"], true);
+        assert!(entry.get("evaluation_error").is_none());
+
+        // The existing CF-agent mock failure stays unchanged and blocking.
+        let agent_failed = mock_policy_check("web-02", &[], true);
+        assert_eq!(agent_failed.cf_agent_enabled, Some(false));
+        assert!(!agent_failed.meets_requirements);
+        assert_eq!(
+            agent_failed.failed_policies,
+            vec![("Crystal Forge agent must be enabled".to_string(), true)]
+        );
     }
 
     #[test]
@@ -5447,13 +11262,141 @@ mod tests {
 
         assert!(matches!(
             outcome,
-            EvaluationFinalizeOutcome::Completed { .. }
+            EvaluationFinalizeOutcome::Completed { ref derivations, .. }
+                if derivations.is_empty()
         ));
         assert_eq!(derivation_count(&pool, commit_id).await, 0);
         assert_eq!(
             cancel_commit_evaluation(&pool, commit_id).await.unwrap(),
             CancelEvalOutcome::AlreadyTerminal
         );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalization_populates_host_metrics_for_complete_configuration_corpus() {
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+        let mut evaluation = plan(Vec::new(), Vec::new());
+        for (configuration, value) in [("alpha", "one"), ("beta", "two")] {
+            evaluation.evaluation_snapshots.insert(
+                configuration.to_string(),
+                vec![EvaluatedOption {
+                    path: "services.example.value".to_string(),
+                    declared_type: Some("string".to_string()),
+                    metadata_error: None,
+                    value: SafeOptionValue::Scalar(serde_json::json!(value)),
+                    definitions: Vec::new(),
+                    overridden: Some(false),
+                }],
+            );
+        }
+
+        let outcome = finalize_evaluation_attempt(&pool, commit_id, attempt, &evaluation)
+            .await
+            .expect("finalization should persist the complete snapshot corpus");
+        assert!(matches!(
+            outcome,
+            EvaluationFinalizeOutcome::Completed { .. }
+        ));
+        let metrics: Vec<Option<i64>> = sqlx::query_scalar(
+            "SELECT host_delta_count FROM evaluation_snapshots \
+             WHERE commit_id = $1 ORDER BY configuration_name",
+        )
+        .bind(commit_id)
+        .fetch_all(&pool)
+        .await
+        .expect("finalized metrics should load");
+        assert_eq!(metrics.len(), 2);
+        assert!(metrics.iter().all(Option::is_some));
+        assert_eq!(metrics.iter().flatten().sum::<i64>(), 1);
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn finalization_replaces_missing_snapshot_artifacts_with_unavailable_lifecycle() {
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+
+        let mut seed_tx = pool.begin().await.expect("seed transaction should begin");
+        crate::queries::evaluation_snapshots::persist_available_snapshot_deferred_tx(
+            &mut seed_tx,
+            commit_id,
+            "chesty",
+            vec![EvaluatedOption {
+                path: "services.example.enable".to_string(),
+                declared_type: Some("boolean".to_string()),
+                metadata_error: None,
+                value: SafeOptionValue::Scalar(serde_json::json!(true)),
+                definitions: Vec::new(),
+                overridden: Some(false),
+            }],
+        )
+        .await
+        .expect("available configuration fixture should persist");
+        crate::queries::evaluation_snapshots::persist_flake_output_snapshot_tx(
+            &mut seed_tx,
+            commit_id,
+            &serde_json::json!({"declared_systems": ["chesty"]}),
+        )
+        .await
+        .expect("available flake output fixture should persist");
+        seed_tx.commit().await.expect("seed data should commit");
+
+        let attempt = start_eval(&pool, commit_id).await;
+        let mut evaluation = plan(vec![successful_system("chesty")], Vec::new());
+        evaluation.snapshot_capture_failures.insert(
+            "chesty".to_string(),
+            "Configuration snapshot was not captured separately".to_string(),
+        );
+        let outcome = finalize_evaluation_attempt(&pool, commit_id, attempt, &evaluation)
+            .await
+            .expect("finalization should persist unavailable lifecycle states");
+        assert!(matches!(
+            outcome,
+            EvaluationFinalizeOutcome::Completed { .. }
+        ));
+
+        let configuration: (String, i64) = sqlx::query_as(
+            "SELECT snapshot.lifecycle, COUNT(item.snapshot_id)::bigint \
+             FROM evaluation_snapshot_selections selection \
+             JOIN evaluation_snapshots snapshot \
+               ON snapshot.id = selection.current_snapshot_id \
+             LEFT JOIN evaluation_snapshot_options item \
+               ON item.snapshot_id = snapshot.id \
+             WHERE selection.commit_id = $1 \
+               AND selection.configuration_name = 'chesty' \
+             GROUP BY snapshot.id, snapshot.lifecycle",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("configuration lifecycle should load");
+        assert_eq!(configuration, ("unavailable".to_string(), 0));
+
+        let flake_output: (String, Option<Vec<u8>>) = sqlx::query_as(
+            "SELECT lifecycle, content_digest FROM flake_output_snapshots WHERE commit_id = $1",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .expect("flake output lifecycle should load");
+        assert_eq!(flake_output, ("unavailable".to_string(), None));
 
         let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
             .bind(flake_id)
@@ -5507,18 +11450,15 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
-
-        finalize_evaluation_attempt(
-            &pool,
-            commit_id,
-            attempt,
-            &plan(
-                vec![successful_system("alpha")],
-                vec![failed_system("broken\0system", "module error")],
-            ),
-        )
-        .await
-        .expect_err("nul byte should make synthetic failure write fail");
+        native_inventory(&pool, commit_id, attempt, &["alpha", "broken"]).await;
+        let mut evaluation = plan(
+            vec![successful_system("alpha")],
+            vec![failed_system("broken", "module error")],
+        );
+        evaluation.force_build_job_insert_failure = true;
+        finalize_evaluation_attempt(&pool, commit_id, attempt, &evaluation)
+            .await
+            .expect_err("injected finalization failure should roll back all writes");
 
         assert_eq!(derivation_count(&pool, commit_id).await, 0);
 
@@ -5547,6 +11487,7 @@ mod tests {
 
         let system = successful_system("alpha");
         let check = passing_policy_check("alpha");
+        native_inventory(&pool, commit_id, attempt, &["alpha"]).await;
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
@@ -5583,6 +11524,7 @@ mod tests {
         let assigned = vec![AssignedPolicy {
             policy_id,
             policy_name: "failme".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::RequirePackages {
                 packages: vec!["grafana".to_string()],
                 strict: true,
@@ -5597,6 +11539,7 @@ mod tests {
             .expect("policy metadata should parse");
 
         let system = successful_system("gray");
+        native_inventory(&pool, commit_id, attempt, &["gray"]).await;
 
         // Simulates the fallback path: finalize_evaluated_system called with
         // this configuration's real assigned policies, matching what the
@@ -5626,7 +11569,8 @@ mod tests {
         // What the bulk streaming path would have produced for the
         // identical check + assigned policies (this is exactly what
         // `persist_evaluated_system` computes internally).
-        let expected = policy_results_json(&check, &assigned);
+        let mut expected = policy_results_json(&check, &assigned);
+        expected["evaluation_attempt"] = serde_json::json!(attempt);
         assert_eq!(
             persisted, expected,
             "fallback path must persist the same policy_results document as the bulk path"
@@ -5657,6 +11601,69 @@ mod tests {
 
     #[tokio::test]
     #[ignore = "requires live database connection"]
+    async fn successful_system_persistence_waits_for_snapshot_writer_lock() {
+        let pool = test_pool().await;
+        cleanup_throwaway_flakes(&pool).await;
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+        native_inventory(&pool, commit_id, attempt, &["writer-lock-host"]).await;
+
+        let mut blocker = pool.begin().await.expect("blocker should begin");
+        lock_snapshot_writer_tx(&mut blocker)
+            .await
+            .expect("blocker should acquire snapshot-writer lock");
+
+        let finalize_pool = pool.clone();
+        let finalize = tokio::spawn(async move {
+            let system = successful_system("writer-lock-host");
+            let check = passing_policy_check("writer-lock-host");
+            persist_evaluated_system(&finalize_pool, commit_id, attempt, &system, &check, &[]).await
+        });
+
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_locks \
+                     WHERE locktype = 'advisory' AND classid::bigint = 0 \
+                       AND objid::bigint = $1 AND NOT granted)",
+                )
+                .bind(SNAPSHOT_WRITER_LOCK_KEY)
+                .fetch_one(&pool)
+                .await
+                .expect("snapshot-writer wait state should load");
+                if waiting {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("production success persistence should wait on the first lock");
+        assert_eq!(derivation_count(&pool, commit_id).await, 0);
+
+        blocker
+            .commit()
+            .await
+            .expect("blocker should release snapshot-writer lock");
+        let outcome = finalize
+            .await
+            .expect("success persistence task should complete")
+            .expect("success persistence should commit");
+        assert!(matches!(
+            outcome,
+            SystemPersistenceOutcome::NeedsBuildPreparation { .. }
+        ));
+        assert_eq!(derivation_count(&pool, commit_id).await, 1);
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
     async fn finalize_system_strict_policy_failure_does_not_queue() {
         let pool = test_pool().await;
         cleanup_throwaway_flakes(&pool).await;
@@ -5666,6 +11673,7 @@ mod tests {
 
         let system = successful_system("alpha");
         let check = failing_policy_check("alpha", true, "Require packages: git");
+        native_inventory(&pool, commit_id, attempt, &["alpha"]).await;
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
@@ -5706,6 +11714,7 @@ mod tests {
 
         let system = successful_system("alpha");
         let check = failing_policy_check("alpha", false, "Require packages: git");
+        native_inventory(&pool, commit_id, attempt, &["alpha"]).await;
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
@@ -5729,6 +11738,7 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
+        native_inventory(&pool, commit_id, attempt, &["alpha"]).await;
 
         let system = successful_system("alpha");
         let check = passing_policy_check("alpha");
@@ -5759,6 +11769,96 @@ mod tests {
             .await;
     }
 
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn policy_cancellation_terminalizes_exact_post_build_scan(pool: PgPool) {
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+        let system = successful_system("policy-cancel");
+        native_inventory(&pool, commit_id, attempt, &["policy-cancel"]).await;
+
+        let first = finalize_evaluated_system(
+            &pool,
+            commit_id,
+            attempt,
+            &system,
+            &passing_policy_check("policy-cancel"),
+            &[],
+        )
+        .await
+        .expect("passing evaluation should queue a build");
+        let build_job_id = match first {
+            SystemFinalizeOutcome::Queued { build_job_id, .. } => build_job_id,
+            other => panic!("expected queued outcome, got {other:?}"),
+        };
+        let scan_id: uuid::Uuid = sqlx::query_scalar(
+            "SELECT id FROM cve_scans WHERE completed_build_job_id = $1 AND source_trigger = 'post_build'",
+        )
+        .bind(build_job_id)
+        .fetch_one(&pool)
+        .await
+        .expect("queued build should have an exact post-build intent");
+        sqlx::query(
+            "UPDATE derivations SET status_id = 7 WHERE id = (SELECT derivation_id FROM build_jobs WHERE id = $1)",
+        )
+        .bind(build_job_id)
+        .execute(&pool)
+        .await
+        .expect("fixture derivation should enter the build-active state");
+
+        // Different terminal policy evidence requires a new evaluation owner.
+        finalize_evaluation_attempt(&pool, commit_id, attempt, &plan(vec![], vec![]))
+            .await
+            .expect("first evaluation should complete");
+        sqlx::query("INSERT INTO evaluation_attempts (commit_id, attempt_number, status) VALUES ($1, $2, 'queued')")
+            .bind(commit_id).bind(attempt + 1).execute(&pool).await.unwrap();
+        sqlx::query("UPDATE commits SET evaluation_status = 'pending' WHERE id = $1")
+            .bind(commit_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let attempt = start_eval(&pool, commit_id).await;
+        native_inventory(&pool, commit_id, attempt, &["policy-cancel"]).await;
+        let cancelled = finalize_evaluated_system(
+            &pool,
+            commit_id,
+            attempt,
+            &system,
+            &failing_policy_check("policy-cancel", true, "Require packages: git"),
+            &[],
+        )
+        .await
+        .expect("policy reevaluation should persist");
+        assert!(matches!(
+            cancelled,
+            SystemFinalizeOutcome::RecordedWithoutBuild {
+                reason: SystemNotQueuedReason::StrictPolicyFailure,
+                ..
+            }
+        ));
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT status FROM build_jobs WHERE id = $1")
+                .bind(build_job_id)
+                .fetch_one(&pool)
+                .await
+                .expect("policy-cancelled build should load"),
+            "cancelled"
+        );
+        let scan_state: (String, i32, String, Option<uuid::Uuid>, serde_json::Value) = sqlx::query_as(
+            "SELECT status, attempts, source_trigger, completed_build_job_id, scan_metadata FROM cve_scans WHERE id = $1",
+        )
+        .bind(scan_id)
+        .fetch_one(&pool)
+        .await
+        .expect("policy-cancelled scan should load");
+        assert_eq!(scan_state.0, "failed");
+        assert_eq!(scan_state.1, 0);
+        assert_eq!(scan_state.2, "post_build");
+        assert_eq!(scan_state.3, Some(build_job_id));
+        assert_eq!(scan_state.4["build_prerequisite"]["status"], "cancelled");
+    }
+
     #[tokio::test]
     #[ignore = "requires live database connection"]
     async fn finalize_attempt_error_can_be_routed_to_retry_failure_cas() {
@@ -5767,15 +11867,12 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
-
-        finalize_evaluation_attempt(
-            &pool,
-            commit_id,
-            attempt,
-            &plan(vec![], vec![failed_system("bad\0system", "module error")]),
-        )
-        .await
-        .expect_err("synthetic failure write should roll back finalization");
+        native_inventory(&pool, commit_id, attempt, &["bad"]).await;
+        let mut evaluation = plan(vec![], vec![failed_system("bad", "module error")]);
+        evaluation.force_build_job_insert_failure = true;
+        finalize_evaluation_attempt(&pool, commit_id, attempt, &evaluation)
+            .await
+            .expect_err("synthetic failure write should roll back finalization");
 
         assert_eq!(derivation_count(&pool, commit_id).await, 0);
         assert_eq!(build_job_count(&pool, commit_id).await, 0);
@@ -5881,6 +11978,7 @@ mod tests {
         let attempt = start_eval(&pool, commit_id).await;
 
         let system = successful_system_no_agent("beta");
+        native_inventory(&pool, commit_id, attempt, &["beta"]).await;
         let check = agent_disabled_check("beta");
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
@@ -5917,6 +12015,7 @@ mod tests {
         let attempt = start_eval(&pool, commit_id).await;
 
         let system = successful_system_no_agent("gamma");
+        native_inventory(&pool, commit_id, attempt, &["gamma"]).await;
         let check = agent_disabled_with_strict_failure("gamma");
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
@@ -5953,6 +12052,7 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
+        native_inventory(&pool, commit_id, attempt, &["alpha", "beta"]).await;
 
         // First system finalizes successfully while eval is in_progress.
         let first_system = successful_system("alpha");
@@ -6018,6 +12118,7 @@ mod tests {
         let flake_id = insert_throwaway_flake(&pool).await;
         let commit_id = insert_throwaway_commit(&pool, flake_id).await;
         let attempt = start_eval(&pool, commit_id).await;
+        native_inventory(&pool, commit_id, attempt, &["alpha", "broken"]).await;
 
         // Finalize A incrementally (simulating streaming bulk path).
         let system_a = successful_system("alpha");
@@ -6184,6 +12285,7 @@ mod tests {
         let attempt = start_eval(&pool, commit_id).await;
 
         let system = successful_system("delta");
+        native_inventory(&pool, commit_id, attempt, &["delta"]).await;
         let check = passing_policy_check("delta");
 
         // First finalize inserts derivation + build job.
@@ -6232,6 +12334,7 @@ mod tests {
         let attempt = start_eval(&pool, commit_id).await;
 
         let system = successful_system("epsilon");
+        native_inventory(&pool, commit_id, attempt, &["epsilon"]).await;
         let check = passing_policy_check("epsilon");
 
         let first = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
@@ -6303,6 +12406,7 @@ mod tests {
         //   → standalone eval runs and succeeds
         //   → finalize_evaluated_system called with the standalone result
         let system = successful_system("nix-builder-1");
+        native_inventory(&pool, commit_id, attempt, &["nix-builder-1"]).await;
         let check = passing_policy_check("nix-builder-1");
 
         let outcome = finalize_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
@@ -6428,6 +12532,7 @@ mod tests {
         let attempt = start_eval(&pool, commit_id).await;
 
         let system = successful_system("kappa");
+        native_inventory(&pool, commit_id, attempt, &["kappa"]).await;
         let check = passing_policy_check("kappa");
 
         // First finalize → Queued
@@ -6539,6 +12644,7 @@ mod tests {
 
         // ── Phase 1: persist only (no build job) ─────────────────────
         let system = successful_system("lambda");
+        native_inventory(&pool, commit_id, attempt, &["lambda"]).await;
         let check = passing_policy_check("lambda");
         let persisted = persist_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
             .await
@@ -6607,6 +12713,96 @@ mod tests {
             .await;
     }
 
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn authoritative_re_evaluation_replaces_obsolete_job_during_activation(pool: PgPool) {
+        let flake_id = insert_throwaway_flake(&pool).await;
+        let commit_id = insert_throwaway_commit(&pool, flake_id).await;
+        let attempt = start_eval(&pool, commit_id).await;
+        let system = successful_system("obsolete-contract-recovery");
+        native_inventory(&pool, commit_id, attempt, &["obsolete-contract-recovery"]).await;
+        let check = passing_policy_check("obsolete-contract-recovery");
+
+        let first = persist_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
+            .await
+            .expect("initial authoritative result should persist");
+        let derivation_id = match first {
+            SystemPersistenceOutcome::NeedsBuildPreparation { derivation_id, .. } => derivation_id,
+            other => panic!("initial persistence should require activation, got {other:?}"),
+        };
+        let initial = activate_evaluated_system_build(&pool, commit_id, attempt, derivation_id)
+            .await
+            .expect("initial activation should succeed");
+        let build_job_id = match initial {
+            SystemBuildActivationOutcome::Queued { build_job_id } => build_job_id,
+            other => panic!("initial activation should queue a job, got {other:?}"),
+        };
+
+        assert!(
+            crate::queries::builders::mark_queued_verified_source_job_obsolete(
+                &pool,
+                &build_job_id,
+                "published source uses an obsolete evaluator contract",
+            )
+            .await
+            .expect("obsolete transition should execute")
+        );
+
+        // A successful result reaches this persistence boundary only after the
+        // authoritative evaluator publishes and evaluates the verified source.
+        let republished = persist_evaluated_system(&pool, commit_id, attempt, &system, &check, &[])
+            .await
+            .expect("authoritative re-evaluation should persist");
+        assert!(
+            matches!(
+                republished,
+                SystemPersistenceOutcome::NeedsBuildPreparation {
+                    derivation_id: id,
+                    ..
+                } if id == derivation_id
+            ),
+            "obsolete job should require controlled reactivation, got {republished:?}"
+        );
+
+        let replacement = activate_evaluated_system_build(&pool, commit_id, attempt, derivation_id)
+            .await
+            .expect("controlled reactivation should succeed");
+        let replacement_id = match replacement {
+            SystemBuildActivationOutcome::Queued { build_job_id } => build_job_id,
+            other => panic!("controlled reactivation should queue a replacement, got {other:?}"),
+        };
+        assert_ne!(replacement_id, build_job_id);
+        let source_state: (String, Option<String>) =
+            sqlx::query_as("SELECT status, server_failure_code FROM build_jobs WHERE id = $1")
+                .bind(build_job_id)
+                .fetch_one(&pool)
+                .await
+                .expect("obsolete source should load");
+        assert_eq!(
+            source_state,
+            (
+                "failed".to_string(),
+                Some("evaluator_contract_obsolete".to_string())
+            )
+        );
+        let replacement_state: (String, Option<String>, Option<uuid::Uuid>) = sqlx::query_as(
+            "SELECT status, server_failure_code, parent_job_id FROM build_jobs WHERE id = $1",
+        )
+        .bind(replacement_id)
+        .fetch_one(&pool)
+        .await
+        .expect("replacement job should load");
+        assert_eq!(
+            replacement_state,
+            ("queued".to_string(), None, Some(build_job_id))
+        );
+
+        let _ = sqlx::query("DELETE FROM flakes WHERE id = $1")
+            .bind(flake_id)
+            .execute(&pool)
+            .await;
+    }
+
     // ── Per-configuration policy regression tests ─────────────────────────
 
     /// Proves that when two configurations are in the same flake but different
@@ -6647,6 +12843,7 @@ mod tests {
             vec![AssignedPolicy {
                 policy_id: id_grafana,
                 policy_name: "require-grafana".to_string(),
+                enforcement_mode: Default::default(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["grafana".to_string()],
                     strict: true,
@@ -6658,6 +12855,7 @@ mod tests {
             vec![AssignedPolicy {
                 policy_id: id_neovim,
                 policy_name: "require-neovim".to_string(),
+                enforcement_mode: Default::default(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["neovim".to_string()],
                     strict: true,
@@ -6732,6 +12930,7 @@ mod tests {
             vec![AssignedPolicy {
                 policy_id: id_grafana,
                 policy_name: "require-grafana".to_string(),
+                enforcement_mode: Default::default(),
                 policy: DeploymentPolicy::RequirePackages {
                     packages: vec!["grafana".to_string()],
                     strict: true,

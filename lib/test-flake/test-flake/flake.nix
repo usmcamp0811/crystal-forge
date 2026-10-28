@@ -41,12 +41,12 @@
     nixosConfigurations = {
       cf-test-sys = nixpkgs.lib.nixosSystem {
         inherit system;
-        modules = [minimalConfig];
+        modules = [minimalConfig {networking.hostName = "cf-test-sys";}];
       };
 
       test-agent = nixpkgs.lib.nixosSystem {
         inherit system;
-        modules = [minimalConfig];
+        modules = [minimalConfig {networking.hostName = "test-agent";}];
       };
     };
   };

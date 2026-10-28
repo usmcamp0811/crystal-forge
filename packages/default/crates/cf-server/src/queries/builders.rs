@@ -5,28 +5,42 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use chrono::{DateTime, Utc};
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use rand::rngs::OsRng;
-use sqlx::PgPool;
-use tracing::info;
+use sqlx::{PgPool, Postgres, Transaction};
+use tracing::{info, warn};
 use uuid::Uuid;
 
 use crate::models::builders::{
     BuildJob, BuildJobRow, Builder, BuilderEnvironmentAssignment, BuilderMetrics, BuilderSummary,
     BuilderWithEnvironments, CreateBuilderRequest, RemoteBuildExecutionStrategy,
-    ReportMetricsRequest, UpdateBuilderRequest,
+    ReportMetricsRequest, SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE, UpdateBuilderRequest,
 };
+
+const GET_AUTHORIZED_SOURCE_ARCHIVE_JOB_SQL: &str = r#"
+    SELECT build_jobs.*
+    FROM build_jobs
+    JOIN builders ON builders.id = build_jobs.builder_id
+    WHERE build_jobs.id = $1
+      AND build_jobs.builder_id = $2
+      AND build_jobs.builder_session_id = $3
+      AND build_jobs.status = 'building'
+      AND builders.current_session_id = $3
+"#;
 use crate::models::public_key::PublicKey;
 use crate::models::retry_policy::{
     AutomaticRetryPolicy, RetryFailureClass, automatic_retry_budget_remaining,
     automatic_retry_eligible,
 };
 use crate::queries::attention;
-use crate::queries::build_jobs::{BUILD_QUEUE_ORDER_LOCK_KEY, lock_build_queue_order};
+use crate::queries::build_jobs::{lock_build_derivation, lock_build_queue_order};
 
 const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
     UPDATE build_jobs
     SET builder_id = $1,
         builder_session_id = $2,
+        dispatched_cache_destination_id = NULL,
+        cache_dispatch_recorded_at = NULL,
         status = 'building',
+        server_failure_code = NULL,
         started_at = NOW(),
         updated_at = NOW()
     WHERE id = (
@@ -35,6 +49,7 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
         JOIN derivations d ON d.id = build_jobs.derivation_id
         WHERE build_jobs.status = 'queued'
             AND build_jobs.available_at <= NOW()
+          AND ($3::uuid IS NULL OR build_jobs.id = $3)
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
         ORDER BY
@@ -56,7 +71,10 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL: &str = r#"
     UPDATE build_jobs
     SET builder_id = $1,
         builder_session_id = $3,
+        dispatched_cache_destination_id = NULL,
+        cache_dispatch_recorded_at = NULL,
         status = 'building',
+        server_failure_code = NULL,
         started_at = NOW(),
         updated_at = NOW()
     WHERE id = (
@@ -65,6 +83,7 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL: &str = r#"
         JOIN derivations d ON d.id = build_jobs.derivation_id
         WHERE build_jobs.status = 'queued'
           AND build_jobs.available_at <= NOW()
+          AND ($4::uuid IS NULL OR build_jobs.id = $4)
           AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
@@ -87,7 +106,10 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL: &str = r#"
     UPDATE build_jobs
     SET builder_id = $1,
         builder_session_id = $3,
+        dispatched_cache_destination_id = NULL,
+        cache_dispatch_recorded_at = NULL,
         status = 'building',
+        server_failure_code = NULL,
         started_at = NOW(),
         updated_at = NOW()
     WHERE id = (
@@ -100,15 +122,11 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL: &str = r#"
           AND build_jobs.available_at <= NOW()
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
-          AND (
-              NOT $2
-              OR (
-                  d.commit_id IS NOT NULL
-                  AND d.derivation_path IS NOT NULL
-                  AND c.id IS NOT NULL
-                  AND f.id IS NOT NULL
-              )
-          )
+          AND build_jobs.id = $2
+          AND d.commit_id IS NOT NULL
+          AND d.derivation_path IS NOT NULL
+          AND c.id IS NOT NULL
+          AND f.id IS NOT NULL
         ORDER BY
             build_jobs.queue_position DESC NULLS LAST,
             build_jobs.priority_weight DESC,
@@ -124,7 +142,10 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL: &str = r#"
     UPDATE build_jobs
     SET builder_id = $1,
         builder_session_id = $4,
+        dispatched_cache_destination_id = NULL,
+        cache_dispatch_recorded_at = NULL,
         status = 'building',
+        server_failure_code = NULL,
         started_at = NOW(),
         updated_at = NOW()
     WHERE id = (
@@ -138,15 +159,11 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL: &str = r#"
           AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
           AND d.cf_agent_enabled IS TRUE
           AND d.policy_requirements_met IS TRUE
-          AND (
-              NOT $3
-              OR (
-                  d.commit_id IS NOT NULL
-                  AND d.derivation_path IS NOT NULL
-                  AND c.id IS NOT NULL
-                  AND f.id IS NOT NULL
-              )
-          )
+          AND build_jobs.id = $3
+          AND d.commit_id IS NOT NULL
+          AND d.derivation_path IS NOT NULL
+          AND c.id IS NOT NULL
+          AND f.id IS NOT NULL
         ORDER BY
             build_jobs.queue_position DESC NULLS LAST,
             build_jobs.priority_weight DESC,
@@ -735,6 +752,7 @@ pub async fn requeue_orphaned_building_jobs_with_reason(
         SET status = 'queued',
             builder_id = NULL,
             builder_session_id = NULL,
+            server_failure_code = NULL,
             started_at = NULL,
             logs = RIGHT(
                 COALESCE(logs, ''),
@@ -775,6 +793,7 @@ const REQUEUE_BUILDER_ASSIGNED_BUILDING_JOBS_SQL: &str = r#"
         SET status = 'queued',
             builder_id = NULL,
             builder_session_id = NULL,
+            server_failure_code = NULL,
             started_at = NULL,
             logs = RIGHT(
                 COALESCE(logs, ''),
@@ -846,6 +865,22 @@ pub async fn establish_builder_session(
             END,
             last_heartbeat_at = now(),
             status = 'active',
+            cve_scanning_enabled = CASE
+                WHEN current_session_id IS DISTINCT FROM $2 THEN false
+                ELSE cve_scanning_enabled
+            END,
+            cve_scan_schema_version = CASE
+                WHEN current_session_id IS DISTINCT FROM $2 THEN 0
+                ELSE cve_scan_schema_version
+            END,
+            cve_scanner_name = CASE
+                WHEN current_session_id IS DISTINCT FROM $2 THEN NULL
+                ELSE cve_scanner_name
+            END,
+            cve_scanner_version = CASE
+                WHEN current_session_id IS DISTINCT FROM $2 THEN NULL
+                ELSE cve_scanner_version
+            END,
             updated_at = now()
         WHERE id = $1
         "#,
@@ -928,6 +963,42 @@ pub async fn count_active_jobs_for_builder(pool: &PgPool, builder_id: &Uuid) -> 
 /// could exceed the builder's max_concurrent_jobs limit.
 ///
 /// TASK-147: Make builder concurrency limit enforcement race-free
+fn validate_verified_source_claim_preflight(
+    execution_strategy: RemoteBuildExecutionStrategy,
+    verified_source_job_id: Option<&Uuid>,
+) -> Result<()> {
+    if execution_strategy == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
+        && verified_source_job_id.is_none()
+    {
+        bail!("verified-source claim requires a preflighted job ID");
+    }
+    Ok(())
+}
+
+/// Claims an eligible job with session fencing and atomic concurrency checks.
+///
+/// `preflight_job_id`, when supplied, restricts either strategy to that exact
+/// candidate. A lost or locked candidate returns `None`; the claim MUST NOT
+/// substitute unvalidated work. Verified-source claims require a candidate.
+/// Legacy internal server-derivation callers may omit the candidate.
+///
+/// # Errors
+/// Returns an error for database failures, a stale builder session, or a
+/// verified-source request without a preflight candidate.
+///
+/// # Examples
+/// ```no_run
+/// # async fn claim(pool: &sqlx::PgPool, builder: &uuid::Uuid, candidate: &uuid::Uuid)
+/// # -> anyhow::Result<()> {
+/// use crystal_forge::models::builders::RemoteBuildExecutionStrategy;
+/// // The caller has validated this candidate's cache capability.
+/// let job = crystal_forge::queries::builders::claim_next_job_atomic(
+///     pool, builder, 1, &[], RemoteBuildExecutionStrategy::ServerDerivation,
+///     None, Some(candidate),
+/// ).await?;
+/// assert!(job.as_ref().is_none_or(|job| job.id == *candidate));
+/// # Ok(()) }
+/// ```
 pub async fn claim_next_job_atomic(
     pool: &PgPool,
     builder_id: &Uuid,
@@ -935,7 +1006,11 @@ pub async fn claim_next_job_atomic(
     environment_ids: &[Uuid],
     execution_strategy: RemoteBuildExecutionStrategy,
     builder_session_id: Option<&Uuid>,
+    preflight_job_id: Option<&Uuid>,
 ) -> Result<Option<BuildJob>> {
+    // The caller must finish canonical artifact validation before this function
+    // can start a transaction or mutate a queued verified-source job.
+    validate_verified_source_claim_preflight(execution_strategy, preflight_job_id)?;
     // Start transaction for atomic count + claim
     let mut tx = pool.begin().await.context("Failed to begin transaction")?;
 
@@ -1007,14 +1082,17 @@ pub async fn claim_next_job_atomic(
                 sqlx::query_as::<_, BuildJobRow>(CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL)
                     .bind(builder_id)
                     .bind(builder_session_id)
+                    .bind(preflight_job_id)
                     .fetch_optional(&mut *tx)
                     .await
                     .context("Failed to claim job (wildcard server_derivation) in transaction")?
             }
             RemoteBuildExecutionStrategy::SourceReEvaluateVerified => {
+                let job_id = preflight_job_id
+                    .context("verified-source claim requires a preflighted job ID")?;
                 sqlx::query_as::<_, BuildJobRow>(CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL)
                     .bind(builder_id)
-                    .bind(true)
+                    .bind(job_id)
                     .bind(builder_session_id)
                     .fetch_optional(&mut *tx)
                     .await
@@ -1031,15 +1109,18 @@ pub async fn claim_next_job_atomic(
                     .bind(builder_id)
                     .bind(environment_ids)
                     .bind(builder_session_id)
+                    .bind(preflight_job_id)
                     .fetch_optional(&mut *tx)
                     .await
                     .context("Failed to claim job (filtered server_derivation) in transaction")?
             }
             RemoteBuildExecutionStrategy::SourceReEvaluateVerified => {
+                let job_id = preflight_job_id
+                    .context("verified-source claim requires a preflighted job ID")?;
                 sqlx::query_as::<_, BuildJobRow>(CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL)
                     .bind(builder_id)
                     .bind(environment_ids)
-                    .bind(true)
+                    .bind(job_id)
                     .bind(builder_session_id)
                     .fetch_optional(&mut *tx)
                     .await
@@ -1054,6 +1135,168 @@ pub async fn claim_next_job_atomic(
     tx.commit().await.context("Failed to commit transaction")?;
 
     Ok(job)
+}
+
+/// Returns the next server-derivation candidate without claiming work.
+///
+/// Uses the same eligibility and ordering as the atomic claim. The caller MUST
+/// pass the returned job ID to [`claim_next_job_atomic`] after cache preflight.
+/// A concurrent claim can consume the candidate; it cannot authorize another
+/// job with a cache type that the polling builder does not understand.
+///
+/// # Errors
+/// Returns an error when PostgreSQL cannot select the candidate.
+pub async fn peek_next_server_derivation_job(
+    pool: &PgPool,
+    environment_ids: &[Uuid],
+) -> Result<Option<BuildJob>> {
+    sqlx::query_as::<_, BuildJobRow>(
+        r#"
+        SELECT build_jobs.*
+        FROM build_jobs
+        JOIN derivations d ON d.id = build_jobs.derivation_id
+        WHERE build_jobs.status = 'queued'
+          AND build_jobs.available_at <= NOW()
+          AND (cardinality($1::uuid[]) = 0
+               OR build_jobs.environment_id = ANY($1)
+               OR build_jobs.environment_id IS NULL)
+          AND d.cf_agent_enabled IS TRUE
+          AND d.policy_requirements_met IS TRUE
+        ORDER BY build_jobs.queue_position DESC NULLS LAST,
+                 build_jobs.priority_weight DESC,
+                 (SELECT c.commit_timestamp FROM commits c
+                  WHERE c.id = d.commit_id) DESC NULLS LAST,
+                 build_jobs.created_at ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(environment_ids)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to select server-derivation claim candidate")
+}
+
+/// Identifies the next verified-source job before its atomic claim.
+#[derive(Debug, sqlx::FromRow)]
+pub struct VerifiedSourceClaimCandidate {
+    /// Build job selected by the normal queue ordering.
+    pub job_id: Uuid,
+    /// Credential-free repository URL used by canonical publication.
+    pub repo_url: String,
+    /// Full authorized Git commit object ID.
+    pub commit_hash: String,
+}
+
+/// Returns the next verified-source candidate without locking or claiming it.
+///
+/// The caller MUST validate the candidate's published artifact and pass its
+/// `job_id` to [`claim_next_job_atomic`]. The atomic claim can return no job if
+/// another builder claims the candidate after this lookup.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot select the candidate.
+pub async fn peek_next_verified_source_job(
+    pool: &PgPool,
+    environment_ids: &[Uuid],
+) -> Result<Option<VerifiedSourceClaimCandidate>> {
+    sqlx::query_as::<_, VerifiedSourceClaimCandidate>(
+        r#"
+        SELECT build_jobs.id AS job_id,
+               f.repo_url,
+               c.git_commit_hash AS commit_hash
+        FROM build_jobs
+        JOIN derivations d ON d.id = build_jobs.derivation_id
+        JOIN commits c ON c.id = d.commit_id
+        JOIN flakes f ON f.id = c.flake_id AND f.deleted_at IS NULL
+        WHERE build_jobs.status = 'queued'
+          AND build_jobs.available_at <= NOW()
+          AND (cardinality($1::uuid[]) = 0
+               OR build_jobs.environment_id = ANY($1)
+               OR build_jobs.environment_id IS NULL)
+          AND d.cf_agent_enabled IS TRUE
+          AND d.policy_requirements_met IS TRUE
+          AND d.derivation_path IS NOT NULL
+        ORDER BY
+            build_jobs.queue_position DESC NULLS LAST,
+            build_jobs.priority_weight DESC,
+            c.commit_timestamp DESC NULLS LAST,
+            build_jobs.created_at ASC
+        LIMIT 1
+        "#,
+    )
+    .bind(environment_ids)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to select verified-source claim candidate")
+}
+
+/// Fails an unclaimed job whose server-authorized evaluator contract is obsolete.
+///
+/// The transition is conditional on `queued` state. A concurrent claim wins
+/// without being overwritten. A later authoritative evaluation can recognize
+/// the structured server failure code and create an immutable replacement child
+/// after source publication and authoritative evaluation succeed. The exact
+/// post-build scan prerequisite becomes terminal in the same transaction only
+/// when the guarded job transition succeeds.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute the transition.
+pub async fn mark_queued_verified_source_job_obsolete(
+    pool: &PgPool,
+    job_id: &Uuid,
+    reason: &str,
+) -> Result<bool> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin obsolete verified-source job transition")?;
+    let derivation_id: Option<i32> =
+        sqlx::query_scalar("SELECT derivation_id FROM build_jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to identify obsolete verified-source job")?;
+    let Some(derivation_id) = derivation_id else {
+        return Ok(false);
+    };
+    lock_build_derivation(&mut tx, derivation_id).await?;
+    let updated = sqlx::query_scalar::<_, Uuid>(
+        r#"
+        UPDATE build_jobs
+        SET status = 'failed',
+            builder_id = NULL,
+            builder_session_id = NULL,
+            started_at = NULL,
+            completed_at = NOW(),
+            server_failure_code = $2,
+            logs = COALESCE(logs, '') || E'\n\nError: [' || $2 || '] ' || $3,
+            updated_at = NOW()
+        WHERE id = $1
+          AND status = 'queued'
+        RETURNING id
+        "#,
+    )
+    .bind(job_id)
+    .bind(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+    .bind(reason)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to retire obsolete verified-source job")?;
+    if updated.is_some() {
+        crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+            &mut tx,
+            *job_id,
+            Some(reason),
+        )
+        .await
+        .context("Failed to terminalize post-build scan after obsolete build failure")?;
+    }
+    tx.commit()
+        .await
+        .context("Failed to commit obsolete verified-source job transition")?;
+    Ok(updated.is_some())
 }
 
 /// Assign a job to a builder and mark it as building.
@@ -1076,7 +1319,10 @@ pub(crate) async fn assign_job_to_builder(
         UPDATE build_jobs
         SET builder_id = $2,
             builder_session_id = NULL,
+            dispatched_cache_destination_id = NULL,
+            cache_dispatch_recorded_at = NULL,
             status = 'building',
+            server_failure_code = NULL,
             started_at = now(),
             updated_at = now()
         WHERE id = $1
@@ -1106,6 +1352,7 @@ pub async fn mark_job_complete(
         r#"
         UPDATE build_jobs
         SET status = 'success',
+            server_failure_code = NULL,
             completed_at = now(),
             updated_at = now()
         WHERE id = $1
@@ -1147,6 +1394,16 @@ pub async fn mark_job_complete(
 /// (`building → success`). The caller should only queue best-effort cache-push side
 /// effects when `true`; idempotent retries reuse the originally persisted store path
 /// and must not accept a newly supplied request path.
+/// Policy-enabled post-build CVE provenance commits in the same transaction.
+/// After commit, prerequisite promotion is best effort and does not turn a
+/// successful build into a failed completion response. An idempotent retry
+/// reattaches successful build provenance to the durable admission-time intent.
+///
+/// # Errors
+///
+/// Returns an error when the job does not exist, builder ownership or session
+/// identity does not match, the job is not completable, or required persistence
+/// fails. Post-commit CVE promotion failure is logged but is not returned.
 pub async fn complete_job_atomic(
     pool: &PgPool,
     job_id: &Uuid,
@@ -1154,15 +1411,615 @@ pub async fn complete_job_atomic(
     builder_session_id: Option<&Uuid>,
     store_path: Option<&str>,
 ) -> Result<(BuildJob, bool)> {
+    complete_job_atomic_with_policy(
+        pool,
+        job_id,
+        builder_id,
+        builder_session_id,
+        store_path,
+        BuildCompletionPolicy::default(),
+    )
+    .await
+}
+
+/// Carries deployment configuration that build completion must obey.
+///
+/// The struct exists so completion policy travels explicitly from the request
+/// handler that owns [`crate::config::ServerConfig`] down to the completion
+/// transaction. Completion code must not read configuration from a process
+/// global or from a database mirror; a caller that cannot reach configuration
+/// must say so instead of guessing.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct BuildCompletionPolicy {
+    /// Mirrors `server.auto_hardening_scans`.
+    ///
+    /// When `true`, a newly successful exact NixOS build admits one hardening
+    /// scan inside the completion transaction. The default is `false` and
+    /// matches the configuration default, so a caller that does not supply a
+    /// policy never admits automatic hardening work.
+    pub auto_hardening_scans: bool,
+}
+
+/// Completes a build job under an explicit deployment policy.
+///
+/// This is [`complete_job_atomic`] with the completion policy supplied by the
+/// caller. See that function for ownership, idempotency, and CVE provenance
+/// behavior, all of which are unchanged.
+///
+/// Automatic hardening admission is one additional idempotent `INSERT` inside
+/// the same transaction. It runs only for a real `building → success`
+/// transition, only for a `nixos` derivation with a realized store path, and
+/// only when `policy.auto_hardening_scans` is `true`. It never spawns work, and
+/// its failure aborts the completion transaction rather than leaving a build
+/// recorded as successful with a half-written admission.
+///
+/// # Errors
+///
+/// Returns the same errors as [`complete_job_atomic`], plus an error when
+/// hardening admission cannot be persisted.
+pub async fn complete_job_atomic_with_policy(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
+    store_path: Option<&str>,
+    policy: BuildCompletionPolicy,
+) -> Result<(BuildJob, bool)> {
+    complete_job_atomic_inner(
+        pool,
+        job_id,
+        builder_id,
+        builder_session_id,
+        store_path,
+        None,
+        false,
+        true,
+        None,
+        policy,
+    )
+    .await
+}
+
+/// Records immutable cache selection on the current claimed job/session.
+///
+/// Selection includes `None` for disabled publication. Repeated calls accept
+/// only the same selection. A new claim clears selection before dispatch.
+/// The builder-session lock precedes the job lock, matching claim ownership.
+///
+/// # Errors
+/// Returns an error for database failures, superseded sessions, non-building
+/// jobs, changed selections, or disabled/ineligible selected destinations.
+///
+/// # Examples
+/// ```no_run
+/// # async fn dispatch(
+/// #     pool: &sqlx::PgPool,
+/// #     job: &crystal_forge::models::builders::BuildJob,
+/// #     builder: &uuid::Uuid,
+/// # ) -> anyhow::Result<()> {
+/// use crystal_forge::queries::builders::record_job_cache_dispatch;
+/// record_job_cache_dispatch(pool, &job.id, builder,
+///     job.builder_session_id.as_ref(), Some(42)).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn record_job_cache_dispatch(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
+    destination_id: Option<i32>,
+) -> Result<BuildJob> {
+    let mut tx = pool.begin().await?;
+    let current: Option<Uuid> =
+        sqlx::query_scalar("SELECT current_session_id FROM builders WHERE id = $1 FOR UPDATE")
+            .bind(builder_id)
+            .fetch_one(&mut *tx)
+            .await?;
+    if current != builder_session_id.copied() {
+        bail!("Builder session mismatch");
+    }
+    let job = sqlx::query_as::<_, BuildJob>("SELECT * FROM build_jobs WHERE id = $1 FOR UPDATE")
+        .bind(job_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if job.builder_id != Some(*builder_id)
+        || job.builder_session_id != builder_session_id.copied()
+        || job.status != "building"
+    {
+        bail!("Build job claim changed before cache dispatch");
+    }
+    if job.cache_dispatch_recorded_at.is_some() {
+        if job.dispatched_cache_destination_id != destination_id {
+            bail!("Cache dispatch selection changed");
+        }
+    }
+    if let Some(id) = destination_id {
+        lock_eligible_cache_destination(&mut tx, id, job.derivation_id).await?;
+    }
+    if job.cache_dispatch_recorded_at.is_some() {
+        tx.commit().await?;
+        return Ok(job);
+    }
+    let job = sqlx::query_as::<_, BuildJob>(
+        "UPDATE build_jobs SET dispatched_cache_destination_id = $2, cache_dispatch_recorded_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *")
+        .bind(job_id).bind(destination_id).fetch_one(&mut *tx).await?;
+    tx.commit().await?;
+    Ok(job)
+}
+
+// SECURITY: Use the same active-system/environment resolution and enabled
+// assignment precedence as dispatch. Keep the selected destination locked so
+// disabling or editing it cannot race the completion transaction's decision.
+async fn lock_eligible_cache_destination(
+    tx: &mut Transaction<'_, Postgres>,
+    destination_id: i32,
+    derivation_id: i32,
+) -> Result<(
+    crate::models::cache_destination::CacheDestination,
+    Vec<Uuid>,
+)> {
+    let (commit_id, derivation_name): (Option<i32>, String) =
+        sqlx::query_as("SELECT commit_id, derivation_name FROM derivations WHERE id = $1")
+            .bind(derivation_id)
+            .fetch_one(&mut **tx)
+            .await?;
+    // SECURITY: Reject all equally preferred cross-environment candidates
+    // before decrypting credentials, using the pool resolver's same decision.
+    let environment = crate::queries::cache_push::resolve_derivation_environment(
+        &mut **tx,
+        commit_id,
+        &derivation_name,
+    )
+    .await?;
+    // Lock before evaluating eligibility so assignment writers cannot commit
+    // between the policy check and the canonical configuration snapshot.
+    let snapshot =
+        crate::queries::cache_destinations::get_cache_publication_snapshot_tx(tx, destination_id)
+            .await?
+            .context("Selected cache destination no longer exists")?;
+    let eligible = sqlx::query_scalar::<_, bool>(
+        r#"WITH enabled_assigned AS (
+            SELECT cd.id FROM cache_destinations cd
+            JOIN cache_destination_environments cde ON cde.cache_destination_id = cd.id
+            WHERE cd.enabled = TRUE AND cde.environment_id = $2
+        )
+        SELECT EXISTS (SELECT 1 FROM cache_destinations cd
+        WHERE cd.id = $1 AND cd.enabled = TRUE
+          AND ((EXISTS (SELECT 1 FROM enabled_assigned) AND cd.id IN (SELECT id FROM enabled_assigned))
+            OR (NOT EXISTS (SELECT 1 FROM enabled_assigned)
+              AND NOT EXISTS (SELECT 1 FROM cache_destination_environments cde WHERE cde.cache_destination_id = cd.id)))
+        )"#,
+    ).bind(destination_id).bind(environment).fetch_one(&mut **tx).await?;
+    if !eligible {
+        bail!("Selected cache destination is disabled or ineligible");
+    }
+    Ok(snapshot)
+}
+
+/// Binds publication to canonical settings without exposing private material.
+///
+/// The digest includes credential bytes, but has no serialization or debug
+/// representation. Keep it in memory only; do not persist or log the digest.
+#[derive(PartialEq, Eq)]
+pub struct CachePublicationFingerprint([u8; 32]);
+
+// SECURITY: CacheDestination serialization deliberately omits private fields.
+// Serialize these explicit borrowed fields to a hash sink instead. No plaintext
+// JSON buffer, digest, or credentials enter persistence or diagnostics. Field
+// order is fixed; keys and assignments are sets. Usage/cosmetic timestamps and
+// upload/retry limits do not change the verified publication configuration.
+fn publication_configuration_fingerprint(
+    destination: &crate::models::cache_destination::CacheDestination,
+    environment_ids: &[Uuid],
+) -> Result<CachePublicationFingerprint> {
+    use sha2::{Digest, Sha256};
+    #[derive(serde::Serialize)]
+    struct Configuration<'a> {
+        schema: u8,
+        id: i32,
+        cache_type: &'a str,
+        enabled: bool,
+        read_url: Option<&'a str>,
+        signing_key_path: Option<&'a str>,
+        compression: Option<&'a str>,
+        require_sigs: Option<bool>,
+        force_repush: Option<bool>,
+        s3_region: Option<&'a str>,
+        s3_profile: Option<&'a str>,
+        s3_access_key_id: Option<&'a str>,
+        s3_secret_access_key: Option<&'a str>,
+        s3_session_token: Option<&'a str>,
+        s3_endpoint_url: Option<&'a str>,
+        attic_token: Option<&'a str>,
+        attic_cache_name: Option<&'a str>,
+        attic_public_key: Option<&'a str>,
+        niks3_server_url: Option<&'a str>,
+        niks3_public_keys: &'a [String],
+        niks3_write_auth_mode: Option<&'a str>,
+        niks3_auth_token: Option<&'a str>,
+        niks3_write_client_cert: Option<&'a str>,
+        niks3_write_client_key: Option<&'a str>,
+        niks3_write_ca_cert: Option<&'a str>,
+        niks3_read_auth_mode: Option<&'a str>,
+        niks3_read_basic_username: Option<&'a str>,
+        niks3_read_basic_password: Option<&'a str>,
+        niks3_read_client_cert: Option<&'a str>,
+        niks3_read_client_key: Option<&'a str>,
+        niks3_read_ca_cert: Option<&'a str>,
+        environment_ids: &'a [Uuid],
+    }
+    struct HashSink(Sha256);
+    impl std::io::Write for HashSink {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0.update(bytes);
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut keys = destination.niks3_public_keys.clone();
+    keys.sort_unstable();
+    keys.dedup();
+    let mut ids = environment_ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let config = Configuration {
+        schema: 2,
+        id: destination.id,
+        cache_type: &destination.cache_type,
+        enabled: destination.enabled,
+        read_url: destination.push_to.as_deref(),
+        signing_key_path: destination.signing_key_path.as_deref(),
+        compression: destination.compression.as_deref(),
+        require_sigs: destination.require_sigs,
+        force_repush: destination.force_repush,
+        s3_region: destination.s3_region.as_deref(),
+        s3_profile: destination.s3_profile.as_deref(),
+        s3_access_key_id: destination.s3_access_key_id.as_deref(),
+        s3_secret_access_key: destination.s3_secret_access_key.as_deref(),
+        s3_session_token: destination.s3_session_token.as_deref(),
+        s3_endpoint_url: destination.s3_endpoint_url.as_deref(),
+        attic_token: destination.attic_token.as_deref(),
+        attic_cache_name: destination.attic_cache_name.as_deref(),
+        attic_public_key: destination.attic_public_key.as_deref(),
+        niks3_server_url: destination.niks3_server_url.as_deref(),
+        niks3_public_keys: &keys,
+        niks3_write_auth_mode: destination.niks3_write_auth_mode.as_deref(),
+        niks3_auth_token: destination.niks3_auth_token.as_deref(),
+        niks3_write_client_cert: destination.niks3_write_client_cert.as_deref(),
+        niks3_write_client_key: destination.niks3_write_client_key.as_deref(),
+        niks3_write_ca_cert: destination.niks3_write_ca_cert.as_deref(),
+        niks3_read_auth_mode: destination.niks3_read_auth_mode.as_deref(),
+        niks3_read_basic_username: destination.niks3_read_basic_username.as_deref(),
+        niks3_read_basic_password: destination.niks3_read_basic_password.as_deref(),
+        niks3_read_client_cert: destination.niks3_read_client_cert.as_deref(),
+        niks3_read_client_key: destination.niks3_read_client_key.as_deref(),
+        niks3_read_ca_cert: destination.niks3_read_ca_cert.as_deref(),
+        environment_ids: &ids,
+    };
+    let mut sink = HashSink(Sha256::new());
+    serde_json::to_writer(&mut sink, &config)
+        .map_err(|_| anyhow::anyhow!("Could not fingerprint publication configuration"))?;
+    Ok(CachePublicationFingerprint(sink.0.finalize().into()))
+}
+
+/// Captures publication configuration under the assignment-writer lock.
+///
+/// Requires the supplied decrypted settings to match the current destination.
+/// The caller must use those settings for the probe and finish verification
+/// before passing the evidence to [`complete_preverified_job_atomic`]. Usage
+/// timestamp changes do not invalidate the evidence. Credentials and digests
+/// must not be logged or persisted. This function performs no network probe.
+/// Failed probes can pass the same captured settings to
+/// [`complete_pending_publication_atomic_with_policy`] without confirming
+/// publication. Both completion paths recheck the captured fingerprint.
+///
+/// # Errors
+/// Returns an error for database/decryption failures, ineligible destinations,
+/// or publication settings that changed before capture.
+///
+/// # Examples
+/// ```no_run
+/// # async fn capture(
+/// #     pool: &sqlx::PgPool,
+/// #     destination: &crystal_forge::models::cache_destination::CacheDestination,
+/// # ) -> anyhow::Result<()> {
+/// use crystal_forge::queries::builders::{
+///     capture_cache_publication_configuration,
+/// };
+/// let evidence = capture_cache_publication_configuration(pool, 42, destination)
+///     .await?;
+/// // Probe with destination before using evidence to commit completion.
+/// # Ok(()) }
+/// ```
+pub async fn capture_cache_publication_configuration(
+    pool: &PgPool,
+    derivation_id: i32,
+    destination: &crate::models::cache_destination::CacheDestination,
+) -> Result<VerifiedCachePublication> {
+    let mut tx = pool.begin().await?;
+    let (current, assignments) =
+        lock_eligible_cache_destination(&mut tx, destination.id, derivation_id).await?;
+    let fingerprint = publication_configuration_fingerprint(&current, &assignments)?;
+    if fingerprint != publication_configuration_fingerprint(destination, &assignments)? {
+        bail!("Publication configuration changed before verification");
+    }
+    tx.commit().await?;
+    Ok(VerifiedCachePublication {
+        destination_id: destination.id,
+        configuration: fingerprint,
+        require_dispatch_identity: destination.cache_type == "Niks3",
+    })
+}
+
+/// Binds a publication attempt to captured canonical destination configuration.
+///
+/// Despite the historical type name, capture performs no remote verification.
+/// The caller must finish the authenticated exact-root availability probe before
+/// passing this snapshot to [`complete_preverified_job_atomic`]. Path-info does
+/// not prove NAR signatures or integrity. Failed probes use
+/// [`complete_pending_publication_atomic_with_policy`] instead. Neither this
+/// type nor the completion transaction performs a network probe.
+pub struct VerifiedCachePublication {
+    /// Identifies the destination whose settings were captured for the probe.
+    pub destination_id: i32,
+    /// Binds read/write/auth/signing settings and assignments, excluding usage.
+    pub configuration: CachePublicationFingerprint,
+    /// Requires immutable dispatch identity for Niks3; legacy jobs may omit it.
+    pub require_dispatch_identity: bool,
+}
+
+/// Validates an output against evaluated identity or idempotent persisted state.
+///
+/// Successful retries use the persisted output and ignore replacement request
+/// paths. Niks3 publication requires an authoritative evaluated/persisted output.
+/// Legacy completion can omit the output or supply a canonical path when the
+/// server has no evaluated identity.
+///
+/// # Errors
+/// Returns an error for an invalid path, missing authoritative publication
+/// output, or a new request that disagrees with the server's evaluated identity.
+///
+/// # Examples
+/// ```
+/// use crystal_forge::queries::builders::validated_completion_output;
+/// let path = "/nix/store/evaluated-output";
+/// assert_eq!(validated_completion_output("building", Some(path), Some(path),
+///     None, true)?.as_deref(), Some(path));
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+pub fn validated_completion_output(
+    status: &str,
+    requested: Option<&str>,
+    evaluated: Option<&str>,
+    persisted: Option<&str>,
+    require_authoritative: bool,
+) -> Result<Option<String>> {
+    let output = if status == "success" {
+        persisted
+    } else {
+        let authoritative = evaluated.or(persisted);
+        if let (Some(requested), Some(authoritative)) = (requested, authoritative) {
+            if requested != authoritative {
+                bail!("Build output does not match evaluated identity");
+            }
+        }
+        if require_authoritative {
+            Some(authoritative.context("Publication requires authoritative build output")?)
+        } else {
+            requested
+        }
+    };
+    if require_authoritative && output.is_none() {
+        bail!("Publication requires persisted build output");
+    }
+    if let Some(output) = output {
+        if !cf_protocol::builder::is_canonical_nix_store_path(output, false) {
+            bail!("Invalid build output path");
+        }
+    }
+    Ok(output.map(str::to_owned))
+}
+
+/// Commits completion only after caller-side publication verification succeeds.
+///
+/// Rechecks output and dispatch identity under the job/derivation locks, and
+/// rechecks the destination's eligibility and canonical configuration. Confirmed
+/// publication is recorded in the same transaction as build success and CVE
+/// provenance attachment. An error leaves all these writes rolled back. No probe
+/// runs here. Automatic hardening admission defaults to disabled; callers with
+/// deployment configuration use [`complete_preverified_job_atomic_with_policy`].
+///
+/// # Errors
+/// Returns an error for database failures, changed ownership, output, dispatch
+/// identity, destination eligibility, or changed publication configuration.
+///
+/// # Examples
+/// ```no_run
+/// # async fn finish(
+/// #     pool: &sqlx::PgPool,
+/// #     job: &crystal_forge::models::builders::BuildJob,
+/// #     builder: &uuid::Uuid,
+/// #     verified: &crystal_forge::queries::builders::VerifiedCachePublication,
+/// # ) -> anyhow::Result<()> {
+/// use crystal_forge::queries::builders::complete_preverified_job_atomic;
+/// // The caller has already verified this authoritative output and publication.
+/// complete_preverified_job_atomic(pool, &job.id, builder,
+///     job.builder_session_id.as_ref(), Some("/nix/store/evaluated-output"),
+///     Some(verified)).await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn complete_preverified_job_atomic(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
+    store_path: Option<&str>,
+    publication: Option<&VerifiedCachePublication>,
+) -> Result<(BuildJob, bool)> {
+    complete_preverified_job_atomic_with_policy(
+        pool,
+        job_id,
+        builder_id,
+        builder_session_id,
+        store_path,
+        publication,
+        BuildCompletionPolicy::default(),
+    )
+    .await
+}
+
+/// Commits preverified publication and build completion under deployment policy.
+///
+/// Preserves the verification and ownership contract of
+/// [`complete_preverified_job_atomic`]. Automatic hardening admission follows
+/// [`complete_job_atomic_with_policy`] in the same transaction as publication,
+/// build success, and admission-time CVE provenance attachment. Idempotent
+/// retries do not reinterpret hardening admission under a new policy.
+///
+/// # Errors
+///
+/// Returns the errors from [`complete_preverified_job_atomic`], plus an error
+/// when hardening admission cannot be persisted. All transaction writes roll
+/// back together.
+///
+/// # Examples
+/// ```no_run
+/// # async fn finish(
+/// #     pool: &sqlx::PgPool,
+/// #     job: &crystal_forge::models::builders::BuildJob,
+/// #     builder: &uuid::Uuid,
+/// # ) -> anyhow::Result<()> {
+/// use crystal_forge::queries::builders::{
+///     BuildCompletionPolicy, complete_preverified_job_atomic_with_policy,
+/// };
+/// complete_preverified_job_atomic_with_policy(pool, &job.id, builder,
+///     job.builder_session_id.as_ref(), Some("/nix/store/evaluated-output"),
+///     None, BuildCompletionPolicy { auto_hardening_scans: true }).await?;
+/// # Ok(()) }
+/// ```
+pub async fn complete_preverified_job_atomic_with_policy(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
+    store_path: Option<&str>,
+    publication: Option<&VerifiedCachePublication>,
+    policy: BuildCompletionPolicy,
+) -> Result<(BuildJob, bool)> {
+    complete_job_atomic_inner(
+        pool,
+        job_id,
+        builder_id,
+        builder_session_id,
+        store_path,
+        publication,
+        true,
+        true,
+        None,
+        policy,
+    )
+    .await
+}
+
+/// Commits build success with unconfirmed publication to the captured destination.
+///
+/// Uses the same ownership, authoritative output, dispatch, eligibility and
+/// configuration checks as verified completion. Existing completed publication
+/// evidence is never demoted. A later verified callback can promote the same
+/// queue row without creating another build attempt.
+///
+/// # Errors
+/// Returns an error for changed ownership, session, output, destination or
+/// configuration, a non-static reason, or a failed transaction. No partial
+/// success is committed on error.
+///
+/// # Examples
+/// ```no_run
+/// # async fn pending(pool: &sqlx::PgPool, job: &crystal_forge::models::builders::BuildJob,
+/// # captured: &crystal_forge::queries::builders::VerifiedCachePublication,
+/// # builder: &uuid::Uuid) -> anyhow::Result<()> {
+/// use crystal_forge::queries::builders::{
+///     complete_pending_publication_atomic_with_policy, BuildCompletionPolicy,
+/// };
+/// complete_pending_publication_atomic_with_policy(pool, &job.id, builder,
+///     job.builder_session_id.as_ref(), "/nix/store/evaluated-output", captured,
+///     "cache_path_missing", BuildCompletionPolicy::default()).await?;
+/// # Ok(()) }
+/// ```
+pub async fn complete_pending_publication_atomic_with_policy(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
+    store_path: &str,
+    captured_cfg: &VerifiedCachePublication,
+    reason: &str,
+    policy: BuildCompletionPolicy,
+) -> Result<(BuildJob, bool)> {
+    anyhow::ensure!(
+        matches!(
+            reason,
+            "cache_path_missing"
+                | "cache_authentication_failed"
+                | "cache_rate_limited"
+                | "cache_network_error"
+                | "cache_probe_timeout"
+                | "cache_read_configuration_invalid"
+                | "cache_probe_failed"
+        ),
+        "Invalid pending publication reason"
+    );
+    complete_job_atomic_inner(
+        pool,
+        job_id,
+        builder_id,
+        builder_session_id,
+        Some(store_path),
+        Some(captured_cfg),
+        true,
+        false,
+        Some(reason),
+        policy,
+    )
+    .await
+}
+
+async fn complete_job_atomic_inner(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
+    store_path: Option<&str>,
+    publication: Option<&VerifiedCachePublication>,
+    enforce_output: bool,
+    record_verified: bool,
+    pending_reason: Option<&str>,
+    policy: BuildCompletionPolicy,
+) -> Result<(BuildJob, bool)> {
     let mut tx = pool
         .begin()
         .await
         .context("Failed to begin completion transaction")?;
 
     // Lock the job row and read all fields needed for ownership validation.
-    let row = sqlx::query_as::<_, (i32, String, Option<Uuid>, Option<Uuid>)>(
+    let row = sqlx::query_as::<
+        _,
+        (
+            i32,
+            String,
+            Option<Uuid>,
+            Option<Uuid>,
+            Option<i32>,
+            Option<DateTime<Utc>>,
+        ),
+    >(
         r#"
-        SELECT derivation_id, status, builder_id, builder_session_id
+        SELECT derivation_id, status, builder_id, builder_session_id,
+               dispatched_cache_destination_id, cache_dispatch_recorded_at
         FROM build_jobs
         WHERE id = $1
         FOR UPDATE
@@ -1174,7 +2031,14 @@ pub async fn complete_job_atomic(
     .context("Failed to lock job for completion")?
     .ok_or_else(|| anyhow::anyhow!("Build job not found"))?;
 
-    let (derivation_id, status, job_builder_id, job_session_id) = row;
+    let (
+        derivation_id,
+        status,
+        job_builder_id,
+        job_session_id,
+        dispatched_id,
+        dispatch_recorded_at,
+    ) = row;
 
     // Validate builder ownership BEFORE any status check. This prevents a
     // superseded or unrelated builder from exploiting the idempotent path
@@ -1188,12 +2052,116 @@ pub async fn complete_job_atomic(
         _ => bail!("Builder session mismatch"),
     }
 
+    if enforce_output {
+        // CONCURRENCY: Freeze authoritative output after the external probe,
+        // before any successful transition or publication record is written.
+        let (evaluated, persisted): (Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT expected_store_path, store_path FROM derivations WHERE id = $1 FOR UPDATE",
+        )
+        .bind(derivation_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        let requires_authority = if let Some(publication) = publication {
+            publication.require_dispatch_identity
+        } else if let Some(destination_id) = dispatched_id {
+            lock_eligible_cache_destination(&mut tx, destination_id, derivation_id)
+                .await?
+                .0
+                .cache_type
+                == "Niks3"
+        } else {
+            false
+        };
+        let checked = validated_completion_output(
+            &status,
+            store_path,
+            evaluated.as_deref(),
+            persisted.as_deref(),
+            requires_authority,
+        )?;
+        if checked.as_deref() != store_path {
+            bail!("Authoritative output changed after verification");
+        }
+    }
+    if let Some(publication) = publication {
+        if (publication.require_dispatch_identity && dispatch_recorded_at.is_none())
+            || (dispatch_recorded_at.is_some() && dispatched_id != Some(publication.destination_id))
+        {
+            bail!("Publication destination does not match persisted dispatch");
+        }
+        let (destination, assignments) =
+            lock_eligible_cache_destination(&mut tx, publication.destination_id, derivation_id)
+                .await?;
+        if publication_configuration_fingerprint(&destination, &assignments)?
+            != publication.configuration
+        {
+            bail!("Cache configuration changed after verification");
+        }
+        let path = store_path.context("Verified publication requires output path")?;
+        // INVARIANT: The shared queue helper preserves durable ID/provenance
+        // and never relabels another destination's pending or active work.
+        let cache_job_id = crate::queries::cache_push::enqueue_cache_push_for_destination_tx(
+            &mut tx,
+            derivation_id,
+            path,
+            destination.id,
+            &destination.name,
+        )
+        .await?;
+        if record_verified {
+            sqlx::query("UPDATE cache_push_jobs SET status = 'completed', completed_at = NOW(), error_message = NULL, retry_after = NULL WHERE id = $1")
+                .bind(cache_job_id).execute(&mut *tx).await?;
+        } else {
+            // INVARIANT: A current failed probe cannot erase historical proof.
+            sqlx::query("UPDATE cache_push_jobs SET error_message = $2 WHERE id = $1 AND status <> 'completed'")
+                .bind(cache_job_id).bind(pending_reason).execute(&mut *tx).await?;
+        }
+    } else if enforce_output && let (Some(destination_id), Some(path)) = (dispatched_id, store_path)
+    {
+        // CONCURRENCY: Missing remote publication queues the exact dispatched
+        // ID with database provenance before success. No name/first-row lookup
+        // can reinterpret the selection after disable/delete/reassignment.
+        let (destination, _) =
+            lock_eligible_cache_destination(&mut tx, destination_id, derivation_id).await?;
+        crate::queries::cache_push::enqueue_cache_push_for_destination_tx(
+            &mut tx,
+            derivation_id,
+            path,
+            destination.id,
+            &destination.name,
+        )
+        .await?;
+    }
+
     if status == "success" {
         // Idempotent: already completed by this exact builder+session.
-        // Return false so the caller knows not to queue a new cache push.
+        // Reattach build provenance before returning success. Admission-time
+        // intent is atomic, so completion must not synthesize new scan work.
+        crate::queries::cve_scan_leases::attach_completed_build_to_post_build_scan_tx(
+            &mut tx, *job_id,
+        )
+        .await
+        .context("Failed to recover post-build CVE intent")?;
+        // IDEMPOTENCY: The original building-to-success transaction already
+        // committed or omitted Hardening admission under its policy snapshot.
+        // A later callback must not reinterpret that completed transition under
+        // current configuration. If admission was disabled then, only the
+        // explicitly labeled bounded backfill path may create later work.
         tx.commit()
             .await
             .context("Failed to commit idempotent completion transaction")?;
+        if let Err(error) = crate::queries::cve_scans::promote_waiting_cve_scans(
+            pool,
+            crate::queries::cve_scans::EVENT_PROMOTION_LIMIT,
+        )
+        .await
+        {
+            warn!(
+                build_job_id = %job_id,
+                error = %error,
+                "Failed to promote waiting CVE scans after idempotent build completion"
+            );
+        }
         let job = get_build_job_by_id(pool, job_id)
             .await?
             .ok_or_else(|| anyhow::anyhow!("Build job disappeared on idempotent completion"))?;
@@ -1210,6 +2178,7 @@ pub async fn complete_job_atomic(
         r#"
         UPDATE build_jobs
         SET status = 'success',
+            server_failure_code = NULL,
             completed_at = now(),
             updated_at = now()
         WHERE id = $1
@@ -1244,9 +2213,37 @@ pub async fn complete_job_atomic(
         .context("Failed to mark derivation complete")?;
     }
 
+    crate::queries::cve_scan_leases::attach_completed_build_to_post_build_scan_tx(&mut tx, *job_id)
+        .await
+        .context("Failed to attach completed build to post-build CVE scan")?;
+
+    // ATOMICITY: Automatic hardening admission commits with the build success it
+    // describes. The helper performs one guarded insert and never starts a scan.
+    crate::queries::hardening_scans::enqueue_post_build_hardening_scan_tx(
+        &mut tx,
+        derivation_id,
+        Some(*job_id),
+        policy.auto_hardening_scans,
+    )
+    .await
+    .context("Failed to admit post-build hardening scan")?;
+
     tx.commit()
         .await
         .context("Failed to commit completion transaction")?;
+
+    if let Err(error) = crate::queries::cve_scans::promote_waiting_cve_scans(
+        pool,
+        crate::queries::cve_scans::EVENT_PROMOTION_LIMIT,
+    )
+    .await
+    {
+        warn!(
+            build_job_id = %job_id,
+            error = %error,
+            "Failed to promote waiting CVE scans after build completion"
+        );
+    }
 
     let _ = attention::resolve(pool, "builds", "build_job", &job_id.to_string())
         .await
@@ -1264,11 +2261,16 @@ pub async fn append_job_logs(pool: &PgPool, job_id: &Uuid, new_logs: &str) -> Re
     append_job_logs_with_limits(pool, job_id, new_logs, 10 * 1024 * 1024).await
 }
 
-/// Append logs to a job with safety limits.
+/// Appends server-owned logs to a live or successfully completed job.
 ///
-/// Enforces:
-/// - job must be in queued/building/cancelling status
-/// - total log bytes must not exceed max_total_log_bytes
+/// Allows `queued`, `building`, `cancelling`, and `success`. Server publication
+/// diagnostics can follow atomic build success. Authenticated builder writes use
+/// [`append_job_logs_with_limits_for_builder`] and cannot append after success.
+/// Total persisted bytes cannot exceed `max_total_log_bytes`.
+///
+/// # Errors
+/// Returns an error for missing jobs, prohibited status, exceeded byte limit,
+/// or a failed database operation.
 pub async fn append_job_logs_with_limits(
     pool: &PgPool,
     job_id: &Uuid,
@@ -1279,6 +2281,15 @@ pub async fn append_job_logs_with_limits(
         .await
 }
 
+/// Appends bounded builder logs only while the exact claim remains live.
+///
+/// Requires builder ownership and the stored session where one exists. Only
+/// `queued`, `building`, and `cancelling` accept writes; successful completion
+/// cannot reopen builder log authorization.
+///
+/// # Errors
+/// Returns an error for missing jobs, ownership/session mismatch, terminal
+/// status, exceeded byte limit, or a failed database operation.
 pub async fn append_job_logs_with_limits_for_builder(
     pool: &PgPool,
     job_id: &Uuid,
@@ -1312,9 +2323,9 @@ async fn append_job_logs_with_limits_guarded(
         SET logs = COALESCE(logs, '') || $2,
             updated_at = now()
         WHERE id = $1
-          AND status IN ('queued', 'building', 'cancelling')
+          AND (status IN ('queued', 'building', 'cancelling') OR ($4::uuid IS NULL AND status = 'success'))
           AND ($4::uuid IS NULL OR builder_id = $4)
-          AND (builder_session_id IS NULL OR builder_session_id = $5)
+          AND ($4::uuid IS NULL OR builder_session_id IS NULL OR builder_session_id = $5)
           AND OCTET_LENGTH(COALESCE(logs, '')) + OCTET_LENGTH($2) <= $3
         RETURNING id
         "#,
@@ -1348,7 +2359,11 @@ async fn append_job_logs_with_limits_guarded(
     match diagnostics {
         None => bail!("job_not_found"),
         Some((status, current_len_opt)) => {
-            if status != "queued" && status != "building" && status != "cancelling" {
+            if status != "queued"
+                && status != "building"
+                && status != "cancelling"
+                && !(builder_id.is_none() && status == "success")
+            {
                 bail!("invalid_job_status:{status}");
             }
 
@@ -1422,6 +2437,30 @@ pub async fn get_build_job_by_id(pool: &PgPool, job_id: &Uuid) -> Result<Option<
     .context("Failed to fetch build job by ID")?;
 
     Ok(job)
+}
+
+/// Returns a source-archive job only for its current owning builder session.
+///
+/// The combined predicate prevents callers from distinguishing an absent job
+/// from a job owned by another builder, another session, or another lifecycle
+/// state.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot execute or decode the query.
+pub async fn get_authorized_source_archive_job(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+    builder_session_id: &Uuid,
+) -> Result<Option<BuildJob>> {
+    sqlx::query_as::<_, BuildJobRow>(GET_AUTHORIZED_SOURCE_ARCHIVE_JOB_SQL)
+        .bind(job_id)
+        .bind(builder_id)
+        .bind(builder_session_id)
+        .fetch_optional(pool)
+        .await
+        .context("Failed to fetch authorized source archive job")
 }
 
 /// Increase priority of a queued build job so it runs next.
@@ -1606,6 +2645,54 @@ pub struct BuildFailureTransition {
     pub retry_job: Option<BuildJob>,
 }
 
+/// Releases a claimed job when defense-in-depth detects evaluator incompatibility.
+///
+/// The job remains queued for another compatible builder. The transition does
+/// not consume retry budget or mark the shared derivation as failed.
+///
+/// # Errors
+///
+/// Returns an error when the job is not owned by the supplied builder session
+/// in `building` state or when PostgreSQL cannot execute the transition.
+pub async fn release_job_for_incompatible_evaluator(
+    pool: &PgPool,
+    job_id: &Uuid,
+    builder_id: &Uuid,
+    builder_session_id: Option<&Uuid>,
+    error_message: Option<&str>,
+) -> Result<BuildJob> {
+    sqlx::query_as::<_, BuildJobRow>(
+        r#"
+        UPDATE build_jobs
+        SET status = 'queued',
+            builder_id = NULL,
+            builder_session_id = NULL,
+            server_failure_code = NULL,
+            started_at = NULL,
+            completed_at = NULL,
+            available_at = NOW(),
+            logs = CASE
+                WHEN $4::text IS NULL THEN logs
+                ELSE COALESCE(logs, '') || E'\n\nRelease: [evaluator_incompatible] ' || $4
+            END,
+            updated_at = NOW()
+        WHERE id = $1
+          AND builder_id = $2
+          AND (builder_session_id IS NULL OR builder_session_id = $3)
+          AND status = 'building'
+        RETURNING *
+        "#,
+    )
+    .bind(job_id)
+    .bind(builder_id)
+    .bind(builder_session_id)
+    .bind(error_message)
+    .fetch_optional(pool)
+    .await
+    .context("Failed to release evaluator-incompatible build job")?
+    .ok_or_else(|| anyhow::anyhow!("Build job is not owned in building state"))
+}
+
 /// Terminally fail one attempt and atomically schedule at most one automatic child.
 pub async fn mark_job_failed_with_retry(
     pool: &PgPool,
@@ -1619,6 +2706,27 @@ pub async fn mark_job_failed_with_retry(
         .begin()
         .await
         .context("Failed to begin fail transaction")?;
+
+    let derivation_id: i32 = sqlx::query_scalar(
+        r#"
+        SELECT derivation_id FROM build_jobs
+        WHERE id = $1
+          AND builder_id = $2
+          AND (builder_session_id IS NULL OR builder_session_id = $3)
+          AND status = 'building'
+        "#,
+    )
+    .bind(job_id)
+    .bind(builder_id)
+    .bind(builder_session_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to identify owned building job for fail transition")?
+    .ok_or_else(|| {
+        anyhow::anyhow!("Build job not found or no longer owned by this builder in building status")
+    })?;
+
+    lock_build_derivation(&mut tx, derivation_id).await?;
 
     let job = sqlx::query_as::<_, BuildJobRow>(
         r#"
@@ -1653,6 +2761,7 @@ pub async fn mark_job_failed_with_retry(
         r#"
         UPDATE build_jobs
         SET status = 'failed',
+            server_failure_code = NULL,
             completed_at = NOW(),
             logs = CASE
                 WHEN $2::text IS NULL THEN logs
@@ -1716,6 +2825,23 @@ pub async fn mark_job_failed_with_retry(
         None
     };
 
+    if retry_job.is_some() {
+        crate::queries::cve_scan_leases::create_post_build_scan_intents_tx(
+            &mut tx,
+            &[job.derivation_id],
+        )
+        .await
+        .context("Failed to persist post-build scan intent for automatic build retry")?;
+    } else {
+        crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+            &mut tx,
+            *job_id,
+            error_message,
+        )
+        .await
+        .context("Failed to terminalize post-build scan after build failure")?;
+    }
+
     tx.commit()
         .await
         .context("Failed to commit build failure")?;
@@ -1764,8 +2890,23 @@ pub async fn get_build_job_status(pool: &PgPool, job_id: &Uuid) -> Result<Option
 ///
 /// Returns the updated `BuildJob`, or an error if the transition is illegal.
 pub async fn cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
-    let job = get_build_job_by_id(pool, job_id)
-        .await?
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin build cancellation")?;
+    let derivation_id: i32 =
+        sqlx::query_scalar("SELECT derivation_id FROM build_jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to identify build job for cancellation")?
+            .ok_or_else(|| anyhow::anyhow!("Build job not found"))?;
+    lock_build_derivation(&mut tx, derivation_id).await?;
+    let job = sqlx::query_as::<_, BuildJobRow>("SELECT * FROM build_jobs WHERE id = $1 FOR UPDATE")
+        .bind(job_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("Failed to lock build job for cancellation")?
         .ok_or_else(|| anyhow::anyhow!("Build job not found"))?;
 
     let (new_status, set_completed_at) = match job.status.as_str() {
@@ -1791,9 +2932,20 @@ pub async fn cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> 
     .bind(job_id)
     .bind(new_status)
     .bind(set_completed_at)
-    .fetch_one(pool)
+    .fetch_one(&mut *tx)
     .await
     .context("Failed to cancel build job")?;
+
+    if new_status == "cancelled" {
+        crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+            &mut tx, *job_id, None,
+        )
+        .await
+        .context("Failed to terminalize post-build scan after build cancellation")?;
+    }
+    tx.commit()
+        .await
+        .context("Failed to commit build cancellation")?;
 
     Ok(updated)
 }
@@ -1811,6 +2963,19 @@ pub async fn cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> 
 ///
 /// Returns the updated `BuildJob`, or an error if the transition is illegal.
 pub async fn force_cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin forced build cancellation")?;
+    let derivation_id: Option<i32> =
+        sqlx::query_scalar("SELECT derivation_id FROM build_jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to identify build job for forced cancellation")?;
+    if let Some(derivation_id) = derivation_id {
+        lock_build_derivation(&mut tx, derivation_id).await?;
+    }
     // Atomic transition guard: only force-cancel while state is still
     // `cancelling`.
     let updated = sqlx::query_as::<_, BuildJobRow>(
@@ -1825,16 +2990,29 @@ pub async fn force_cancel_build_job(pool: &PgPool, job_id: &Uuid) -> Result<Buil
         "#,
     )
     .bind(job_id)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *tx)
     .await
     .context("Failed to force-cancel build job")?;
 
     if let Some(updated) = updated {
+        crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+            &mut tx, *job_id, None,
+        )
+        .await
+        .context("Failed to terminalize post-build scan after forced cancellation")?;
+        tx.commit()
+            .await
+            .context("Failed to commit forced build cancellation")?;
         info!("Force-cancelled job {} → 'cancelled'", job_id);
         return Ok(updated);
     }
 
-    let current_status = get_build_job_status(pool, job_id).await?;
+    let current_status =
+        sqlx::query_scalar::<_, String>("SELECT status FROM build_jobs WHERE id = $1")
+            .bind(job_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("Failed to fetch build job status")?;
     match current_status.as_deref() {
         None => bail!("Build job not found"),
         Some("queued") => bail!("Cannot force-cancel a queued job; use regular cancel instead"),
@@ -1863,6 +3041,31 @@ pub async fn finalize_cancelled_job(
     builder_id: &Uuid,
     builder_session_id: Option<&Uuid>,
 ) -> Result<BuildJob> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("Failed to begin cancelled build finalization")?;
+    let derivation_id: i32 = sqlx::query_scalar(
+        r#"
+        SELECT derivation_id FROM build_jobs
+        WHERE id = $1
+          AND builder_id = $2
+          AND (builder_session_id IS NULL OR builder_session_id = $3)
+          AND status IN ('cancelling', 'cancelled')
+        "#,
+    )
+    .bind(job_id)
+    .bind(builder_id)
+    .bind(builder_session_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to identify cancelled build job")?
+    .ok_or_else(|| {
+        anyhow::anyhow!(
+            "Build job not found or no longer owned by this builder in cancellable state"
+        )
+    })?;
+    lock_build_derivation(&mut tx, derivation_id).await?;
     let result = sqlx::query(
         r#"
         UPDATE build_jobs
@@ -1878,7 +3081,7 @@ pub async fn finalize_cancelled_job(
     .bind(job_id)
     .bind(builder_id)
     .bind(builder_session_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await
     .context("Failed to finalize cancelled job")?;
 
@@ -1886,45 +3089,273 @@ pub async fn finalize_cancelled_job(
         bail!("Build job not found or no longer owned by this builder in cancellable state");
     }
 
-    let job = get_build_job_by_id(pool, job_id).await?.ok_or_else(|| {
-        anyhow::anyhow!("Build job disappeared after successful finalize-cancelled transition")
-    })?;
+    crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+        &mut tx, *job_id, None,
+    )
+    .await
+    .context("Failed to terminalize post-build scan after cancelled build finalization")?;
+    let job = sqlx::query_as::<_, BuildJobRow>("SELECT * FROM build_jobs WHERE id = $1")
+        .bind(job_id)
+        .fetch_optional(&mut *tx)
+        .await?
+        .map(BuildJob::from)
+        .ok_or_else(|| {
+            anyhow::anyhow!("Build job disappeared after successful finalize-cancelled transition")
+        })?;
+    tx.commit()
+        .await
+        .context("Failed to commit cancelled build finalization")?;
 
     Ok(job)
 }
 
-/// Create a new queued build attempt from a terminal job.
+/// Describes whether manual requeue created or reused the active attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequeueBuildJobDisposition {
+    /// The transaction inserted a new queued child attempt.
+    Created,
+    /// The transaction returned the derivation's existing active attempt.
+    Reused,
+}
+
+/// Contains the active attempt produced by a manual requeue request.
+#[derive(Debug, Clone)]
+pub struct RequeueBuildJobOutcome {
+    /// The new or existing active attempt.
+    pub attempt: BuildJob,
+    /// Whether this request created the attempt.
+    pub disposition: RequeueBuildJobDisposition,
+}
+
+/// Identifies a truthful manual requeue failure category.
+#[derive(Debug)]
+pub enum RequeueBuildJobError {
+    /// The source does not exist or is outside the caller's environment scope.
+    NotFoundOrHidden,
+    /// The visible source is not terminal and cannot be requeued.
+    LifecycleConflict { status: String },
+    /// The source requires authoritative evaluation of its exact commit.
+    EvaluatorContractObsolete { commit_id: i32 },
+    /// Persistence or constraint processing failed.
+    Internal(anyhow::Error),
+}
+
+impl std::fmt::Display for RequeueBuildJobError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFoundOrHidden => formatter.write_str("Build job not found"),
+            Self::LifecycleConflict { status } => {
+                write!(
+                    formatter,
+                    "Build job is not terminal (current status: {status})"
+                )
+            }
+            Self::EvaluatorContractObsolete { commit_id } => write!(
+                formatter,
+                "Build job uses an obsolete evaluator contract; re-evaluate commit {commit_id} before retrying",
+            ),
+            Self::Internal(error) => write!(formatter, "{error:#}"),
+        }
+    }
+}
+
+impl std::error::Error for RequeueBuildJobError {}
+
+impl From<anyhow::Error> for RequeueBuildJobError {
+    fn from(error: anyhow::Error) -> Self {
+        Self::Internal(error)
+    }
+}
+
+// SECURITY: Locks the membership that authorizes a scoped build mutation until
+// the transaction commits. A concurrent membership revocation must complete
+// before authorization or wait until the already-authorized transaction ends.
+async fn lock_requeue_environment_access(
+    tx: &mut Transaction<'_, Postgres>,
+    user_id: Uuid,
+    is_admin: bool,
+    environment_id: Option<Uuid>,
+) -> Result<bool> {
+    if is_admin {
+        return Ok(true);
+    }
+    let Some(environment_id) = environment_id else {
+        return Ok(false);
+    };
+    let visible: Option<Uuid> = sqlx::query_scalar(
+        r#"
+        SELECT environment_id
+        FROM user_environment_memberships
+        WHERE user_id = $1 AND environment_id = $2
+        FOR SHARE
+        "#,
+    )
+    .bind(user_id)
+    .bind(environment_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("Failed to lock build requeue environment membership")?;
+    Ok(visible.is_some())
+}
+
+/// Returns one active attempt for a terminal build without mutating history.
 ///
-/// This preserves immutable build history by keeping the original row intact
-/// and inserting a brand-new `build_jobs` row for the same derivation/context.
+/// Concurrent requests for any terminal attempt of the same derivation are
+/// serialized. The first request creates a queued child and later requests
+/// return that child with [`RequeueBuildJobDisposition::Reused`].
 ///
-/// Requeue-eligible terminal statuses: `cancelled`, `failed`, `success`.
-/// New attempts are appended to the queue tail by assigning a weight lower than
-/// the current minimum queued weight.
-pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> Result<BuildJob> {
+/// # Errors
+///
+/// Returns [`RequeueBuildJobError::NotFoundOrHidden`] when the source is missing
+/// or outside the caller's environment scope. Returns
+/// [`RequeueBuildJobError::LifecycleConflict`] when the visible source is not
+/// terminal. Returns
+/// [`RequeueBuildJobError::EvaluatorContractObsolete`] when the exact source
+/// revision requires authoritative re-evaluation. Persistence failures return
+/// [`RequeueBuildJobError::Internal`].
+pub async fn requeue_build_job_as_new_attempt(
+    pool: &PgPool,
+    job_id: &Uuid,
+    user_id: Uuid,
+    is_admin: bool,
+) -> std::result::Result<RequeueBuildJobOutcome, RequeueBuildJobError> {
     let mut tx = pool
         .begin()
         .await
-        .context("Failed to begin requeue_build_job_as_new_attempt transaction")?;
+        .context("Failed to begin requeue_build_job_as_new_attempt transaction")
+        .map_err(RequeueBuildJobError::Internal)?;
 
-    lock_build_queue_order(&mut tx).await?;
+    let derivation_id: i32 = sqlx::query_scalar(
+        r#"
+        SELECT derivation_id
+        FROM build_jobs
+        WHERE id = $1
+          AND ($3 OR (
+              environment_id IS NOT NULL
+              AND EXISTS (
+                  SELECT 1 FROM user_environment_memberships membership
+                  WHERE membership.user_id = $2
+                    AND membership.environment_id = build_jobs.environment_id
+              )
+          ))
+        "#,
+    )
+    .bind(job_id)
+    .bind(user_id)
+    .bind(is_admin)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to identify build derivation for requeue")
+    .map_err(RequeueBuildJobError::Internal)?
+    .ok_or(RequeueBuildJobError::NotFoundOrHidden)?;
+
+    lock_build_derivation(&mut tx, derivation_id)
+        .await
+        .map_err(RequeueBuildJobError::Internal)?;
+
+    #[derive(sqlx::FromRow)]
+    struct RequeueSource {
+        derivation_id: i32,
+        environment_id: Option<Uuid>,
+        root_job_id: Option<Uuid>,
+        server_failure_code: Option<String>,
+        commit_id: i32,
+        status: String,
+    }
+
+    let source = sqlx::query_as::<_, RequeueSource>(
+        r#"
+        SELECT bj.derivation_id, bj.environment_id, bj.root_job_id,
+               bj.server_failure_code, d.commit_id, bj.status
+        FROM build_jobs bj
+        JOIN derivations d ON d.id = bj.derivation_id
+        WHERE bj.id = $1
+        FOR UPDATE OF bj
+        "#,
+    )
+    .bind(job_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to load terminal build attempt for requeue")
+    .map_err(RequeueBuildJobError::Internal)?
+    .ok_or(RequeueBuildJobError::NotFoundOrHidden)?;
+
+    if !lock_requeue_environment_access(&mut tx, user_id, is_admin, source.environment_id)
+        .await
+        .map_err(RequeueBuildJobError::Internal)?
+    {
+        return Err(RequeueBuildJobError::NotFoundOrHidden);
+    }
+
+    if !matches!(source.status.as_str(), "cancelled" | "failed" | "success") {
+        return Err(RequeueBuildJobError::LifecycleConflict {
+            status: source.status,
+        });
+    }
+
+    let active = sqlx::query_as::<_, BuildJobRow>(
+        r#"
+        SELECT * FROM build_jobs
+        WHERE derivation_id = $1
+          AND status IN ('queued', 'building', 'cancelling')
+        ORDER BY created_at DESC, id DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(source.derivation_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("Failed to find an existing active build attempt")
+    .map_err(RequeueBuildJobError::Internal)?;
+
+    if let Some(attempt) = active {
+        if !lock_requeue_environment_access(&mut tx, user_id, is_admin, attempt.environment_id)
+            .await
+            .map_err(RequeueBuildJobError::Internal)?
+        {
+            return Err(RequeueBuildJobError::NotFoundOrHidden);
+        }
+        tx.commit()
+            .await
+            .context("Failed to commit reused build attempt")
+            .map_err(RequeueBuildJobError::Internal)?;
+        return Ok(RequeueBuildJobOutcome {
+            attempt,
+            disposition: RequeueBuildJobDisposition::Reused,
+        });
+    }
+
+    if source.server_failure_code.as_deref()
+        == Some(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+    {
+        return Err(RequeueBuildJobError::EvaluatorContractObsolete {
+            commit_id: source.commit_id,
+        });
+    }
+
+    lock_build_queue_order(&mut tx)
+        .await
+        .map_err(RequeueBuildJobError::Internal)?;
 
     let next_pos: i64 = sqlx::query_scalar(
         "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM build_jobs WHERE status = 'queued' OR status = 'building'",
     )
     .fetch_one(&mut *tx)
     .await
-    .context("Failed to read max queue_position for requeue")?;
+    .context("Failed to read max queue_position for requeue")
+    .map_err(RequeueBuildJobError::Internal)?;
+
+    let attempt_number: i32 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(attempt_number), 0) + 1 FROM build_jobs WHERE derivation_id = $1",
+    )
+    .bind(source.derivation_id)
+    .fetch_one(&mut *tx)
+    .await
+    .context("Failed to allocate the next build attempt number")
+    .map_err(RequeueBuildJobError::Internal)?;
 
     let inserted = sqlx::query_as::<_, BuildJobRow>(
         r#"
-        WITH source_job AS (
-            SELECT derivation_id, environment_id, id,
-                   COALESCE(root_job_id, id) AS root_job_id, attempt_number
-            FROM build_jobs
-            WHERE id = $1
-              AND status IN ('cancelled', 'failed', 'success')
-        )
         INSERT INTO build_jobs (
             derivation_id,
             environment_id,
@@ -1938,38 +3369,79 @@ pub async fn requeue_build_job_as_new_attempt(pool: &PgPool, job_id: &Uuid) -> R
             attempt_number,
             available_at
         )
-        SELECT
-            s.derivation_id,
-            s.environment_id,
+        VALUES (
+            $1,
+            $2,
             'queued',
             0,
             COALESCE((SELECT max_build_retries FROM automatic_retry_policy WHERE id = 1), 2),
             1.0,
-            $2,
-            s.id,
-            s.root_job_id,
-            s.attempt_number + 1,
+            $3,
+            $4,
+            $5,
+            $6,
             NOW()
-        FROM source_job s
+        )
+        ON CONFLICT (derivation_id)
+            WHERE status IN ('queued', 'building', 'cancelling') DO NOTHING
         RETURNING *
         "#,
     )
-    .bind(job_id)
+    .bind(source.derivation_id)
+    .bind(source.environment_id)
     .bind(next_pos)
+    .bind(job_id)
+    .bind(source.root_job_id.unwrap_or(*job_id))
+    .bind(attempt_number)
     .fetch_optional(&mut *tx)
     .await
-    .context("Failed to requeue build job as new attempt")?
-    .ok_or_else(|| {
-        anyhow::anyhow!(
-            "Build job not found or not in a requeue-eligible status (cancelled/failed/success)"
+    .context("Failed to requeue build job as new attempt")
+    .map_err(RequeueBuildJobError::Internal)?;
+
+    if inserted.is_some() {
+        crate::queries::cve_scan_leases::create_post_build_scan_intents_tx(
+            &mut tx,
+            &[source.derivation_id],
         )
-    })?;
+        .await
+        .context("Failed to persist post-build scan intent for requeued build")
+        .map_err(RequeueBuildJobError::Internal)?;
+    }
+
+    let (attempt, disposition) = if let Some(attempt) = inserted {
+        (attempt, RequeueBuildJobDisposition::Created)
+    } else {
+        let attempt = sqlx::query_as::<_, BuildJobRow>(
+            "SELECT * FROM build_jobs WHERE derivation_id = $1 AND status IN ('queued', 'building', 'cancelling') ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(source.derivation_id)
+        .fetch_optional(&mut *tx)
+        .await
+        .context("Failed to load active build attempt after uniqueness conflict")
+        .map_err(RequeueBuildJobError::Internal)?
+        .ok_or_else(|| {
+            RequeueBuildJobError::Internal(anyhow::anyhow!(
+                "Active build uniqueness conflict did not identify an active attempt"
+            ))
+        })?;
+        if !lock_requeue_environment_access(&mut tx, user_id, is_admin, attempt.environment_id)
+            .await
+            .map_err(RequeueBuildJobError::Internal)?
+        {
+            return Err(RequeueBuildJobError::NotFoundOrHidden);
+        }
+        (attempt, RequeueBuildJobDisposition::Reused)
+    };
 
     tx.commit()
         .await
-        .context("Failed to commit requeue_build_job_as_new_attempt")?;
+        .context("Failed to commit requeue_build_job_as_new_attempt")
+        .map_err(RequeueBuildJobError::Internal)?;
 
-    Ok(inserted)
+    Ok(RequeueBuildJobOutcome {
+        attempt,
+        disposition,
+    })
 }
 
 #[cfg(test)]
@@ -1980,6 +3452,30 @@ mod tests {
     use base64::Engine;
     use chrono::{Duration, Utc};
     use sqlx::postgres::PgPoolOptions;
+
+    #[test]
+    fn verified_source_claim_requires_preflight_before_database_work() {
+        let error = validate_verified_source_claim_preflight(
+            RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            None,
+        )
+        .expect_err("verified-source claims without a preflighted job must fail");
+        assert!(error.to_string().contains("preflighted job ID"));
+        assert!(
+            validate_verified_source_claim_preflight(
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+                Some(&Uuid::new_v4()),
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_verified_source_claim_preflight(
+                RemoteBuildExecutionStrategy::ServerDerivation,
+                None,
+            )
+            .is_ok()
+        );
+    }
 
     #[test]
     fn claim_next_job_queries_lock_only_build_jobs_rows() {
@@ -2014,6 +3510,16 @@ mod tests {
                 "verified-source claim SQL must cover metadata outer joins: {sql}"
             );
         }
+    }
+
+    #[test]
+    fn source_archive_query_authorizes_before_disclosing_job_existence() {
+        let sql = GET_AUTHORIZED_SOURCE_ARCHIVE_JOB_SQL;
+        assert!(sql.contains("build_jobs.id = $1"));
+        assert!(sql.contains("build_jobs.builder_id = $2"));
+        assert!(sql.contains("build_jobs.builder_session_id = $3"));
+        assert!(sql.contains("build_jobs.status = 'building'"));
+        assert!(sql.contains("builders.current_session_id = $3"));
     }
 
     #[test]
@@ -2224,6 +3730,1295 @@ mod tests {
         .expect("Failed to update test job status");
     }
 
+    async fn insert_post_build_scan(pool: &PgPool, job_id: Uuid) -> Uuid {
+        sqlx::query_scalar(
+            r#"
+            INSERT INTO cve_scans (
+                derivation_id, scanner_name, status, attempts, source_trigger,
+                completed_build_job_id
+            )
+            SELECT derivation_id, 'vulnix', 'awaiting_build', 0, 'post_build', id
+            FROM build_jobs
+            WHERE id = $1
+            RETURNING id
+            "#,
+        )
+        .bind(job_id)
+        .fetch_one(pool)
+        .await
+        .expect("post-build scan should be inserted")
+    }
+
+    async fn insert_later_build_attempt(pool: &PgPool, source_job_id: Uuid, status: &str) -> Uuid {
+        sqlx::query_scalar(
+            r#"
+            INSERT INTO build_jobs (
+                derivation_id, status, attempt_number, parent_job_id,
+                root_job_id, created_at, completed_at
+            )
+            SELECT derivation_id, $2, attempt_number + 1, id,
+                   COALESCE(root_job_id, id), created_at + INTERVAL '1 second',
+                   CASE WHEN $2 IN ('success', 'failed', 'cancelled')
+                        THEN created_at + INTERVAL '1 second'
+                        ELSE NULL
+                   END
+            FROM build_jobs
+            WHERE id = $1
+            RETURNING id
+            "#,
+        )
+        .bind(source_job_id)
+        .bind(status)
+        .fetch_one(pool)
+        .await
+        .expect("later build attempt should be inserted")
+    }
+
+    async fn set_job_derivation_path(pool: &PgPool, job_id: Uuid, drv_path: &str) {
+        sqlx::query(
+            "UPDATE derivations SET derivation_path = $2 WHERE id = (SELECT derivation_id FROM build_jobs WHERE id = $1)",
+        )
+        .bind(job_id)
+        .bind(drv_path)
+        .execute(pool)
+        .await
+        .expect("Failed to set test derivation path");
+    }
+
+    #[test]
+    fn niks3_completion_output_requires_authority_and_preserves_retry_identity() {
+        let evaluated = "/nix/store/evaluated-output";
+        let wrong = "/nix/store/unrelated-output";
+        assert!(
+            validated_completion_output("building", Some(wrong), Some(evaluated), None, true)
+                .is_err()
+        );
+        assert!(validated_completion_output("building", Some(wrong), None, None, true).is_err());
+        assert_eq!(
+            validated_completion_output("building", Some(wrong), None, None, false)
+                .unwrap()
+                .as_deref(),
+            Some(wrong)
+        );
+        assert_eq!(
+            validated_completion_output("building", None, Some(evaluated), None, true)
+                .unwrap()
+                .as_deref(),
+            Some(evaluated)
+        );
+        assert_eq!(
+            validated_completion_output("success", Some(wrong), Some(wrong), Some(evaluated), true)
+                .unwrap()
+                .as_deref(),
+            Some(evaluated)
+        );
+        assert!(validated_completion_output("success", None, None, None, true).is_err());
+        assert_eq!(
+            validated_completion_output("building", None, Some(evaluated), None, false).unwrap(),
+            None
+        );
+        assert!(
+            validated_completion_output("building", Some("/nix/store/../wrong"), None, None, false)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn niks3_publication_fingerprint_includes_secrets_policy_and_canonical_sets() {
+        use crate::models::cache_destination::CacheDestination;
+        let destination = CacheDestination {
+            id: 42,
+            name: "display-name".into(),
+            enabled: true,
+            cache_type: "Niks3".into(),
+            push_to: Some("https://read.example".into()),
+            niks3_server_url: Some("https://write.example".into()),
+            niks3_public_keys: vec!["two:key".into(), "one:key".into()],
+            niks3_write_auth_mode: Some("token".into()),
+            niks3_auth_token: Some("test-write-token".into()),
+            niks3_read_auth_mode: Some("mtls".into()),
+            niks3_read_client_key: Some("test-read-key".into()),
+            niks3_write_client_key: Some("test-write-key".into()),
+            ..Default::default()
+        };
+        let first = Uuid::from_u128(1);
+        let second = Uuid::from_u128(2);
+        let original =
+            publication_configuration_fingerprint(&destination, &[first, second]).unwrap();
+        let mut usage = destination.clone();
+        usage.updated_at = Utc::now();
+        usage.last_used_at = Some(Utc::now());
+        usage.created_at = Utc::now();
+        usage.name = "renamed-display".into();
+        usage.parallel_uploads = Some(91);
+        usage.max_retries = Some(100);
+        usage.niks3_public_keys.reverse();
+        usage.niks3_public_keys.push("one:key".into());
+        assert!(
+            original
+                == publication_configuration_fingerprint(&usage, &[second, first, first]).unwrap()
+        );
+        for field in [
+            "token",
+            "read-key",
+            "write-key",
+            "read-url",
+            "write-url",
+            "keys",
+            "read-mode",
+            "basic-username",
+            "basic-password",
+            "enabled",
+        ] {
+            let mut changed = destination.clone();
+            match field {
+                "token" => changed.niks3_auth_token = Some("rotated-token".into()),
+                "read-key" => changed.niks3_read_client_key = Some("rotated-read-key".into()),
+                "write-key" => changed.niks3_write_client_key = Some("rotated-write-key".into()),
+                "read-url" => changed.push_to = Some("https://other-read.example".into()),
+                "write-url" => {
+                    changed.niks3_server_url = Some("https://other-write.example".into())
+                }
+                "keys" => changed.niks3_public_keys = vec!["different:key".into()],
+                "read-mode" => changed.niks3_read_auth_mode = Some("none".into()),
+                "basic-username" => {
+                    changed.niks3_read_basic_username = Some("rotated-reader".into())
+                }
+                "basic-password" => {
+                    changed.niks3_read_basic_password = Some("synthetic-rotated-read-secret".into())
+                }
+                "enabled" => changed.enabled = false,
+                _ => unreachable!(),
+            }
+            if matches!(
+                field,
+                "token" | "read-key" | "write-key" | "basic-username" | "basic-password"
+            ) {
+                // Model serialization would miss these changes completely.
+                assert_eq!(
+                    serde_json::to_value(&changed).unwrap(),
+                    serde_json::to_value(&destination).unwrap()
+                );
+            }
+            assert!(
+                original
+                    != publication_configuration_fingerprint(&changed, &[first, second]).unwrap()
+            );
+        }
+        assert!(original != publication_configuration_fingerprint(&destination, &[first]).unwrap());
+        assert!(
+            publication_configuration_fingerprint(&destination, &[first]).unwrap()
+                != publication_configuration_fingerprint(&destination, &[first, second]).unwrap()
+        );
+    }
+
+    // Use the real validated/encrypted persistence path so migration constraints
+    // are exercised. The test runner supplies a nonproduction encryption key.
+    async fn create_public_niks3_test_cache(
+        pool: &PgPool,
+        name: &str,
+        read_url: &str,
+    ) -> crate::models::cache_destination::CacheDestination {
+        crate::queries::cache_destinations::create_cache_destination(
+            pool,
+            &crate::models::cache_destination::CreateCacheDestination {
+                name: name.into(),
+                cache_type: "Niks3".into(),
+                push_to: Some(read_url.into()),
+                enabled: Some(true),
+                niks3_server_url: Some("https://write.example".into()),
+                niks3_public_keys: vec![
+                    "cache:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into(),
+                ],
+                niks3_write_auth_mode: Some("token".into()),
+                niks3_auth_token: Some("fixture-write-token".into()),
+                niks3_read_auth_mode: Some("none".into()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap()
+    }
+
+    async fn canonical_environment_fixture(
+        pool: &PgPool,
+    ) -> (
+        BuildJob,
+        Uuid,
+        crate::models::cache_destination::CacheDestination,
+        i32,
+        Uuid,
+    ) {
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            pool,
+            "https://example.com/canonical-environment.git",
+            "canonical-environment",
+            &"a".repeat(40),
+            now,
+            "canonical-config",
+            1.0,
+            now,
+        )
+        .await;
+        let builder = create_active_test_builder(pool, "canonical-builder").await;
+        let job = claim_next_job_atomic(
+            pool,
+            &builder.id,
+            4,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(job.id, job_id);
+        let flake_id: i32 = sqlx::query_scalar(
+            "SELECT c.flake_id FROM commits c JOIN derivations d ON d.commit_id = c.id WHERE d.id = $1",
+        )
+        .bind(job.derivation_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let preferred: Uuid = sqlx::query_scalar(
+            "INSERT INTO environments (name) VALUES ('preferred-environment') RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let other: Uuid = sqlx::query_scalar(
+            "INSERT INTO environments (name) VALUES ('other-environment') RETURNING id",
+        )
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        // A lower-ranked hostname and an inactive configuration-name match must
+        // not make the active preferred configuration ambiguous.
+        sqlx::query(
+            "INSERT INTO systems (hostname, system_configuration_name, public_key, derivation, flake_id, environment_id, is_active)
+             VALUES ('preferred-host', 'canonical-config', 'test-key', '', $1, $2, TRUE),
+                    ('canonical-config', 'other-config', 'test-key', '', $1, $3, TRUE),
+                    ('inactive-host', 'canonical-config', 'test-key', '', $1, $3, FALSE)",
+        )
+        .bind(flake_id)
+        .bind(preferred)
+        .bind(other)
+        .execute(pool)
+        .await
+        .unwrap();
+        let destination =
+            create_public_niks3_test_cache(pool, "preferred-cache", "https://preferred.example")
+                .await;
+        crate::queries::cache_destinations::assign_environments_to_cache(
+            pool,
+            destination.id,
+            &[preferred],
+        )
+        .await
+        .unwrap();
+        (job, builder.id, destination, flake_id, other)
+    }
+
+    async fn insert_competing_preferred_environment(pool: &PgPool, flake: i32, environment: Uuid) {
+        sqlx::query(
+            "INSERT INTO systems (hostname, system_configuration_name, public_key, derivation, flake_id, environment_id, is_active)
+             VALUES ('competing-host', 'canonical-config', 'test-key', '', $1, $2, TRUE)",
+        )
+        .bind(flake)
+        .bind(environment)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified isolated database creation privileges"]
+    async fn niks3_canonical_environment_dispatch_rejects_ambiguity_before_credentials(
+        pool: PgPool,
+    ) {
+        let (job, builder, destination, flake, other) = canonical_environment_fixture(&pool).await;
+        insert_competing_preferred_environment(&pool, flake, other).await;
+        // An absent destination would fail at credential snapshot loading. The
+        // ambiguity error must take precedence even before that read occurs.
+        for id in [destination.id, i32::MAX] {
+            let error = record_job_cache_dispatch(&pool, &job.id, &builder, None, Some(id))
+                .await
+                .unwrap_err();
+            assert_eq!(error.to_string(), "Ambiguous derivation environment");
+        }
+        let unchanged = get_build_job_by_id(&pool, &job.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.status, "building");
+        assert!(unchanged.dispatched_cache_destination_id.is_none());
+        assert!(unchanged.cache_dispatch_recorded_at.is_none());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified isolated database creation privileges"]
+    async fn niks3_canonical_environment_completion_rejects_post_dispatch_ambiguity(pool: PgPool) {
+        let (job, builder, destination, flake, other) = canonical_environment_fixture(&pool).await;
+        let output = "/nix/store/canonical-output";
+        sqlx::query("UPDATE derivations SET expected_store_path = $2 WHERE id = $1")
+            .bind(job.derivation_id)
+            .bind(output)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let derivation =
+            crate::queries::derivations::get_derivation_by_id(&pool, job.derivation_id)
+                .await
+                .unwrap();
+        let eligible = crate::queries::cache_push::eligible_cache_destinations_for_derivation(
+            &pool,
+            &derivation,
+        )
+        .await
+        .unwrap();
+        assert_eq!(eligible.len(), 1);
+        assert_eq!(eligible[0].id, destination.id);
+        record_job_cache_dispatch(&pool, &job.id, &builder, None, Some(destination.id))
+            .await
+            .unwrap();
+        let publication =
+            capture_cache_publication_configuration(&pool, job.derivation_id, &destination)
+                .await
+                .unwrap();
+        let before: (i32, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+            "SELECT status_id, store_path, completed_at FROM derivations WHERE id = $1",
+        )
+        .bind(job.derivation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        // Introduce the tie only after both dispatch and publication evidence.
+        // Destination settings and assignments remain unchanged.
+        insert_competing_preferred_environment(&pool, flake, other).await;
+        assert!(
+            crate::queries::cache_push::eligible_cache_destinations_for_derivation(
+                &pool,
+                &derivation
+            )
+            .await
+            .is_err()
+        );
+        for evidence in [Some(&publication), None] {
+            let error = complete_preverified_job_atomic_with_policy(
+                &pool,
+                &job.id,
+                &builder,
+                None,
+                Some(output),
+                evidence,
+                BuildCompletionPolicy {
+                    auto_hardening_scans: true,
+                },
+            )
+            .await
+            .unwrap_err();
+            assert_eq!(error.to_string(), "Ambiguous derivation environment");
+            let unchanged = get_build_job_by_id(&pool, &job.id).await.unwrap().unwrap();
+            assert_eq!(unchanged.status, "building");
+            assert!(unchanged.completed_at.is_none());
+            assert_eq!(
+                unchanged.dispatched_cache_destination_id,
+                Some(destination.id)
+            );
+            let after: (i32, Option<String>, Option<DateTime<Utc>>) = sqlx::query_as(
+                "SELECT status_id, store_path, completed_at FROM derivations WHERE id = $1",
+            )
+            .bind(job.derivation_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(after, before);
+            let publications: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM cache_push_jobs WHERE derivation_id = $1")
+                    .bind(job.derivation_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(
+                publications, 0,
+                "no confirmed publication or no-push enqueue"
+            );
+            let hardening: i64 =
+                sqlx::query_scalar("SELECT COUNT(*) FROM hardening_scans WHERE derivation_id = $1")
+                    .bind(job.derivation_id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap();
+            assert_eq!(hardening, 0);
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn niks3_preclaim_handler_rejects_legacy_and_allows_capable_builder(pool: PgPool) {
+        use axum::{
+            body::Bytes,
+            extract::{ConnectInfo, Path, State},
+            http::{HeaderMap, Method, StatusCode},
+        };
+        use ed25519_dalek::Signer;
+
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/rolling.git",
+            "rolling",
+            &"a".repeat(40),
+            now,
+            "rolling",
+            1.0,
+            now,
+        )
+        .await;
+        let builder = create_active_test_builder(&pool, "rolling-builder").await;
+        let key = SigningKey::generate(&mut rand::thread_rng());
+        sqlx::query("UPDATE builders SET public_key = $2 WHERE id = $1")
+            .bind(builder.id)
+            .bind(BASE64.encode(key.verifying_key().to_bytes()))
+            .execute(&pool)
+            .await
+            .unwrap();
+        let destination =
+            create_public_niks3_test_cache(&pool, "rolling-cache", "https://read.example").await;
+        let mut config = crate::config::ServerConfig::default();
+        config.trust_forwarded_builder_https = true;
+        config.trusted_proxy_cidrs = vec!["127.0.0.1/32".into()];
+        let state = crate::handlers::agent_request::CFState::new(
+            pool.clone(),
+            config,
+            std::sync::Arc::new(crate::queue::QueueNotifier::new()),
+            crate::server::jobs::BackgroundJobRegistry::new(),
+        );
+        let path = format!("/api/v1/builders/{}/next-job", builder.id);
+        for (method, body, capable) in [
+            (Method::GET, "", false),
+            (Method::POST, "{}", false),
+            (
+                Method::POST,
+                r#"{"capabilities":{"cve_scanning":true,"cve_scan_schema_version":1,"cve_scanner":{"name":"vulnix","version":"test"}}}"#,
+                false,
+            ),
+            (
+                Method::POST,
+                r#"{"capabilities":{"niks3_cache":true}}"#,
+                true,
+            ),
+        ] {
+            let timestamp = Utc::now().to_rfc3339();
+            let payload = format!("{method}\n{path}\n{timestamp}\n{body}");
+            let mut headers = HeaderMap::new();
+            headers.insert("X-Builder-ID", builder.id.to_string().parse().unwrap());
+            headers.insert("X-Timestamp", timestamp.parse().unwrap());
+            headers.insert(
+                "X-Signature",
+                BASE64
+                    .encode(key.sign(payload.as_bytes()).to_bytes())
+                    .parse()
+                    .unwrap(),
+            );
+            headers.insert("X-Forwarded-Proto", "https".parse().unwrap());
+            let response = crate::handlers::api::builders::get_next_job(
+                State(state.clone()),
+                Path(builder.id),
+                Some(ConnectInfo("127.0.0.1:47000".parse().unwrap())),
+                method,
+                headers,
+                Bytes::copy_from_slice(body.as_bytes()),
+            )
+            .await
+            .unwrap();
+            let status = response.status();
+            let bytes = axum::body::to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            let persisted = get_build_job_by_id(&pool, &job_id).await.unwrap().unwrap();
+            if capable {
+                assert_eq!(status, StatusCode::OK);
+                assert_eq!(value["derivation"]["cache_push"]["cache_type"], "Niks3");
+                assert_eq!(persisted.status, "building");
+                assert_eq!(
+                    persisted.dispatched_cache_destination_id,
+                    Some(destination.id)
+                );
+            } else {
+                assert_eq!(status, StatusCode::CONFLICT);
+                assert_eq!(
+                    value,
+                    serde_json::json!({"reason":"unsupported_cache_type"})
+                );
+                assert_eq!(persisted.status, "queued");
+                assert!(persisted.builder_id.is_none());
+                assert!(persisted.builder_session_id.is_none());
+                assert!(persisted.started_at.is_none());
+                assert!(persisted.cache_dispatch_recorded_at.is_none());
+                assert!(persisted.dispatched_cache_destination_id.is_none());
+                assert_eq!(persisted.retry_count, 0);
+            }
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn niks3_exact_candidate_claim_never_substitutes_after_queue_races(pool: PgPool) {
+        for strategy in [
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+        ] {
+            for environments in [vec![], vec![Uuid::new_v4()]] {
+                let builder = create_active_test_builder(&pool, "race-builder").await;
+                let competitor = create_active_test_builder(&pool, "competing-builder").await;
+                let mut jobs = Vec::new();
+                for _ in 0..3 {
+                    let suffix = Uuid::new_v4().simple().to_string();
+                    let now = Utc::now();
+                    let job = create_queued_job(
+                        &pool,
+                        &format!("https://example.com/{suffix}.git"),
+                        &suffix,
+                        &format!("{suffix}00000000"),
+                        now,
+                        &suffix,
+                        1.0,
+                        now,
+                    )
+                    .await;
+                    set_job_derivation_path(&pool, job, &format!("/nix/store/{suffix}.drv")).await;
+                    jobs.push(job);
+                }
+                let candidate_id = match strategy {
+                    RemoteBuildExecutionStrategy::ServerDerivation => {
+                        peek_next_server_derivation_job(&pool, &environments)
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .id
+                    }
+                    RemoteBuildExecutionStrategy::SourceReEvaluateVerified => {
+                        peek_next_verified_source_job(&pool, &environments)
+                            .await
+                            .unwrap()
+                            .unwrap()
+                            .job_id
+                    }
+                };
+                assert_eq!(candidate_id, jobs[2]);
+                // A reordered queue head cannot replace the previewed job.
+                prioritize_build_job(&pool, &jobs[0]).await.unwrap();
+                // A competing transaction locks the exact candidate. SKIP
+                // LOCKED must return no work, even with another eligible head.
+                let mut tx = pool.begin().await.unwrap();
+                sqlx::query("SELECT id FROM build_jobs WHERE id = $1 FOR UPDATE")
+                    .bind(candidate_id)
+                    .fetch_one(&mut *tx)
+                    .await
+                    .unwrap();
+                let locked = claim_next_job_atomic(
+                    &pool,
+                    &builder.id,
+                    4,
+                    &environments,
+                    strategy,
+                    None,
+                    Some(&candidate_id),
+                )
+                .await
+                .unwrap();
+                assert!(locked.is_none());
+                tx.rollback().await.unwrap();
+                let won = claim_next_job_atomic(
+                    &pool,
+                    &competitor.id,
+                    4,
+                    &environments,
+                    strategy,
+                    None,
+                    Some(&candidate_id),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(won.id, candidate_id);
+                let lost = claim_next_job_atomic(
+                    &pool,
+                    &builder.id,
+                    4,
+                    &environments,
+                    strategy,
+                    None,
+                    Some(&candidate_id),
+                )
+                .await
+                .unwrap();
+                assert!(lost.is_none());
+                let exact = claim_next_job_atomic(
+                    &pool,
+                    &builder.id,
+                    4,
+                    &environments,
+                    strategy,
+                    None,
+                    Some(&jobs[1]),
+                )
+                .await
+                .unwrap()
+                .unwrap();
+                assert_eq!(exact.id, jobs[1]);
+                let untouched = get_build_job_by_id(&pool, &jobs[0]).await.unwrap().unwrap();
+                assert_eq!(untouched.status, "queued");
+                assert!(untouched.builder_id.is_none());
+                set_build_job_status(&pool, jobs[0], "cancelled").await;
+            }
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn niks3_dispatch_identity_and_completion_transaction_rechecks(pool: PgPool) {
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/cache-dispatch.git",
+            "cache-dispatch",
+            &"e".repeat(40),
+            now,
+            "cache-dispatch",
+            1.0,
+            now,
+        )
+        .await;
+        let builder = create_active_test_builder(&pool, "cache-dispatch-builder").await;
+        let job = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            4,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(job.id, job_id);
+        let output = "/nix/store/evaluated-output";
+        sqlx::query(
+            "UPDATE derivations SET expected_store_path = $2, store_path = NULL WHERE id = $1",
+        )
+        .bind(job.derivation_id)
+        .bind(output)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let first = create_public_niks3_test_cache(&pool, "selected", "https://selected.example")
+            .await
+            .id;
+        let other =
+            create_public_niks3_test_cache(&pool, "other-eligible", "https://other.example")
+                .await
+                .id;
+        let stored_token: String =
+            sqlx::query_scalar("SELECT niks3_auth_token FROM cache_destinations WHERE id = $1")
+                .bind(first)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(crate::security::cache_secrets::is_encrypted(&stored_token));
+        let dispatched = record_job_cache_dispatch(&pool, &job_id, &builder.id, None, Some(first))
+            .await
+            .unwrap();
+        assert_eq!(dispatched.dispatched_cache_destination_id, Some(first));
+        assert!(dispatched.cache_dispatch_recorded_at.is_some());
+        assert!(
+            record_job_cache_dispatch(&pool, &job_id, &builder.id, None, Some(other))
+                .await
+                .is_err()
+        );
+        assert!(
+            record_job_cache_dispatch(
+                &pool,
+                &job_id,
+                &builder.id,
+                Some(&Uuid::new_v4()),
+                Some(first)
+            )
+            .await
+            .is_err()
+        );
+        let other_destination =
+            crate::queries::cache_destinations::get_cache_destination(&pool, other)
+                .await
+                .unwrap()
+                .unwrap();
+        let mismatch =
+            capture_cache_publication_configuration(&pool, job.derivation_id, &other_destination)
+                .await
+                .unwrap();
+        assert!(
+            complete_preverified_job_atomic(
+                &pool,
+                &job_id,
+                &builder.id,
+                None,
+                Some(output),
+                Some(&mismatch)
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            get_build_job_by_id(&pool, &job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "building"
+        );
+        let first_destination =
+            crate::queries::cache_destinations::get_cache_destination(&pool, first)
+                .await
+                .unwrap()
+                .unwrap();
+        let publication =
+            capture_cache_publication_configuration(&pool, job.derivation_id, &first_destination)
+                .await
+                .unwrap();
+        crate::queries::cache_destinations::update_cache_destination_last_used(&pool, "selected")
+            .await
+            .unwrap();
+        let mut snapshot_tx = pool.begin().await.unwrap();
+        let (used, assignments) =
+            lock_eligible_cache_destination(&mut snapshot_tx, first, job.derivation_id)
+                .await
+                .unwrap();
+        assert!(
+            publication.configuration
+                == publication_configuration_fingerprint(&used, &assignments).unwrap()
+        );
+        snapshot_tx.commit().await.unwrap();
+        sqlx::query("UPDATE cache_destinations SET enabled = FALSE WHERE id = $1")
+            .bind(first)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            complete_preverified_job_atomic(
+                &pool,
+                &job_id,
+                &builder.id,
+                None,
+                Some(output),
+                Some(&publication)
+            )
+            .await
+            .is_err()
+        );
+        sqlx::query("UPDATE cache_destinations SET enabled = TRUE WHERE id = $1")
+            .bind(first)
+            .execute(&pool)
+            .await
+            .unwrap();
+        // Usage or an equivalent restored configuration does not invalidate
+        // evidence; changed authentication does, even with public reads.
+        let rotated_token =
+            crate::security::cache_secrets::encrypt_secret("rotated-fixture-write-token").unwrap();
+        sqlx::query("UPDATE cache_destinations SET niks3_auth_token = $2 WHERE id = $1")
+            .bind(first)
+            .bind(rotated_token)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            complete_preverified_job_atomic(
+                &pool,
+                &job_id,
+                &builder.id,
+                None,
+                Some(output),
+                Some(&publication)
+            )
+            .await
+            .is_err()
+        );
+        let restored_token =
+            crate::security::cache_secrets::encrypt_secret("fixture-write-token").unwrap();
+        sqlx::query("UPDATE cache_destinations SET niks3_auth_token = $2 WHERE id = $1")
+            .bind(first)
+            .bind(restored_token)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let environment: Uuid = sqlx::query_scalar("INSERT INTO environments (name, description, is_active) VALUES ('unrelated-cache-env', 'test', TRUE) RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        crate::queries::cache_destinations::assign_environments_to_cache(
+            &pool,
+            first,
+            &[environment],
+        )
+        .await
+        .unwrap();
+        assert!(
+            complete_preverified_job_atomic(
+                &pool,
+                &job_id,
+                &builder.id,
+                None,
+                Some(output),
+                Some(&publication)
+            )
+            .await
+            .is_err()
+        );
+        crate::queries::cache_destinations::assign_environments_to_cache(&pool, first, &[])
+            .await
+            .unwrap();
+        assert!(
+            complete_preverified_job_atomic(
+                &pool,
+                &job_id,
+                &builder.id,
+                None,
+                Some("/nix/store/wrong-output"),
+                Some(&publication)
+            )
+            .await
+            .is_err()
+        );
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM cache_push_jobs WHERE derivation_id = $1")
+                .bind(job.derivation_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(count, 0);
+        let (persisted, completed): (Option<String>, Option<DateTime<Utc>>) =
+            sqlx::query_as("SELECT store_path, completed_at FROM derivations WHERE id = $1")
+                .bind(job.derivation_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert!(persisted.is_none());
+        assert!(completed.is_none());
+        assert_eq!(
+            get_build_job_by_id(&pool, &job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "building"
+        );
+        // A recovered claim must not inherit the preceding session's selection.
+        sqlx::query("UPDATE build_jobs SET status = 'queued', builder_id = NULL, builder_session_id = NULL WHERE id = $1")
+            .bind(job_id).execute(&pool).await.unwrap();
+        let reclaimed = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            4,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(reclaimed.dispatched_cache_destination_id.is_none());
+        assert!(reclaimed.cache_dispatch_recorded_at.is_none());
+        record_job_cache_dispatch(&pool, &job_id, &builder.id, None, Some(first))
+            .await
+            .unwrap();
+        let (_, is_new) = complete_preverified_job_atomic(
+            &pool,
+            &job_id,
+            &builder.id,
+            None,
+            Some(output),
+            Some(&publication),
+        )
+        .await
+        .unwrap();
+        assert!(is_new);
+        let (_, is_new) = complete_preverified_job_atomic(
+            &pool,
+            &job_id,
+            &builder.id,
+            None,
+            Some(output),
+            Some(&publication),
+        )
+        .await
+        .unwrap();
+        assert!(!is_new);
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cache_push_jobs WHERE derivation_id = $1 AND status = 'completed' AND cache_destination = 'selected'")
+            .bind(job.derivation_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn niks3_pending_publication_guards_rollback_and_later_promotion(pool: PgPool) {
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.invalid/pending.git",
+            "pending",
+            &"a".repeat(40),
+            now,
+            "pending",
+            1.0,
+            now,
+        )
+        .await;
+        let builder = create_active_test_builder(&pool, "pending-builder").await;
+        let session = Uuid::new_v4();
+        establish_builder_session(&pool, &builder.id, &session, 60, "test session")
+            .await
+            .unwrap();
+        let job = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            4,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            Some(&session),
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(job.id, job_id);
+        let output = "/nix/store/pending-output";
+        sqlx::query(
+            "UPDATE derivations SET expected_store_path = $2, store_path = NULL WHERE id = $1",
+        )
+        .bind(job.derivation_id)
+        .bind(output)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let destination =
+            create_public_niks3_test_cache(&pool, "pending-cache", "https://read.example").await;
+        record_job_cache_dispatch(
+            &pool,
+            &job_id,
+            &builder.id,
+            Some(&session),
+            Some(destination.id),
+        )
+        .await
+        .unwrap();
+        let captured =
+            capture_cache_publication_configuration(&pool, job.derivation_id, &destination)
+                .await
+                .unwrap();
+        let wrong_session = Uuid::new_v4();
+        let wrong_builder = Uuid::new_v4();
+        for (sql, reason) in [
+            (
+                "UPDATE build_jobs SET status = 'failed' WHERE id = $1",
+                "cache_path_missing",
+            ),
+            (
+                "UPDATE build_jobs SET status = 'building' WHERE id = $1",
+                "nonstatic-secret-reason",
+            ),
+        ] {
+            sqlx::query(sql).bind(job_id).execute(&pool).await.unwrap();
+            assert!(
+                complete_pending_publication_atomic_with_policy(
+                    &pool,
+                    &job_id,
+                    &builder.id,
+                    Some(&session),
+                    output,
+                    &captured,
+                    reason,
+                    BuildCompletionPolicy::default()
+                )
+                .await
+                .is_err()
+            );
+        }
+        for (owner, lease, path) in [
+            (&builder.id, &wrong_session, output),
+            (&wrong_builder, &session, output),
+            (&builder.id, &session, "/nix/store/wrong-output"),
+        ] {
+            assert!(
+                complete_pending_publication_atomic_with_policy(
+                    &pool,
+                    &job_id,
+                    owner,
+                    Some(lease),
+                    path,
+                    &captured,
+                    "cache_rate_limited",
+                    BuildCompletionPolicy::default()
+                )
+                .await
+                .is_err()
+            );
+        }
+        sqlx::query(
+            "UPDATE cache_destinations SET push_to = 'https://changed.example' WHERE id = $1",
+        )
+        .bind(destination.id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        assert!(
+            complete_pending_publication_atomic_with_policy(
+                &pool,
+                &job_id,
+                &builder.id,
+                Some(&session),
+                output,
+                &captured,
+                "cache_rate_limited",
+                BuildCompletionPolicy::default()
+            )
+            .await
+            .is_err()
+        );
+        sqlx::query("UPDATE cache_destinations SET push_to = $2 WHERE id = $1")
+            .bind(destination.id)
+            .bind(&destination.push_to)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let other =
+            create_public_niks3_test_cache(&pool, "other-cache", "https://other.example").await;
+        let other_cfg = capture_cache_publication_configuration(&pool, job.derivation_id, &other)
+            .await
+            .unwrap();
+        assert!(
+            complete_pending_publication_atomic_with_policy(
+                &pool,
+                &job_id,
+                &builder.id,
+                Some(&session),
+                output,
+                &other_cfg,
+                "cache_path_missing",
+                BuildCompletionPolicy::default()
+            )
+            .await
+            .is_err()
+        );
+        let before: (String, Option<String>, Option<DateTime<Utc>>, i64) = sqlx::query_as(
+            "SELECT j.status, d.store_path, d.completed_at, (SELECT COUNT(*) FROM cache_push_jobs c WHERE c.derivation_id = d.id) FROM build_jobs j JOIN derivations d ON d.id = j.derivation_id WHERE j.id = $1")
+            .bind(job_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(before, ("building".into(), None, None, 0));
+        let (_, is_new) = complete_pending_publication_atomic_with_policy(
+            &pool,
+            &job_id,
+            &builder.id,
+            Some(&session),
+            output,
+            &captured,
+            "cache_rate_limited",
+            BuildCompletionPolicy::default(),
+        )
+        .await
+        .unwrap();
+        assert!(is_new);
+        let pending: (i32, i32, String, String, Option<String>, String) = sqlx::query_as(
+            "SELECT id, cache_destination_id, cache_destination_source, status, error_message, store_path FROM cache_push_jobs WHERE derivation_id = $1")
+            .bind(job.derivation_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            (
+                pending.1,
+                pending.2.as_str(),
+                pending.3.as_str(),
+                pending.4.as_deref(),
+                pending.5.as_str()
+            ),
+            (
+                destination.id,
+                "database",
+                "pending",
+                Some("cache_rate_limited"),
+                output
+            )
+        );
+        assert_eq!(
+            get_build_job_by_id(&pool, &job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "success"
+        );
+        let persisted: String =
+            sqlx::query_scalar("SELECT store_path FROM derivations WHERE id = $1")
+                .bind(job.derivation_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(persisted, output);
+        let completed_evidence: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cache_push_jobs WHERE derivation_id = $1 AND status = 'completed'")
+            .bind(job.derivation_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(completed_evidence, 0);
+        // Server-owned diagnostics may append after success; builders still cannot.
+        append_job_logs_with_limits(&pool, &job_id, "static publication pending\n", 1024)
+            .await
+            .unwrap();
+        assert!(
+            append_job_logs_with_limits_for_builder(
+                &pool,
+                &job_id,
+                &builder.id,
+                Some(&session),
+                "builder terminal append",
+                1024
+            )
+            .await
+            .is_err()
+        );
+        assert!(
+            append_job_logs_with_limits(&pool, &job_id, &"x".repeat(1024), 1024)
+                .await
+                .is_err()
+        );
+        let (_, is_new) = complete_preverified_job_atomic_with_policy(
+            &pool,
+            &job_id,
+            &builder.id,
+            Some(&session),
+            Some(output),
+            Some(&captured),
+            BuildCompletionPolicy::default(),
+        )
+        .await
+        .unwrap();
+        assert!(!is_new);
+        let confirmed: (i32, String, Option<String>) = sqlx::query_as(
+            "SELECT id, status, error_message FROM cache_push_jobs WHERE derivation_id = $1",
+        )
+        .bind(job.derivation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(confirmed, (pending.0, "completed".into(), None));
+        complete_pending_publication_atomic_with_policy(
+            &pool,
+            &job_id,
+            &builder.id,
+            Some(&session),
+            output,
+            &captured,
+            "cache_rate_limited",
+            BuildCompletionPolicy::default(),
+        )
+        .await
+        .unwrap();
+        let retained: (String, Option<String>) =
+            sqlx::query_as("SELECT status, error_message FROM cache_push_jobs WHERE id = $1")
+                .bind(pending.0)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(retained, ("completed".into(), None));
+        let attempts: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM build_jobs WHERE derivation_id = $1")
+                .bind(job.derivation_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(attempts, 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated test database creation privileges"]
+    async fn niks3_missing_push_queues_exact_id_and_requires_authoritative_output(pool: PgPool) {
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/no-push.git",
+            "no-push",
+            &"f".repeat(40),
+            now,
+            "no-push",
+            1.0,
+            now,
+        )
+        .await;
+        let builder = create_active_test_builder(&pool, "no-push-builder").await;
+        let job = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            4,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            None,
+            None,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(job.id, job_id);
+        let other = create_public_niks3_test_cache(
+            &pool,
+            "a-first-but-not-dispatched",
+            "https://other.example",
+        )
+        .await
+        .id;
+        let selected =
+            create_public_niks3_test_cache(&pool, "z-dispatched", "https://selected.example")
+                .await
+                .id;
+        record_job_cache_dispatch(&pool, &job_id, &builder.id, None, Some(selected))
+            .await
+            .unwrap();
+        let output = "/nix/store/authoritative-output";
+        assert!(
+            complete_preverified_job_atomic(&pool, &job_id, &builder.id, None, Some(output), None)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            get_build_job_by_id(&pool, &job_id)
+                .await
+                .unwrap()
+                .unwrap()
+                .status,
+            "building"
+        );
+        sqlx::query("UPDATE derivations SET expected_store_path = $2 WHERE id = $1")
+            .bind(job.derivation_id)
+            .bind(output)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE cache_destinations SET enabled = FALSE WHERE id = $1")
+            .bind(selected)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(
+            complete_preverified_job_atomic(&pool, &job_id, &builder.id, None, Some(output), None)
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE cache_destinations SET enabled = TRUE WHERE id = $1")
+            .bind(selected)
+            .execute(&pool)
+            .await
+            .unwrap();
+        complete_preverified_job_atomic(&pool, &job_id, &builder.id, None, Some(output), None)
+            .await
+            .unwrap();
+        let queued: (i32, String, String) = sqlx::query_as("SELECT cache_destination_id, cache_destination_source, status FROM cache_push_jobs WHERE derivation_id = $1")
+            .bind(job.derivation_id).fetch_one(&pool).await.unwrap();
+        assert_eq!(queued, (selected, "database".into(), "pending".into()));
+        assert_ne!(selected, other);
+    }
+
     #[tokio::test]
     #[ignore = "requires running test database"]
     async fn test_requeue_creates_new_attempt_and_preserves_original_for_terminal_statuses() {
@@ -2251,9 +5046,10 @@ mod tests {
                 .expect("original job exists");
             assert_eq!(original.status, *terminal_status);
 
-            let requeued = requeue_build_job_as_new_attempt(&pool, &job_id)
+            let requeued = requeue_build_job_as_new_attempt(&pool, &job_id, Uuid::nil(), true)
                 .await
-                .expect("requeue should create new attempt");
+                .expect("requeue should create new attempt")
+                .attempt;
 
             assert_ne!(requeued.id, original.id, "new attempt must have new id");
             assert_eq!(requeued.status, "queued");
@@ -2291,15 +5087,573 @@ mod tests {
         // Make queue empty by taking source job out of queued state.
         set_build_job_status(&pool, job_id, "success").await;
 
-        let requeued = requeue_build_job_as_new_attempt(&pool, &job_id)
+        let requeued = requeue_build_job_as_new_attempt(&pool, &job_id, Uuid::nil(), true)
             .await
-            .expect("requeue should succeed on empty queue");
+            .expect("requeue should succeed on empty queue")
+            .attempt;
 
         assert_eq!(requeued.status, "queued");
         assert!(
             requeued.priority_weight > 0.0,
             "priority_weight must satisfy DB CHECK (priority_weight > 0)"
         );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn manual_requeue_creates_once_then_reuses_active_attempt(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/manual-requeue-{}.git", Uuid::new_v4()),
+            &format!("manual-requeue-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "manual-requeue-system",
+            5.0,
+            now,
+        )
+        .await;
+        set_build_job_status(&pool, source_id, "failed").await;
+
+        let created = requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true)
+            .await
+            .expect("first request should create an attempt");
+        let reused = requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true)
+            .await
+            .expect("second request should reuse the active attempt");
+
+        assert_eq!(created.disposition, RequeueBuildJobDisposition::Created);
+        assert_eq!(reused.disposition, RequeueBuildJobDisposition::Reused);
+        assert_eq!(created.attempt.id, reused.attempt.id);
+        assert_eq!(created.attempt.attempt_number, 2);
+        let source = get_build_job_by_id(&pool, &source_id)
+            .await
+            .expect("source query should succeed")
+            .expect("source should remain present");
+        assert_eq!(source.status, "failed");
+        assert!(source.completed_at.is_some());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn concurrent_manual_requeue_requests_share_one_active_attempt(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/concurrent-requeue-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("concurrent-requeue-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "concurrent-requeue-system",
+            5.0,
+            now,
+        )
+        .await;
+        set_build_job_status(&pool, source_id, "cancelled").await;
+
+        let (first, second) = tokio::join!(
+            requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true),
+            requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true)
+        );
+        let first = first.expect("first concurrent request should succeed");
+        let second = second.expect("second concurrent request should succeed");
+
+        assert_eq!(first.attempt.id, second.attempt.id);
+        assert_ne!(first.disposition, second.disposition);
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM build_jobs WHERE derivation_id = $1 AND status IN ('queued', 'building', 'cancelling')",
+        )
+        .bind(first.attempt.derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("active attempt count should load");
+        assert_eq!(active_count, 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn manual_requeue_enforces_operator_environment_scope(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/scoped-requeue-{}.git", Uuid::new_v4()),
+            &format!("scoped-requeue-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "scoped-requeue-system",
+            5.0,
+            now,
+        )
+        .await;
+        set_build_job_status(&pool, source_id, "failed").await;
+
+        let operator_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO users (username, first_name, last_name, email) VALUES ($1, 'Test', 'Operator', $2) RETURNING id",
+        )
+        .bind(format!("operator-{}", Uuid::new_v4()))
+        .bind(format!("operator-{}@example.com", Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .expect("operator user should be inserted");
+
+        let hidden = requeue_build_job_as_new_attempt(&pool, &source_id, operator_id, false)
+            .await
+            .expect_err("an unassigned build must be hidden from an operator");
+        assert!(matches!(hidden, RequeueBuildJobError::NotFoundOrHidden));
+
+        let environment_id: Uuid =
+            sqlx::query_scalar("INSERT INTO environments (name) VALUES ($1) RETURNING id")
+                .bind(format!("scoped-requeue-{}", Uuid::new_v4().simple()))
+                .fetch_one(&pool)
+                .await
+                .expect("environment should be inserted");
+        sqlx::query("UPDATE build_jobs SET environment_id = $2 WHERE id = $1")
+            .bind(source_id)
+            .bind(environment_id)
+            .execute(&pool)
+            .await
+            .expect("source should be assigned to the environment");
+        sqlx::query(
+            "INSERT INTO user_environment_memberships (user_id, environment_id) VALUES ($1, $2)",
+        )
+        .bind(operator_id)
+        .bind(environment_id)
+        .execute(&pool)
+        .await
+        .expect("operator membership should be inserted");
+
+        let allowed = requeue_build_job_as_new_attempt(&pool, &source_id, operator_id, false)
+            .await
+            .expect("an operator may requeue a build in their environment");
+        assert_eq!(allowed.disposition, RequeueBuildJobDisposition::Created);
+        assert_eq!(allowed.attempt.environment_id, Some(environment_id));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn visible_non_terminal_requeue_is_a_lifecycle_conflict(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/nonterminal-requeue-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("nonterminal-requeue-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "nonterminal-requeue-system",
+            5.0,
+            now,
+        )
+        .await;
+
+        let error = requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true)
+            .await
+            .expect_err("a visible queued source must conflict rather than appear absent");
+        assert!(matches!(
+            error,
+            RequeueBuildJobError::LifecycleConflict { status } if status == "queued"
+        ));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn migration_0262_upgrades_populated_global_derivation_uniqueness(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/migration-0262-{}.git", Uuid::new_v4()),
+            &format!("migration-0262-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "migration-0262-system",
+            5.0,
+            now,
+        )
+        .await;
+        set_build_job_status(&pool, source_id, "success").await;
+        sqlx::query("DROP INDEX build_jobs_one_active_execution_per_derivation")
+            .execute(&pool)
+            .await
+            .expect("new active index should be removed for the upgrade fixture");
+        sqlx::query(
+            "CREATE UNIQUE INDEX idx_build_jobs_derivation_unique ON build_jobs (derivation_id)",
+        )
+        .execute(&pool)
+        .await
+        .expect("legacy global index should be restored");
+
+        sqlx::raw_sql(include_str!(
+            "../../migrations/0262_active_build_job_derivation.sql"
+        ))
+        .execute(&pool)
+        .await
+        .expect("migration 0262 should upgrade populated build history");
+
+        let replacement = requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true)
+            .await
+            .expect("upgraded schema should permit an immutable child");
+        assert_ne!(replacement.attempt.id, source_id);
+        assert_eq!(replacement.attempt.attempt_number, 2);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn obsolete_contract_requeue_requires_exact_commit_reevaluation(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/obsolete-requeue-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("obsolete-requeue-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "obsolete-requeue-system",
+            5.0,
+            now,
+        )
+        .await;
+        sqlx::query(
+            "UPDATE build_jobs SET status = 'failed', completed_at = NOW(), server_failure_code = $2 WHERE id = $1",
+        )
+        .bind(source_id)
+        .bind(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+        .execute(&pool)
+        .await
+        .expect("source should become an authoritative obsolete failure");
+        let expected_commit_id: i32 = sqlx::query_scalar(
+            "SELECT d.commit_id FROM derivations d JOIN build_jobs bj ON bj.derivation_id = d.id WHERE bj.id = $1",
+        )
+        .bind(source_id)
+        .fetch_one(&pool)
+        .await
+        .expect("source commit should load");
+
+        let error = requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true)
+            .await
+            .expect_err("obsolete source must not create an unusable child");
+        assert!(matches!(
+            error,
+            RequeueBuildJobError::EvaluatorContractObsolete { commit_id }
+                if commit_id == expected_commit_id
+        ));
+        let child_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM build_jobs WHERE parent_job_id = $1")
+                .bind(source_id)
+                .fetch_one(&pool)
+                .await
+                .expect("child count should load");
+        assert_eq!(child_count, 0);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn obsolete_source_reuses_authoritative_active_child(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/obsolete-active-{}.git", Uuid::new_v4()),
+            &format!("obsolete-active-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "obsolete-active-system",
+            5.0,
+            now,
+        )
+        .await;
+        let derivation_id: i32 = sqlx::query_scalar(
+            "UPDATE build_jobs SET status = 'failed', completed_at = NOW(), server_failure_code = $2 WHERE id = $1 RETURNING derivation_id",
+        )
+        .bind(source_id)
+        .bind(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+        .fetch_one(&pool)
+        .await
+        .expect("source should become obsolete");
+        sqlx::query("UPDATE derivations SET status_id = 5 WHERE id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("authoritative evaluation should make the derivation eligible");
+
+        let mut tx = pool.begin().await.expect("transaction should begin");
+        let inserted =
+            crate::queries::build_jobs::create_build_job_for_derivation_tx(&mut tx, derivation_id)
+                .await
+                .expect("authoritative replacement should execute")
+                .expect("authoritative replacement should exist");
+        tx.commit().await.expect("transaction should commit");
+        let replacement_id = match inserted {
+            crate::queries::build_jobs::BuildJobInsertOutcome::Inserted { build_job_id } => {
+                build_job_id
+            }
+            other => panic!("expected an inserted replacement, got {other:?}"),
+        };
+
+        let reused = requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true)
+            .await
+            .expect("manual recovery should reuse the authoritative child");
+        assert_eq!(reused.disposition, RequeueBuildJobDisposition::Reused);
+        assert_eq!(reused.attempt.id, replacement_id);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn stale_obsolete_marker_does_not_replace_later_terminal_attempt(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/obsolete-stale-{}.git", Uuid::new_v4()),
+            &format!("obsolete-stale-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "obsolete-stale-system",
+            5.0,
+            now,
+        )
+        .await;
+        let derivation_id: i32 = sqlx::query_scalar(
+            "UPDATE build_jobs SET status = 'failed', completed_at = NOW(), server_failure_code = $2 WHERE id = $1 RETURNING derivation_id",
+        )
+        .bind(source_id)
+        .bind(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+        .fetch_one(&pool)
+        .await
+        .expect("source should become obsolete");
+        sqlx::query("UPDATE derivations SET status_id = 5 WHERE id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("derivation should be eligible");
+
+        let mut first_tx = pool.begin().await.expect("first transaction should begin");
+        let first = crate::queries::build_jobs::create_build_job_for_derivation_tx(
+            &mut first_tx,
+            derivation_id,
+        )
+        .await
+        .expect("first replacement should execute")
+        .expect("first replacement should exist");
+        first_tx
+            .commit()
+            .await
+            .expect("first transaction should commit");
+        let replacement_id = match first {
+            crate::queries::build_jobs::BuildJobInsertOutcome::Inserted { build_job_id } => {
+                build_job_id
+            }
+            other => panic!("expected an inserted replacement, got {other:?}"),
+        };
+        set_build_job_status(&pool, replacement_id, "success").await;
+
+        let mut second_tx = pool.begin().await.expect("second transaction should begin");
+        let second = crate::queries::build_jobs::create_build_job_for_derivation_tx(
+            &mut second_tx,
+            derivation_id,
+        )
+        .await
+        .expect("repeat activation should execute")
+        .expect("terminal replacement should be reported");
+        second_tx
+            .commit()
+            .await
+            .expect("second transaction should commit");
+        assert!(matches!(
+            second,
+            crate::queries::build_jobs::BuildJobInsertOutcome::AlreadyExists {
+                build_job_id,
+                ref status,
+            } if build_job_id == replacement_id && status == "success"
+        ));
+        let attempt_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM build_jobs WHERE derivation_id = $1")
+                .bind(derivation_id)
+                .fetch_one(&pool)
+                .await
+                .expect("attempt count should load");
+        assert_eq!(attempt_count, 2);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn manual_and_authoritative_obsolete_recovery_create_one_active_child(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/authoritative-race-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("authoritative-race-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "authoritative-race-system",
+            5.0,
+            now,
+        )
+        .await;
+        let derivation_id: i32 = sqlx::query_scalar(
+            "UPDATE build_jobs SET status = 'failed', completed_at = NOW(), server_failure_code = $2 WHERE id = $1 RETURNING derivation_id",
+        )
+        .bind(source_id)
+        .bind(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+        .fetch_one(&pool)
+        .await
+        .expect("source should become obsolete");
+        sqlx::query("UPDATE derivations SET status_id = 5 WHERE id = $1")
+            .bind(derivation_id)
+            .execute(&pool)
+            .await
+            .expect("authoritative evaluation should make the derivation eligible");
+
+        let authoritative = async {
+            let mut tx = pool
+                .begin()
+                .await
+                .expect("authoritative transaction should begin");
+            let outcome = crate::queries::build_jobs::create_build_job_for_derivation_tx(
+                &mut tx,
+                derivation_id,
+            )
+            .await;
+            tx.commit()
+                .await
+                .expect("authoritative transaction should commit");
+            outcome
+        };
+        let (manual, authoritative) = tokio::join!(
+            requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true),
+            authoritative
+        );
+
+        assert!(matches!(
+            manual,
+            Err(RequeueBuildJobError::EvaluatorContractObsolete { .. })
+                | Ok(RequeueBuildJobOutcome {
+                    disposition: RequeueBuildJobDisposition::Reused,
+                    ..
+                })
+        ));
+        let authoritative = authoritative
+            .expect("authoritative replacement should execute")
+            .expect("authoritative replacement should exist");
+        assert!(matches!(
+            authoritative,
+            crate::queries::build_jobs::BuildJobInsertOutcome::Inserted { .. }
+        ));
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM build_jobs WHERE derivation_id = $1 AND status IN ('queued', 'building', 'cancelling')",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("active count should load");
+        assert_eq!(active_count, 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn manual_and_automatic_retry_serialize_to_one_active_child(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/automatic-race-{}.git", Uuid::new_v4()),
+            &format!("automatic-race-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "automatic-race-system",
+            5.0,
+            now,
+        )
+        .await;
+        let builder = create_active_test_builder(&pool, "automatic-race-builder").await;
+        sqlx::query(
+            "UPDATE build_jobs SET status = 'building', builder_id = $2, started_at = NOW() WHERE id = $1",
+        )
+        .bind(source_id)
+        .bind(builder.id)
+        .execute(&pool)
+        .await
+        .expect("builder should own the source");
+
+        let (manual, automatic) = tokio::join!(
+            requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true),
+            mark_job_failed_with_retry(
+                &pool,
+                &source_id,
+                &builder.id,
+                None,
+                Some("transient race failure"),
+                RetryFailureClass::Transient,
+            )
+        );
+        automatic.expect("automatic failure transition should succeed");
+        assert!(matches!(
+            manual,
+            Ok(RequeueBuildJobOutcome {
+                disposition: RequeueBuildJobDisposition::Reused,
+                ..
+            }) | Err(RequeueBuildJobError::LifecycleConflict { .. })
+        ));
+
+        let derivation_id: i32 =
+            sqlx::query_scalar("SELECT derivation_id FROM build_jobs WHERE id = $1")
+                .bind(source_id)
+                .fetch_one(&pool)
+                .await
+                .expect("source derivation should load");
+        let active_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM build_jobs WHERE derivation_id = $1 AND status IN ('queued', 'building', 'cancelling')",
+        )
+        .bind(derivation_id)
+        .fetch_one(&pool)
+        .await
+        .expect("active count should load");
+        assert_eq!(active_count, 1);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn manually_requeued_attempt_claims_through_production_path(pool: PgPool) {
+        let now = Utc::now();
+        let source_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/claim-requeue-{}.git", Uuid::new_v4()),
+            &format!("claim-requeue-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "claim-requeue-system",
+            5.0,
+            now,
+        )
+        .await;
+        set_build_job_status(&pool, source_id, "success").await;
+        let requeued = requeue_build_job_as_new_attempt(&pool, &source_id, Uuid::nil(), true)
+            .await
+            .expect("terminal source should create an active attempt");
+        let builder = create_active_test_builder(&pool, "manual-requeue-claim-builder").await;
+
+        let claimed = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            1,
+            &[],
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            None,
+            None,
+        )
+        .await
+        .expect("production claim should succeed")
+        .expect("requeued attempt should be claimable");
+
+        assert_eq!(claimed.id, requeued.attempt.id);
+        assert_eq!(claimed.status, "building");
     }
 
     #[sqlx::test(migrations = "./migrations")]
@@ -2376,6 +5730,1221 @@ mod tests {
         assert_eq!(child_count, 1);
     }
 
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn post_build_prerequisite_failure_terminalizes_only_without_replacement(pool: PgPool) {
+        let now = Utc::now();
+        let builder = create_active_test_builder(&pool, "post-build-terminal-failure").await;
+        let terminal_job = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/post-build-terminal-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("post-build-terminal-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "post-build-terminal-system",
+            5.0,
+            now,
+        )
+        .await;
+        let terminal_scan = insert_post_build_scan(&pool, terminal_job).await;
+        sqlx::query(
+            "UPDATE build_jobs SET status = 'building', builder_id = $2, started_at = NOW() WHERE id = $1",
+        )
+        .bind(terminal_job)
+        .bind(builder.id)
+        .execute(&pool)
+        .await
+        .expect("terminal build should be assigned");
+        sqlx::query("UPDATE automatic_retry_policy SET max_build_retries = 0 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("automatic retry should be disabled");
+        let secret = format!(
+            "https://operator:password@example.test/{}",
+            "ordinary failure detail ".repeat(300)
+        );
+
+        let transition = mark_job_failed_with_retry(
+            &pool,
+            &terminal_job,
+            &builder.id,
+            None,
+            Some(&secret),
+            RetryFailureClass::Deterministic,
+        )
+        .await
+        .expect("terminal build failure should persist");
+        assert!(transition.retry_job.is_none());
+        let terminal_state: (String, i32, Option<Uuid>, serde_json::Value) = sqlx::query_as(
+            "SELECT status, attempts, completed_build_job_id, scan_metadata FROM cve_scans WHERE id = $1",
+        )
+        .bind(terminal_scan)
+        .fetch_one(&pool)
+        .await
+        .expect("terminalized scan should load");
+        assert_eq!(terminal_state.0, "failed");
+        assert_eq!(terminal_state.1, 0);
+        assert_eq!(terminal_state.2, Some(terminal_job));
+        assert_eq!(
+            terminal_state.3["build_prerequisite"]["job_id"],
+            terminal_job.to_string()
+        );
+        assert_eq!(terminal_state.3["build_prerequisite"]["status"], "failed");
+        let detail = terminal_state.3["build_prerequisite"]["message"]
+            .as_str()
+            .expect("bounded prerequisite message should be present");
+        assert_eq!(
+            detail.chars().count(),
+            super::super::cve_scan_leases::MAX_FAILURE_CHARS
+        );
+        assert!(!detail.contains("operator:password"));
+
+        let retry_job = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/post-build-retry-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("post-build-retry-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "post-build-retry-system",
+            5.0,
+            now,
+        )
+        .await;
+        let retry_scan = insert_post_build_scan(&pool, retry_job).await;
+        sqlx::query(
+            "UPDATE build_jobs SET status = 'building', builder_id = $2, started_at = NOW() WHERE id = $1",
+        )
+        .bind(retry_job)
+        .bind(builder.id)
+        .execute(&pool)
+        .await
+        .expect("retryable build should be assigned");
+        sqlx::query("UPDATE automatic_retry_policy SET max_build_retries = 2 WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("automatic retry should be enabled");
+        let replacement = mark_job_failed_with_retry(
+            &pool,
+            &retry_job,
+            &builder.id,
+            None,
+            Some("temporary failure"),
+            RetryFailureClass::Transient,
+        )
+        .await
+        .expect("retryable failure should persist")
+        .retry_job
+        .expect("retryable failure should create a replacement");
+        let rebound: (String, i32, Option<Uuid>) = sqlx::query_as(
+            "SELECT status, attempts, completed_build_job_id FROM cve_scans WHERE id = $1",
+        )
+        .bind(retry_scan)
+        .fetch_one(&pool)
+        .await
+        .expect("rebound scan should load");
+        assert_eq!(rebound, ("awaiting_build".into(), 0, Some(replacement.id)));
+
+        let mut delayed = pool.begin().await.expect("delayed event should begin");
+        assert!(
+            !crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+                &mut delayed,
+                retry_job,
+                Some("delayed source failure"),
+            )
+            .await
+            .expect("delayed source failure should be ignored")
+        );
+        delayed.commit().await.expect("delayed event should commit");
+        assert_eq!(
+            sqlx::query_as::<_, (String, i32, Option<Uuid>)>(
+                "SELECT status, attempts, completed_build_job_id FROM cve_scans WHERE id = $1",
+            )
+            .bind(retry_scan)
+            .fetch_one(&pool)
+            .await
+            .expect("replacement-bound scan should remain active"),
+            ("awaiting_build".into(), 0, Some(replacement.id))
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn post_build_reconciliation_rebinds_latest_attempt_without_current_policy(pool: PgPool) {
+        let now = Utc::now();
+        let active_source = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/reconcile-active-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("reconcile-active-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "reconcile-active-system",
+            5.0,
+            now,
+        )
+        .await;
+        let active_scan = insert_post_build_scan(&pool, active_source).await;
+        set_build_job_status(&pool, active_source, "failed").await;
+        let active_replacement = insert_later_build_attempt(&pool, active_source, "queued").await;
+
+        let success_source = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/reconcile-success-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("reconcile-success-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "reconcile-success-system",
+            5.0,
+            now,
+        )
+        .await;
+        let success_scan = insert_post_build_scan(&pool, success_source).await;
+        set_build_job_status(&pool, success_source, "failed").await;
+        let success_replacement =
+            insert_later_build_attempt(&pool, success_source, "success").await;
+
+        sqlx::query("UPDATE scan_schedule_policy SET on_build = FALSE WHERE id = 1")
+            .execute(&pool)
+            .await
+            .expect("post-build creation policy should be disabled");
+
+        assert_eq!(
+            crate::queries::cve_scan_leases::reconcile_post_build_scan_prerequisites(&pool, 10)
+                .await
+                .expect("reconciliation should succeed"),
+            2
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<Uuid>>(
+                "SELECT completed_build_job_id FROM cve_scans WHERE id = $1",
+            )
+            .bind(active_scan)
+            .fetch_one(&pool)
+            .await
+            .expect("active scan binding should load"),
+            Some(active_replacement)
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<Uuid>>(
+                "SELECT completed_build_job_id FROM cve_scans WHERE id = $1",
+            )
+            .bind(success_scan)
+            .fetch_one(&pool)
+            .await
+            .expect("successful scan binding should load"),
+            Some(success_replacement)
+        );
+
+        let mut delayed = pool
+            .begin()
+            .await
+            .expect("delayed transaction should begin");
+        assert!(
+            !crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+                &mut delayed,
+                success_source,
+                Some("delayed old failure"),
+            )
+            .await
+            .expect("delayed failure should be ignored")
+        );
+        delayed
+            .commit()
+            .await
+            .expect("delayed transaction should commit");
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT status FROM cve_scans WHERE id = $1")
+                .bind(success_scan)
+                .fetch_one(&pool)
+                .await
+                .expect("rebound scan status should load"),
+            "awaiting_build"
+        );
+
+        set_build_job_status(&pool, active_replacement, "failed").await;
+        let future_replacement =
+            insert_later_build_attempt(&pool, active_replacement, "queued").await;
+        let active_derivation: i32 =
+            sqlx::query_scalar("SELECT derivation_id FROM build_jobs WHERE id = $1")
+                .bind(future_replacement)
+                .fetch_one(&pool)
+                .await
+                .expect("future replacement derivation should load");
+        let mut rebound_tx = pool
+            .begin()
+            .await
+            .expect("future rebind transaction should begin");
+        assert_eq!(
+            crate::queries::cve_scan_leases::create_post_build_scan_intents_tx(
+                &mut rebound_tx,
+                &[active_derivation],
+            )
+            .await
+            .expect("future replacement should rebind with policy disabled"),
+            1
+        );
+        rebound_tx
+            .commit()
+            .await
+            .expect("future rebind transaction should commit");
+        assert_eq!(
+            sqlx::query_scalar::<_, Option<Uuid>>(
+                "SELECT completed_build_job_id FROM cve_scans WHERE id = $1",
+            )
+            .bind(active_scan)
+            .fetch_one(&pool)
+            .await
+            .expect("future replacement binding should load"),
+            Some(future_replacement)
+        );
+
+        let policy_gated_job = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/reconcile-policy-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("reconcile-policy-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "reconcile-policy-system",
+            5.0,
+            now,
+        )
+        .await;
+        let policy_gated_derivation: i32 =
+            sqlx::query_scalar("SELECT derivation_id FROM build_jobs WHERE id = $1")
+                .bind(policy_gated_job)
+                .fetch_one(&pool)
+                .await
+                .expect("policy-gated derivation should load");
+        let mut tx = pool.begin().await.expect("intent transaction should begin");
+        assert_eq!(
+            crate::queries::cve_scan_leases::create_post_build_scan_intents_tx(
+                &mut tx,
+                &[policy_gated_derivation],
+            )
+            .await
+            .expect("policy-gated intent creation should execute"),
+            0
+        );
+        tx.commit().await.expect("intent transaction should commit");
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM cve_scans WHERE derivation_id = $1",
+            )
+            .bind(policy_gated_derivation)
+            .fetch_one(&pool)
+            .await
+            .expect("policy-gated scan count should load"),
+            0
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn post_build_reconciliation_terminalizes_only_authoritative_prerequisites(pool: PgPool) {
+        let now = Utc::now();
+        let failed_job = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/reconcile-failed-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("reconcile-failed-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "reconcile-failed-system",
+            5.0,
+            now,
+        )
+        .await;
+        let failed_scan = insert_post_build_scan(&pool, failed_job).await;
+        set_build_job_status(&pool, failed_job, "failed").await;
+
+        let orphan_job = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/reconcile-orphan-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("reconcile-orphan-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "reconcile-orphan-system",
+            5.0,
+            now,
+        )
+        .await;
+        let orphan_scan = insert_post_build_scan(&pool, orphan_job).await;
+        sqlx::query("DELETE FROM build_jobs WHERE id = $1")
+            .bind(orphan_job)
+            .execute(&pool)
+            .await
+            .expect("orphan prerequisite should be removed");
+
+        let mut non_post_build_scans = Vec::new();
+        for trigger in ["manual", "fleet", "periodic"] {
+            let job_id = create_queued_job(
+                &pool,
+                &format!(
+                    "https://example.com/reconcile-{trigger}-{}.git",
+                    Uuid::new_v4()
+                ),
+                &format!("reconcile-{trigger}-{}", Uuid::new_v4()),
+                &Uuid::new_v4().simple().to_string(),
+                now,
+                &format!("reconcile-{trigger}-system"),
+                5.0,
+                now,
+            )
+            .await;
+            let scan_id = insert_post_build_scan(&pool, job_id).await;
+            sqlx::query("UPDATE cve_scans SET source_trigger = $2 WHERE id = $1")
+                .bind(scan_id)
+                .bind(trigger)
+                .execute(&pool)
+                .await
+                .expect("non-post-build fixture should update");
+            set_build_job_status(&pool, job_id, "failed").await;
+            non_post_build_scans.push((scan_id, trigger));
+        }
+
+        assert_eq!(
+            crate::queries::cve_scan_leases::reconcile_post_build_scan_prerequisites(&pool, 1)
+                .await
+                .expect("first bounded reconciliation should succeed"),
+            1
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM cve_scans WHERE id IN ($1, $2) AND status = 'awaiting_build'",
+            )
+            .bind(failed_scan)
+            .bind(orphan_scan)
+            .fetch_one(&pool)
+            .await
+            .expect("bounded pending count should load"),
+            1
+        );
+        assert_eq!(
+            crate::queries::cve_scan_leases::reconcile_post_build_scan_prerequisites(&pool, 10)
+                .await
+                .expect("second reconciliation should succeed"),
+            1
+        );
+
+        let failed: (String, Option<Uuid>, serde_json::Value) = sqlx::query_as(
+            "SELECT status, completed_build_job_id, scan_metadata FROM cve_scans WHERE id = $1",
+        )
+        .bind(failed_scan)
+        .fetch_one(&pool)
+        .await
+        .expect("failed prerequisite scan should load");
+        assert_eq!(failed.0, "failed");
+        assert_eq!(failed.1, Some(failed_job));
+        assert_eq!(failed.2["build_prerequisite"]["status"], "failed");
+
+        let orphan: (String, Option<Uuid>, serde_json::Value) = sqlx::query_as(
+            "SELECT status, completed_build_job_id, scan_metadata FROM cve_scans WHERE id = $1",
+        )
+        .bind(orphan_scan)
+        .fetch_one(&pool)
+        .await
+        .expect("orphan prerequisite scan should load");
+        assert_eq!(orphan.0, "failed");
+        assert_eq!(orphan.1, None);
+        assert_eq!(orphan.2["build_prerequisite"]["status"], "unavailable");
+        assert!(orphan.2["build_prerequisite"].get("job_id").is_none());
+
+        for (scan_id, trigger) in non_post_build_scans {
+            assert_eq!(
+                sqlx::query_as::<_, (String, String, i32)>(
+                    "SELECT status, source_trigger, attempts FROM cve_scans WHERE id = $1",
+                )
+                .bind(scan_id)
+                .fetch_one(&pool)
+                .await
+                .expect("non-post-build scan should remain unchanged"),
+                ("awaiting_build".into(), trigger.into(), 0)
+            );
+        }
+        assert_eq!(
+            crate::queries::cve_scan_leases::reconcile_post_build_scan_prerequisites(&pool, 10)
+                .await
+                .expect("idempotent reconciliation should succeed"),
+            0
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn racing_post_build_reconciliation_passes_are_idempotent(pool: PgPool) {
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/reconcile-race-{}.git", Uuid::new_v4()),
+            &format!("reconcile-race-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "reconcile-race-system",
+            5.0,
+            now,
+        )
+        .await;
+        let scan_id = insert_post_build_scan(&pool, job_id).await;
+        set_build_job_status(&pool, job_id, "cancelled").await;
+
+        let (first, second) = tokio::join!(
+            crate::queries::cve_scan_leases::reconcile_post_build_scan_prerequisites(&pool, 10),
+            crate::queries::cve_scan_leases::reconcile_post_build_scan_prerequisites(&pool, 10),
+        );
+        assert_eq!(
+            first.expect("first reconciliation should succeed")
+                + second.expect("second reconciliation should succeed"),
+            1
+        );
+        assert_eq!(
+            sqlx::query_as::<_, (String, Option<Uuid>, String)>(
+                "SELECT status, completed_build_job_id, scan_metadata->'build_prerequisite'->>'status' FROM cve_scans WHERE id = $1",
+            )
+            .bind(scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("racing result should load"),
+            ("failed".into(), Some(job_id), "cancelled".into())
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn post_build_prerequisite_terminalizes_only_true_cancelled_paths(pool: PgPool) {
+        let now = Utc::now();
+        let queued_job = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/post-build-queued-cancel-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("post-build-queued-cancel-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "post-build-queued-cancel-system",
+            5.0,
+            now,
+        )
+        .await;
+        let queued_scan = insert_post_build_scan(&pool, queued_job).await;
+        assert_eq!(
+            cancel_build_job(&pool, &queued_job)
+                .await
+                .expect("queued cancellation should succeed")
+                .status,
+            "cancelled"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT status FROM cve_scans WHERE id = $1")
+                .bind(queued_scan)
+                .fetch_one(&pool)
+                .await
+                .expect("queued-cancel scan should load"),
+            "failed"
+        );
+
+        let builder = create_active_test_builder(&pool, "post-build-cancel-builder").await;
+        let building_job = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/post-build-building-cancel-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("post-build-building-cancel-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "post-build-building-cancel-system",
+            5.0,
+            now,
+        )
+        .await;
+        let building_scan = insert_post_build_scan(&pool, building_job).await;
+        sqlx::query(
+            "UPDATE build_jobs SET status = 'building', builder_id = $2, started_at = NOW() WHERE id = $1",
+        )
+        .bind(building_job)
+        .bind(builder.id)
+        .execute(&pool)
+        .await
+        .expect("cancellable build should be assigned");
+        assert_eq!(
+            cancel_build_job(&pool, &building_job)
+                .await
+                .expect("building cancellation request should succeed")
+                .status,
+            "cancelling"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT status FROM cve_scans WHERE id = $1")
+                .bind(building_scan)
+                .fetch_one(&pool)
+                .await
+                .expect("cancelling scan should load"),
+            "awaiting_build"
+        );
+        assert_eq!(
+            finalize_cancelled_job(&pool, &building_job, &builder.id, None)
+                .await
+                .expect("builder cancellation finalization should succeed")
+                .status,
+            "cancelled"
+        );
+        let cancelled_state: (String, i32, Option<Uuid>, serde_json::Value) = sqlx::query_as(
+            "SELECT status, attempts, completed_build_job_id, scan_metadata FROM cve_scans WHERE id = $1",
+        )
+        .bind(building_scan)
+        .fetch_one(&pool)
+        .await
+        .expect("cancelled scan should load");
+        assert_eq!(cancelled_state.0, "failed");
+        assert_eq!(cancelled_state.1, 0);
+        assert_eq!(cancelled_state.2, Some(building_job));
+        assert_eq!(
+            cancelled_state.3["build_prerequisite"]["status"],
+            "cancelled"
+        );
+
+        let forced_job = create_queued_job(
+            &pool,
+            &format!(
+                "https://example.com/post-build-force-cancel-{}.git",
+                Uuid::new_v4()
+            ),
+            &format!("post-build-force-cancel-{}", Uuid::new_v4()),
+            &Uuid::new_v4().simple().to_string(),
+            now,
+            "post-build-force-cancel-system",
+            5.0,
+            now,
+        )
+        .await;
+        let forced_scan = insert_post_build_scan(&pool, forced_job).await;
+        set_build_job_status(&pool, forced_job, "cancelling").await;
+        assert_eq!(
+            force_cancel_build_job(&pool, &forced_job)
+                .await
+                .expect("forced cancellation should succeed")
+                .status,
+            "cancelled"
+        );
+        assert_eq!(
+            sqlx::query_as::<_, (String, i32, Option<Uuid>)>(
+                "SELECT status, attempts, completed_build_job_id FROM cve_scans WHERE id = $1",
+            )
+            .bind(forced_scan)
+            .fetch_one(&pool)
+            .await
+            .expect("force-cancelled scan should load"),
+            ("failed".into(), 0, Some(forced_job))
+        );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn post_build_terminalization_preserves_guarded_scan_states(pool: PgPool) {
+        let now = Utc::now();
+        let mut fixtures = Vec::new();
+        for guard in ["attempted", "manual", "pending"] {
+            let job_id = create_queued_job(
+                &pool,
+                &format!(
+                    "https://example.com/post-build-{guard}-{}.git",
+                    Uuid::new_v4()
+                ),
+                &format!("post-build-{guard}-{}", Uuid::new_v4()),
+                &Uuid::new_v4().simple().to_string(),
+                now,
+                &format!("post-build-{guard}-system"),
+                5.0,
+                now,
+            )
+            .await;
+            let scan_id = insert_post_build_scan(&pool, job_id).await;
+            match guard {
+                "attempted" => {
+                    sqlx::query("UPDATE cve_scans SET attempts = 1 WHERE id = $1")
+                        .bind(scan_id)
+                        .execute(&pool)
+                        .await
+                        .expect("attempted scan fixture should update");
+                }
+                "manual" => {
+                    sqlx::query("UPDATE cve_scans SET source_trigger = 'manual' WHERE id = $1")
+                        .bind(scan_id)
+                        .execute(&pool)
+                        .await
+                        .expect("manual scan fixture should update");
+                }
+                "pending" => {
+                    sqlx::query("UPDATE cve_scans SET status = 'pending' WHERE id = $1")
+                        .bind(scan_id)
+                        .execute(&pool)
+                        .await
+                        .expect("pending scan fixture should update");
+                }
+                _ => unreachable!(),
+            }
+            fixtures.push((guard, job_id, scan_id));
+        }
+
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("terminalization transaction should begin");
+        for (_, job_id, _) in &fixtures {
+            sqlx::query(
+                "UPDATE build_jobs SET status = 'failed', completed_at = NOW() WHERE id = $1",
+            )
+            .bind(job_id)
+            .execute(&mut *tx)
+            .await
+            .expect("terminal build fixture should update");
+            assert!(
+                !crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+                    &mut tx,
+                    *job_id,
+                    Some("terminal prerequisite"),
+                )
+                .await
+                .expect("guarded terminalization should execute")
+            );
+        }
+        tx.commit()
+            .await
+            .expect("terminalization transaction should commit");
+
+        for (guard, _, scan_id) in fixtures {
+            let state: (String, i32, String) = sqlx::query_as(
+                "SELECT status, attempts, source_trigger FROM cve_scans WHERE id = $1",
+            )
+            .bind(scan_id)
+            .fetch_one(&pool)
+            .await
+            .expect("guarded scan should load");
+            let expected = match guard {
+                "attempted" => ("awaiting_build".to_string(), 1, "post_build".to_string()),
+                "manual" => ("awaiting_build".to_string(), 0, "manual".to_string()),
+                "pending" => ("pending".to_string(), 0, "post_build".to_string()),
+                _ => unreachable!(),
+            };
+            assert_eq!(state, expected);
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn builder_log_marker_cannot_revive_an_ordinary_failed_job(pool: PgPool) {
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/untrusted-log-{}.git", Uuid::new_v4()),
+            &format!("untrusted-log-{}", Uuid::new_v4()),
+            &"e".repeat(40),
+            now,
+            "untrusted-log-system",
+            10.0,
+            now,
+        )
+        .await;
+        let builder = create_active_test_builder(&pool, "untrusted-log-builder").await;
+        sqlx::query(
+            "UPDATE build_jobs SET status = 'building', builder_id = $2, started_at = NOW() WHERE id = $1",
+        )
+        .bind(job_id)
+        .bind(builder.id)
+        .execute(&pool)
+        .await
+        .expect("builder should own the test job");
+        append_job_logs_with_limits_for_builder(
+            &pool,
+            &job_id,
+            &builder.id,
+            None,
+            "malicious [evaluator_contract_obsolete] builder output",
+            1024,
+        )
+        .await
+        .expect("owned builder log should append");
+        let transition = mark_job_failed_with_retry(
+            &pool,
+            &job_id,
+            &builder.id,
+            None,
+            Some("ordinary deterministic failure"),
+            RetryFailureClass::Deterministic,
+        )
+        .await
+        .expect("ordinary failure should become terminal");
+        assert!(transition.retry_job.is_none());
+        assert!(transition.failed_job.server_failure_code.is_none());
+
+        sqlx::query("UPDATE derivations SET status_id = 5 WHERE id = $1")
+            .bind(transition.failed_job.derivation_id)
+            .execute(&pool)
+            .await
+            .expect("derivation should meet the reevaluation eligibility gate");
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("recovery transaction should begin");
+        let outcome = crate::queries::build_jobs::create_build_job_for_derivation_tx(
+            &mut tx,
+            transition.failed_job.derivation_id,
+        )
+        .await
+        .expect("recovery lookup should execute")
+        .expect("the existing row should be reported");
+        tx.commit().await.expect("recovery lookup should commit");
+        assert_eq!(
+            outcome,
+            crate::queries::build_jobs::BuildJobInsertOutcome::AlreadyExists {
+                build_job_id: job_id,
+                status: "failed".to_string(),
+            }
+        );
+        let unchanged = get_build_job_by_id(&pool, &job_id)
+            .await
+            .expect("ordinary failed job should load")
+            .expect("ordinary failed job should exist");
+        assert_eq!(unchanged.status, "failed");
+        assert!(unchanged.server_failure_code.is_none());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn ordinary_retry_and_terminal_failure_clear_server_failure_code(pool: PgPool) {
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/ordinary-retry-{}.git", Uuid::new_v4()),
+            &format!("ordinary-retry-{}", Uuid::new_v4()),
+            &"f".repeat(40),
+            now,
+            "ordinary-retry-system",
+            10.0,
+            now,
+        )
+        .await;
+
+        assert!(
+            mark_queued_verified_source_job_obsolete(&pool, &job_id, "obsolete contract")
+                .await
+                .expect("obsolete transition should execute")
+        );
+        crate::queries::build_jobs::mark_job_failed(
+            &pool,
+            job_id,
+            "ordinary retryable failure",
+            None,
+        )
+        .await
+        .expect("ordinary failure should requeue the job");
+        let retried = get_build_job_by_id(&pool, &job_id)
+            .await
+            .expect("retried job should load")
+            .expect("retried job should exist");
+        assert_eq!(retried.status, "queued");
+        assert_eq!(retried.retry_count, 1);
+        assert!(retried.server_failure_code.is_none());
+
+        let retry_child_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/retry-child-{}.git", Uuid::new_v4()),
+            &format!("retry-child-{}", Uuid::new_v4()),
+            &"b".repeat(40),
+            now,
+            "retry-child-system",
+            10.0,
+            now,
+        )
+        .await;
+        sqlx::query(
+            r#"
+            UPDATE build_jobs
+            SET parent_job_id = $2,
+                root_job_id = $2,
+                automatic_retry_source_id = $2,
+                attempt_number = 2
+            WHERE id = $1
+            "#,
+        )
+        .bind(retry_child_id)
+        .bind(job_id)
+        .execute(&pool)
+        .await
+        .expect("retry lineage should be recorded");
+        let retry_child = get_build_job_by_id(&pool, &retry_child_id)
+            .await
+            .expect("retry child should load")
+            .expect("retry child should exist");
+        assert_eq!(retry_child.parent_job_id, Some(job_id));
+        assert!(retry_child.server_failure_code.is_none());
+
+        crate::queries::build_jobs::mark_job_failed(
+            &pool,
+            job_id,
+            "second ordinary retryable failure",
+            None,
+        )
+        .await
+        .expect("second ordinary failure should requeue the job");
+        crate::queries::build_jobs::mark_job_failed(
+            &pool,
+            job_id,
+            "ordinary terminal failure",
+            None,
+        )
+        .await
+        .expect("retry exhaustion should fail the job");
+        let terminal = get_build_job_by_id(&pool, &job_id)
+            .await
+            .expect("terminal job should load")
+            .expect("terminal job should exist");
+        assert_eq!(terminal.status, "failed");
+        assert_eq!(terminal.retry_count, terminal.max_retries);
+        assert!(terminal.server_failure_code.is_none());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn server_failure_code_constraint_rejects_invalid_value_or_status(pool: PgPool) {
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/failure-code-{}.git", Uuid::new_v4()),
+            &format!("failure-code-{}", Uuid::new_v4()),
+            &"a".repeat(40),
+            now,
+            "failure-code-system",
+            10.0,
+            now,
+        )
+        .await;
+
+        let invalid_value = sqlx::query(
+            "UPDATE build_jobs SET status = 'failed', server_failure_code = 'builder_supplied' WHERE id = $1",
+        )
+        .bind(job_id)
+        .execute(&pool)
+        .await;
+        assert!(invalid_value.is_err());
+
+        let invalid_status =
+            sqlx::query("UPDATE build_jobs SET server_failure_code = $2 WHERE id = $1")
+                .bind(job_id)
+                .bind(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+                .execute(&pool)
+                .await;
+        assert!(invalid_status.is_err());
+
+        let unchanged = get_build_job_by_id(&pool, &job_id)
+            .await
+            .expect("constrained job should load")
+            .expect("constrained job should exist");
+        assert_eq!(unchanged.status, "queued");
+        assert!(unchanged.server_failure_code.is_none());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn incompatible_evaluator_leaves_job_queued_for_compatible_builder(pool: PgPool) {
+        use cf_protocol::builder::{
+            EvaluatorFingerprint, NextJobRequest, VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+            VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+        };
+
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/evaluator-{}.git", Uuid::new_v4()),
+            &format!("evaluator-{}", Uuid::new_v4()),
+            &"a".repeat(40),
+            now,
+            "evaluator-system",
+            10.0,
+            now,
+        )
+        .await;
+        set_job_derivation_path(&pool, job_id, "/nix/store/evaluator-system.drv").await;
+        let builder = create_active_test_builder(&pool, "evaluator-builder").await;
+        let authoritative = EvaluatorFingerprint {
+            contract_version: VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+            nix_version: "2.34.5".to_string(),
+            evaluator_system: "x86_64-linux".to_string(),
+            pure_eval: true,
+            lockfile_mutation_allowed: false,
+            allow_import_from_derivation: true,
+            source_materialization_schema_version: VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+        };
+        let mut request = NextJobRequest {
+            capabilities: Default::default(),
+            protocol_version: 2,
+            supported_execution_strategies: vec![
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            ],
+            supported_evaluator_contract_versions: vec![authoritative.contract_version],
+            evaluator: Some(EvaluatorFingerprint {
+                nix_version: "2.34.4".to_string(),
+                ..authoritative.clone()
+            }),
+        };
+
+        assert!(
+            !crate::handlers::api::builders::verified_source_evaluator_is_compatible(
+                &request,
+                &authoritative,
+            )
+        );
+        let untouched = get_build_job_by_id(&pool, &job_id)
+            .await
+            .expect("queued job should load")
+            .expect("queued job should exist");
+        assert_eq!(untouched.status, "queued");
+        assert!(untouched.builder_id.is_none());
+
+        request.evaluator = Some(authoritative.clone());
+        assert!(
+            crate::handlers::api::builders::verified_source_evaluator_is_compatible(
+                &request,
+                &authoritative,
+            )
+        );
+        let claimed = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            builder.max_concurrent_jobs,
+            &[],
+            RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            None,
+            Some(&job_id),
+        )
+        .await
+        .expect("compatible claim should execute")
+        .expect("compatible builder should claim queued job");
+        assert_eq!(claimed.id, job_id);
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn obsolete_queue_head_is_failed_before_next_compatible_job_claim(pool: PgPool) {
+        let now = Utc::now();
+        let new_job = create_queued_job(
+            &pool,
+            &format!("https://example.com/new-source-{}.git", Uuid::new_v4()),
+            &format!("new-source-{}", Uuid::new_v4()),
+            &"b".repeat(40),
+            now,
+            "new-source-system",
+            10.0,
+            now,
+        )
+        .await;
+        set_job_derivation_path(&pool, new_job, "/nix/store/new-source-system.drv").await;
+        let old_job = create_queued_job(
+            &pool,
+            &format!("https://example.com/old-source-{}.git", Uuid::new_v4()),
+            &format!("old-source-{}", Uuid::new_v4()),
+            &"c".repeat(40),
+            now,
+            "old-source-system",
+            10.0,
+            now,
+        )
+        .await;
+        set_job_derivation_path(&pool, old_job, "/nix/store/old-source-system.drv").await;
+        let old_scan = insert_post_build_scan(&pool, old_job).await;
+        prioritize_build_job(&pool, &old_job)
+            .await
+            .expect("old job should become queue head");
+        let first = peek_next_verified_source_job(&pool, &[])
+            .await
+            .expect("queue head lookup should execute")
+            .expect("old queue head should exist");
+        assert_eq!(first.job_id, old_job);
+
+        assert!(
+            mark_queued_verified_source_job_obsolete(
+                &pool,
+                &old_job,
+                "contract-v1 source publication is absent",
+            )
+            .await
+            .expect("obsolete transition should execute")
+        );
+        let retired = get_build_job_by_id(&pool, &old_job)
+            .await
+            .expect("retired job should load")
+            .expect("retired job should exist");
+        assert_eq!(retired.status, "failed");
+        assert_eq!(
+            retired.server_failure_code.as_deref(),
+            Some(SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE)
+        );
+        let retired_scan: (String, Option<Uuid>, serde_json::Value) = sqlx::query_as(
+            "SELECT status, completed_build_job_id, scan_metadata FROM cve_scans WHERE id = $1",
+        )
+        .bind(old_scan)
+        .fetch_one(&pool)
+        .await
+        .expect("obsolete build's scan should load");
+        assert_eq!(retired_scan.0, "failed");
+        assert_eq!(retired_scan.1, Some(old_job));
+        assert_eq!(retired_scan.2["build_prerequisite"]["status"], "failed");
+
+        // Replacement remains closed until authoritative evaluation republishes
+        // the matching source and returns this derivation to
+        // DryRunComplete in its persistence transaction.
+        let mut premature_tx = pool
+            .begin()
+            .await
+            .expect("premature recovery transaction should begin");
+        let premature = crate::queries::build_jobs::create_build_job_for_derivation_tx(
+            &mut premature_tx,
+            retired.derivation_id,
+        )
+        .await
+        .expect("premature recovery lookup should execute")
+        .expect("failed row should still be reported");
+        premature_tx
+            .commit()
+            .await
+            .expect("premature recovery lookup should commit");
+        assert_eq!(
+            premature,
+            crate::queries::build_jobs::BuildJobInsertOutcome::AlreadyExists {
+                build_job_id: old_job,
+                status: "failed".to_string(),
+            }
+        );
+
+        let next = peek_next_verified_source_job(&pool, &[])
+            .await
+            .expect("next queue lookup should execute")
+            .expect("new job should remain claimable");
+        assert_eq!(next.job_id, new_job);
+
+        let obsolete_status = retired.status.clone();
+        let obsolete_code = retired.server_failure_code.clone();
+        let obsolete_logs = retired.logs.clone();
+        let obsolete_started_at = retired.started_at;
+        let obsolete_completed_at = retired.completed_at;
+
+        // Authoritative re-evaluation republishes the derivation as
+        // DryRunComplete before queue activation creates a replacement child.
+        sqlx::query("UPDATE derivations SET status_id = 5 WHERE id = $1")
+            .bind(retired.derivation_id)
+            .execute(&pool)
+            .await
+            .expect("republished derivation should become queue-eligible");
+
+        let mut tx = pool
+            .begin()
+            .await
+            .expect("replacement transaction should begin");
+        let replacement = crate::queries::build_jobs::create_build_job_for_derivation_tx(
+            &mut tx,
+            retired.derivation_id,
+        )
+        .await
+        .expect("republished authority should create a replacement attempt")
+        .expect("replacement attempt should be reported");
+        tx.commit().await.expect("replacement should commit");
+        let crate::queries::build_jobs::BuildJobInsertOutcome::Inserted {
+            build_job_id: replacement_id,
+        } = replacement
+        else {
+            panic!("authoritative replacement should be inserted");
+        };
+        assert_ne!(replacement_id, old_job);
+
+        let unchanged = get_build_job_by_id(&pool, &old_job)
+            .await
+            .expect("obsolete source should load")
+            .expect("obsolete source should remain present");
+        assert_eq!(unchanged.status, obsolete_status);
+        assert_eq!(unchanged.server_failure_code, obsolete_code);
+        assert_eq!(unchanged.logs, obsolete_logs);
+        assert_eq!(unchanged.started_at, obsolete_started_at);
+        assert_eq!(unchanged.completed_at, obsolete_completed_at);
+
+        let replacement = get_build_job_by_id(&pool, &replacement_id)
+            .await
+            .expect("replacement should load")
+            .expect("replacement should exist");
+        assert_eq!(replacement.status, "queued");
+        assert_eq!(replacement.parent_job_id, Some(old_job));
+        assert_eq!(replacement.root_job_id, Some(old_job));
+        assert_eq!(replacement.attempt_number, retired.attempt_number + 1);
+        assert_eq!(replacement.environment_id, retired.environment_id);
+        assert!(replacement.server_failure_code.is_none());
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn post_claim_evaluator_mismatch_releases_without_failing_job(pool: PgPool) {
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            &format!("https://example.com/release-{}.git", Uuid::new_v4()),
+            &format!("release-{}", Uuid::new_v4()),
+            &"d".repeat(40),
+            now,
+            "release-system",
+            10.0,
+            now,
+        )
+        .await;
+        set_job_derivation_path(&pool, job_id, "/nix/store/release-system.drv").await;
+        let builder = create_active_test_builder(&pool, "release-builder").await;
+        let claimed = claim_next_job_atomic(
+            &pool,
+            &builder.id,
+            builder.max_concurrent_jobs,
+            &[],
+            RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            None,
+            Some(&job_id),
+        )
+        .await
+        .expect("claim should execute")
+        .expect("job should be claimed");
+
+        let released = release_job_for_incompatible_evaluator(
+            &pool,
+            &claimed.id,
+            &builder.id,
+            None,
+            Some("Nix evaluator system mismatch"),
+        )
+        .await
+        .expect("incompatible job should be released");
+        assert_eq!(released.status, "queued");
+        assert!(released.builder_id.is_none());
+        assert!(released.builder_session_id.is_none());
+        assert!(released.server_failure_code.is_none());
+        assert!(released.completed_at.is_none());
+        assert_eq!(released.retry_count, 0);
+    }
+
     #[tokio::test]
     #[ignore = "requires running test database"]
     async fn test_dashboard_queue_matches_next_claim_order_for_queued_items() {
@@ -2436,6 +7005,7 @@ mod tests {
             builder.max_concurrent_jobs,
             &[],
             RemoteBuildExecutionStrategy::ServerDerivation,
+            None,
             None,
         )
         .await
@@ -2507,6 +7077,7 @@ mod tests {
             builder.max_concurrent_jobs,
             &[],
             RemoteBuildExecutionStrategy::ServerDerivation,
+            None,
             None,
         )
         .await
@@ -2693,6 +7264,7 @@ mod tests {
                 &[],
                 RemoteBuildExecutionStrategy::ServerDerivation,
                 None,
+                None,
             ),
             claim_next_job_atomic(
                 &pool,
@@ -2700,6 +7272,7 @@ mod tests {
                 builder_b.max_concurrent_jobs,
                 &[],
                 RemoteBuildExecutionStrategy::ServerDerivation,
+                None,
                 None,
             )
         );
@@ -3463,6 +8036,7 @@ mod tests {
             &[],
             RemoteBuildExecutionStrategy::ServerDerivation,
             Some(&session_a),
+            None,
         )
         .await;
 
@@ -3489,6 +8063,7 @@ mod tests {
             &[],
             RemoteBuildExecutionStrategy::ServerDerivation,
             Some(&session_b),
+            None,
         )
         .await
         .expect("current session B claim should succeed")
@@ -3543,6 +8118,7 @@ mod tests {
             &[],
             RemoteBuildExecutionStrategy::ServerDerivation,
             None,
+            None,
         )
         .await;
 
@@ -3571,6 +8147,7 @@ mod tests {
             &[],
             RemoteBuildExecutionStrategy::ServerDerivation,
             Some(&session),
+            None,
         )
         .await
         .expect("established session claim should succeed")

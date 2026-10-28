@@ -44,18 +44,35 @@ Crystal Forge has comprehensive testing across multiple levels. When contributin
 
 **For database changes**:
 
-- Add database tests in `packages/cf-test-modules/cf_test/tests/database/`
-- Test scenarios in `packages/cf-test-modules/cf_test/scenarios/`
-- Run with `nix build .#checks.x86_64-linux.database`
+- Add database tests in `packages/cf-test-suite/cf_test/tests/database/`
+- Test scenarios in `packages/cf-test-suite/cf_test/scenarios/`
+- Run with `nix run .#cf-test-suite.runTests -- -vvv -m database`
 
 **For component integration**:
 
-- Server tests: `nix build .#checks.x86_64-linux.server`
-- Builder tests: `nix build .#checks.x86_64-linux.builder`
-- Cache tests: `nix build .#checks.x86_64-linux.s3-cache` or `.#checks.x86_64-linux.attic-cache`
-- Full test suite: `nix flake check`
+- Core component tests: `nix build .#default.cf-server-core-drv -L`
+- Isolated server/database regressions: `nix run .#devScripts.state-machine-test -- up --tui=false`
+- Registered integration owner: `nix build .#checks.x86_64-linux.integration-access`
+- Python server, builder, cache, and database tests:
+  `nix run .#cf-test-suite.runTests -- -vvv`
+- Full registered flake checks: `nix flake check`
 
-See the [Test Plan](docs/test_plan.md) for detailed testing guidance.
+TASK-490.24 retires the legacy suites before replacement coverage is complete.
+Only Access exists today, with 16 executed cases; missing Access, Delivery,
+Assurance, and Upgrade obligations remain in the coverage map. The current
+inventory is one total check, formerly 27. The final target is exactly four
+total check attributes, without placeholders. Lower-level verification uses
+ordinary component builds, direct `component-tests` CI commands, and existing
+isolated database workflows. All fifteen `verify-*` wrappers are removed.
+Documentation and mocked design captures remain `.#okf-knowledge` and
+`.#ui-screenshots` package targets. The [verification guide](docs/agents/verification.md#consolidated-component-verification)
+lists the consolidated commands and their execution boundaries.
+The host `web-ui-test` developer command remains available; the legacy `web-ui`
+VM gate and baseline-candidate CI job are retired.
+
+See the [testing guide](docs/knowledge/testing/test-plan.md) and
+[flake-check catalog](docs/knowledge/testing/flake-checks.md) for current
+testing guidance.
 
 ## Project Management & Process
 
@@ -87,7 +104,7 @@ When contributing, please:
 - Update the changelog if your change is user-facing
 - Include examples where appropriate
 
-**Frontend Contributors:** See [Frontend Component Isolation Standards](docs/frontend-component-standards.md) for component development workflow, state coverage requirements, and isolation-driven development practices.
+**Frontend Contributors:** See the [Frontend Component Isolation Standards](docs/knowledge/ui/component-isolation-standards.md) for component development workflow, state coverage requirements, and isolation-driven development practices.
 
 ## Code Style
 

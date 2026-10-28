@@ -7,19 +7,49 @@ let
   serverCargoToml = builtins.fromTOML (builtins.readFile (src + "/crates/cf-server/Cargo.toml"));
   version = serverCargoToml.package.version;
   migrationsDir = ./crates/cf-server/migrations;
+  nixosOptionsMetadata = pkgs.crystal-forge.nixos-options-metadata;
+  # INVARIANT: Verified-source builders must execute the Nix CLI linked to the
+  # nix-eval-jobs evaluator. Exact evaluator fingerprints are a security
+  # boundary, so an unrelated pkgs.nix must not precede this package in PATH.
+  # The CF overlay binds this evaluator and CLI to the same authority-guarded
+  # Nix libraries. The guard remains disabled outside Basic read children.
+  evaluatorNix = pkgs.nix-eval-jobs.nix;
+  # Niks3 shells out to Nix and its wrapper prepends that dependency to PATH.
+  # Keep the pinned Niks3 version, but bind its CLI to the evaluator's Nix.
+  niks3 = pkgs.niks3.override { nix = evaluatorNix; };
+  # Core component tests consume freshly generated module TOML, not only the
+  # checked-in compatibility snapshot. This evaluates configuration generation
+  # without starting services or traversing a system closure.
+  generatedDeploymentConfig = pkgs.writeText "generated-deployment-config.toml"
+    (import ./crates/cf-config/test-support/deployment-config.nix {
+      flake = inputs.self;
+      system = pkgs.stdenv.hostPlatform.system;
+    });
 
   # ─────────────────────────────────────────────────────────────────────────
   # Source filtering
   #
-  # Each component derivation filters its source to only the workspace metadata
-  # and its transitive local-crate closure. This prevents server-only changes
-  # from invalidating agent/builder derivations.
+  # Every component derivation filters its source to the workspace metadata
+  # plus its transitive local-crate closure. A crate that no component depends
+  # on is not part of that component's derivation input, so editing one
+  # component does not invalidate the others.
+  #
+  # INVARIANT: the crate list passed to mkWorkspaceSrc must be the complete
+  # transitive local-crate closure of the component. Cargo resolves path
+  # dependencies from the build tree, so a missing crate is a build failure
+  # rather than a silent fallback.
   # ─────────────────────────────────────────────────────────────────────────
 
   # Helper: build a source filter that includes:
   # 1. Workspace root metadata (Cargo.toml, Cargo.lock)
   # 2. Full source of the specified crate directories
-  mkWorkspaceSrc = crates:
+  # 3. Any additional workspace-root paths the component needs at build time
+  #
+  # `rootPaths` names workspace-root entries that are real build inputs but are
+  # not crate sources. Each entry is included together with everything below
+  # it. Keep this list minimal: every entry is an invalidation edge, so a
+  # component rebuilds whenever a listed path changes.
+  mkWorkspaceSrc = { crates, rootPaths ? [ ] }:
     lib.cleanSourceWith {
       src = src;
       filter = path: _type:
@@ -37,8 +67,22 @@ let
               relPath == "crates/${crate}" ||
               lib.hasPrefix "crates/${crate}/" relPath)
             crates;
+          isIncludedRootPath = builtins.any
+            (rootPath:
+              relPath == rootPath ||
+              lib.hasPrefix "${rootPath}/" relPath)
+            rootPaths;
+          # These files are explicit postCheck inputs, not Cargo sources. Keep
+          # them out of dependency artifacts and embedded-UI source identity.
+          isNixCheckInput = builtins.any
+            (entry: relPath == entry || lib.hasPrefix "${entry}/" relPath)
+            [ "crates/cf-server/tests/nix" "crates/cf-config/test-support" ]
+            || relPath == "crates/cf-server/tests/xccdf-schema.sh";
         in
-        isWorkspaceMeta || isWorkspaceDirectory || isIncludedCrateSource;
+        (isWorkspaceMeta
+        || isWorkspaceDirectory
+        || isIncludedCrateSource
+        || isIncludedRootPath) && !isNixCheckInput;
     };
 
   # Cargo parses every member named by a workspace manifest, even when
@@ -59,30 +103,81 @@ let
   # cf-protocol and cf-config are shared foundational crates needed by all.
   foundationalCrates = [ "cf-protocol" "cf-config" ];
 
-  agentSrc   = mkWorkspaceSrc (foundationalCrates ++ [ "cf-agent" ]);
-  builderSrc = mkWorkspaceSrc (foundationalCrates ++ [ "cf-builder" ]);
-  keygenSrc  = mkWorkspaceSrc [ "cf-keygen" ];
+  agentCrates   = foundationalCrates ++ [ "cf-agent" ];
+  builderCrates = foundationalCrates ++ [ "cf-builder" ];
+  keygenCrates  = [ "cf-keygen" ];
+  # cf-server declares exactly three local path dependencies: cf-config,
+  # cf-protocol, and cf-compliance (the database-free interchange crate that
+  # also serves the NixOS module generator). It does not depend on cf-agent,
+  # cf-builder, cf-keygen, or cf-nixos-module, so those crates are excluded
+  # from the server derivation input.
+  serverCrates  = foundationalCrates ++ [ "cf-compliance" "cf-server" ];
+
   # The NixOS module generator depends only on the database-free compliance
-  # interchange crate, so it never pulls in sqlx, axum, or openssl.
+  # interchange crate, so it never pulls in sqlx, axum, or openssl. It has no
+  # foundational crates and no query cache.
   nixosModuleCrates = [ "cf-compliance" "cf-nixos-module" ];
-  nixosModuleSrc = mkWorkspaceSrc nixosModuleCrates;
-  serverSrc  = src; # server builds the full workspace
+
+  # The cf-server build expands sqlx query macros offline. sqlx resolves the
+  # offline query cache from the workspace root, so `.sqlx` at the workspace
+  # root is a required build input for the server and must survive filtering.
+  #
+  # COMPATIBILITY: `crates/cf-server/.sqlx` also exists for commands that use
+  # the crate manifest directly. The two caches currently contain the same
+  # query metadata, but the component workspace still resolves offline queries
+  # from this workspace-root path. See TASK-451 for cache reconciliation.
+  #
+  # The agent, builder, and keygen crates expand no query macros, so they do
+  # not receive the query cache and are not invalidated when it changes.
+  serverRootPaths = [ ".sqlx" ];
+
+  agentSrc   = mkWorkspaceSrc { crates = agentCrates; };
+  builderSrc = mkWorkspaceSrc { crates = builderCrates; };
+  keygenSrc  = mkWorkspaceSrc { crates = keygenCrates; };
+  nixosModuleSrc = mkWorkspaceSrc { crates = nixosModuleCrates; };
+  serverSrc  = mkWorkspaceSrc {
+    crates = serverCrates;
+    rootPaths = serverRootPaths;
+  };
 
   agentWorkspaceManifest =
-    mkComponentWorkspaceManifest "agent" (foundationalCrates ++ [ "cf-agent" ]);
+    mkComponentWorkspaceManifest "agent" agentCrates;
   builderWorkspaceManifest =
-    mkComponentWorkspaceManifest "builder" (foundationalCrates ++ [ "cf-builder" ]);
+    mkComponentWorkspaceManifest "builder" builderCrates;
   keygenWorkspaceManifest =
-    mkComponentWorkspaceManifest "keygen" [ "cf-keygen" ];
+    mkComponentWorkspaceManifest "keygen" keygenCrates;
   nixosModuleWorkspaceManifest =
     mkComponentWorkspaceManifest "nixos-module" nixosModuleCrates;
+  serverWorkspaceManifest =
+    mkComponentWorkspaceManifest "server" serverCrates;
 
   # ─────────────────────────────────────────────────────────────────────────
   # Per-component SRC_HASH
   #
-  # Each SRC_HASH is derived from that component's filtered source tree,
-  # NOT from the full unfiltered backend. A server-only source change must
-  # not change agentSrcHash or builderSrcHash.
+  # Each SRC_HASH is derived from that component's filtered source tree, not
+  # from the full backend tree. A server-only source change must not change
+  # agentSrcHash, and an agent-only or builder-only change must not change
+  # serverSrcHash.
+  #
+  # Each hash is taken over the filtered backend source store path. That path
+  # encodes the content of the filtered tree, so the hash identifies the Rust
+  # workspace sources available to that component build.
+  #
+  # SEMANTICS: SRC_HASH identifies the filtered backend workspace source of the
+  # component that reports it. The server crate reads it in two places, and
+  # both are source identity reporting rather than comparison against an
+  # external value:
+  #
+  #   - handlers::api::admin reports it as the `commit` field of the server
+  #     runtime info response.
+  #   - models::system_states reports it as `agent_build_hash` for the
+  #     test-agent binary, which the server crate also produces.
+  #
+  # Neither consumer compares SRC_HASH against a hash produced by another
+  # component, so narrowing serverSrc does not break them. Both server variants
+  # receive the same value. The hash does not identify Cargo feature selection
+  # or embedded UI assets, which are outside serverSrc; a UI-only change can
+  # therefore change the production server binary without changing SRC_HASH.
   #
   # The builder and keygen do not use SRC_HASH at runtime, so they receive
   # no SRC_HASH preBuild export at all.
@@ -98,33 +193,105 @@ let
   ];
   commonNativeBuildInputs = with pkgs; [ pkg-config ];
 
+  craneLib = inputs.crane.mkLib pkgs;
+
+  # Coverage is an opt-in variant of the same build/check phases, never a
+  # dependency of installed components. Passthru does not change the normal
+  # derivation. Profiles and unstripped coverage objects are explicit outputs.
+  withCoverage = drv: drv.overrideAttrs (old: {
+    passthru = (old.passthru or { }) // {
+      coverage = drv.overrideAttrs (attrs: {
+        outputs = [ "out" "profile" ];
+        nativeBuildInputs = (attrs.nativeBuildInputs or [ ]) ++ [
+          pkgs.rustc.llvmPackages.llvm pkgs.findutils pkgs.gnugrep
+        ];
+        preBuild = (attrs.preBuild or "") + ''
+          export CF_COVERAGE_DIR="$profile"
+          export CF_LLVM_BIN="${pkgs.rustc.llvmPackages.llvm}/bin"
+          source ${../coverage/instrument.sh}
+          coverage_start "$PWD"
+        '';
+        postCheck = (if (attrs.postCheck or null) == null then "" else attrs.postCheck) + ''
+          coverage_export "''${CARGO_TARGET_DIR:-target}" "$profile"
+        '';
+      });
+    };
+  });
+
   # ─────────────────────────────────────────────────────────────────────────
-  # Server derivation — builds cf-server with embedded-ui
-  # Only server and test-agent binaries; agent/builder/keygen are separate.
+  # Server derivations
+  #
+  # The cf-server crate declares `embedded-ui` as an optional feature with no
+  # default features, so the same crate source produces two builds:
+  #
+  #   cf-server-core-drv  no embedded UI, no dependency on the web-ui build
+  #   cf-server-drv       embedded UI, depends on the web-ui build
+  #
+  # INVARIANT: production compilation differs only by the embedded-ui Cargo
+  # feature and CRYSTAL_FORGE_UI_DIST. Core additionally owns foundational
+  # library, pure export integration, and real Nix protocol checks so those
+  # checks do not repeat for embedded UI.
+  #
+  # Why the split exists: CRYSTAL_FORGE_UI_DIST makes the web-ui derivation a
+  # Nix input of the server. Without the split, editing a Dioxus source file
+  # rebuilds the backend server and invalidates every check that boots a
+  # server, including checks that never open a browser.
+  #
+  # Consumer rule:
+  #
+  #   - Use cf-server-core-drv for backend-only tests and checks. Those
+  #     consumers must not gain a web-ui dependency.
+  #   - Use cf-server-drv for the production package and for the authoritative
+  #     browser check, which must prove the production binary serves the
+  #     production WASM.
+  #
+  # Serving behavior without the feature: handlers::ui and the axum fallback
+  # route at bin/server.rs are both gated on `embedded-ui`. A core build
+  # therefore registers no UI fallback and answers a UI route with the axum
+  # default 404 Not Found. API routes are unaffected. This is deliberate: a
+  # core build must not appear to serve a UI.
+  #
+  # Only the server, hardening-worker, config-inspector-worker, test-agent, and
+  # xccdf-export-fixture binaries come from this crate. The agent, builder, and
+  # keygen binaries are separate derivations.
   # ─────────────────────────────────────────────────────────────────────────
-  cf-server-drv = pkgs.rustPlatform.buildRustPackage rec {
+  serverCargoBuildExtraArgs = lib.concatStringsSep " " [
+    "--bin server"
+    "--bin hardening-worker"
+    "--bin config-inspector-worker"
+    "--bin test-agent"
+    "--bin xccdf-export-fixture"
+  ];
+
+  # Crane reads Cargo.toml files while constructing its dependency-only dummy
+  # source, before any derivation hook can run. Replace the workspace manifest
+  # in that dummy source explicitly, just as postPatch does in the real source.
+  # This prevents excluded workspace members from becoming dependency inputs.
+  serverDummySrc = craneLib.mkDummySrc {
+    src = serverSrc;
+    cargoLock = ./Cargo.lock;
+    extraDummyScript = ''
+      chmod +w $out/Cargo.toml
+      cp ${serverWorkspaceManifest} $out/Cargo.toml
+    '';
+  };
+
+  serverCommonArgs = {
     src = serverSrc;
     inherit version;
-    pname = "cf-server";
-    cargoLock = { lockFile = ./Cargo.lock; };
-    cargoBuildFlags = [
-      "--package" "cf-server"
-      "--bin" "server"
-      "--bin" "hardening-worker"
-      "--bin" "test-agent"
-      "--bin" "xccdf-export-fixture"
-      "--features" "cf-server/embedded-ui"
-    ];
-    cargoCheckFlags = cargoBuildFlags;
-    cargoTestFlags = [
-      "--package" "cf-server"
-      "--lib"
-      "--bins"
-      "--features" "cf-server/embedded-ui"
-    ];
-    CRYSTAL_FORGE_UI_DIST = "${pkgs.crystal-forge.web-ui}/public";
+    strictDeps = true;
 
-    nativeBuildInputs = commonNativeBuildInputs ++ (with pkgs; [ sqlx-cli ]);
+    postPatch = ''
+      cp ${serverWorkspaceManifest} Cargo.toml
+    '';
+    CRYSTAL_FORGE_NIXOS_OPTIONS_METADATA = "${nixosOptionsMetadata}/share/crystal-forge/nixos-options.json";
+
+    nativeBuildInputs = commonNativeBuildInputs ++ (with pkgs; [
+      makeWrapper
+      git # Server tests exercise shallow-clone and first-parent behavior.
+      nix
+      sqlx-cli
+    ]);
     buildInputs = commonBuildInputs;
 
     runtimeDeps = with pkgs; [
@@ -132,16 +299,119 @@ let
       zfs        # optional
       vulnix
     ];
+  };
 
-    preBuild = ''
-      export SRC_HASH="${lib.strings.removeSuffix "\n" serverSrcHash}"
-    '';
+  # This derivation intentionally depends on Cargo.lock and the Cargo.toml
+  # manifests only. craneLib.buildDepsOnly replaces Rust application source
+  # with serverDummySrc, so editing a .rs file does not change this derivation.
+  #
+  # Build the superset of dependencies required by the embedded-UI variant.
+  # The core variant can reuse that target tree without enabling the feature;
+  # its closure still has no web-ui input because this feature selection adds
+  # only the include_dir and mime_guess Rust crates, not UI assets.
+  serverCargoArtifacts = craneLib.buildDepsOnly (
+    builtins.removeAttrs serverCommonArgs [ "src" "postPatch" "runtimeDeps" ]
+    // {
+      pname = "cf-server";
+      dummySrc = serverDummySrc;
+      cargoExtraArgs = "--locked --package cf-server --features cf-server/embedded-ui";
+      cargoBuildExtraArgs = serverCargoBuildExtraArgs;
+      cargoTestExtraArgs = "--no-run --lib --bins";
+    }
+  );
 
-    meta = with lib; {
-      description = "Crystal Forge server";
-      license = licenses.agpl3Only;
-      platforms = platforms.all;
-    };
+  mkServerDrv = { pname, embedUi }:
+    let
+      cargoFeatureArg = lib.optionalString embedUi " --features cf-server/embedded-ui";
+    in
+    craneLib.buildPackage (serverCommonArgs // {
+      inherit pname;
+      cargoArtifacts = serverCargoArtifacts;
+      cargoExtraArgs = "--locked --package cf-server${cargoFeatureArg}";
+      cargoBuildExtraArgs = serverCargoBuildExtraArgs;
+      # Cargo does not run dependency tests for --package cf-server. Core owns
+      # the foundational config/protocol tests and pure export targets once.
+      cargoTestExtraArgs = "--lib --bins" + lib.optionalString (!embedUi) (lib.concatStringsSep " " [
+        " --package cf-config --package cf-protocol"
+        "--test oscal_poam_export"
+        "--test register_oscal_snapshot"
+        "--test register_tabular_export"
+      ]);
+      nativeBuildInputs = serverCommonArgs.nativeBuildInputs
+        ++ lib.optionals (!embedUi) [ pkgs.jq pkgs.nix-eval-jobs.nix pkgs.nix-eval-jobs pkgs.go pkgs.openssl pkgs.check-jsonschema pkgs.libxml2 ];
+      # Keep fixtures inside independent subshells: their HOME, NIX_CONFIG,
+      # working files and shell functions must not leak into other checks.
+      postCheck = if embedUi then null else ''
+        export PATH="${lib.makeBinPath [ evaluatorNix pkgs.nix-eval-jobs ]}:$PATH"
+        (set -euo pipefail; work=$(mktemp -d); cd "$work"
+          ${import ./crates/cf-server/tests/nix/config-inspection.nix {
+            inherit pkgs;
+            legacyLock = ../../lib/test-flake/test-flake/flake.lock;
+          }}
+        )
+        (set -euo pipefail; work=$(mktemp -d); cd "$work"
+          ${import ./crates/cf-server/tests/nix/config-observation.nix { inherit pkgs; }}
+        )
+        (set -euo pipefail; work=$(mktemp -d); cd "$work"
+          ${import ./crates/cf-server/tests/nix/primary-isolation.nix { inherit pkgs; }}
+        )
+        (set -euo pipefail; work=$(mktemp -d); cd "$work"
+          ${import ./crates/cf-server/tests/nix/source-parity.nix { inherit pkgs; }}
+        )
+        (set -euo pipefail
+          ${import ./crates/cf-config/test-support/ca-bundle/compatibility.nix { inherit pkgs lib; }}
+        )
+        (set -euo pipefail
+          export NIX_TEST_BIN="${evaluatorNix}/bin/nix"
+          cargo test --offline --locked --package cf-config --lib \
+            config::cache::tests::warm_nix_publication_propagates_closure_trust \
+            -- --ignored --exact --nocapture
+        )
+      '';
+      # Dependency-only Crane artifacts contain no installed server binary.
+      # Wrap only the final component outputs, including the core variant.
+      postFixup = ''
+        wrapProgram "$out/bin/server" \
+          --prefix PATH : ${lib.makeBinPath [ evaluatorNix niks3 pkgs.vulnix ]}
+      '';
+      preBuild = ''
+        export SRC_HASH="${lib.strings.removeSuffix "\n" serverSrcHash}"
+      '';
+
+      meta = with lib; {
+        description =
+          if embedUi
+          then "Crystal Forge server with embedded web UI"
+          else "Crystal Forge server without embedded web UI";
+        license = licenses.agpl3Only;
+        platforms = platforms.all;
+      };
+    }
+    # Setting CRYSTAL_FORGE_UI_DIST only for the embedded variant is what keeps
+    # the web-ui derivation out of the core variant's input closure.
+    # include_dir!("$CRYSTAL_FORGE_UI_DIST") is compiled only under the
+    # embedded-ui feature, so a core build never reads this variable.
+    // lib.optionalAttrs embedUi {
+      CRYSTAL_FORGE_UI_DIST = "${pkgs.crystal-forge.web-ui}/public";
+    }
+    // lib.optionalAttrs (!embedUi) {
+      CF_TEST_GENERATED_DEPLOYMENT_CONFIG = generatedDeploymentConfig;
+      # Filtered Cargo sources omit repository-root schemas. Pass the schema
+      # directory explicitly to the runtime validators without widening src.
+      CF_TEST_OSCAL_SCHEMAS = ../../schemas/oscal-1.1.2;
+    });
+
+  # Production server. Ships the embedded web UI.
+  cf-server-drv = mkServerDrv {
+    pname = "cf-server";
+    embedUi = true;
+  };
+
+  # Backend-only server. Has no web-ui input, so Dioxus changes do not
+  # invalidate it. Not a production artifact.
+  cf-server-core-drv = mkServerDrv {
+    pname = "cf-server-core";
+    embedUi = false;
   };
 
   # ─────────────────────────────────────────────────────────────────────────
@@ -197,8 +467,13 @@ let
       cp ${builderWorkspaceManifest} Cargo.toml
     '';
 
-    nativeBuildInputs = commonNativeBuildInputs;
+    nativeBuildInputs = commonNativeBuildInputs ++ [ pkgs.makeWrapper ];
     buildInputs = commonBuildInputs;
+
+    postFixup = ''
+      wrapProgram "$out/bin/builder" \
+        --prefix PATH : ${lib.makeBinPath [ evaluatorNix niks3 pkgs.vulnix ]}
+    '';
 
     # SRC_HASH intentionally not set: cf-builder does not use option_env!("SRC_HASH").
 
@@ -258,6 +533,11 @@ let
 
     nativeBuildInputs = commonNativeBuildInputs;
     buildInputs = commonBuildInputs;
+
+    # Test phase only. cf-compliance's custom-expression tests run the
+    # `nix-instantiate --parse` syntax check that the server also applies. The
+    # same parser is supplied by the CLI wrapper for CF-native bundle input.
+    nativeCheckInputs = [ pkgs.nix ];
 
     meta = with lib; {
       description = "Generate standalone NixOS modules from exported Crystal Forge policies and compliance bundles";
@@ -346,24 +626,50 @@ let
     text = ''${cf-keygen-drv}/bin/cf-keygen "$@"'';
   };
 
+  # test-agent is a test harness binary and never serves the web UI, so it is
+  # taken from the core server build. Sourcing it from the embedded build would
+  # put the whole web-ui derivation in the closure of every test that runs a
+  # fake agent.
   test-agent = pkgs.writeShellApplication {
     name = "test-agent";
-    text = ''${cf-server-drv}/bin/test-agent "$@"'';
+    text = ''${cf-server-core-drv}/bin/test-agent "$@"'';
   };
 
   builder = pkgs.writeShellApplication {
     name = "builder";
+    runtimeInputs = [ evaluatorNix niks3 pkgs.vulnix ];
     text = ''${cf-builder-drv}/bin/builder "$@"'';
   };
 
-  cf-nixos-module = pkgs.writeShellApplication {
+  cf-nixos-module = (pkgs.writeShellApplication {
     name = "cf-nixos-module";
+    runtimeInputs = [ evaluatorNix ];
     text = ''${cf-nixos-module-drv}/bin/cf-nixos-module "$@"'';
-  };
+  }).overrideAttrs (_: {
+    passthru.tests = {
+      helper = import ./crates/cf-nixos-module/nix/tests-helper {
+        inherit pkgs lib;
+      };
+      generation = import ./crates/cf-nixos-module/nix/tests-generation {
+        inherit pkgs lib;
+      };
+    };
+  });
 
 in crystal-forge // {
+  inherit niks3 evaluatorNix;
   inherit agent server builder cf-keygen test-agent migrate cf-nixos-module;
-  inherit cf-server-drv cf-agent-drv cf-builder-drv cf-keygen-drv cf-nixos-module-drv;
+  # Component derivations. Internal consumers such as NixOS module services,
+  # checks, and test helpers must reference these directly rather than the
+  # `crystal-forge`, `server`, or `agent` aggregates above, so that a component
+  # closure contains only what that consumer runs.
+  inherit serverCargoArtifacts;
+  cf-server-drv = withCoverage cf-server-drv;
+  cf-server-core-drv = withCoverage cf-server-core-drv;
+  cf-agent-drv = withCoverage cf-agent-drv;
+  cf-builder-drv = withCoverage cf-builder-drv;
+  cf-keygen-drv = withCoverage cf-keygen-drv;
+  inherit cf-nixos-module-drv;
   # Expose component-specific source hashes for verification
   agentSrcHash = agentSrcHash;
   serverSrcHash = serverSrcHash;

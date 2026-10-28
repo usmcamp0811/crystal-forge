@@ -52,6 +52,15 @@ pub struct FlakeCredentialEnv {
 }
 
 impl FlakeCredentialEnv {
+    /// Returns the protected temporary netrc path for explicit Nix configuration.
+    ///
+    /// The caller must keep this credential environment alive until the command
+    /// and its input fetches finish. Only the path may be passed in arguments;
+    /// credential contents must never be copied into arguments or diagnostics.
+    pub(crate) fn netrc_path(&self) -> Option<&Path> {
+        self.netrc_path.as_deref()
+    }
+
     /// Load credentials from the DB for the given `flake_id`.
     ///
     /// Returns `None` if the flake has no credentials stored (public repo).

@@ -5,7 +5,7 @@
 }: let
   keyPair = pkgs.runCommand "agent-keypair" {} ''
     mkdir -p $out
-    ${pkgs.crystal-forge.default.cf-keygen}/bin/cf-keygen -f $out/agent.key
+    ${pkgs.crystal-forge.default.cf-keygen-drv}/bin/cf-keygen -f $out/agent.key
   '';
   key = pkgs.runCommand "agent.key" {} ''
     mkdir -p $out
@@ -42,5 +42,8 @@ in {
     };
   };
 
-  environment.systemPackages = [pkgs.crystal-forge.default.agent pkgs.bash];
+  # This system runs only the real agent. Keep the server, builder, and keygen
+  # out of the runtime closure; keygen is used only above while constructing
+  # the fixed key pair.
+  environment.systemPackages = [pkgs.crystal-forge.default.cf-agent-drv pkgs.bash];
 }

@@ -8,7 +8,7 @@ use axum::{
     Json,
     body::Body,
     extract::{
-        Path, Query, State,
+        ConnectInfo, Path, Query, State,
         ws::{Message, WebSocket, WebSocketUpgrade},
     },
     http::{HeaderMap, Method, StatusCode},
@@ -22,10 +22,13 @@ use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 use tokio::process::Command;
 use tokio_util::io::ReaderStream;
+use url::Url;
 use uuid::Uuid;
 
 use crate::handlers::agent_request::CFState;
+use crate::handlers::api::auth_session::require_csrf;
 use crate::handlers::api::rbac::{
+    authenticated_user_roles, has_admin_role, has_operator_or_admin_role, has_viewer_or_above_role,
     require_admin, require_operator_or_admin, require_viewer_or_above,
 };
 use crate::handlers::builder_request::{
@@ -35,9 +38,11 @@ use crate::models::builders::{
     AppendLogsRequest, BuildJob, Builder, BuilderCachePushConfig, BuilderCreatedResponse,
     BuilderMetrics, BuilderSummary, BuilderWithEnvironments, CreateBuilderRequest,
     EstablishBuilderSessionRequest, EstablishBuilderSessionResponse, EvaluatorFingerprint,
-    KeypairRegeneratedResponse, NextJobRequest, RemoteBuildExecutionStrategy, ReportMetricsRequest,
-    ResolveBuilderIdRequest, ResolveBuilderIdResponse, SourceInputDeliveryMode,
-    UpdateBuilderEnvironmentsRequest, UpdateBuilderPublicKeyRequest, UpdateBuilderRequest,
+    KeypairRegeneratedResponse, NextJobConflictReason, NextJobConflictResponse, NextJobRequest,
+    RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
+    ResolveBuilderIdResponse, SourceInputDeliveryMode, UpdateBuilderEnvironmentsRequest,
+    UpdateBuilderPublicKeyRequest, UpdateBuilderRequest,
+    VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION, VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
     VerifiedSourceIdentity,
 };
 use crate::models::cache_destination::CacheDestination;
@@ -47,86 +52,96 @@ use crate::queries::builders;
 const NIX_STORE_EXPORT_ARG_BYTES_LIMIT: usize = 128 * 1024;
 const ATTIC_PUSH_PATH_CHUNK_SIZE: usize = 200;
 const BUILDER_SESSION_STALE_TIMEOUT_SECS: i64 = 60;
+// Metadata reads have a one-minute budget, independent of closure imports.
+// This bounds completion latency and permits bounded client reporting retries.
+const CACHE_PUBLICATION_VERIFY_TIMEOUT_SECS: u64 = 60;
+// Match the read-probe diagnostic budget. One extra byte detects overflow.
+const CACHE_PUBLICATION_CAPTURE_LIMIT: usize = 64 * 1024;
 
-// Per-mirror mutex map: prevents concurrent git clone/fetch into the same bare
-// mirror when multiple jobs for the same repo are claimed at the same time.
-// The lock scope covers clone/fetch AND archive generation so a reader never
-// opens a partially-written mirror.
-static MIRROR_LOCKS: std::sync::OnceLock<
-    dashmap::DashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
-> = std::sync::OnceLock::new();
-
-fn mirror_lock(mirror_id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
-    let map = MIRROR_LOCKS.get_or_init(dashmap::DashMap::new);
-    map.entry(mirror_id.to_string())
-        .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(())))
-        .clone()
-}
-
-/// Returns true only when the server is explicitly configured to trust
-/// forwarded-proto headers from its reverse proxy AND those headers assert
-/// HTTPS for the current request.
+/// Verifies confidential transport through an explicitly trusted direct peer.
 ///
-/// The two-layer check prevents a builder from spoofing the header over a
-/// direct plaintext connection:
-///   1. `trust_forwarded_builder_https` must be `true` in `[server]` config —
-///      the operator opts in by confirming their proxy strips/rewrites these
-///      headers before forwarding.
-///   2. At least one of the standard forwarded-proto headers in the request
-///      must assert "https".
-///
-/// When `trust_forwarded_builder_https` is `false` (the default) this always
-/// returns `false`, so credential-bearing cache config is never sent.
-fn builder_https_verified_by_trusted_proxy(
+/// The proxy must overwrite `X-Forwarded-Proto`. Missing peer information,
+/// duplicate headers, and protocol chains fail closed. The HTTPS opt-in alone
+/// does not establish trust in a client-supplied header.
+pub(crate) fn builder_https_verified_by_trusted_proxy(
     server_config: &crate::config::ServerConfig,
     headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
 ) -> bool {
-    if !server_config.trust_forwarded_builder_https {
-        return false;
+    BuilderHttpsEvidence::from_request(server_config, headers, peer).verified()
+}
+
+/// Records only credential-free evidence for the direct-peer HTTPS decision.
+///
+/// The decision and denial diagnostics use the same snapshot. Header contents,
+/// CIDR strings, URLs, and request bodies must never enter this type.
+#[derive(Debug, PartialEq, Eq)]
+struct BuilderHttpsEvidence {
+    direct_peer_ip: Option<std::net::IpAddr>,
+    trust_forwarded_builder_https: bool,
+    peer_cidr_match: bool,
+    x_forwarded_proto_count: usize,
+    exact_https: bool,
+}
+
+impl BuilderHttpsEvidence {
+    fn from_request(
+        server_config: &crate::config::ServerConfig,
+        headers: &HeaderMap,
+        peer: Option<std::net::SocketAddr>,
+    ) -> Self {
+        let direct_peer_ip = peer.map(|peer| peer.ip());
+        let peer_cidr_match = direct_peer_ip.is_some_and(|ip| {
+            server_config.trusted_proxy_cidrs.iter().any(|cidr| {
+                let Some((network, prefix)) = cidr.split_once('/') else {
+                    return false;
+                };
+                let (Ok(network), Ok(prefix)) =
+                    (network.parse::<std::net::IpAddr>(), prefix.parse::<u8>())
+                else {
+                    return false;
+                };
+                match (ip, network) {
+                    (std::net::IpAddr::V4(ip), std::net::IpAddr::V4(network)) if prefix <= 32 => {
+                        let mask = u32::MAX.checked_shl(u32::from(32 - prefix)).unwrap_or(0);
+                        u32::from(ip) & mask == u32::from(network) & mask
+                    }
+                    (std::net::IpAddr::V6(ip), std::net::IpAddr::V6(network)) if prefix <= 128 => {
+                        let mask = u128::MAX.checked_shl(u32::from(128 - prefix)).unwrap_or(0);
+                        u128::from(ip) & mask == u128::from(network) & mask
+                    }
+                    _ => false,
+                }
+            })
+        });
+        let values = headers.get_all("x-forwarded-proto");
+        let x_forwarded_proto_count = values.iter().count();
+        let exact_https = x_forwarded_proto_count == 1
+            && values
+                .iter()
+                .next()
+                .is_some_and(|value| value.as_bytes() == b"https");
+        Self {
+            direct_peer_ip,
+            trust_forwarded_builder_https: server_config.trust_forwarded_builder_https,
+            peer_cidr_match,
+            x_forwarded_proto_count,
+            exact_https,
+        }
     }
-    forwarded_header_asserts_https(headers)
+
+    fn verified(&self) -> bool {
+        self.trust_forwarded_builder_https && self.peer_cidr_match && self.exact_https
+    }
 }
 
 fn build_log_append_status_allowed(status: &str) -> bool {
     matches!(status, "queued" | "building" | "cancelling")
 }
 
-fn forwarded_header_asserts_https(headers: &HeaderMap) -> bool {
-    headers
-        .get("x-forwarded-proto")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.split(',').next())
-        .is_some_and(|v| v.trim().eq_ignore_ascii_case("https"))
-        || headers
-            .get("forwarded")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| forwarded_field_has_https(v))
-        || headers
-            .get("x-forwarded-ssl")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.eq_ignore_ascii_case("on"))
-        || headers
-            .get("x-url-scheme")
-            .and_then(|v| v.to_str().ok())
-            .is_some_and(|v| v.eq_ignore_ascii_case("https"))
-}
-
-fn forwarded_field_has_https(value: &str) -> bool {
-    value
-        .split(',')
-        .flat_map(|part| part.split(';'))
-        .map(str::trim)
-        .any(|part| {
-            let Some((name, val)) = part.split_once('=') else {
-                return false;
-            };
-            name.eq_ignore_ascii_case("proto")
-                && val.trim_matches('"').eq_ignore_ascii_case("https")
-        })
-}
-
 fn cache_push_config_contains_credentials(config: &BuilderCachePushConfig) -> bool {
-    config.attic_token.is_some()
+    config.niks3_write_auth.is_some()
+        || config.attic_token.is_some()
         || config.s3_access_key_id.is_some()
         || config.s3_secret_access_key.is_some()
         || config.s3_session_token.is_some()
@@ -251,103 +266,68 @@ async fn resolve_cache_destinations_for_derivation(
     pool: &sqlx::PgPool,
     derivation: &crate::derivations::Derivation,
 ) -> Result<Vec<crate::models::cache_destination::CacheDestination>, StatusCode> {
-    let environment_id = match derivation.commit_id {
-        Some(commit_id) => sqlx::query_scalar::<_, uuid::Uuid>(
-            r#"
-            SELECT s.environment_id
-            FROM systems s
-            JOIN commits c ON c.flake_id = s.flake_id
-            WHERE c.id = $1
-              AND s.environment_id IS NOT NULL
-              AND s.is_active = TRUE
-              AND (
-                    s.hostname = $2
-                    OR NULLIF(s.system_configuration_name, '') = $2
-                  )
-            ORDER BY CASE
-                WHEN NULLIF(s.system_configuration_name, '') = $2 THEN 0
-                ELSE 1
-            END
-            LIMIT 1
-            "#,
-        )
-        .bind(commit_id)
-        .bind(&derivation.derivation_name)
-        .fetch_optional(pool)
+    crate::queries::cache_push::eligible_cache_destinations_for_derivation(pool, derivation)
         .await
         .map_err(|e| {
             tracing::warn!(
                 derivation_id = derivation.id,
-                derivation_name = %derivation.derivation_name,
-                "failed to resolve derivation environment for cache selection: {e}"
+                "failed to resolve canonical cache destinations: {e}"
             );
             StatusCode::INTERNAL_SERVER_ERROR
-        })?,
-        None => None,
-    };
-
-    let mut destinations = if let Some(environment_id) = environment_id {
-        let assigned = crate::queries::cache_destinations::filter_caches_by_environment(
-            pool,
-            Some(environment_id),
-        )
-        .await
-        .map_err(|e| {
-            tracing::warn!(
-                derivation_id = derivation.id,
-                environment_id = %environment_id,
-                "failed to load environment cache destinations for derivation closure publish: {e}"
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .into_iter()
-        .filter(|destination| destination.enabled)
-        .collect::<Vec<_>>();
-
-        if assigned.is_empty() {
-            crate::queries::cache_destinations::get_global_caches(pool)
-                .await
-                .map_err(|e| {
-                    tracing::warn!(
-                        derivation_id = derivation.id,
-                        environment_id = %environment_id,
-                        "failed to load global cache destinations for derivation closure publish: {e}"
-                    );
-                    StatusCode::INTERNAL_SERVER_ERROR
-                })?
-        } else {
-            assigned
-        }
-    } else {
-        crate::queries::cache_destinations::get_global_caches(pool)
-            .await
-            .map_err(|e| {
-                tracing::warn!(
-                    derivation_id = derivation.id,
-                    "failed to load global cache destinations for derivation closure publish: {e}"
-                );
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?
-    };
-
-    destinations.retain(|destination| destination.enabled);
-    Ok(destinations)
+        })
 }
 
-fn cache_type_from_destination(value: &str) -> cf_protocol::cache::CacheType {
+fn cache_type_from_destination(value: &str) -> Result<cf_protocol::cache::CacheType, StatusCode> {
     match value {
-        "S3" => cf_protocol::cache::CacheType::S3,
-        "Attic" => cf_protocol::cache::CacheType::Attic,
-        "Http" => cf_protocol::cache::CacheType::Http,
-        _ => cf_protocol::cache::CacheType::Nix,
+        "S3" => Ok(cf_protocol::cache::CacheType::S3),
+        "Attic" => Ok(cf_protocol::cache::CacheType::Attic),
+        "Http" => Ok(cf_protocol::cache::CacheType::Http),
+        "Nix" => Ok(cf_protocol::cache::CacheType::Nix),
+        "Niks3" => Ok(cf_protocol::cache::CacheType::Niks3),
+        _ => Err(StatusCode::CONFLICT),
     }
 }
 
 fn builder_cache_push_config_from_destination(
     destination: &CacheDestination,
-) -> BuilderCachePushConfig {
-    BuilderCachePushConfig {
-        cache_type: cache_type_from_destination(&destination.cache_type),
+) -> Result<BuilderCachePushConfig, StatusCode> {
+    let cache_type = cache_type_from_destination(&destination.cache_type)?;
+    if cache_type == cf_protocol::cache::CacheType::Niks3 {
+        let (url, keys, _) = destination
+            .read_config()
+            .map_err(|_| StatusCode::CONFLICT)?;
+        return Ok(BuilderCachePushConfig {
+            cache_destination_id: Some(destination.id),
+            cache_destination_name: Some(cf_protocol::cache::cache_log_display_name(Some(
+                &destination.name,
+            ))),
+            cache_type,
+            push_to: Some(url),
+            push_after_build: true,
+            signing_key: destination.signing_key_path.clone(),
+            niks3_server_url: destination.niks3_server_url.clone(),
+            niks3_write_auth: Some(
+                destination
+                    .niks3_write_auth()
+                    .map_err(|_| StatusCode::CONFLICT)?,
+            ),
+            attic_public_key: Some(keys.join(" ")),
+            parallel_uploads: Some(destination.parallel_uploads.unwrap_or(1).max(1) as u32),
+            max_retries: destination.max_retries.unwrap_or(3).max(0) as u32,
+            retry_delay_seconds: destination.retry_delay_seconds.unwrap_or(5).max(0) as u64,
+            push_timeout_seconds: destination.push_timeout_seconds.unwrap_or(3600).max(1) as u64,
+            ..BuilderCachePushConfig::disabled()
+        });
+    }
+    Ok(BuilderCachePushConfig {
+        cache_destination_id: Some(destination.id),
+        cache_destination_name: Some(cf_protocol::cache::cache_log_display_name(Some(
+            &destination.name,
+        ))),
+        parallel_uploads: Some(destination.parallel_uploads.unwrap_or(1).max(1) as u32),
+        niks3_server_url: None,
+        niks3_write_auth: None,
+        cache_type,
         push_to: destination.push_to.clone(),
         push_after_build: true,
         signing_key: destination.signing_key_path.clone(),
@@ -383,7 +363,7 @@ fn builder_cache_push_config_from_destination(
             .unwrap_or_else(crate::config::CacheConfig::default_push_timeout_seconds),
         force_repush: destination.force_repush.unwrap_or(false),
         require_sigs: destination.require_sigs.unwrap_or(true),
-    }
+    })
 }
 
 async fn builder_cache_push_config_for_derivation(
@@ -392,10 +372,10 @@ async fn builder_cache_push_config_for_derivation(
 ) -> Result<BuilderCachePushConfig, StatusCode> {
     let destinations = resolve_cache_destinations_for_derivation(pool, derivation).await?;
 
-    Ok(destinations
+    destinations
         .first()
         .map(builder_cache_push_config_from_destination)
-        .unwrap_or_else(BuilderCachePushConfig::disabled))
+        .unwrap_or_else(|| Ok(BuilderCachePushConfig::disabled()))
 }
 
 async fn verified_source_identity_for_derivation(
@@ -412,7 +392,7 @@ async fn verified_source_identity_for_derivation(
     let mirror_id = source_mirror_id(&flake.repo_url);
 
     Ok(Some(VerifiedSourceIdentity {
-        repo_url: flake.repo_url,
+        repo_url: credential_free_repo_url(&flake.repo_url)?,
         commit_hash: commit.git_commit_hash,
         flake_target: source_flake_target_for_derivation(derivation),
         mirror_id: Some(mirror_id),
@@ -421,15 +401,144 @@ async fn verified_source_identity_for_derivation(
         lock_hash: None,
         archive_url: None,
         archive_sha256: None,
+        immutable_source: None,
     }))
 }
 
-fn current_evaluator_fingerprint() -> EvaluatorFingerprint {
-    EvaluatorFingerprint {
-        nix_version: std::env::var("NIX_VERSION").unwrap_or_else(|_| "unknown".to_string()),
+fn credential_free_repo_url(repo_url: &str) -> anyhow::Result<String> {
+    let Ok(mut parsed) = Url::parse(repo_url) else {
+        let without_suffix = repo_url.split(['?', '#']).next().unwrap_or_default();
+        return Ok(without_suffix
+            .rsplit_once('@')
+            .map_or(without_suffix, |(_, location)| location)
+            .to_string());
+    };
+    parsed
+        .set_username("")
+        .map_err(|_| anyhow::anyhow!("repository URL username cannot be removed"))?;
+    parsed
+        .set_password(None)
+        .map_err(|_| anyhow::anyhow!("repository URL password cannot be removed"))?;
+    parsed.set_query(None);
+    parsed.set_fragment(None);
+    Ok(parsed.to_string())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct NixEvaluatorIdentity {
+    nix_version: String,
+    evaluator_system: String,
+}
+
+fn parse_nix_eval_jobs_identity(output: &str) -> Option<NixEvaluatorIdentity> {
+    output.lines().find_map(|line| {
+        let value = serde_json::from_str::<serde_json::Value>(line).ok()?;
+        let extra = value.get("extraValue")?;
+        Some(NixEvaluatorIdentity {
+            nix_version: extra.get("nixVersion")?.as_str()?.to_string(),
+            evaluator_system: extra.get("evaluatorSystem")?.as_str()?.to_string(),
+        })
+    })
+}
+
+fn parse_nix_version(output: &str) -> Option<String> {
+    output
+        .trim()
+        .strip_prefix("nix (Nix) ")
+        .filter(|version| !version.is_empty())
+        .map(str::to_string)
+}
+
+async fn probe_nix_version(program: &std::path::Path) -> anyhow::Result<String> {
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::process::Command::new(program)
+            .kill_on_drop(true)
+            .arg("--version")
+            .output(),
+    )
+    .await
+    .map_err(|_| anyhow::anyhow!("nix --version probe timed out"))??;
+    if !output.status.success() {
+        anyhow::bail!("nix --version probe failed");
+    }
+    parse_nix_version(String::from_utf8_lossy(&output.stdout).as_ref())
+        .ok_or_else(|| anyhow::anyhow!("nix --version returned an invalid version"))
+}
+
+async fn executing_nix_version() -> anyhow::Result<String> {
+    static VERSION: tokio::sync::OnceCell<String> = tokio::sync::OnceCell::const_new();
+    VERSION
+        .get_or_try_init(|| probe_nix_version(std::path::Path::new("nix")))
+        .await
+        .cloned()
+}
+
+async fn executing_nix_evaluator_identity() -> anyhow::Result<NixEvaluatorIdentity> {
+    static IDENTITY: tokio::sync::OnceCell<NixEvaluatorIdentity> =
+        tokio::sync::OnceCell::const_new();
+    IDENTITY
+        .get_or_try_init(|| async {
+            let output = tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                tokio::process::Command::new("nix-eval-jobs")
+                    .kill_on_drop(true)
+                    .args([
+                        "--expr",
+                        "{ probe = builtins.derivation { name = \"crystal-forge-evaluator-probe\"; system = builtins.currentSystem; builder = \"/bin/sh\"; }; }",
+                        "--workers",
+                        "1",
+                        "--meta",
+                        "--apply",
+                        "_: { nixVersion = builtins.nixVersion; evaluatorSystem = builtins.currentSystem; }",
+                        "--option",
+                        "pure-eval",
+                        "false",
+                        "--option",
+                        "allow-import-from-derivation",
+                        "true",
+                    ])
+                    .output(),
+            )
+            .await
+            .map_err(|_| anyhow::anyhow!("nix-eval-jobs version probe timed out"))??;
+            if !output.status.success() {
+                anyhow::bail!("nix-eval-jobs version probe failed");
+            }
+            parse_nix_eval_jobs_identity(String::from_utf8_lossy(&output.stdout).trim())
+                .ok_or_else(|| anyhow::anyhow!("nix-eval-jobs returned no evaluator identity"))
+        })
+        .await
+        .cloned()
+}
+
+fn evaluator_fingerprint(
+    executing_nix_version: &str,
+    identity: NixEvaluatorIdentity,
+) -> anyhow::Result<EvaluatorFingerprint> {
+    // INVARIANT: The fingerprint describes the Nix library linked into the
+    // authoritative evaluator, but only when the server's Nix CLI matches it.
+    if executing_nix_version != identity.nix_version {
+        anyhow::bail!(
+            "executing Nix version {executing_nix_version} does not match nix-eval-jobs linked Nix version {}",
+            identity.nix_version
+        );
+    }
+    Ok(EvaluatorFingerprint {
+        contract_version: VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+        nix_version: identity.nix_version,
+        evaluator_system: identity.evaluator_system,
         pure_eval: true,
         lockfile_mutation_allowed: false,
-    }
+        allow_import_from_derivation: true,
+        source_materialization_schema_version: VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+    })
+}
+
+async fn current_evaluator_fingerprint() -> anyhow::Result<EvaluatorFingerprint> {
+    let (nix_version, identity) =
+        tokio::try_join!(executing_nix_version(), executing_nix_evaluator_identity())?;
+    evaluator_fingerprint(&nix_version, identity)
 }
 
 fn source_flake_target_for_derivation(derivation: &crate::derivations::Derivation) -> String {
@@ -457,6 +566,70 @@ fn source_flake_target_for_derivation(derivation: &crate::derivations::Derivatio
     }
 }
 
+fn source_archive_contract_is_authorized(
+    execution_strategy: RemoteBuildExecutionStrategy,
+    delivery: SourceInputDeliveryMode,
+) -> bool {
+    execution_strategy == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
+        && delivery == SourceInputDeliveryMode::ServerBundledArchive
+}
+
+fn next_job_conflict(reason: NextJobConflictReason) -> Response {
+    (
+        StatusCode::CONFLICT,
+        Json(NextJobConflictResponse { reason }),
+    )
+        .into_response()
+}
+
+/// Returns a preclaim conflict when the selected cache cannot be decoded.
+///
+/// Only Niks3 requires the additive capability. Disabled publication and
+/// existing cache types preserve their legacy dispatch behavior.
+pub(crate) fn cache_type_conflict(
+    request: &NextJobRequest,
+    cache: &BuilderCachePushConfig,
+) -> Option<NextJobConflictReason> {
+    (cache.cache_type == cf_protocol::cache::CacheType::Niks3 && !request.capabilities.niks3_cache)
+        .then_some(NextJobConflictReason::UnsupportedCacheType)
+}
+
+fn execution_strategy_conflict(
+    request: &NextJobRequest,
+    execution_strategy: RemoteBuildExecutionStrategy,
+) -> Option<NextJobConflictReason> {
+    (!request
+        .supported_execution_strategies
+        .contains(&execution_strategy))
+    .then_some(NextJobConflictReason::UnsupportedExecutionStrategy)
+}
+
+fn evaluator_conflict(
+    request: &NextJobRequest,
+    authoritative: &EvaluatorFingerprint,
+) -> Option<NextJobConflictReason> {
+    (!verified_source_evaluator_is_compatible(request, authoritative))
+        .then_some(NextJobConflictReason::IncompatibleEvaluator)
+}
+
+fn source_delivery_conflict(
+    execution_strategy: RemoteBuildExecutionStrategy,
+    delivery: SourceInputDeliveryMode,
+) -> Option<NextJobConflictReason> {
+    (!source_archive_contract_is_authorized(execution_strategy, delivery))
+        .then_some(NextJobConflictReason::IncompatibleSourceDelivery)
+}
+
+pub(crate) fn verified_source_evaluator_is_compatible(
+    request: &NextJobRequest,
+    authoritative: &EvaluatorFingerprint,
+) -> bool {
+    request
+        .supported_evaluator_contract_versions
+        .contains(&authoritative.contract_version)
+        && request.evaluator.as_ref() == Some(authoritative)
+}
+
 fn source_mirror_id(repo_url: &str) -> String {
     use sha2::{Digest, Sha256};
 
@@ -466,305 +639,6 @@ fn source_mirror_id(repo_url: &str) -> String {
         .map(|byte| format!("{byte:02x}"))
         .collect::<String>();
     format!("repo-{short}")
-}
-
-/// Compute the path for the server's cached bare mirror of a repo.
-fn server_mirror_path(archive_root: &std::path::Path, repo_url: &str) -> std::path::PathBuf {
-    archive_root
-        .join("mirrors")
-        .join(format!("{}.git", source_mirror_id(repo_url)))
-}
-
-/// Ensure the server's bare mirror for `repo_url` contains `commit_hash`.
-///
-/// Clones the repo bare if the mirror does not exist, or fetches if the commit
-/// is not present. Mirrors the builder's `ensure_mirror_has_commit` logic but
-/// runs server-side so the server can serve archive tarballs to remote builders.
-///
-/// `creds` is the optional per-flake credential environment (SSH key / netrc).
-/// When `None`, the git commands run without credential injection (public repos only).
-async fn ensure_server_mirror_has_commit(
-    mirror_path: &std::path::Path,
-    repo_url: &str,
-    commit_hash: &str,
-    creds: Option<&crate::flake::credentials::FlakeCredentialEnv>,
-) -> Result<(), StatusCode> {
-    let source_err = |msg: String| {
-        tracing::error!("server source mirror error: {msg}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    };
-
-    if !mirror_path.exists() {
-        let temp_suffix = format!(".tmp-{}-{}", std::process::id(), uuid::Uuid::new_v4());
-        let temp_mirror = mirror_path.with_extension(temp_suffix);
-
-        if let Some(parent) = mirror_path.parent() {
-            tokio::fs::create_dir_all(parent).await.map_err(|e| {
-                source_err(format!(
-                    "failed to create mirror parent {}: {e}",
-                    parent.display()
-                ))
-            })?;
-        }
-
-        let _ = tokio::fs::remove_dir_all(&temp_mirror).await;
-
-        let mut clone_cmd = tokio::process::Command::new("git");
-        clone_cmd.kill_on_drop(true);
-        clone_cmd
-            .arg("clone")
-            .arg("--bare")
-            .arg(repo_url)
-            .arg(&temp_mirror);
-        if let Some(c) = creds {
-            c.apply_to_git_command(&mut clone_cmd);
-        }
-
-        let output = clone_cmd
-            .output()
-            .await
-            .map_err(|e| source_err(format!("failed to spawn git clone --bare: {e}")))?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-            return Err(source_err(format!(
-                "git clone --bare failed for {repo_url}: {stderr}"
-            )));
-        }
-
-        tokio::fs::rename(&temp_mirror, mirror_path)
-            .await
-            .map_err(|e| {
-                source_err(format!(
-                    "failed to install cloned source mirror {} -> {}: {e}",
-                    temp_mirror.display(),
-                    mirror_path.display()
-                ))
-            })?;
-
-        tracing::info!("Server source mirror cloned at {}", mirror_path.display());
-    }
-
-    // Check if commit is already present.
-    let has_commit = tokio::process::Command::new("git")
-        .kill_on_drop(true)
-        .arg("--git-dir")
-        .arg(mirror_path)
-        .arg("cat-file")
-        .arg("-e")
-        .arg(format!("{commit_hash}^{{commit}}"))
-        .output()
-        .await
-        .map(|out| out.status.success())
-        .unwrap_or(false);
-
-    if has_commit {
-        return Ok(());
-    }
-
-    tracing::info!(
-        "Fetching authorized commit {} into server source mirror {}",
-        commit_hash,
-        mirror_path.display()
-    );
-
-    let mut fetch_cmd = tokio::process::Command::new("git");
-    fetch_cmd.kill_on_drop(true);
-    fetch_cmd
-        .arg("--git-dir")
-        .arg(mirror_path)
-        .arg("fetch")
-        .arg("--prune")
-        .arg(repo_url)
-        .arg("+refs/*:refs/*");
-    if let Some(c) = creds {
-        c.apply_to_git_command(&mut fetch_cmd);
-    }
-
-    let output = fetch_cmd
-        .output()
-        .await
-        .map_err(|e| source_err(format!("failed to spawn git fetch: {e}")))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(source_err(format!(
-            "git fetch failed for {repo_url}: {stderr}"
-        )));
-    }
-
-    let has_commit_after = tokio::process::Command::new("git")
-        .kill_on_drop(true)
-        .arg("--git-dir")
-        .arg(mirror_path)
-        .arg("cat-file")
-        .arg("-e")
-        .arg(format!("{commit_hash}^{{commit}}"))
-        .output()
-        .await
-        .map(|out| out.status.success())
-        .unwrap_or(false);
-
-    if has_commit_after {
-        Ok(())
-    } else {
-        Err(source_err(format!(
-            "commit {commit_hash} not found in server mirror for {repo_url} after fetch"
-        )))
-    }
-}
-
-/// Generate a gzipped tar archive of the bare mirror at the archive path.
-///
-/// Returns the SHA-256 hex digest of the archive.
-/// Generate a gzipped tar archive of the bare mirror at `archive_path`.
-///
-/// Writes to a `.tmp` file first and renames atomically on success so that
-/// concurrent readers or partial downloads never see a half-written archive.
-///
-/// Returns the SHA-256 hex digest of the completed archive.
-///
-/// Callers MUST hold the per-mirror lock (via `mirror_lock()`) before calling
-/// this function to prevent concurrent mutation of the same mirror.
-async fn generate_source_archive(
-    mirror_path: &std::path::Path,
-    archive_path: &std::path::Path,
-) -> Result<String, StatusCode> {
-    let source_err = |msg: String| {
-        tracing::error!("source archive generation error: {msg}");
-        StatusCode::INTERNAL_SERVER_ERROR
-    };
-
-    if let Some(parent) = archive_path.parent() {
-        tokio::fs::create_dir_all(parent).await.map_err(|e| {
-            source_err(format!(
-                "failed to create archive parent {}: {e}",
-                parent.display()
-            ))
-        })?;
-    }
-
-    // Write to a temp file then rename atomically so readers never see a
-    // partially-written archive. Include the PID to avoid cross-process
-    // collision if the server is restarted mid-generation.
-    // Build the temp path by appending a suffix to the full archive path string
-    // rather than using .with_extension(), which strips only the last component
-    // and produces a double extension like ".tar.tar.gz.tmp" for ".tar.gz" paths.
-    let tmp_archive = {
-        let mut s = archive_path.as_os_str().to_owned();
-        s.push(format!(".tmp.{}", std::process::id()));
-        std::path::PathBuf::from(s)
-    };
-    let _ = tokio::fs::remove_file(&tmp_archive).await;
-
-    // Tar the mirror directory. Since mirror_path is like .../<mirror_id>.git,
-    // we tar from the parent directory with the basename so extraction produces
-    // the correct directory layout.
-    let mirror_parent = mirror_path
-        .parent()
-        .ok_or_else(|| source_err("mirror path has no parent".to_string()))?;
-    let mirror_name = mirror_path
-        .file_name()
-        .ok_or_else(|| source_err("mirror path has no file name".to_string()))?;
-
-    let output = tokio::process::Command::new("tar")
-        .kill_on_drop(true)
-        .arg("-czf")
-        .arg(&tmp_archive)
-        .arg("-C")
-        .arg(mirror_parent)
-        .arg(mirror_name)
-        .output()
-        .await
-        .map_err(|e| source_err(format!("failed to spawn tar: {e}")))?;
-
-    if !output.status.success() {
-        let _ = tokio::fs::remove_file(&tmp_archive).await;
-        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        return Err(source_err(format!("tar archive creation failed: {stderr}")));
-    }
-
-    // Compute SHA256 of the archive before it becomes visible to readers.
-    let hash_output = tokio::process::Command::new("sha256sum")
-        .arg(&tmp_archive)
-        .output()
-        .await
-        .map_err(|e| source_err(format!("failed to run sha256sum: {e}")))?;
-
-    if !hash_output.status.success() {
-        let _ = tokio::fs::remove_file(&tmp_archive).await;
-        let stderr = String::from_utf8_lossy(&hash_output.stderr)
-            .trim()
-            .to_string();
-        return Err(source_err(format!("sha256sum failed: {stderr}")));
-    }
-
-    let stdout = String::from_utf8_lossy(&hash_output.stdout);
-    let hash = stdout
-        .split_whitespace()
-        .next()
-        .ok_or_else(|| source_err("sha256sum produced no output".to_string()))?
-        .to_string();
-
-    // Atomic rename: makes the archive visible to readers only when fully written.
-    tokio::fs::rename(&tmp_archive, archive_path)
-        .await
-        .map_err(|e| {
-            source_err(format!(
-                "failed to atomically install source archive {} → {}: {e}",
-                tmp_archive.display(),
-                archive_path.display()
-            ))
-        })?;
-
-    tracing::info!(
-        "Source archive generated at {} (sha256: {})",
-        archive_path.display(),
-        hash
-    );
-
-    Ok(hash)
-}
-
-/// Best-effort cleanup of the job-scoped source archive after job completion/failure.
-///
-/// The archive is stored under `archives/jobs/<job_id>.tar.gz` so cleanup only
-/// ever removes the archive for this specific job. Errors are logged but not
-/// propagated — archive cleanup must not block job finalization.
-async fn cleanup_source_archive(_pool: &PgPool, archive_root: &std::path::Path, job_id: Uuid) {
-    // Job-scoped path: each job has its own archive so concurrent jobs for the
-    // same repo+commit cannot interfere with each other's downloads.
-    let archive_path = job_scoped_archive_path(archive_root, job_id);
-
-    match tokio::fs::remove_file(&archive_path).await {
-        Ok(()) => {
-            tracing::debug!(
-                job_id = %job_id,
-                archive_path = %archive_path.display(),
-                "Cleaned up job-scoped source archive"
-            );
-        }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => {
-            tracing::warn!(
-                job_id = %job_id,
-                archive_path = %archive_path.display(),
-                "Failed to clean up source archive: {e}"
-            );
-        }
-    }
-}
-
-/// Compute the job-scoped archive path.
-///
-/// Archives are stored per-job rather than per-repo+commit to avoid concurrent
-/// job races where one job's cleanup deletes an archive another job is still
-/// downloading.
-fn job_scoped_archive_path(archive_root: &std::path::Path, job_id: Uuid) -> std::path::PathBuf {
-    archive_root
-        .join("archives")
-        .join("jobs")
-        .join(format!("{job_id}.tar.gz"))
 }
 
 fn parse_next_job_request(body: &[u8]) -> Result<NextJobRequest, StatusCode> {
@@ -777,8 +651,11 @@ fn parse_next_job_request(body: &[u8]) -> Result<NextJobRequest, StatusCode> {
 
 fn legacy_next_job_request() -> NextJobRequest {
     NextJobRequest {
+        capabilities: Default::default(),
         protocol_version: 1,
         supported_execution_strategies: vec![RemoteBuildExecutionStrategy::ServerDerivation],
+        supported_evaluator_contract_versions: Vec::new(),
+        evaluator: None,
     }
 }
 
@@ -816,6 +693,17 @@ fn apply_cache_destination_env(
     }
     if let Some(value) = destination.attic_token.as_deref() {
         command.env("ATTIC_TOKEN", value);
+    }
+    if destination.cache_type == "Attic"
+        && let (Some(endpoint), Some(cache)) = (
+            destination.push_to.as_deref(),
+            destination.attic_cache_name.as_deref(),
+        )
+        && let Ok(urls) = cf_config::resolve_attic_urls(endpoint, cache)
+    {
+        // Match the login and read consumers without changing persisted URLs.
+        // The CLI still requires its remote profile to be initialized.
+        command.env("ATTIC_SERVER_URL", urls.server_url.as_str());
     }
 }
 
@@ -860,9 +748,50 @@ async fn sign_derivation_requisites_for_cache(
 async fn push_derivation_requisites_to_cache_destination(
     destination: &crate::models::cache_destination::CacheDestination,
     archive_paths: &[String],
+    root: &str,
 ) -> Result<bool, StatusCode> {
-    let remote = std::env::var("ATTIC_REMOTE_NAME").unwrap_or_else(|_| "local".to_string());
-
+    let cache_type = cache_type_from_destination(&destination.cache_type)?;
+    if cache_type == cf_protocol::cache::CacheType::Niks3 {
+        if !archive_paths.iter().any(|path| path == root) {
+            return Err(StatusCode::CONFLICT);
+        }
+        for chunk in archive_paths.chunks(ATTIC_PUSH_PATH_CHUNK_SIZE) {
+            sign_derivation_requisites_for_cache(destination, chunk).await?;
+        }
+        let auth = destination
+            .niks3_write_auth()
+            .map_err(|_| StatusCode::CONFLICT)?;
+        // PERFORMANCE: Niks3 traverses the root's closure itself. Passing only
+        // the authoritative root avoids ARG_MAX for large requisite manifests.
+        let prepared = cf_config::cache_credentials::PreparedNiks3Push::new(
+            destination
+                .niks3_server_url
+                .as_deref()
+                .ok_or(StatusCode::CONFLICT)?,
+            &auth,
+            destination.parallel_uploads.unwrap_or(1).max(1) as u32,
+            root,
+        )
+        .map_err(|_| StatusCode::CONFLICT)?;
+        let deadline = std::time::Duration::from_secs(
+            destination.push_timeout_seconds.unwrap_or(3600).max(1) as u64,
+        );
+        return run_niks3_input_owner(prepared, deadline, |event| {
+            // SECURITY: Fixed fields identify an operation, never its arguments,
+            // credential filenames, store paths, URLs or upstream diagnostics.
+            tracing::info!(
+                target: "crystal_forge::niks3_input_owner",
+                operation = %event.operation,
+                phase = event.phase,
+                child_pid = event.child_pid.unwrap_or(0),
+                child_reaped = event.child_reaped,
+                cleanup_attempted = event.cleanup_attempted,
+                outcome = event.outcome,
+                "Niks3 input owner lifecycle"
+            );
+        })
+        .await;
+    }
     for (chunk_index, chunk) in archive_paths.chunks(ATTIC_PUSH_PATH_CHUNK_SIZE).enumerate() {
         sign_derivation_requisites_for_cache(destination, chunk).await?;
 
@@ -874,24 +803,48 @@ async fn push_derivation_requisites_to_cache_destination(
                 );
                 return Ok(false);
             };
-            let cache_ref = if cache_name.contains(':') {
-                cache_name.to_string()
-            } else {
-                format!("{remote}:{cache_name}")
+            // SECURITY: This caller already selected a database destination.
+            // Requisite publication uses its stored Attic credentials, not an
+            // ambient remote or persistent CLI login. This changes only cache
+            // authentication; signing, chunk roots and closure policy stay here.
+            let cache = crate::config::CacheConfig {
+                cache_type: cf_protocol::cache::CacheType::Attic,
+                push_to: destination.push_to.clone(),
+                attic_token: destination.attic_token.clone(),
+                attic_cache_name: Some(cache_name.to_owned()),
+                attic_ignore_upstream_cache_filter: destination
+                    .attic_ignore_upstream_cache_filter
+                    .unwrap_or(true),
+                attic_jobs: destination.attic_jobs.unwrap_or(5).max(1) as u32,
+                ..Default::default()
             };
-            let attic_jobs = destination.attic_jobs.unwrap_or(5).max(1).to_string();
-            let mut command = Command::new("attic");
-            command.arg("push").arg(&cache_ref).args(chunk);
-
-            if destination
-                .attic_ignore_upstream_cache_filter
-                .unwrap_or(true)
-            {
-                command.arg("--ignore-upstream-cache-filter");
-            }
-
-            command.arg("--jobs").arg(attic_jobs);
-            command
+            let prepared = cf_config::cache_credentials::PreparedAtticPush::for_paths(
+                &cache, chunk,
+            )
+            .map_err(|_| {
+                tracing::warn!(
+                    chunk_index,
+                    "selected Attic requisite credentials could not be prepared"
+                );
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+            let deadline = std::time::Duration::from_secs(
+                destination.push_timeout_seconds.unwrap_or(3600).max(1) as u64,
+            );
+            tracing::info!(
+                chunk_index,
+                chunk_path_count = chunk.len(),
+                "publishing derivation requisite closure chunk to selected Attic cache"
+            );
+            // The owner applies private XDG config last and retains it through
+            // child exit or kill/reap. No generic ambient setup follows this call.
+            crate::derivations::cache::run_prepared_attic_push(prepared, deadline)
+                .await
+                .map_err(|error| {
+                    tracing::warn!(chunk_index, error = %error, "selected Attic requisite chunk failed");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?;
+            continue;
         } else {
             let Some(push_to) = destination.push_to.as_deref() else {
                 tracing::warn!(
@@ -953,14 +906,430 @@ async fn push_derivation_requisites_to_cache_destination(
     Ok(true)
 }
 
+// Completion acknowledges resource destruction, not successful directory
+// removal: TempDir::drop can ignore filesystem errors. The final cleanup audit
+// must still check the original roots after this acknowledgment.
+struct Niks3InputOwnerEvent {
+    operation: Uuid,
+    phase: &'static str,
+    child_pid: Option<u32>,
+    child_reaped: bool,
+    cleanup_attempted: bool,
+    outcome: &'static str,
+}
+
+// CONCURRENCY: The handoff transfers child and prepared credentials together.
+// Dropping the caller afterward detaches the owned task without changing upload
+// cancellation policy.
+// Child startup and the start acknowledgment precede the first await and task
+// handoff, so a queued owner cannot hold resources without a visible start.
+// It emits exactly one start and one completion on controlled return paths.
+// Completion follows child wait/reap and explicit credential-owner drop. A
+// failed reap is recorded as such and cannot establish a quiescent boundary.
+async fn run_niks3_input_owner(
+    prepared: cf_config::cache_credentials::PreparedNiks3Push,
+    deadline: std::time::Duration,
+    mut observe: impl FnMut(Niks3InputOwnerEvent) + Send + 'static,
+) -> Result<bool, StatusCode> {
+    let operation = Uuid::new_v4();
+    let credential_directory = prepared
+        .args
+        .windows(2)
+        .find(|pair| matches!(pair[0].as_str(), "--auth-token-path" | "--client-key"))
+        .and_then(|pair| std::path::Path::new(&pair[1]).parent());
+    let spawned = credential_directory.map(|directory| {
+        let mut command = Command::new(&prepared.command);
+        crate::derivations::utils::apply_niks3_env_to_command(&mut command, directory);
+        command
+            .args(&prepared.args)
+            .kill_on_drop(true)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+    });
+    let child_pid = spawned
+        .as_ref()
+        .and_then(|result| result.as_ref().ok())
+        .and_then(tokio::process::Child::id);
+    // Preserve the deadline relative to child startup even if the owned task
+    // must wait for a scheduler slot after this synchronous resource handoff.
+    let expires = tokio::time::Instant::now() + deadline;
+    observe(Niks3InputOwnerEvent {
+        operation,
+        phase: "started",
+        child_pid,
+        child_reaped: false,
+        cleanup_attempted: false,
+        outcome: "running",
+    });
+    tokio::spawn(async move {
+        let (result, child_reaped, outcome) = match spawned {
+            Some(Ok(mut child)) => {
+                let completion =
+                    match crate::derivations::cache::wait_niks3_diagnostics(&mut child, expires)
+                        .await
+                    {
+                        Ok(()) => (Ok(true), true, "success"),
+                        Err(error) => {
+                            // SECURITY: The runner returns only exit status and static
+                            // diagnostics. Never attach a command or raw output here.
+                            tracing::warn!(error = %error, "Niks3 input push failed");
+                            let timed_out = error.is::<tokio::time::error::Elapsed>();
+                            if child.id().is_none() {
+                                (Err(StatusCode::INTERNAL_SERVER_ERROR), true, "exit_failure")
+                            } else {
+                                let _ = child.kill().await;
+                                let reaped = child.wait().await.is_ok();
+                                if timed_out {
+                                    (Err(StatusCode::CONFLICT), reaped, "timeout")
+                                } else {
+                                    (
+                                        Err(StatusCode::INTERNAL_SERVER_ERROR),
+                                        reaped,
+                                        "wait_failure",
+                                    )
+                                }
+                            }
+                        }
+                    };
+                drop(child);
+                completion
+            }
+            Some(Err(_)) => (
+                Err(StatusCode::INTERNAL_SERVER_ERROR),
+                false,
+                "spawn_failure",
+            ),
+            None => (Err(StatusCode::CONFLICT), false, "configuration_failure"),
+        };
+        drop(prepared);
+        observe(Niks3InputOwnerEvent {
+            operation,
+            phase: "completed",
+            child_pid,
+            child_reaped,
+            cleanup_attempted: true,
+            outcome,
+        });
+        result
+    })
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+}
+
+#[cfg(test)]
+mod niks3_input_owner_tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::os::fd::AsRawFd;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    use std::time::{Duration, Instant};
+
+    // Keep both FIFO ends open before spawning a child. O_NONBLOCK bounds every
+    // read/write syscall; the parent endpoints prevent blocking opens or EOF
+    // from making a missing child look like a completed handshake.
+    fn handshake_fifo(path: &std::path::Path) -> std::io::Result<std::fs::File> {
+        nix::unistd::mkfifo(
+            path,
+            nix::sys::stat::Mode::S_IRUSR | nix::sys::stat::Mode::S_IWUSR,
+        )?;
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .custom_flags(libc::O_NONBLOCK | libc::O_CLOEXEC)
+            .open(path)
+    }
+
+    fn poll_fifo(
+        fifo: &std::fs::File,
+        events: libc::c_short,
+        until: Instant,
+        phase: &'static str,
+    ) -> std::io::Result<()> {
+        loop {
+            let remaining = until
+                .checked_duration_since(Instant::now())
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::TimedOut, phase))?;
+            let milliseconds = remaining
+                .as_millis()
+                .saturating_add(1)
+                .min(i32::MAX as u128);
+            let mut descriptor = libc::pollfd {
+                fd: fifo.as_raw_fd(),
+                events,
+                revents: 0,
+            };
+            // SAFETY: The borrowed File keeps its descriptor open. The initialized
+            // stack pollfd is exclusively borrowed for one synchronous poll call.
+            let result = unsafe { libc::poll(&mut descriptor, 1, milliseconds as i32) };
+            if result < 0 {
+                let error = std::io::Error::last_os_error();
+                if error.kind() == std::io::ErrorKind::Interrupted {
+                    // EINTR must not restart the original relative timeout.
+                    continue;
+                }
+                return Err(error);
+            }
+            if result == 0 {
+                return Err(std::io::Error::new(std::io::ErrorKind::TimedOut, phase));
+            }
+            if descriptor.revents & (libc::POLLERR | libc::POLLNVAL | libc::POLLHUP) != 0 {
+                return Err(std::io::Error::other(phase));
+            }
+            if descriptor.revents & events != 0 {
+                return Ok(());
+            }
+        }
+    }
+
+    fn ready_pid(fifo: &mut std::fs::File, until: Instant) -> std::io::Result<u32> {
+        // A u32 PID needs at most ten decimal digits plus newline. Reject an
+        // oversized or malformed marker without printing any received bytes.
+        let mut digits = Vec::with_capacity(10);
+        loop {
+            poll_fifo(fifo, libc::POLLIN, until, "child readiness deadline")?;
+            let mut byte = [0];
+            match fifo.read(&mut byte) {
+                Ok(1) if byte[0] == b'\n' => {
+                    return std::str::from_utf8(&digits)
+                        .ok()
+                        .and_then(|line| line.parse::<u32>().ok())
+                        .filter(|pid| *pid != 0)
+                        .ok_or_else(|| std::io::Error::other("invalid child readiness marker"));
+                }
+                Ok(1) if byte[0].is_ascii_digit() && digits.len() < 10 => digits.push(byte[0]),
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                _ => return Err(std::io::Error::other("invalid child readiness marker")),
+            }
+        }
+    }
+
+    fn release_child(
+        fifo: &mut std::fs::File,
+        code: &[u8; 2],
+        until: Instant,
+    ) -> std::io::Result<()> {
+        let mut written = 0;
+        while written < code.len() {
+            poll_fifo(fifo, libc::POLLOUT, until, "child release deadline")?;
+            match fifo.write(&code[written..]) {
+                Ok(0) => return Err(std::io::Error::other("child release made no progress")),
+                Ok(count) => written += count,
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fifo_deadlines_cover_missing_readiness_and_absent_release_reader() {
+        let fixture = tempfile::tempdir().unwrap();
+        let mut ready = handshake_fifo(&fixture.path().join("ready")).unwrap();
+        let mut release = handshake_fifo(&fixture.path().join("release")).unwrap();
+        let bound = Duration::from_millis(30);
+        assert_eq!(
+            ready_pid(&mut ready, Instant::now() + bound)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::TimedOut
+        );
+        // No child has opened a reader. The tiny release is still nonblocking
+        // because the parent holds RDWR; readiness/owner checks identify absence.
+        release_child(&mut release, b"0\n", Instant::now() + bound).unwrap();
+        // With no external reader, exhaust the FIFO capacity and prove that a
+        // blocked release fails at its own poll deadline rather than hanging.
+        let fill_until = Instant::now() + Duration::from_secs(1);
+        loop {
+            assert!(Instant::now() < fill_until, "FIFO capacity-fill deadline");
+            match release.write(&[0; 4096]) {
+                Ok(count) => assert!(count > 0),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                _ => panic!("FIFO capacity-fill failed"),
+            }
+        }
+        assert_eq!(
+            release_child(&mut release, b"0\n", Instant::now() + bound)
+                .unwrap_err()
+                .kind(),
+            std::io::ErrorKind::TimedOut
+        );
+    }
+
+    // FIFO handshakes prove that the child has inspected its live credentials.
+    // The completion callback, not filesystem polling, is the cleanup boundary.
+    #[tokio::test]
+    async fn niks3_input_owner_acknowledges_reap_and_cleanup_after_detach() {
+        for scenario in [
+            "success",
+            "exit_failure",
+            "timeout",
+            "detach",
+            "spawn_failure",
+            "configuration_failure",
+        ] {
+            let fixture = tempfile::tempdir().unwrap();
+            let ready_path = fixture.path().join("ready");
+            let release_path = fixture.path().join("release");
+            let mut ready = handshake_fifo(&ready_path).unwrap();
+            let mut release = handshake_fifo(&release_path).unwrap();
+            let program = fixture.path().join("niks3");
+            std::fs::write(&program, format!(
+                "#!/bin/sh\nset -eu\ntest -f \"$HOME/token\"\nprintf '%s\\n' \"$$\" > '{}'\nIFS= read -r code < '{}'\ntest -f \"$HOME/token\"\ni=0\nwhile test \"$i\" -lt 4096; do printf '%s' 'synthetic-input-fixture'; printf '%s' 'https://object.invalid/?signature=private&certificate=TLS' >&2; i=$((i + 1)); done\nexit \"$code\"\n",
+                ready_path.display(), release_path.display(),
+            )).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let mut prepared = cf_config::cache_credentials::PreparedNiks3Push::new(
+                "https://input.example",
+                &cf_protocol::cache::Niks3WriteAuth::Token {
+                    token: "synthetic-input-fixture".into(),
+                },
+                1,
+                "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-input.drv",
+            )
+            .unwrap();
+            let credentials = std::path::PathBuf::from(
+                &prepared.args[prepared
+                    .args
+                    .iter()
+                    .position(|arg| arg == "--auth-token-path")
+                    .unwrap()
+                    + 1],
+            );
+            prepared.command = if scenario == "spawn_failure" {
+                fixture.path().join("absent").display().to_string()
+            } else {
+                program.display().to_string()
+            };
+            if scenario == "configuration_failure" {
+                prepared.args.clear();
+            }
+            let (sender, mut receiver) = tokio::sync::mpsc::unbounded_channel();
+            let observed_credentials = credentials.clone();
+            let deadline = if scenario == "timeout" {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_secs(10)
+            };
+            let caller = tokio::spawn(run_niks3_input_owner(prepared, deadline, move |event| {
+                if event.phase == "started" {
+                    assert!(observed_credentials.exists());
+                } else {
+                    assert!(!observed_credentials.exists());
+                    assert!(!observed_credentials.parent().unwrap().exists());
+                    if let Some(pid) = event.child_pid {
+                        assert!(event.child_reaped);
+                        assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+                    }
+                }
+                sender.send((event, Instant::now())).unwrap();
+            }));
+            let (started, started_at) =
+                tokio::time::timeout(Duration::from_secs(5), receiver.recv())
+                    .await
+                    .unwrap()
+                    .unwrap();
+            assert_eq!(started.phase, "started");
+            let pid = if matches!(scenario, "spawn_failure" | "configuration_failure") {
+                None
+            } else {
+                let pid = ready_pid(&mut ready, started_at + Duration::from_secs(2))
+                    .unwrap_or_else(|error| panic!("{scenario}: readiness phase failed: {error}"));
+                assert_eq!(Some(pid), started.child_pid);
+                let stat = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                    .unwrap_or_else(|_| panic!("{scenario}: ready child no longer exists"));
+                let state = stat
+                    .rsplit_once(')')
+                    .unwrap()
+                    .1
+                    .split_whitespace()
+                    .next()
+                    .unwrap();
+                assert!(
+                    !matches!(state, "Z" | "X"),
+                    "{scenario}: ready child is not alive"
+                );
+                assert!(credentials.exists());
+                if scenario == "detach" {
+                    caller.abort();
+                }
+                if scenario != "timeout" {
+                    let code = if scenario == "exit_failure" {
+                        b"7\n"
+                    } else {
+                        b"0\n"
+                    };
+                    release_child(&mut release, code, Instant::now() + Duration::from_secs(1))
+                        .unwrap_or_else(|error| {
+                            panic!("{scenario}: release phase failed: {error}")
+                        });
+                }
+                Some(pid)
+            };
+            // Include the remaining configured operation deadline and two seconds
+            // for reap/drop/ack scheduling. This is a bound, not a readiness sleep.
+            let remaining = (started_at + deadline + Duration::from_secs(2))
+                .saturating_duration_since(Instant::now());
+            let (completed, _) = tokio::time::timeout(remaining, receiver.recv())
+                .await
+                .unwrap_or_else(|_| panic!("{scenario}: owner completion deadline"))
+                .unwrap_or_else(|| panic!("{scenario}: owner ended without acknowledgment"));
+            assert_eq!(completed.operation, started.operation);
+            assert_eq!(completed.phase, "completed");
+            assert!(completed.cleanup_attempted);
+            assert!(!credentials.exists());
+            if let Some(pid) = pid {
+                assert!(completed.child_reaped);
+                assert!(!std::path::Path::new(&format!("/proc/{pid}")).exists());
+            }
+            assert_eq!(
+                completed.outcome,
+                if scenario == "detach" {
+                    "success"
+                } else {
+                    scenario
+                }
+            );
+            if scenario != "detach" {
+                let result = tokio::time::timeout(Duration::from_secs(2), caller)
+                    .await
+                    .expect("caller result deadline")
+                    .unwrap();
+                assert_eq!(result.is_ok(), scenario == "success");
+            }
+            assert!(
+                tokio::time::timeout(Duration::from_secs(2), receiver.recv())
+                    .await
+                    .expect("owner event-channel closure deadline")
+                    .is_none(),
+                "owner emitted more than two events"
+            );
+        }
+    }
+}
+
 async fn push_derivation_requisites_to_assigned_cache(
     pool: &sqlx::PgPool,
     derivation: &crate::derivations::Derivation,
     archive_paths: &[String],
+    job: &BuildJob,
 ) -> Result<bool, StatusCode> {
     let destinations = resolve_cache_destinations_for_derivation(pool, derivation).await?;
 
     if destinations.is_empty() {
+        if job.cache_dispatch_recorded_at.is_some() && job.dispatched_cache_destination_id.is_some()
+        {
+            return Err(StatusCode::CONFLICT);
+        }
         tracing::debug!(
             derivation_id = derivation.id,
             derivation_name = %derivation.derivation_name,
@@ -969,8 +1338,28 @@ async fn push_derivation_requisites_to_assigned_cache(
         return Ok(false);
     }
 
-    let destination = &destinations[0];
-    push_derivation_requisites_to_cache_destination(destination, archive_paths).await
+    // SECURITY: Input closure publication uses the same immutable selection
+    // as output publication. Reordering eligible caches must not redirect it.
+    let destination = if job.cache_dispatch_recorded_at.is_some() {
+        let Some(selected) = job.dispatched_cache_destination_id else {
+            return Ok(false);
+        };
+        destinations
+            .iter()
+            .find(|destination| destination.id == selected)
+            .ok_or(StatusCode::CONFLICT)?
+    } else {
+        let first = &destinations[0];
+        if first.cache_type == "Niks3" {
+            return Err(StatusCode::CONFLICT);
+        }
+        first
+    };
+    let root = derivation
+        .derivation_path
+        .as_deref()
+        .ok_or(StatusCode::CONFLICT)?;
+    push_derivation_requisites_to_cache_destination(destination, archive_paths, root).await
 }
 
 // =============================================================================
@@ -1051,6 +1440,28 @@ pub async fn resolve_builder_id(
         )
     })?;
 
+    let capabilities_recorded =
+        crate::queries::cve_scan_leases::record_session_cve_capabilities(
+        &state.pool,
+        builder_id,
+        session_id,
+        request.capabilities,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(builder_id = %builder_id, %error, "failed to persist builder CVE capabilities");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to establish builder capabilities".to_string(),
+        )
+    })?;
+    if !capabilities_recorded {
+        return Err((
+            StatusCode::GONE,
+            "Builder session is no longer active".to_string(),
+        ));
+    }
+
     if !recovered_jobs.is_empty() {
         tracing::warn!(
             builder_id = %builder_id,
@@ -1121,6 +1532,28 @@ pub async fn establish_builder_session(
             )
         }
     })?;
+
+    let capabilities_recorded =
+        crate::queries::cve_scan_leases::record_session_cve_capabilities(
+        &state.pool,
+        builder_id,
+        request.session_id,
+        request.capabilities,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(builder_id = %builder_id, %error, "failed to persist builder CVE capabilities");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Failed to establish builder capabilities".to_string(),
+        )
+    })?;
+    if !capabilities_recorded {
+        return Err((
+            StatusCode::GONE,
+            "Builder session is no longer active".to_string(),
+        ));
+    }
 
     Ok(Json(EstablishBuilderSessionResponse {
         builder_id,
@@ -1636,30 +2069,114 @@ pub async fn cancel_build_job(
         })
 }
 
-/// POST /api/v1/build-jobs/:id/requeue - Requeue a terminal build job (operator/admin)
+/// Reports the active attempt selected by a manual requeue request.
+#[derive(Debug, Serialize)]
+pub struct RequeueBuildJobResponse {
+    /// Active build attempt identity.
+    pub attempt_id: Uuid,
+    /// Immutable lineage attempt number.
+    pub attempt_number: i32,
+    /// Active attempt status.
+    pub status: String,
+    /// `created` when this request inserted the attempt, otherwise `reused`.
+    pub outcome: &'static str,
+}
+
+/// POST /api/v1/build-jobs/:id/requeue - Requeues a terminal build job.
+///
+/// The endpoint requires operator or administrator authorization and a valid
+/// CSRF token. It returns the new or existing active attempt so retries are
+/// idempotent from the caller's perspective.
 pub async fn requeue_build_job(
     State(state): State<CFState>,
     Path(job_id): Path<Uuid>,
     headers: axum::http::HeaderMap,
-) -> Result<Json<BuildJob>, (StatusCode, String)> {
-    let Some(_operator_or_admin) = require_operator_or_admin(&state.pool, &headers).await else {
-        return Err((
+) -> Response {
+    let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
+        return (
             StatusCode::FORBIDDEN,
-            "Operator or admin access required".to_string(),
-        ));
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "message": "Operator or admin access required"
+            })),
+        )
+            .into_response();
     };
+    if !has_operator_or_admin_role(&roles) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(serde_json::json!({
+                "error": "forbidden",
+                "message": "Operator or admin access required"
+            })),
+        )
+            .into_response();
+    }
 
-    builders::requeue_build_job_as_new_attempt(&state.pool, &job_id)
-        .await
-        .map(Json)
-        .map_err(|e| {
-            let message = e.to_string();
-            if message.to_lowercase().contains("not found") {
-                (StatusCode::NOT_FOUND, message)
-            } else {
-                (StatusCode::BAD_REQUEST, message)
-            }
-        })
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
+
+    match builders::requeue_build_job_as_new_attempt(
+        &state.pool,
+        &job_id,
+        user_id,
+        has_admin_role(&roles),
+    )
+    .await
+    {
+        Ok(result) => {
+            let outcome = match result.disposition {
+                builders::RequeueBuildJobDisposition::Created => "created",
+                builders::RequeueBuildJobDisposition::Reused => "reused",
+            };
+            Json(RequeueBuildJobResponse {
+                attempt_id: result.attempt.id,
+                attempt_number: result.attempt.attempt_number,
+                status: result.attempt.status,
+                outcome,
+            })
+            .into_response()
+        }
+        Err(builders::RequeueBuildJobError::NotFoundOrHidden) => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({
+                "error": "not_found",
+                "message": "Build job not found"
+            })),
+        )
+            .into_response(),
+        Err(builders::RequeueBuildJobError::LifecycleConflict { status }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "build_job_not_terminal",
+                "message": "Build job is not in a terminal state",
+                "status": status
+            })),
+        )
+            .into_response(),
+        Err(builders::RequeueBuildJobError::EvaluatorContractObsolete { commit_id }) => (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({
+                "error": "evaluator_contract_obsolete",
+                "message": "Re-evaluate this exact revision before retrying the build",
+                "commit_id": commit_id,
+                "action": "re_evaluate_commit"
+            })),
+        )
+            .into_response(),
+        Err(builders::RequeueBuildJobError::Internal(error)) => {
+            tracing::error!(job_id = %job_id, error = %error, "failed to requeue build attempt");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": "requeue_failed",
+                    "message": "Failed to create or reuse a build attempt"
+                })),
+            )
+                .into_response()
+        }
+    }
 }
 
 /// POST /api/v1/build-jobs/:id/force-cancel - Force-cancel a stuck build job (admin-only)
@@ -1734,14 +2251,6 @@ pub async fn finalize_cancelled_job(
     })?;
 
     cleanup_build_log_channel(&state, job_id).await;
-    if state.server_config.source_delivery_mode == SourceInputDeliveryMode::ServerBundledArchive {
-        cleanup_source_archive(
-            &state.pool,
-            &state.server_config.source_archive_root,
-            job_id,
-        )
-        .await;
-    }
     Ok(StatusCode::OK)
 }
 
@@ -1781,9 +2290,13 @@ pub async fn list_build_queue(
     headers: HeaderMap,
     Query(mut params): Query<crate::api::models::BuildQueueParams>,
 ) -> Result<Json<crate::api::models::BuildQueuePageResponse>, StatusCode> {
-    let Some(_viewer) = require_viewer_or_above(&state.pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
         return Err(StatusCode::FORBIDDEN);
     };
+    if !has_viewer_or_above_role(&roles) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let visibility_user_id = (!has_admin_role(&roles)).then_some(user_id);
 
     // Clamp per-request limit to prevent unbounded result sets and overflow.
     params.limit = params.limit.max(1).min(crate::api::models::LIMIT_MAX);
@@ -1792,14 +2305,56 @@ pub async fn list_build_queue(
         return Err(StatusCode::BAD_REQUEST);
     }
 
-    let result = crate::queries::dashboard::list_build_queue_paginated(&state.pool, &params)
-        .await
-        .map_err(|e| {
-            tracing::error!("Failed to list build queue: {e:#}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+    let result = crate::queries::dashboard::list_build_queue_paginated(
+        &state.pool,
+        &params,
+        visibility_user_id,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("Failed to list build queue: {e:#}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
 
     Ok(Json(result))
+}
+
+/// Returns one exact visible build attempt without scanning paginated lists.
+///
+/// # Errors
+///
+/// Returns `403 Forbidden` when the caller is unauthenticated or lacks Viewer
+/// access. Returns `404 Not Found` for both missing attempts and attempts hidden
+/// by the caller's environment scope. Returns `500 Internal Server Error` when
+/// the database query fails.
+pub async fn get_build_attempt(
+    State(state): State<CFState>,
+    Path(attempt_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Json<crate::api::models::BuildAttemptLookupResponse>, StatusCode> {
+    let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
+        return Err(StatusCode::FORBIDDEN);
+    };
+    if !has_viewer_or_above_role(&roles) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let visibility_user_id = (!has_admin_role(&roles)).then_some(user_id);
+
+    let attempt = crate::queries::dashboard::get_build_attempt_by_id(
+        &state.pool,
+        attempt_id,
+        visibility_user_id,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(%attempt_id, "Failed to load exact build attempt: {error:#}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    // SECURITY: Hidden and missing attempts are both 404 so this endpoint does
+    // not disclose build identity across environment boundaries.
+    .ok_or(StatusCode::NOT_FOUND)?;
+
+    Ok(Json(attempt))
 }
 
 /// GET /api/v1/build-jobs/recent - Recent completed/failed builds (viewer+)
@@ -1808,9 +2363,13 @@ pub async fn list_recent_build_jobs(
     headers: HeaderMap,
     Query(params): Query<std::collections::HashMap<String, String>>,
 ) -> Result<Json<crate::api::models::BuildQueuePageResponse>, StatusCode> {
-    let Some(_viewer) = require_viewer_or_above(&state.pool, &headers).await else {
+    let Some((user_id, roles)) = authenticated_user_roles(&state.pool, &headers).await else {
         return Err(StatusCode::FORBIDDEN);
     };
+    if !has_viewer_or_above_role(&roles) {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let visibility_user_id = (!has_admin_role(&roles)).then_some(user_id);
 
     let limit: i64 = params
         .get("limit")
@@ -1842,9 +2401,13 @@ pub async fn list_recent_build_jobs(
             .unwrap_or(false),
     };
 
-    let items = crate::queries::dashboard::fetch_recent_build_history(&state.pool, &query)
-        .await
-        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let items = crate::queries::dashboard::fetch_recent_build_history(
+        &state.pool,
+        &query,
+        visibility_user_id,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
 
     Ok(Json(items))
 }
@@ -1925,6 +2488,19 @@ pub async fn builder_heartbeat(
     let metrics: ReportMetricsRequest =
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
 
+    if let Some(session_id) = verified.builder_session_id
+        && !crate::queries::cve_scan_leases::record_session_cve_capabilities(
+            &state.pool,
+            builder_id,
+            session_id,
+            metrics.capabilities.clone(),
+        )
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    {
+        return Err(StatusCode::GONE);
+    }
+
     // Update heartbeat timestamp (marks builder as active)
     builders::update_builder_heartbeat(
         &state.pool,
@@ -1944,19 +2520,232 @@ pub async fn builder_heartbeat(
         message: "Heartbeat recorded".to_string(),
     }))
 }
+
+/// Claims one server-authorized CVE scan lease for an API builder.
+///
+/// A direct post-build request can claim only the successful build named in the
+/// request. Background claims yield no work while build work is queued or while
+/// this builder owns an active build. Incapable builders also receive no work.
+///
+/// # Errors
+///
+/// Returns an HTTP error for invalid authentication, builder/session mismatch,
+/// malformed input, or persistence failure.
+pub async fn claim_cve_scan(
+    State(state): State<CFState>,
+    Path(builder_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<crate::models::builders::CveScanClaimResponse>, StatusCode> {
+    let path = format!("/api/v1/builders/{builder_id}/cve-scans/claim");
+    let verified =
+        authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let request: crate::models::builders::CveScanClaimRequest =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if verified.builder_session_id != Some(request.builder_session_id) {
+        return Err(StatusCode::GONE);
+    }
+    if !request.capabilities.supports_current_cve_schema() {
+        return Ok(Json(crate::models::builders::CveScanClaimResponse {
+            claim: None,
+        }));
+    }
+    let claim = crate::queries::cve_scan_leases::claim_remote_cve_scan(
+        &state.pool,
+        builder_id,
+        request.builder_session_id,
+        request.completed_build_job_id,
+    )
+    .await
+    .map_err(|error| {
+        if error.to_string().contains("session_mismatch")
+            || error.to_string().contains("builder_inactive")
+        {
+            StatusCode::GONE
+        } else {
+            tracing::error!(builder_id = %builder_id, %error, "remote CVE claim failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    })?;
+    Ok(Json(crate::models::builders::CveScanClaimResponse {
+        claim,
+    }))
+}
+
+/// Renews one exact remote CVE scan execution lease.
+///
+/// # Errors
+///
+/// Returns `403 Forbidden` for mismatched lease ownership, `410 Gone` for an
+/// expired or superseded lease, or another HTTP error for invalid
+/// authentication, malformed input, or persistence failure.
+pub async fn heartbeat_cve_scan(
+    State(state): State<CFState>,
+    Path(builder_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<crate::models::builders::CveScanHeartbeatResponse>, StatusCode> {
+    let path = format!("/api/v1/builders/{builder_id}/cve-scans/heartbeat");
+    let verified =
+        authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let request: crate::models::builders::CveScanHeartbeatRequest =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if request.lease.builder_id != builder_id
+        || verified.builder_session_id != Some(request.lease.builder_session_id)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let Some(lease_expires_at) = crate::queries::cve_scan_leases::heartbeat_remote_cve_scan(
+        &state.pool,
+        request.lease,
+        request.entries_collected,
+        request.observations_collected,
+        &request.diagnostics,
+    )
+    .await
+    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    else {
+        return Err(StatusCode::GONE);
+    };
+    Ok(Json(crate::models::builders::CveScanHeartbeatResponse {
+        lease_expires_at,
+        revocation_requested: false,
+    }))
+}
+
+/// Completes one remote CVE lease after server-side canonical validation.
+///
+/// The server returns `422 Unprocessable Entity` without changing the lease for
+/// invalid evidence. A same-digest retry succeeds idempotently. A different
+/// digest for the same completed execution returns `409 Conflict`.
+///
+/// # Errors
+///
+/// Returns an HTTP error for invalid authentication, mismatched ownership,
+/// malformed or semantically invalid evidence, stale execution, digest
+/// conflict, or persistence failure.
+pub async fn complete_cve_scan(
+    State(state): State<CFState>,
+    Path(builder_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<crate::models::builders::CveScanCompleteResponse>, StatusCode> {
+    let path = format!("/api/v1/builders/{builder_id}/cve-scans/complete");
+    let verified =
+        authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let request: crate::models::builders::CveScanCompleteRequest =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
+    if request.lease.builder_id != builder_id
+        || verified.builder_session_id != Some(request.lease.builder_session_id)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    use crate::queries::cve_scan_leases::RemoteCompletion;
+    match crate::queries::cve_scan_leases::complete_remote_cve_scan(&state.pool, request)
+        .await
+        .map_err(|error| {
+            tracing::error!(builder_id = %builder_id, %error, "remote CVE completion failed");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })? {
+        RemoteCompletion::Completed(digest) => {
+            Ok(Json(crate::models::builders::CveScanCompleteResponse {
+                result_digest_sha256: digest,
+                already_completed: false,
+            }))
+        }
+        RemoteCompletion::AlreadyCompleted(digest) => {
+            Ok(Json(crate::models::builders::CveScanCompleteResponse {
+                result_digest_sha256: digest,
+                already_completed: true,
+            }))
+        }
+        RemoteCompletion::Invalid(_) | RemoteCompletion::DigestMismatch => {
+            Err(StatusCode::UNPROCESSABLE_ENTITY)
+        }
+        RemoteCompletion::DigestConflict => Err(StatusCode::CONFLICT),
+        RemoteCompletion::Stale => Err(StatusCode::GONE),
+    }
+}
+
+/// Reports a remote scanner failure without changing build or cache outcome.
+///
+/// # Errors
+///
+/// Returns `410 Gone` for a stale execution or another HTTP error for invalid
+/// authentication, mismatched ownership, malformed input, or persistence
+/// failure.
+pub async fn fail_cve_scan(
+    State(state): State<CFState>,
+    Path(builder_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Json<crate::models::builders::CveScanFailResponse>, StatusCode> {
+    let path = format!("/api/v1/builders/{builder_id}/cve-scans/fail");
+    let verified =
+        authenticate_builder_request(&headers, body.clone(), "POST", &path, &state.pool).await?;
+    if verified.builder_id != builder_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let request: crate::models::builders::CveScanFailRequest =
+        serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?;
+    if request.lease.builder_id != builder_id
+        || verified.builder_session_id != Some(request.lease.builder_session_id)
+    {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let requeued = crate::queries::cve_scan_leases::fail_remote_cve_scan(
+        &state.pool,
+        request.lease,
+        request.failure_class,
+        &request.error_message,
+        &request.diagnostics,
+    )
+    .await
+    .map_err(|error| {
+        if error.to_string().contains("stale_cve_scan_execution") {
+            StatusCode::GONE
+        } else {
+            StatusCode::INTERNAL_SERVER_ERROR
+        }
+    })?;
+    Ok(Json(crate::models::builders::CveScanFailResponse {
+        requeued,
+    }))
+}
 /// GET/POST /api/v1/builders/:id/next-job - Get next job for builder
 ///
 /// This endpoint implements the load-based job assignment logic:
 /// 1. Filter jobs by builder's environment assignments (or all if no assignments)
 /// 2. Check builder's current concurrency limit
 /// 3. Return highest-priority queued job if available
+/// Niks3 dispatch requires capability advertisement in the signed poll. Cache
+/// preflight precedes the exact-candidate claim, so incompatible builders never
+/// claim work or receive cache credentials. Legacy cache types remain eligible.
+/// Credential-bearing cache settings require an allowlisted direct proxy peer
+/// with the HTTPS opt-in and one proxy-overwritten `X-Forwarded-Proto: https`.
+///
+/// # Errors
+/// Returns an authentication or authorization status for invalid builders and
+/// sessions, `NOT_FOUND` when no job is available, or a conflict/error status
+/// when dispatch preflight fails. Secret delivery fails closed without verified
+/// confidential transport.
 pub async fn get_next_job(
     State(state): State<CFState>,
     Path(builder_id): Path<Uuid>,
+    peer: Option<ConnectInfo<std::net::SocketAddr>>,
     method: Method,
     headers: axum::http::HeaderMap,
     body: Bytes,
-) -> Result<Json<crate::models::builders::NextJobResponse>, StatusCode> {
+) -> Result<Response, StatusCode> {
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/next-job", builder_id);
     let verified =
@@ -1980,23 +2769,161 @@ pub async fn get_next_job(
 
     let next_job_request = next_job_request_for_method(&method, &body)?;
     let execution_strategy = state.server_config.remote_build_execution_strategy;
-    if !next_job_request
-        .supported_execution_strategies
-        .contains(&execution_strategy)
-    {
+    if let Some(reason) = execution_strategy_conflict(&next_job_request, execution_strategy) {
         tracing::warn!(
             builder_id = %builder_id,
             ?execution_strategy,
             supported = ?next_job_request.supported_execution_strategies,
             "builder does not support configured remote execution strategy; returning 409 Conflict"
         );
-        return Err(StatusCode::CONFLICT);
+        return Ok(next_job_conflict(reason));
     }
+    let evaluator_fingerprint =
+        if execution_strategy == RemoteBuildExecutionStrategy::SourceReEvaluateVerified {
+            let authoritative = current_evaluator_fingerprint().await.map_err(|error| {
+                tracing::error!(
+                    builder_id = %builder_id,
+                    "failed to identify authoritative Nix evaluator: {error:#}"
+                );
+                StatusCode::SERVICE_UNAVAILABLE
+            })?;
+            // SECURITY: Capability equality is checked before queue lookup or claim.
+            // A mismatch is builder-specific and must not mutate shared job state.
+            if let Some(reason) = evaluator_conflict(&next_job_request, &authoritative) {
+                tracing::warn!(
+                    builder_id = %builder_id,
+                    builder_evaluator = ?next_job_request.evaluator,
+                    authoritative_evaluator = ?authoritative,
+                    "builder evaluator is incompatible with verified-source work"
+                );
+                return Ok(next_job_conflict(reason));
+            }
+            Some(authoritative)
+        } else {
+            None
+        };
 
     // Get builder's environment assignments (empty = wildcard)
     let environment_ids = builders::get_builder_environment_ids(&state.pool, &builder_id)
         .await
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+
+    let preflight_source = if execution_strategy
+        == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
+    {
+        if let Some(reason) =
+            source_delivery_conflict(execution_strategy, state.server_config.source_delivery_mode)
+        {
+            tracing::warn!(
+                builder_id = %builder_id,
+                ?state.server_config.source_delivery_mode,
+                "verified-source contract version 1 requires canonical server artifact delivery"
+            );
+            return Ok(next_job_conflict(reason));
+        }
+        let (candidate, published) = loop {
+            let Some(candidate) = builders::peek_next_verified_source_job(
+                    &state.pool,
+                    &environment_ids,
+                )
+                .await
+                .map_err(|error| {
+                    tracing::error!(builder_id = %builder_id, "failed to select source preflight candidate: {error:#}");
+                    StatusCode::INTERNAL_SERVER_ERROR
+                })?
+                else {
+                    return Err(StatusCode::NOT_FOUND);
+                };
+            match crate::flake::verified_source::lookup_published_source(
+                &state.server_config.source_archive_root,
+                &candidate.repo_url,
+                &candidate.commit_hash,
+            )
+            .await
+            {
+                Ok(published) => break (candidate, published),
+                Err(error)
+                    if matches!(
+                        error.class,
+                        crate::flake::verified_source::MaterializationFailureClass::NotPublished
+                            | crate::flake::verified_source::MaterializationFailureClass::UnsupportedObjectFormat
+                            | crate::flake::verified_source::MaterializationFailureClass::Deterministic
+                    ) =>
+                {
+                    // Pre-contract jobs cannot satisfy the signed source and
+                    // evaluator identity. Retire each stale queue head so a
+                    // compatible job behind it can be selected in this poll.
+                    let retired = builders::mark_queued_verified_source_job_obsolete(
+                        &state.pool,
+                        &candidate.job_id,
+                        &format!("contract-v1 source publication is unusable: {error}"),
+                    )
+                    .await
+                    .map_err(|transition_error| {
+                        tracing::error!(
+                            job_id = %candidate.job_id,
+                            "failed to retire obsolete verified-source job: {transition_error:#}"
+                        );
+                        StatusCode::INTERNAL_SERVER_ERROR
+                    })?;
+                    tracing::warn!(
+                        job_id = %candidate.job_id,
+                        class = ?error.class,
+                        retired,
+                        "retired obsolete verified-source authority before claim"
+                    );
+                }
+                Err(error) => {
+                    let status = match error.class {
+                        crate::flake::verified_source::MaterializationFailureClass::Transient => {
+                            StatusCode::SERVICE_UNAVAILABLE
+                        }
+                        crate::flake::verified_source::MaterializationFailureClass::Cancelled => {
+                            return Ok(next_job_conflict(
+                                NextJobConflictReason::SourceMaterializationCancelled,
+                            ));
+                        }
+                        crate::flake::verified_source::MaterializationFailureClass::NotPublished
+                        | crate::flake::verified_source::MaterializationFailureClass::UnsupportedObjectFormat
+                        | crate::flake::verified_source::MaterializationFailureClass::Deterministic => {
+                            StatusCode::UNPROCESSABLE_ENTITY
+                        }
+                    };
+                    tracing::warn!(
+                        job_id = %candidate.job_id,
+                        class = ?error.class,
+                        "canonical source is not ready for dispatch: {error}"
+                    );
+                    return Err(status);
+                }
+            }
+        };
+        Some((candidate, published))
+    } else {
+        None
+    };
+    let candidate = if let Some((candidate, _)) = preflight_source.as_ref() {
+        builders::get_build_job_by_id(&state.pool, &candidate.job_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    } else {
+        builders::peek_next_server_derivation_job(&state.pool, &environment_ids)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+    }
+    .ok_or(StatusCode::NOT_FOUND)?;
+    let derivation =
+        crate::queries::derivations::get_derivation_by_id(&state.pool, candidate.derivation_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let cache_push = builder_cache_push_config_for_derivation(&state.pool, &derivation).await?;
+    if let Some(reason) = cache_type_conflict(&next_job_request, &cache_push) {
+        return Ok(next_job_conflict(reason));
+    }
+    // CONCURRENCY: Claim only the cache-preflighted candidate and retain its
+    // selected configuration. A lost candidate must not substitute a job or
+    // resolve a newly selected Niks3 cache after this capability check.
+    let preflight_job_id = Some(&candidate.id);
 
     // TASK-147: Atomically claim next job with race-free concurrency enforcement
     // This single transaction ensures count check + job assignment are atomic,
@@ -2008,6 +2935,7 @@ pub async fn get_next_job(
         &environment_ids,
         execution_strategy,
         verified.builder_session_id.as_ref(),
+        preflight_job_id,
     )
     .await
     .map_err(|e| {
@@ -2033,7 +2961,8 @@ pub async fn get_next_job(
     // Convenience alias for the session ID used in every dispatch-failure call.
     let session_id = verified.builder_session_id.as_ref();
 
-    // Embed the derivation build payload so the remote builder needs no DB access.
+    // Reload build metadata after claim, retaining only the cache configuration
+    // that passed capability preflight. Source authority remains current.
     let derivation =
         match crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
             .await
@@ -2078,123 +3007,49 @@ pub async fn get_next_job(
         }
     };
 
-    let mut source_archive_generated = false;
-
-    // If ServerBundledArchive is selected, generate the source archive now.
-    if source_input_delivery == SourceInputDeliveryMode::ServerBundledArchive {
-        if let Some(ref mut source_mut) = source {
-            let mirror_path = server_mirror_path(
-                &state.server_config.source_archive_root,
-                &source_mut.repo_url,
-            );
-            let mirror_id = source_mirror_id(&source_mut.repo_url);
-
-            // Job-scoped archive path: one archive file per claimed job so
-            // concurrent jobs for the same repo+commit don't interfere.
-            let archive_path =
-                job_scoped_archive_path(&state.server_config.source_archive_root, job.id);
-
-            // Load per-flake credentials so the server-side mirror clone/fetch
-            // can authenticate against private repositories.
-            let flake_creds = if let Some(commit_id) = derivation.commit_id {
-                match crate::queries::commits::get_commit_by_id(&state.pool, commit_id).await {
-                    Ok(commit) => crate::flake::credentials::FlakeCredentialEnv::load(
-                        &state.pool,
-                        commit.flake_id,
-                    )
-                    .await
-                    .unwrap_or_else(|e| {
-                        tracing::warn!(
-                            job_id = %job.id,
-                            flake_id = commit.flake_id,
-                            "failed to load flake credentials for server mirror: {e}"
-                        );
-                        None
-                    }),
-                    Err(e) => {
-                        tracing::warn!(
-                            job_id = %job.id,
-                            commit_id,
-                            "failed to load commit for credential lookup: {e}"
-                        );
-                        None
-                    }
-                }
-            } else {
-                None
-            };
-
-            // Acquire the per-mirror lock before any git clone/fetch or archive
-            // generation. This ensures concurrent jobs for the same repository
-            // don't corrupt the shared bare mirror.
-            let _mirror_guard = mirror_lock(&mirror_id).lock_owned().await;
-
-            if let Err(mirror_err) = ensure_server_mirror_has_commit(
-                &mirror_path,
-                &source_mut.repo_url,
-                &source_mut.commit_hash,
-                flake_creds.as_ref(),
-            )
-            .await
-            {
-                // Mirror fetch failure: the commit may not yet be pushed or the
-                // remote may be temporarily unavailable. Classify as Transient so
-                // the job gets a retry with backoff rather than re-entering the
-                // front of the queue immediately.
-                let status = fail_claimed_job_at_dispatch(
-                    &state.pool,
-                    &job.id,
-                    &builder_id,
-                    session_id,
-                    "source_mirror",
-                    DispatchFailureClass::Transient,
-                    &format!(
-                        "commit {} not available in server mirror for {}: {:?}",
-                        source_mut.commit_hash, source_mut.repo_url, mirror_err
-                    ),
-                )
-                .await;
-                return Err(status);
-            }
-
-            match generate_source_archive(&mirror_path, &archive_path).await {
-                Ok(sha256) => {
-                    source_archive_generated = true;
-                    source_mut.archive_url = Some(format!(
-                        "/api/v1/builders/{}/jobs/{}/source-archive",
-                        builder_id, job.id
-                    ));
-                    source_mut.archive_sha256 = Some(sha256);
-                }
-                Err(_archive_status) => {
-                    let status = fail_claimed_job_at_dispatch(
-                        &state.pool,
-                        &job.id,
-                        &builder_id,
-                        session_id,
-                        "source_archive",
-                        DispatchFailureClass::Transient,
-                        "failed to generate source archive from server mirror",
-                    )
-                    .await;
-                    return Err(status);
-                }
-            }
-        } else {
-            // Source is None but delivery is ServerBundledArchive — this is a
-            // permanent data problem: the job was queued without source metadata.
+    if execution_strategy == RemoteBuildExecutionStrategy::SourceReEvaluateVerified {
+        let Some(source_mut) = source.as_mut() else {
             let status = fail_claimed_job_at_dispatch(
                 &state.pool,
                 &job.id,
                 &builder_id,
                 session_id,
-                "source_archive",
+                "source_materialization",
                 DispatchFailureClass::Deterministic,
-                "ServerBundledArchive selected but source identity is missing",
+                "verified-source job has no source identity",
+            )
+            .await;
+            return Err(status);
+        };
+        let Some((candidate, published)) = preflight_source else {
+            return Err(StatusCode::INTERNAL_SERVER_ERROR);
+        };
+        if candidate.job_id != job.id
+            || candidate.commit_hash != source_mut.commit_hash
+            || credential_free_repo_url(&candidate.repo_url)
+                .ok()
+                .as_deref()
+                != Some(source_mut.repo_url.as_str())
+        {
+            let status = fail_claimed_job_at_dispatch(
+                &state.pool,
+                &job.id,
+                &builder_id,
+                session_id,
+                "source_identity",
+                DispatchFailureClass::Deterministic,
+                "claimed source identity differs from its dispatch preflight",
             )
             .await;
             return Err(status);
         }
+        source_mut.archive_url = Some(format!(
+            "/api/v1/builders/{}/jobs/{}/source-archive",
+            builder_id, job.id
+        ));
+        source_mut.archive_sha256 = Some(published.identity.artifact_sha256.clone());
+        source_mut.lock_hash = Some(published.identity.lock_hash.clone());
+        source_mut.immutable_source = Some(published.identity);
     }
 
     if execution_strategy == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
@@ -2203,14 +3058,6 @@ pub async fn get_next_job(
         // Permanent data invariant violation: SourceReEvaluateVerified jobs
         // must have both source identity and derivation_path. Classify as
         // Deterministic so the job does not endlessly cycle through the queue.
-        if source_archive_generated {
-            cleanup_source_archive(
-                &state.pool,
-                &state.server_config.source_archive_root,
-                job.id,
-            )
-            .await;
-        }
         let status = fail_claimed_job_at_dispatch(
             &state.pool,
             &job.id,
@@ -2229,52 +3076,26 @@ pub async fn get_next_job(
         return Err(status);
     }
 
-    let cache_push = match builder_cache_push_config_for_derivation(&state.pool, &derivation).await
-    {
-        Ok(cache_push) => Some(cache_push),
-        Err(_cache_status) => {
-            if source_archive_generated {
-                cleanup_source_archive(
-                    &state.pool,
-                    &state.server_config.source_archive_root,
-                    job.id,
-                )
-                .await;
-            }
-            let status = fail_claimed_job_at_dispatch(
-                &state.pool,
-                &job.id,
-                &builder_id,
-                session_id,
-                "cache_config",
-                DispatchFailureClass::Transient,
-                "failed to assemble builder cache-push config",
-            )
-            .await;
-            return Err(status);
-        }
-    };
+    let cache_push = Some(cache_push);
+    let https_evidence =
+        BuilderHttpsEvidence::from_request(&state.server_config, &headers, peer.map(|p| p.0));
 
     if cache_push
         .as_ref()
         .is_some_and(cache_push_config_contains_credentials)
-        && !builder_https_verified_by_trusted_proxy(&state.server_config, &headers)
+        && !https_evidence.verified()
     {
         tracing::warn!(
             job_id = %job.id,
             derivation_id = derivation.id,
             builder_id = %builder_id,
-            trust_forwarded = state.server_config.trust_forwarded_builder_https,
+            direct_peer_ip = ?https_evidence.direct_peer_ip,
+            trust_forwarded_builder_https = https_evidence.trust_forwarded_builder_https,
+            peer_cidr_match = https_evidence.peer_cidr_match,
+            x_forwarded_proto_count = https_evidence.x_forwarded_proto_count,
+            exact_https = https_evidence.exact_https,
             "refusing to send cache push credentials: connection is not verified HTTPS"
         );
-        if source_archive_generated {
-            cleanup_source_archive(
-                &state.pool,
-                &state.server_config.source_archive_root,
-                job.id,
-            )
-            .await;
-        }
         // This is a transient configuration mismatch (server config / TLS termination),
         // not a data problem with the job itself.
         let status = fail_claimed_job_at_dispatch(
@@ -2284,11 +3105,40 @@ pub async fn get_next_job(
             session_id,
             "cache_config",
             DispatchFailureClass::Transient,
-            "cache push credentials refused: builder connection is not verified HTTPS",
+            "cache push credentials refused: builder connection is not verified HTTPS; configure services.crystal-forge.server.trust_forwarded_builder_https and services.crystal-forge.server.trustedProxyCidrs for the actual direct backend proxy peer, and have that proxy overwrite X-Forwarded-Proto with exactly one https value",
         )
         .await;
         return Err(status);
     }
+
+    // SECURITY: Completion must compare with the selection actually dispatched
+    // on this claim, not merely with any destination currently eligible for it.
+    let job = match builders::record_job_cache_dispatch(
+        &state.pool,
+        &job.id,
+        &builder_id,
+        session_id,
+        cache_push
+            .as_ref()
+            .and_then(|cache| cache.cache_destination_id),
+    )
+    .await
+    {
+        Ok(job) => job,
+        Err(_) => {
+            let status = fail_claimed_job_at_dispatch(
+                &state.pool,
+                &job.id,
+                &builder_id,
+                session_id,
+                "cache_identity",
+                DispatchFailureClass::Transient,
+                "failed to persist selected cache destination for dispatch",
+            )
+            .await;
+            return Err(status);
+        }
+    };
 
     let payload = crate::models::builders::BuildJobDerivation {
         id: derivation.id,
@@ -2303,14 +3153,15 @@ pub async fn get_next_job(
         source,
         source_input_delivery,
         expected_drv_path,
-        evaluator: Some(current_evaluator_fingerprint()),
+        evaluator: evaluator_fingerprint,
         cache_push,
     };
 
     Ok(Json(crate::models::builders::NextJobResponse {
         job: job.into(),
         derivation: payload,
-    }))
+    })
+    .into_response())
 }
 
 /// Classification of a post-claim dispatch failure.
@@ -3028,10 +3879,7 @@ pub async fn download_job_derivation_archive_delta(
 
 /// GET /api/v1/builders/:id/jobs/:job_id/source-archive
 ///
-/// Streams a gzipped tar archive of the bare Git mirror for the job's source
-/// repository, containing the authorized commit. Remote API builders in
-/// ServerBundledArchive mode download this archive instead of cloning the repo
-/// directly.
+/// Streams the canonical tracked-tree artifact used by authoritative evaluation.
 pub async fn download_job_source_archive(
     State(state): State<CFState>,
     Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
@@ -3048,24 +3896,65 @@ pub async fn download_job_source_archive(
         return Err(StatusCode::FORBIDDEN);
     }
 
-    let job = builders::get_build_job_by_id(&state.pool, &job_id)
-        .await
-        .map_err(|e| {
-            tracing::error!(job_id = %job_id, "failed to load build job for source archive: {e}");
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?
-        .ok_or(StatusCode::NOT_FOUND)?;
-
-    if !builder_owns_job_session(&job, builder_id, verified.builder_session_id)
-        || job.status != "building"
-    {
+    // SECURITY: Reject unsupported global modes before querying by job ID. The
+    // route must not disclose whether a source-bearing job exists in those modes.
+    if !source_archive_contract_is_authorized(
+        state.server_config.remote_build_execution_strategy,
+        state.server_config.source_delivery_mode,
+    ) {
         return Err(StatusCode::FORBIDDEN);
     }
+    let builder_session_id = verified
+        .builder_session_id
+        .as_ref()
+        .ok_or(StatusCode::FORBIDDEN)?;
+    let job = builders::get_authorized_source_archive_job(
+        &state.pool,
+        &job_id,
+        &builder_id,
+        builder_session_id,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!(job_id = %job_id, "failed to authorize source archive job: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?
+    .ok_or(StatusCode::NOT_FOUND)?;
 
-    // Job-scoped archive path: one archive per claimed job, so this builder
-    // gets exactly the archive generated for its job and not one shared with
-    // (and potentially deleted by) another concurrent job.
-    let archive_path = job_scoped_archive_path(&state.server_config.source_archive_root, job_id);
+    let derivation =
+        crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
+            .await
+            .map_err(|error| {
+                tracing::error!(job_id = %job_id, "failed to load source derivation: {error:#}");
+                StatusCode::INTERNAL_SERVER_ERROR
+            })?;
+    if derivation.derivation_path.is_none() {
+        return Err(StatusCode::NOT_FOUND);
+    }
+    let commit_id = derivation.commit_id.ok_or(StatusCode::NOT_FOUND)?;
+    let commit = crate::queries::commits::get_commit_by_id(&state.pool, commit_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(job_id = %job_id, "failed to load source commit: {error:#}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let flake = crate::queries::flakes::get_flake_by_id(&state.pool, commit.flake_id)
+        .await
+        .map_err(|error| {
+            tracing::error!(job_id = %job_id, "failed to load source flake: {error:#}");
+            StatusCode::INTERNAL_SERVER_ERROR
+        })?;
+    let published = crate::flake::verified_source::lookup_published_source(
+        &state.server_config.source_archive_root,
+        &flake.repo_url,
+        &commit.git_commit_hash,
+    )
+    .await
+    .map_err(|error| {
+        tracing::warn!(job_id = %job_id, class = ?error.class, "canonical source is unavailable: {error}");
+        StatusCode::NOT_FOUND
+    })?;
+    let archive_path = published.artifact_path;
 
     // Stream the archive file rather than reading it fully into RAM.
     let file = tokio::fs::File::open(&archive_path).await.map_err(|e| {
@@ -3081,10 +3970,10 @@ pub async fn download_job_source_archive(
 
     let mut resp_builder = Response::builder()
         .status(StatusCode::OK)
-        .header("Content-Type", "application/gzip")
+        .header("Content-Type", "application/x-tar")
         .header(
             "Content-Disposition",
-            format!("attachment; filename=\"{}.tar.gz\"", job_id),
+            format!("attachment; filename=\"{}.tar\"", job_id),
         );
     if let Some(size) = file_size {
         resp_builder = resp_builder.header("Content-Length", size.to_string());
@@ -3095,11 +3984,19 @@ pub async fn download_job_source_archive(
     })
 }
 
+/// Publishes the authorized derivation closure to the dispatched cache.
+///
 /// POST /api/v1/builders/:id/jobs/:job_id/publish-derivation-closure
 ///
-/// Publishes the evaluated derivation requisite closure to the configured Attic
-/// cache so API builders can fetch it through normal Nix substituters instead
-/// of downloading a large archive through the Crystal Forge server.
+/// Rechecks current eligibility without selecting an alternate cache for a
+/// recorded claim. Legacy claims can use the first eligible non-Niks3 cache.
+/// API builders can fetch the closure through Nix substituters or use the
+/// authenticated archive endpoint when cache publication is unavailable.
+///
+/// # Errors
+/// Returns an authentication/authorization status for invalid ownership, a
+/// conflict for missing Niks3 dispatch identity or an ineligible selection,
+/// `NOT_FOUND` when publication is disabled, or an error for Nix/process failure.
 pub async fn publish_job_derivation_closure(
     State(state): State<CFState>,
     Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
@@ -3187,8 +4084,13 @@ pub async fn publish_job_derivation_closure(
         "publishing derivation requisite closure to cache"
     );
 
-    match push_derivation_requisites_to_assigned_cache(&state.pool, &derivation, &archive_paths)
-        .await?
+    match push_derivation_requisites_to_assigned_cache(
+        &state.pool,
+        &derivation,
+        &archive_paths,
+        &job,
+    )
+    .await?
     {
         true => Ok(StatusCode::NO_CONTENT),
         false => Err(StatusCode::NOT_FOUND),
@@ -3227,12 +4129,20 @@ pub async fn start_job(
     Ok(StatusCode::ACCEPTED)
 }
 
+/// Reports build completion while preserving legacy reference-only clients.
 #[derive(Debug, Deserialize)]
 pub struct CompleteJobRequest {
+    /// Identifies the enabled, derivation-eligible destination actually used.
+    /// Niks3 publication requires this identity; references are insufficient.
+    #[serde(default)]
+    pub cache_destination_id: Option<i32>,
+    /// Reports the built output path, or omits it for legacy completion.
     #[serde(default)]
     pub output_path: Option<String>,
+    /// Indicates that the builder actually published the output.
     #[serde(default)]
     pub cache_pushed: bool,
+    /// Provides a legacy destination name, URL, or Attic cache reference.
     #[serde(default)]
     pub cache_reference: Option<String>,
 }
@@ -3254,48 +4164,38 @@ fn cache_reference_matches_destination(
 async fn validated_reported_cache_destination(
     state: &CFState,
     request: &CompleteJobRequest,
-    builder_id: Uuid,
-    job_id: Uuid,
+    job: &BuildJob,
+    derivation: &crate::derivations::Derivation,
 ) -> Result<Option<crate::models::cache_destination::CacheDestination>, StatusCode> {
     if !request.cache_pushed {
         return Ok(None);
     }
 
-    let Some(reported) = request
+    let reported = request
         .cache_reference
         .as_deref()
         .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
+        .filter(|value| !value.is_empty());
+    if reported.is_none() && request.cache_destination_id.is_none() {
         tracing::warn!(
-            builder_id = %builder_id,
-            job_id = %job_id,
+            job_id = %job.id,
             "builder reported cache_pushed without cache_reference"
         );
         return Err(StatusCode::CONFLICT);
-    };
+    }
 
-    let destinations =
-        crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
-            .await
-            .map_err(|e| {
-                tracing::warn!(
-                    builder_id = %builder_id,
-                    job_id = %job_id,
-                    error = %e,
-                    "failed to load cache destinations while validating builder cache push"
-                );
-                StatusCode::INTERNAL_SERVER_ERROR
-            })?;
+    let destinations = resolve_cache_destinations_for_derivation(&state.pool, derivation).await?;
 
-    let Some(destination) = destinations
-        .iter()
-        .find(|destination| cache_reference_matches_destination(reported, destination))
-    else {
+    let Some(destination) = destinations.iter().find(|destination| {
+        completion_matches_destination(
+            request,
+            destination,
+            job.dispatched_cache_destination_id,
+            job.cache_dispatch_recorded_at.is_some(),
+        )
+    }) else {
         tracing::warn!(
-            builder_id = %builder_id,
-            job_id = %job_id,
-            reported_cache = reported,
+            job_id = %job.id,
             "builder reported cache push to a cache that does not match any active server cache destination"
         );
         return Err(StatusCode::CONFLICT);
@@ -3304,150 +4204,556 @@ async fn validated_reported_cache_destination(
     Ok(Some(destination.clone()))
 }
 
+// SECURITY: An ID never falls back to a reference on mismatch. Niks3 requires
+// an ID because its independent write and read URLs are not an identity.
+fn completion_matches_destination(
+    request: &CompleteJobRequest,
+    destination: &CacheDestination,
+    dispatched_id: Option<i32>,
+    dispatch_recorded: bool,
+) -> bool {
+    destination.enabled
+        && cache_type_from_destination(&destination.cache_type).is_ok()
+        && (!dispatch_recorded || dispatched_id == Some(destination.id))
+        && (destination.cache_type != "Niks3"
+            || (dispatch_recorded
+                && dispatched_id == Some(destination.id)
+                && request.cache_destination_id == Some(destination.id)))
+        && match request.cache_destination_id {
+            Some(id) => id == destination.id,
+            None => {
+                destination.cache_type != "Niks3"
+                    && request.cache_reference.as_deref().is_some_and(|reference| {
+                        cache_reference_matches_destination(reference, destination)
+                    })
+            }
+        }
+}
+
 async fn verify_store_path_available_from_cache(
     destination: &crate::models::cache_destination::CacheDestination,
     store_path: &str,
     derivation_id: i32,
     job_id: Uuid,
-) -> Result<(), StatusCode> {
-    let Some(cache_url) = destination
-        .push_to
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        tracing::warn!(
-            derivation_id,
-            job_id = %job_id,
-            cache_destination = %destination.name,
-            "cannot verify builder cache push because destination has no push_to/substituter URL"
-        );
-        return Err(StatusCode::CONFLICT);
-    };
-
-    let mut command = Command::new("nix");
-    command.args(["path-info", "--store", cache_url, store_path]);
-
-    if let Some(public_key) = destination
-        .attic_public_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        command.env(
-            "NIX_CONFIG",
-            format!("extra-substituters = {cache_url}\nextra-trusted-public-keys = {public_key}\n"),
-        );
+) -> Result<(), CacheProbeFailure> {
+    let status = probe_cache_read(
+        destination.clone(),
+        store_path.to_owned(),
+        std::ffi::OsString::from("nix"),
+        std::time::Duration::from_secs(CACHE_PUBLICATION_VERIFY_TIMEOUT_SECS),
+    )
+    .await?;
+    if !status.success() {
+        tracing::warn!(derivation_id, job_id = %job_id,
+            "builder reported cache_pushed, but server publication verification failed");
+        return Err(CacheProbeFailure::Process);
     }
-
-    let output = tokio::time::timeout(std::time::Duration::from_secs(30), command.output())
-        .await
-        .map_err(|_| {
-            tracing::warn!(
-                derivation_id,
-                job_id = %job_id,
-                cache_destination = %destination.name,
-                cache_url,
-                store_path,
-                "timed out verifying builder cache push"
-            );
-            StatusCode::CONFLICT
-        })?
-        .map_err(|e| {
-            tracing::warn!(
-                derivation_id,
-                job_id = %job_id,
-                cache_destination = %destination.name,
-                cache_url,
-                store_path,
-                error = %e,
-                "failed to run cache availability probe"
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    if !output.status.success() {
-        tracing::warn!(
-            derivation_id,
-            job_id = %job_id,
-            cache_destination = %destination.name,
-            cache_url,
-            store_path,
-            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-            "builder reported cache_pushed, but server cache probe could not find store path"
-        );
-        return Err(StatusCode::CONFLICT);
-    }
-
     Ok(())
 }
 
-async fn record_builder_confirmed_cache_push(
-    state: &CFState,
-    derivation_id: i32,
-    job_id: Uuid,
-    cache_destination: &crate::models::cache_destination::CacheDestination,
-) -> Result<(), StatusCode> {
-    let derivation = crate::queries::derivations::get_derivation_by_id(&state.pool, derivation_id)
-        .await
-        .map_err(|e| {
-            tracing::warn!(
-                derivation_id,
-                job_id = %job_id,
-                error = %e,
-                "failed to load derivation while recording builder-confirmed cache push"
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
-
-    let Some(store_path) = derivation
-        .store_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    else {
-        tracing::warn!(
-            derivation_id,
-            job_id = %job_id,
-            "builder reported cache_pushed but derivation has no persisted store_path"
-        );
-        return Err(StatusCode::CONFLICT);
-    };
-
-    verify_store_path_available_from_cache(cache_destination, store_path, derivation_id, job_id)
-        .await?;
-
-    let cache_job_id = crate::queries::cache_push::create_cache_push_job(
-        &state.pool,
-        derivation_id,
-        store_path,
-        Some(cache_destination.name.as_str()),
-    )
+async fn probe_cache_read(
+    destination: CacheDestination,
+    store_path: String,
+    program: std::ffi::OsString,
+    deadline: std::time::Duration,
+) -> Result<std::process::ExitStatus, CacheProbeFailure> {
+    if !cf_protocol::builder::is_canonical_nix_store_path(&store_path, false) {
+        return Err(CacheProbeFailure::Configuration);
+    }
+    let (url, keys, auth) = destination
+        .read_config()
+        .map_err(|_| CacheProbeFailure::Configuration)?;
+    // CONCURRENCY: Dropping the HTTP future signals the process owner to kill
+    // and reap before deleting read credentials or the isolated metadata cache.
+    let (cancel_guard, mut cancelled) = tokio::sync::oneshot::channel::<()>();
+    let result = tokio::spawn(async move {
+        let expires = tokio::time::Instant::now() + deadline;
+        let prepared = if destination.cache_type == "Niks3" {
+            // SECURITY: Establish native support before creating secret files
+            // using the exact read executable.
+            let features = if matches!(auth, cf_protocol::cache::CacheReadAuth::Basic { .. }) {
+                probe_nix_read_features(&program)
+                    .await
+                    .map_err(|_| CacheProbeFailure::Configuration)?
+            } else {
+                cf_config::cache_credentials::NixReadFeatures::default()
+            };
+            Some(
+                cf_config::cache_credentials::PreparedCacheRead::new_with_nix_features(
+                    &url, &keys, &auth, &features,
+                )
+                .map_err(|_| CacheProbeFailure::Configuration)?,
+            )
+        } else {
+            None
+        };
+        let temporary_environment = if prepared.is_some() {
+            use std::os::unix::fs::PermissionsExt;
+            Some(
+                tempfile::Builder::new()
+                    .prefix("cf-cache-probe-")
+                    .permissions(std::fs::Permissions::from_mode(0o700))
+                    .tempdir()
+                    .map_err(|_| CacheProbeFailure::Configuration)?,
+            )
+        } else {
+            None
+        };
+        let outcome = async {
+            let mut command = Command::new(&program);
+            command.args([
+                "path-info",
+                "--refresh",
+                "--store",
+                prepared.as_ref().map_or(url.as_str(), |p| p.url.as_str()),
+                &store_path,
+            ]);
+            // Completion reporting owns bounded retries. Avoid another retry
+            // loop inside Nix that can hide throttling until the probe expires.
+            command.args(["--option", "download-attempts", "1"]);
+            if let (Some(read), Some(root)) = (&prepared, &temporary_environment) {
+                configure_niks3_verification_read(&mut command, read, root.path());
+            } else {
+                command.args(["--option", "extra-trusted-public-keys", &keys.join(" ")]);
+                apply_cache_destination_env(&mut command, &destination);
+            }
+            // SECURITY: path-info proves exact-root availability, not NAR
+            // integrity or signatures. Deployment and CVE copy retain those
+            // checks at materialization. No local logical store is created.
+            wait_cache_verification_command(command, expires, &mut cancelled).await
+        }
+        .await;
+        drop(prepared);
+        drop(temporary_environment);
+        outcome
+    })
     .await
-    .map_err(|e| {
-        tracing::warn!(
-            derivation_id,
-            job_id = %job_id,
-            error = %e,
-            "failed to create/reuse cache push job for builder-confirmed cache push"
+    .map_err(|_| CacheProbeFailure::Process)?;
+    drop(cancel_guard);
+    result
+}
+
+// SECURITY: Do not inherit ambient write auth, Nix user/system trust keys or
+// narinfo metadata. A task-owned cache directory and --refresh ensure each
+// verification observes the selected remote publication instead of old cache
+// metadata. HOME/config/cache are scratch directories, not a local Nix store.
+fn configure_niks3_verification_read(
+    command: &mut Command,
+    read: &cf_config::cache_credentials::PreparedCacheRead,
+    root: &std::path::Path,
+) {
+    command.env_clear();
+    for key in ["PATH", "SSL_CERT_FILE", "SSL_CERT_DIR", "NIX_SSL_CERT_FILE"] {
+        if let Some(value) = std::env::var_os(key) {
+            command.env(key, value);
+        }
+    }
+    command
+        .env("HOME", root)
+        .env("XDG_CACHE_HOME", root.join("cache"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("NIX_CONF_DIR", root.join("config"))
+        .env("NIX_USER_CONF_FILES", "/dev/null");
+    command.args([
+        "--extra-experimental-features",
+        "nix-command",
+        "--option",
+        "trusted-public-keys",
+        &read.trusted_public_keys,
+        "--option",
+        "extra-trusted-public-keys",
+        "",
+        "--option",
+        "require-sigs",
+        "true",
+        "--option",
+        "substituters",
+        "",
+        "--option",
+        "narinfo-cache-positive-ttl",
+        "0",
+        "--option",
+        "narinfo-cache-negative-ttl",
+        "0",
+    ]);
+    if let Some(ca) = &read.ca_certificate_path {
+        command.env("NIX_SSL_CERT_FILE", ca);
+    }
+    read.apply_to_nix_command(command.as_std_mut());
+}
+
+/// Probes the actual read executable without exposing runtime configuration.
+///
+/// Callers must use the same executable and PATH for the subsequent read.
+/// Captures at most 2 MiB of settings and 64 KiB of private diagnostics, with a
+/// ten-second deadline. No credential files or network reads are prepared here.
+///
+/// # Errors
+/// Returns a static error for failed, oversized, timed-out or malformed probes.
+/// Valid settings from an unpatched runtime report absent guard support.
+pub(crate) async fn probe_nix_read_features(
+    program: &std::ffi::OsStr,
+) -> anyhow::Result<cf_config::cache_credentials::NixReadFeatures> {
+    use tokio::io::AsyncReadExt;
+    const MAX_SETTINGS: u64 = 2 * 1024 * 1024;
+    let mut command = Command::new(program);
+    command.args([
+        "--extra-experimental-features",
+        "nix-command",
+        "config",
+        "show",
+        "--json",
+    ]);
+    let mut child = command
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|_| anyhow::anyhow!("Nix runtime feature probe failed"))?;
+    let stdout = child
+        .stdout
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Missing Nix probe stdout"))?;
+    let stderr = child
+        .stderr
+        .take()
+        .ok_or_else(|| anyhow::anyhow!("Missing Nix probe stderr"))?;
+    let capture = async {
+        let mut settings = Vec::new();
+        let mut diagnostics = Vec::new();
+        let mut stdout = stdout.take(MAX_SETTINGS + 1);
+        let mut stderr = stderr.take(64 * 1024 + 1);
+        let (out, err) = tokio::join!(
+            stdout.read_to_end(&mut settings),
+            stderr.read_to_end(&mut diagnostics),
         );
-        StatusCode::INTERNAL_SERVER_ERROR
-    })?;
+        if out.is_err()
+            || err.is_err()
+            || settings.len() > MAX_SETTINGS as usize
+            || diagnostics.len() > 64 * 1024
+        {
+            anyhow::bail!("Nix runtime feature probe exceeded capture limits");
+        }
+        let status = child
+            .wait()
+            .await
+            .map_err(|_| anyhow::anyhow!("Nix runtime feature probe failed"))?;
+        anyhow::ensure!(status.success(), "Nix runtime feature probe failed");
+        cf_config::cache_credentials::NixReadFeatures::from_settings_json(&settings)
+    };
+    match tokio::time::timeout(std::time::Duration::from_secs(10), capture).await {
+        Ok(Ok(features)) => Ok(features),
+        _ => {
+            let _ = child.kill().await;
+            let _ = child.wait().await;
+            anyhow::bail!("Nix runtime feature probe failed");
+        }
+    }
+}
 
-    crate::queries::cache_push::mark_cache_push_completed(&state.pool, cache_job_id, None, None)
-        .await
-        .map_err(|e| {
-            tracing::warn!(
-                derivation_id,
-                job_id = %job_id,
-                cache_job_id,
-                error = %e,
-                "failed to mark builder-confirmed cache push completed"
-            );
-            StatusCode::INTERNAL_SERVER_ERROR
-        })?;
+async fn wait_cache_verification_command(
+    mut command: Command,
+    expires: tokio::time::Instant,
+    cancelled: &mut tokio::sync::oneshot::Receiver<()>,
+) -> Result<std::process::ExitStatus, CacheProbeFailure> {
+    use crate::vulnix::process_group::{ScannerProcessGroup, isolate};
+    use tokio::io::AsyncReadExt;
+    if tokio::time::Instant::now() >= expires
+        || !matches!(
+            cancelled.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+        )
+    {
+        return Err(CacheProbeFailure::Timeout);
+    }
+    command
+        .kill_on_drop(true)
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
+    isolate(&mut command);
+    let mut child = command.spawn().map_err(|_| CacheProbeFailure::Process)?;
+    let stdout = child.stdout.take().ok_or(CacheProbeFailure::Process)?;
+    let stderr = child.stderr.take().ok_or(CacheProbeFailure::Process)?;
+    let mut child = ScannerProcessGroup::new(child, "cache publication verification")
+        .map_err(|_| CacheProbeFailure::Process)?;
+    // SECURITY: Retain at most 64 KiB per private stream. Oversize output ends
+    // the probe; neither raw stream nor command Debug can reach logs or JSON.
+    let capture = async {
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let mut stdout = stdout.take(CACHE_PUBLICATION_CAPTURE_LIMIT as u64 + 1);
+        let mut stderr = stderr.take(CACHE_PUBLICATION_CAPTURE_LIMIT as u64 + 1);
+        let (out_result, err_result) =
+            tokio::join!(stdout.read_to_end(&mut out), stderr.read_to_end(&mut err),);
+        if out_result.is_err()
+            || err_result.is_err()
+            || out.len() > CACHE_PUBLICATION_CAPTURE_LIMIT
+            || err.len() > CACHE_PUBLICATION_CAPTURE_LIMIT
+        {
+            return Err(CacheProbeFailure::Process);
+        }
+        tracing::debug!(
+            stdout_bytes = out.len(),
+            stderr_bytes = err.len(),
+            "Private cache metadata capture completed"
+        );
+        let status = child.wait().await.map_err(|_| CacheProbeFailure::Process)?;
+        if status.success() {
+            Ok(status)
+        } else {
+            Err(classify_cache_probe_failure(&err))
+        }
+    };
+    let result = tokio::select! {
+        result = capture => result,
+        _ = tokio::time::sleep_until(expires) => Err(CacheProbeFailure::Timeout),
+        _ = cancelled => Err(CacheProbeFailure::Timeout),
+    };
+    if result.is_ok() {
+        child.disarm();
+    } else {
+        child.terminate().await;
+    }
+    result
+}
 
-    Ok(())
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CacheProbeFailure {
+    MissingPath,
+    AuthenticationFailed,
+    RateLimited,
+    Network,
+    Timeout,
+    Configuration,
+    Process,
+}
+
+// SECURITY: Operator logs use bounded sanitized names and fixed failure text.
+// IDs remain structured telemetry; endpoints and process output never enter logs.
+fn publication_probe_message(
+    name: &str,
+    cache_type: &str,
+    elapsed: std::time::Duration,
+    failure: Option<CacheProbeFailure>,
+) -> String {
+    let name = cf_protocol::cache::cache_log_display_name(Some(name));
+    let cache_type = publication_log_cache_type(cache_type);
+    match failure {
+        Some(failure) => format!(
+            "⚠️ Cache availability check failed for {name} ({cache_type}): {} ({} ms)\n",
+            failure.description(),
+            elapsed.as_millis(),
+        ),
+        None => format!(
+            "✅ Output confirmed in {name} ({} ms)\n",
+            elapsed.as_millis()
+        ),
+    }
+}
+
+fn publication_log_cache_type(cache_type: &str) -> &str {
+    match cache_type {
+        "Niks3" => "Niks3",
+        "Attic" => "Attic",
+        "S3" => "S3",
+        "Nix" => "Nix",
+        "Http" => "Http",
+        _ => "unsupported",
+    }
+}
+
+async fn append_publication_probe_log(
+    state: &CFState,
+    job_id: Uuid,
+    destination: &CacheDestination,
+    elapsed: std::time::Duration,
+    failure: Option<CacheProbeFailure>,
+) {
+    tracing::info!(
+        cache_id = destination.id,
+        cache_type = publication_log_cache_type(&destination.cache_type),
+        stage = "availability_path_info",
+        elapsed_ms = elapsed.as_millis() as u64,
+        outcome = failure.map_or("success", CacheProbeFailure::code),
+        publication_status = if failure.is_some() {
+            "pending"
+        } else {
+            "confirmed"
+        },
+        "cache_publication",
+    );
+    let message =
+        publication_probe_message(&destination.name, &destination.cache_type, elapsed, failure);
+    append_publication_log_message(state, job_id, message).await;
+}
+
+async fn append_publication_log_message(state: &CFState, job_id: Uuid, message: String) {
+    let max_chunk = state
+        .server_config
+        .max_build_log_chunk_mb
+        .saturating_mul(1024 * 1024);
+    let max_total = state
+        .server_config
+        .max_build_log_size_mb
+        .saturating_mul(1024 * 1024);
+    if message.len() > max_chunk
+        || builders::append_job_logs_with_limits(&state.pool, &job_id, &message, max_total)
+            .await
+            .is_err()
+    {
+        tracing::warn!(%job_id, "Publication diagnostic could not be persisted within log limits");
+        return;
+    }
+    if let Some(tx) = get_or_create_build_log_channel(state, job_id).await {
+        let log = BuildStreamMessage::Log { message };
+        record_build_stream_message(state, job_id, &log).await;
+        let _ = broadcast_build_stream_message(&tx, &log);
+    }
+}
+
+impl CacheProbeFailure {
+    fn description(self) -> &'static str {
+        match self {
+            Self::MissingPath => "output not yet available",
+            Self::AuthenticationFailed => "authentication failed",
+            Self::RateLimited => "rate limited",
+            Self::Network => "network error",
+            Self::Timeout => "timed out",
+            Self::Configuration => "invalid read configuration",
+            Self::Process => "probe failed",
+        }
+    }
+
+    fn code(self) -> &'static str {
+        match self {
+            Self::MissingPath => "cache_path_missing",
+            Self::AuthenticationFailed => "cache_authentication_failed",
+            Self::RateLimited => "cache_rate_limited",
+            Self::Network => "cache_network_error",
+            Self::Timeout => "cache_probe_timeout",
+            Self::Configuration => "cache_read_configuration_invalid",
+            Self::Process => "cache_probe_failed",
+        }
+    }
+
+    fn retryable(self) -> bool {
+        matches!(
+            self,
+            Self::MissingPath | Self::RateLimited | Self::Network | Self::Timeout
+        )
+    }
+
+    fn response(self) -> Response {
+        let mut body = serde_json::json!({
+            "build_status": "success", "publication_status": "pending",
+            "verification_code": self.code(), "retryable": self.retryable(),
+        });
+        if self.retryable() {
+            body["retry_after_secs"] = serde_json::json!(2);
+        }
+        (StatusCode::ACCEPTED, Json(body)).into_response()
+    }
+}
+
+// SECURITY: Nix diagnostics can quote credential URLs and append response
+// bodies. Match only fixed Nix diagnostic forms outside quoted spans, and stop
+// before response-body lines. Classification is a retry hint, not authorization.
+fn classify_cache_probe_failure(stderr: &[u8]) -> CacheProbeFailure {
+    let text = String::from_utf8_lossy(stderr);
+    let mut hints = String::new();
+    for line in text.lines() {
+        let lower = line.to_ascii_lowercase();
+        if lower.contains("response body") || lower.contains("<!doctype") || lower.contains("<html")
+        {
+            break;
+        }
+        if !lower.trim_start().starts_with("error:") && !lower.trim_start().starts_with("warning:")
+        {
+            continue;
+        }
+        // URL text can itself contain quote characters. Only consider the
+        // suffix after the final enclosing quote, never pieces of that URL.
+        let lower = if let Some(scheme) = lower.find("://") {
+            let Some(open) = lower[..scheme].rfind(['\'', '"', '`']) else {
+                continue;
+            };
+            let delimiter = lower.as_bytes()[open] as char;
+            let Some((close, _)) = lower.rmatch_indices(delimiter).find(|(index, _)| {
+                *index > scheme
+                    && lower[*index + 1..]
+                        .chars()
+                        .next()
+                        .is_none_or(|next| next.is_whitespace() || matches!(next, ':' | ',' | ')'))
+            }) else {
+                continue;
+            };
+            &lower[close + 1..]
+        } else {
+            lower.as_str()
+        };
+        let mut quote = None;
+        let mut previous = ' ';
+        for ch in lower.chars() {
+            if let Some(open) = quote {
+                if ch == open {
+                    quote = None;
+                }
+            } else if matches!(ch, '\'' | '"' | '`') && !previous.is_ascii_alphanumeric() {
+                quote = Some(ch);
+                hints.push(' ');
+            } else {
+                hints.push(ch);
+            }
+            previous = ch;
+        }
+        hints.push('\n');
+    }
+    if hints.contains("http error 401") || hints.contains("http error 403") {
+        CacheProbeFailure::AuthenticationFailed
+    } else if hints.contains("http error 429") {
+        CacheProbeFailure::RateLimited
+    } else if hints.contains("http error 404")
+        || hints.contains("is not valid")
+        || hints.contains("does not exist")
+    {
+        CacheProbeFailure::MissingPath
+    } else if hints.contains("timed out") || hints.contains("timeout was reached") {
+        CacheProbeFailure::Timeout
+    } else if [
+        "could not resolve host",
+        "couldn't resolve host",
+        "couldn't connect to server",
+        "could not connect",
+        "connection refused",
+        "connection reset",
+        "unexpected eof",
+        "ssl connect error",
+    ]
+    .iter()
+    .any(|hint| hints.contains(hint))
+    {
+        CacheProbeFailure::Network
+    } else {
+        CacheProbeFailure::Process
+    }
+}
+
+// CONCURRENCY: Only the selected transaction future is polled. A failed probe
+// cannot record confirmed publication; pending completion still rechecks all
+// claim/output/configuration guards before recording build success.
+async fn complete_after_verification<T, F>(
+    failure: Option<CacheProbeFailure>,
+    completion: impl std::future::Future<Output = T>,
+    pending: impl FnOnce(CacheProbeFailure) -> F,
+) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    if let Some(failure) = failure {
+        pending(failure).await
+    } else {
+        completion.await
+    }
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/complete - Mark job as complete
@@ -3455,12 +4761,30 @@ async fn record_builder_confirmed_cache_push(
 /// In addition to closing the build job, the server performs the derivation
 /// completion (store path + status) and queues a cache-push job. This keeps all
 /// database writes server-side so API builders never need a DB connection.
+/// Reported publication is verified once against authoritative output before
+/// publication confirmation. Niks3 requires the persisted dispatch identity and
+/// refreshed exact-root metadata. This probe does not prove NAR integrity or
+/// signatures. The success transaction rechecks output, destination eligibility
+/// and captured configuration. Failed probes commit build success with durable
+/// pending publication and return 202 with a static retry hint. Confirmed probes
+/// return 200; completion without a reported push returns publication `none`.
+/// The pending queue is operator-visible; automatic worker recovery is not
+/// guaranteed. Same-claim retries can confirm publication without rebuilding.
+/// Admission-time CVE provenance and policy-enabled automatic hardening admission
+/// commit with build success. Idempotent retries retain the original admission.
+/// After commit, confirmed publication releases the derivation's GC root with
+/// best-effort cleanup. Failed verification retains the root for recovery.
+///
+/// # Errors
+/// Returns an authentication/authorization status for invalid ownership, a
+/// conflict for changed identity, output, status or configuration, or an
+/// internal error for database failures. Probe failures are pending responses.
 pub async fn complete_job(
     State(state): State<CFState>,
     Path((builder_id, job_id)): Path<(Uuid, Uuid)>,
     headers: axum::http::HeaderMap,
     body: Bytes,
-) -> Result<StatusCode, StatusCode> {
+) -> Result<Response, StatusCode> {
     // Authenticate builder request with replay resistance
     let path = format!("/api/v1/builders/{}/jobs/{}/complete", builder_id, job_id);
     let verified =
@@ -3473,6 +4797,7 @@ pub async fn complete_job(
     // Output path is optional for backwards compatibility but expected from API builders.
     let request: CompleteJobRequest = if body.is_empty() {
         CompleteJobRequest {
+            cache_destination_id: None,
             output_path: None,
             cache_pushed: false,
             cache_reference: None,
@@ -3481,88 +4806,199 @@ pub async fn complete_job(
         serde_json::from_slice(&body).map_err(|_| StatusCode::BAD_REQUEST)?
     };
 
+    let job = builders::get_build_job_by_id(&state.pool, &job_id)
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if job.builder_id != Some(builder_id) || job.builder_session_id != verified.builder_session_id {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if !matches!(job.status.as_str(), "building" | "success") {
+        return Err(StatusCode::CONFLICT);
+    }
+    let derivation =
+        crate::queries::derivations::get_derivation_by_id(&state.pool, job.derivation_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     let reported_cache_destination =
-        validated_reported_cache_destination(&state, &request, builder_id, job_id).await?;
+        validated_reported_cache_destination(&state, &request, &job, &derivation).await?;
+    let (evaluated_output, persisted_output): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT expected_store_path, store_path FROM derivations WHERE id = $1")
+            .bind(job.derivation_id)
+            .fetch_one(&state.pool)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let require_authoritative = if let Some(destination) = reported_cache_destination.as_ref() {
+        destination.cache_type == "Niks3"
+    } else if let Some(destination_id) = job.dispatched_cache_destination_id {
+        crate::queries::cache_destinations::get_cache_destination(&state.pool, destination_id)
+            .await
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+            .is_some_and(|destination| destination.cache_type == "Niks3")
+    } else {
+        false
+    };
+    // COMPATIBILITY: Older caches can report a canonical builder output when
+    // evaluation did not record one. Existing server authority still wins;
+    // Niks3 always requires it. Request-less legacy publication uses known data.
+    let requested_output = request.output_path.as_deref().or_else(|| {
+        reported_cache_destination
+            .as_ref()
+            .and(evaluated_output.as_deref().or(persisted_output.as_deref()))
+    });
+    let output = builders::validated_completion_output(
+        &job.status,
+        requested_output,
+        evaluated_output.as_deref(),
+        persisted_output.as_deref(),
+        require_authoritative,
+    )
+    .map_err(|_| StatusCode::CONFLICT)?;
+    let publication = if let Some(destination) = reported_cache_destination.as_ref() {
+        Some(
+            builders::capture_cache_publication_configuration(
+                &state.pool,
+                job.derivation_id,
+                destination,
+            )
+            .await
+            .map_err(|_| StatusCode::CONFLICT)?,
+        )
+    } else {
+        None
+    };
+    if let Some(destination) = reported_cache_destination.as_ref() {
+        let name = cf_protocol::cache::cache_log_display_name(Some(&destination.name));
+        append_publication_log_message(
+            &state,
+            job_id,
+            format!("🔎 Checking output availability in {name}...\n"),
+        )
+        .await;
+    }
+    let probe_started = std::time::Instant::now();
+    let probe_failure = if let Some(destination) = reported_cache_destination.as_ref() {
+        verify_store_path_available_from_cache(
+            destination,
+            output.as_deref().ok_or(StatusCode::CONFLICT)?,
+            job.derivation_id,
+            job_id,
+        )
+        .await
+        .err()
+    } else {
+        None
+    };
 
     // Perform atomic completion (job + derivation update in one transaction).
+    let probe_elapsed = probe_started.elapsed();
     // Idempotent: if the job is already 'success' with matching builder+session,
     // this is a safe no-op. The returned bool indicates whether this was a new
     // completion (true) or an idempotent retry (false).
-    let (completed_job, is_new) = builders::complete_job_atomic(
-        &state.pool,
-        &job_id,
-        &builder_id,
-        verified.builder_session_id.as_ref(),
-        request.output_path.as_deref(),
+    // The completion policy carries deployment configuration into the
+    // transaction after publication verification. Automatic hardening admission
+    // uses the handler's configuration, not a query-layer configuration read.
+    let policy = builders::BuildCompletionPolicy {
+        auto_hardening_scans: state.server_config.auto_hardening_scans,
+    };
+    let pending_state = &state;
+    let pending_output = output.as_deref();
+    let captured = publication.as_ref();
+    let session = verified.builder_session_id.as_ref();
+    let completion = complete_after_verification(
+        probe_failure,
+        async {
+            builders::complete_preverified_job_atomic_with_policy(
+                &state.pool,
+                &job_id,
+                &builder_id,
+                verified.builder_session_id.as_ref(),
+                output.as_deref(),
+                publication.as_ref(),
+                policy,
+            )
+            .await
+        },
+        |failure| async move {
+            builders::complete_pending_publication_atomic_with_policy(
+                &pending_state.pool,
+                &job_id,
+                &builder_id,
+                session,
+                pending_output.ok_or_else(|| anyhow::anyhow!("Missing pending output"))?,
+                captured.ok_or_else(|| anyhow::anyhow!("Missing captured configuration"))?,
+                failure.code(),
+                policy,
+            )
+            .await
+        },
     )
-    .await
-    .map_err(|err| {
+    .await;
+    let (completed_job, is_new) = completion.map_err(|_| {
         tracing::warn!(
             builder_id = %builder_id,
             job_id = %job_id,
-            error = %err,
             "Rejected complete transition due to lease/state mismatch"
         );
         StatusCode::CONFLICT
     })?;
 
-    if request.cache_pushed {
-        let Some(cache_destination) = reported_cache_destination.as_ref() else {
-            tracing::warn!(
-                builder_id = %builder_id,
-                job_id = %job_id,
-                "builder reported cache_pushed but no validated cache destination is available"
-            );
-            return Err(StatusCode::CONFLICT);
-        };
-        record_builder_confirmed_cache_push(
-            &state,
-            completed_job.derivation_id,
-            job_id,
-            cache_destination,
-        )
-        .await?;
-    } else if is_new {
-        // Old builder compatibility: builders that do not report builder-side cache
-        // push still create a pending server-side cache-push row on first completion.
-        if let Some(ref store_path) = request.output_path {
-            let cache_destination =
-                crate::queries::cache_destinations::list_cache_destinations(&state.pool, true)
-                    .await
-                    .ok()
-                    .and_then(|dests| dests.into_iter().next().map(|d| d.name));
+    if let Some(destination) = reported_cache_destination.as_ref() {
+        append_publication_probe_log(&state, job_id, destination, probe_elapsed, probe_failure)
+            .await;
+    }
+    if let Some(failure) = probe_failure {
+        // INVARIANT: Pending success retains GC root and live log ownership.
+        return Ok(failure.response());
+    }
 
-            if let Err(e) = crate::queries::cache_push::create_cache_push_job(
+    if publication.is_some() {
+        // INVARIANT: Retain the recovery root until verified publication and
+        // success commit together. Cleanup remains best-effort and retryable.
+        if let Err(error) = crate::builder::remove_gc_root(completed_job.derivation_id).await {
+            tracing::warn!(derivation_id = completed_job.derivation_id, %error,
+                "failed to remove GC root after verified builder publication");
+        }
+    }
+
+    if !request.cache_pushed
+        && is_new
+        && job.dispatched_cache_destination_id.is_none()
+        && output.is_some()
+    {
+        // COMPATIBILITY: Only unbound legacy/static work needs post-commit
+        // resolution. Recorded IDs were queued atomically above. The shared
+        // helper requires unambiguous eligibility and never chooses a first row.
+        let database_present: bool =
+            sqlx::query_scalar("SELECT EXISTS (SELECT 1 FROM cache_destinations)")
+                .fetch_one(&state.pool)
+                .await
+                .unwrap_or(true);
+        if job.cache_dispatch_recorded_at.is_none() || !database_present {
+            let static_config = crate::config::CrystalForgeConfig::load()
+                .map(|config| config.get_cache_config().clone())
+                .unwrap_or_default();
+            if crate::queries::cache_push::enqueue_cache_push_for_derivation(
                 &state.pool,
                 completed_job.derivation_id,
-                store_path,
-                cache_destination.as_deref(),
+                &static_config,
             )
             .await
+            .is_err()
             {
-                tracing::warn!(
-                    "Failed to queue cache push for derivation {} (job {}): {}",
-                    completed_job.derivation_id,
-                    job_id,
-                    e
-                );
+                tracing::warn!(derivation_id = completed_job.derivation_id, job_id = %job_id,
+                    "failed to queue unbound legacy publication with canonical destination policy");
             }
         }
     }
 
     cleanup_build_log_channel(&state, job_id).await;
 
-    // Best-effort source archive cleanup (for ServerBundledArchive jobs).
-    if state.server_config.source_delivery_mode == SourceInputDeliveryMode::ServerBundledArchive {
-        cleanup_source_archive(
-            &state.pool,
-            &state.server_config.source_archive_root,
-            job_id,
-        )
-        .await;
-    }
-
-    Ok(StatusCode::OK)
+    Ok(Json(serde_json::json!({
+        "build_status": "success",
+        "publication_status": if publication.is_some() { "confirmed" } else { "none" },
+    }))
+    .into_response())
 }
 
 /// POST /api/v1/builders/:id/jobs/:job_id/fail - Mark job as failed
@@ -3607,6 +5043,33 @@ pub async fn fail_job(
 
     let failure_message = format_failure_message(&request);
 
+    if request.failure_phase.as_deref() == Some("evaluator_incompatible")
+        && state.server_config.remote_build_execution_strategy
+            == RemoteBuildExecutionStrategy::SourceReEvaluateVerified
+    {
+        // SECURITY: Only a verified-source claim can encounter an evaluator
+        // mismatch. Do not let a builder bypass retry accounting for another
+        // execution strategy by selecting this failure-phase string.
+        builders::release_job_for_incompatible_evaluator(
+            &state.pool,
+            &job_id,
+            &builder_id,
+            verified.builder_session_id.as_ref(),
+            request.error_message.as_deref(),
+        )
+        .await
+        .map_err(|error| {
+            tracing::warn!(
+                builder_id = %builder_id,
+                job_id = %job_id,
+                "rejected evaluator-incompatible release: {error:#}"
+            );
+            StatusCode::CONFLICT
+        })?;
+        cleanup_build_log_channel(&state, job_id).await;
+        return Ok(StatusCode::OK);
+    }
+
     // Mark job as failed with retry logic
     let updated_job = builders::mark_job_failed_with_retry(
         &state.pool,
@@ -3631,15 +5094,6 @@ pub async fn fail_job(
 
     // Return 200 when a child was scheduled, 202 when no retry is eligible.
     if updated_job.retry_job.is_some() {
-        if state.server_config.source_delivery_mode == SourceInputDeliveryMode::ServerBundledArchive
-        {
-            cleanup_source_archive(
-                &state.pool,
-                &state.server_config.source_archive_root,
-                job_id,
-            )
-            .await;
-        }
         Ok(StatusCode::OK) // Job re-queued for retry
     } else {
         // No retry was scheduled: record the derivation-level failure server-side so
@@ -3677,17 +5131,6 @@ pub async fn fail_job(
                     e
                 );
             }
-        }
-
-        // Best-effort source archive cleanup (for ServerBundledArchive jobs).
-        if state.server_config.source_delivery_mode == SourceInputDeliveryMode::ServerBundledArchive
-        {
-            cleanup_source_archive(
-                &state.pool,
-                &state.server_config.source_archive_root,
-                job_id,
-            )
-            .await;
         }
 
         Ok(StatusCode::ACCEPTED) // Job permanently failed
@@ -4277,7 +5720,72 @@ async fn record_build_stream_message(state: &CFState, job_id: Uuid, msg: &BuildS
 }
 
 #[cfg(test)]
+#[path = "builders_proxy_dispatch_tests.rs"]
+mod proxy_dispatch_tests;
+
+#[cfg(test)]
 mod tests {
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified isolated database and database creation privileges"]
+    async fn niks3_builder_and_agent_selection_share_assigned_first_policy(pool: sqlx::PgPool) {
+        let environment: uuid::Uuid = sqlx::query_scalar("INSERT INTO environments (name, description, is_active) VALUES ('builder-selection', 'test', TRUE) RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        let repo = "https://example.com/cache-selection.git";
+        let hash = "2".repeat(40);
+        crate::queries::flakes::insert_flake(&pool, "cache-selection", repo, "main", "all_configs")
+            .await
+            .unwrap();
+        crate::queries::commits::insert_commit_with_metadata(
+            &pool,
+            &hash,
+            repo,
+            chrono::Utc::now(),
+            Some("selection fixture"),
+            Some("test"),
+        )
+        .await
+        .unwrap();
+        let commit = crate::queries::commits::get_commit_by_hash(&pool, &hash)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO systems (hostname, system_configuration_name, environment_id, public_key, derivation, flake_id) VALUES ('selection-host', 'selection-config', $1, $2, '/nix/store/current', $3)")
+            .bind(environment).bind("AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=").bind(commit.flake_id).execute(&pool).await.unwrap();
+        let selected: i32 = sqlx::query_scalar("INSERT INTO cache_destinations (name, cache_type, enabled, push_to, niks3_server_url, niks3_write_auth_mode, niks3_auth_token, niks3_public_keys, niks3_read_auth_mode) VALUES ('z-assigned-niks3', 'Niks3', TRUE, 'https://selected.example', 'https://write.example', 'token', 'write-token', ARRAY['cache:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='], 'none') RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO cache_destination_environments (cache_destination_id, environment_id) VALUES ($1, $2)")
+            .bind(selected).bind(environment).execute(&pool).await.unwrap();
+        let global: i32 = sqlx::query_scalar("INSERT INTO cache_destinations (name, cache_type, enabled, push_to) VALUES ('a-global', 'Nix', TRUE, 'https://fallback.example') RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        let derivation = crate::test_utils::builders::DerivationBuilder::new()
+            .commit_id(Some(commit.id))
+            .name("selection-config")
+            .build();
+        for expected in [selected, global] {
+            let builder = super::resolve_cache_destinations_for_derivation(&pool, &derivation)
+                .await
+                .unwrap();
+            let agent =
+                crate::queries::cache_destinations::eligible_cache_destinations_for_environment(
+                    &pool,
+                    Some(environment),
+                )
+                .await
+                .unwrap();
+            assert_eq!(
+                builder.iter().map(|d| d.id).collect::<Vec<_>>(),
+                vec![expected]
+            );
+            assert_eq!(
+                agent.iter().map(|d| d.id).collect::<Vec<_>>(),
+                vec![expected]
+            );
+            sqlx::query("UPDATE cache_destinations SET enabled = FALSE WHERE id = $1")
+                .bind(selected)
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+    }
     use anyhow::anyhow;
     use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
     use base64::engine::{Engine, general_purpose};
@@ -4291,6 +5799,8 @@ mod tests {
     use super::builder_id_for_resolved_builder;
     use super::canonical_signature_payload;
     use super::chunk_derivation_archive_paths;
+    use super::evaluator_conflict;
+    use super::execution_strategy_conflict;
     use super::fallback_job_status_request_for_invalid_details;
     use super::format_failure_message;
     use super::map_create_builder_error;
@@ -4300,13 +5810,14 @@ mod tests {
     use super::parse_next_job_request;
     use super::persisted_build_log_frames;
     use super::retry_failure_class;
+    use super::source_delivery_conflict;
     use super::source_flake_target_for_derivation;
     use super::verify_builder_resolve_request;
     use crate::builder::api_client::BuilderApiClient;
     use crate::derivations::{Derivation, DerivationType};
     use crate::models::builders::{
-        Builder, BuilderStatus, NextJobRequest, RemoteBuildExecutionStrategy,
-        ResolveBuilderIdRequest,
+        Builder, BuilderStatus, NextJobConflictReason, NextJobConflictResponse, NextJobRequest,
+        RemoteBuildExecutionStrategy, ResolveBuilderIdRequest, SourceInputDeliveryMode,
     };
     use crate::models::public_key::PublicKey;
 
@@ -4319,6 +5830,7 @@ mod tests {
         let body = serde_json::to_vec(&ResolveBuilderIdRequest {
             public_key: public_key_base64.clone(),
             session_id: Some(Uuid::new_v4()),
+            capabilities: Default::default(),
         })
         .expect("resolve request should serialize");
         let payload =
@@ -4450,6 +5962,7 @@ mod tests {
             request.supported_execution_strategies,
             vec![RemoteBuildExecutionStrategy::ServerDerivation]
         );
+        assert!(request.evaluator.is_none());
     }
 
     #[test]
@@ -4462,16 +5975,152 @@ mod tests {
             request.supported_execution_strategies,
             vec![RemoteBuildExecutionStrategy::ServerDerivation]
         );
+        assert!(request.evaluator.is_none());
+    }
+
+    #[test]
+    fn unsupported_execution_strategy_has_discriminating_preclaim_reason() {
+        let request = NextJobRequest {
+            capabilities: Default::default(),
+            protocol_version: 2,
+            supported_execution_strategies: vec![
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            ],
+            supported_evaluator_contract_versions: Vec::new(),
+            evaluator: None,
+        };
+
+        assert_eq!(
+            execution_strategy_conflict(&request, RemoteBuildExecutionStrategy::ServerDerivation,),
+            Some(NextJobConflictReason::UnsupportedExecutionStrategy)
+        );
+    }
+
+    #[tokio::test]
+    async fn niks3_preclaim_capability_gate_preserves_legacy_cache_dispatch() {
+        use cf_protocol::cache::CacheType;
+        let mut request = super::legacy_next_job_request();
+        let mut cache = super::BuilderCachePushConfig::disabled();
+        for cache_type in [
+            CacheType::Nix,
+            CacheType::Attic,
+            CacheType::S3,
+            CacheType::Http,
+        ] {
+            cache.cache_type = cache_type;
+            assert_eq!(super::cache_type_conflict(&request, &cache), None);
+        }
+        cache.cache_type = CacheType::Niks3;
+        // Even a no-push config contains an enum older builders cannot decode.
+        assert!(!cache.push_after_build);
+        let reason = super::cache_type_conflict(&request, &cache).unwrap();
+        assert_eq!(reason, NextJobConflictReason::UnsupportedCacheType);
+        let response = super::next_job_conflict(reason);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({"reason":"unsupported_cache_type"})
+        );
+        request.capabilities.niks3_cache = true;
+        assert!(!request.capabilities.supports_current_cve_schema());
+        assert_eq!(super::cache_type_conflict(&request, &cache), None);
+    }
+
+    #[tokio::test]
+    async fn next_job_conflict_response_contains_machine_readable_reason() {
+        let response =
+            super::next_job_conflict(NextJobConflictReason::UnsupportedExecutionStrategy);
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("conflict response body should be readable");
+        let conflict: NextJobConflictResponse =
+            serde_json::from_slice(&body).expect("conflict response should be JSON");
+
+        assert_eq!(
+            conflict.reason,
+            NextJobConflictReason::UnsupportedExecutionStrategy
+        );
+    }
+
+    #[test]
+    fn evaluator_compatibility_has_discriminating_preclaim_reason() {
+        let authoritative = super::EvaluatorFingerprint {
+            contract_version: super::VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+            nix_version: "2.34.5".to_string(),
+            evaluator_system: "x86_64-linux".to_string(),
+            pure_eval: true,
+            lockfile_mutation_allowed: false,
+            allow_import_from_derivation: true,
+            source_materialization_schema_version:
+                super::VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+        };
+        let mut request = NextJobRequest {
+            capabilities: Default::default(),
+            protocol_version: 2,
+            supported_execution_strategies: vec![
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            ],
+            supported_evaluator_contract_versions: vec![authoritative.contract_version],
+            evaluator: Some(authoritative.clone()),
+        };
+
+        assert_eq!(evaluator_conflict(&request, &authoritative), None);
+
+        request.evaluator = Some(super::EvaluatorFingerprint {
+            nix_version: "2.33.0".to_string(),
+            ..authoritative.clone()
+        });
+
+        assert_eq!(
+            evaluator_conflict(&request, &authoritative),
+            Some(NextJobConflictReason::IncompatibleEvaluator)
+        );
+    }
+
+    #[test]
+    fn incompatible_source_delivery_has_discriminating_preclaim_reason() {
+        assert_eq!(
+            source_delivery_conflict(
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+                SourceInputDeliveryMode::LocalGitWorktree,
+            ),
+            Some(NextJobConflictReason::IncompatibleSourceDelivery)
+        );
+        assert_eq!(
+            source_delivery_conflict(
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+                SourceInputDeliveryMode::ServerBundledArchive,
+            ),
+            None
+        );
     }
 
     #[test]
     fn next_job_body_accepts_explicit_verified_source_capability() {
         let body = serde_json::to_vec(&NextJobRequest {
+            capabilities: Default::default(),
             protocol_version: 2,
             supported_execution_strategies: vec![
                 RemoteBuildExecutionStrategy::ServerDerivation,
                 RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
             ],
+            supported_evaluator_contract_versions: vec![
+                super::VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+            ],
+            evaluator: Some(super::EvaluatorFingerprint {
+                contract_version: super::VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+                nix_version: "2.34.5".to_string(),
+                evaluator_system: "x86_64-linux".to_string(),
+                pure_eval: true,
+                lockfile_mutation_allowed: false,
+                allow_import_from_derivation: true,
+                source_materialization_schema_version:
+                    super::VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+            }),
         })
         .expect("request should serialize");
 
@@ -4483,6 +6132,86 @@ mod tests {
                 .supported_execution_strategies
                 .contains(&RemoteBuildExecutionStrategy::SourceReEvaluateVerified)
         );
+        assert!(request.evaluator.is_some());
+    }
+
+    #[test]
+    fn verified_source_preclaim_requires_exact_evaluator_capability() {
+        let authoritative = super::EvaluatorFingerprint {
+            contract_version: super::VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+            nix_version: "2.34.5".to_string(),
+            evaluator_system: "x86_64-linux".to_string(),
+            pure_eval: true,
+            lockfile_mutation_allowed: false,
+            allow_import_from_derivation: true,
+            source_materialization_schema_version:
+                super::VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+        };
+        let mut request = NextJobRequest {
+            capabilities: Default::default(),
+            protocol_version: 2,
+            supported_execution_strategies: vec![
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            ],
+            supported_evaluator_contract_versions: vec![authoritative.contract_version],
+            evaluator: Some(authoritative.clone()),
+        };
+        assert!(super::verified_source_evaluator_is_compatible(
+            &request,
+            &authoritative
+        ));
+
+        for mismatch in [
+            ("nix_version", "2.34.4"),
+            ("evaluator_system", "aarch64-linux"),
+        ] {
+            let mut candidate = authoritative.clone();
+            match mismatch.0 {
+                "nix_version" => candidate.nix_version = mismatch.1.to_string(),
+                "evaluator_system" => candidate.evaluator_system = mismatch.1.to_string(),
+                _ => unreachable!(),
+            }
+            request.evaluator = Some(candidate);
+            assert!(!super::verified_source_evaluator_is_compatible(
+                &request,
+                &authoritative
+            ));
+        }
+
+        for candidate in [
+            super::EvaluatorFingerprint {
+                contract_version: 0,
+                ..authoritative.clone()
+            },
+            super::EvaluatorFingerprint {
+                pure_eval: false,
+                ..authoritative.clone()
+            },
+            super::EvaluatorFingerprint {
+                lockfile_mutation_allowed: true,
+                ..authoritative.clone()
+            },
+            super::EvaluatorFingerprint {
+                allow_import_from_derivation: false,
+                ..authoritative.clone()
+            },
+            super::EvaluatorFingerprint {
+                source_materialization_schema_version: 0,
+                ..authoritative.clone()
+            },
+        ] {
+            request.evaluator = Some(candidate);
+            assert!(!super::verified_source_evaluator_is_compatible(
+                &request,
+                &authoritative
+            ));
+        }
+
+        request.evaluator = None;
+        assert!(!super::verified_source_evaluator_is_compatible(
+            &request,
+            &authoritative
+        ));
     }
 
     #[test]
@@ -4657,6 +6386,7 @@ mod tests {
         let body = serde_json::to_vec(&ResolveBuilderIdRequest {
             public_key: public_key_base64.clone(),
             session_id: Some(Uuid::new_v4()),
+            capabilities: Default::default(),
         })
         .expect("resolve request should serialize");
 
@@ -4837,6 +6567,7 @@ mod tests {
     fn server_config_with_trust(trust: bool) -> crate::config::ServerConfig {
         let mut cfg = crate::config::ServerConfig::default();
         cfg.trust_forwarded_builder_https = trust;
+        cfg.trusted_proxy_cidrs = vec!["127.0.0.1/32".into()];
         cfg
     }
 
@@ -4845,7 +6576,11 @@ mod tests {
         let cfg = server_config_with_trust(false);
         let headers = make_headers_with("x-forwarded-proto", "https");
         assert!(
-            !builder_https_verified_by_trusted_proxy(&cfg, &headers),
+            !builder_https_verified_by_trusted_proxy(
+                &cfg,
+                &headers,
+                Some("127.0.0.1:443".parse().unwrap())
+            ),
             "must not trust forwarded headers when flag is off"
         );
     }
@@ -4855,7 +6590,11 @@ mod tests {
         let cfg = server_config_with_trust(true);
         let headers = HeaderMap::new();
         assert!(
-            !builder_https_verified_by_trusted_proxy(&cfg, &headers),
+            !builder_https_verified_by_trusted_proxy(
+                &cfg,
+                &headers,
+                Some("127.0.0.1:443".parse().unwrap())
+            ),
             "must not pass when flag is on but no forwarded-proto header present"
         );
     }
@@ -4865,7 +6604,11 @@ mod tests {
         let cfg = server_config_with_trust(true);
         let headers = make_headers_with("x-forwarded-proto", "http");
         assert!(
-            !builder_https_verified_by_trusted_proxy(&cfg, &headers),
+            !builder_https_verified_by_trusted_proxy(
+                &cfg,
+                &headers,
+                Some("127.0.0.1:443".parse().unwrap())
+            ),
             "must not pass when forwarded-proto says http"
         );
     }
@@ -4875,29 +6618,806 @@ mod tests {
         let cfg = server_config_with_trust(true);
         let headers = make_headers_with("x-forwarded-proto", "https");
         assert!(
-            builder_https_verified_by_trusted_proxy(&cfg, &headers),
+            builder_https_verified_by_trusted_proxy(
+                &cfg,
+                &headers,
+                Some("127.0.0.1:443".parse().unwrap())
+            ),
             "must pass when flag is on and x-forwarded-proto asserts https"
         );
     }
 
     #[test]
-    fn credential_check_passes_when_flag_true_and_forwarded_proto_https() {
+    fn credential_check_rejects_unsupported_forwarded_proto() {
         let cfg = server_config_with_trust(true);
         let headers = make_headers_with("forwarded", "for=1.2.3.4;proto=https");
         assert!(
-            builder_https_verified_by_trusted_proxy(&cfg, &headers),
-            "must pass when flag is on and Forwarded field asserts proto=https"
+            !builder_https_verified_by_trusted_proxy(
+                &cfg,
+                &headers,
+                Some("127.0.0.1:443".parse().unwrap())
+            ),
+            "only the proxy-overwritten x-forwarded-proto header is supported"
         );
     }
 
     #[test]
-    fn credential_check_passes_when_flag_true_and_x_forwarded_ssl_on() {
+    fn credential_check_rejects_unsupported_forwarded_ssl() {
         let cfg = server_config_with_trust(true);
         let headers = make_headers_with("x-forwarded-ssl", "on");
         assert!(
-            builder_https_verified_by_trusted_proxy(&cfg, &headers),
-            "must pass when flag is on and x-forwarded-ssl: on"
+            !builder_https_verified_by_trusted_proxy(
+                &cfg,
+                &headers,
+                Some("127.0.0.1:443".parse().unwrap())
+            ),
+            "only the proxy-overwritten x-forwarded-proto header is supported"
         );
+    }
+
+    #[test]
+    fn niks3_confidential_transport_rejects_spoofing_and_ambiguous_headers() {
+        let cfg = server_config_with_trust(true);
+        let mut headers = make_headers_with("x-forwarded-proto", "https");
+        assert!(!builder_https_verified_by_trusted_proxy(
+            &cfg, &headers, None
+        ));
+        assert!(!builder_https_verified_by_trusted_proxy(
+            &cfg,
+            &headers,
+            Some("192.0.2.1:443".parse().unwrap())
+        ));
+        let peer = Some("127.0.0.1:443".parse().unwrap());
+        headers.append("x-forwarded-proto", "https".parse().unwrap());
+        assert!(!builder_https_verified_by_trusted_proxy(
+            &cfg, &headers, peer
+        ));
+        headers.insert("x-forwarded-proto", "https,http".parse().unwrap());
+        assert!(!builder_https_verified_by_trusted_proxy(
+            &cfg, &headers, peer
+        ));
+        let mut cfg = cfg;
+        cfg.trusted_proxy_cidrs.clear();
+        assert!(!builder_https_verified_by_trusted_proxy(
+            &cfg,
+            &make_headers_with("x-forwarded-proto", "https"),
+            peer
+        ));
+    }
+
+    #[test]
+    fn attic_requisite_env_uses_shared_server_base() {
+        use crate::models::cache_destination::CacheDestination;
+        use std::ffi::OsStr;
+
+        for input in [
+            "https://cache.example/proxy/",
+            "https://cache.example/proxy/campground",
+            "https://cache.example/proxy/campground/nix-cache-info",
+        ] {
+            let destination = CacheDestination {
+                cache_type: "Attic".into(),
+                push_to: Some(input.into()),
+                attic_cache_name: Some("local:campground".into()),
+                ..Default::default()
+            };
+            let mut command = tokio::process::Command::new("attic");
+            super::apply_cache_destination_env(&mut command, &destination);
+            let endpoint = command
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == OsStr::new("ATTIC_SERVER_URL"))
+                .and_then(|(_, value)| value);
+            assert_eq!(endpoint, Some(OsStr::new("https://cache.example/proxy/")));
+        }
+        for (kind, input) in [
+            ("Nix", "https://cache.example"),
+            ("Attic", "https://cache.example/#fragment"),
+        ] {
+            let destination = CacheDestination {
+                cache_type: kind.into(),
+                push_to: Some(input.into()),
+                attic_cache_name: Some("campground".into()),
+                ..Default::default()
+            };
+            let mut command = tokio::process::Command::new("attic");
+            super::apply_cache_destination_env(&mut command, &destination);
+            assert!(
+                !command
+                    .as_std()
+                    .get_envs()
+                    .any(|(key, _)| key == OsStr::new("ATTIC_SERVER_URL"))
+            );
+        }
+    }
+
+    #[test]
+    fn publication_probe_operator_messages_are_bounded_and_readable() {
+        use super::{CacheProbeFailure, publication_probe_message};
+        let elapsed = std::time::Duration::from_millis(44);
+        assert_eq!(
+            publication_probe_message("niks3", "Niks3", elapsed, None),
+            "✅ Output confirmed in niks3 (44 ms)\n",
+        );
+        assert_eq!(
+            publication_probe_message(
+                "niks3",
+                "Niks3",
+                elapsed,
+                Some(CacheProbeFailure::RateLimited)
+            ),
+            "⚠️ Cache availability check failed for niks3 (Niks3): rate limited (44 ms)\n",
+        );
+        for name in [
+            "bad\n✅ Forged",
+            "https://secret@example.test",
+            "token=secret",
+        ] {
+            assert_eq!(
+                publication_probe_message(name, "Niks3", elapsed, None),
+                "✅ Output confirmed in cache (44 ms)\n",
+            );
+        }
+        let message = publication_probe_message(
+            "niks3",
+            "bad\nvalue",
+            elapsed,
+            Some(CacheProbeFailure::Process),
+        );
+        assert_eq!(
+            message,
+            "⚠️ Cache availability check failed for niks3 (unsupported): probe failed (44 ms)\n"
+        );
+    }
+
+    #[test]
+    fn builder_display_name_is_metadata_for_all_destination_types() {
+        for cache_type in ["Attic", "S3", "Nix", "Http"] {
+            let mut destination = crate::models::cache_destination::CacheDestination {
+                id: 42,
+                name: "my cache".into(),
+                cache_type: cache_type.into(),
+                ..Default::default()
+            };
+            let config = super::builder_cache_push_config_from_destination(&destination).unwrap();
+            assert_eq!(config.cache_destination_name.as_deref(), Some("my cache"));
+            destination.name = "https://user:secret@example.test".into();
+            let config = super::builder_cache_push_config_from_destination(&destination).unwrap();
+            assert_eq!(config.cache_destination_name.as_deref(), Some("cache"));
+            assert_eq!(config.cache_destination_id, Some(42));
+        }
+    }
+
+    #[test]
+    fn niks3_builder_config_excludes_read_and_aws_credentials_and_requires_identity() {
+        use crate::models::cache_destination::CacheDestination;
+        let mut destination = CacheDestination {
+            id: 42,
+            enabled: true,
+            name: "niks3".into(),
+            cache_type: "Niks3".into(),
+            push_to: Some("https://read.example".into()),
+            niks3_server_url: Some("https://write.example".into()),
+            niks3_public_keys: vec![
+                crate::models::cache_destination::nix_public_key_fixture("one"),
+                crate::models::cache_destination::nix_public_key_fixture("two"),
+            ],
+            parallel_uploads: Some(7),
+            attic_jobs: Some(91),
+            niks3_write_auth_mode: Some("token".into()),
+            niks3_auth_token: Some("write-token".into()),
+            niks3_read_auth_mode: Some("mtls".into()),
+            niks3_read_client_cert: Some(crate::security::cache_secrets::TEST_CERTIFICATE.into()),
+            niks3_read_client_key: Some("read-key".into()),
+            s3_access_key_id: Some("aws-id".into()),
+            s3_secret_access_key: Some("aws-secret".into()),
+            ..Default::default()
+        };
+        let config = super::builder_cache_push_config_from_destination(&destination).unwrap();
+        assert_eq!(config.cache_destination_id, Some(42));
+        assert_eq!(config.cache_destination_name.as_deref(), Some("niks3"));
+        assert_eq!(config.parallel_uploads, Some(7));
+        assert_ne!(config.attic_jobs, 91);
+        assert!(super::cache_push_config_contains_credentials(&config));
+        let json = serde_json::to_string(&config).unwrap();
+        assert!(json.contains("write-token"));
+        for secret in ["BEGIN CERTIFICATE", "read-key", "aws-id", "aws-secret"] {
+            assert!(!json.contains(secret));
+        }
+        let mut request: super::CompleteJobRequest = serde_json::from_value(serde_json::json!({
+            "cache_pushed":true, "cache_reference":"niks3"
+        }))
+        .unwrap();
+        assert!(!super::completion_matches_destination(
+            &request,
+            &destination,
+            Some(42),
+            true
+        ));
+        request.cache_destination_id = Some(42);
+        assert!(!super::completion_matches_destination(
+            &request,
+            &destination,
+            Some(43),
+            true
+        ));
+        assert!(!super::completion_matches_destination(
+            &request,
+            &destination,
+            None,
+            false
+        ));
+        assert!(super::completion_matches_destination(
+            &request,
+            &destination,
+            Some(42),
+            true
+        ));
+        request.cache_destination_id = Some(43);
+        assert!(!super::completion_matches_destination(
+            &request,
+            &destination,
+            Some(42),
+            true
+        ));
+        destination.enabled = false;
+        request.cache_destination_id = Some(42);
+        assert!(!super::completion_matches_destination(
+            &request,
+            &destination,
+            Some(42),
+            true
+        ));
+        destination.enabled = true;
+        destination.niks3_write_auth_mode = Some("mtls".into());
+        destination.niks3_auth_token = None;
+        destination.niks3_write_client_cert =
+            Some(crate::security::cache_secrets::TEST_CERTIFICATE.into());
+        destination.niks3_write_client_key = Some("write-key".into());
+        let config = super::builder_cache_push_config_from_destination(&destination).unwrap();
+        assert!(super::cache_push_config_contains_credentials(&config));
+        destination.cache_type = "Nix".into();
+        request.cache_destination_id = None;
+        assert!(super::completion_matches_destination(
+            &request,
+            &destination,
+            None,
+            false
+        ));
+        destination.cache_type = "unknown".into();
+        assert!(super::builder_cache_push_config_from_destination(&destination).is_err());
+    }
+
+    #[tokio::test]
+    async fn cache_probe_failure_codes_and_wire_contract_are_static() {
+        use super::{CacheProbeFailure as F, classify_cache_probe_failure as classify};
+        for (diagnostic, expected) in [
+            (
+                "error: unable to download 'https://user:secret@example/?sig=HTTP error 403': HTTP error 404",
+                F::MissingPath,
+            ),
+            (
+                "error: unable to download \"https://example/?sig=HTTP error 404\": HTTP error 403",
+                F::AuthenticationFailed,
+            ),
+            (
+                "error: unable to download 'https://example/': HTTP error 429",
+                F::RateLimited,
+            ),
+            (
+                "error: unable to download 'https://example/': Couldn't connect to server",
+                F::Network,
+            ),
+            (
+                "error: path '/nix/store/output' is not valid",
+                F::MissingPath,
+            ),
+            ("error: operation timed out", F::Timeout),
+            (
+                "error: 'https://user:secret@example/?sig=HTTP error 404'",
+                F::Process,
+            ),
+            (
+                "error: unable to download 'https://user:secret@example/?sig=one' HTTP error 401'",
+                F::Process,
+            ),
+            (
+                "error: unable to download 'https://example/?sig=one' HTTP error 401': HTTP error 429",
+                F::RateLimited,
+            ),
+            (
+                "error: unknown\nresponse body:\nerror: HTTP error 401",
+                F::Process,
+            ),
+            ("<html>HTTP error 401</html>", F::Process),
+            ("error: private diagnostic", F::Process),
+        ] {
+            assert_eq!(classify(diagnostic.as_bytes()), expected);
+        }
+        for failure in [
+            F::MissingPath,
+            F::AuthenticationFailed,
+            F::RateLimited,
+            F::Network,
+            F::Timeout,
+            F::Configuration,
+            F::Process,
+        ] {
+            let response = failure.response();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let bytes = axum::body::to_bytes(response.into_body(), 8192)
+                .await
+                .unwrap();
+            let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            assert_eq!(body["build_status"], "success");
+            assert_eq!(body["publication_status"], "pending");
+            assert_eq!(body["verification_code"], failure.code());
+            assert_eq!(body["retryable"], failure.retryable());
+            assert_eq!(body.get("retry_after_secs").is_some(), failure.retryable());
+            assert_eq!(
+                body.as_object().unwrap().len(),
+                if failure.retryable() { 5 } else { 4 }
+            );
+            assert!(!String::from_utf8_lossy(&bytes).contains("secret"));
+        }
+    }
+
+    #[tokio::test]
+    async fn cache_probe_exact_root_refresh_attic_and_private_capture_bounds() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("nix");
+        let destination = crate::models::cache_destination::CacheDestination {
+            cache_type: "Attic".into(),
+            push_to: Some("https://read.example".into()),
+            attic_cache_name: Some("cache".into()),
+            attic_token: Some("synthetic-token".into()),
+            ..Default::default()
+        };
+        std::fs::write(&program, "#!/bin/sh\nset -eu\ntest \"$1\" = path-info\ntest \"$2\" = --refresh\ntest \"$3\" = --store\ntest \"$4\" = https://read.example/cache\ntest \"$5\" = /nix/store/output\nshift 5\nwhile test \"$#\" -gt 0; do test \"$1\" = --option; shift 3; done\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        super::probe_cache_read(
+            destination.clone(),
+            "/nix/store/output".into(),
+            program.clone().into_os_string(),
+            std::time::Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
+        for stream in ["", " >&2"] {
+            std::fs::write(
+                &program,
+                format!(
+                    "#!/bin/sh\ndd if=/dev/zero bs=65537 count=1 2>/dev/null{stream}\nexit 1\n"
+                ),
+            )
+            .unwrap();
+            assert_eq!(
+                super::probe_cache_read(
+                    destination.clone(),
+                    "/nix/store/output".into(),
+                    program.clone().into_os_string(),
+                    std::time::Duration::from_secs(5)
+                )
+                .await
+                .unwrap_err(),
+                super::CacheProbeFailure::Process
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn niks3_basic_probe_applies_guard_to_path_info_only() {
+        use crate::models::cache_destination::CacheDestination;
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("nix");
+        std::fs::write(
+            &program,
+            r#"#!/bin/sh
+set -eu
+if test "$1" = --extra-experimental-features; then
+    test "$2" = nix-command; test "$3" = config; test "$4" = show; test "$5" = --json
+    printf '%s' '{"cf-netrc-authority":{"value":""}}'
+    exit 0
+fi
+operation=$1
+case "$*" in *private-user*|*private-password*) exit 24 ;; esac
+case "$operation" in
+path-info) test "$2" = --refresh; test "$3" = --store; test "$4" = https://read.example/; test "$5" = /nix/store/output; shift 5 ;;
+copy) touch "${0%/*}/copy-called"; exit 29 ;;
+*) exit 10 ;;
+esac
+authority=false; netrc=; sigs=false; keys=false
+while test "$#" -gt 0; do
+    case "$1" in
+    --refresh) shift ;;
+    --extra-experimental-features) shift 2 ;;
+    --option)
+        case "$2" in
+        cf-netrc-authority) test "$3" = https://read.example; authority=true ;;
+        netrc-file) netrc=$3 ;;
+        require-sigs) test "$3" = true; sigs=true ;;
+        trusted-public-keys) test -n "$3"; keys=true ;;
+        esac
+        shift 3 ;;
+    *) exit 11 ;;
+    esac
+done
+test "$authority" = true; test "$sigs" = true; test "$keys" = true
+test -f "$netrc"; test "$(stat -c %a "$netrc")" = 600
+test "$(stat -c %a "${netrc%/*}")" = 700
+test -z "${NIX_CONFIG:-}"; test -z "${NIKS3_AUTH_TOKEN_FILE:-}"
+test ! -e "$HOME/nix/store"; test "$(stat -c %a "$HOME")" = 700
+printf '%s' "${netrc%/*}" > "${0%/*}/$operation-credentials"
+"#,
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let destination = CacheDestination {
+            cache_type: "Niks3".into(),
+            push_to: Some("https://read.example".into()),
+            niks3_public_keys: vec![crate::models::cache_destination::nix_public_key_fixture(
+                "one",
+            )],
+            niks3_read_auth_mode: Some("basic".into()),
+            niks3_read_basic_username: Some("private-user".into()),
+            niks3_read_basic_password: Some(" private-password ".into()),
+            ..Default::default()
+        };
+        assert!(
+            super::probe_cache_read(
+                destination.clone(),
+                "/nix/store/output".into(),
+                program.clone().into_os_string(),
+                std::time::Duration::from_secs(5)
+            )
+            .await
+            .unwrap()
+            .success()
+        );
+        let path_info = std::fs::read_to_string(dir.path().join("path-info-credentials")).unwrap();
+        assert!(!dir.path().join("copy-called").exists());
+        assert!(!std::path::Path::new(&path_info).exists());
+        // Unsupported runtimes cannot proceed to network reads or secret files.
+        std::fs::remove_file(dir.path().join("path-info-credentials")).unwrap();
+        std::fs::write(
+            &program,
+            "#!/bin/sh\ntest \"$1\" = --extra-experimental-features || exit 23\nprintf '%s' '{}'\n",
+        )
+        .unwrap();
+        assert_eq!(
+            super::probe_cache_read(
+                destination,
+                "/nix/store/output".into(),
+                program.into_os_string(),
+                std::time::Duration::from_secs(5)
+            )
+            .await
+            .unwrap_err(),
+            super::CacheProbeFailure::Configuration
+        );
+        assert!(!dir.path().join("path-info-credentials").exists());
+        assert!(!dir.path().join("copy-called").exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_runtime_probe_rejects_private_invalid_or_oversized_output() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("nix");
+        for script in [
+            "printf '%s' '{\"cf-netrc-authority\":{\"value\":false}}'",
+            "printf 'private-settings' >&2; exit 7",
+            "printf 'private-settings'",
+            "dd if=/dev/zero bs=1048576 count=3 2>/dev/null",
+        ] {
+            std::fs::write(&program, format!("#!/bin/sh\n{script}\n")).unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let error = super::probe_nix_read_features(program.as_os_str())
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(!error.contains("private-settings"));
+        }
+    }
+
+    #[tokio::test]
+    async fn niks3_completion_probe_uses_independent_read_plane() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("nix");
+        std::fs::write(
+            dir.path().join("expected-ca"),
+            crate::security::cache_secrets::TEST_CERTIFICATE,
+        )
+        .unwrap();
+        std::fs::write(
+            &program,
+            format!(
+                r#"#!/bin/sh
+set -eu
+case "$1" in
+path-info)
+    test "$2" = --refresh; test "$3" = --store
+    case "$4" in https://read.example/*tls-certificate=*tls-private-key=*) ;; *) exit 11;; esac
+    test "$5" = /nix/store/output
+    test ! -e "$HOME/nix/var/nix/db/db.sqlite"
+    test ! -e "$HOME/nix/store"
+    shift 5 ;;
+copy) touch "${{0%/*}}/copy-called"; exit 29 ;;
+*) exit 13 ;;
+esac
+keys=false; signatures=false
+while test "$#" -gt 0; do
+    case "$1" in
+    --refresh) refresh=true; shift ;;
+    --extra-experimental-features) test "$2" = nix-command; shift 2 ;;
+    --option)
+        case "$2" in
+        trusted-public-keys) test "$3" = '{}'; expected_keys=$3; keys=true ;;
+        require-sigs) test "$3" = true; signatures=true ;;
+        extra-trusted-public-keys) test -z "$3" || test "$3" = "$expected_keys" ;;
+        substituters) test -z "$3" ;;
+        narinfo-cache-positive-ttl|narinfo-cache-negative-ttl) test "$3" = 0 ;;
+        download-attempts) test "$3" = 1 ;;
+        *) exit 14 ;;
+        esac
+        shift 3 ;;
+    *) exit 15 ;;
+    esac
+done
+test "$keys" = true; test "$signatures" = true
+test "$(cat "$NIX_SSL_CERT_FILE")" = "$(cat '{}')"
+test -z "${{AWS_SECRET_ACCESS_KEY:-}}"
+test -z "${{NIKS3_AUTH_TOKEN_FILE:-}}"
+printf '%s' "${{NIX_SSL_CERT_FILE%/*}}" > '{}'
+"#,
+                [
+                    crate::models::cache_destination::nix_public_key_fixture("one"),
+                    crate::models::cache_destination::nix_public_key_fixture("two")
+                ]
+                .join(" "),
+                dir.path().join("expected-ca").display(),
+                dir.path().join("credentials").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let destination = crate::models::cache_destination::CacheDestination {
+            cache_type: "Niks3".into(),
+            push_to: Some("https://read.example".into()),
+            niks3_server_url: Some("https://write.example".into()),
+            niks3_public_keys: vec![
+                crate::models::cache_destination::nix_public_key_fixture("one"),
+                crate::models::cache_destination::nix_public_key_fixture("two"),
+            ],
+            niks3_read_auth_mode: Some("mtls".into()),
+            niks3_read_client_cert: Some(crate::security::cache_secrets::TEST_CERTIFICATE.into()),
+            niks3_read_client_key: Some("read-key".into()),
+            niks3_read_ca_cert: Some(crate::security::cache_secrets::TEST_CERTIFICATE.into()),
+            niks3_auth_token: Some("write-token".into()),
+            s3_secret_access_key: Some("aws-secret".into()),
+            ..Default::default()
+        };
+        assert!(
+            super::probe_cache_read(
+                destination,
+                "/nix/store/output".into(),
+                program.into_os_string(),
+                std::time::Duration::from_secs(5)
+            )
+            .await
+            .unwrap()
+            .success()
+        );
+        let directory = std::fs::read_to_string(dir.path().join("credentials")).unwrap();
+        assert!(!std::path::Path::new(&directory).exists());
+        assert!(!dir.path().join("copy-called").exists());
+    }
+
+    #[tokio::test]
+    async fn niks3_probe_failure_never_polls_success_transition() {
+        use std::os::unix::fs::PermissionsExt;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("nix");
+        for (diagnostic, failure) in [
+            (
+                "error: unable to download 'https://private.example/?signed=secret': HTTP error 404",
+                super::CacheProbeFailure::MissingPath,
+            ),
+            (
+                "error: unable to download 'https://private.example/': HTTP error 401",
+                super::CacheProbeFailure::AuthenticationFailed,
+            ),
+            (
+                "error: unable to download 'https://private.example/': HTTP error 429",
+                super::CacheProbeFailure::RateLimited,
+            ),
+            (
+                "error: unable to download 'https://private.example/': connection reset",
+                super::CacheProbeFailure::Network,
+            ),
+        ] {
+            std::fs::write(
+                &program,
+                format!(
+                    r#"#!/bin/sh
+set -eu
+test "$1" = path-info
+printf '%s' "{}" >&2
+exit 17
+"#,
+                    diagnostic,
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            let destination = crate::models::cache_destination::CacheDestination {
+                cache_type: "Niks3".into(),
+                push_to: Some("https://read.example".into()),
+                niks3_public_keys: vec![crate::models::cache_destination::nix_public_key_fixture(
+                    "one",
+                )],
+                niks3_read_auth_mode: Some("none".into()),
+                ..Default::default()
+            };
+            let transitions = AtomicUsize::new(0);
+            let pending_transitions = AtomicUsize::new(0);
+            let probe = super::probe_cache_read(
+                destination,
+                "/nix/store/output".into(),
+                program.clone().into_os_string(),
+                std::time::Duration::from_secs(5),
+            )
+            .await;
+            assert_eq!(probe.unwrap_err(), failure);
+            let pending_counter = &pending_transitions;
+            let result = super::complete_after_verification(
+                Some(failure),
+                async {
+                    transitions.fetch_add(1, Ordering::SeqCst);
+                    "confirmed"
+                },
+                |reason| async move {
+                    assert_eq!(reason, failure);
+                    pending_counter.fetch_add(1, Ordering::SeqCst);
+                    "pending"
+                },
+            )
+            .await;
+            assert_eq!(result, "pending");
+            assert_eq!(transitions.load(Ordering::SeqCst), 0);
+            assert_eq!(pending_transitions.load(Ordering::SeqCst), 1);
+        }
+        let events = std::sync::Mutex::new(Vec::new());
+        super::complete_after_verification(
+            None,
+            async {
+                events.lock().unwrap().push("success");
+            },
+            |_| async { panic!("Successful probe cannot select pending completion") },
+        )
+        .await;
+        assert_eq!(*events.lock().unwrap(), ["success"]);
+    }
+
+    #[tokio::test]
+    async fn niks3_probe_timeout_and_cancellation_reap_before_cleanup() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let program = dir.path().join("nix");
+        std::fs::write(
+            &program,
+            format!(
+                r#"#!/bin/sh
+set -eu
+printf '%s' "$HOME" > '{}'
+printf '%s' "$NIX_SSL_CERT_FILE" > '{}'
+exec sleep 30
+"#,
+                dir.path().join("root").display(),
+                dir.path().join("ca").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let destination = crate::models::cache_destination::CacheDestination {
+            cache_type: "Niks3".into(),
+            push_to: Some("https://read.example".into()),
+            niks3_public_keys: vec![crate::models::cache_destination::nix_public_key_fixture(
+                "one",
+            )],
+            niks3_read_auth_mode: Some("mtls".into()),
+            niks3_read_client_cert: Some(crate::security::cache_secrets::TEST_CERTIFICATE.into()),
+            niks3_read_client_key: Some("read-key".into()),
+            niks3_read_ca_cert: Some(crate::security::cache_secrets::TEST_CERTIFICATE.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            super::probe_cache_read(
+                destination.clone(),
+                "/nix/store/output".into(),
+                program.clone().into_os_string(),
+                std::time::Duration::from_millis(200)
+            )
+            .await
+            .unwrap_err(),
+            super::CacheProbeFailure::Timeout
+        );
+        let root = std::fs::read_to_string(dir.path().join("root")).unwrap();
+        let ca = std::fs::read_to_string(dir.path().join("ca")).unwrap();
+        assert!(!std::path::Path::new(&root).exists());
+        assert!(!std::path::Path::new(&ca).exists());
+        std::fs::remove_file(dir.path().join("root")).unwrap();
+        std::fs::remove_file(dir.path().join("ca")).unwrap();
+        let operation = tokio::spawn(super::probe_cache_read(
+            destination,
+            "/nix/store/output".into(),
+            program.into_os_string(),
+            std::time::Duration::from_secs(5),
+        ));
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !dir.path().join("ca").exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let root = std::fs::read_to_string(dir.path().join("root")).unwrap();
+        let ca = std::fs::read_to_string(dir.path().join("ca")).unwrap();
+        operation.abort();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while std::path::Path::new(&root).exists() || std::path::Path::new(&ca).exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn niks3_pinned_nix_accepts_remote_metadata_and_refresh_flags() {
+        use super::Command;
+        let version = Command::new("nix").arg("--version").output().await.unwrap();
+        assert!(version.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&version.stdout).trim(),
+            "nix (Nix) 2.34.8"
+        );
+        let root = tempfile::tempdir().unwrap();
+        let read = cf_config::cache_credentials::PreparedCacheRead::new(
+            "https://read.example",
+            &["cache:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA=".into()],
+            &cf_protocol::cache::CacheReadAuth::None,
+        )
+        .unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let mut probe = Command::new("nix");
+        probe.args([
+            "path-info",
+            "--refresh",
+            "--store",
+            &format!("file://{}", source.path().display()),
+            "/nix/store/00000000000000000000000000000000-verification-missing",
+        ]);
+        super::configure_niks3_verification_read(&mut probe, &read, root.path());
+        let output = probe.output().await.unwrap();
+        assert!(!output.status.success());
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            !stderr.contains("unrecognised flag") && !stderr.contains("unknown setting"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("is not valid")
+                || stderr.contains("does not exist")
+                || stderr.contains("not found")
+                || stderr.contains("no substituter"),
+            "{stderr}"
+        );
+        assert!(!root.path().join("nix/store").exists());
     }
 
     // ── ServerBundledArchive / source mirror tests ─────────────────────────
@@ -4918,19 +7438,6 @@ mod tests {
     }
 
     #[test]
-    fn server_mirror_path_contains_mirror_id() {
-        let archive_root = std::path::PathBuf::from("/var/lib/crystal-forge/source-archives");
-        let path = super::server_mirror_path(&archive_root, "https://github.com/example/repo.git");
-        let mirror_id = super::source_mirror_id("https://github.com/example/repo.git");
-        assert_eq!(
-            path,
-            archive_root
-                .join("mirrors")
-                .join(format!("{mirror_id}.git"))
-        );
-    }
-
-    #[test]
     fn source_archive_url_format_matches_download_endpoint() {
         // The archive_url set in get_next_job must be parseable as an API path
         // that the builder can GET as an authenticated request.
@@ -4943,6 +7450,46 @@ mod tests {
         assert!(url.contains(&builder_id.to_string()));
         assert!(url.contains(&job_id.to_string()));
         assert!(url.ends_with("/source-archive"));
+    }
+
+    #[test]
+    fn source_archive_route_accepts_only_contract_v1_mode() {
+        for rejected in [
+            SourceInputDeliveryMode::None,
+            SourceInputDeliveryMode::LocalGitWorktree,
+            SourceInputDeliveryMode::BuilderFetchPublicInputs,
+        ] {
+            assert!(!super::source_archive_contract_is_authorized(
+                RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+                rejected,
+            ));
+        }
+        assert!(!super::source_archive_contract_is_authorized(
+            RemoteBuildExecutionStrategy::ServerDerivation,
+            SourceInputDeliveryMode::ServerBundledArchive,
+        ));
+        assert!(super::source_archive_contract_is_authorized(
+            RemoteBuildExecutionStrategy::SourceReEvaluateVerified,
+            SourceInputDeliveryMode::ServerBundledArchive,
+        ));
+    }
+
+    #[test]
+    fn verified_source_manifest_removes_repository_url_credentials() {
+        let sanitized = super::credential_free_repo_url(
+            "https://deploy-token:secret@example.com/team/repo.git?access_token=secret#fragment",
+        )
+        .expect("credential URL should be sanitizable");
+
+        assert_eq!(sanitized, "https://example.com/team/repo.git");
+        assert!(!sanitized.contains("secret"));
+        assert!(!sanitized.contains("deploy-token"));
+
+        let scp_style = super::credential_free_repo_url(
+            "deploy-token@example.com:team/repo.git?access_token=secret#fragment",
+        )
+        .expect("SCP-style repository URL should be sanitizable");
+        assert_eq!(scp_style, "example.com:team/repo.git");
     }
 
     #[test]
@@ -5063,39 +7610,6 @@ mod tests {
         assert_eq!(forwarded, b"AB", "only the records may be forwarded");
     }
 
-    #[test]
-    fn source_archive_path_is_job_scoped() {
-        // Archives are job-scoped so concurrent jobs for the same repo+commit
-        // don't race to delete each other's archive during cleanup.
-        let archive_root = std::path::PathBuf::from("/var/lib/crystal-forge/source-archives");
-        let job_a = uuid::Uuid::new_v4();
-        let job_b = uuid::Uuid::new_v4();
-
-        let path_a = super::job_scoped_archive_path(&archive_root, job_a);
-        let path_b = super::job_scoped_archive_path(&archive_root, job_b);
-
-        // Two different jobs produce different paths even for the same repo+commit.
-        assert_ne!(path_a, path_b);
-        assert!(path_a.to_str().unwrap().ends_with(".tar.gz"));
-        assert!(path_a.to_str().unwrap().contains(&job_a.to_string()));
-        assert!(path_b.to_str().unwrap().contains(&job_b.to_string()));
-
-        // Both paths are deterministic.
-        assert_eq!(path_a, super::job_scoped_archive_path(&archive_root, job_a));
-    }
-
-    #[test]
-    fn job_scoped_archive_cleanup_only_removes_one_job() {
-        // Prove that cleanup_source_archive uses the job-scoped path by
-        // checking the path helper returns unique files per job.
-        let root = std::path::PathBuf::from("/var/lib/cf/archives");
-        let j1 = uuid::Uuid::new_v4();
-        let j2 = uuid::Uuid::new_v4();
-        let p1 = super::job_scoped_archive_path(&root, j1);
-        let p2 = super::job_scoped_archive_path(&root, j2);
-        assert_ne!(p1, p2, "different jobs must have different archive paths");
-    }
-
     // ── delta derivation transport: requested-path validation ──────────────
 
     fn manifest_fixture() -> Vec<String> {
@@ -5181,5 +7695,192 @@ mod tests {
         assert!(!super::looks_like_store_path("/etc/passwd"));
         assert!(!super::looks_like_store_path("nix/store/abc"));
         assert!(!super::looks_like_store_path("/nix/store/abc\0evil"));
+    }
+
+    fn write_nix_version_fixture(path: &std::path::Path) {
+        // CONCURRENCY: Only this child opens the fixture for writing. A fork
+        // in another test cannot inherit its writer from the test process.
+        // Waiting for child exit closes all writers before the real probe;
+        // closing a parent writer alone does not cover pre-exec inheritance.
+        let status = std::process::Command::new("/bin/sh")
+            .arg("-c")
+            .arg("printf '%s' \"$1\" > \"$2\" && chmod 700 \"$2\"")
+            .arg("write-nix-version-fixture")
+            .arg("#!/bin/sh\n[ \"$1\" = --version ] || exit 1\nprintf 'nix (Nix) 2.34.5\\n'\n")
+            .arg(path)
+            .status()
+            .expect("fixture writer child should run");
+        assert!(status.success(), "fixture writer child should succeed");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn evaluator_fixture_reproduces_inherited_cloexec_writer() {
+        const ISOLATED_FORK_TEST: &str = "CF_ISOLATED_FORK_FIXTURE_TEST";
+
+        // CONCURRENCY: Run the raw-fork proof in a fresh, single-test process.
+        // The normal Rust harness runs unrelated tests on threads in this
+        // process. Their open executable-fixture writers are inherited by a
+        // fork even when those descriptors have FD_CLOEXEC set, and can make
+        // an unrelated probe fail with ETXTBSY while this child waits at its
+        // barrier. `--exact` excludes those tests from the subprocess; exec
+        // closes their CLOEXEC descriptors before this test performs its fork.
+        // `status` waits for and reaps the subprocess on both success and test
+        // failure. The environment guard prevents recursive re-spawning.
+        if std::env::var_os(ISOLATED_FORK_TEST).is_none() {
+            let status = std::process::Command::new(
+                std::env::current_exe().expect("unit-test executable path should be available"),
+            )
+            .args([
+                "--exact",
+                "handlers::api::builders::tests::evaluator_fixture_reproduces_inherited_cloexec_writer",
+            ])
+            .env(ISOLATED_FORK_TEST, "1")
+            .status()
+            .expect("isolated fork-regression test process should start");
+            assert!(
+                status.success(),
+                "isolated fork-regression test failed: {status}"
+            );
+            return;
+        }
+
+        use std::io::{Read, Write};
+        use std::os::fd::AsRawFd;
+        use std::os::unix::net::UnixStream;
+
+        struct InheritedWriter {
+            pid: libc::pid_t,
+            barrier: UnixStream,
+        }
+
+        impl InheritedWriter {
+            fn reap(&mut self) -> std::io::Result<i32> {
+                let mut status = 0;
+                loop {
+                    // SAFETY: pid identifies only our child, and status is
+                    // writable. No other code waits for this child's exit.
+                    if unsafe { libc::waitpid(self.pid, &mut status, 0) } == self.pid {
+                        self.pid = 0;
+                        return Ok(status);
+                    }
+                    let error = std::io::Error::last_os_error();
+                    if error.kind() != std::io::ErrorKind::Interrupted {
+                        return Err(error);
+                    }
+                }
+            }
+        }
+
+        impl Drop for InheritedWriter {
+            fn drop(&mut self) {
+                if self.pid != 0 {
+                    // Release and reap on assertion failure as well. The
+                    // child closes the opposite endpoint before waiting.
+                    let _ = self.barrier.shutdown(std::net::Shutdown::Both);
+                    let _ = self.reap();
+                }
+            }
+        }
+
+        let tempdir = tempfile::tempdir().unwrap();
+        let nix = tempdir.path().join("nix");
+        let mut writer = std::fs::File::create(&nix).unwrap();
+        writer
+            .write_all(b"#!/bin/sh\nprintf 'nix (Nix) 2.34.5\\n'\n")
+            .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&nix, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let writer_fd = writer.as_raw_fd();
+        // SAFETY: F_GETFD reads flags for this live, owned file descriptor.
+        let flags = unsafe { libc::fcntl(writer_fd, libc::F_GETFD) };
+        assert!(flags >= 0);
+        assert_ne!(flags & libc::FD_CLOEXEC, 0);
+
+        let (parent, child) = UnixStream::pair().unwrap();
+        let parent_fd = parent.as_raw_fd();
+        let child_fd = child.as_raw_fd();
+        // SAFETY: The child uses only async-signal-safe close, read, write,
+        // and _exit calls. It does not access Rust state or locks after fork.
+        let pid = unsafe { libc::fork() };
+        assert!(pid >= 0, "controlled fixture fork must succeed");
+        if pid == 0 {
+            let mut byte = 1_u8;
+            // SAFETY: Both socket descriptors are inherited and live. Closing
+            // parent_fd lets parent shutdown release the read on failure. The
+            // byte buffers are valid; _exit avoids inherited Rust destructors.
+            unsafe {
+                libc::close(parent_fd);
+                if libc::write(child_fd, (&byte as *const u8).cast(), 1) != 1 {
+                    libc::_exit(1);
+                }
+                if libc::read(child_fd, (&mut byte as *mut u8).cast(), 1) != 1 {
+                    libc::_exit(2);
+                }
+                libc::_exit(0);
+            }
+        }
+        let mut inherited = InheritedWriter {
+            pid,
+            barrier: parent,
+        };
+        drop(child);
+        drop(writer);
+        inherited.barrier.read_exact(&mut [0_u8]).unwrap();
+
+        // CONCURRENCY: The parent writer is closed, but the child has not
+        // executed anything. CLOEXEC does not close its inherited writer yet.
+        let blocked = super::probe_nix_version(&nix).await;
+        let isolated = tempdir.path().join("isolated-nix");
+        write_nix_version_fixture(&isolated);
+        let isolated_version = super::probe_nix_version(&isolated).await;
+        inherited.barrier.write_all(&[1]).unwrap();
+        assert_eq!(inherited.reap().unwrap(), 0);
+        let error = blocked.expect_err("inherited writable FD must prohibit exec");
+        assert_eq!(
+            error
+                .downcast_ref::<std::io::Error>()
+                .unwrap()
+                .raw_os_error(),
+            Some(libc::ETXTBSY)
+        );
+        assert_eq!(isolated_version.unwrap(), "2.34.5");
+    }
+
+    #[tokio::test]
+    async fn evaluator_fingerprint_reports_executing_nix_and_pure_contract() {
+        let tempdir = tempfile::tempdir().expect("Nix probe test tempdir should create");
+        let nix = tempdir.path().join("nix");
+        write_nix_version_fixture(&nix);
+
+        let nix_version = super::probe_nix_version(&nix)
+            .await
+            .expect("controlled Nix version should be probeable");
+        let identity = super::parse_nix_eval_jobs_identity(
+            r#"{"attr":"probe","extraValue":{"nixVersion":"2.34.5","evaluatorSystem":"x86_64-linux"}}"#,
+        )
+        .expect("controlled evaluator output should contain its identity");
+        let fingerprint = super::evaluator_fingerprint(&nix_version, identity)
+            .expect("matching Nix identities should produce a fingerprint");
+
+        assert_eq!(fingerprint.nix_version, "2.34.5");
+        assert_eq!(fingerprint.evaluator_system, "x86_64-linux");
+        assert!(fingerprint.pure_eval);
+        assert!(!fingerprint.lockfile_mutation_allowed);
+        assert!(fingerprint.allow_import_from_derivation);
+        assert_eq!(
+            fingerprint.contract_version,
+            super::VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION
+        );
+        assert_eq!(
+            fingerprint.source_materialization_schema_version,
+            super::VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION
+        );
+
+        let mismatched_identity = super::NixEvaluatorIdentity {
+            nix_version: "2.34.4".to_string(),
+            evaluator_system: "x86_64-linux".to_string(),
+        };
+        assert!(super::evaluator_fingerprint(&nix_version, mismatched_identity).is_err());
     }
 }

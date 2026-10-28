@@ -1,0 +1,18 @@
+stateDiagram-v2
+    [*] --> Closed
+    Closed --> Loading: Exact pair selected
+    Loading --> Loaded: Successful fleet detail
+    Loading --> Empty: Not found
+    Loading --> Unauthorized: Authorization failure
+    Loading --> Error: Retryable read failure
+    Error --> Loading: Retry
+    Loaded --> Editing: Open triage
+    Editing --> Submitting: Valid draft submitted
+    Submitting --> Loaded: Success, then full detail refresh
+    Submitting --> Loaded: Conflict, discard draft and refresh
+    Submitting --> Editing: Other reported failure
+    Editing --> Loaded: Cancel or nested Escape
+    Loaded --> Closed: Close, Escape, or route change
+    Empty --> Closed: Close
+    Unauthorized --> Closed: Close
+    Error --> Closed: Close

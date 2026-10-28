@@ -4,8 +4,8 @@
 # both the repository library and the `lib.nix` embedded in every generated
 # artifact. That keeps the deployed helper and the tested helper identical.
 #
-# See `checks/compliance-module` for its unit tests, and
-# `docs/operator/nixos-module-generation.md` for consumer usage.
+# See `cf-nixos-module.tests.helper` for its unit tests, and
+# `docs/knowledge/compliance/nixos-module-generation.md` for consumer usage.
 #
 # Note: `lib/stig` remains for existing STIG-specific callers. New work should
 # use `mkComplianceModule`, which is framework-neutral: a Crystal Forge policy

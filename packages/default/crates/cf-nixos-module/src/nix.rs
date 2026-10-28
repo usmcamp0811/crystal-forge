@@ -9,7 +9,7 @@
 ///
 /// This is the exact same file the repository exposes as
 /// `lib.crystal-forge.mkComplianceModule`, so the helper that is unit-tested in
-/// `checks/compliance-module` and the helper shipped inside every generated
+/// `cf-nixos-module.tests.helper` and the helper shipped inside every generated
 /// artifact cannot drift apart.
 pub const COMPLIANCE_LIB_NIX: &str = include_str!("../nix/mk-compliance-module.nix");
 

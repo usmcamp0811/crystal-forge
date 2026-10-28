@@ -1,0 +1,21 @@
+sequenceDiagram
+    actor User
+    participant Page as CVEs page
+    participant API as Fleet read APIs
+    participant Drawer as Fleet drawer
+    participant Triage as Triage API
+    User->>Page: Open /cves
+    par Independent reads
+        Page->>API: Statistics
+        Page->>API: Package names
+        Page->>API: Flat rows, including grouped mode
+        Page->>API: Grouped rows when mounted
+    end
+    User->>Page: Open exact CVE/package pair
+    Page->>Drawer: Selection and route identity
+    Drawer->>API: Full fleet detail
+    User->>Drawer: Submit environment decisions
+    Drawer->>Triage: Complete environment action set
+    Triage-->>Drawer: Committed exact-subject mutation response
+    Drawer->>API: Refetch full fleet detail
+    Note over Page,Drawer: No parent list, group, or statistics invalidation is wired here

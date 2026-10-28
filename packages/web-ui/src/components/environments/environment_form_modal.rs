@@ -290,9 +290,15 @@ fn PolicyEnforcementSection(props: PolicyEnforcementSectionProps) -> Element {
     let Some(current) = draft.read().clone() else {
         return rsx! {};
     };
+    let mut policy_search = use_signal(String::new);
     let mut bundle_search = use_signal(String::new);
     let disabled = props.disabled;
     let q = bundle_search.read().to_ascii_lowercase();
+    let available_policies = filter_gate_policies(
+        &props.policy_library,
+        &current.required_policy_ids,
+        &policy_search.read(),
+    );
 
     // Bundles available to add: have a current published version and are not already assigned.
     let assigned_bundle_ids: std::collections::HashSet<Uuid> = current
@@ -354,11 +360,12 @@ fn PolicyEnforcementSection(props: PolicyEnforcementSectionProps) -> Element {
                 input {
                     class: "input focus-ring",
                     placeholder: "Search {props.policy_library.len()} policies…",
-                    oninput: move |_evt| {}, // gate policy search handled inline below
+                    value: "{policy_search}",
+                    oninput: move |evt| policy_search.set(evt.value()),
                 }
             }
             div { style: "display:flex; flex-wrap:wrap; gap:6px; margin-bottom:14px;",
-                for policy in props.policy_library.iter().filter(|p| !current.required_policy_ids.contains(&p.id)).take(12).cloned().collect::<Vec<_>>() {
+                for policy in available_policies {
                     {
                         let policy_id = policy.id;
                         rsx! {
@@ -401,7 +408,7 @@ fn PolicyEnforcementSection(props: PolicyEnforcementSectionProps) -> Element {
                     let bundle_version = assignment.bundle_version.clone();
                     let framework = assignment.framework.clone();
                     rsx! {
-                        div { style: "display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--cf-divider); border-radius:8px; background:var(--cf-card-bg); margin-bottom:6px;",
+                        div { style: "display:flex; align-items:center; gap:8px; padding:8px 10px; border:1px solid var(--cf-divider); border-radius:8px; background:var(--cf-card-bg); margin-bottom:6px;", "data-coach-target": "env-bundle-assignment",
                             Icon { name: IconName::Shield, size: 13 }
                             div { style: "flex:1; min-width:0;",
                                 div { style: "font-size:13px; font-weight:600;", "{bundle_name}" }
@@ -413,6 +420,7 @@ fn PolicyEnforcementSection(props: PolicyEnforcementSectionProps) -> Element {
                                 }
                             }
                             select {
+                                "data-coach-target": "env-assignment-mode",
                                 class: "input focus-ring",
                                 style: "width:auto; font-size:12px; padding:3px 8px;",
                                 value: "{current_mode}",
@@ -515,6 +523,64 @@ fn PolicyEnforcementSection(props: PolicyEnforcementSectionProps) -> Element {
                 }
             }
         }
+    }
+}
+
+// Search only narrows the authoritative assignable catalog's available chips.
+// Selected IDs stay in the draft and remain visible independently of the query;
+// validation must still reject stale IDs rather than silently discard them.
+fn filter_gate_policies(
+    catalog: &[PolicyOption],
+    selected: &[Uuid],
+    search: &str,
+) -> Vec<PolicyOption> {
+    let query = search.trim().to_ascii_lowercase();
+    catalog
+        .iter()
+        .filter(|policy| !selected.contains(&policy.id))
+        .filter(|policy| policy.name.to_ascii_lowercase().contains(&query))
+        .cloned()
+        .collect()
+}
+
+#[cfg(test)]
+mod policy_picker_tests {
+    use super::*;
+
+    fn catalog() -> Vec<PolicyOption> {
+        (1..=20)
+            .map(|index| PolicyOption {
+                id: Uuid::from_u128(index),
+                name: format!("Gate {index:02}"),
+                description: String::new(),
+            })
+            .collect()
+    }
+
+    #[test]
+    fn policy_filter_reaches_beyond_twelve_and_keeps_catalog_order() {
+        let catalog = catalog();
+        assert_eq!(filter_gate_policies(&catalog, &[], ""), catalog);
+        assert_eq!(
+            filter_gate_policies(&catalog, &[], "  gAtE 19  "),
+            vec![catalog[18].clone()]
+        );
+    }
+
+    #[test]
+    fn policy_filter_excludes_selected_without_mutating_selection() {
+        let catalog = catalog();
+        let selected = vec![catalog[18].id, Uuid::from_u128(100)];
+        let before = selected.clone();
+        assert!(filter_gate_policies(&catalog, &selected, "Gate 19").is_empty());
+        assert_eq!(filter_gate_policies(&catalog, &selected, "").len(), 19);
+        assert_eq!(selected, before);
+    }
+
+    #[test]
+    fn policy_filter_no_match_and_empty_catalog_return_no_options() {
+        assert!(filter_gate_policies(&catalog(), &[], "absent gate").is_empty());
+        assert!(filter_gate_policies(&[], &[], "").is_empty());
     }
 }
 

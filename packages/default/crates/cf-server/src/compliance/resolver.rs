@@ -5,19 +5,20 @@
 //! rollups, assignment previews) must use this resolver — not reimplement the
 //! ordering, exclusion, addition, or precedence rules.
 //!
-//! # Schema assumptions (2022_correctness_3.sql + 0198_assignments.sql)
+//! # Schema assumptions (0204_compliance_assignment_versions.sql)
 //!
-//! - `compliance_bundle_assignments` stores one row per (bundle_version_id, scope, scope_id).
-//!   The CHECK constraint ensures scope_type='environment' ⟹ environment_id IS NOT NULL AND system_id IS NULL,
-//!   and scope_type='system' ⟹ system_id IS NOT NULL AND environment_id IS NULL.
-//! - `compliance_assignment_exclusions` and `compliance_assignment_additions` are
-//!   simple join tables; PK is (assignment_id, policy_version_id).
-//! - `compliance_assignment_value_overrides` uses (assignment_id, policy_version_id, value_path) unique key.
-//! - All child tables fire `invalidate_overlay_on_child_change` → sets
-//!   `assignment_overlay_digest = 'pending'`. Rust write paths must call
-//!   `write_assignment_effective_set_digest` in the same transaction.
-//! - `assignment_overlay_digest` is computed from `AssignmentEffectiveSetCanonical`
-//!   (see digest.rs lines 150-197).
+//! - `compliance_bundle_assignments` stores assignment lineage identity. Each
+//!   active bundle and target pair has at most one lineage. The scope check
+//!   requires exactly one matching environment or system target.
+//! - `current_version_id` selects the authoritative immutable assignment
+//!   snapshot. Active lineages without a valid current snapshot are incomplete
+//!   and must not participate in effective-policy resolution.
+//! - `compliance_bundle_assignment_versions` stores immutable snapshots of the
+//!   selected bundle version, enforcement mode, provenance, and overlay digest.
+//! - Exclusions, additions, and value overrides belong to an immutable
+//!   `assignment_version_id`, not directly to the assignment lineage.
+//! - `assignment_overlay_digest` is computed from
+//!   `AssignmentEffectiveSetCanonical` (see `digest.rs`).
 //!
 //! # Effective set algorithm
 //!
@@ -63,17 +64,27 @@ use crate::compliance::digest::{AssignmentEffectiveSetCanonical, CombinedEffecti
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssignmentTarget {
-    Environment { environment_id: Uuid },
-    System { system_id: Uuid },
+    /// Targets every applicable system in one environment.
+    Environment {
+        /// Identifies the target environment.
+        environment_id: Uuid,
+    },
+    /// Targets one exact system.
+    System {
+        /// Identifies the target system.
+        system_id: Uuid,
+    },
 }
 
 impl AssignmentTarget {
+    /// Returns the persistence discriminator for this target.
     pub fn scope_type(&self) -> &'static str {
         match self {
             Self::Environment { .. } => "environment",
             Self::System { .. } => "system",
         }
     }
+    /// Returns the environment or system ID represented by this target.
     pub fn scope_id(&self) -> Uuid {
         match self {
             Self::Environment { environment_id } => *environment_id,
@@ -86,11 +97,14 @@ impl AssignmentTarget {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssignmentMode {
+    /// Applies policy outcomes to enforcement decisions.
     Enforce,
+    /// Records evidence without blocking deployment.
     ReportOnly,
 }
 
 impl AssignmentMode {
+    /// Returns the persistence representation of this mode.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Enforce => "enforce",
@@ -102,9 +116,11 @@ impl AssignmentMode {
 /// A single value override targeting one policy in the effective set.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PolicyOverride {
+    /// Identifies the exact immutable policy version to modify.
     pub policy_version_id: Uuid,
     /// JSON-path within the policy config that this override sets.
     pub value_path: String,
+    /// Contains the replacement JSON value.
     pub value: serde_json::Value,
 }
 
@@ -144,7 +160,9 @@ pub struct EffectivePolicy {
 /// One contributing source in the effective policy set.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProvenanceEntry {
+    /// Describes how the contributing policy entered its effective set.
     pub source: EffectivePolicySource,
+    /// Records the precedence of the contributing source.
     pub specificity: PolicySpecificity,
     /// Assignment that contributed this policy, when it came from a bundle.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -155,9 +173,12 @@ pub struct ProvenanceEntry {
     /// Exact assigned bundle version, when it came from a bundle.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bundle_version_id: Option<Uuid>,
+    /// Records the assignment scope discriminator when one exists.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub scope_type: Option<String>,
+    /// Records the assignment enforcement mode for this source.
     pub enforcement_mode: String,
+    /// Indicates whether this source supplies the winning effective semantics.
     pub authoritative: bool,
 }
 
@@ -226,14 +247,18 @@ pub struct EffectivePolicySet {
 /// A conflict that prevents resolution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResolutionConflict {
+    /// Contains a stable machine-readable conflict code.
     pub code: String,
+    /// Explains the conflict for operators and API clients.
     pub message: String,
 }
 
 /// Result of resolving one assignment: either a complete set or a conflict.
 #[derive(Debug)]
 pub enum ResolutionOutcome {
+    /// Contains the complete deterministic effective policy set.
     Resolved(EffectivePolicySet),
+    /// Contains all semantic conflicts that prevent a complete set.
     Conflict(Vec<ResolutionConflict>),
 }
 
@@ -242,6 +267,7 @@ pub enum ResolutionOutcome {
 /// All inputs needed to resolve one assignment's effective set.
 #[derive(Debug)]
 pub struct EffectivePolicyResolutionInput {
+    /// Identifies the scope for which the set is resolved.
     pub target: AssignmentTarget,
     /// Exact immutable bundle version ID (must be in 'accepted' state).
     pub bundle_version_id: Uuid,
@@ -348,6 +374,25 @@ fn merge_effective_policy_candidate(
                 for p in &mut entry.provenance {
                     p.authoritative = false;
                 }
+                entry.provenance.push(ProvenanceEntry {
+                    authoritative: true,
+                    ..provenance
+                });
+            } else if specificity == existing_spec {
+                let entry = &mut staging[existing_idx];
+                if entry.effective_config != candidate.effective_config
+                    || entry.effective_mode != candidate.effective_mode
+                {
+                    per_lineage.insert(lineage_id, (existing_ver, existing_spec, existing_idx));
+                    return MergeOutcome::Conflict(ResolutionConflict {
+                        code: "EFFECTIVE_POLICY_OVERLAY_CONFLICT".into(),
+                        message: format!(
+                            "Policy lineage {lineage_id}: the same version {version_id} has different overlays at equal specificity {specificity:?}"
+                        ),
+                    });
+                }
+                // Equal-specificity assignments with identical resolved semantics
+                // are both authoritative contexts for evidence navigation.
                 entry.provenance.push(ProvenanceEntry {
                     authoritative: true,
                     ..provenance
@@ -485,7 +530,7 @@ fn enforce_mode_unresolved_conflicts(
 
 // ── Authoritative resolver ────────────────────────────────────────────────────
 
-/// Resolve the effective policy set for one assignment.
+/// Resolves the effective policy set for one assignment.
 ///
 /// This is the **single authoritative implementation** of the effective-policy
 /// algorithm. All callers (evaluation, deployment, compliance rollups,
@@ -1097,7 +1142,7 @@ fn apply_json_path_override(
 
 // ── System-level combined resolution ─────────────────────────────────────────
 
-/// Resolve all effective policies for a system by combining:
+/// Resolves all effective policies for a system by combining:
 ///   - Environment bundle assignments
 ///   - System bundle assignments
 ///   - Direct environment policy additions
@@ -1106,6 +1151,11 @@ fn apply_json_path_override(
 /// Returns one combined EffectivePolicySet covering all active assignments.
 /// Conflicts between assignments (duplicate policy lineages) are returned as
 /// typed ResolutionConflicts.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load a consistent policy snapshot.
+/// It also returns an error when persisted policy configuration cannot decode.
 pub async fn resolve_system_effective_policies(
     pool: &PgPool,
     system_id: Uuid,
@@ -1113,10 +1163,69 @@ pub async fn resolve_system_effective_policies(
     resolve_system_effective_policies_with_options(pool, system_id, false).await
 }
 
-/// Resolve only the policy semantics relevant to Nix evaluation while still
-/// retaining the complete resolver for compliance and deployment consumers.
+/// Resolves the exact effective policy set through a caller-owned transaction.
+/// Callers that authorize a target use this to keep policy resolution, target
+/// validation, assessment merges, and the guarded target write atomic.
+///
+/// # Concurrency
+/// Reborrows the caller's transaction without acquiring another connection or
+/// changing isolation. Establish REPEATABLE READ before the first query when
+/// resolution must share a stable snapshot with authorization and evidence.
+/// The caller owns commit and rollback; no partial-query retry is performed.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load policy inputs through the
+/// transaction or persisted policy configuration cannot be decoded.
+pub async fn resolve_system_effective_policies_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+) -> Result<ResolutionOutcome> {
+    resolve_system_effective_policies_with_options_in_tx(tx, system_id, false).await
+}
+
+/// Resolves complete policy semantics for a deterministic system batch through
+/// the caller's transaction. This is the authoritative API for decisions that
+/// must remain in the same serializable closure as their locks and writes.
+///
+/// Duplicate input IDs are resolved once. Missing system IDs are omitted.
+///
+/// # Concurrency
+/// Uses the caller's isolation and retained locks, without acquiring another
+/// connection. Establish REPEATABLE READ before the first query for a stable
+/// multiquery snapshot. The caller owns commit, rollback, and whole-operation
+/// retry; database failures must not be retried as isolated queries.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load batch inputs through the
+/// transaction or persisted policy configuration cannot be decoded.
+pub async fn resolve_systems_effective_policies_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, ResolutionOutcome>> {
+    let mut ids = system_ids.to_vec();
+    ids.sort_unstable();
+    ids.dedup();
+    let keyed = resolve_systems_effective_policies_batch_in_tx(tx, &ids, None, false).await?;
+    Ok(keyed
+        .into_iter()
+        .filter_map(|((bundle_version_id, system_id), outcome)| {
+            bundle_version_id.is_none().then_some((system_id, outcome))
+        })
+        .collect())
+}
+
+/// Resolves only policy semantics relevant to Nix evaluation while retaining
+/// the complete resolver for compliance and deployment consumers.
 /// Conflicts between two non-Nix policy versions at the same specificity are
 /// ignored here because they cannot affect nix-eval-jobs.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot load a consistent policy snapshot.
+/// It also returns an error when persisted evaluation configuration cannot
+/// decode.
 pub async fn resolve_system_effective_policies_for_evaluation(
     pool: &PgPool,
     system_id: Uuid,
@@ -1144,6 +1253,11 @@ pub async fn resolve_system_effective_policies_for_evaluation(
 /// resolution produced a conflict are included in the map as
 /// `ResolutionOutcome::Conflict(_)`.  System IDs not found in the DB are
 /// omitted silently (the caller should treat absence as "no assignments").
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot create or query the repeatable-read
+/// snapshot, or when persisted policy configuration cannot be decoded.
 pub async fn resolve_systems_effective_policies_for_evaluation_batch(
     pool: &PgPool,
     system_ids: &[Uuid],
@@ -1161,10 +1275,37 @@ pub async fn resolve_systems_effective_policies_for_evaluation_batch(
         .collect())
 }
 
-/// Resolve one exact bundle version for all provided systems in one batch.
+/// Resolves compliance and deployment semantics for many systems in one
+/// repeatable-read snapshot.
+///
+/// Missing system IDs are omitted from the returned map.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot create or query the repeatable-read
+/// snapshot, or when persisted policy configuration cannot be decoded.
+pub async fn resolve_systems_effective_policies_for_deployment_batch(
+    pool: &PgPool,
+    system_ids: &[Uuid],
+) -> Result<std::collections::HashMap<Uuid, ResolutionOutcome>> {
+    let keyed = resolve_systems_effective_policies_batch(pool, system_ids, None, false).await?;
+    Ok(keyed
+        .into_iter()
+        .filter_map(|((bundle_version_id, system_id), outcome)| {
+            bundle_version_id.is_none().then_some((system_id, outcome))
+        })
+        .collect())
+}
+
+/// Resolves one exact bundle version for all provided systems in one batch.
 /// Explicit assignments for the requested version are authoritative; systems
 /// in the bundle scope without one receive the unmodified baseline. Direct
 /// environment and system policies still use the normal precedence rules.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot create or query the repeatable-read
+/// snapshot, or when persisted policy configuration cannot be decoded.
 pub async fn resolve_systems_effective_policies_for_bundle_version_batch(
     pool: &PgPool,
     system_ids: &[Uuid],
@@ -1187,15 +1328,97 @@ pub async fn resolve_systems_effective_policies_for_bundle_version_batch(
         .collect())
 }
 
-/// Resolve exact bundle versions for explicit system sets in one batch.
+/// Resolves exact bundle versions for explicit system sets in one batch.
 ///
 /// Unlike the single-version compatibility API, the requested bundle-version IDs
 /// are first-class inputs: metadata and baseline membership are loaded for every
 /// requested version even when there are no explicit assignments. Results are
 /// keyed by `(bundle_version_id, system_id)` so callers can aggregate many
 /// versions without accidentally merging assignments from another revision.
+///
+/// Empty requests return an empty map. Duplicate system IDs within a requested
+/// version are resolved once.
+///
+/// # Errors
+///
+/// Returns an error when PostgreSQL cannot create or query the repeatable-read
+/// snapshot, or when persisted policy configuration cannot be decoded.
 pub async fn resolve_systems_effective_policies_for_bundle_versions_batch(
     pool: &PgPool,
+    requests: &[(Uuid, Vec<Uuid>)],
+) -> Result<std::collections::HashMap<(Uuid, Uuid), ResolutionOutcome>> {
+    if requests.iter().all(|(_, system_ids)| system_ids.is_empty()) {
+        return Ok(std::collections::HashMap::new());
+    }
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await?;
+    let result =
+        resolve_systems_effective_policies_for_bundle_versions_batch_in_tx(&mut tx, requests)
+            .await?;
+    tx.commit().await?;
+    Ok(result)
+}
+
+/// Resolves one exact bundle revision in the caller's transaction.
+///
+/// # Concurrency
+/// Uses the caller's snapshot and retains its locks. Does not begin, commit,
+/// or retry a transaction. Callers requiring a stable multiquery snapshot must
+/// establish REPEATABLE READ before their first query.
+///
+/// # Errors
+/// Returns database or policy decode errors; the caller must abort on failure.
+pub async fn resolve_systems_effective_policies_for_bundle_version_batch_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_ids: &[Uuid],
+    bundle_version_id: Uuid,
+) -> Result<std::collections::HashMap<Uuid, ResolutionOutcome>> {
+    Ok(
+        resolve_systems_effective_policies_for_bundle_versions_batch_in_tx(
+            tx,
+            &[(bundle_version_id, system_ids.to_vec())],
+        )
+        .await?
+        .into_iter()
+        .filter_map(|((version_id, system_id), outcome)| {
+            (version_id == bundle_version_id).then_some((system_id, outcome))
+        })
+        .collect(),
+    )
+}
+
+/// Resolves exact bundle revisions and system sets in the caller's transaction.
+///
+/// Duplicate system IDs are resolved once; empty requests return an empty map.
+/// Results retain exact `(bundle_version_id, system_id)` identity.
+///
+/// # Concurrency
+/// Reuses the internal batch core without acquiring a pool connection. The
+/// caller owns isolation, locks, commit, and rollback. Establish REPEATABLE READ
+/// before the first query when combining resolution with other snapshot reads.
+///
+/// # Errors
+/// Returns database or policy decode errors. No partial result or query-only
+/// retry is performed; the caller must abort the transaction on failure.
+///
+/// # Examples
+/// ```no_run
+/// # async fn example(pool: &sqlx::PgPool, version: uuid::Uuid, system: uuid::Uuid) -> anyhow::Result<()> {
+/// let mut tx = pool.begin().await?;
+/// sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+///     .execute(&mut *tx).await?;
+/// let resolved = crystal_forge::compliance::resolver::resolve_systems_effective_policies_for_bundle_versions_batch_in_tx(
+///     &mut tx, &[(version, vec![system])],
+/// ).await?;
+/// let _ = resolved.get(&(version, system));
+/// tx.commit().await?;
+/// # Ok(())
+/// # }
+/// ```
+pub async fn resolve_systems_effective_policies_for_bundle_versions_batch_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
     requests: &[(Uuid, Vec<Uuid>)],
 ) -> Result<std::collections::HashMap<(Uuid, Uuid), ResolutionOutcome>> {
     let mut requests_by_version = std::collections::HashMap::<Uuid, Vec<Uuid>>::new();
@@ -1219,8 +1442,8 @@ pub async fn resolve_systems_effective_policies_for_bundle_versions_batch(
         return Ok(std::collections::HashMap::new());
     }
 
-    let keyed = resolve_systems_effective_policies_batch(
-        pool,
+    let keyed = resolve_systems_effective_policies_batch_in_tx(
+        tx,
         &all_system_ids,
         Some(&requests_by_version),
         false,
@@ -1243,8 +1466,6 @@ async fn resolve_systems_effective_policies_batch(
     if system_ids.is_empty() {
         return Ok(std::collections::HashMap::new());
     }
-
-    // ── Open a single REPEATABLE READ snapshot for all reads ──────────────────
     let mut tx = pool
         .begin()
         .await
@@ -1253,12 +1474,84 @@ async fn resolve_systems_effective_policies_batch(
         .execute(&mut *tx)
         .await
         .context("set repeatable read (batch)")?;
+    let result = resolve_systems_effective_policies_batch_in_tx(
+        &mut tx,
+        system_ids,
+        bundle_version_requests,
+        ignore_non_evaluation_conflicts,
+    )
+    .await?;
+    tx.commit()
+        .await
+        .context("commit batch resolution snapshot")?;
+    Ok(result)
+}
+
+/// Resolves a batch through the caller's snapshot without committing it.
+///
+/// The evaluation loader keeps this snapshot open through first-write capture.
+///
+/// # Errors
+/// Returns an error when policy inputs cannot be loaded or decoded.
+async fn resolve_systems_effective_policies_batch_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_ids: &[Uuid],
+    bundle_version_requests: Option<&std::collections::HashMap<Uuid, Vec<Uuid>>>,
+    ignore_non_evaluation_conflicts: bool,
+) -> Result<std::collections::HashMap<(Option<Uuid>, Uuid), ResolutionOutcome>> {
+    resolve_systems_effective_policies_and_contexts_in_tx(
+        tx,
+        system_ids,
+        bundle_version_requests,
+        ignore_non_evaluation_conflicts,
+        &mut std::collections::HashMap::new(),
+    )
+    .await
+}
+
+/// Identifies one applicable bundle context before policy exclusions or merging.
+///
+/// Empty bundles and bundles with no executable policies still have a context.
+/// Virtual baselines have neither assignment identity; persisted assignments
+/// always have both. Context presence does not assert successful resolution or
+/// that a superseded policy version supplied effective execution semantics.
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedBundleContext {
+    /// Identifies the exact bundle version selected for this system.
+    pub bundle_version_id: Uuid,
+    /// Identifies a persisted assignment lineage, absent for virtual baselines.
+    pub assignment_id: Option<Uuid>,
+    /// Identifies its immutable snapshot, absent for virtual baselines.
+    pub assignment_version_id: Option<Uuid>,
+    /// Distinguishes the resolver's virtual context from a persisted assignment.
+    pub virtual_baseline: bool,
+}
+
+/// Resolves policies and exports the exact applicable contexts from the same inputs.
+///
+/// Contexts come from the authoritative assignment query and virtual-work-item
+/// construction, not a second applicability query or surviving policy union.
+/// The caller must supply an empty context map. Results include contexts for
+/// conflicts so consumers cannot mistake skipped gates for nonassignment.
+///
+/// # Errors
+/// Returns an error when policy inputs cannot be loaded or decoded.
+pub(crate) async fn resolve_systems_effective_policies_and_contexts_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_ids: &[Uuid],
+    bundle_version_requests: Option<&std::collections::HashMap<Uuid, Vec<Uuid>>>,
+    ignore_non_evaluation_conflicts: bool,
+    contexts: &mut std::collections::HashMap<(Option<Uuid>, Uuid), Vec<ResolvedBundleContext>>,
+) -> Result<std::collections::HashMap<(Option<Uuid>, Uuid), ResolutionOutcome>> {
+    if system_ids.is_empty() {
+        return Ok(std::collections::HashMap::new());
+    }
 
     // ── Q1: Load system → environment_id for all systems ─────────────────────
     let system_envs: Vec<(Uuid, Option<Uuid>)> =
         sqlx::query_as("SELECT id, environment_id FROM systems WHERE id = ANY($1)")
             .bind(system_ids)
-            .fetch_all(&mut *tx)
+            .fetch_all(&mut **tx)
             .await
             .context("batch load system environments")?;
 
@@ -1287,7 +1580,7 @@ async fn resolve_systems_effective_policies_batch(
             "SELECT current_published_version_id FROM compliance_bundles WHERE current_published_version_id = ANY($1)",
         )
         .bind(version_ids)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("load current published bundle versions for virtual baseline resolution")?
     } else {
@@ -1308,10 +1601,11 @@ async fn resolve_systems_effective_policies_batch(
         Option<Uuid>,
     )> = sqlx::query_as(
         r#"SELECT a.id, a.current_version_id, a.bundle_id, av.bundle_version_id,
-                      a.scope_type, a.enforcement_mode, a.assignment_overlay_digest,
-                      a.environment_id, a.system_id
-               FROM compliance_bundle_assignments a
-               JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
+                       a.scope_type, av.enforcement_mode, av.assignment_overlay_digest,
+                       a.environment_id, a.system_id
+                FROM compliance_bundle_assignments a
+                JOIN compliance_bundle_assignment_versions av
+                  ON av.id = a.current_version_id AND av.assignment_id = a.id
                WHERE a.active AND a.current_version_id IS NOT NULL
                  AND ($3::uuid[] IS NULL OR av.bundle_version_id = ANY($3))
                  AND (
@@ -1326,7 +1620,7 @@ async fn resolve_systems_effective_policies_batch(
     .bind(&all_env_ids)
     .bind(system_ids)
     .bind(bundle_version_filter_ids.as_deref())
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .context("batch load bundle assignments")?;
 
@@ -1354,7 +1648,7 @@ async fn resolve_systems_effective_policies_batch(
          WHERE assignment_version_id = ANY($1)",
     )
     .bind(&all_assignment_version_ids)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .context("batch load exclusions")?;
 
@@ -1372,7 +1666,7 @@ async fn resolve_systems_effective_policies_batch(
          ORDER BY assignment_version_id, addition_order",
     )
     .bind(&all_assignment_version_ids)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .context("batch load additions")?;
 
@@ -1389,7 +1683,7 @@ async fn resolve_systems_effective_policies_batch(
          WHERE assignment_version_id = ANY($1)",
     )
     .bind(&all_assignment_version_ids)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .context("batch load overrides")?;
 
@@ -1419,7 +1713,7 @@ async fn resolve_systems_effective_policies_batch(
          WHERE id = ANY($1)",
     )
     .bind(&all_bundle_version_ids)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .context("batch load bundle versions")?;
 
@@ -1451,7 +1745,7 @@ async fn resolve_systems_effective_policies_batch(
                ORDER BY cbvp.bundle_version_id, cbvp.policy_order"#,
     )
     .bind(&all_bundle_version_ids)
-    .fetch_all(&mut *tx)
+    .fetch_all(&mut **tx)
     .await
     .context("batch load bundle baselines")?;
 
@@ -1495,22 +1789,42 @@ async fn resolve_systems_effective_policies_batch(
 
     let mut addition_pv_info: std::collections::HashMap<
         Uuid,
-        (Uuid, String, serde_json::Value, String),
+        (Uuid, String, serde_json::Value, String, String, String),
     > = std::collections::HashMap::new();
     if !all_addition_pv_ids.is_empty() {
-        let raw_addition_pvs: Vec<(Uuid, Uuid, String, serde_json::Value, String)> =
-            sqlx::query_as(
-                "SELECT id, policy_id, policy_type, config, implementation_state
+        let raw_addition_pvs: Vec<(
+            Uuid,
+            Uuid,
+            String,
+            serde_json::Value,
+            String,
+            String,
+            String,
+        )> = sqlx::query_as(
+            "SELECT id, policy_id, policy_type, config, implementation_state,
+                        publication_state, trust_state
                  FROM deployment_policy_versions
                  WHERE id = ANY($1)",
-            )
-            .bind(&all_addition_pv_ids)
-            .fetch_all(&mut *tx)
-            .await
-            .context("batch load addition policy versions")?;
+        )
+        .bind(&all_addition_pv_ids)
+        .fetch_all(&mut **tx)
+        .await
+        .context("batch load addition policy versions")?;
 
-        for (pv_id, lin_id, ptype, config, implementation_state) in raw_addition_pvs {
-            addition_pv_info.insert(pv_id, (lin_id, ptype, config, implementation_state));
+        for (pv_id, lin_id, ptype, config, implementation_state, publication_state, trust_state) in
+            raw_addition_pvs
+        {
+            addition_pv_info.insert(
+                pv_id,
+                (
+                    lin_id,
+                    ptype,
+                    config,
+                    implementation_state,
+                    publication_state,
+                    trust_state,
+                ),
+            );
         }
     }
 
@@ -1534,10 +1848,11 @@ async fn resolve_systems_effective_policies_batch(
                    pv.publication_state = 'accepted'
                    OR (dp.current_published_version_id IS NULL
                        AND pv.publication_state IN ('incomplete', 'draft', 'interim'))
-                 )"#,
+                   )
+               ORDER BY ep.environment_id, pv.id"#,
         )
         .bind(&all_env_ids)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("batch load environment direct policies")?;
 
@@ -1569,10 +1884,11 @@ async fn resolve_systems_effective_policies_batch(
                    pv.publication_state = 'accepted'
                    OR (dp.current_published_version_id IS NULL
                        AND pv.publication_state IN ('incomplete', 'draft', 'interim'))
-                 )"#,
+                   )
+               ORDER BY sp.system_id, pv.id"#,
         )
         .bind(system_ids)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("batch load system direct policies")?;
 
@@ -1583,11 +1899,6 @@ async fn resolve_systems_effective_policies_batch(
                 .push((pv_id, lin_id, ptype, config));
         }
     }
-
-    // Close the transaction — all reads are done.
-    tx.commit()
-        .await
-        .context("commit batch resolution snapshot")?;
 
     // ── Per-system merge phase (pure Rust, no DB access) ──────────────────────
     //
@@ -1716,6 +2027,26 @@ async fn resolve_systems_effective_policies_batch(
         }
     }
 
+    // Export contexts before exclusions, eligibility, and merge can erase every
+    // policy. This observes the work items without changing resolution inputs.
+    for (requested, system, assignments) in &work_items {
+        contexts.insert(
+            (*requested, *system),
+            assignments
+                .iter()
+                .map(|(assignment, version, _, bundle, scope, _, _, _)| {
+                    let virtual_baseline = scope == "virtual_baseline";
+                    ResolvedBundleContext {
+                        bundle_version_id: *bundle,
+                        assignment_id: (!virtual_baseline).then_some(*assignment),
+                        assignment_version_id: (!virtual_baseline).then_some(*version),
+                        virtual_baseline,
+                    }
+                })
+                .collect(),
+        );
+    }
+
     let mut results = std::collections::HashMap::new();
 
     'system: for (requested_bundle_version_id, sys_id, sys_assignments) in work_items {
@@ -1727,6 +2058,7 @@ async fn resolve_systems_effective_policies_batch(
         let mut staging: Vec<EffectivePolicy> = Vec::new();
         let mut all_warnings: Vec<String> = Vec::new();
         let mut primary_bundle_version_id: Option<Uuid> = None;
+        let mut bundle_version_ids_ordered: Vec<Uuid> = Vec::new();
         let mut has_assignments = false;
 
         // Process bundle assignments (already in scope order).
@@ -1916,8 +2248,14 @@ async fn resolve_systems_effective_policies_batch(
                     continue 'system;
                 }
 
-                let Some((lin_id, ptype, config, implementation_state)) =
-                    addition_pv_info.get(add_pv_id)
+                let Some((
+                    lin_id,
+                    ptype,
+                    config,
+                    implementation_state,
+                    publication_state,
+                    trust_state,
+                )) = addition_pv_info.get(add_pv_id)
                 else {
                     results.insert(
                         result_key,
@@ -1928,6 +2266,37 @@ async fn resolve_systems_effective_policies_batch(
                     );
                     continue 'system;
                 };
+
+                if publication_state != "accepted" {
+                    results.insert(
+                        result_key,
+                        ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                            code: "ASSIGNMENT_POLICY_NOT_ACCEPTED".to_string(),
+                            message: format!(
+                                "Addition policy version {} is in '{}' state; must be 'accepted'",
+                                add_pv_id, publication_state
+                            ),
+                        }]),
+                    );
+                    continue 'system;
+                }
+                if matches!(
+                    implementation_state.as_str(),
+                    "native" | "external" | "manual"
+                ) && trust_state != "trusted"
+                {
+                    results.insert(
+                        result_key,
+                        ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                            code: "ASSIGNMENT_POLICY_UNTRUSTED".to_string(),
+                            message: format!(
+                                "Addition policy version {} is not trusted",
+                                add_pv_id
+                            ),
+                        }]),
+                    );
+                    continue 'system;
+                }
 
                 if let Some(existing_vid) = seen_lineages.get(lin_id) {
                     if existing_vid != add_pv_id {
@@ -1976,16 +2345,59 @@ async fn resolve_systems_effective_policies_batch(
             }
 
             // Apply overrides
+            let effective_version_ids: std::collections::HashSet<Uuid> = assignment_effective
+                .iter()
+                .map(|policy| policy.policy_version_id)
+                .collect();
             for o in &overrides_for_av {
+                if exclusions_set.contains(&o.policy_version_id)
+                    || !effective_version_ids.contains(&o.policy_version_id)
+                {
+                    results.insert(
+                        result_key,
+                        ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                            code: "ASSIGNMENT_OVERRIDE_TARGET_MISSING".to_string(),
+                            message: format!(
+                                "Override targets policy version {} which is not in the effective set",
+                                o.policy_version_id
+                            ),
+                        }]),
+                    );
+                    continue 'system;
+                }
                 for pol in assignment_effective.iter_mut() {
                     if pol.policy_version_id == o.policy_version_id {
-                        if let Err(e) = apply_json_path_override(
+                        if let Err(error) = validate_typed_override(
+                            &pol.policy_type,
+                            &pol.effective_config,
+                            &o.value_path,
+                            &o.value,
+                        ) {
+                            results.insert(
+                                result_key,
+                                ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                                    code: "ASSIGNMENT_OVERRIDE_FIELD_INVALID".to_string(),
+                                    message: error,
+                                }]),
+                            );
+                            continue 'system;
+                        }
+                        if let Err(error) = apply_json_path_override(
                             &mut pol.effective_config,
                             &o.value_path,
                             &o.value,
                         ) {
-                            all_warnings
-                                .push(format!("Override warning for {}: {e}", o.policy_version_id));
+                            results.insert(
+                                result_key,
+                                ResolutionOutcome::Conflict(vec![ResolutionConflict {
+                                    code: "ASSIGNMENT_OVERRIDE_VALUE_INVALID".to_string(),
+                                    message: format!(
+                                        "Override at path '{}' on policy {} failed: {}",
+                                        o.value_path, o.policy_version_id, error
+                                    ),
+                                }]),
+                            );
+                            continue 'system;
                         }
                         if !pol.overrides.iter().any(|x| x.value_path == o.value_path) {
                             pol.overrides.push(o.clone());
@@ -1997,6 +2409,7 @@ async fn resolve_systems_effective_policies_batch(
             if primary_bundle_version_id.is_none() {
                 primary_bundle_version_id = Some(*bv_id);
             }
+            bundle_version_ids_ordered.push(*bv_id);
 
             // Merge assignment policies into staging using the authoritative merge
             for mut pol in assignment_effective {
@@ -2018,7 +2431,7 @@ async fn resolve_systems_effective_policies_batch(
                     &mut staging,
                     &mut per_lineage,
                     &mut all_warnings,
-                    true, // ignore_non_evaluation_conflicts
+                    ignore_non_evaluation_conflicts,
                 ) {
                     MergeOutcome::Conflict(conflict) => {
                         results.insert(result_key, ResolutionOutcome::Conflict(vec![conflict]));
@@ -2139,7 +2552,6 @@ async fn resolve_systems_effective_policies_batch(
             .map(|p| p.policy_version_id)
             .collect();
         direct.sort();
-        let bundle_version_ids_ordered: Vec<Uuid> = primary_bundle_version_id.into_iter().collect();
         let canonical = CombinedEffectiveSetCanonical {
             bundle_version_ids_ordered,
             addition_policy_version_ids: additions,
@@ -2183,11 +2595,26 @@ async fn resolve_system_effective_policies_with_options(
         .await
         .context("set repeatable read")?;
 
+    let outcome = resolve_system_effective_policies_with_options_in_tx(
+        &mut tx,
+        system_id,
+        ignore_non_evaluation_conflicts,
+    )
+    .await?;
+    tx.commit().await.context("commit resolution transaction")?;
+    Ok(outcome)
+}
+
+async fn resolve_system_effective_policies_with_options_in_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+    ignore_non_evaluation_conflicts: bool,
+) -> Result<ResolutionOutcome> {
     // Load the system's environment inside the snapshot.
     let env_id: Option<Option<Uuid>> =
         sqlx::query_scalar("SELECT environment_id FROM systems WHERE id = $1")
             .bind(system_id)
-            .fetch_optional(&mut *tx)
+            .fetch_optional(&mut **tx)
             .await
             .context("load system environment")?;
 
@@ -2198,9 +2625,10 @@ async fn resolve_system_effective_policies_with_options(
     let assignments: Vec<_> =
         sqlx::query_as::<_, (Uuid, Uuid, Uuid, Uuid, String, String, String)>(
             r#"SELECT a.id, a.current_version_id, a.bundle_id, av.bundle_version_id,
-                  a.scope_type, a.enforcement_mode, a.assignment_overlay_digest
+                   a.scope_type, av.enforcement_mode, av.assignment_overlay_digest
             FROM compliance_bundle_assignments a
-            JOIN compliance_bundle_assignment_versions av ON av.id = a.current_version_id
+            JOIN compliance_bundle_assignment_versions av
+              ON av.id = a.current_version_id AND av.assignment_id = a.id
             WHERE a.active AND a.current_version_id IS NOT NULL
               AND ((a.scope_type = 'environment' AND a.environment_id = $2)
                 OR (a.scope_type = 'system' AND a.system_id = $1)
@@ -2216,7 +2644,7 @@ async fn resolve_system_effective_policies_with_options(
         )
         .bind(system_id)
         .bind(env_id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("load bundle assignments for system")?;
 
@@ -2243,10 +2671,11 @@ async fn resolve_system_effective_policies_with_options(
                          dp.current_published_version_id IS NULL
                          AND pv.publication_state IN ('incomplete', 'draft', 'interim')
                      )
-                 )"#,
+                  )
+               ORDER BY pv.id"#,
         )
         .bind(eid)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("load environment direct policies")?;
 
@@ -2292,10 +2721,11 @@ async fn resolve_system_effective_policies_with_options(
                          dp.current_published_version_id IS NULL
                          AND pv.publication_state IN ('incomplete', 'draft', 'interim')
                      )
-                 )"#,
+                  )
+               ORDER BY pv.id"#,
         )
         .bind(system_id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("load system direct policies")?;
 
@@ -2350,7 +2780,7 @@ async fn resolve_system_effective_policies_with_options(
              "SELECT policy_version_id FROM compliance_assignment_exclusions WHERE assignment_version_id = $1",
         )
         .bind(assignment_version_id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("load assignment exclusions")?;
 
@@ -2358,7 +2788,7 @@ async fn resolve_system_effective_policies_with_options(
              "SELECT policy_version_id FROM compliance_assignment_additions WHERE assignment_version_id = $1 ORDER BY addition_order",
         )
         .bind(assignment_version_id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("load assignment additions")?;
 
@@ -2366,7 +2796,7 @@ async fn resolve_system_effective_policies_with_options(
             "SELECT policy_version_id, value_path, value FROM compliance_assignment_value_overrides WHERE assignment_version_id = $1",
         )
         .bind(assignment_version_id)
-        .fetch_all(&mut *tx)
+        .fetch_all(&mut **tx)
         .await
         .context("load assignment overrides")?
         .into_iter()
@@ -2401,7 +2831,7 @@ async fn resolve_system_effective_policies_with_options(
             specificity,
         };
 
-        let outcome = resolve_effective_policy_set_with_options(&mut tx, &input).await?;
+        let outcome = resolve_effective_policy_set_with_options(tx, &input).await?;
 
         match outcome {
             ResolutionOutcome::Resolved(set) => {
@@ -2433,7 +2863,6 @@ async fn resolve_system_effective_policies_with_options(
                         ignore_non_evaluation_conflicts,
                     ) {
                         MergeOutcome::Conflict(conflict) => {
-                            let _ = tx.rollback().await;
                             return Ok(ResolutionOutcome::Conflict(vec![conflict]));
                         }
                         _ => {}
@@ -2441,7 +2870,6 @@ async fn resolve_system_effective_policies_with_options(
                 }
             }
             ResolutionOutcome::Conflict(conflicts) => {
-                let _ = tx.rollback().await;
                 return Ok(ResolutionOutcome::Conflict(conflicts));
             }
         }
@@ -2476,7 +2904,6 @@ async fn resolve_system_effective_policies_with_options(
             ignore_non_evaluation_conflicts,
         ) {
             MergeOutcome::Conflict(conflict) => {
-                let _ = tx.rollback().await;
                 return Ok(ResolutionOutcome::Conflict(vec![conflict]));
             }
             _ => {}
@@ -2485,8 +2912,6 @@ async fn resolve_system_effective_policies_with_options(
 
     // The final all_policies preserves insertion order (first seen wins position).
     let all_policies = staging;
-
-    tx.commit().await.context("commit resolution transaction")?;
 
     // ── Canonical combined target digest ──────────────────────────────────────
     //

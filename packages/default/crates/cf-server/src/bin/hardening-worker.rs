@@ -15,7 +15,15 @@ async fn main() -> anyhow::Result<()> {
     let pool = db_pool().await?;
     sqlx::migrate!("./migrations").run(&pool).await?;
 
-    info!("Starting Crystal Forge hardening worker");
-    run_hardening_scan_queue(pool).await;
+    // Automatic admission policy is configuration-owned. The worker reads it
+    // once here and passes it explicitly into the queue loop, which gates the
+    // bounded backfill. Manually requested scans run regardless of this value.
+    let auto_hardening_scans = cfg.server.auto_hardening_scans;
+
+    info!(
+        auto_hardening_scans,
+        "Starting Crystal Forge hardening worker"
+    );
+    run_hardening_scan_queue(pool, auto_hardening_scans).await;
     Ok(())
 }

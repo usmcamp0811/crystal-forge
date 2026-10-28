@@ -1,0 +1,18 @@
+flowchart TB
+  S["Systems draft at 58006084"] --> Ledger["Cross-view contract ledger"]
+  C["Fleet CVEs draft at 58006084"] --> Ledger
+  K["Compliance draft at 931e3622"] --> Ledger
+  Bridge["Direct comparison: intervening commits add docs only"] --> Ledger
+  Ledger --> Identity["Identity and exact selection"]
+  Ledger --> Scope["Authorization and scope"]
+  Ledger --> Evidence["Observation, freshness and authority"]
+  Ledger --> Units["Count units and state dimensions"]
+  Ledger --> Lifecycle["Mutation, verification and closure"]
+  Ledger --> Refresh["Navigation and invalidation"]
+  Identity --> Decide["Joint review and explicit decisions"]
+  Scope --> Decide
+  Evidence --> Decide
+  Units --> Decide
+  Lifecycle --> Decide
+  Refresh --> Decide
+  Decide --> Tests["Shared fixtures and cross-screen assertions"]

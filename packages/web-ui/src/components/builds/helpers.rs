@@ -147,6 +147,10 @@ impl WorkerItem {
 pub struct BuildItem {
     pub id: i32,
     pub job_id: Option<uuid::Uuid>,
+    /// Database commit identity for exact-revision recovery.
+    pub commit_id: Option<i32>,
+    /// Server-owned failure code that selects authoritative recovery behavior.
+    pub server_failure_code: Option<String>,
     pub system_id: Option<uuid::Uuid>,
     pub hostname: String,
     pub environment: Option<String>,
@@ -435,6 +439,8 @@ pub fn mock_builds() -> Vec<BuildItem> {
         BuildItem {
             id: 1,
             job_id: None,
+            commit_id: None,
+            server_failure_code: None,
             system_id: None,
             hostname: "atlas-01".to_string(),
             environment: Some("production".to_string()),
@@ -464,6 +470,8 @@ pub fn mock_builds() -> Vec<BuildItem> {
         BuildItem {
             id: 2,
             job_id: None,
+            commit_id: None,
+            server_failure_code: None,
             system_id: None,
             hostname: "luna-02".to_string(),
             environment: Some("staging".to_string()),
@@ -492,6 +500,8 @@ pub fn mock_builds() -> Vec<BuildItem> {
         BuildItem {
             id: 3,
             job_id: None,
+            commit_id: None,
+            server_failure_code: None,
             system_id: None,
             hostname: "gray".to_string(),
             environment: Some("dev".to_string()),
@@ -520,6 +530,8 @@ pub fn mock_builds() -> Vec<BuildItem> {
         BuildItem {
             id: 4,
             job_id: None,
+            commit_id: None,
+            server_failure_code: None,
             system_id: None,
             hostname: "reckless".to_string(),
             environment: Some("production".to_string()),

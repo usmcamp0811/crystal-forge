@@ -1,9 +1,14 @@
 pub mod jobs;
+mod policy_capture;
+#[cfg(test)]
+mod policy_capture_tests;
+#[cfg(test)]
+mod required_inventory_worker_tests;
 
 use crate::builder::run_cve_scan_loop;
 use crate::compliance::canonical::semantic_digest;
 use crate::compliance::resolver::{
-    AssignmentMode, ResolutionOutcome, resolve_systems_effective_policies_for_evaluation_batch,
+    AssignmentMode, ResolutionOutcome, resolve_systems_effective_policies_and_contexts_in_tx,
 };
 use crate::config::{CrystalForgeConfig, FlakeConfig};
 use crate::deployment::spawn_deployment_policy_manager;
@@ -32,7 +37,9 @@ use tracing::{debug, error, info, warn};
 
 // ⬇️ bring in the commit-eval helpers you said you added in queries/commits.rs
 use crate::derivations::utils::count_closure_packages;
-use crate::models::deployment_policies::{AssignedPolicy, PoliciesByConfiguration};
+use crate::models::deployment_policies::{
+    AssignedPolicy, AssignedPolicyEnforcementMode, PoliciesByConfiguration,
+};
 use crate::queries::build_jobs::{QueuedBuild, recover_orphaned_derivation_build_jobs};
 use crate::queries::builders::{
     cleanup_expired_build_logs, mark_stale_builders_offline,
@@ -44,13 +51,11 @@ use crate::queries::commits::{
     reset_stuck_commit_evaluations,
 };
 use crate::queries::deployment_policies::{
-    get_deployment_policies_by_versions, list_enabled_deployment_policies,
     list_enabled_policies_for_flake, list_policy_rows_by_configuration_for_flake,
 };
 use crate::queries::derivations::{
     cleanup_partial_derivations, reset_stuck_builds, set_closure_counts,
 };
-use crate::services::hardening_scans::trigger_commit_hardening_scans;
 
 const CLOSURE_COUNT_MAX_CONCURRENT: usize = 2;
 static CLOSURE_COUNT_LIMITER: OnceLock<Arc<Semaphore>> = OnceLock::new();
@@ -100,305 +105,15 @@ fn custom_field_name(name: &str, id: uuid::Uuid) -> String {
 }
 
 pub(crate) fn normalize_custom_policy_expression(expression: &str) -> (String, bool) {
-    let chars = expression.chars().collect::<Vec<_>>();
-    let legacy = "cfg.config.";
-    let legacy_chars = legacy.chars().collect::<Vec<_>>();
-    let mut output = String::with_capacity(expression.len());
-    let mut index = 0;
-    let mut state = LexicalState::Normal;
-
-    while index < chars.len() {
-        match state {
-            LexicalState::Normal => {
-                if chars[index] == '"' {
-                    state = LexicalState::DoubleQuoted;
-                    output.push(chars[index]);
-                    index += 1;
-                } else if chars[index] == '#' {
-                    state = LexicalState::LineComment;
-                    output.push(chars[index]);
-                    index += 1;
-                } else if chars[index] == '/' && chars.get(index + 1) == Some(&'*') {
-                    state = LexicalState::BlockComment;
-                    output.push('/');
-                    output.push('*');
-                    index += 2;
-                } else if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
-                    state = LexicalState::IndentedString;
-                    output.push('\'');
-                    output.push('\'');
-                    index += 2;
-                } else if index + legacy_chars.len() <= chars.len()
-                    && chars[index..index + legacy_chars.len()] == legacy_chars
-                    && (index == 0 || !is_nix_identifier_char(chars[index - 1]))
-                    && chars
-                        .get(index + legacy_chars.len())
-                        .is_some_and(|character| is_nix_identifier_char(*character))
-                {
-                    output.push_str("config.");
-                    index += legacy_chars.len();
-                } else {
-                    output.push(chars[index]);
-                    index += 1;
-                }
-            }
-            LexicalState::DoubleQuoted => {
-                let character = chars[index];
-                output.push(character);
-                index += 1;
-                if character == '\\' {
-                    if let Some(escaped) = chars.get(index) {
-                        output.push(*escaped);
-                        index += 1;
-                    }
-                } else if character == '"' {
-                    state = LexicalState::Normal;
-                }
-            }
-            LexicalState::IndentedString => {
-                if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
-                    if chars
-                        .get(index + 2)
-                        .is_some_and(|next| matches!(next, '$' | '\\' | '\''))
-                    {
-                        output.push('\'');
-                        output.push('\'');
-                        index += 2;
-                        continue;
-                    }
-                    output.push('\'');
-                    output.push('\'');
-                    index += 2;
-                    state = LexicalState::Normal;
-                } else {
-                    output.push(chars[index]);
-                    index += 1;
-                }
-            }
-            LexicalState::LineComment => {
-                let character = chars[index];
-                output.push(character);
-                index += 1;
-                if character == '\n' {
-                    state = LexicalState::Normal;
-                }
-            }
-            LexicalState::BlockComment => {
-                if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
-                    output.push('*');
-                    output.push('/');
-                    index += 2;
-                    state = LexicalState::Normal;
-                } else {
-                    output.push(chars[index]);
-                    index += 1;
-                }
-            }
-        }
-    }
-
-    let output = normalize_string_interpolations(&output);
-    let changed = output != expression;
-    (output, changed)
+    crate::models::custom_check::normalize_expression(expression)
 }
 
-/// Normalize legacy references inside Nix string interpolations. The main
-/// scanner intentionally treats string bodies as opaque, but `${...}` is an
-/// embedded Nix expression and must be scanned as code. Escaped `\${` remains
-/// literal; indented strings use the same rule for their interpolation body.
-fn normalize_string_interpolations(expression: &str) -> String {
-    let chars: Vec<char> = expression.chars().collect();
-    let mut output = String::with_capacity(expression.len());
-    let mut index = 0;
-    let mut string_kind = None::<bool>; // false = double quoted, true = indented
-    while index < chars.len() {
-        if string_kind.is_none() {
-            if chars[index] == '"' {
-                string_kind = Some(false);
-                output.push(chars[index]);
-                index += 1;
-                continue;
-            }
-            if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
-                string_kind = Some(true);
-                output.push('\'');
-                output.push('\'');
-                index += 2;
-                continue;
-            }
-            output.push(chars[index]);
-            index += 1;
-            continue;
-        }
-
-        let indented = string_kind == Some(true);
-        if !indented && chars[index] == '\\' {
-            output.push(chars[index]);
-            if let Some(next) = chars.get(index + 1) {
-                output.push(*next);
-                index += 2;
-            } else {
-                index += 1;
-            }
-            continue;
-        }
-        if indented && chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
-            if chars.get(index + 2) == Some(&'\\') {
-                output.push('\'');
-                output.push('\'');
-                index += 2;
-                output.push(chars[index]);
-                index += 1;
-                if let Some(escaped) = chars.get(index) {
-                    output.push(*escaped);
-                    index += 1;
-                }
-                continue;
-            }
-            if chars
-                .get(index + 2)
-                .is_some_and(|next| matches!(next, '$' | '\''))
-            {
-                output.push('\'');
-                output.push('\'');
-                index += 2;
-                if let Some(escaped) = chars.get(index) {
-                    output.push(*escaped);
-                    index += 1;
-                }
-                continue;
-            }
-            output.push('\'');
-            output.push('\'');
-            index += 2;
-            string_kind = None;
-            continue;
-        }
-        if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
-            let start = index + 2;
-            if let Some(end) = interpolation_end(&chars, start) {
-                let inner: String = chars[start..end].iter().collect();
-                let (normalized, _) = normalize_custom_policy_expression(&inner);
-                output.push_str("${");
-                output.push_str(&normalized);
-                output.push('}');
-                index = end + 1;
-                continue;
-            }
-        }
-        if !indented && chars[index] == '"' {
-            output.push(chars[index]);
-            index += 1;
-            string_kind = None;
-        } else {
-            output.push(chars[index]);
-            index += 1;
-        }
-    }
-    output
-}
-
-fn interpolation_end(chars: &[char], mut index: usize) -> Option<usize> {
-    let mut depth = 1usize;
-    let mut state = LexicalState::Normal;
-    while index < chars.len() {
-        match state {
-            LexicalState::Normal => match chars[index] {
-                '"' => {
-                    state = LexicalState::DoubleQuoted;
-                    index += 1;
-                }
-                '#' => {
-                    state = LexicalState::LineComment;
-                    index += 1;
-                }
-                '/' if chars.get(index + 1) == Some(&'*') => {
-                    state = LexicalState::BlockComment;
-                    index += 2;
-                }
-                '\'' if chars.get(index + 1) == Some(&'\'') => {
-                    state = LexicalState::IndentedString;
-                    index += 2;
-                }
-                '{' => {
-                    depth += 1;
-                    index += 1;
-                }
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(index);
-                    }
-                    index += 1;
-                }
-                _ => index += 1,
-            },
-            LexicalState::DoubleQuoted => {
-                if chars[index] == '\\' {
-                    index += 2;
-                } else if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
-                    let nested_start = index + 2;
-                    index = interpolation_end(chars, nested_start)? + 1;
-                } else if chars[index] == '"' {
-                    state = LexicalState::Normal;
-                    index += 1;
-                } else {
-                    index += 1;
-                }
-            }
-            LexicalState::IndentedString => {
-                if chars[index] == '\'' && chars.get(index + 1) == Some(&'\'') {
-                    if chars.get(index + 2) == Some(&'\\') {
-                        index += 3;
-                        if index < chars.len() {
-                            index += 1;
-                        }
-                    } else if chars
-                        .get(index + 2)
-                        .is_some_and(|next| matches!(next, '$' | '\''))
-                    {
-                        index += 3;
-                    } else {
-                        state = LexicalState::Normal;
-                        index += 2;
-                    }
-                } else if chars[index] == '$' && chars.get(index + 1) == Some(&'{') {
-                    let nested_start = index + 2;
-                    index = interpolation_end(chars, nested_start)? + 1;
-                } else {
-                    index += 1;
-                }
-            }
-            LexicalState::LineComment => {
-                if chars[index] == '\n' {
-                    state = LexicalState::Normal;
-                }
-                index += 1;
-            }
-            LexicalState::BlockComment => {
-                if chars[index] == '*' && chars.get(index + 1) == Some(&'/') {
-                    state = LexicalState::Normal;
-                    index += 2;
-                } else {
-                    index += 1;
-                }
-            }
-        }
-    }
-    None
-}
-
-#[derive(Clone, Copy)]
-enum LexicalState {
-    Normal,
-    DoubleQuoted,
-    IndentedString,
-    LineComment,
-    BlockComment,
-}
-
-fn is_nix_identifier_char(character: char) -> bool {
-    character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+/// Reports whether executable Nix code uses the canonical `config` binding.
+///
+/// String and comment text is ignored. References inside string interpolation
+/// are executable and are included.
+pub(crate) fn has_canonical_custom_policy_reference(expression: &str) -> bool {
+    crate::models::custom_check::has_current_reference(expression)
 }
 
 async fn run_post_finalize_derivation_side_effects(
@@ -440,8 +155,10 @@ async fn run_post_finalize_derivation_side_effects(
                 }
             };
             match count_closure_packages(&drv2).await {
-                Ok((total, cached)) => {
-                    if let Err(err) = set_closure_counts(&pool2, derivation_id, total, cached).await
+                Ok((total, cached, closure_size_bytes)) => {
+                    if let Err(err) =
+                        set_closure_counts(&pool2, derivation_id, total, cached, closure_size_bytes)
+                            .await
                     {
                         warn!(
                             "⚠️  Failed to store closure counts for id={}: {}",
@@ -499,12 +216,71 @@ async fn handle_evaluation_attempt_failure(
     error: &str,
     failure_class: crate::models::retry_policy::RetryFailureClass,
 ) -> Result<()> {
-    error!(
-        "❌ Failed to evaluate commit {}: {}",
-        commit.git_commit_hash, error
-    );
+    handle_evaluation_attempt_failure_with_retained_plan(
+        pool,
+        cf_state,
+        commit,
+        attempt,
+        error,
+        failure_class,
+        None,
+        None,
+        &[],
+    )
+    .await
+}
 
-    match mark_commit_evaluation_failed(pool, commit.id, error, attempt, failure_class).await {
+async fn handle_evaluation_attempt_failure_with_retained_plan(
+    pool: &PgPool,
+    cf_state: &crate::handlers::agent_request::CFState,
+    commit: &Commit,
+    attempt: i32,
+    error: &str,
+    failure_class: crate::models::retry_policy::RetryFailureClass,
+    retained_plan: Option<&crate::models::evaluate_with_policies::EvaluationPlan>,
+    remaining_systems: Option<&[String]>,
+    unacknowledged_completions: &[crate::models::evaluate_with_policies::UnacknowledgedCompletion],
+) -> Result<()> {
+    // SECURITY: This function logs, persists, and broadcasts the failure.
+    // Redact and bound once at entry so no branch can expose untrusted source
+    // diagnostics or turn an oversized Nix trace into durable API data.
+    let error = bounded_redacted_evaluation_error(error);
+    let mut error =
+        if failure_class == crate::models::retry_policy::RetryFailureClass::ResourceFailure {
+            format!("resource_pressure: {error}")
+        } else {
+            error
+        };
+    if retained_plan.is_none() {
+        error!(
+            "❌ Failed to evaluate commit {}: {}",
+            commit.git_commit_hash, error
+        );
+    }
+
+    let failure_outcome = if let Some(plan) = retained_plan {
+        if let Some(remaining) = remaining_systems {
+            crate::queries::commits::finalize_partial_evaluation_resource_failure(
+                pool,
+                commit.id,
+                attempt,
+                plan,
+                remaining,
+                unacknowledged_completions,
+                &error,
+            )
+            .await
+        } else {
+            Err(anyhow::anyhow!(
+                "partial resource failure lacks selected remainder"
+            ))
+        }
+    } else {
+        mark_commit_evaluation_failed(pool, commit.id, &error, attempt, failure_class)
+            .await
+            .map(|outcome| (outcome, 0, 0, error.clone()))
+    };
+    match failure_outcome {
         Err(mark_err) => {
             crate::handlers::api::commits::cleanup_eval_channel(cf_state, commit.id).await;
             return Err(mark_err).with_context(|| {
@@ -514,7 +290,7 @@ async fn handle_evaluation_attempt_failure(
                 )
             });
         }
-        Ok(EvalFailureOutcome::SupersededOrCancelled) => {
+        Ok((EvalFailureOutcome::SupersededOrCancelled, _, _, _)) => {
             let cancel_outcome =
                 crate::queries::commits::finalize_requested_commit_evaluation_cancellation(
                     pool, commit.id, attempt,
@@ -560,7 +336,7 @@ async fn handle_evaluation_attempt_failure(
                 );
             }
         }
-        Ok(EvalFailureOutcome::RetryScheduled) => {
+        Ok((EvalFailureOutcome::RetryScheduled, _, _, _)) => {
             if let Err(cache_err) = update_commit_metadata_cache(pool, commit.id, &[], true).await {
                 error!(
                     "❌ Failed to update commit metadata cache for {}: {}",
@@ -590,8 +366,23 @@ async fn handle_evaluation_attempt_failure(
             )
             .await;
         }
-        Ok(EvalFailureOutcome::PermanentlyFailed) => {
-            if let Err(cache_err) = update_commit_metadata_cache(pool, commit.id, &[], true).await {
+        Ok((EvalFailureOutcome::PermanentlyFailed, completed, remaining, verified_diagnostic)) => {
+            if retained_plan.is_some() {
+                error = verified_diagnostic;
+                // Only the finalizer's committed proof can report counts. The
+                // source checkpoint can still describe lost COMMIT replies.
+                error!(
+                    commit_id = commit.id,
+                    completed_count = completed,
+                    unresolved_resource_count = remaining,
+                    "❌ Bounded evaluation recovery stopped: {}",
+                    error
+                );
+            }
+            if retained_plan.is_none()
+                && let Err(cache_err) =
+                    update_commit_metadata_cache(pool, commit.id, &[], true).await
+            {
                 error!(
                     "❌ Failed to update commit metadata cache for {}: {}",
                     commit.git_commit_hash, cache_err
@@ -618,7 +409,28 @@ async fn handle_evaluation_attempt_failure(
     Ok(())
 }
 
-fn parse_deployment_policy_record(
+/// Maximum persisted evaluation diagnostic length after redaction.
+///
+/// Source-materialization errors can contain a complete Git or Nix trace. The
+/// bounded chain preserves the actionable cause without making `commits`,
+/// `evaluation_attempts`, or streamed logs unbounded.
+const MAX_PERSISTED_EVALUATION_ERROR_CHARS: usize = 4096;
+
+fn bounded_redacted_evaluation_error(error: &str) -> String {
+    let redacted = crate::security::snapshot_redaction::redact_evaluation_error(error);
+    if redacted.chars().count() > MAX_PERSISTED_EVALUATION_ERROR_CHARS {
+        let mut bounded = redacted
+            .chars()
+            .take(MAX_PERSISTED_EVALUATION_ERROR_CHARS - 1)
+            .collect::<String>();
+        bounded.push('…');
+        bounded
+    } else {
+        redacted
+    }
+}
+
+pub(crate) fn parse_deployment_policy_record(
     record: &crate::models::deployment_policies::DeploymentPolicyRecord,
 ) -> Option<DeploymentPolicy> {
     let cfg = &record.config;
@@ -867,6 +679,22 @@ fn parse_deployment_policy_record(
                 }
             }
         }
+        "composite" => {
+            match crate::models::deployment_policies::deserialize_policy_type_config(
+                &record.policy_type,
+                cfg,
+            ) {
+                Ok(Some(config)) => Some(DeploymentPolicy::Composite { config }),
+                Ok(None) => unreachable!("composite validator returned a non-composite result"),
+                Err(err) => {
+                    warn!(
+                        "Skipping composite policy '{}' ({}): {}",
+                        record.name, record.id, err
+                    );
+                    None
+                }
+            }
+        }
         other => {
             warn!(
                 "Skipping unsupported deployment policy type '{}' for policy '{}' ({})",
@@ -877,12 +705,81 @@ fn parse_deployment_policy_record(
     }
 }
 
-async fn load_deployment_policies_for_eval(pool: &PgPool, flake_id: i32) -> Vec<DeploymentPolicy> {
+fn is_explicit_no_enforcement_policy(
+    record: &crate::models::deployment_policies::DeploymentPolicyRecord,
+) -> bool {
+    record.policy_type == "custom_check"
+        && record.config.get("expression").is_none()
+        && record.config.get("mode").and_then(|value| value.as_str()) == Some("all")
+        && record
+            .config
+            .get("rules")
+            .and_then(|value| value.as_array())
+            .is_some_and(Vec::is_empty)
+}
+
+fn parse_executable_policy_record(
+    record: &crate::models::deployment_policies::DeploymentPolicyRecord,
+) -> std::result::Result<Option<DeploymentPolicy>, EvaluationPolicyLoadSafetyError> {
+    match parse_deployment_policy_record(record) {
+        Some(policy) => Ok(Some(policy)),
+        None if is_explicit_no_enforcement_policy(record) => Ok(None),
+        None => Err(EvaluationPolicyLoadSafetyError(format!(
+            "executable policy version {} of type {:?} has malformed or unsupported config; refusing evaluation",
+            record.id, record.policy_type
+        ))),
+    }
+}
+
+#[derive(Debug)]
+struct SkippedReportOnlyPolicy {
+    policy_version_id: uuid::Uuid,
+    policy_type: String,
+    effective_config: serde_json::Value,
+}
+
+enum EvaluationPolicyRecord {
+    Executable(DeploymentPolicy),
+    Empty,
+    SkippedReportOnly {
+        placeholder: SkippedReportOnlyPolicy,
+        reason: String,
+    },
+}
+
+fn parse_effective_policy_record(
+    record: &crate::models::deployment_policies::DeploymentPolicyRecord,
+    mode: &AssignmentMode,
+) -> std::result::Result<EvaluationPolicyRecord, EvaluationPolicyLoadSafetyError> {
+    match parse_executable_policy_record(record) {
+        Ok(Some(policy)) => Ok(EvaluationPolicyRecord::Executable(policy)),
+        Ok(None) => Ok(EvaluationPolicyRecord::Empty),
+        Err(error) if matches!(mode, AssignmentMode::ReportOnly) => {
+            Ok(EvaluationPolicyRecord::SkippedReportOnly {
+                placeholder: SkippedReportOnlyPolicy {
+                    policy_version_id: record.id,
+                    policy_type: record.policy_type.clone(),
+                    effective_config: record.config.clone(),
+                },
+                reason: error.to_string(),
+            })
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn load_deployment_policies_for_eval(
+    pool: &PgPool,
+    flake_id: i32,
+) -> anyhow::Result<Vec<DeploymentPolicy>> {
     match list_enabled_policies_for_flake(pool, flake_id).await {
         Ok(records) => {
             let all_policies = records
                 .iter()
-                .filter_map(parse_deployment_policy_record)
+                .map(parse_executable_policy_record)
+                .collect::<std::result::Result<Vec<_>, _>>()?
+                .into_iter()
+                .flatten()
                 .collect::<Vec<_>>();
 
             // Only pass Nix-evaluated policies to the evaluator.
@@ -902,7 +799,7 @@ async fn load_deployment_policies_for_eval(pool: &PgPool, flake_id: i32) -> Vec<
                 policies.push(DeploymentPolicy::RequireCrystalForgeAgent { strict: true });
             }
 
-            policies
+            Ok(policies)
         }
         Err(err) => {
             error!(
@@ -912,17 +809,18 @@ async fn load_deployment_policies_for_eval(pool: &PgPool, flake_id: i32) -> Vec<
             // Use strict mode in fallback to enforce core security policy even in error scenarios.
             // This ensures systems without the agent package cannot pass evaluation when policy
             // loading fails, maintaining the "always enforce core policy" safety model.
-            vec![DeploymentPolicy::RequireCrystalForgeAgent { strict: true }]
+            Ok(vec![DeploymentPolicy::RequireCrystalForgeAgent {
+                strict: true,
+            }])
         }
     }
 }
 
-/// Build a per-configuration policy map for a flake's evaluation run.
+/// Builds a per-configuration policy map for loader regression tests.
 ///
 /// For each active Crystal Forge system in the flake, the effective policy set
-/// is the union of:
-/// - Policies assigned directly through `system_policies`
-/// - Policies inherited from the system's environment through `environment_policies`
+/// comes from the authoritative specificity-aware resolver, including bundle
+/// assignments and direct environment/system assignments.
 ///
 /// If two active systems share the same NixOS configuration name but have
 /// *different* effective policy ID sets, this function returns an error with
@@ -931,22 +829,90 @@ async fn load_deployment_policies_for_eval(pool: &PgPool, flake_id: i32) -> Vec<
 ///
 /// Systems with zero assigned policies produce *no entry* in the returned map.
 /// Use `policies_for_config(map, name)` to safely get an empty slice for those.
+/// Only native `nix-evaluation` and `multi-phase` policy versions with a parsed
+/// Nix check enter the map. Both enforce and report-only assignments enter it.
+#[cfg(test)]
 async fn load_policies_by_configuration_for_eval(
     pool: &PgPool,
     flake_id: i32,
 ) -> anyhow::Result<PoliciesByConfiguration> {
+    load_and_capture_policies_for_eval(pool, flake_id, None).await
+}
+
+// CONCURRENCY: Resolution, executable eligibility, metadata, and first-write
+// capture share one snapshot. The commit share lock serializes cancellation
+// and retry ownership changes until the plan is durable. Execution starts only
+// after this transaction commits; a duplicate capture never re-resolves a plan
+// and then executes different inputs under the same attempt identity.
+/// Resolves executable policy inputs and captures their public attempt provenance.
+///
+/// # Errors
+/// Returns ownership, duplicate-capture, resolution, or database errors. A stored
+/// public plan is never reused as an executable checkpoint after interruption.
+pub(crate) async fn load_and_capture_policies_for_eval(
+    pool: &PgPool,
+    flake_id: i32,
+    attempt: Option<(i32, i32)>,
+) -> anyhow::Result<PoliciesByConfiguration> {
+    let mut tx = pool.begin().await?;
+    sqlx::query("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ")
+        .execute(&mut *tx)
+        .await?;
+    let mut capture = policy_capture::new_snapshot();
+    if let Some((commit_id, number)) = attempt {
+        let id =
+            crate::queries::eval_policy_plans::lock_attempt(&mut tx, commit_id, number).await?;
+        capture.evaluation_attempt_id = Some(id);
+        capture.attempt_number = number;
+        let (name, branch): (String, Option<String>) = sqlx::query_as(
+            "SELECT f.name,f.branch FROM flakes f JOIN commits c ON c.flake_id=f.id
+             WHERE c.id=$1 AND f.id=$2",
+        )
+        .bind(commit_id)
+        .bind(flake_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        capture.source_label =
+            Some(crate::api::eval_policy_matrix::EvalSourceLabel { name, branch });
+    }
+    let result = load_policies_for_eval_in_tx(&mut tx, flake_id, &mut capture).await;
+    if let Some((commit_id, _)) = attempt {
+        if result.is_err() {
+            // No evaluator receives this plan when executable loading fails.
+            for row in &mut capture.rows {
+                if row.resolution == crate::api::eval_policy_matrix::EvalMatrixResolution::Resolved
+                {
+                    row.resolution =
+                        crate::api::eval_policy_matrix::EvalMatrixResolution::Unavailable;
+                }
+                row.evaluation_digest = None;
+            }
+        }
+        crate::queries::eval_policy_plans::insert_plan(&mut tx, commit_id, &capture).await?;
+    }
+    tx.commit().await?;
+    result
+}
+
+async fn load_policies_for_eval_in_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    flake_id: i32,
+    capture: &mut crate::api::eval_policy_matrix::EvalPolicyMatrixSnapshot,
+) -> anyhow::Result<PoliciesByConfiguration> {
     use std::collections::{BTreeMap, BTreeSet};
 
-    let system_rows = sqlx::query_as::<_, (uuid::Uuid, String)>(
+    let system_rows = sqlx::query_as::<_, (uuid::Uuid, String, String, Option<bool>)>(
         r#"
-        SELECT s.id, COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
+        SELECT s.id, COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname), s.hostname,
+               lifecycle.greenfield
         FROM systems s
+        LEFT JOIN system_evaluation_lifecycle lifecycle ON lifecycle.system_id = s.id
         WHERE s.flake_id = $1 AND s.is_active = TRUE
         ORDER BY 2, 1
         "#,
     )
     .bind(flake_id)
-    .fetch_all(pool)
+    .fetch_all(&mut **tx)
     .await
     .context("Failed to load systems for effective policy evaluation")?;
 
@@ -956,18 +922,24 @@ async fn load_policies_by_configuration_for_eval(
 
     // Batch-resolve all systems in one transaction (~10 queries total),
     // replacing the previous per-system N+1 loop of full resolver invocations.
-    let system_id_vec: Vec<uuid::Uuid> = system_rows.iter().map(|(id, _)| *id).collect();
-    let batch_outcomes =
-        resolve_systems_effective_policies_for_evaluation_batch(pool, &system_id_vec)
-            .await
-            .context("Batch policy resolution for evaluation failed")?;
+    let system_id_vec: Vec<uuid::Uuid> = system_rows.iter().map(|(id, _, _, _)| *id).collect();
+    let mut bundle_contexts = std::collections::HashMap::new();
+    let batch_outcomes = resolve_systems_effective_policies_and_contexts_in_tx(
+        tx,
+        &system_id_vec,
+        None,
+        true,
+        &mut bundle_contexts,
+    )
+    .await
+    .context("Batch policy resolution for evaluation failed")?;
 
-    for (system_id, config_name) in system_rows {
+    policy_capture::initialize_rows(capture, &system_rows, &batch_outcomes);
+    for (system_id, config_name, _, _) in system_rows {
         if invalid_configurations.contains(&config_name) {
             continue;
         }
-
-        let outcome = match batch_outcomes.get(&system_id) {
+        let outcome = match batch_outcomes.get(&(None, system_id)) {
             Some(o) => match o {
                 ResolutionOutcome::Resolved(set) => set.policies.clone(),
                 ResolutionOutcome::Conflict(conflicts) => {
@@ -975,7 +947,7 @@ async fn load_policies_by_configuration_for_eval(
                         %system_id,
                         %config_name,
                         conflicts = ?conflicts,
-                        "Compliance policy conflict; evaluating configuration without compliance gates"
+                        "Compliance policy conflict; preserving legacy behavior and evaluating configuration without compliance gates"
                     );
                     invalid_configurations.insert(config_name.clone());
                     resolved_systems
@@ -984,37 +956,71 @@ async fn load_policies_by_configuration_for_eval(
                 }
             },
             None => {
-                // System not in batch result — no active assignments (empty policy set).
+                // Preserve the old execution fallback, but capture marks the
+                // missing resolver outcome unavailable instead of known-empty.
                 vec![]
             }
         };
 
-        let enforced = outcome
-            .into_iter()
-            .filter(|policy| matches!(policy.effective_mode, AssignmentMode::Enforce))
-            .collect::<Vec<_>>();
-        policy_version_ids.extend(enforced.iter().map(|policy| policy.policy_version_id));
-        resolved_systems.push((system_id, config_name, enforced));
+        policy_version_ids.extend(outcome.iter().map(|policy| policy.policy_version_id));
+        resolved_systems.push((system_id, config_name, outcome));
     }
 
+    policy_capture::mark_skipped_configurations(capture, &invalid_configurations);
+
     let policy_version_ids = policy_version_ids.into_iter().collect::<Vec<_>>();
-    let policies_by_version =
-        get_deployment_policies_by_versions(pool, &policy_version_ids).await?;
+    let policies_by_version = policy_capture::load_records(tx, &policy_version_ids).await?;
+    let capture_metadata =
+        policy_capture::load_metadata(tx, &policy_version_ids, &bundle_contexts).await?;
+    policy_capture::bind_contexts(capture, &capture_metadata, &bundle_contexts)?;
+    let execution_metadata = sqlx::query_as::<_, (uuid::Uuid, String, String)>(
+        r#"
+        SELECT id, implementation_state, execution_phase
+        FROM deployment_policy_versions
+        WHERE id = ANY($1)
+        "#,
+    )
+    .bind(&policy_version_ids)
+    .fetch_all(&mut **tx)
+    .await
+    .context("Failed to load policy execution metadata for evaluation")?
+    .into_iter()
+    .map(|(id, implementation_state, execution_phase)| {
+        (id, (implementation_state, execution_phase))
+    })
+    .collect::<BTreeMap<_, _>>();
 
     let mut map: PoliciesByConfiguration = BTreeMap::new();
     // A configuration can be evaluated once only when the Nix-evaluation
     // policy set is identical. The resolver's complete effective-set digest
-    // intentionally includes report-only and operational policies, which do
-    // not affect nix-eval-jobs and therefore must not block this map.
+    // includes non-Nix operational policies, which do not affect nix-eval-jobs
+    // and therefore must not block this map.
     let mut evaluation_digest_by_config: BTreeMap<String, String> = BTreeMap::new();
     for (_system_id, config_name, effective) in resolved_systems {
         let mut assigned = Vec::new();
+        let mut skipped_report_only = Vec::new();
         for effective_policy in effective {
+            let captured_policy = effective_policy.clone();
+            let Some((implementation_state, execution_phase)) =
+                execution_metadata.get(&effective_policy.policy_version_id)
+            else {
+                return Err(anyhow::Error::new(EvaluationPolicyLoadSafetyError(
+                    format!(
+                        "effective policy version {} has no execution metadata",
+                        effective_policy.policy_version_id
+                    ),
+                )));
+            };
+            if !has_nix_execution_metadata(implementation_state, execution_phase) {
+                continue;
+            }
             let Some(record) = policies_by_version.get(&effective_policy.policy_version_id) else {
-                anyhow::bail!(
-                    "Effective policy version {} was not found",
-                    effective_policy.policy_version_id
-                );
+                return Err(anyhow::Error::new(EvaluationPolicyLoadSafetyError(
+                    format!(
+                        "effective policy version {} was not found",
+                        effective_policy.policy_version_id
+                    ),
+                )));
             };
             let mut record = record.clone();
 
@@ -1026,16 +1032,56 @@ async fn load_policies_by_configuration_for_eval(
                 record.config = effective_policy.effective_config;
             }
 
-            if let Some(policy) = parse_deployment_policy_record(&record) {
-                if policy.is_nix_evaluated()
-                    && !matches!(policy, DeploymentPolicy::RequireCrystalForgeAgent { .. })
+            match parse_effective_policy_record(&record, &effective_policy.effective_mode)? {
+                EvaluationPolicyRecord::Executable(policy)
+                    if is_nix_policy_execution_eligible(
+                        &policy,
+                        implementation_state,
+                        execution_phase,
+                    ) && !matches!(
+                        policy,
+                        DeploymentPolicy::RequireCrystalForgeAgent { .. }
+                    ) =>
                 {
+                    policy_capture::bind_policy(
+                        &capture_metadata,
+                        capture,
+                        _system_id,
+                        &captured_policy,
+                        true,
+                    )?;
                     assigned.push(AssignedPolicy {
                         policy_id: effective_policy.policy_version_id,
                         policy_name: record.name,
                         policy,
+                        enforcement_mode: match effective_policy.effective_mode {
+                            AssignmentMode::Enforce => AssignedPolicyEnforcementMode::Enforce,
+                            AssignmentMode::ReportOnly => AssignedPolicyEnforcementMode::ReportOnly,
+                        },
                     });
                 }
+                EvaluationPolicyRecord::SkippedReportOnly {
+                    placeholder,
+                    reason,
+                } => {
+                    policy_capture::bind_policy(
+                        &capture_metadata,
+                        capture,
+                        _system_id,
+                        &captured_policy,
+                        false,
+                    )?;
+                    warn!(
+                        system_id = %_system_id,
+                        configuration = %config_name,
+                        policy_version_id = %placeholder.policy_version_id,
+                        policy_type = %placeholder.policy_type,
+                        reason = %reason,
+                        "Skipping invalid report-only policy implementation during Nix evaluation"
+                    );
+                    skipped_report_only.push(placeholder);
+                }
+                EvaluationPolicyRecord::Executable(_) | EvaluationPolicyRecord::Empty => {}
             }
         }
 
@@ -1046,16 +1092,23 @@ async fn load_policies_by_configuration_for_eval(
         // semantic conflict, not permission to apply the latter's gates to
         // both systems.
         assigned.sort_by_key(|policy| policy.policy_id);
-        let evaluation_digest = evaluation_policy_digest(&assigned);
+        let evaluation_digest = evaluation_policy_digest(&assigned, &skipped_report_only);
+        if let Some(row) = capture
+            .rows
+            .iter_mut()
+            .find(|row| row.system_id == Some(_system_id))
+        {
+            row.evaluation_digest = Some(evaluation_digest.clone());
+        }
 
         if let Some(existing_digest) = evaluation_digest_by_config.get(&config_name) {
             if existing_digest != &evaluation_digest {
-                anyhow::bail!(
-                    "Configuration {:?} resolves to different Nix evaluation policy semantics across systems ({} vs {})",
-                    config_name,
-                    existing_digest,
-                    evaluation_digest
-                );
+                return Err(anyhow::Error::new(EvaluationPolicyLoadSafetyError(
+                    format!(
+                        "Configuration {:?} resolves to different Nix evaluation policy semantics across systems ({} vs {})",
+                        config_name, existing_digest, evaluation_digest
+                    ),
+                )));
             }
         } else {
             evaluation_digest_by_config.insert(config_name.clone(), evaluation_digest);
@@ -1080,19 +1133,75 @@ async fn load_policies_by_configuration_for_eval(
     return Ok(map);
 }
 
+fn has_nix_execution_metadata(implementation_state: &str, execution_phase: &str) -> bool {
+    // SECURITY: Imported or non-Nix policy content must not cross the trusted
+    // native Nix execution boundary, even when its JSON resembles a Nix policy.
+    implementation_state == "native" && matches!(execution_phase, "nix-evaluation" | "multi-phase")
+}
+
+fn is_nix_policy_execution_eligible(
+    policy: &DeploymentPolicy,
+    implementation_state: &str,
+    execution_phase: &str,
+) -> bool {
+    has_nix_execution_metadata(implementation_state, execution_phase) && policy.is_nix_evaluated()
+}
+
+#[derive(Debug)]
+struct EvaluationPolicyLoadSafetyError(String);
+
+impl std::fmt::Display for EvaluationPolicyLoadSafetyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for EvaluationPolicyLoadSafetyError {}
+
+fn classify_policy_loader_failure(
+    error: &anyhow::Error,
+) -> crate::models::retry_policy::RetryFailureClass {
+    if error
+        .chain()
+        .any(|cause| cause.is::<EvaluationPolicyLoadSafetyError>())
+    {
+        crate::models::retry_policy::RetryFailureClass::Deterministic
+    } else {
+        crate::models::retry_policy::RetryFailureClass::Transient
+    }
+}
+
 /// Hash only the policies that can affect the Nix evaluation for one
 /// configuration. This is deliberately distinct from the resolver's complete
 /// effective-set digest, which is used by compliance and deployment consumers.
-fn evaluation_policy_digest(assigned: &[AssignedPolicy]) -> String {
-    let policies = assigned
+fn evaluation_policy_digest(
+    assigned: &[AssignedPolicy],
+    skipped_report_only: &[SkippedReportOnlyPolicy],
+) -> String {
+    let mut policies = assigned
         .iter()
         .map(|policy| {
             serde_json::json!({
                 "policy_version_id": policy.policy_id,
                 "policy": policy.policy,
+                "enforcement_mode": policy.enforcement_mode,
             })
         })
         .collect::<Vec<_>>();
+    policies.extend(skipped_report_only.iter().map(|policy| {
+        serde_json::json!({
+            "policy_version_id": policy.policy_version_id,
+            "policy_type": policy.policy_type,
+            "effective_config": policy.effective_config,
+            "enforcement_mode": "report_only",
+            "evaluation_state": "invalid_implementation",
+        })
+    }));
+    policies.sort_by(|left, right| {
+        left["policy_version_id"]
+            .as_str()
+            .cmp(&right["policy_version_id"].as_str())
+    });
     semantic_digest(&serde_json::Value::Array(policies))
 }
 
@@ -1155,6 +1264,7 @@ async fn load_policies_by_configuration_for_eval_legacy(
                         policy_id,
                         policy_name: row.name.clone(),
                         policy: parsed,
+                        enforcement_mode: Default::default(),
                     });
                 }
             }
@@ -1291,20 +1401,13 @@ async fn load_policies_by_configuration_for_eval_legacy(
     Ok(map)
 }
 
-/// Load enabled `require_cve_check` policies from the database.
-/// Called by the deployment manager to evaluate post-build CVE gates.
-pub async fn load_cve_policies(pool: &PgPool) -> Vec<DeploymentPolicy> {
-    match list_enabled_deployment_policies(pool).await {
-        Ok(records) => records
-            .iter()
-            .filter_map(parse_deployment_policy_record)
-            .filter(|p| matches!(p, DeploymentPolicy::RequireCveCheck { .. }))
-            .collect(),
-        Err(err) => {
-            error!("Failed to load CVE deployment policies from DB: {:#}", err);
-            vec![]
-        }
-    }
+/// Loads persisted evaluation policies through the production loader for tests.
+#[cfg(test)]
+pub(crate) async fn load_policies_by_configuration_for_eval_test(
+    pool: &PgPool,
+    flake_id: i32,
+) -> anyhow::Result<PoliciesByConfiguration> {
+    load_policies_by_configuration_for_eval(pool, flake_id).await
 }
 
 /// Spawn all server background tasks and register controllable jobs in the
@@ -1364,6 +1467,49 @@ pub fn spawn_background_tasks(
             attention_reconciliation_pool,
         ),
     );
+    // CONCURRENCY: Bounded pages advance past unprovable systems instead of
+    // repeatedly locking the same first page. Each candidate rechecks the
+    // latest observation under the snapshot-writer lock before insertion.
+    let external_reconciliation_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut cursor = None;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(60));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match crate::queries::evaluation_snapshots::reconcile_external_current_generation_page(
+                &external_reconciliation_pool,
+                cursor,
+            )
+            .await
+            {
+                Ok(next) => cursor = next,
+                Err(error) => tracing::warn!(
+                    error = %error,
+                    "External Current generation reconciliation will retry next cycle"
+                ),
+            }
+        }
+    });
+    let scheduled_cve_reconciliation_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut cursor = None;
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(90));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            match crate::services::poam::reconcile_scheduled_environment_cve_page(
+                &scheduled_cve_reconciliation_pool,
+                cursor,
+            )
+            .await
+            {
+                Ok(next) => cursor = next,
+                Err(error) => tracing::warn!(error = ?error,
+                    "Scheduled CVE membership reconciliation will retry next cycle"),
+            }
+        }
+    });
     let attention_cleanup_pool = pool.clone();
     tokio::spawn(
         crate::tasks::attention_reconciliation::run_attention_cleanup_loop(attention_cleanup_pool),
@@ -1400,22 +1546,22 @@ pub fn spawn_background_tasks(
     // tab (TASK-336.5) can list it, toggle enabled/disabled, and trigger run-now.
     // vulnix poll_interval comes from [vulnix] config (default: 60 s).
     let vulnix_poll_interval = cfg.get_vulnix_config().poll_interval;
-    // The CVE scan worker starts DISABLED by default so that a first deployment
-    // against an established database does not immediately begin an unbounded
-    // historical backfill. An operator must explicitly enable it via the
-    // Admin → Background Jobs tab (TASK-336.5) or the scanning schedule API.
-    let (cve_job_handle, cve_run_now_rx) = BackgroundJobHandle::new(
-        "cve_scan",
-        "CVE Scan",
-        vulnix_poll_interval,
-        false, // disabled by default — operator must enable
-    );
+    // The worker starts enabled because the persisted scan schedule policy is
+    // the operational control for post-build and cadence-driven scans. Runtime
+    // controls remain available for the future Admin Background Jobs surface.
+    let (cve_job_handle, cve_run_now_rx) = new_cve_scan_background_job(vulnix_poll_interval);
     let cve_job_for_task = cve_job_handle.clone();
     let registry_for_spawn = job_registry.clone();
     tokio::spawn(async move {
         registry_for_spawn.register(cve_job_handle).await;
         run_cve_scan_loop(cve_pool, cve_job_for_task, cve_run_now_rx).await;
     });
+}
+
+fn new_cve_scan_background_job(
+    poll_interval: std::time::Duration,
+) -> (BackgroundJobHandle, tokio::sync::watch::Receiver<u64>) {
+    BackgroundJobHandle::new("cve_scan", "CVE Scan", poll_interval, true)
 }
 
 async fn run_session_retention_loop(pool: PgPool, retention_days: i64) {
@@ -1774,6 +1920,30 @@ async fn process_pending_commits(
             }
         };
 
+        // SECURITY: All lifecycle helpers and evaluator/preparation state clones
+        // carry this immutable attempt/generation capability. Never rebind a
+        // failed old worker by resolving a publication-time latest attempt.
+        let cf_state =
+            match crate::handlers::api::commits::bind_eval_producer(cf_state, commit.id, attempt)
+                .await
+            {
+                Ok(producer) => Arc::new(producer),
+                Err(error) => {
+                    // A claim can be cancelled/superseded while binding waits for
+                    // the database. Use the normal exact-attempt failure path; do
+                    // not leave a claimed commit active after a logging error.
+                    return handle_evaluation_attempt_failure(
+                        pool,
+                        cf_state,
+                        &commit,
+                        attempt,
+                        &error.to_string(),
+                        crate::models::retry_policy::RetryFailureClass::Transient,
+                    )
+                    .await;
+                }
+            };
+
         // Get flake info (post-claim; failures now go through retry/defer path)
         let flake = match commit.get_flake(&pool).await {
             Ok(flake) => flake,
@@ -1790,6 +1960,7 @@ async fn process_pending_commits(
                     crate::models::retry_policy::RetryFailureClass::Deterministic,
                 )
                 .await;
+                crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
                 return Ok(());
             }
         };
@@ -1807,6 +1978,7 @@ async fn process_pending_commits(
                     crate::models::retry_policy::RetryFailureClass::Deterministic,
                 )
                 .await;
+                crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
                 return Ok(());
             }
         };
@@ -1821,32 +1993,58 @@ async fn process_pending_commits(
 
         // Load per-configuration policies: each active system's effective policy set
         // (environment + direct assignments), returned as a BTreeMap keyed by
-        // NixOS configuration name. Configurations with zero assigned policies
-        // produce no entry and are evaluated without policy gates.
-        let policies_by_configuration =
-            match load_policies_by_configuration_for_eval(pool, flake.id).await {
-                Ok(m) => std::sync::Arc::new(m),
-                Err(e) => {
-                    // Compliance policy resolution is advisory for flake
-                    // evaluation. A bad assignment, missing policy version,
-                    // or database problem must not prevent nix-eval-jobs from
-                    // running. The affected configurations simply receive no
-                    // compliance gates in this evaluation.
-                    let e = e.context(format!(
-                        "Failed to load per-configuration policies for flake {} (commit {})",
-                        flake.id, commit.git_commit_hash,
-                    ));
-                    warn!(
-                        "{:#}; continuing flake evaluation without compliance gates",
-                        e
-                    );
-                    std::sync::Arc::new(PoliciesByConfiguration::new())
-                }
-            };
+        // NixOS configuration name. Configurations with zero eligible Nix
+        // policies produce no entry and are evaluated without assigned gates.
+        let policies_by_configuration = match load_and_capture_policies_for_eval(
+            pool,
+            flake.id,
+            Some((commit.id, attempt)),
+        )
+        .await
+        {
+            Ok(m) => std::sync::Arc::new(m),
+            Err(e) => {
+                let failure_class = classify_policy_loader_failure(&e);
+                let e = e.context(format!(
+                    "Failed to load per-configuration policies for flake {} (commit {})",
+                    flake.id, commit.git_commit_hash,
+                ));
+                error!(
+                    "{:#}; refusing evaluation because executable policy context is unavailable",
+                    e
+                );
+                let _ = mark_commit_evaluation_failed(
+                    pool,
+                    commit.id,
+                    &format!("{e:#}"),
+                    attempt,
+                    failure_class,
+                )
+                .await;
+                crate::handlers::api::commits::cleanup_eval_channel(&cf_state, commit.id).await;
+                return Ok(());
+            }
+        };
 
-        // CRITICAL: Create broadcast channel BEFORE eval starts
-        // This ensures WebSocket clients can subscribe before messages are sent
-        crate::handlers::api::commits::ensure_eval_channel(&cf_state, commit.id).await;
+        if let Err(error) = crate::services::composite_enforcement::initialize_eval_passed_attempt(
+            pool,
+            commit.id,
+            attempt,
+            &policies_by_configuration,
+        )
+        .await
+        {
+            let error = error.context("Failed to initialize evaluation-phase policy evidence");
+            return handle_evaluation_attempt_failure(
+                pool,
+                &cf_state,
+                &commit,
+                attempt,
+                &format!("{error:#}"),
+                crate::models::retry_policy::RetryFailureClass::Transient,
+            )
+            .await;
+        }
 
         // Broadcast eval start status to WebSocket clients
         crate::handlers::api::commits::broadcast_eval_status(
@@ -1874,7 +2072,7 @@ async fn process_pending_commits(
         // (plus their fallback phases) may run simultaneously.  This prevents
         // a burst of incoming commits from each spawning their own full-flake
         // Nix evaluation concurrently and exhausting host memory.
-        let _eval_permit = match commit_evaluation_limiter().acquire_owned().await {
+        let eval_permit = match commit_evaluation_limiter().acquire_owned().await {
             Ok(p) => p,
             Err(_) => {
                 error!(
@@ -1905,6 +2103,7 @@ async fn process_pending_commits(
             evaluate_with_mock_eval_jobs(
                 pool,
                 &commit,
+                attempt,
                 &flake,
                 &flake.repo_url,
                 &commit.git_commit_hash,
@@ -1934,6 +2133,15 @@ async fn process_pending_commits(
             )
             .await
         };
+
+        // CONCURRENCY: This slot bounds actual evaluation, not metadata
+        // finalization, which can wait on the snapshot-writer lock. Release it
+        // only after the evaluator returns through its child-cleanup boundary.
+        // Child guards retain both heavy-Nix admission locks if cleanup needs
+        // quarantine; releasing this outer slot cannot admit a replacement Nix
+        // child before reap and process-group absence. Canonical DB ownership
+        // and the unique active-commit index still fence the next worker claim.
+        drop(eval_permit);
 
         // ── Helper: finalize cancellation side effects ──────────────────
         // Shared by both the success and failure SupersededOrCancelled branches.
@@ -2031,30 +2239,14 @@ async fn process_pending_commits(
 
                         run_post_finalize_derivation_side_effects(pool, &derivations).await;
 
-                        if server_config.auto_hardening_scans {
-                            match trigger_commit_hardening_scans(
-                                pool.clone(),
-                                commit.id,
-                                &flake.repo_url,
-                                &commit.git_commit_hash,
-                            )
-                            .await
-                            {
-                                Ok(count) if count > 0 => {
-                                    info!(
-                                        "🛡️ Queued {} hardening scans for commit {}",
-                                        count, commit.git_commit_hash
-                                    );
-                                }
-                                Ok(_) => {}
-                                Err(err) => {
-                                    warn!(
-                                        "Failed to queue hardening scans for commit {}: {}",
-                                        commit.git_commit_hash, err
-                                    );
-                                }
-                            }
-                        }
+                        // Automatic hardening admission deliberately does not
+                        // happen here. Evaluation proves only that a
+                        // configuration exists, not that it was built, and
+                        // admitting one scan per evaluated derivation was the
+                        // fan-out that caused the 2026-07-28 memory incident.
+                        // Admission now belongs to the transaction that records
+                        // a successful exact NixOS build. See
+                        // `queries::hardening_scans::enqueue_post_build_hardening_scan_tx`.
 
                         let total = results.len();
                         let with_agent = policy_checks
@@ -2079,6 +2271,10 @@ async fn process_pending_commits(
 
                         for check in policy_checks.iter().filter(|c| !c.meets_requirements) {
                             for warning in &check.warnings {
+                                // SECURITY: Evaluator support diagnostics can contain
+                                // raw values or source URLs. Sanitize before the first log.
+                                let warning =
+                                    crate::security::snapshot_redaction::redact_text(warning);
                                 warn!("⚠️  {}: {}", check.system_name, warning);
                             }
                         }
@@ -2106,14 +2302,55 @@ async fn process_pending_commits(
                 }
             }
             Err(e) => {
-                let error_text = e.to_string();
-                return handle_evaluation_attempt_failure(
+                // SECURITY: The support error can contain evaluator-controlled
+                // values and URLs. Redact before failure handling can log,
+                // persist, or broadcast the diagnostic.
+                let diagnostic = if let Some(resource) = e.resource_failure() {
+                    // SECURITY: Preserve the typed cause and selected names,
+                    // never raw child output. Limits keep the complete JSON
+                    // diagnostic below the finalizer's persistence bound.
+                    // Four entries with 32-character fields also fit when JSON
+                    // must escape every character as a six-character sequence.
+                    let bounded = |text: &str| {
+                        crate::security::snapshot_redaction::redact_evaluation_error(text)
+                            .chars()
+                            .take(32)
+                            .collect::<String>()
+                    };
+                    serde_json::json!({
+                        "failure_code": "resource_pressure",
+                        "completed_count": resource.completed_systems.len(),
+                        "remaining_count": resource.remaining_systems.len(),
+                        "remaining_systems": resource.remaining_systems.iter()
+                            .take(4).map(|name| bounded(name)).collect::<Vec<_>>(),
+                        "resource_failures": resource.resource_failures.iter().take(4)
+                            .map(|failure| serde_json::json!({
+                                "configuration": bounded(&failure.system_name),
+                                "diagnostic": bounded(&failure.error),
+                            })).collect::<Vec<_>>(),
+                        "truncated": resource.remaining_systems.len() > 4
+                            || resource.resource_failures.len() > 4
+                            || resource.remaining_systems.iter().any(|name| name.chars().count() > 32)
+                            || resource.resource_failures.iter().any(|failure|
+                                failure.system_name.chars().count() > 32 || failure.error.chars().count() > 32),
+                        "action": "Check evaluator resource diagnostics and database acknowledgement; resolve the recorded cause before manual retry.",
+                    }).to_string()
+                } else {
+                    e.diagnostic_chain()
+                };
+                return handle_evaluation_attempt_failure_with_retained_plan(
                     pool,
                     &cf_state,
                     &commit,
                     attempt,
-                    &error_text,
+                    &diagnostic,
                     e.class,
+                    e.partial_plan.as_deref(),
+                    e.resource_failure()
+                        .map(|resource| resource.remaining_systems.as_slice()),
+                    e.resource_failure()
+                        .map(|resource| resource.unacknowledged_completions.as_slice())
+                        .unwrap_or_default(),
                 )
                 .await;
             }
@@ -2130,16 +2367,137 @@ fn select_next_pending_commit_id_for_cycle(
 #[cfg(test)]
 mod tests {
     use super::{
-        builder_stale_timeout_secs, evaluation_due_delay, evaluation_policy_digest,
+        EvaluationPolicyLoadSafetyError, EvaluationPolicyRecord,
+        MAX_PERSISTED_EVALUATION_ERROR_CHARS, bounded_redacted_evaluation_error,
+        builder_stale_timeout_secs, classify_policy_loader_failure, evaluation_due_delay,
+        evaluation_policy_digest, is_nix_policy_execution_eligible, new_cve_scan_background_job,
         normalize_custom_policy_expression, parse_deployment_policy_record,
+        parse_effective_policy_record, parse_executable_policy_record,
         select_next_pending_commit_id_for_cycle,
     };
+    use crate::compliance::resolver::AssignmentMode;
     use crate::models::deployment_policies::{
-        AssignedPolicy, DeploymentPolicy, DeploymentPolicyRecord, PolicyRule, RuleMode,
+        AssignedPolicy, AssignedPolicyEnforcementMode, DeploymentPolicy, DeploymentPolicyRecord,
+        PolicyRule, RuleMode,
     };
     use chrono::Utc;
     use serde_json::json;
     use uuid::Uuid;
+
+    #[test]
+    fn evaluation_failure_diagnostic_is_bounded_after_redaction() {
+        let error = "a".repeat(MAX_PERSISTED_EVALUATION_ERROR_CHARS + 1);
+        let bounded = bounded_redacted_evaluation_error(&error);
+
+        assert_eq!(
+            bounded.chars().count(),
+            MAX_PERSISTED_EVALUATION_ERROR_CHARS
+        );
+        assert!(bounded.ends_with('…'));
+    }
+
+    #[tokio::test]
+    async fn registered_cve_scan_job_starts_enabled() {
+        let (handle, _run_now_rx) = new_cve_scan_background_job(std::time::Duration::from_secs(60));
+
+        let status = handle.status().await;
+        assert_eq!(status.id, "cve_scan");
+        assert!(
+            status.enabled,
+            "persisted scan policy should gate an active worker"
+        );
+    }
+
+    fn policy_record(policy_type: &str, config: serde_json::Value) -> DeploymentPolicyRecord {
+        DeploymentPolicyRecord {
+            id: Uuid::new_v4(),
+            name: format!("{policy_type} policy"),
+            description: None,
+            policy_type: policy_type.to_string(),
+            config,
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
+        }
+    }
+
+    #[test]
+    fn executable_policy_parser_rejects_every_malformed_or_unsupported_type_deterministically() {
+        let malformed = [
+            ("require_packages", json!({"packages": [42]})),
+            ("custom_check", json!({"rules": [false]})),
+            ("require_cve_check", json!({"max_critical": "none"})),
+            ("time_window", json!({"description": 42})),
+            ("require_approvals", json!({"count": "two"})),
+            ("canary_rollout", json!({"percentage": "ten"})),
+            ("cve_threshold", json!({"thresholds": "none"})),
+            ("composite", json!({"schema_version": "one"})),
+            ("future_policy_type", json!({})),
+        ];
+
+        for (policy_type, config) in malformed {
+            let record = policy_record(policy_type, config);
+            let error = parse_executable_policy_record(&record)
+                .expect_err("malformed executable policy must fail closed");
+            let error = anyhow::Error::new(error);
+            assert_eq!(
+                classify_policy_loader_failure(&error),
+                crate::models::retry_policy::RetryFailureClass::Deterministic,
+                "{policy_type}"
+            );
+            assert!(error.to_string().contains(policy_type));
+        }
+    }
+
+    #[test]
+    fn executable_policy_parser_allows_explicit_empty_custom_check() {
+        let record = policy_record("custom_check", json!({"mode": "all", "rules": []}));
+        assert!(parse_executable_policy_record(&record).unwrap().is_none());
+    }
+
+    #[test]
+    fn malformed_report_only_policy_is_skipped_while_enforce_fails_closed() {
+        let record = policy_record("custom_check", json!({"rules": [false]}));
+
+        assert!(parse_effective_policy_record(&record, &AssignmentMode::Enforce).is_err());
+        let EvaluationPolicyRecord::SkippedReportOnly {
+            placeholder,
+            reason,
+        } = parse_effective_policy_record(&record, &AssignmentMode::ReportOnly)
+            .expect("invalid report-only policy must not fail evaluation loading")
+        else {
+            panic!("invalid report-only policy must produce a digest placeholder");
+        };
+        assert_eq!(placeholder.policy_version_id, record.id);
+        assert_eq!(placeholder.policy_type, "custom_check");
+        assert_eq!(placeholder.effective_config, record.config);
+        assert!(reason.contains("malformed or unsupported"));
+        assert_ne!(
+            evaluation_policy_digest(&[], &[]),
+            evaluation_policy_digest(&[], &[placeholder])
+        );
+    }
+
+    #[test]
+    fn policy_loader_classifies_semantic_conflicts_as_deterministic() {
+        let conflict = anyhow::Error::new(EvaluationPolicyLoadSafetyError(
+            "shared configuration has conflicting policy semantics".to_string(),
+        ));
+        assert_eq!(
+            classify_policy_loader_failure(&conflict),
+            crate::models::retry_policy::RetryFailureClass::Deterministic
+        );
+    }
+
+    #[test]
+    fn policy_loader_classifies_infrastructure_failures_as_transient() {
+        assert_eq!(
+            classify_policy_loader_failure(&anyhow::anyhow!("database connection reset")),
+            crate::models::retry_policy::RetryFailureClass::Transient
+        );
+    }
 
     #[test]
     fn evaluation_due_wakeup_respects_zero_ten_and_thirty_second_backoffs() {
@@ -2202,6 +2560,59 @@ mod tests {
             DeploymentPolicy::RequireCrystalForgeAgent { strict } => assert!(strict),
             _ => panic!("expected RequireCrystalForgeAgent variant"),
         }
+    }
+
+    #[test]
+    fn parse_custom_check_skips_the_explicit_no_enforcement_representation() {
+        // The unified policy editor persists "no enforcement" as an explicit
+        // empty custom_check rule set. Runtime semantics must agree with that
+        // claim: the policy is skipped entirely rather than compiled into an
+        // always-true assertion that would silently report a pass.
+        let record = DeploymentPolicyRecord {
+            id: Uuid::new_v4(),
+            name: "no-enforcement".to_string(),
+            description: Some("mapped but not enforced".to_string()),
+            policy_type: "custom_check".to_string(),
+            config: json!({"mode": "all", "rules": []}),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            mapped_requirement_count: 3,
+            bundle_usage_count: 1,
+        };
+
+        assert!(
+            parse_deployment_policy_record(&record).is_none(),
+            "an empty rule set must not produce an executable policy"
+        );
+    }
+
+    #[test]
+    fn parse_composite_preserves_typed_representation_without_marking_it_nix_executable() {
+        let record = DeploymentPolicyRecord {
+            id: Uuid::new_v4(),
+            name: "mixed".to_string(),
+            description: Some("mixed phases".to_string()),
+            policy_type: "composite".to_string(),
+            config: json!({
+                "schema_version": 1,
+                "mode": "all",
+                "rules": [{
+                    "id": "40000000-0000-0000-0000-000000000001",
+                    "kind": "cve_block",
+                    "config": {"severity": "critical", "max_allowed": 0}
+                }]
+            }),
+            enabled: true,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+            mapped_requirement_count: 0,
+            bundle_usage_count: 0,
+        };
+
+        let parsed = parse_deployment_policy_record(&record).expect("typed representation");
+        assert!(matches!(parsed, DeploymentPolicy::Composite { .. }));
+        assert!(!parsed.is_nix_evaluated());
     }
 
     #[test]
@@ -2374,21 +2785,28 @@ in cfg.config.security.auditd.enable}""#;
 
     #[test]
     fn evaluation_policy_digest_is_real_for_an_empty_set() {
-        assert_eq!(evaluation_policy_digest(&[]), evaluation_policy_digest(&[]));
+        assert_eq!(
+            evaluation_policy_digest(&[], &[]),
+            evaluation_policy_digest(&[], &[])
+        );
         assert_ne!(
-            evaluation_policy_digest(&[]),
-            evaluation_policy_digest(&[AssignedPolicy {
-                policy_id: Uuid::from_u128(1),
-                policy_name: "firewall".to_string(),
-                policy: DeploymentPolicy::CustomCheck {
-                    expression: "cfg.config.networking.firewall.enable".to_string(),
-                    description: "firewall enabled".to_string(),
-                    field_name: "firewallEnabled".to_string(),
-                    strict: true,
-                    rules: Vec::new(),
-                    mode: RuleMode::All,
-                },
-            },])
+            evaluation_policy_digest(&[], &[]),
+            evaluation_policy_digest(
+                &[AssignedPolicy {
+                    policy_id: Uuid::from_u128(1),
+                    policy_name: "firewall".to_string(),
+                    enforcement_mode: Default::default(),
+                    policy: DeploymentPolicy::CustomCheck {
+                        expression: "cfg.config.networking.firewall.enable".to_string(),
+                        description: "firewall enabled".to_string(),
+                        field_name: "firewallEnabled".to_string(),
+                        strict: true,
+                        rules: Vec::new(),
+                        mode: RuleMode::All,
+                    },
+                }],
+                &[]
+            )
         );
     }
 
@@ -2397,6 +2815,7 @@ in cfg.config.security.auditd.enable}""#;
         let make_policy = |expression: &str| AssignedPolicy {
             policy_id: Uuid::from_u128(1),
             policy_name: "firewall".to_string(),
+            enforcement_mode: Default::default(),
             policy: DeploymentPolicy::CustomCheck {
                 expression: String::new(),
                 description: "firewall".to_string(),
@@ -2413,11 +2832,83 @@ in cfg.config.security.auditd.enable}""#;
         };
 
         assert_ne!(
-            evaluation_policy_digest(&[make_policy("cfg.config.networking.firewall.enable")]),
-            evaluation_policy_digest(&[make_policy(
-                "cfg.config.networking.firewall.allowedTCPPorts != []"
-            )]),
+            evaluation_policy_digest(&[make_policy("cfg.config.networking.firewall.enable")], &[]),
+            evaluation_policy_digest(
+                &[make_policy(
+                    "cfg.config.networking.firewall.allowedTCPPorts != []"
+                )],
+                &[]
+            ),
         );
+    }
+
+    #[test]
+    fn evaluation_policy_digest_changes_when_enforcement_mode_changes() {
+        let policy = AssignedPolicy {
+            policy_id: Uuid::from_u128(1),
+            policy_name: "firewall".to_string(),
+            enforcement_mode: AssignedPolicyEnforcementMode::Enforce,
+            policy: DeploymentPolicy::CustomCheck {
+                expression: "config.networking.firewall.enable".to_string(),
+                description: "firewall".to_string(),
+                field_name: "firewallEnabled".to_string(),
+                strict: true,
+                rules: Vec::new(),
+                mode: RuleMode::All,
+            },
+        };
+        let mut report_only = policy.clone();
+        report_only.enforcement_mode = AssignedPolicyEnforcementMode::ReportOnly;
+
+        assert_ne!(
+            evaluation_policy_digest(&[policy], &[]),
+            evaluation_policy_digest(&[report_only], &[])
+        );
+    }
+
+    #[test]
+    fn nix_policy_execution_eligibility_requires_native_nix_phase_and_parsed_support() {
+        let nix_policy = DeploymentPolicy::RequirePackages {
+            packages: vec!["curl".to_string()],
+            strict: true,
+        };
+        assert!(is_nix_policy_execution_eligible(
+            &nix_policy,
+            "native",
+            "nix-evaluation"
+        ));
+        assert!(is_nix_policy_execution_eligible(
+            &nix_policy,
+            "native",
+            "multi-phase"
+        ));
+
+        for implementation_state in ["unbound", "opaque", "manual", "external"] {
+            assert!(!is_nix_policy_execution_eligible(
+                &nix_policy,
+                implementation_state,
+                "nix-evaluation"
+            ));
+        }
+        for execution_phase in [
+            "post-build",
+            "pre-deployment",
+            "deployment-orchestration",
+            "continuous-assessment",
+        ] {
+            assert!(!is_nix_policy_execution_eligible(
+                &nix_policy,
+                "native",
+                execution_phase
+            ));
+        }
+        assert!(!is_nix_policy_execution_eligible(
+            &DeploymentPolicy::RequireCveCheck {
+                config: Default::default(),
+            },
+            "native",
+            "nix-evaluation"
+        ));
     }
 
     #[test]
@@ -2437,14 +2928,24 @@ in cfg.config.security.auditd.enable}""#;
     }
 }
 
-/// Background task to hydrate commit artifact cache (nixosConfigurations + changed files).
-/// Processes commits with missing cache entries, with progressive backoff on failure.
+/// Hydrates display-only configuration inventories and best-effort changed files.
+///
+/// Configuration discovery uses the commit's flake credentials, current server
+/// configuration, and exact immutable source. Source materialization precedes
+/// heavy-Nix admission. Discovery holds both locks through acknowledged cleanup
+/// and finishes its scope before cache persistence. Failed discovery marks the
+/// cache row unpopulated; the missing-row query does not select that row again.
+/// Authoritative evaluation rediscovers names instead of trusting these rows.
 async fn run_commit_artifact_hydration_loop(pool: PgPool) {
-    use crate::flake::commits::{get_commit_changed_files, get_commit_nixos_configurations};
+    use crate::flake::commits::get_commit_changed_files;
+    use crate::flake::credentials::FlakeCredentialEnv;
+    use crate::flake::verified_source::materialize_immutable_source;
+    use crate::models::evaluate_with_policies::run_configuration_discovery_preflight;
     use crate::queries::commits_artifacts::{
         get_commits_needing_artifact_cache, mark_commit_artifact_hydration_failed,
         upsert_commit_artifact_cache,
     };
+    use cf_protocol::builder::nar_qualified_store_flake_ref;
 
     info!("🔁 Starting commit artifact hydration background task...");
 
@@ -2463,16 +2964,40 @@ async fn run_commit_artifact_hydration_loop(pool: PgPool) {
                         repo_url, commit_hash
                     );
 
-                    // Try to get nixosConfigurations
-                    let configs = match get_commit_nixos_configurations(
-                        &repo_url,
-                        &[commit_hash.clone()],
-                    )
-                    .await
-                    .remove(&commit_hash)
-                    {
-                        Some(configs) => configs,
-                        None => {
+                    // SECURITY: Resolve auth from the commit's actual flake,
+                    // never from a repository URL shared by unrelated flakes.
+                    // No remote CLI fallback can reconcile this source's locks.
+                    let discovery = async {
+                        let config = CrystalForgeConfig::load()?;
+                        let server_config = config.get_server_config();
+                        let commit =
+                            crate::queries::commits::get_commit_by_id(&pool, commit_id).await?;
+                        let flake = commit.get_flake(&pool).await?;
+                        let creds = FlakeCredentialEnv::load(&pool, flake.id).await?;
+                        let source = materialize_immutable_source(
+                            &pool,
+                            commit.id,
+                            &server_config.source_archive_root,
+                            &flake.repo_url,
+                            &commit.git_commit_hash,
+                            creds.as_ref(),
+                        )
+                        .await?;
+                        let source_ref = nar_qualified_store_flake_ref(
+                            &source.server_store_path,
+                            &source.nar_hash,
+                        );
+                        run_configuration_discovery_preflight(
+                            &pool,
+                            &source_ref,
+                            creds.as_ref(),
+                            server_config,
+                        )
+                        .await
+                    };
+                    let configs = match discovery.await {
+                        Ok(configs) => configs,
+                        Err(_) => {
                             warn!(
                                 "⚠️  Failed to get nixosConfigurations for {} @ {}, marking as failed",
                                 repo_url, commit_hash

@@ -9,18 +9,31 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::api::models::{
-    BuildQueueItem, BuildQueuePageResponse, BuildQueueParams, BuildQueueSummary, BuildStatus,
-    CveSummary, DeploymentStatus, DeploymentStatusSummary, FleetHealthSummary, RecentDeployment,
+    BuildAttemptCollection, BuildAttemptLookupResponse, BuildQueueItem, BuildQueuePageResponse,
+    BuildQueueParams, BuildQueueSummary, BuildStatus, CacheHealthStatus, CacheHealthSummary,
+    CveSummary, DashboardActivity, DashboardActivityKind, DashboardActivityStatus,
+    DeploymentStatus, DeploymentStatusSummary, FleetHealthSummary, RecentDeployment,
 };
 
 /// Query `view_fleet_health_status` for system counts by health category.
 pub async fn fetch_fleet_health(pool: &PgPool) -> Result<FleetHealthSummary> {
+    fetch_fleet_health_for_user(pool, None).await
+}
+
+pub async fn fetch_fleet_health_for_user(
+    pool: &PgPool,
+    user_id: Option<Uuid>,
+) -> Result<FleetHealthSummary> {
     // Source of truth must match Systems view health semantics exactly.
     // `view_system_list.health_status` already powers systems listing and uses
     // lowercase values: healthy|warning|critical|offline.
     let rows = sqlx::query_as::<_, (String, i64)>(
-        "SELECT health_status, COUNT(*)::BIGINT AS count FROM view_system_list GROUP BY health_status",
+        "SELECT v.health_status, COUNT(*)::BIGINT AS count \
+         FROM view_system_list v JOIN systems s ON s.id = v.id \
+         WHERE ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id)) \
+         GROUP BY v.health_status",
     )
+    .bind(user_id)
     .fetch_all(pool)
     .await?;
 
@@ -48,11 +61,34 @@ fn apply_health_count(summary: &mut FleetHealthSummary, status: &str, count: i64
     }
 }
 
+fn apply_deployment_count(summary: &mut DeploymentStatusSummary, status: &str, count: i64) {
+    match status {
+        "Up to Date" => summary.up_to_date += count,
+        "Behind" => summary.behind += count,
+        "No Deployment" | "Never Seen" => summary.never_deployed += count,
+        _ => summary.unknown += count,
+    }
+}
+
 /// Query `view_deployment_status` for system counts by deployment category.
 pub async fn fetch_deployment_status(pool: &PgPool) -> Result<DeploymentStatusSummary> {
+    fetch_deployment_status_for_user(pool, None).await
+}
+
+pub async fn fetch_deployment_status_for_user(
+    pool: &PgPool,
+    user_id: Option<Uuid>,
+) -> Result<DeploymentStatusSummary> {
     let rows = sqlx::query_as::<_, (i64, String)>(
-        "SELECT count, status_display FROM view_deployment_status",
+        "SELECT COUNT(*)::bigint, CASE v.deployment_status \
+           WHEN 'up_to_date' THEN 'Up to Date' WHEN 'ahead' THEN 'Up to Date' \
+           WHEN 'behind' THEN 'Behind' \
+           WHEN 'no_deployment' THEN 'No Deployment' ELSE 'Unknown' END \
+         FROM view_system_deployment_status v JOIN systems s ON s.hostname = v.hostname \
+         WHERE ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id)) \
+         GROUP BY v.deployment_status",
     )
+    .bind(user_id)
     .fetch_all(pool)
     .await?;
 
@@ -64,13 +100,7 @@ pub async fn fetch_deployment_status(pool: &PgPool) -> Result<DeploymentStatusSu
     };
 
     for (count, status) in rows {
-        match status.as_str() {
-            "Up to Date" => summary.up_to_date = count,
-            "Behind" => summary.behind = count,
-            "No Deployment" | "Never Seen" => summary.never_deployed += count,
-            "Unknown" | "Evaluation Failed" | "No Evaluation" => summary.unknown += count,
-            _ => summary.unknown += count,
-        }
+        apply_deployment_count(&mut summary, &status, count);
     }
 
     Ok(summary)
@@ -78,6 +108,13 @@ pub async fn fetch_deployment_status(pool: &PgPool) -> Result<DeploymentStatusSu
 
 /// Aggregate CVE counts from `view_systems_cve_summary` across all systems.
 pub async fn fetch_cve_summary(pool: &PgPool) -> Result<CveSummary> {
+    fetch_cve_summary_for_user(pool, None).await
+}
+
+pub async fn fetch_cve_summary_for_user(
+    pool: &PgPool,
+    user_id: Option<Uuid>,
+) -> Result<CveSummary> {
     let row = sqlx::query_as::<_, (i64, i64, i64, i64)>(
         "WITH per_system_counts AS ( \
             SELECT \
@@ -88,7 +125,8 @@ pub async fn fetch_cve_summary(pool: &PgPool) -> Result<CveSummary> {
                 COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'LOW')::BIGINT AS low_cves \
             FROM view_system_vulnerabilities v \
             JOIN systems s ON s.hostname = v.hostname \
-            WHERE s.is_active = TRUE \
+             WHERE s.is_active = TRUE \
+               AND ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id)) \
             GROUP BY v.hostname \
          ) \
          SELECT \
@@ -98,6 +136,7 @@ pub async fn fetch_cve_summary(pool: &PgPool) -> Result<CveSummary> {
             COALESCE(SUM(low_cves), 0)::BIGINT \
          FROM per_system_counts",
     )
+    .bind(user_id)
     .fetch_one(pool)
     .await?;
 
@@ -111,7 +150,14 @@ pub async fn fetch_cve_summary(pool: &PgPool) -> Result<CveSummary> {
 
 /// Count total registered systems.
 pub async fn fetch_total_systems(pool: &PgPool) -> Result<i64> {
-    let count: (i64,) = sqlx::query_as("SELECT COUNT(*) FROM systems")
+    fetch_total_systems_for_user(pool, None).await
+}
+
+pub async fn fetch_total_systems_for_user(pool: &PgPool, user_id: Option<Uuid>) -> Result<i64> {
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM systems s WHERE $1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id)",
+    )
+        .bind(user_id)
         .fetch_one(pool)
         .await?;
     Ok(count.0)
@@ -119,11 +165,28 @@ pub async fn fetch_total_systems(pool: &PgPool) -> Result<i64> {
 
 /// Count active (non-terminal) builds.
 pub async fn fetch_active_builds(pool: &PgPool) -> Result<i64> {
+    fetch_active_builds_for_user(pool, None).await
+}
+
+/// Count active (non-terminal) builds visible to `user_id`.
+///
+/// The counted domain is intentionally identical to the historical
+/// `active_builds` contract: derivations whose status is non-terminal. Only the
+/// visibility predicate is new, so passing `None` reproduces the previous
+/// fleet-wide value exactly for existing consumers.
+pub async fn fetch_active_builds_for_user(pool: &PgPool, user_id: Option<Uuid>) -> Result<i64> {
     let count: (i64,) = sqlx::query_as(
         "SELECT COUNT(*) FROM derivations d \
          JOIN derivation_statuses ds ON d.status_id = ds.id \
-         WHERE ds.is_terminal = false",
+         WHERE ds.is_terminal = false \
+           AND ($1::uuid IS NULL OR EXISTS ( \
+             SELECT 1 FROM systems s \
+             JOIN user_environment_memberships uem ON uem.environment_id = s.environment_id \
+             WHERE uem.user_id = $1 \
+               AND (s.hostname = d.derivation_target OR s.system_configuration_name = d.derivation_target) \
+           ))",
     )
+    .bind(user_id)
     .fetch_one(pool)
     .await?;
     Ok(count.0)
@@ -134,36 +197,48 @@ pub async fn fetch_active_builds(pool: &PgPool) -> Result<i64> {
 /// Returns the 10 most recent deployment events (systems that have a
 /// `deployment_time` and `current_commit_hash`).
 pub async fn fetch_recent_deployments(pool: &PgPool) -> Result<Vec<RecentDeployment>> {
-    let rows = sqlx::query_as::<_, (String, String, DateTime<Utc>, String)>(
-        "SELECT hostname, \
-                COALESCE(current_commit_hash, ''), \
-                deployment_time, \
-                deployment_status \
-         FROM view_system_deployment_status \
-         WHERE deployment_time IS NOT NULL \
-         ORDER BY deployment_time DESC \
+    fetch_recent_deployments_for_user(pool, None).await
+}
+
+pub async fn fetch_recent_deployments_for_user(
+    pool: &PgPool,
+    user_id: Option<Uuid>,
+) -> Result<Vec<RecentDeployment>> {
+    let rows = sqlx::query_as::<_, (String, String, Option<String>, DateTime<Utc>, String)>(
+        "SELECT v.hostname, \
+                COALESCE(v.current_commit_hash, ''), \
+                c.message, v.deployment_time, v.deployment_status \
+         FROM view_system_deployment_status v \
+         JOIN systems s USING (hostname) \
+         LEFT JOIN LATERAL (SELECT message FROM commits WHERE flake_id = s.flake_id AND git_commit_hash = v.current_commit_hash ORDER BY id DESC LIMIT 1) c ON TRUE \
+         WHERE v.deployment_time IS NOT NULL AND ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id)) \
+         ORDER BY v.deployment_time DESC \
          LIMIT 10",
     )
+    .bind(user_id)
     .fetch_all(pool)
     .await?;
 
     let deployments = rows
         .into_iter()
-        .map(|(hostname, commit_hash, deployed_at, status)| {
-            let deployment_status = match status.as_str() {
-                "up_to_date" => DeploymentStatus::UpToDate,
-                "behind" => DeploymentStatus::Behind,
-                "ahead" => DeploymentStatus::Ahead,
-                "no_deployment" => DeploymentStatus::NeverDeployed,
-                _ => DeploymentStatus::Unknown,
-            };
-            RecentDeployment {
-                hostname,
-                commit_hash,
-                deployed_at,
-                status: deployment_status,
-            }
-        })
+        .map(
+            |(hostname, commit_hash, commit_message, deployed_at, status)| {
+                let deployment_status = match status.as_str() {
+                    "up_to_date" => DeploymentStatus::UpToDate,
+                    "behind" => DeploymentStatus::Behind,
+                    "ahead" => DeploymentStatus::Ahead,
+                    "no_deployment" => DeploymentStatus::NeverDeployed,
+                    _ => DeploymentStatus::Unknown,
+                };
+                RecentDeployment {
+                    hostname,
+                    commit_hash,
+                    commit_message,
+                    deployed_at,
+                    status: deployment_status,
+                }
+            },
+        )
         .collect();
 
     Ok(deployments)
@@ -171,6 +246,14 @@ pub async fn fetch_recent_deployments(pool: &PgPool) -> Result<Vec<RecentDeploym
 
 /// Fetch the active build queue (building + queued) from build_jobs.
 pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSummary> {
+    fetch_build_queue_for_user(pool, limit, None).await
+}
+
+pub async fn fetch_build_queue_for_user(
+    pool: &PgPool,
+    limit: i64,
+    user_id: Option<Uuid>,
+) -> Result<BuildQueueSummary> {
     #[derive(sqlx::FromRow)]
     struct ActiveBuildRow {
         job_id: Option<Uuid>,
@@ -190,6 +273,8 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
         attempt_number: i32,
         parent_job_id: Option<Uuid>,
         root_job_id: Option<Uuid>,
+        commit_id: Option<i32>,
+        server_failure_code: Option<String>,
         available_at: DateTime<Utc>,
     }
 
@@ -216,15 +301,39 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
             bj.attempt_number,
             bj.parent_job_id,
             bj.root_job_id,
+            d.commit_id,
+            bj.server_failure_code,
             bj.available_at
         FROM build_jobs bj
         JOIN derivations d ON d.id = bj.derivation_id
         LEFT JOIN commits c ON c.id = d.commit_id
         LEFT JOIN flakes f ON f.id = c.flake_id
-        LEFT JOIN systems s ON s.hostname = d.derivation_target
-        LEFT JOIN environments e ON e.id = s.environment_id
+        LEFT JOIN LATERAL (
+            SELECT id, hostname, environment_id
+            FROM systems s
+            WHERE (s.hostname = d.derivation_target OR s.system_configuration_name = d.derivation_target)
+              AND (bj.environment_id IS NULL OR s.environment_id = bj.environment_id)
+              AND ($2::uuid IS NULL OR EXISTS (
+                SELECT 1 FROM user_environment_memberships uem
+                WHERE uem.user_id = $2 AND uem.environment_id = s.environment_id
+              ))
+            ORDER BY CASE WHEN s.hostname = d.derivation_target THEN 0 ELSE 1 END, s.id
+            LIMIT 1
+        ) s ON TRUE
+        LEFT JOIN environments e ON e.id = COALESCE(bj.environment_id, s.environment_id)
         LEFT JOIN builders b ON b.id = bj.builder_id
-        WHERE bj.status IN ('queued', 'building', 'cancelling')
+         WHERE bj.status IN ('queued', 'building', 'cancelling')
+           AND ($2::uuid IS NULL OR (
+             (bj.environment_id IS NOT NULL AND EXISTS (
+               SELECT 1 FROM user_environment_memberships uem
+               WHERE uem.user_id = $2 AND uem.environment_id = bj.environment_id
+             )) OR (bj.environment_id IS NULL AND EXISTS (
+               SELECT 1 FROM systems matched
+               JOIN user_environment_memberships uem ON uem.environment_id = matched.environment_id
+               WHERE uem.user_id = $2
+                 AND (matched.hostname = d.derivation_target OR matched.system_configuration_name = d.derivation_target)
+             ))
+           ))
         ORDER BY
             CASE
                 WHEN bj.status = 'building'   THEN 0
@@ -239,6 +348,7 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
         "#,
     )
     .bind(limit)
+    .bind(user_id)
     .fetch_all(pool)
     .await?;
 
@@ -270,6 +380,8 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
                 attempt_number: row.attempt_number,
                 parent_job_id: row.parent_job_id,
                 root_job_id: row.root_job_id,
+                commit_id: row.commit_id,
+                server_failure_code: row.server_failure_code,
                 available_at: Some(row.available_at),
                 started_at: row.started_at,
                 elapsed_secs: row.elapsed_secs,
@@ -282,27 +394,543 @@ pub async fn fetch_build_queue(pool: &PgPool, limit: i64) -> Result<BuildQueueSu
         })
         .collect::<Vec<_>>();
 
-    let building_count = items
-        .iter()
-        .filter(|item| matches!(item.status, BuildStatus::Building | BuildStatus::Cancelling))
-        .count() as i64;
-    let queued_count = items
-        .iter()
-        .filter(|item| item.status == BuildStatus::Queued)
-        .count() as i64;
+    let (building_count, queued_count, failed_24h_count): (i64, i64, i64) = sqlx::query_as(
+        r#"SELECT
+          COUNT(*) FILTER (WHERE bj.status IN ('building', 'cancelling')),
+          COUNT(*) FILTER (WHERE bj.status = 'queued'),
+          COUNT(*) FILTER (WHERE bj.status = 'failed' AND bj.completed_at >= now() - interval '24 hours')
+        FROM build_jobs bj
+        JOIN derivations d ON d.id = bj.derivation_id
+        WHERE $1::uuid IS NULL OR (
+          (bj.environment_id IS NOT NULL AND EXISTS (
+            SELECT 1 FROM user_environment_memberships uem
+            WHERE uem.user_id = $1 AND uem.environment_id = bj.environment_id
+          )) OR (bj.environment_id IS NULL AND EXISTS (
+            SELECT 1 FROM systems s
+            JOIN user_environment_memberships uem ON uem.environment_id = s.environment_id
+            WHERE uem.user_id = $1
+              AND (s.hostname = d.derivation_target OR s.system_configuration_name = d.derivation_target)
+          ))
+        )"#,
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
+
+    // Slot capacity must describe workers that can actually accept build jobs.
+    // `available_builders` is therefore the single eligibility set behind
+    // `active_workers`, `used_slots`, and `total_slots`; a builder that is
+    // disabled, unregistered, or not `active` contributes neither capacity nor
+    // occupancy. `total_workers` remains the full visible inventory.
+    let (active_workers, total_workers, used_slots, total_slots): (i64, i64, i64, i64) =
+        sqlx::query_as(
+            r#"WITH visible_builders AS (
+              SELECT b.id, b.status, b.enabled, b.registered, b.max_concurrent_jobs
+              FROM builders b
+              WHERE $1::uuid IS NULL OR NOT EXISTS (
+                SELECT 1 FROM builder_environment_assignments all_bea WHERE all_bea.builder_id = b.id
+              ) OR EXISTS (
+                SELECT 1 FROM builder_environment_assignments bea
+                JOIN user_environment_memberships uem ON uem.environment_id = bea.environment_id
+                WHERE bea.builder_id = b.id AND uem.user_id = $1
+              )
+            ), available_builders AS (
+              SELECT id, max_concurrent_jobs
+              FROM visible_builders
+              WHERE enabled AND registered AND status = 'active'
+            ), used AS (
+              SELECT COUNT(*)::bigint AS count FROM build_jobs bj
+              JOIN derivations d ON d.id = bj.derivation_id
+              WHERE bj.status IN ('building', 'cancelling')
+                AND bj.builder_id IN (SELECT id FROM available_builders)
+                AND ($1::uuid IS NULL OR (
+                  (bj.environment_id IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM user_environment_memberships uem
+                    WHERE uem.user_id = $1 AND uem.environment_id = bj.environment_id
+                  )) OR (bj.environment_id IS NULL AND EXISTS (
+                    SELECT 1 FROM systems s
+                    JOIN user_environment_memberships uem ON uem.environment_id = s.environment_id
+                    WHERE uem.user_id = $1
+                      AND (s.hostname = d.derivation_target OR s.system_configuration_name = d.derivation_target)
+                  ))
+                ))
+            )
+            SELECT
+              (SELECT COUNT(*)::bigint FROM available_builders),
+              (SELECT COUNT(*)::bigint FROM visible_builders),
+              (SELECT count FROM used),
+              (SELECT COALESCE(SUM(max_concurrent_jobs), 0)::bigint FROM available_builders)"#,
+        )
+        .bind(user_id)
+        .fetch_one(pool)
+        .await?;
 
     Ok(BuildQueueSummary {
         building_count,
         queued_count,
+        failed_24h_count,
+        active_workers,
+        total_workers,
+        used_slots,
+        total_slots,
         items,
         timestamp: Utc::now(),
     })
 }
 
-/// Fetch recent completed/failed builds for history views as a growing prefix.
+pub async fn fetch_cache_health_for_user(
+    pool: &PgPool,
+    user_id: Option<Uuid>,
+) -> Result<CacheHealthSummary> {
+    let (destination_count, enabled_destination_count, successful_pushes_24h, failed_pushes_24h, last_activity_at): (
+        i64,
+        i64,
+        i64,
+        i64,
+        Option<DateTime<Utc>>,
+    ) = sqlx::query_as(
+        r#"WITH visible_caches AS (
+          SELECT cd.name, cd.enabled
+          FROM cache_destinations cd
+          WHERE $1::uuid IS NULL
+             OR NOT EXISTS (SELECT 1 FROM cache_destination_environments all_cde WHERE all_cde.cache_destination_id = cd.id)
+             OR EXISTS (
+               SELECT 1 FROM cache_destination_environments cde
+               JOIN user_environment_memberships uem ON uem.environment_id = cde.environment_id
+               WHERE cde.cache_destination_id = cd.id AND uem.user_id = $1
+             )
+        ), push_agg AS (
+          SELECT
+            COUNT(*) FILTER (WHERE cpj.status = 'completed' AND cpj.completed_at >= now() - interval '24 hours')::bigint AS successful,
+            COUNT(*) FILTER (WHERE cpj.status IN ('failed', 'permanently_failed') AND COALESCE(cpj.completed_at, cpj.scheduled_at) >= now() - interval '24 hours')::bigint AS failed,
+            MAX(COALESCE(cpj.completed_at, cpj.started_at, cpj.scheduled_at)) AS last_activity
+          FROM cache_push_jobs cpj
+          JOIN derivations d ON d.id = cpj.derivation_id
+          WHERE cpj.cache_destination IN (SELECT name FROM visible_caches)
+            AND ($1::uuid IS NULL OR EXISTS (
+              SELECT 1 FROM build_jobs bj
+              WHERE bj.derivation_id = cpj.derivation_id
+                AND (
+                  (bj.environment_id IS NOT NULL AND EXISTS (
+                    SELECT 1 FROM user_environment_memberships uem
+                    WHERE uem.user_id = $1 AND uem.environment_id = bj.environment_id
+                  )) OR (bj.environment_id IS NULL AND EXISTS (
+                    SELECT 1 FROM systems s
+                    JOIN user_environment_memberships uem ON uem.environment_id = s.environment_id
+                    WHERE uem.user_id = $1
+                      AND (s.hostname = d.derivation_target OR s.system_configuration_name = d.derivation_target)
+                  ))
+                )
+            ) OR (
+              $1::uuid IS NOT NULL
+              AND NOT EXISTS (SELECT 1 FROM build_jobs bj WHERE bj.derivation_id = cpj.derivation_id)
+              AND EXISTS (
+                SELECT 1 FROM systems s
+                JOIN user_environment_memberships uem ON uem.environment_id = s.environment_id
+                WHERE uem.user_id = $1
+                  AND (s.hostname = d.derivation_target OR s.system_configuration_name = d.derivation_target)
+              )
+            ))
+        )
+        SELECT COUNT(*)::bigint,
+               COUNT(*) FILTER (WHERE enabled)::bigint,
+               COALESCE((SELECT successful FROM push_agg), 0),
+               COALESCE((SELECT failed FROM push_agg), 0),
+               (SELECT last_activity FROM push_agg)
+        FROM visible_caches"#,
+    )
+    .bind(user_id)
+    .fetch_one(pool)
+    .await?;
+
+    let status = cache_health_status(
+        destination_count,
+        enabled_destination_count,
+        successful_pushes_24h,
+        failed_pushes_24h,
+    );
+
+    Ok(CacheHealthSummary {
+        status,
+        destination_count,
+        enabled_destination_count,
+        successful_pushes_24h,
+        failed_pushes_24h,
+        last_activity_at,
+        used_bytes: None,
+        capacity_bytes: None,
+    })
+}
+
+fn cache_health_status(
+    destination_count: i64,
+    enabled_destination_count: i64,
+    successful_pushes_24h: i64,
+    failed_pushes_24h: i64,
+) -> CacheHealthStatus {
+    if destination_count > 0 && enabled_destination_count == 0 {
+        CacheHealthStatus::Disabled
+    } else if failed_pushes_24h > 0 {
+        CacheHealthStatus::Degraded
+    } else if successful_pushes_24h > 0 {
+        CacheHealthStatus::Healthy
+    } else {
+        CacheHealthStatus::Unknown
+    }
+}
+
+fn dashboard_activity_kind(value: &str) -> Result<DashboardActivityKind> {
+    match value {
+        "deployment" => Ok(DashboardActivityKind::Deployment),
+        "build" => Ok(DashboardActivityKind::Build),
+        "evaluation" => Ok(DashboardActivityKind::Evaluation),
+        value => anyhow::bail!("unexpected dashboard activity kind {value}"),
+    }
+}
+
+fn dashboard_activity_status(value: &str) -> Result<DashboardActivityStatus> {
+    match value {
+        "deployment_started" => Ok(DashboardActivityStatus::DeploymentStarted),
+        "deployment_succeeded" => Ok(DashboardActivityStatus::DeploymentSucceeded),
+        "deployment_failed" => Ok(DashboardActivityStatus::DeploymentFailed),
+        "build_queued" => Ok(DashboardActivityStatus::BuildQueued),
+        "build_building" => Ok(DashboardActivityStatus::BuildBuilding),
+        "build_cancelling" => Ok(DashboardActivityStatus::BuildCancelling),
+        "build_succeeded" => Ok(DashboardActivityStatus::BuildSucceeded),
+        "build_failed" => Ok(DashboardActivityStatus::BuildFailed),
+        "build_cancelled" => Ok(DashboardActivityStatus::BuildCancelled),
+        "evaluation_pending" => Ok(DashboardActivityStatus::EvaluationPending),
+        "evaluation_in_progress" => Ok(DashboardActivityStatus::EvaluationInProgress),
+        "evaluation_cancelling" => Ok(DashboardActivityStatus::EvaluationCancelling),
+        "evaluation_succeeded" => Ok(DashboardActivityStatus::EvaluationSucceeded),
+        "evaluation_failed" => Ok(DashboardActivityStatus::EvaluationFailed),
+        "evaluation_cancelled" => Ok(DashboardActivityStatus::EvaluationCancelled),
+        value => anyhow::bail!("unexpected dashboard activity status {value}"),
+    }
+}
+
+pub async fn fetch_activity_for_user(
+    pool: &PgPool,
+    user_id: Option<Uuid>,
+    limit: i64,
+) -> Result<Vec<DashboardActivity>> {
+    #[derive(sqlx::FromRow)]
+    struct ActivityRow {
+        id: String,
+        kind: String,
+        status: String,
+        occurred_at: DateTime<Utc>,
+        title: String,
+        system_id: Option<Uuid>,
+        flake_id: Option<i32>,
+        commit_id: Option<i32>,
+        commit_hash: Option<String>,
+        build_job_id: Option<Uuid>,
+        deployment_id: Option<Uuid>,
+        evaluation_attempt_id: Option<Uuid>,
+    }
+
+    let rows = sqlx::query_as::<_, ActivityRow>(
+        r#"WITH activity AS (
+          SELECT ('deployment:' || se.id::text) AS id, 'deployment'::text AS kind,
+                 CASE se.event_type
+                   WHEN 'cf_deployment_started' THEN 'deployment_started'
+                   WHEN 'cf_deployment_succeeded' THEN 'deployment_succeeded'
+                   WHEN 'cf_deployment_failed' THEN 'deployment_failed'
+                 END AS status,
+                 se.occurred_at,
+                 s.hostname AS title, s.id AS system_id, s.flake_id, c.id AS commit_id,
+                 c.git_commit_hash AS commit_hash, NULL::uuid AS build_job_id,
+                 se.deployment_id, NULL::uuid AS evaluation_attempt_id, se.id::text AS stable_id
+          FROM system_events se
+          JOIN systems s ON s.id = se.system_id
+          LEFT JOIN LATERAL (
+            SELECT c.id, c.git_commit_hash
+            FROM derivations d JOIN commits c ON c.id = d.commit_id
+            WHERE d.derivation_type = 'nixos'
+              AND d.derivation_name = COALESCE(NULLIF(s.system_configuration_name, ''), s.hostname)
+              AND COALESCE(d.store_path, d.expected_store_path) = se.new_store_path
+            ORDER BY d.id DESC LIMIT 1
+          ) c ON TRUE
+          WHERE se.event_type IN ('cf_deployment_started', 'cf_deployment_succeeded', 'cf_deployment_failed')
+            AND ($1::uuid IS NULL OR EXISTS (SELECT 1 FROM user_environment_memberships uem WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id))
+          UNION ALL
+          SELECT ('build:' || bj.id::text), 'build', CASE bj.status
+                   WHEN 'queued' THEN 'build_queued'
+                   WHEN 'building' THEN 'build_building'
+                   WHEN 'cancelling' THEN 'build_cancelling'
+                   WHEN 'success' THEN 'build_succeeded'
+                   WHEN 'failed' THEN 'build_failed'
+                   WHEN 'cancelled' THEN 'build_cancelled'
+                 END,
+                 COALESCE(bj.completed_at, bj.started_at, bj.created_at),
+                 COALESCE(s.hostname, d.derivation_target, d.derivation_name), s.id, c.flake_id, c.id,
+                 c.git_commit_hash, bj.id, NULL::uuid, NULL::uuid, bj.id::text
+          FROM build_jobs bj
+          JOIN derivations d ON d.id = bj.derivation_id
+          LEFT JOIN commits c ON c.id = d.commit_id
+          LEFT JOIN LATERAL (
+            SELECT s.id, s.hostname, s.flake_id, s.environment_id FROM systems s
+            WHERE (s.hostname = d.derivation_target OR s.system_configuration_name = d.derivation_target)
+              AND (bj.environment_id IS NULL OR s.environment_id = bj.environment_id)
+              AND ($1::uuid IS NULL OR EXISTS (
+                SELECT 1 FROM user_environment_memberships uem
+                WHERE uem.user_id = $1 AND uem.environment_id = s.environment_id
+              ))
+            ORDER BY CASE WHEN s.hostname = d.derivation_target THEN 0 ELSE 1 END, s.id LIMIT 1
+          ) s ON TRUE
+          WHERE ($1::uuid IS NULL OR (
+            (bj.environment_id IS NOT NULL AND EXISTS (
+              SELECT 1 FROM user_environment_memberships uem
+              WHERE uem.user_id = $1 AND uem.environment_id = bj.environment_id
+            )) OR (bj.environment_id IS NULL AND EXISTS (
+              SELECT 1 FROM systems matched
+              JOIN user_environment_memberships uem ON uem.environment_id = matched.environment_id
+              WHERE uem.user_id = $1
+                AND (matched.hostname = d.derivation_target OR matched.system_configuration_name = d.derivation_target)
+            ))
+          ))
+          UNION ALL
+          SELECT ('evaluation:' || ea.id::text), 'evaluation', CASE ea.status
+                   WHEN 'queued' THEN 'evaluation_pending'
+                   WHEN 'in_progress' THEN 'evaluation_in_progress'
+                   WHEN 'complete' THEN 'evaluation_succeeded'
+                   WHEN 'failed' THEN 'evaluation_failed'
+                   WHEN 'cancelled' THEN 'evaluation_cancelled'
+                  END,
+                  COALESCE(ea.completed_at, ea.started_at, ea.created_at),
+                  f.name, NULL::uuid, c.flake_id, c.id, c.git_commit_hash, NULL::uuid, NULL::uuid,
+                  ea.id, ea.id::text
+          FROM evaluation_attempts ea
+          JOIN commits c ON c.id = ea.commit_id
+          JOIN flakes f ON f.id = c.flake_id
+          WHERE TRUE
+            AND ($1::uuid IS NULL OR EXISTS (
+              SELECT 1 FROM systems s JOIN user_environment_memberships uem ON uem.environment_id = s.environment_id
+              WHERE s.flake_id = c.flake_id AND uem.user_id = $1
+            ))
+        )
+        SELECT id, kind, status, occurred_at, title, system_id, flake_id, commit_id,
+               commit_hash, build_job_id, deployment_id, evaluation_attempt_id FROM activity
+        ORDER BY occurred_at DESC, kind ASC, stable_id DESC
+        LIMIT $2"#,
+    )
+    .bind(user_id)
+    .bind(limit.clamp(1, 200))
+    .fetch_all(pool)
+    .await?;
+
+    rows.into_iter()
+        .map(|row| {
+            let kind = dashboard_activity_kind(&row.kind)?;
+            let status = dashboard_activity_status(&row.status)?;
+            Ok(DashboardActivity {
+                id: row.id,
+                kind,
+                status,
+                occurred_at: row.occurred_at,
+                title: row.title,
+                system_id: row.system_id,
+                flake_id: row.flake_id,
+                commit_id: row.commit_id,
+                commit_hash: row.commit_hash,
+                build_job_id: row.build_job_id,
+                deployment_id: row.deployment_id,
+                evaluation_attempt_id: row.evaluation_attempt_id,
+            })
+        })
+        .collect()
+}
+
+const EXACT_BUILD_ATTEMPT_SQL: &str = r#"
+SELECT
+    bj.id AS job_id,
+    resolved_system.id AS system_id,
+    commit.flake_id,
+    COALESCE(resolved_system.hostname, derivation.derivation_target, derivation.derivation_name) AS hostname,
+    flake.name AS flake_name,
+    commit.git_commit_hash AS commit_hash,
+    NULLIF(split_part(COALESCE(commit.message, ''), E'\n', 1), '') AS commit_message,
+    bj.status,
+    builder.name AS builder_name,
+    bj.created_at AS queued_at,
+    bj.started_at,
+    CASE
+        WHEN bj.started_at IS NULL THEN NULL
+        WHEN bj.status IN ('success', 'failed', 'cancelled') AND bj.completed_at IS NOT NULL
+            THEN EXTRACT(EPOCH FROM (bj.completed_at - bj.started_at))::BIGINT
+        ELSE EXTRACT(EPOCH FROM (NOW() - bj.started_at))::BIGINT
+    END AS elapsed_secs,
+    bj.logs,
+    environment.name AS environment,
+    bj.attempt_number,
+    bj.parent_job_id,
+    bj.root_job_id,
+    derivation.commit_id,
+    bj.server_failure_code,
+    bj.available_at,
+    COALESCE(flake.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = commit.id, FALSE)
+        AS is_latest_per_flake,
+    COALESCE((
+        SELECT COUNT(*)::BIGINT
+        FROM derivations related
+        WHERE related.commit_id = derivation.commit_id
+          AND related.derivation_target = derivation.derivation_target
+          AND related.status_id >= 5
+          AND related.status_id <> 6
+    ), 0)::BIGINT AS total_derivs,
+    COALESCE((
+        SELECT COUNT(*)::BIGINT
+        FROM derivations related
+        WHERE related.commit_id = derivation.commit_id
+          AND related.derivation_target = derivation.derivation_target
+          AND related.status_id IN (10, 11, 12)
+    ), 0)::BIGINT AS built_derivs,
+    COALESCE((
+        SELECT COUNT(*)::BIGINT
+        FROM derivations related
+        WHERE related.commit_id = derivation.commit_id
+          AND related.derivation_target = derivation.derivation_target
+          AND related.status_id = 14
+    ), 0)::BIGINT AS cached_derivs
+FROM build_jobs bj
+JOIN derivations derivation ON derivation.id = bj.derivation_id
+LEFT JOIN commits commit ON commit.id = derivation.commit_id
+LEFT JOIN flakes flake ON flake.id = commit.flake_id
+LEFT JOIN flake_branch_commit_snapshot latest_snapshot
+  ON latest_snapshot.flake_id = commit.flake_id
+ AND latest_snapshot.position = 0
+LEFT JOIN LATERAL (
+    SELECT id, hostname, environment_id
+    FROM systems
+    WHERE (hostname = derivation.derivation_target
+       OR (system_configuration_name IS NOT NULL
+           AND system_configuration_name = derivation.derivation_target))
+      AND systems.flake_id = commit.flake_id
+      AND (bj.environment_id IS NULL OR environment_id = bj.environment_id)
+      AND ($2::uuid IS NULL OR bj.environment_id IS NOT NULL OR EXISTS (
+          SELECT 1
+          FROM user_environment_memberships membership
+          WHERE membership.user_id = $2
+            AND membership.environment_id = systems.environment_id
+      ))
+    ORDER BY
+        CASE WHEN hostname = derivation.derivation_target THEN 0 ELSE 1 END,
+        id
+    LIMIT 1
+) resolved_system ON TRUE
+LEFT JOIN environments environment
+  ON environment.id = COALESCE(bj.environment_id, resolved_system.environment_id)
+LEFT JOIN builders builder ON builder.id = bj.builder_id
+WHERE bj.id = $1
+  AND ($2::uuid IS NULL OR EXISTS (
+      SELECT 1
+      FROM user_environment_memberships membership
+      WHERE membership.user_id = $2
+        AND membership.environment_id = COALESCE(bj.environment_id, resolved_system.environment_id)
+  ))
+"#;
+
+/// Returns one exact build attempt in the caller's environment visibility scope.
+///
+/// The primary-key predicate and authorization predicate execute in one query.
+/// A hidden attempt therefore has the same `None` result as a missing attempt.
+///
+/// # Errors
+///
+/// Returns an error when the database query fails or a persisted status is not
+/// part of the supported build lifecycle.
+pub async fn get_build_attempt_by_id(
+    pool: &PgPool,
+    attempt_id: Uuid,
+    visibility_user_id: Option<Uuid>,
+) -> Result<Option<BuildAttemptLookupResponse>> {
+    #[derive(sqlx::FromRow)]
+    struct ExactBuildRow {
+        job_id: Uuid,
+        system_id: Option<Uuid>,
+        flake_id: Option<i32>,
+        hostname: Option<String>,
+        flake_name: Option<String>,
+        commit_hash: Option<String>,
+        commit_message: Option<String>,
+        status: String,
+        builder_name: Option<String>,
+        queued_at: DateTime<Utc>,
+        started_at: Option<DateTime<Utc>>,
+        elapsed_secs: Option<i64>,
+        logs: Option<String>,
+        environment: Option<String>,
+        attempt_number: i32,
+        parent_job_id: Option<Uuid>,
+        root_job_id: Option<Uuid>,
+        commit_id: Option<i32>,
+        server_failure_code: Option<String>,
+        available_at: DateTime<Utc>,
+        is_latest_per_flake: bool,
+        total_derivs: i64,
+        built_derivs: i64,
+        cached_derivs: i64,
+    }
+
+    let row = sqlx::query_as::<_, ExactBuildRow>(EXACT_BUILD_ATTEMPT_SQL)
+        .bind(attempt_id)
+        .bind(visibility_user_id)
+        .fetch_optional(pool)
+        .await?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let (collection, status) = match row.status.as_str() {
+        "queued" => (BuildAttemptCollection::Active, BuildStatus::Queued),
+        "building" => (BuildAttemptCollection::Active, BuildStatus::Building),
+        "cancelling" => (BuildAttemptCollection::Active, BuildStatus::Cancelling),
+        "success" => (BuildAttemptCollection::Completed, BuildStatus::Complete),
+        "failed" => (BuildAttemptCollection::Completed, BuildStatus::Failed),
+        "cancelled" => (BuildAttemptCollection::Completed, BuildStatus::Cancelled),
+        status => anyhow::bail!("unsupported persisted build status {status}"),
+    };
+
+    Ok(Some(BuildAttemptLookupResponse {
+        collection,
+        attempt: BuildQueueItem {
+            job_id: Some(row.job_id),
+            system_id: row.system_id,
+            flake_id: row.flake_id,
+            is_latest_per_flake: row.is_latest_per_flake,
+            hostname: row.hostname.unwrap_or_else(|| "unknown".to_string()),
+            flake_name: row.flake_name.unwrap_or_else(|| "unknown".to_string()),
+            commit_hash: row.commit_hash.unwrap_or_else(|| "unknown".to_string()),
+            commit_message: row.commit_message,
+            status,
+            builder_name: row.builder_name,
+            queued_at: row.queued_at,
+            attempt_number: row.attempt_number,
+            parent_job_id: row.parent_job_id,
+            root_job_id: row.root_job_id,
+            commit_id: row.commit_id,
+            server_failure_code: row.server_failure_code,
+            available_at: Some(row.available_at),
+            started_at: row.started_at,
+            elapsed_secs: row.elapsed_secs,
+            logs: row.logs,
+            environment: row.environment,
+            total_derivs: row.total_derivs,
+            built_derivs: row.built_derivs,
+            cached_derivs: row.cached_derivs,
+        },
+    }))
+}
+
+/// Fetches recent completed/failed builds as a growing, visibility-scoped prefix.
+///
+/// `visibility_user_id` scopes non-admin callers to assigned environments;
+/// administrators pass `None` for fleet-wide visibility.
 pub async fn fetch_recent_build_history(
     pool: &PgPool,
     params: &BuildQueueParams,
+    visibility_user_id: Option<Uuid>,
 ) -> Result<BuildQueuePageResponse> {
     let limit = params.limit.max(1).min(crate::api::models::LIMIT_MAX);
     let status_filter: Vec<String> = params
@@ -333,6 +961,8 @@ pub async fn fetch_recent_build_history(
         attempt_number: i32,
         parent_job_id: Option<Uuid>,
         root_job_id: Option<Uuid>,
+        commit_id: Option<i32>,
+        server_failure_code: Option<String>,
         available_at: DateTime<Utc>,
         is_latest_per_flake: bool,
     }
@@ -345,21 +975,38 @@ pub async fn fetch_recent_build_history(
                    COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS display_name,
                    COALESCE(s.system_configuration_name, '') AS system_configuration_name,
                    COALESCE(b.name, '') AS builder_name,
-                   RANK() OVER (PARTITION BY c.flake_id ORDER BY c.commit_timestamp DESC, c.id DESC) AS latest_rank
+                   COALESCE(f.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = c.id, FALSE)
+                       AS is_latest_per_flake
             FROM build_jobs bj
             JOIN derivations d ON d.id = bj.derivation_id
             LEFT JOIN commits c ON c.id = d.commit_id
             LEFT JOIN flakes f ON f.id = c.flake_id
+            LEFT JOIN flake_branch_commit_snapshot latest_snapshot
+              ON latest_snapshot.flake_id = c.flake_id
+             AND latest_snapshot.position = 0
             LEFT JOIN LATERAL (
-                SELECT hostname, system_configuration_name
+                SELECT hostname, environment_id, system_configuration_name
                 FROM systems
-                WHERE hostname = d.derivation_target
-                   OR (system_configuration_name IS NOT NULL AND system_configuration_name = d.derivation_target)
-                ORDER BY CASE WHEN hostname = d.derivation_target THEN 0 ELSE 1 END
+                WHERE (hostname = d.derivation_target
+                   OR (system_configuration_name IS NOT NULL AND system_configuration_name = d.derivation_target))
+                  AND systems.flake_id = c.flake_id
+                  AND (bj.environment_id IS NULL OR environment_id = bj.environment_id)
+                  AND ($9::uuid IS NULL OR bj.environment_id IS NOT NULL OR EXISTS (
+                      SELECT 1 FROM user_environment_memberships membership
+                      WHERE membership.user_id = $9
+                        AND membership.environment_id = systems.environment_id
+                  ))
+                ORDER BY CASE WHEN hostname = d.derivation_target THEN 0 ELSE 1 END, id
                 LIMIT 1
             ) s ON TRUE
             LEFT JOIN builders b ON b.id = bj.builder_id
             WHERE bj.status IN ('success', 'failed', 'cancelled')
+              AND ($9::uuid IS NULL OR EXISTS (
+                  SELECT 1
+                  FROM user_environment_memberships membership
+                  WHERE membership.user_id = $9
+                    AND membership.environment_id = COALESCE(bj.environment_id, s.environment_id)
+              ))
         ), filtered AS (
             SELECT * FROM domain
             WHERE ($1::text[] IS NULL OR cardinality($1::text[]) = 0 OR status = ANY($1::text[]))
@@ -368,12 +1015,12 @@ pub async fn fetch_recent_build_history(
               AND ($4::text IS NULL OR display_name ILIKE ('%' || $4 || '%') OR system_configuration_name ILIKE ('%' || $4 || '%'))
               AND ($5::timestamptz IS NULL OR created_at >= $5)
               AND ($6::timestamptz IS NULL OR created_at <= $6)
-              AND ($7::text IS NULL OR display_name ILIKE ('%' || $7 || '%') OR flake_name ILIKE ('%' || $7 || '%')
-                   OR git_commit_hash ILIKE ('%' || $7 || '%') OR builder_name ILIKE ('%' || $7 || '%')
-                   OR status ILIKE ('%' || $7 || '%')
+               AND ($7::text IS NULL OR display_name ILIKE ('%' || $7 || '%') OR flake_name ILIKE ('%' || $7 || '%')
+                    OR git_commit_hash ILIKE ('%' || $7 || '%') OR builder_name ILIKE ('%' || $7 || '%')
+                    OR status ILIKE ('%' || $7 || '%')
                    OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $7 || '%')
                    OR 'x86_64-linux' ILIKE ('%' || $7 || '%'))
-              AND (NOT $8 OR (flake_id IS NOT NULL AND latest_rank = 1))
+               AND (NOT $8 OR is_latest_per_flake)
         )
         SELECT (SELECT COUNT(*) FROM domain), (SELECT COUNT(*) FROM filtered)
         "#,
@@ -386,6 +1033,7 @@ pub async fn fetch_recent_build_history(
     .bind(params.queued_before)
     .bind(params.search.as_deref())
     .bind(params.latest_only)
+    .bind(visibility_user_id)
     .fetch_one(pool)
     .await?;
 
@@ -413,28 +1061,44 @@ pub async fn fetch_recent_build_history(
             bj.attempt_number,
             bj.parent_job_id,
             bj.root_job_id,
+            d.commit_id,
+            bj.server_failure_code,
             bj.available_at,
             COALESCE(bj.completed_at, bj.updated_at, bj.created_at) AS completed_sort_at,
             COALESCE(s.system_configuration_name, '') AS system_configuration_name,
-            RANK() OVER (
-                PARTITION BY c.flake_id
-                ORDER BY c.commit_timestamp DESC, c.id DESC
-            ) AS latest_rank
+            COALESCE(f.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = c.id, FALSE)
+                AS is_latest_per_flake
         FROM build_jobs bj
         JOIN derivations d ON d.id = bj.derivation_id
         LEFT JOIN commits c ON c.id = d.commit_id
         LEFT JOIN flakes f ON f.id = c.flake_id
+        LEFT JOIN flake_branch_commit_snapshot latest_snapshot
+          ON latest_snapshot.flake_id = c.flake_id
+         AND latest_snapshot.position = 0
         LEFT JOIN LATERAL (
             SELECT id, hostname, environment_id, system_configuration_name
             FROM systems
-            WHERE hostname = d.derivation_target
-               OR (system_configuration_name IS NOT NULL AND system_configuration_name = d.derivation_target)
-            ORDER BY CASE WHEN hostname = d.derivation_target THEN 0 ELSE 1 END
+            WHERE (hostname = d.derivation_target
+               OR (system_configuration_name IS NOT NULL AND system_configuration_name = d.derivation_target))
+              AND systems.flake_id = c.flake_id
+              AND (bj.environment_id IS NULL OR environment_id = bj.environment_id)
+              AND ($9::uuid IS NULL OR bj.environment_id IS NOT NULL OR EXISTS (
+                  SELECT 1 FROM user_environment_memberships membership
+                  WHERE membership.user_id = $9
+                    AND membership.environment_id = systems.environment_id
+              ))
+            ORDER BY CASE WHEN hostname = d.derivation_target THEN 0 ELSE 1 END, id
             LIMIT 1
         ) s ON TRUE
-        LEFT JOIN environments e ON e.id = s.environment_id
+        LEFT JOIN environments e ON e.id = COALESCE(bj.environment_id, s.environment_id)
         LEFT JOIN builders b ON b.id = bj.builder_id
         WHERE bj.status IN ('success', 'failed', 'cancelled')
+          AND ($9::uuid IS NULL OR EXISTS (
+              SELECT 1
+              FROM user_environment_memberships membership
+              WHERE membership.user_id = $9
+                AND membership.environment_id = COALESCE(bj.environment_id, s.environment_id)
+          ))
         ), filtered AS (
             SELECT * FROM domain
             WHERE ($1::text[] IS NULL OR cardinality($1::text[]) = 0 OR status = ANY($1::text[]))
@@ -445,15 +1109,15 @@ pub async fn fetch_recent_build_history(
               AND ($6::timestamptz IS NULL OR queued_at <= $6)
               AND ($7::text IS NULL OR hostname ILIKE ('%' || $7 || '%') OR flake_name ILIKE ('%' || $7 || '%')
                    OR commit_hash ILIKE ('%' || $7 || '%') OR COALESCE(builder_name, '') ILIKE ('%' || $7 || '%')
-                   OR status ILIKE ('%' || $7 || '%')
+                    OR status ILIKE ('%' || $7 || '%')
                    OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $7 || '%')
                    OR 'x86_64-linux' ILIKE ('%' || $7 || '%'))
-              AND (NOT $8 OR (flake_id IS NOT NULL AND latest_rank = 1))
+               AND (NOT $8 OR is_latest_per_flake)
         )
-        SELECT *, flake_id IS NOT NULL AND latest_rank = 1 AS is_latest_per_flake
+        SELECT *
         FROM filtered
         ORDER BY completed_sort_at DESC, job_id DESC
-        LIMIT $9
+        LIMIT $10
         "#,
     )
     .bind(if status_filter.is_empty() { None } else { Some(status_filter) })
@@ -464,6 +1128,7 @@ pub async fn fetch_recent_build_history(
     .bind(params.queued_before)
     .bind(params.search.as_deref())
     .bind(params.latest_only)
+    .bind(visibility_user_id)
     .bind(limit)
     .fetch_all(pool)
     .await?;
@@ -498,6 +1163,8 @@ pub async fn fetch_recent_build_history(
                 attempt_number: row.attempt_number,
                 parent_job_id: row.parent_job_id,
                 root_job_id: row.root_job_id,
+                commit_id: row.commit_id,
+                server_failure_code: row.server_failure_code,
                 available_at: Some(row.available_at),
                 started_at: row.started_at,
                 elapsed_secs: row.elapsed_secs,
@@ -523,9 +1190,12 @@ pub async fn fetch_recent_build_history(
 ///
 /// Supports filtering by status, commit hash, flake name, config/hostname, and time range.
 /// Returns a total row count alongside the page of items so the caller can render pagination.
+/// `visibility_user_id` scopes non-admin callers to assigned environments;
+/// administrators pass `None` for fleet-wide visibility.
 pub async fn list_build_queue_paginated(
     pool: &PgPool,
     params: &BuildQueueParams,
+    visibility_user_id: Option<Uuid>,
 ) -> Result<BuildQueuePageResponse> {
     let limit = params.limit.max(1).min(crate::api::models::LIMIT_MAX);
     let page = params.page.max(1);
@@ -563,6 +1233,8 @@ pub async fn list_build_queue_paginated(
         attempt_number: i32,
         parent_job_id: Option<Uuid>,
         root_job_id: Option<Uuid>,
+        commit_id: Option<i32>,
+        server_failure_code: Option<String>,
         available_at: DateTime<Utc>,
         is_latest_per_flake: bool,
         total_derivs: i64,
@@ -599,27 +1271,40 @@ pub async fn list_build_queue_paginated(
                 COALESCE(s.hostname, d.derivation_target, d.derivation_name) AS display_name,
                 COALESCE(s.system_configuration_name, '') AS system_configuration_name,
                 COALESCE(b.name, '') AS builder_name,
-                RANK() OVER (
-                    PARTITION BY c.flake_id,
-                        bj.status IN ('queued', 'building', 'cancelling')
-                    ORDER BY c.commit_timestamp DESC, c.id DESC
-                ) AS latest_rank
+                COALESCE(f.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = c.id, FALSE)
+                    AS is_latest_per_flake
             FROM build_jobs bj
             JOIN derivations d ON d.id = bj.derivation_id
             LEFT JOIN commits c ON c.id = d.commit_id
             LEFT JOIN flakes f ON f.id = c.flake_id
+            LEFT JOIN flake_branch_commit_snapshot latest_snapshot
+              ON latest_snapshot.flake_id = c.flake_id
+             AND latest_snapshot.position = 0
             LEFT JOIN LATERAL (
-                SELECT hostname, system_configuration_name
+                SELECT hostname, environment_id, system_configuration_name
                 FROM systems
-                WHERE hostname = d.derivation_target
-                   OR (system_configuration_name IS NOT NULL AND system_configuration_name = d.derivation_target)
-                ORDER BY CASE WHEN hostname = d.derivation_target THEN 0 ELSE 1 END
+                WHERE (hostname = d.derivation_target
+                   OR (system_configuration_name IS NOT NULL AND system_configuration_name = d.derivation_target))
+                  AND systems.flake_id = c.flake_id
+                  AND (bj.environment_id IS NULL OR environment_id = bj.environment_id)
+                  AND ($10::uuid IS NULL OR bj.environment_id IS NOT NULL OR EXISTS (
+                      SELECT 1 FROM user_environment_memberships membership
+                      WHERE membership.user_id = $10
+                        AND membership.environment_id = systems.environment_id
+                  ))
+                ORDER BY CASE WHEN hostname = d.derivation_target THEN 0 ELSE 1 END, id
                 LIMIT 1
             ) s ON TRUE
             LEFT JOIN builders b ON b.id = bj.builder_id
-            WHERE ($1 = 'all')
+            WHERE (($1 = 'all')
                OR ($1 = 'active' AND bj.status IN ('queued', 'building', 'cancelling'))
-               OR ($1 = 'history' AND bj.status IN ('success', 'failed', 'cancelled'))
+               OR ($1 = 'history' AND bj.status IN ('success', 'failed', 'cancelled')))
+              AND ($10::uuid IS NULL OR EXISTS (
+                  SELECT 1
+                  FROM user_environment_memberships membership
+                  WHERE membership.user_id = $10
+                    AND membership.environment_id = COALESCE(bj.environment_id, s.environment_id)
+              ))
         ), filtered AS (
             SELECT * FROM domain
             WHERE ($2::text[] IS NULL OR cardinality($2::text[]) = 0 OR status = ANY($2::text[]))
@@ -630,10 +1315,10 @@ pub async fn list_build_queue_paginated(
               AND ($7::timestamptz IS NULL OR created_at <= $7)
               AND ($8::text IS NULL OR display_name ILIKE ('%' || $8 || '%') OR flake_name ILIKE ('%' || $8 || '%')
                    OR git_commit_hash ILIKE ('%' || $8 || '%') OR builder_name ILIKE ('%' || $8 || '%')
-                   OR status ILIKE ('%' || $8 || '%')
+                    OR status ILIKE ('%' || $8 || '%')
                    OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $8 || '%')
                    OR 'x86_64-linux' ILIKE ('%' || $8 || '%'))
-              AND (NOT $9 OR (flake_id IS NOT NULL AND latest_rank = 1))
+               AND (NOT $9 OR is_latest_per_flake)
         )
         SELECT (SELECT COUNT(*) FROM domain), (SELECT COUNT(*) FROM filtered)
         "#,
@@ -647,6 +1332,7 @@ pub async fn list_build_queue_paginated(
     .bind(params.queued_before)
     .bind(params.search.as_deref())
     .bind(params.latest_only)
+    .bind(visibility_user_id)
     .fetch_one(pool)
     .await?;
 
@@ -686,12 +1372,11 @@ pub async fn list_build_queue_paginated(
             bj.attempt_number,
             bj.parent_job_id,
             bj.root_job_id,
+            d.commit_id,
+            bj.server_failure_code,
             bj.available_at,
-            RANK() OVER (
-                PARTITION BY c.flake_id,
-                    bj.status IN ('queued', 'building', 'cancelling')
-                ORDER BY c.commit_timestamp DESC, c.id DESC
-            ) AS latest_rank,
+            COALESCE(f.snapshot_ready_at IS NOT NULL AND latest_snapshot.commit_id = c.id, FALSE)
+                AS is_latest_per_flake,
             COALESCE(s.system_configuration_name, '') AS system_configuration_name,
             -- Derivation progress counts for the same system config at this commit.
             -- total: all derivations that reached dry-run-complete or beyond (eligible to build).
@@ -720,23 +1405,40 @@ pub async fn list_build_queue_paginated(
         JOIN derivations d ON d.id = bj.derivation_id
         LEFT JOIN commits c ON c.id = d.commit_id
         LEFT JOIN flakes f ON f.id = c.flake_id
+        LEFT JOIN flake_branch_commit_snapshot latest_snapshot
+          ON latest_snapshot.flake_id = c.flake_id
+         AND latest_snapshot.position = 0
         -- Use a LATERAL subquery to guarantee at most one system per build job.
         -- Hostname match wins over system_configuration_name match to be deterministic.
         LEFT JOIN LATERAL (
             SELECT id, hostname, environment_id, system_configuration_name
             FROM systems
-            WHERE hostname = d.derivation_target
+            WHERE (hostname = d.derivation_target
                OR (system_configuration_name IS NOT NULL
-                   AND system_configuration_name = d.derivation_target)
+                   AND system_configuration_name = d.derivation_target))
+              AND systems.flake_id = c.flake_id
+              AND (bj.environment_id IS NULL OR environment_id = bj.environment_id)
+              AND ($10::uuid IS NULL OR bj.environment_id IS NOT NULL OR EXISTS (
+                  SELECT 1 FROM user_environment_memberships membership
+                  WHERE membership.user_id = $10
+                    AND membership.environment_id = systems.environment_id
+              ))
             ORDER BY
-                CASE WHEN hostname = d.derivation_target THEN 0 ELSE 1 END
+                CASE WHEN hostname = d.derivation_target THEN 0 ELSE 1 END,
+                id
             LIMIT 1
         ) s ON TRUE
-        LEFT JOIN environments e ON e.id = COALESCE(s.environment_id, bj.environment_id)
+        LEFT JOIN environments e ON e.id = COALESCE(bj.environment_id, s.environment_id)
         LEFT JOIN builders b ON b.id = bj.builder_id
-        WHERE ($1 = 'all')
+        WHERE (($1 = 'all')
            OR ($1 = 'active' AND bj.status IN ('queued', 'building', 'cancelling'))
-           OR ($1 = 'history' AND bj.status IN ('success', 'failed', 'cancelled'))
+           OR ($1 = 'history' AND bj.status IN ('success', 'failed', 'cancelled')))
+          AND ($10::uuid IS NULL OR EXISTS (
+              SELECT 1
+              FROM user_environment_memberships membership
+              WHERE membership.user_id = $10
+                AND membership.environment_id = COALESCE(bj.environment_id, s.environment_id)
+          ))
         ), filtered AS (
         SELECT * FROM domain
         WHERE
@@ -764,9 +1466,9 @@ pub async fn list_build_queue_paginated(
                  OR status ILIKE ('%' || $8 || '%')
                  OR CASE status WHEN 'success' THEN 'complete' WHEN 'cancelling' THEN 'stopping' ELSE status END ILIKE ('%' || $8 || '%')
                  OR 'x86_64-linux' ILIKE ('%' || $8 || '%'))
-            AND (NOT $9 OR (flake_id IS NOT NULL AND latest_rank = 1))
+             AND (NOT $9 OR is_latest_per_flake)
         )
-        SELECT *, flake_id IS NOT NULL AND latest_rank = 1 AS is_latest_per_flake
+        SELECT *
         FROM filtered
         ORDER BY
             -- In-progress first, stopping second, queued third, then terminal
@@ -789,8 +1491,8 @@ pub async fn list_build_queue_paginated(
             END DESC NULLS LAST,
             queued_at DESC NULLS LAST,
             job_id DESC
-        LIMIT $10
-        OFFSET $11
+        LIMIT $11
+        OFFSET $12
         "#,
     )
     .bind(domain_kind)
@@ -802,6 +1504,7 @@ pub async fn list_build_queue_paginated(
     .bind(params.queued_before)
     .bind(params.search.as_deref())
     .bind(params.latest_only)
+    .bind(visibility_user_id)
     .bind(limit)
     .bind(offset)
     .fetch_all(pool)
@@ -836,6 +1539,8 @@ pub async fn list_build_queue_paginated(
                 attempt_number: r.attempt_number,
                 parent_job_id: r.parent_job_id,
                 root_job_id: r.root_job_id,
+                commit_id: r.commit_id,
+                server_failure_code: r.server_failure_code,
                 available_at: Some(r.available_at),
                 started_at: r.started_at,
                 elapsed_secs: r.elapsed_secs,
@@ -897,6 +1602,25 @@ mod tests {
     }
 
     #[test]
+    fn deployment_categories_accumulate_mapped_rows() {
+        let mut summary = DeploymentStatusSummary {
+            up_to_date: 0,
+            behind: 0,
+            never_deployed: 0,
+            unknown: 0,
+        };
+
+        apply_deployment_count(&mut summary, "Up to Date", 2);
+        apply_deployment_count(&mut summary, "Up to Date", 3);
+        apply_deployment_count(&mut summary, "Evaluation Failed", 4);
+        apply_deployment_count(&mut summary, "No Evaluation", 5);
+        apply_deployment_count(&mut summary, "unexpected", 6);
+
+        assert_eq!(summary.up_to_date, 5);
+        assert_eq!(summary.unknown, 15);
+    }
+
+    #[test]
     fn build_queue_params_defaults() {
         let p: BuildQueueParams = serde_json::from_str("{}").unwrap();
         assert_eq!(p.page, 1);
@@ -926,9 +1650,35 @@ mod tests {
         assert_eq!(status_filter, vec!["queued", "building"]);
     }
 
+    #[test]
+    fn cache_health_uses_only_persisted_outcomes() {
+        assert_eq!(cache_health_status(0, 0, 0, 0), CacheHealthStatus::Unknown);
+        assert_eq!(cache_health_status(2, 0, 0, 0), CacheHealthStatus::Disabled);
+        assert_eq!(cache_health_status(1, 1, 3, 0), CacheHealthStatus::Healthy);
+        assert_eq!(cache_health_status(1, 1, 3, 1), CacheHealthStatus::Degraded);
+    }
+
+    #[test]
+    fn activity_statuses_are_domain_typed_and_reject_unknown_values() {
+        assert_eq!(
+            dashboard_activity_status("deployment_succeeded").unwrap(),
+            DashboardActivityStatus::DeploymentSucceeded
+        );
+        assert_eq!(
+            dashboard_activity_status("build_succeeded").unwrap(),
+            DashboardActivityStatus::BuildSucceeded
+        );
+        assert_eq!(
+            dashboard_activity_status("evaluation_succeeded").unwrap(),
+            DashboardActivityStatus::EvaluationSucceeded
+        );
+        assert!(dashboard_activity_status("complete").is_err());
+        assert!(dashboard_activity_kind("other").is_err());
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires test database creation privileges"]
-    async fn latest_builds_rank_by_stable_flake_before_search_and_pagination(pool: PgPool) {
+    async fn latest_builds_follow_branch_snapshot_before_search_and_pagination(pool: PgPool) {
         let queued_at = chrono::Utc::now() - chrono::Duration::minutes(5);
         let mut job_ids = Vec::new();
 
@@ -947,6 +1697,19 @@ mod tests {
             .bind(flake_id)
             .bind(format!("build-{}", uuid::Uuid::new_v4()))
             .fetch_one(&pool)
+            .await
+            .unwrap();
+            sqlx::query("UPDATE flakes SET snapshot_ready_at = NOW() WHERE id = $1")
+                .bind(flake_id)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query(
+                "INSERT INTO flake_branch_commit_snapshot (flake_id, commit_id, position) VALUES ($1, $2, 0)",
+            )
+            .bind(flake_id)
+            .bind(commit_id)
+            .execute(&pool)
             .await
             .unwrap();
             let derivation_id: i32 = sqlx::query_scalar(
@@ -978,11 +1741,38 @@ mod tests {
             job_ids.push((flake_id, commit_id, derivation_id, job_id));
         }
 
+        let newer_commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, $2, NOW() + INTERVAL '1 minute') RETURNING id",
+        )
+        .bind(job_ids[0].0)
+        .bind(format!("build-head-{}", uuid::Uuid::new_v4()))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE flakes SET snapshot_ready_at = NOW() WHERE id = $1")
+            .bind(job_ids[0].0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("DELETE FROM flake_branch_commit_snapshot WHERE flake_id = $1")
+            .bind(job_ids[0].0)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO flake_branch_commit_snapshot (flake_id, commit_id, position) VALUES ($1, $2, 0)",
+        )
+        .bind(job_ids[0].0)
+        .bind(newer_commit_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
         let newer_derivation_id: i32 = sqlx::query_scalar(
             "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id) \
              VALUES ($1, 'winner-host', 'winner-host', 'nixos', 5) RETURNING id",
         )
-        .bind(job_ids[0].1)
+        .bind(newer_commit_id)
         .fetch_one(&pool)
         .await
         .unwrap();
@@ -1012,6 +1802,7 @@ mod tests {
                 latest_only: true,
                 ..Default::default()
             },
+            None,
         )
         .await
         .unwrap();
@@ -1027,6 +1818,7 @@ mod tests {
                 latest_only: true,
                 ..Default::default()
             },
+            None,
         )
         .await
         .unwrap();
@@ -1048,6 +1840,7 @@ mod tests {
                 latest_only: true,
                 ..Default::default()
             },
+            None,
         )
         .await
         .unwrap();
@@ -1055,6 +1848,920 @@ mod tests {
         assert_eq!(history.total, 2);
         assert_eq!(history.items.len(), 2);
         assert!(history.items.iter().all(|item| item.is_latest_per_flake));
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "runs in the PostgreSQL server-regressions check"]
+    async fn exact_build_lookup_plan_stays_primary_key_bounded_at_production_scale(pool: PgPool) {
+        async fn explain_exact(pool: &PgPool, attempt_id: Uuid, user_id: Uuid) -> String {
+            let sql = format!("EXPLAIN (ANALYZE, BUFFERS) {EXACT_BUILD_ATTEMPT_SQL}");
+            sqlx::query_scalar::<_, String>(&sql)
+                .bind(attempt_id)
+                .bind(user_id)
+                .fetch_all(pool)
+                .await
+                .unwrap()
+                .join("\n")
+        }
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let visible_env = Uuid::new_v4();
+        let hidden_env = Uuid::new_v4();
+        for (environment_id, label) in [(visible_env, "visible"), (hidden_env, "hidden")] {
+            sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+                .bind(environment_id)
+                .bind(format!("exact-plan-{label}-{}", &suffix[..12]))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, username, first_name, last_name, email, user_type) \
+             VALUES ($1, $2, 'Exact', 'Viewer', $3, 'human')",
+        )
+        .bind(user_id)
+        .bind(format!("exact-plan-viewer-{suffix}"))
+        .bind(format!("exact-plan-viewer-{suffix}@example.invalid"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO user_environment_memberships (user_id, environment_id) VALUES ($1, $2)",
+        )
+        .bind(user_id)
+        .bind(visible_env)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("exact-plan-flake-{suffix}"))
+        .bind(format!("https://example.invalid/exact-plan-{suffix}.git"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) \
+             VALUES ($1, $2, NOW()) RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(format!("exact-plan-commit-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations \
+             (commit_id, derivation_name, derivation_target, derivation_type, status_id) \
+             VALUES ($1, $2, $2, 'nixos', 5) RETURNING id",
+        )
+        .bind(commit_id)
+        .bind(format!("exact-plan-host-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // This retained terminal corpus approximates a production build history
+        // while sharing one derivation to keep the fixture setup bounded.
+        sqlx::query(
+            "INSERT INTO build_jobs (derivation_id, environment_id, status, completed_at) \
+             SELECT $1, $2, 'failed', NOW() FROM generate_series(1, 20000)",
+        )
+        .bind(derivation_id)
+        .bind(visible_env)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let active_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs \
+             (derivation_id, environment_id, status, queue_position) \
+             VALUES ($1, $2, 'queued', 1) RETURNING id",
+        )
+        .bind(derivation_id)
+        .bind(visible_env)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let completed_id: Uuid = sqlx::query_scalar(
+            "SELECT id FROM build_jobs \
+             WHERE derivation_id = $1 AND environment_id = $2 AND status = 'failed' LIMIT 1",
+        )
+        .bind(derivation_id)
+        .bind(visible_env)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let hidden_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, environment_id, status, completed_at) \
+             VALUES ($1, $2, 'failed', NOW()) RETURNING id",
+        )
+        .bind(derivation_id)
+        .bind(hidden_env)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("ANALYZE build_jobs")
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let missing_id = Uuid::new_v4();
+        for (label, attempt_id) in [
+            ("active", active_id),
+            ("completed", completed_id),
+            ("hidden", hidden_id),
+            ("missing", missing_id),
+        ] {
+            let plan = explain_exact(&pool, attempt_id, user_id).await;
+            assert!(
+                plan.contains("build_jobs_pkey"),
+                "{label} exact lookup did not use the build_jobs primary key:\n{plan}"
+            );
+            assert!(
+                !plan.contains("Seq Scan on build_jobs"),
+                "{label} exact lookup scanned build history:\n{plan}"
+            );
+            assert!(plan.contains("Buffers:"), "{label} plan omitted buffers");
+            assert!(
+                plan.contains("Execution Time:"),
+                "{label} plan did not execute"
+            );
+        }
+
+        let legacy_plan = sqlx::query_scalar::<_, String>(
+            "EXPLAIN (ANALYZE, BUFFERS) \
+             SELECT id FROM build_jobs WHERE id::text = $1",
+        )
+        .bind(completed_id.to_string())
+        .fetch_all(&pool)
+        .await
+        .unwrap()
+        .join("\n");
+        assert!(
+            legacy_plan.contains("Seq Scan on build_jobs"),
+            "UUID text search unexpectedly avoided the retained-history scan:\n{legacy_plan}"
+        );
+
+        assert_eq!(
+            get_build_attempt_by_id(&pool, active_id, Some(user_id))
+                .await
+                .unwrap()
+                .unwrap()
+                .collection,
+            BuildAttemptCollection::Active
+        );
+        assert_eq!(
+            get_build_attempt_by_id(&pool, completed_id, Some(user_id))
+                .await
+                .unwrap()
+                .unwrap()
+                .collection,
+            BuildAttemptCollection::Completed
+        );
+        assert!(
+            get_build_attempt_by_id(&pool, hidden_id, Some(user_id))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            get_build_attempt_by_id(&pool, missing_id, Some(user_id))
+                .await
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Connect to the migrated, repository-owned test database.
+    ///
+    /// Mirrors the pattern used by the other database-backed regressions so the
+    /// dashboard visibility suite can run inside the CI process-compose target
+    /// without requiring `CREATE DATABASE` privileges.
+    async fn visibility_test_pool() -> PgPool {
+        let db_url = std::env::var("CRYSTAL_FORGE_TEST_DATABASE_URL")
+            .or_else(|_| std::env::var("DATABASE_URL"))
+            .expect("CRYSTAL_FORGE_TEST_DATABASE_URL or DATABASE_URL must be set");
+        PgPool::connect(&db_url)
+            .await
+            .expect("failed to connect to the migrated test database")
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires test database creation privileges"]
+    async fn visibility_scope_handles_ambiguous_systems_cache_pushes_and_eval_attempts(
+        pool: PgPool,
+    ) {
+        let visible_env = Uuid::new_v4();
+        let hidden_env = Uuid::new_v4();
+        let suffix = Uuid::new_v4().simple().to_string();
+        for (id, name) in [(visible_env, "visible"), (hidden_env, "hidden")] {
+            sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+                .bind(id)
+                .bind(format!("dash-{name}-{}", &suffix[..12]))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, username, first_name, last_name, email, user_type) VALUES ($1, $2, 'Test', 'Viewer', $3, 'human')",
+        )
+        .bind(user_id)
+        .bind(format!("dashboard-viewer-{suffix}"))
+        .bind(format!("dashboard-viewer-{suffix}@example.invalid"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO user_environment_memberships (user_id, environment_id) VALUES ($1, $2)",
+        )
+        .bind(user_id)
+        .bind(visible_env)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("dashboard-flake-{suffix}"))
+        .bind(format!("https://example.invalid/dashboard-{suffix}.git"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, message, author) VALUES ($1, $2, NOW(), 'real message', 'Real Author') RETURNING id",
+        )
+        .bind(flake_id)
+        .bind(format!("commit-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let config_name = format!("shared-config-{suffix}");
+        for (environment_id, hostname, key_byte) in [
+            (hidden_env, format!("hidden-host-{suffix}"), 41_u8),
+            (visible_env, format!("visible-host-{suffix}"), 42_u8),
+        ] {
+            sqlx::query(
+                "INSERT INTO systems (id, hostname, system_configuration_name, public_key, is_active, derivation, deployment_policy, environment_id, flake_id) VALUES ($1, $2, $3, $4, TRUE, '', 'manual', $5, $6)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(hostname)
+            .bind(&config_name)
+            .bind(vec![key_byte; 32])
+            .bind(environment_id)
+            .bind(flake_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id) VALUES ($1, $2, $2, 'nixos', 5) RETURNING id",
+        )
+        .bind(commit_id)
+        .bind(&config_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let visible_job_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO build_jobs (id, derivation_id, environment_id, status, queue_position) VALUES ($1, $2, $3, 'queued', 1000)",
+        )
+        .bind(visible_job_id)
+        .bind(derivation_id)
+        .bind(visible_env)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let queue = fetch_build_queue_for_user(&pool, 10, Some(user_id))
+            .await
+            .unwrap();
+        let item = queue
+            .items
+            .iter()
+            .find(|item| item.job_id == Some(visible_job_id))
+            .unwrap();
+        assert_eq!(item.hostname, format!("visible-host-{suffix}"));
+        let active_exact = get_build_attempt_by_id(&pool, visible_job_id, Some(user_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(active_exact.collection, BuildAttemptCollection::Active);
+        assert_eq!(active_exact.attempt.job_id, Some(visible_job_id));
+
+        let cache_name = format!("dashboard-cache-{suffix}");
+        sqlx::query(
+            "INSERT INTO cache_destinations (name, cache_type, enabled) VALUES ($1, 'Nix', TRUE)",
+        )
+        .bind(&cache_name)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO cache_push_jobs (derivation_id, status, completed_at, cache_destination) VALUES ($1, 'completed', NOW(), $2)",
+        )
+        .bind(derivation_id)
+        .bind(&cache_name)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        sqlx::query("UPDATE build_jobs SET status = 'success', completed_at = NOW() WHERE id = $1")
+            .bind(visible_job_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let hidden_derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id) VALUES ($1, $2, $2, 'nixos', 5) RETURNING id",
+        )
+        .bind(commit_id)
+        .bind(format!("hidden-only-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let hidden_job_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, environment_id, status, completed_at) VALUES ($1, $2, 'failed', NOW()) RETURNING id",
+        )
+        .bind(hidden_derivation_id)
+        .bind(hidden_env)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let build_params = BuildQueueParams {
+            limit: 100,
+            ..Default::default()
+        };
+        let scoped_builds = list_build_queue_paginated(&pool, &build_params, Some(user_id))
+            .await
+            .unwrap();
+        assert!(
+            scoped_builds
+                .items
+                .iter()
+                .any(|item| item.job_id == Some(visible_job_id))
+        );
+        assert!(
+            scoped_builds
+                .items
+                .iter()
+                .all(|item| item.job_id != Some(hidden_job_id))
+        );
+        let scoped_history = fetch_recent_build_history(&pool, &build_params, Some(user_id))
+            .await
+            .unwrap();
+        assert!(
+            scoped_history
+                .items
+                .iter()
+                .any(|item| item.job_id == Some(visible_job_id))
+        );
+        assert!(
+            scoped_history
+                .items
+                .iter()
+                .all(|item| item.job_id != Some(hidden_job_id))
+        );
+        let completed_exact = get_build_attempt_by_id(&pool, visible_job_id, Some(user_id))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            completed_exact.collection,
+            BuildAttemptCollection::Completed
+        );
+        assert_eq!(completed_exact.attempt.job_id, Some(visible_job_id));
+        assert!(
+            get_build_attempt_by_id(&pool, hidden_job_id, Some(user_id))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            get_build_attempt_by_id(&pool, Uuid::new_v4(), Some(user_id))
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            get_build_attempt_by_id(&pool, hidden_job_id, None)
+                .await
+                .unwrap()
+                .unwrap()
+                .attempt
+                .job_id,
+            Some(hidden_job_id)
+        );
+
+        let uuid_search = BuildQueueParams {
+            search: Some(visible_job_id.to_string()),
+            limit: 100,
+            ..Default::default()
+        };
+        assert!(
+            list_build_queue_paginated(&pool, &uuid_search, Some(user_id))
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+        assert!(
+            fetch_recent_build_history(&pool, &uuid_search, Some(user_id))
+                .await
+                .unwrap()
+                .items
+                .is_empty()
+        );
+
+        let timelines = crate::queries::flakes::fetch_dashboard_flake_timelines(
+            &pool,
+            10,
+            Some(&[flake_id]),
+            Some(user_id),
+        )
+        .await
+        .unwrap();
+        let commit = timelines[0]
+            .commits
+            .iter()
+            .find(|entry| entry.id == commit_id)
+            .unwrap();
+        assert_eq!(commit.build_status, Some(BuildStatus::Complete));
+
+        sqlx::query(
+            "INSERT INTO cache_push_jobs (derivation_id, status, completed_at, cache_destination) VALUES ($1, 'completed', NOW(), $2)",
+        )
+        .bind(hidden_derivation_id)
+        .bind(&cache_name)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let unassociated_derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id) VALUES ($1, $2, $2, 'package', 5) RETURNING id",
+        )
+        .bind(commit_id)
+        .bind(format!("unassociated-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO cache_push_jobs (derivation_id, status, completed_at, cache_destination) VALUES ($1, 'completed', NOW(), $2)",
+        )
+        .bind(unassociated_derivation_id)
+        .bind(&cache_name)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let cache = fetch_cache_health_for_user(&pool, Some(user_id))
+            .await
+            .unwrap();
+        assert_eq!(cache.successful_pushes_24h, 1);
+
+        let first_attempt_id: Uuid = sqlx::query_scalar(
+            "UPDATE evaluation_attempts SET status = 'complete', completed_at = NOW() - interval '1 minute' WHERE commit_id = $1 RETURNING id",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let second_attempt_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO evaluation_attempts (commit_id, status, attempt_number, completed_at) VALUES ($1, 'failed', 2, NOW()) RETURNING id",
+        )
+        .bind(commit_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let activity = fetch_activity_for_user(&pool, Some(user_id), 30)
+            .await
+            .unwrap();
+        let attempts = activity
+            .iter()
+            .filter(|entry| entry.kind == DashboardActivityKind::Evaluation)
+            .collect::<Vec<_>>();
+        assert_eq!(attempts.len(), 2);
+        assert_eq!(attempts[0].evaluation_attempt_id, Some(second_attempt_id));
+        assert_eq!(attempts[1].evaluation_attempt_id, Some(first_attempt_id));
+        assert_eq!(attempts[0].id, format!("evaluation:{second_attempt_id}"));
+
+        sqlx::query("UPDATE commits SET evaluation_status = 'complete' WHERE id = $1")
+            .bind(commit_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let hidden_flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("hidden-flake-{}", &suffix[..12]))
+        .bind(format!("https://example.invalid/hidden-{suffix}.git"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let hidden_commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp, evaluation_status) VALUES ($1, $2, NOW(), 'failed') RETURNING id",
+        )
+        .bind(hidden_flake_id)
+        .bind(format!("hidden-commit-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let hidden_system_id =
+            Uuid::parse_str(&format!("ffffffff-ffff-4fff-8fff-{}", &suffix[..12])).unwrap();
+        sqlx::query(
+            "INSERT INTO systems (id, hostname, system_configuration_name, public_key, is_active, derivation, deployment_policy, environment_id, flake_id) VALUES ($1, $2, $3, $4, TRUE, '', 'manual', $5, $6)",
+        )
+        .bind(hidden_system_id)
+        .bind(format!("hidden-eval-{}", &suffix[..12]))
+        .bind(format!("cross-flake-{suffix}"))
+        .bind(vec![43_u8; 32])
+        .bind(hidden_env)
+        .bind(hidden_flake_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let collision_name = format!("cross-flake-{suffix}");
+        let visible_collision_system_id =
+            Uuid::parse_str(&format!("00000000-0000-4000-8000-{}", &suffix[..12])).unwrap();
+        sqlx::query(
+            "INSERT INTO systems (id, hostname, system_configuration_name, public_key, is_active, derivation, deployment_policy, environment_id, flake_id) VALUES ($1, $2, $3, $4, TRUE, '', 'manual', $5, $6)",
+        )
+        .bind(visible_collision_system_id)
+        .bind(format!("visible-collision-{}", &suffix[..12]))
+        .bind(&collision_name)
+        .bind(vec![44_u8; 32])
+        .bind(visible_env)
+        .bind(flake_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let collision_derivation_id: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id) VALUES ($1, $2, $2, 'nixos', 5) RETURNING id",
+        )
+        .bind(hidden_commit_id)
+        .bind(&collision_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let collision_job_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO build_jobs (derivation_id, status, completed_at) VALUES ($1, 'failed', NOW()) RETURNING id",
+        )
+        .bind(collision_derivation_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let collision_params = BuildQueueParams {
+            limit: 100,
+            ..Default::default()
+        };
+        let scoped_collision_queue =
+            list_build_queue_paginated(&pool, &collision_params, Some(user_id))
+                .await
+                .unwrap();
+        assert!(
+            scoped_collision_queue
+                .items
+                .iter()
+                .all(|item| item.job_id != Some(collision_job_id))
+        );
+        let scoped_collision_history =
+            fetch_recent_build_history(&pool, &collision_params, Some(user_id))
+                .await
+                .unwrap();
+        assert!(
+            scoped_collision_history
+                .items
+                .iter()
+                .all(|item| item.job_id != Some(collision_job_id))
+        );
+
+        // A scoped user sees terminal evaluation history only through the
+        // latest attempt's captured plan (`inventory_summary::visibility`).
+        // Current flake membership alone does not grant it. Capture the
+        // flake's registered systems for attempt 2 as the production loader
+        // does. Without this plan the commit is correctly hidden from the user.
+        sqlx::query(
+            "INSERT INTO evaluation_policy_plans(commit_id, attempt_number, evaluation_attempt_id, payload)
+             SELECT c.id, a.attempt_number, a.id, jsonb_build_object(
+                 'evaluation_attempt_id', a.id, 'attempt_number', a.attempt_number,
+                 'provenance', 'captured', 'columns', '[]'::jsonb, 'bundles', '[]'::jsonb,
+                 'empty_bundle_metadata_complete', true, 'rows',
+                 (SELECT jsonb_agg(jsonb_build_object('system_id', s.id, 'system_name', s.hostname,
+                     'configuration_name', COALESCE(NULLIF(btrim(s.system_configuration_name), ''), s.hostname),
+                     'resolution', 'resolved', 'evaluation_digest', NULL, 'policies', '[]'::jsonb,
+                     'cells', '[]'::jsonb)) FROM systems s WHERE s.flake_id = c.flake_id))
+             FROM commits c JOIN evaluation_attempts a ON a.commit_id = c.id
+             WHERE a.id = $1",
+        )
+        .bind(second_attempt_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let evaluation_summary = crate::queries::commits::list_eval_queue_for_user(
+            &pool,
+            &crate::api::models::EvalQueueParams::default(),
+            Some(user_id),
+        )
+        .await
+        .unwrap();
+        assert_eq!(evaluation_summary.successful_count, 1);
+        assert_eq!(evaluation_summary.failed_count, 0);
+        assert_eq!(evaluation_summary.completed_count, 1);
+        assert_eq!(evaluation_summary.rows.len(), 1);
+        assert_eq!(evaluation_summary.rows[0].commit_id, commit_id);
+
+        // ── Worker eligibility and slot capacity ─────────────────────────────
+        // Measured as deltas because builders without environment assignments
+        // are globally visible and may already exist in the shared test schema.
+        let before = fetch_build_queue_for_user(&pool, 10, Some(user_id))
+            .await
+            .unwrap();
+
+        let mut builder_ids = std::collections::HashMap::new();
+        for (label, environment_id, enabled, registered, status) in [
+            ("eligible", visible_env, true, true, "active"),
+            ("unregistered", visible_env, true, false, "active"),
+            ("inactive", visible_env, true, true, "inactive"),
+            ("disabled", visible_env, false, true, "active"),
+            ("hidden", hidden_env, true, true, "active"),
+        ] {
+            let builder_id: Uuid = sqlx::query_scalar(
+                "INSERT INTO builders (name, public_key, status, arch, enabled, registered, max_concurrent_jobs) \
+                 VALUES ($1, $2, $3, 'x86_64-linux', $4, $5, 4) RETURNING id",
+            )
+            .bind(format!("dash-builder-{label}-{suffix}"))
+            .bind(format!("dash-builder-key-{label}-{suffix}"))
+            .bind(status)
+            .bind(enabled)
+            .bind(registered)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO builder_environment_assignments (builder_id, environment_id) VALUES ($1, $2)",
+            )
+            .bind(builder_id)
+            .bind(environment_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            builder_ids.insert(label, builder_id);
+        }
+
+        // Two building jobs in the visible environment: one on an eligible
+        // worker, one on a worker that can no longer accept work.
+        for (label, occupant) in [("eligible", "eligible"), ("inactive", "inactive")] {
+            let occupied_derivation_id: i32 = sqlx::query_scalar(
+                "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id) \
+                 VALUES ($1, $2, $3, 'nixos', 5) RETURNING id",
+            )
+            .bind(commit_id)
+            .bind(format!("slot-{label}-{suffix}"))
+            .bind(&config_name)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO build_jobs (derivation_id, environment_id, builder_id, status, started_at) \
+                 VALUES ($1, $2, $3, 'building', NOW())",
+            )
+            .bind(occupied_derivation_id)
+            .bind(visible_env)
+            .bind(builder_ids[occupant])
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let after = fetch_build_queue_for_user(&pool, 10, Some(user_id))
+            .await
+            .unwrap();
+
+        // Only the enabled, registered, active, visible builder is available.
+        assert_eq!(after.active_workers - before.active_workers, 1);
+        // Every visible builder is inventoried, including unusable ones.
+        assert_eq!(after.total_workers - before.total_workers, 4);
+        // Capacity counts only slots that can actually run builds.
+        assert_eq!(after.total_slots - before.total_slots, 4);
+        // Occupancy uses the same eligibility set as capacity.
+        assert_eq!(after.used_slots - before.used_slots, 1);
+        // Both jobs are still reported as building work in the visible scope.
+        assert_eq!(after.building_count - before.building_count, 2);
+        assert!(after.used_slots <= after.total_slots);
+
+        // ── active_builds keeps its non-terminal derivation semantics ────────
+        let unscoped_active_builds_before = fetch_active_builds(&pool).await.unwrap();
+        let scoped_active_builds_before = fetch_active_builds_for_user(&pool, Some(user_id))
+            .await
+            .unwrap();
+        for (label, target) in [
+            ("visible", config_name.clone()),
+            ("hidden", format!("hidden-only-{suffix}")),
+        ] {
+            sqlx::query(
+                "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id) \
+                 VALUES ($1, $2, $3, 'nixos', 4)",
+            )
+            .bind(commit_id)
+            .bind(format!("active-build-{label}-{suffix}"))
+            .bind(target)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        // Unscoped callers keep counting every non-terminal derivation.
+        assert_eq!(
+            fetch_active_builds(&pool).await.unwrap() - unscoped_active_builds_before,
+            2
+        );
+        // The viewer only sees the derivation targeting a visible system.
+        assert_eq!(
+            fetch_active_builds_for_user(&pool, Some(user_id))
+                .await
+                .unwrap()
+                - scoped_active_builds_before,
+            1
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires migrated CRYSTAL_FORGE_TEST_DATABASE_URL"]
+    async fn visibility_deployment_status_preserves_ahead_as_up_to_date() {
+        let pool = visibility_test_pool().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let visible_env = Uuid::new_v4();
+        let hidden_env = Uuid::new_v4();
+        for (environment_id, label) in [(visible_env, "visible"), (hidden_env, "hidden")] {
+            sqlx::query("INSERT INTO environments (id, name) VALUES ($1, $2)")
+                .bind(environment_id)
+                .bind(format!("ahead-{label}-{}", &suffix[..12]))
+                .execute(&pool)
+                .await
+                .unwrap();
+        }
+
+        let user_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO users (id, username, first_name, last_name, email, user_type) \
+             VALUES ($1, $2, 'Ahead', 'Viewer', $3, 'human')",
+        )
+        .bind(user_id)
+        .bind(format!("ahead-viewer-{suffix}"))
+        .bind(format!("ahead-viewer-{suffix}@example.invalid"))
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO user_environment_memberships (user_id, environment_id) VALUES ($1, $2)",
+        )
+        .bind(user_id)
+        .bind(visible_env)
+        .execute(&pool)
+        .await
+        .unwrap();
+
+        let expected_flake_id: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ($1, $2, 'main') RETURNING id",
+        )
+        .bind(format!("ahead-expected-{suffix}"))
+        .bind(format!(
+            "https://example.invalid/ahead-expected-{suffix}.git"
+        ))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let expected_commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) \
+             VALUES ($1, $2, NOW() - INTERVAL '1 day') RETURNING id",
+        )
+        .bind(expected_flake_id)
+        .bind(format!("ahead-expected-commit-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        // Migration 0291 compares the observed configuration with a published
+        // deployable target in the same flake. A newer cross-flake path or an
+        // absent deployable target is unknown, not ahead.
+        let deployed_commit_id: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) \
+             VALUES ($1, $2, NOW()) RETURNING id",
+        )
+        .bind(expected_flake_id)
+        .bind(format!("ahead-deployed-commit-{suffix}"))
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+
+        let unscoped_before = fetch_deployment_status(&pool).await.unwrap();
+        let scoped_before = fetch_deployment_status_for_user(&pool, Some(user_id))
+            .await
+            .unwrap();
+        assert_eq!(scoped_before.total(), 0);
+
+        for (environment_id, label, key_byte) in [
+            (visible_env, "visible", 61_u8),
+            (hidden_env, "hidden", 62_u8),
+        ] {
+            let hostname = format!("ahead-{label}-{}", &suffix[..12]);
+            let store_path = format!("/nix/store/ahead-{label}-{suffix}");
+            sqlx::query(
+                "INSERT INTO systems (id, hostname, system_configuration_name, public_key, is_active, derivation, deployment_policy, environment_id, flake_id) \
+                 VALUES ($1, $2, $2, $3, TRUE, '', 'manual', $4, $5)",
+            )
+            .bind(Uuid::new_v4())
+            .bind(&hostname)
+            .bind(vec![key_byte; 32])
+            .bind(environment_id)
+            .bind(expected_flake_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let target_store_path = format!("/nix/store/ahead-target-{label}-{suffix}");
+            let target_derivation_id: i32 = sqlx::query_scalar(
+                "INSERT INTO derivations (commit_id, derivation_name, derivation_target, \
+                 derivation_type, status_id, expected_store_path, store_path, \
+                 cf_agent_enabled, policy_requirements_met, completed_at) \
+                 VALUES ($1, $2, $2, 'nixos', 10, $3, $3, TRUE, TRUE, NOW()) RETURNING id",
+            )
+            .bind(expected_commit_id)
+            .bind(&hostname)
+            .bind(&target_store_path)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO cache_push_jobs (derivation_id, store_path, status, completed_at) \
+                 VALUES ($1, $2, 'completed', NOW())",
+            )
+            .bind(target_derivation_id)
+            .bind(&target_store_path)
+            .execute(&pool)
+            .await
+            .unwrap();
+            // The newer observed path intentionally has no completed cache
+            // publication, so the older eligible artifact remains the target.
+            sqlx::query(
+                "INSERT INTO derivations (commit_id, derivation_name, derivation_target, derivation_type, status_id, expected_store_path) \
+                 VALUES ($1, $2, $2, 'nixos', 5, $3)",
+            )
+            .bind(deployed_commit_id)
+            .bind(&hostname)
+            .bind(&store_path)
+            .execute(&pool)
+            .await
+            .unwrap();
+            sqlx::query(
+                "INSERT INTO system_states (hostname, change_reason, store_path, timestamp) \
+                 VALUES ($1, 'startup', $2, NOW())",
+            )
+            .bind(&hostname)
+            .bind(&store_path)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let deployment_status: String = sqlx::query_scalar(
+                "SELECT deployment_status FROM view_system_deployment_status WHERE hostname = $1",
+            )
+            .bind(&hostname)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(deployment_status, "ahead");
+        }
+
+        let unscoped_after = fetch_deployment_status(&pool).await.unwrap();
+        assert_eq!(
+            unscoped_after.up_to_date - unscoped_before.up_to_date,
+            2,
+            "legacy unscoped aggregation must normalize ahead systems as up to date"
+        );
+        assert_eq!(
+            unscoped_after.unknown - unscoped_before.unknown,
+            0,
+            "ahead systems must not move into the unknown bucket"
+        );
+
+        let scoped_after = fetch_deployment_status_for_user(&pool, Some(user_id))
+            .await
+            .unwrap();
+        assert_eq!(scoped_after.up_to_date, 1);
+        assert_eq!(scoped_after.unknown, 0);
+        assert_eq!(scoped_after.total(), 1);
     }
 
     // ── TASK-272: dashboard summary scope tests ──────────────────────────────

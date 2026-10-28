@@ -1,10 +1,10 @@
 ---
 id: TASK-416
 title: Implement policy classification metadata (Phases 1A/1B/1C)
-status: In Progress
+status: To Do
 assignee: []
 created_date: '2026-08-09 21:12'
-updated_date: '2026-08-09 21:21'
+updated_date: '2026-09-07 01:27'
 labels: []
 dependencies: []
 modified_files:
@@ -43,6 +43,12 @@ Add category/framework/severity/control_family/cmmc_level/cis_section/rationale 
 - [x] #9 web-ui DeploymentPolicyVersionSummary and PolicyRevisionSummary updated
 - [x] #10 cargo check passes with SQLX_OFFLINE=true
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Backlog grooming (2026-09-06): Found In Progress with no active lock, no worktree, and no associated MR. Returned to To Do pending someone picking the work back up.
+<!-- SECTION:NOTES:END -->
 
 ## Final Summary
 

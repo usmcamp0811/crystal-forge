@@ -35,12 +35,18 @@ use crate::models::public_key::PublicKey;
 // building NextJobResponse.
 pub use cf_protocol::builder::{
     AppendLogsRequest, BuildFailureClass, BuildFailurePhase, BuildJobDerivation,
-    BuildProgressRequest, BuilderCachePushConfig, CachePushCompleteRequest, CachePushFailRequest,
-    CachePushJobPayload, CveScanFailRequest, CveScanResultsRequest, CveScanTarget,
-    DerivationArchiveRequest, DerivationManifestResponse, EstablishBuilderSessionRequest,
-    EstablishBuilderSessionResponse, EvaluatorFingerprint, NextJobRequest,
+    BuildProgressRequest, BuilderCachePushConfig, BuilderCapabilities, CachePushCompleteRequest,
+    CachePushFailRequest, CachePushJobPayload, CveDerivationOutput, CveObservation,
+    CvePackageEvidence, CveScanCacheSource, CveScanClaim, CveScanClaimRequest,
+    CveScanClaimResponse, CveScanCompleteRequest, CveScanCompleteResponse, CveScanDerivation,
+    CveScanFailRequest, CveScanFailResponse, CveScanFailureClass, CveScanHeartbeatRequest,
+    CveScanHeartbeatResponse, CveScanLease, CveScanPolicy, CveScanResult, CveScanSchemaVersion,
+    CveScannerIdentity, DerivationArchiveRequest, DerivationManifestResponse,
+    EstablishBuilderSessionRequest, EstablishBuilderSessionResponse, EvaluatorFingerprint,
+    ImmutableSourceIdentity, NextJobConflictReason, NextJobConflictResponse, NextJobRequest,
     RemoteBuildExecutionStrategy, ReportMetricsRequest, ResolveBuilderIdRequest,
-    ResolveBuilderIdResponse, SourceInputDeliveryMode, VerifiedSourceIdentity,
+    ResolveBuilderIdResponse, SourceInputDeliveryMode, VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
+    VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION, VerifiedSourceIdentity,
 };
 
 // Re-export NextJobResponse as an alias using the protocol's BuildJob type.
@@ -57,8 +63,11 @@ pub use cf_protocol::builder::NextJobResponse;
 /// The `disabled()` associated function is defined in `cf-protocol` directly on
 /// `BuilderCachePushConfig`, so it is NOT part of this trait.
 pub trait BuilderCachePushConfigExt {
-    /// Convert the builder-delivered cache-push configuration to the server's
-    /// local `CacheConfig`, filling in any missing fields from `local_fallback`.
+    /// Converts dispatched push settings without inheriting Niks3 credentials.
+    ///
+    /// Dispatched upload caps override the local legacy fallback. Niks3 caps
+    /// have a minimum of one and are independent of Attic's job count.
+    /// Local fallback supplies other execution settings, not a Niks3 identity.
     fn to_cache_config(&self, local_fallback: &CacheConfig) -> CacheConfig;
 }
 
@@ -68,9 +77,14 @@ impl BuilderCachePushConfigExt for BuilderCachePushConfig {
         let cache_type = match &self.cache_type {
             cf_protocol::cache::CacheType::S3 => CacheType::S3,
             cf_protocol::cache::CacheType::Attic => CacheType::Attic,
+            cf_protocol::cache::CacheType::Niks3 => CacheType::Niks3,
             cf_protocol::cache::CacheType::Http => CacheType::Http,
             cf_protocol::cache::CacheType::Nix => CacheType::Nix,
         };
+        let parallel_uploads = self
+            .parallel_uploads
+            .unwrap_or(local_fallback.parallel_uploads);
+        let is_niks3 = matches!(cache_type, CacheType::Niks3);
         CacheConfig {
             cache_type,
             push_to: self.push_to.clone(),
@@ -81,7 +95,11 @@ impl BuilderCachePushConfigExt for BuilderCachePushConfig {
                 .or_else(|| local_fallback.signing_key.clone()),
             compression: self.compression.clone(),
             push_filter: None,
-            parallel_uploads: local_fallback.parallel_uploads,
+            parallel_uploads: if is_niks3 {
+                parallel_uploads.max(1)
+            } else {
+                parallel_uploads
+            },
             s3_region: self.s3_region.clone(),
             s3_profile: self.s3_profile.clone(),
             s3_access_key_id: self.s3_access_key_id.clone(),
@@ -91,6 +109,10 @@ impl BuilderCachePushConfigExt for BuilderCachePushConfig {
             attic_token: self.attic_token.clone(),
             attic_cache_name: self.attic_cache_name.clone(),
             attic_public_key: self.attic_public_key.clone(),
+            niks3_server_url: self.niks3_server_url.clone(),
+            niks3_write_auth: self.niks3_write_auth.clone(),
+            niks3_public_keys: Vec::new(),
+            niks3_read_auth: cf_protocol::cache::CacheReadAuth::None,
             attic_ignore_upstream_cache_filter: self.attic_ignore_upstream_cache_filter,
             attic_jobs: if self.attic_jobs == 0 {
                 local_fallback.attic_jobs
@@ -118,6 +140,9 @@ impl BuilderCachePushConfigExt for BuilderCachePushConfig {
 /// `cf_protocol::builder::BuildJob` via `Into::into`.  The `cf-builder` crate
 /// (extracted in a later step) will use `cf_protocol::builder::BuildJob`
 /// directly and will never need `sqlx::FromRow`.
+///
+/// Cache selection is server-owned and immutable for one builder/session claim.
+/// A new claim clears the previous selection before the server dispatches it.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct BuildJob {
     pub id: Uuid,
@@ -125,6 +150,18 @@ pub struct BuildJob {
     #[serde(default)]
     #[sqlx(default)]
     pub builder_session_id: Option<Uuid>,
+    /// Retains the cache identity selected for this exact builder/session claim.
+    /// Destination deletion does not erase the identity. A new claim resets it.
+    /// This server-owned field is not part of the builder job wire model.
+    #[serde(skip)]
+    #[sqlx(default)]
+    pub dispatched_cache_destination_id: Option<i32>,
+    /// Distinguishes undispatched legacy claims from recorded cache selection.
+    /// A recorded selection is immutable until the next claim, including `None`
+    /// when publication is disabled.
+    #[serde(skip)]
+    #[sqlx(default)]
+    pub cache_dispatch_recorded_at: Option<DateTime<Utc>>,
     pub derivation_id: i32,
     pub environment_id: Option<Uuid>,
     pub status: String,
@@ -149,6 +186,11 @@ pub struct BuildJob {
     pub started_at: Option<DateTime<Utc>>,
     pub completed_at: Option<DateTime<Utc>>,
     pub logs: Option<String>,
+    /// Server-owned terminal failure authority that is never accepted from or
+    /// serialized to builders.
+    #[serde(skip)]
+    #[sqlx(default)]
+    pub server_failure_code: Option<String>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
 }
@@ -187,6 +229,9 @@ fn default_attempt_number() -> i32 {
 
 /// Internal alias for backward compatibility with query code.
 pub type BuildJobRow = BuildJob;
+
+/// Identifies failures that require authoritative evaluator republication.
+pub const SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE: &str = "evaluator_contract_obsolete";
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Builder status enum (server-owned: sqlx::Type for DB column mapping)
@@ -410,6 +455,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn niks3_upload_cap_uses_dispatch_or_legacy_fallback_not_attic_jobs() {
+        let mut fallback = CacheConfig {
+            parallel_uploads: 3,
+            attic_jobs: 99,
+            ..CacheConfig::default()
+        };
+        let mut push = BuilderCachePushConfig::disabled();
+        push.cache_type = CacheType::Niks3;
+        push.attic_jobs = 91;
+        for (supplied, expected) in [(None, 3), (Some(7), 7), (Some(1), 1), (Some(0), 1)] {
+            push.parallel_uploads = supplied;
+            assert_eq!(push.to_cache_config(&fallback).parallel_uploads, expected);
+        }
+        push.parallel_uploads = None;
+        fallback.parallel_uploads = 0;
+        assert_eq!(push.to_cache_config(&fallback).parallel_uploads, 1);
+    }
+
+    #[test]
     fn test_builder_status_serialization() {
         assert_eq!(BuilderStatus::Active.to_string(), "active");
         assert_eq!(BuilderStatus::Inactive.to_string(), "inactive");
@@ -482,13 +546,29 @@ mod tests {
                 lock_hash: Some("sha256-lock".to_string()),
                 archive_url: Some("file:///tmp/source".to_string()),
                 archive_sha256: Some("sha256-source".to_string()),
+                immutable_source: Some(ImmutableSourceIdentity {
+                    schema_version: VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
+                    store_name: "crystal-forge-source-v1-abc123".to_string(),
+                    nar_hash: "sha256-source-nar".to_string(),
+                    lock_hash: "lock-sha256".to_string(),
+                    artifact_format_version:
+                        cf_protocol::source_artifact::VERIFIED_SOURCE_ARTIFACT_FORMAT_VERSION,
+                    artifact_sha256: "artifact-sha256".to_string(),
+                    artifact_size: 1024,
+                    server_store_path: "/nix/store/source".to_string(),
+                }),
             }),
             source_input_delivery: SourceInputDeliveryMode::ServerBundledArchive,
             expected_drv_path: Some("/nix/store/server-host-a.drv".to_string()),
             evaluator: Some(EvaluatorFingerprint {
+                contract_version: VERIFIED_SOURCE_EVALUATOR_CONTRACT_VERSION,
                 nix_version: "2.28.0".to_string(),
+                evaluator_system: "x86_64-linux".to_string(),
                 pure_eval: true,
                 lockfile_mutation_allowed: false,
+                allow_import_from_derivation: true,
+                source_materialization_schema_version:
+                    VERIFIED_SOURCE_MATERIALIZATION_SCHEMA_VERSION,
             }),
             cache_push: None,
         };

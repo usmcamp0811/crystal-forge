@@ -69,6 +69,7 @@ const BACKGROUND_JOBS = (typeof __fx === "function" && __fx("admin.backgroundJob
   { id:"j7", name:"Session GC",               desc:"Expire idle sessions and purge revoked tokens.", interval:"30m", enabled:true,  lastRun:"18m ago", lastDuration:"0.3s",  nextRun:"in 12m", status:"healthy", impact:"low" },
   { id:"j8", name:"Audit log archival",       desc:"Roll audit events older than retention window to cold storage.", interval:"24h", enabled:false, lastRun:"never",   lastDuration:"—",     nextRun:"disabled", status:"disabled", impact:"medium" },
   { id:"j9", name:"Cache storage metrics",    desc:"Pull bucket size / object counts (CloudWatch, atticd) for the Caches view.", interval:"1h",  enabled:true,  lastRun:"41m ago", lastDuration:"9.4s",  nextRun:"in 19m", status:"degraded", impact:"medium", note:"edge-cache poll timed out last run" },
+  { id:"j10",name:"Retention sweep",          desc:"Apply retention rules to build, evaluation and scan history. Archives only — records stay intact and linkable.", interval:"24h", enabled:true,  lastRun:"3h ago",  lastDuration:"2.7s",  nextRun:"in 21h", status:"healthy", impact:"low" },
 ];
 const JOB_INTERVALS = ["1m","5m","15m","30m","1h","6h","12h","24h","never"];
 

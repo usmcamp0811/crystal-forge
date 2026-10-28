@@ -1,17 +1,11 @@
 // Scanning view — CVE scan pipeline status + schedule config
 
 function ScanningView({ onNavigate }) {
-  const [tab, setTab] = React.useState("deployed");
+  const [tab, setTab] = React.useState("active");
   const [configOpen, setConfigOpen] = React.useState(false);
-  const [showActivity, setShowActivity] = React.useState(() => {
-    try { return localStorage.getItem("cf-scan-activity") !== "0"; } catch { return true; }
-  });
+  const [logCfg, setLogCfg] = React.useState(null);
   const scanSel = useMultiSelect(tab);
-  const toggleActivity = () => setShowActivity(v => {
-    const n = !v;
-    try { localStorage.setItem("cf-scan-activity", n ? "1" : "0"); } catch {}
-    return n;
-  });
+  const doneArc = useArchive("scans", SCAN_DONE);
 
   return (
     <div style={{ display:"flex", flexDirection:"column", gap:16 }}>
@@ -22,11 +16,11 @@ function ScanningView({ onNavigate }) {
             CVE scanning · vulnix {SCAN_POLICY.vulnixVersion} · DB updated {SCAN_POLICY.dbAge}
           </p>
         </div>
-        <div style={{ display:"flex", gap:8 }}>
+        <div style={{ display:"flex", gap:12, alignItems:"center" }}>
+          <LiveIndicator />
           <button className="btn btn-ghost focus-ring" onClick={()=>setConfigOpen(true)}>
             <Icon name="gear" size={14}/> Schedule
           </button>
-          <button className="btn btn-primary focus-ring"><Icon name="sync" size={14}/> Rescan all</button>
         </div>
       </div>
 
@@ -35,7 +29,7 @@ function ScanningView({ onNavigate }) {
           <span className="stat-accent" style={{ "--stat-color":"#60a5fa" }}/>
           <div className="stat-label">Scanning now</div>
           <div className="stat-value" style={{ color:"#60a5fa" }}>{SCAN_STATS.scanning}</div>
-          <div className="stat-meta">{SCAN_STATS.queued} queued</div>
+          <div className="stat-meta">{SCAN_STATS.queued} queued · {SCAN_STATS.awaiting} awaiting closure</div>
         </div>
         <div className="stat">
           <span className="stat-accent" style={{ "--stat-color":"#fbbf24" }}/>
@@ -48,10 +42,13 @@ function ScanningView({ onNavigate }) {
           <div className="stat-label">Never scanned</div>
           <div className="stat-value" style={{ color:"#9ca3af" }}>{SCAN_STATS.unscanned}</div>
         </div>
-        <div className="stat">
+        <div className="stat" style={{ cursor: SCAN_STATS.failed>0 ? "pointer" : undefined }}
+          onClick={SCAN_STATS.failed>0 ? () => { setTab("completed"); const f = SCAN_CONFIGS.find(s=>s.status==="failed"); if (f) setLogCfg(f); } : undefined}
+          title={SCAN_STATS.failed>0 ? "Open the failing scan's log" : undefined}>
           <span className="stat-accent" style={{ "--stat-color":"#f87171" }}/>
           <div className="stat-label">Failed</div>
           <div className="stat-value" style={{ color: SCAN_STATS.failed>0?"#f87171":"#34d399" }}>{SCAN_STATS.failed}</div>
+          {SCAN_STATS.failed>0 && <div className="stat-meta">view log →</div>}
         </div>
         <div className="stat">
           <span className="stat-accent" style={{ "--stat-color":"#34d399" }}/>
@@ -61,92 +58,205 @@ function ScanningView({ onNavigate }) {
         </div>
       </div>
 
-      <div style={{ display:"grid", gridTemplateColumns: showActivity ? "1fr 320px" : "1fr", gap:14, alignItems:"start" }}>
-        {/* Scan queue */}
-        <div className="card" style={{ overflow:"hidden" }}>
-          <div className="sd-tabs" style={{ padding:"0 16px", borderBottom:"1px solid var(--cf-card-border)", display:"flex", alignItems:"center" }}>
-            {[
-              { k:"deployed", l:"Deployed" },
-              { k:"queue",    l:"Active & Recent" },
-              { k:"all",      l:"All configs" },
-            ].map(t => (
-              <button key={t.k} className={`sd-tab focus-ring${tab===t.k?" active":""}`} onClick={()=>setTab(t.k)}>{t.l}</button>
-            ))}
-            {tab==="queue" && SCAN_CONFIGS.some(s=>s.status==="scanning"||s.status==="queued") && <MultiSelectHint />}
-            {!showActivity && (
-              <button className="btn btn-ghost focus-ring xs" style={{ marginLeft:"auto" }} onClick={toggleActivity} title="Show scan activity">
-                <Icon name="history" size={11}/> Activity
-              </button>
-            )}
-          </div>
-          {tab === "deployed"
-            ? <ScanTable rows={SCAN_CONFIGS.filter(s=>s.freshness==="deployed")} onNavigate={onNavigate} sel={scanSel}/>
-          : tab === "queue"
-            ? <ScanTable rows={SCAN_CONFIGS.filter(s=>s.status!=="unscanned" || s.freshness!=="archived")} onNavigate={onNavigate} sel={scanSel}/>
-            : <ScanAllConfigs onNavigate={onNavigate}/>}
+      <div className="card" style={{ overflow:"hidden" }}>
+        <div className="sd-tabs" style={{ padding:"0 16px", borderBottom:"1px solid var(--cf-card-border)", display:"flex", alignItems:"center" }}>
+          {[
+            { k:"active",    l:"Active",    n:SCAN_ACTIVE.length },
+            { k:"completed", l:"Completed", n:doneArc.include ? SCAN_DONE.length : SCAN_DONE.length - doneArc.archived.size },
+          ].map(t => (
+            <button key={t.k} className={`sd-tab focus-ring${tab===t.k?" active":""}`} onClick={()=>setTab(t.k)}>
+              {t.l} <span className="sd-tab-badge">{t.n}</span>
+            </button>
+          ))}
         </div>
-
-        {/* Activity feed */}
-        {showActivity && (
-        <div className="card" style={{ padding:16 }}>
-          <div style={{ display:"flex", alignItems:"center", justifyContent:"space-between", marginBottom:12 }}>
-            <h3 style={{ margin:0, fontSize:13, fontWeight:600 }}>Scan activity</h3>
-            <button className="btn-icon focus-ring" onClick={toggleActivity} title="Hide panel"><Icon name="x" size={14}/></button>
-          </div>
-          <div className="dash-w-body" style={{ gap:0 }}>
-            {SCAN_ACTIVITY.map((a, i) => (
-              <div key={i} style={{ display:"flex", gap:10, paddingLeft:2 }}>
-                <div style={{ display:"flex", flexDirection:"column", alignItems:"center", paddingTop:4, flexShrink:0 }}>
-                  <div style={{ width:22, height:22, borderRadius:6, background:`color-mix(in oklab, ${a.color} 18%, transparent)`, color:a.color, display:"grid", placeItems:"center" }}>
-                    <Icon name={a.icon} size={11}/>
-                  </div>
-                  {i < SCAN_ACTIVITY.length-1 && <div style={{ width:2, flex:1, background:"var(--cf-divider)", minHeight:16 }}/>}
-                </div>
-                <div style={{ paddingTop:3, paddingBottom:i===SCAN_ACTIVITY.length-1?0:14, minWidth:0 }}>
-                  <div style={{ fontSize:12, color:"var(--cf-text-primary)", display:"flex", gap:6, justifyContent:"space-between" }}>
-                    <span style={{ fontWeight:600 }}>{a.event}</span>
-                    <span style={{ fontSize:11, color:"var(--cf-text-muted)", whiteSpace:"nowrap" }}>{a.at}</span>
-                  </div>
-                  <div className="mono" style={{ fontSize:11, color:"var(--cf-brand-purple)" }}>{a.name}</div>
-                  <div style={{ fontSize:11, color:"var(--cf-text-muted)", marginTop:2 }}>{a.detail}</div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-        )}
+        <ScanQueue
+          scope={tab}
+          rows={tab === "active" ? SCAN_ACTIVE : SCAN_DONE}
+          arc={tab === "completed" ? doneArc : null}
+          onNavigate={onNavigate} sel={scanSel} onOpenLog={setLogCfg}/>
       </div>
+
+      {logCfg && <ScanLogDrawer cfg={logCfg} onClose={()=>setLogCfg(null)} onNavigate={onNavigate}/>}
 
       {configOpen && <ScanScheduleModal onClose={()=>setConfigOpen(false)}/>}
 
       <BulkBar count={scanSel.size} onClear={scanSel.clear}>
-        <button className="btn btn-danger xs focus-ring"
-          onClick={() => { alert(`Cancelling ${scanSel.size} scan${scanSel.size===1?"":"s"}…`); scanSel.clear(); }}>
-          <Icon name="x" size={12} /> Cancel {scanSel.size} scan{scanSel.size===1?"":"s"}
-        </button>
+        {tab === "completed" ? (() => {
+          const ids = [...scanSel.ids];
+          const allArchived = ids.length > 0 && ids.every(id => doneArc.archived.has(id));
+          return (
+            <button className="btn btn-ghost xs focus-ring"
+              title={allArchived ? "Bring these back into the default list" : "Hide from the default list · results are kept"}
+              onClick={()=>{ allArchived ? cfRetention.restore("scans", ids) : cfRetention.archive("scans", ids); scanSel.clear(); }}>
+              <Icon name="archive" size={12} /> {allArchived ? `Restore ${ids.length}` : `Archive ${ids.length}`}
+            </button>
+          );
+        })() : (
+          <button className="btn btn-danger xs focus-ring"
+            onClick={() => { alert(`Cancelling ${scanSel.size} scan${scanSel.size===1?"":"s"}…`); scanSel.clear(); }}>
+            <Icon name="x" size={12} /> Cancel {scanSel.size} scan{scanSel.size===1?"":"s"}
+          </button>
+        )}
       </BulkBar>
     </div>
   );
 }
 
-function ScanTable({ rows, onNavigate, sel }) {
+// A scan is "active" while it's in the pipeline: running, waiting for a slot,
+// or blocked on a build/cache push it needs before it can run at all.
+const SCAN_ACTIVE_STATUSES = ["scanning","queued","awaiting"];
+const SCAN_ACTIVE = SCAN_CONFIGS.filter(s => SCAN_ACTIVE_STATUSES.includes(s.status));
+const SCAN_DONE   = [
+  ...SCAN_CONFIGS.filter(s => !SCAN_ACTIVE_STATUSES.includes(s.status)),
+  ...(typeof SCAN_COMPLETED_HISTORY !== "undefined" ? SCAN_COMPLETED_HISTORY : []),
+];
+
+// Relative timestamps sort by age, so "12m ago" ranks ahead of "3d ago".
+function scanAgeMins(v) {
+  if (!v) return Infinity;
+  if (/scanning|pending|waiting/i.test(v)) return -1;
+  if (/never/i.test(v)) return Infinity;
+  const n = parseFloat(v);
+  if (isNaN(n)) return Infinity;
+  if (/mo/.test(v)) return n * 43200;
+  if (/w/.test(v)) return n * 10080;
+  if (/d/.test(v)) return n * 1440;
+  if (/h/.test(v)) return n * 60;
+  return n;
+}
+const SCAN_SEV = (f) => f ? f.crit * 10000 + f.high * 100 + f.med : -1;
+const SCAN_STATUS_ORDER = ["failed","awaiting","scanning","queued","stale","complete","unscanned"];
+
+function ScanQueue({ rows, scope, onNavigate, sel, onOpenLog, arc }) {
+  const [query, setQuery] = React.useState("");
+  const [status, setStatus] = React.useState("all");
+  const [fresh, setFresh] = React.useState("all");
+  const [latestOnly, setLatestOnly] = React.useState(false);
+  const [sort, setSort] = React.useState({ key:"status", dir:"asc" });
+  React.useEffect(() => { setQuery(""); setStatus("all"); setFresh("all"); }, [scope]);
+
+  const q = query.trim().toLowerCase();
+  const latestIds = React.useMemo(
+    () => (typeof latestPerFlake === "function" ? latestPerFlake(rows) : new Set()), [rows]);
+
+  const filtered = (arc ? arc.visible(rows) : rows).filter(r =>
+    (status === "all" || r.status === status) &&
+    (fresh === "all" || r.freshness === fresh) &&
+    (!latestOnly || latestIds.has(r.id)) &&
+    (!q || r.name.toLowerCase().includes(q) || r.flake.toLowerCase().includes(q) || (r.commit||"").toLowerCase().includes(q))
+  );
+
+  const sorted = React.useMemo(() => {
+    const dir = sort.dir === "asc" ? 1 : -1;
+    const val = (r) => {
+      switch (sort.key) {
+        case "name":     return r.name;
+        case "freshness":return ["deployed","recent","archived"].indexOf(r.freshness);
+        case "status":   return SCAN_STATUS_ORDER.indexOf(r.status);
+        case "findings": return -SCAN_SEV(r.found);
+        case "lastScan": return scanAgeMins(r.lastScan);
+        default:         return 0;
+      }
+    };
+    return [...filtered].sort((a,b) => {
+      const x = val(a), y = val(b);
+      if (x < y) return -dir;
+      if (x > y) return dir;
+      return a.name.localeCompare(b.name);
+    });
+  }, [filtered, sort]);
+
+  const statuses = SCAN_STATUS_ORDER.filter(k => rows.some(r => r.status === k));
+  const selectable = scope === "completed" ? sorted : sorted.filter(r => r.status === "scanning" || r.status === "queued");
+  // Count what retention is hiding from the rows the other filters would keep.
+  const archivedHidden = arc ? rows.filter(r =>
+    arc.archived.has(r.id) &&
+    (status === "all" || r.status === status) &&
+    (fresh === "all" || r.freshness === fresh) &&
+    (!q || r.name.toLowerCase().includes(q) || r.flake.toLowerCase().includes(q) || (r.commit||"").toLowerCase().includes(q))
+  ).length : 0;
+
+  return (
+    <>
+      <div className="scan-toolbar">
+        <div className="q-search" style={{ maxWidth:250 }}>
+          <Icon name="search" size={13}/>
+          <input className="q-search-input" placeholder={scope==="active"?"Search the scan queue…":"Search completed scans…"}
+            value={query} onChange={e=>setQuery(e.target.value)}/>
+          {q && <button className="btn-icon xs focus-ring" title="Clear search" onClick={()=>setQuery("")}><Icon name="x" size={13}/></button>}
+        </div>
+        <select className="input filter-select focus-ring" style={{ width:"auto" }} value={status} onChange={e=>setStatus(e.target.value)}>
+          <option value="all">All statuses</option>
+          {statuses.map(k => <option key={k} value={k}>{SCAN_STATUS_META[k].label}</option>)}
+        </select>
+        {rows.length > 0 && rows.some(r => r.freshness !== rows[0].freshness) && (
+          <select className="input filter-select focus-ring" style={{ width:"auto" }} value={fresh} onChange={e=>setFresh(e.target.value)}>
+            <option value="all">All revisions</option>
+            <option value="deployed">Deployed</option>
+            <option value="recent">Recent</option>
+            <option value="archived">Superseded</option>
+          </select>
+        )}
+        <button className={`btn btn-ghost xs focus-ring${latestOnly?" active-filter":""}`} onClick={()=>setLatestOnly(v=>!v)}
+          title="Show only the most recent revision per flake">
+          <Icon name="star" size={12}/> Latest per flake
+        </button>
+        <span className="filter-count" style={{ marginLeft:"auto" }}>{sorted.length} of {rows.length}</span>
+        {arc && <ArchiveControls kind="scans" arc={arc} hidden={archivedHidden} label="scans"/>}
+        {selectable.length > 0 && <MultiSelectHint />}
+      </div>
+      {sorted.length === 0 ? (
+        rows.length === 0 && scope === "active" ? (
+          <div className="empty" style={{ margin:24 }}><h3>Nothing in the scan queue</h3><div>Every tracked config has a result. New scans are enqueued on build and on the schedule.</div></div>
+        ) : archivedHidden > 0 && !arc.include ? (
+          <div className="q-empty"><Icon name="archive" size={20}/><div>{archivedHidden.toLocaleString()} matching scan{archivedHidden===1?" is":"s are"} archived under the current retention rules.</div><button className="btn btn-ghost xs focus-ring" onClick={()=>arc.setInclude(true)}>Include archived</button></div>
+        ) : (
+        <div className="q-empty">
+          <Icon name="search" size={20}/>
+          <div>No scans match these filters.</div>
+          <button className="btn btn-ghost xs focus-ring" onClick={()=>{ setQuery(""); setStatus("all"); setFresh("all"); setLatestOnly(false); }}>Reset filters</button>
+        </div>
+        )
+      ) : (
+        <ScanTable rows={sorted} onNavigate={onNavigate} sel={sel} onOpenLog={onOpenLog} sort={sort} onSort={setSort} showFreshness={true} arc={arc} selectAll={scope==="completed"} timeLabel={scope === "completed" ? "Scanned" : "Queued"}/>
+      )}
+    </>
+  );
+}
+
+function ScanTable({ rows, onNavigate, sel, onOpenLog, sort, onSort, showFreshness = true, arc, selectAll, timeLabel = "Last scan" }) {
   const latestIds = React.useMemo(() => (typeof latestPerFlake === "function" ? latestPerFlake(rows) : new Set()), [rows]);
   const freshChip = (f) => {
-    const map = { deployed:["chip-healthy","deployed"], recent:["chip-info","recent"], archived:["chip-unknown","archived"] };
+    const map = { deployed:["chip-healthy","deployed"], recent:["chip-info","recent"], archived:["chip-unknown","superseded"] };
     const [cls,label] = map[f] || ["chip-unknown",f];
     return <span className={`chip ${cls}`} style={{ fontSize:10 }}>{label}</span>;
   };
   const isCancellable = (s) => s.status === "scanning" || s.status === "queued";
-  const cancellableIds = sel ? rows.filter(isCancellable).map(s => s.id) : [];
+  const isSelectable = (s) => selectAll || isCancellable(s);
+  const cancellableIds = sel ? rows.filter(isSelectable).map(s => s.id) : [];
+  const SortTh = ({ k, children, align }) => {
+    if (!onSort) return <th style={align?{textAlign:align}:undefined}>{children}</th>;
+    const on = sort && sort.key === k;
+    return (
+      <th style={align?{textAlign:align}:undefined}>
+        <button className={`th-sort focus-ring${on?" on":""}`}
+          onClick={()=>onSort({ key:k, dir: on && sort.dir === "asc" ? "desc" : "asc" })}>
+          {children}
+          <Icon name={on && sort.dir === "desc" ? "chevron-down" : "chevron-up"} size={10}
+            style={{ opacity: on ? 0.9 : 0.25 }}/>
+        </button>
+      </th>
+    );
+  };
   return (
     <table className="sys-table">
       <thead>
         <tr>
-          <th>Config</th>
-          <th>Freshness</th>
-          <th>Status</th>
-          <th>Findings</th>
-          <th>Last scan</th>
+          <SortTh k="name">Config</SortTh>
+          {showFreshness && <SortTh k="freshness">Revision</SortTh>}
+          <SortTh k="status">Status</SortTh>
+          <SortTh k="findings">Findings</SortTh>
+          <SortTh k="lastScan">{timeLabel}</SortTh>
           <th>Trigger</th>
           <th style={{ textAlign:"right" }}> </th>
         </tr>
@@ -157,20 +267,31 @@ function ScanTable({ rows, onNavigate, sel }) {
           const checked = sel && sel.has(s.id);
           return (
             <tr key={s.id}
-              className={`${sel && isCancellable(s) ? "selectable " : ""}${checked ? "row-checked" : ""}`}
+              className={`row-clickable ${sel && isSelectable(s) ? "selectable " : ""}${checked ? "row-checked" : ""}${arc?.isArchived(s) ? " q-row-archived" : ""}`}
               onMouseDown={sel ? (e)=>{ if(e.shiftKey) e.preventDefault(); } : undefined}
-              onClick={sel ? (e)=>{ sel.handleClick(e, s.id, cancellableIds); } : undefined}>
+              onClick={sel ? (e)=>{ if (e.shiftKey || e.metaKey || e.ctrlKey) { sel.handleClick(e, s.id, cancellableIds); } else { onOpenLog?.(s); } } : ()=>onOpenLog?.(s)}>
               <td>
                 <div style={{ fontWeight:600, fontSize:13 }}>{s.name}</div>
                 <div className={`mono${latestIds.has(s.id)?" commit-latest":""}`} style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{s.flake} · {latestIds.has(s.id) && <Icon name="star" size={9} className="latest-star" style={{ marginRight:2, verticalAlign:"-1px" }}/>}{s.commit}</div>
               </td>
-              <td>{freshChip(s.freshness)}</td>
+              {showFreshness && <td>{freshChip(s.freshness)}</td>}
               <td>
                 <span className={`chip ${meta.cls}`}><span className="chip-dot" style={{ background:meta.color }}/>{meta.label}</span>
-                {s.status==="scanning" && s.progress != null && (
-                  <ProgressBar value={s.progress} height={3} color="#60a5fa" style={{ marginTop:5, maxWidth:80 }} />
+                {arc?.isArchived(s) && <ArchivedChip reason={arc.reason(s)}/>}
+                {/* vulnix reports no progress — only that it is running. Show elapsed instead of a fake bar. */}
+                {s.status==="scanning" && s.startedAgo && (
+                  <div style={{ fontSize:10, color:"var(--cf-text-muted)", marginTop:3, display:"flex", alignItems:"center", gap:5 }}>
+                    <span className="scan-pulse"/> running <LiveDuration dur={s.startedAgo} live style={{ fontSize:10, color:"var(--cf-text-muted)" }}/>
+                  </div>
                 )}
-                {s.error && <div style={{ fontSize:10, color:"#fca5a5", marginTop:3 }}>{s.error}</div>}
+                {s.status==="awaiting" && s.awaitingDetail && (
+                  <div style={{ fontSize:10, color:"var(--cf-text-muted)", marginTop:3, maxWidth:190 }}>{s.awaitingDetail}</div>
+                )}
+                {s.error && (
+                  <button className="scan-err-link focus-ring" onClick={(e)=>{ e.stopPropagation(); onOpenLog?.(s); }} title="Open full scan log">
+                    {s.error} <Icon name="arrow-right" size={9}/>
+                  </button>
+                )}
               </td>
               <td>
                 {s.found ? (
@@ -186,9 +307,10 @@ function ScanTable({ rows, onNavigate, sel }) {
               <td>{s.trigger ? <span className="chip chip-unknown" style={{ fontSize:10 }}>{s.trigger}</span> : <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>—</span>}</td>
               <td>
                 <div className="row-actions">
-                  <button className="btn-icon focus-ring" title="Rescan now"><Icon name="sync" size={14}/></button>
+                  <button className="btn-icon focus-ring" title="View scan log" onClick={(e)=>{ e.stopPropagation(); onOpenLog?.(s); }}><Icon name="terminal" size={14}/></button>
+                  <button className="btn-icon focus-ring" title="Rescan now" onClick={(e)=>e.stopPropagation()}><Icon name="sync" size={14}/></button>
                   {s.found && (s.found.crit>0||s.found.high>0) && (
-                    <button className="btn-icon focus-ring" title="View CVEs" onClick={()=>onNavigate("cves")}><Icon name="arrow-right" size={14}/></button>
+                    <button className="btn-icon focus-ring" title="View CVEs" onClick={(e)=>{ e.stopPropagation(); onNavigate("cves"); }}><Icon name="arrow-right" size={14}/></button>
                   )}
                 </div>
               </td>
@@ -200,163 +322,179 @@ function ScanTable({ rows, onNavigate, sel }) {
   );
 }
 
-function ScanAllConfigs({ onNavigate }) {
+// Scan log drawer — full vulnix output for one config, with search. Same tray shell as
+// the build/eval log drawers so "open the log" behaves identically across the app.
+function ScanLogDrawer({ cfg, onClose, onNavigate }) {
+  const [tab, setTab] = React.useState("log");
+  const lines = React.useMemo(() => scanLogLines(cfg), [cfg.id]);
   const [query, setQuery] = React.useState("");
-  const [envFilter, setEnvFilter] = React.useState("all");
-  const [expanded, setExpanded] = React.useState(null);
+  const [matchIdx, setMatchIdx] = React.useState(0);
+  const ref = React.useRef(null);
+  const searchRef = React.useRef(null);
+  const meta = SCAN_STATUS_META[cfg.status];
+  const live = cfg.status === "scanning";
 
-  const rows = SCAN_HISTORY.filter(s =>
-    (envFilter === "all" || s.environment === envFilter) &&
-    (!query || s.hostname.toLowerCase().includes(query.toLowerCase()) || s.flake.toLowerCase().includes(query.toLowerCase()))
-  ).sort((a,b) => b.totalConfigs - a.totalConfigs);
+  const q = query.trim().toLowerCase();
+  const matches = React.useMemo(() =>
+    q ? lines.map((l, i) => l.m.toLowerCase().includes(q) || l.t.includes(q) ? i : -1).filter(i => i >= 0) : [],
+    [q, lines]);
 
-  const freshChip = (f) => {
-    const map = { deployed:["chip-healthy","deployed"], recent:["chip-info","recent"], archived:["chip-unknown","archived"] };
-    const [cls,label] = map[f] || ["chip-unknown",f];
-    return <span className={`chip ${cls}`} style={{ fontSize:10 }}>{label}</span>;
+  React.useEffect(() => {
+    const onKey = (e) => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+  React.useEffect(() => { if (ref.current && !q) ref.current.scrollTop = ref.current.scrollHeight; }, [tab]);
+  React.useEffect(() => { setMatchIdx(0); }, [q]);
+
+  const renderMsg = (m) => {
+    if (!q) return m;
+    const lo = m.toLowerCase();
+    const out = []; let from = 0, idx;
+    while ((idx = lo.indexOf(q, from)) !== -1) {
+      if (idx > from) out.push(m.slice(from, idx));
+      out.push(<mark key={idx} className="log-hit">{m.slice(idx, idx + q.length)}</mark>);
+      from = idx + q.length;
+    }
+    out.push(m.slice(from));
+    return out;
   };
+  const activeLine = matches.length ? matches[Math.min(matchIdx, matches.length-1)] : -1;
+  const failed = cfg.status === "failed";
 
   return (
     <>
-      <div style={{ padding:"10px 16px", borderBottom:"1px solid var(--cf-divider)", display:"flex", gap:10, alignItems:"center", flexWrap:"wrap" }}>
-        <div className="filter-search" style={{ maxWidth:240 }}>
-          <Icon name="search"/>
-          <input className="input focus-ring" placeholder="Search systems…" value={query} onChange={e=>setQuery(e.target.value)}/>
+      <div className="fl-tray-backdrop" onClick={onClose}/>
+      <aside className="fl-tray" style={{ width:"min(900px,100vw)", display:"flex", flexDirection:"column" }}>
+        <div className="panel-head">
+          <div className="panel-title">
+            <h2><Icon name="shield" size={14} style={{ opacity:0.7 }}/> {cfg.name}</h2>
+            <span className="fqdn mono">{cfg.flake} · {cfg.commit}</span>
+          </div>
+          <button className="btn-icon focus-ring" onClick={onClose} aria-label="Close"><Icon name="x" size={16}/></button>
         </div>
-        <select className="input filter-select focus-ring" style={{ width:"auto" }} value={envFilter} onChange={e=>setEnvFilter(e.target.value)}>
-          <option value="all">All environments</option>
-          {ENVIRONMENTS.map(e => <option key={e.name} value={e.name}>{e.name}</option>)}
-        </select>
-        <span className="filter-count">{rows.length} systems · {rows.reduce((a,s)=>a+s.totalConfigs,0)} configs</span>
-      </div>
-      <table className="sys-table">
-        <thead>
-          <tr>
-            <th>System</th>
-            <th>Env</th>
-            <th>Configs</th>
-            <th title="Share of this system's configs that have a fresh scan (green), a stale scan past the rescan interval (amber), or were never scanned (gray)">Scan freshness</th>
-            <th>Current findings</th>
-            <th style={{ textAlign:"right" }}> </th>
-          </tr>
-        </thead>
-        <tbody>
-          {rows.map(s => {
-            const isOpen = expanded === s.id;
-            const covPct = Math.round(s.scanned / s.totalConfigs * 100);
-            return (
-              <React.Fragment key={s.id}>
-                <tr style={{ cursor:"pointer" }} onClick={()=>setExpanded(isOpen?null:s.id)}>
-                  <td>
-                    <div style={{ display:"flex", alignItems:"center", gap:8 }}>
-                      <Icon name={isOpen?"chevron-down":"chevron-right"} size={12} style={{ color:"var(--cf-text-muted)", flexShrink:0 }}/>
-                      <span className="status-dot" style={{ "--status-color": s.statusColor }}/>
-                      <div>
-                        <div style={{ fontWeight:600, fontSize:13 }}>{s.hostname}</div>
-                        <div className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{s.flake}</div>
-                      </div>
-                    </div>
-                  </td>
-                  <td><EnvBadge env={s.environment}/></td>
-                  <td className="mono" style={{ fontSize:12 }}>{s.totalConfigs}</td>
-                  <td>
-                    <div style={{ display:"flex", alignItems:"center", gap:8, minWidth:120 }} title={`${s.scanned} fresh · ${s.stale} stale · ${s.needsBuild} need build · ${s.unscanned} never scanned`}>
-                      <div style={{ flex:1, height:5, background:"var(--cf-subtle-bg)", borderRadius:99, overflow:"hidden", display:"flex" }}>
-                        <div style={{ width:`${(s.scanned/s.totalConfigs)*100}%`, background:"#34d399" }}/>
-                        <div style={{ width:`${(s.stale/s.totalConfigs)*100}%`, background:"#fbbf24" }}/>
-                        <div style={{ width:`${(s.needsBuild/s.totalConfigs)*100}%`, background:"#f59e0b" }}/>
-                        <div style={{ width:`${(s.unscanned/s.totalConfigs)*100}%`, background:"#4b5563" }}/>
-                      </div>
-                      <span className="mono" style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{s.scanned}/{s.totalConfigs}</span>
-                    </div>
-                    <div style={{ fontSize:10, color:"var(--cf-text-muted)", marginTop:3, display:"flex", gap:8, flexWrap:"wrap" }}>
-                      <span style={{ color:"#34d399" }}>{s.scanned} fresh</span>
-                      {s.stale>0 && <span style={{ color:"#fbbf24" }}>{s.stale} stale</span>}
-                      {s.needsBuild>0 && <span style={{ color:"#f59e0b" }}>{s.needsBuild} need build</span>}
-                      {s.unscanned>0 && <span>{s.unscanned} never</span>}
-                    </div>
-                  </td>
-                  <td>
-                    {s.currentCrit>0 || s.currentHigh>0 ? (
-                      <div style={{ display:"flex", gap:4 }}>
-                        {s.currentCrit>0 && <span className="chip chip-critical" style={{ fontSize:10 }}>{s.currentCrit}C</span>}
-                        {s.currentHigh>0 && <span className="chip chip-warning" style={{ fontSize:10 }}>{s.currentHigh}H</span>}
-                      </div>
-                    ) : <span className="chip chip-healthy" style={{ fontSize:10 }}><Icon name="check" size={9}/> clean</span>}
-                  </td>
-                  <td>
-                    <div className="row-actions">
-                      <button className="btn-icon focus-ring" title="Rescan current" onClick={e=>e.stopPropagation()}><Icon name="sync" size={14}/></button>
-                    </div>
-                  </td>
-                </tr>
-                {isOpen && (
-                  <tr>
-                    <td colSpan={6} style={{ padding:0, background:"color-mix(in oklab, var(--cf-brand-purple) 4%, var(--cf-page-bg))" }}>
-                      <div style={{ padding:"6px 16px 10px 40px" }}>
-                        <div style={{ display:"flex", justifyContent:"space-between", alignItems:"center", padding:"4px 8px" }}>
-                          <span style={{ fontSize:11, color:"var(--cf-text-muted)" }}>
-                            {s.commits.length} config{s.commits.length===1?"":"s"} for this system{s.commits.length>8 ? " · newest first" : ""}
-                          </span>
-                          <button className="btn btn-ghost focus-ring xs"><Icon name="sync" size={10}/> Rescan all</button>
-                        </div>
-                        <div style={{ maxHeight: s.commits.length > 8 ? 300 : "none", overflowY: s.commits.length > 8 ? "auto" : "visible", border:"1px solid var(--cf-divider)", borderRadius:8 }}>
-                        <table style={{ width:"100%", borderCollapse:"collapse", fontSize:12 }}>
-                          <thead style={{ position:"sticky", top:0, zIndex:1 }}>
-                            <tr style={{ color:"var(--cf-text-muted)", fontSize:10, textTransform:"uppercase", letterSpacing:"0.06em", background:"var(--cf-card-bg)" }}>
-                              <th style={{ textAlign:"left", padding:"6px 8px", fontWeight:600 }}>Commit</th>
-                              <th style={{ textAlign:"left", padding:"6px 8px", fontWeight:600 }}>Freshness</th>
-                              <th style={{ textAlign:"left", padding:"6px 8px", fontWeight:600 }}>Status</th>
-                              <th style={{ textAlign:"left", padding:"6px 8px", fontWeight:600 }}>Findings</th>
-                              <th style={{ textAlign:"left", padding:"6px 8px", fontWeight:600 }}>Last scan</th>
-                              <th style={{ textAlign:"right", padding:"6px 8px" }}></th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {s.commits.map((c, i) => {
-                              const meta = SCAN_STATUS_META[c.status];
-                              return (
-                                <tr key={i} style={{ borderTop:"1px solid var(--cf-divider)" }}>
-                                  <td style={{ padding:"7px 8px" }}>
-                                    <span className="mono" style={{ fontWeight:600 }}>{c.commit}</span>
-                                    {c.current && <span className="chip chip-info" style={{ fontSize:9, marginLeft:6 }}>current</span>}
-                                    <div style={{ fontSize:10, color:"var(--cf-text-muted)" }}>{c.msg}</div>
-                                  </td>
-                                  <td style={{ padding:"7px 8px" }}>{freshChip(c.freshness)}</td>
-                                  <td style={{ padding:"7px 8px" }}>
-                                    <span className={`chip ${meta.cls}`} style={{ fontSize:10 }}><span className="chip-dot" style={{ background:meta.color }}/>{meta.label}</span>
-                                  </td>
-                                  <td style={{ padding:"7px 8px" }}>
-                                    {c.found ? (
-                                      <div style={{ display:"flex", gap:4 }}>
-                                        {c.found.crit>0 && <span className="chip chip-critical" style={{ fontSize:10 }}>{c.found.crit}C</span>}
-                                        {c.found.high>0 && <span className="chip chip-warning" style={{ fontSize:10 }}>{c.found.high}H</span>}
-                                        {c.found.med>0  && <span className="chip chip-info" style={{ fontSize:10 }}>{c.found.med}M</span>}
-                                        {c.found.crit===0 && c.found.high===0 && c.found.med===0 && <span className="chip chip-healthy" style={{ fontSize:10 }}>clean</span>}
-                                      </div>
-                                    ) : <span style={{ color:"var(--cf-text-muted)" }}>—</span>}
-                                  </td>
-                                  <td style={{ padding:"7px 8px", color:"var(--cf-text-muted)" }}>{c.lastScan}</td>
-                                  <td style={{ padding:"7px 8px", textAlign:"right" }}>
-                                    {c.status === "needs-build"
-                                      ? <button className="btn btn-ghost focus-ring xs" title="Not in cache — build first, then scan"><Icon name="build" size={11}/> Build & scan</button>
-                                      : <button className="btn-icon focus-ring" title="Rescan this config"><Icon name="sync" size={13}/></button>}
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-                        </div>
-                      </div>
-                    </td>
-                  </tr>
+
+        <div style={{ padding:"10px 16px", borderBottom:"1px solid var(--cf-divider)", display:"flex", gap:8, alignItems:"center", flexWrap:"wrap", flexShrink:0 }}>
+          <span className={`chip ${meta.cls}`}><span className="chip-dot" style={{ background:meta.color }}/>{meta.label}</span>
+          {cfg.trigger && <span className="chip chip-unknown" style={{ fontSize:10 }}>{cfg.trigger}</span>}
+          <span style={{ fontSize:11.5, color:"var(--cf-text-muted)" }}>{cfg.lastScan}</span>
+          {cfg.found && (
+            <div style={{ display:"flex", gap:4, marginLeft:"auto" }}>
+              {cfg.found.crit>0 && <span className="chip chip-critical" style={{ fontSize:10 }}>{cfg.found.crit}C</span>}
+              {cfg.found.high>0 && <span className="chip chip-warning" style={{ fontSize:10 }}>{cfg.found.high}H</span>}
+              {cfg.found.med>0  && <span className="chip chip-info" style={{ fontSize:10 }}>{cfg.found.med}M</span>}
+            </div>
+          )}
+        </div>
+
+        {cfg.status === "awaiting" && (
+          <div style={{ margin:"12px 16px 0", padding:"10px 12px", borderRadius:8, border:"1px solid var(--cf-card-border)", background:"var(--cf-subtle-bg)", display:"flex", gap:9, alignItems:"flex-start", flexShrink:0 }}>
+            <Icon name="clock" size={14} style={{ color:"#94a3b8", flexShrink:0, marginTop:1 }}/>
+            <div style={{ minWidth:0 }}>
+              <div style={{ fontSize:12.5, fontWeight:600, color:"var(--cf-text-primary)" }}>
+                {cfg.awaiting === "building" ? "Waiting on the build" : "Closure not available to any scanner"}
+              </div>
+              <div style={{ fontSize:11.5, color:"var(--cf-text-muted)", marginTop:3 }}>
+                {cfg.awaitingDetail}. Scanning is async from building — vulnix needs the realised closure in the store or on a reachable substituter. This scan starts on its own once the closure lands; no action needed unless it stays here.
+              </div>
+              <div style={{ display:"flex", gap:6, marginTop:8 }}>
+                <button className="btn btn-ghost focus-ring xs" onClick={()=>onNavigate?.(cfg.awaiting === "building" ? "builds" : "caches", cfg.awaiting === "building" ? { sha: cfg.commit, flake: cfg.flake } : undefined)}>
+                  <Icon name={cfg.awaiting === "building" ? "build" : "cache"} size={11}/> {cfg.awaiting === "building" ? "Go to build" : "Check caches"}
+                </button>
+                <button className="btn btn-ghost focus-ring xs"><Icon name="sync" size={11}/> Check now</button>
+              </div>
+            </div>
+          </div>
+        )}
+        {failed && (
+          <div style={{ margin:"12px 16px 0", padding:"10px 12px", borderRadius:8, border:"1px solid rgba(248,113,113,0.35)", background:"rgba(248,113,113,0.07)", display:"flex", gap:9, alignItems:"flex-start", flexShrink:0 }}>
+            <Icon name="warn" size={14} style={{ color:"#f87171", flexShrink:0, marginTop:1 }}/>
+            <div style={{ minWidth:0 }}>
+              <div style={{ fontSize:12.5, fontWeight:600, color:"#fca5a5" }}>{cfg.error}</div>
+              <div style={{ fontSize:11.5, color:"var(--cf-text-muted)", marginTop:3 }}>
+                vulnix needs the config's derivation closure in the store. Build this config (or fetch it from a cache) and rescan.
+              </div>
+              <div style={{ display:"flex", gap:6, marginTop:8 }}>
+                <button className="btn btn-ghost focus-ring xs" onClick={()=>onNavigate?.("builds", { sha: cfg.commit, flake: cfg.flake })}><Icon name="build" size={11}/> Go to build</button>
+                <button className="btn btn-ghost focus-ring xs"><Icon name="sync" size={11}/> Retry scan</button>
+              </div>
+            </div>
+          </div>
+        )}
+
+        <div className="sd-tabs" style={{ padding:"0 16px", borderBottom:"1px solid var(--cf-card-border)", flexShrink:0, marginTop:12 }}>
+          {[{ k:"log", l:"Log" }, { k:"details", l:"Details" }].map(t => (
+            <button key={t.k} className={`sd-tab focus-ring${tab===t.k?" active":""}`} onClick={()=>setTab(t.k)}>{t.l}</button>
+          ))}
+        </div>
+
+        {tab === "log" ? (
+          <div style={{ display:"flex", flexDirection:"column", flex:1, minHeight:0 }}>
+            <div style={{ padding:"8px 16px", borderBottom:"1px solid var(--cf-divider)", display:"flex", gap:10, alignItems:"center", flexShrink:0 }}>
+              <span style={{ fontSize:11, color:"var(--cf-text-muted)", whiteSpace:"nowrap" }}>
+                {q ? `${matches.length} ${matches.length===1?"match":"matches"}` : `${lines.length} lines`}
+              </span>
+              <div style={{ flex:1 }}/>
+              <div className="log-search">
+                <Icon name="search" size={13}/>
+                <input ref={searchRef} className="log-search-input" placeholder="Search log…" value={query} onChange={e=>setQuery(e.target.value)}/>
+                {q && <span className="log-search-count">{matches.length ? `${Math.min(matchIdx,matches.length-1)+1}/${matches.length}` : "0"}</span>}
+                {q && (
+                  <>
+                    <button className="btn-icon xs focus-ring" title="Previous match" disabled={!matches.length}
+                      onClick={()=>setMatchIdx(i=>(i-1+matches.length)%matches.length)}><Icon name="chevron-up" size={13}/></button>
+                    <button className="btn-icon xs focus-ring" title="Next match" disabled={!matches.length}
+                      onClick={()=>setMatchIdx(i=>(i+1)%matches.length)}><Icon name="chevron-down" size={13}/></button>
+                  </>
                 )}
-              </React.Fragment>
-            );
-          })}
-        </tbody>
-      </table>
+              </div>
+              <button className="btn-icon focus-ring" title="Download log"
+                onClick={()=>downloadFile(`${cfg.name}-${cfg.commit}-scan.log`, lines.map(l=>`${l.t} ${l.lvl.toUpperCase()} ${l.m}`).join("\n"), "text/plain")}>
+                <Icon name="download" size={13}/>
+              </button>
+            </div>
+            <pre ref={ref} className="sd-log-stream build-log-stream">
+              {lines.map((l,i) => (
+                <div key={i} data-li={i} className={`sd-log-line sd-log-${l.lvl}${matches.includes(i) ? " log-line-hit" : ""}${i===activeLine ? " log-line-active" : ""}`}>
+                  <span className="sd-log-t">{l.t}</span>
+                  <span className="sd-log-lvl">{l.lvl.toUpperCase()}</span>
+                  <span className="sd-log-m">{renderMsg(l.m)}</span>
+                </div>
+              ))}
+              {!q && live && <div className="sd-log-caret">▍</div>}
+            </pre>
+          </div>
+        ) : (
+          <div style={{ padding:"14px 16px", overflowY:"auto", flex:1 }}>
+            <dl className="kv-grid">
+              <dt>Config</dt><dd className="mono">{cfg.name}</dd>
+              <dt>Flake</dt><dd className="mono">{cfg.flake}</dd>
+              <dt>Commit</dt><dd className="mono">{cfg.commit}</dd>
+              <dt>Freshness</dt><dd>{cfg.freshness}</dd>
+              <dt>Status</dt><dd>{meta.label}</dd>
+              <dt>Trigger</dt><dd>{cfg.trigger || "—"}</dd>
+              <dt>Last scan</dt><dd>{cfg.lastScan}</dd>
+              <dt>Scanner</dt><dd className="mono">vulnix {SCAN_POLICY.vulnixVersion}</dd>
+              <dt>CVE database</dt><dd>updated {SCAN_POLICY.dbAge}</dd>
+            </dl>
+            {cfg.found && (
+              <div style={{ marginTop:18 }}>
+                <h3 style={{ fontSize:12, fontWeight:600, margin:"0 0 8px", color:"var(--cf-text-secondary)" }}>Findings</h3>
+                <div style={{ display:"flex", gap:6 }}>
+                  <span className="chip chip-critical">{cfg.found.crit} critical</span>
+                  <span className="chip chip-warning">{cfg.found.high} high</span>
+                  <span className="chip chip-info">{cfg.found.med} medium</span>
+                </div>
+                {(cfg.found.crit>0 || cfg.found.high>0) && (
+                  <button className="btn btn-ghost focus-ring xs" style={{ marginTop:10 }} onClick={()=>onNavigate?.("cves")}>
+                    <Icon name="arrow-right" size={11}/> View these CVEs
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </aside>
     </>
   );
 }
@@ -398,13 +536,13 @@ function ScanScheduleModal({ onClose }) {
           <Row title="Recent configs" desc="Built in the last 30 days but not currently deployed.">
             <IntervalSelect value={form.recentInterval} onChange={v=>set("recentInterval",v)}/>
           </Row>
-          <Row title="Archived configs" desc="Old / superseded configs no longer in rotation. Scan rarely (or never) to save builder time.">
+          <Row title="Superseded configs" desc="Old configs no longer in rotation. Scan rarely (or never) to save builder time.">
             <div style={{ display:"flex", alignItems:"center", gap:8 }}>
               <input type="checkbox" checked={form.archivedEnabled} onChange={e=>set("archivedEnabled",e.target.checked)} style={{ accentColor:"var(--cf-brand-purple)" }}/>
               <IntervalSelect value={form.archivedInterval} onChange={v=>set("archivedInterval",v)} disabled={!form.archivedEnabled}/>
             </div>
           </Row>
-          <Row title="Rebuild to scan old configs" desc="vulnix needs a realised derivation. Archived configs evicted from cache must be rebuilt before they can be scanned — this can be expensive. Off = skip uncached configs instead of building them.">
+          <Row title="Rebuild to scan old configs" desc="vulnix needs a realised derivation. Superseded configs evicted from cache must be rebuilt before they can be scanned — this can be expensive. Off = skip uncached configs instead of building them.">
             <label style={{ display:"flex", gap:8, alignItems:"center", fontSize:13, cursor:"pointer" }}>
               <input type="checkbox" checked={form.rebuildToScan ?? false} onChange={e=>set("rebuildToScan",e.target.checked)} style={{ accentColor:"var(--cf-brand-purple)" }}/>
               <span>{form.rebuildToScan ? "On" : "Off"}</span>

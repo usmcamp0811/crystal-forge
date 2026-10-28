@@ -10,7 +10,6 @@ use crate::alerts::{
     occurrence_id_for_subject, should_flash,
 };
 
-use crate::api::client::set_setup_wizard_agent_acknowledged;
 use crate::api::models::{
     DeploymentStatus, HealthStatus, SystemDetail, SystemHistoryEntry, SystemSummary,
     SystemsListParams, UpdateUserPreferences,
@@ -27,6 +26,7 @@ use crate::components::modals::{
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::system::{
     EditSystemModal, PendingDeployBanner, SystemCardV2, deployment_state_label,
+    key_rotation::public_key_fingerprint,
 };
 use crate::components::systems_stat_strip::SystemsStatStrip;
 use crate::components::tables::SystemsTable;
@@ -40,11 +40,11 @@ use crate::state::auth;
 use crate::state::navigation_focus::{FocusTarget, NavigationFocus};
 use crate::state::preferences;
 use crate::systems::adapter::{
-    create_system_via_api, deactivate_system_via_api, fallback_flake_names,
-    load_flake_context_with_fallback, load_flake_names_with_fallback,
+    SystemPublicKeyRotationOutcome, create_system_via_api, deactivate_system_via_api,
+    fallback_flake_names, load_flake_context_with_fallback, load_flake_names_with_fallback,
     load_system_deployment_progress_with_fallback, load_system_detail_with_fallback,
     load_system_history_with_fallback, load_systems_with_fallback,
-    update_system_public_key_via_api, update_system_via_api,
+    update_system_public_key_and_reconcile, update_system_via_api,
 };
 use crate::theme;
 
@@ -274,7 +274,20 @@ pub fn SystemsListView() -> Element {
     let mut show_key_modal = use_signal(|| false);
     let mut generated_keys = use_signal(|| None::<GeneratedKeyPair>);
     let mut update_key_error = use_signal(|| None::<String>);
+    let mut update_key_in_flight = use_signal(|| false);
     let mut onboarding_agent_reminder = use_signal(|| None::<String>);
+    let registration_prefill = system_registration_prefill();
+    use_effect(move || {
+        if let Some((hostname, configuration, flake_name, branch)) = registration_prefill.clone() {
+            let mut next = NewSystemDraft::new();
+            next.hostname = hostname;
+            next.system_configuration_name = configuration;
+            next.flake_name = flake_name;
+            next.flake_branch = branch;
+            draft.set(next);
+            show_add_form.set(true);
+        }
+    });
 
     // New modal state for edit
     let mut edit_modal_system = use_signal(|| None::<SystemDetail>);
@@ -348,7 +361,6 @@ pub fn SystemsListView() -> Element {
     let registered_flakes_for_submit = registered_flakes.clone();
 
     let from_setup = use_signal(came_from_setup);
-    let mut dismiss_add_target_callout = use_signal(|| false);
 
     // Attention/flash state for alerting systems (TASK-385 follow-up).
     let has_attention_systems = filtered_systems.iter().any(|s| {
@@ -391,20 +403,6 @@ pub fn SystemsListView() -> Element {
         div {
             class: "space-y-6",
             id: "{container_id}",
-
-            if from_setup() {
-                div {
-                    "data-testid": "setup-coach-systems-callout",
-                    style: "background:rgba(30,58,138,0.22); border:1px solid rgba(96,165,250,0.55); border-radius:8px; padding:12px 16px;",
-                    div {
-                        style: "display:flex; flex-direction:column; gap:6px;",
-                        p { style: "color:#dbeafe; font-size:12px; font-weight:700; margin:0; letter-spacing:0.03em; text-transform:uppercase;", "Setup Tour - Step 5 of 6" }
-                        p { style: "color:#dbeafe; font-size:14px; font-weight:600; margin:0;", "Register a system and its agent" }
-                        p { style: "color:#bfdbfe; font-size:13px; margin:0;", "Use Add System to register a machine in this fleet and connect it to environment + flake." }
-                        p { style: "color:#93c5fd; font-size:12px; margin:0;", "Agents are lightweight clients installed on systems so Crystal Forge can evaluate and apply deployments." }
-                    }
-                }
-            }
 
             if let Some(ref reminder) = *onboarding_agent_reminder.read() {
                 div {
@@ -547,6 +545,7 @@ pub fn SystemsListView() -> Element {
                         class: "relative z-40",
                         button {
                             "data-testid": "add-system-button",
+                            "data-coach-target": "system",
                             class: if from_setup() && !*show_add_form.read() {
                                 "btn btn-primary focus-ring animate-pulse"
                             } else {
@@ -556,23 +555,9 @@ pub fn SystemsListView() -> Element {
                                 let next = !*show_add_form.read();
                                 show_add_form.set(next);
                                 add_error.set(None);
-                                if next {
-                                    dismiss_add_target_callout.set(true);
-                                }
                             },
                             Icon { name: IconName::Plus, size: 14 }
                             if *show_add_form.read() { "Close" } else { "Add system" }
-                        }
-                        if from_setup() && !*show_add_form.read() && !dismiss_add_target_callout() {
-                            div {
-                                "data-testid": "setup-coach-systems-target-callout",
-                                style: "position:absolute; z-index:70; right:0; top:calc(100% + 10px); background:rgba(30,64,175,0.94); border:1px solid rgba(96,165,250,0.75); border-radius:10px; padding:8px 10px; color:#dbeafe; font-size:12px; width:220px; box-shadow:0 10px 24px rgba(15,23,42,0.45);",
-                                div {
-                                    style: "position:absolute; top:-6px; right:18px; width:10px; height:10px; background:rgba(30,64,175,0.94); border-left:1px solid rgba(96,165,250,0.75); border-top:1px solid rgba(96,165,250,0.75); transform:rotate(45deg);"
-                                }
-                                p { style: "margin:0; color:#eff6ff; font-weight:600;", "Next action" }
-                                p { style: "margin:2px 0 0 0;", "Click Add system to register your first managed machine." }
-                            }
                         }
                     }
                 }
@@ -647,9 +632,8 @@ pub fn SystemsListView() -> Element {
                                     add_error.set(None);
                                     show_add_form.set(false);
                                     if first_system_in_setup {
-                                        let _ = set_setup_wizard_agent_acknowledged(true).await;
                                         onboarding_agent_reminder.set(Some(
-                                            "System record created. Next, ensure this host config enables the Crystal Forge agent module, apply/rebuild that config, and confirm the agent service is running before expecting heartbeats or deployment status.".to_string(),
+                                            "System record created. Next, install the Crystal Forge agent and wait for its first signed report. An administrator must then acknowledge the agent in the Setup track.".to_string(),
                                         ));
                                     }
                                 }
@@ -660,8 +644,14 @@ pub fn SystemsListView() -> Element {
                         });
                     },
                     on_generate_keys: move |_| {
-                        generated_keys.set(Some(generate_key_pair()));
-                        show_key_modal.set(true);
+                        match generate_key_pair() {
+                            Ok(keys) => {
+                                generated_keys.set(Some(keys));
+                                add_error.set(None);
+                                show_key_modal.set(true);
+                            }
+                            Err(message) => add_error.set(Some(message)),
+                        }
                     },
                     environments: dropdown_environments.clone(),
                     flake_names: registered_flakes.clone(),
@@ -671,9 +661,11 @@ pub fn SystemsListView() -> Element {
             }
 
             // Key Pair Modal
-            if *show_key_modal.read() {
+            if *show_key_modal.read()
+                && let Some(keys) = generated_keys.read().clone()
+            {
                 KeyPairModal {
-                    keys: generated_keys.read().clone(),
+                    keys,
                     on_close: move |_| show_key_modal.set(false),
                     on_use_public_key: move |_| {
                         if let Some(keys) = generated_keys.read().clone() {
@@ -973,7 +965,7 @@ pub fn SystemsListView() -> Element {
                             },
                             on_open_detail: move |_| {
                                 preview_system.set(None);
-                                nav.push(Route::SystemDetailView { id: detail_for_open_detail.id.to_string() });
+                                nav.push(Route::SystemDetailView { id: detail_for_open_detail.id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() });
                             },
                             on_deploy: move |_| {
                                 #[cfg(target_arch = "wasm32")]
@@ -1025,24 +1017,49 @@ pub fn SystemsListView() -> Element {
                 UpdatePublicKeyModal {
                     system_id: system.id,
                     hostname: system.hostname.clone(),
+                    in_flight: update_key_in_flight(),
+                    api_error: update_key_error.read().clone(),
                     on_cancel: move |_| {
                         pending_update_key.set(None);
                         update_key_error.set(None);
                     },
-                    on_confirm: move |new_public_key| {
+                    on_confirm: move |new_public_key: String| {
                         let system_id = system.id;
+                        let Some(expected_fingerprint) = public_key_fingerprint(&new_public_key) else {
+                            update_key_error.set(Some("Public key is not a valid Ed25519 public key".to_string()));
+                            return;
+                        };
+                        update_key_in_flight.set(true);
+                        update_key_error.set(None);
                         spawn(async move {
-                            match update_system_public_key_via_api(system_id, new_public_key).await {
-                                Ok(message) => {
-                                    // Success - close modal and maybe show a success toast
+                            match update_system_public_key_and_reconcile(
+                                system_id,
+                                new_public_key,
+                                expected_fingerprint,
+                            ).await {
+                                Ok(SystemPublicKeyRotationOutcome::Confirmed(_)) => {
                                     pending_update_key.set(None);
                                     update_key_error.set(None);
-                                    // TODO: Show success toast with message
+                                }
+                                Ok(SystemPublicKeyRotationOutcome::ConfirmedAfterAmbiguousResponse {
+                                    warning,
+                                    ..
+                                }) => {
+                                    pending_update_key.set(None);
+                                    update_key_error.set(None);
+                                    api_notice.set(Some(warning));
                                 }
                                 Err(error_message) => {
-                                    update_key_error.set(Some(error_message));
+                                    let prefix = if error_message.outcome_unknown() {
+                                        "Rotation outcome is unknown. "
+                                    } else {
+                                        ""
+                                    };
+                                    update_key_error
+                                        .set(Some(format!("{prefix}{error_message}")));
                                 }
                             }
+                            update_key_in_flight.set(false);
                         });
                     }
                 }
@@ -1089,6 +1106,9 @@ pub fn SystemsListView() -> Element {
                              }
                          });
                     },
+                    on_key_rotated: move |updated_detail: SystemDetail| {
+                        edit_modal_system.set(Some(updated_detail));
+                    },
                     on_delete: move |_| {
                         let system_id = detail.id;
                         edit_modal_error.set(None);
@@ -1116,6 +1136,32 @@ pub fn SystemsListView() -> Element {
 
         }
     }
+}
+
+fn system_registration_prefill() -> Option<(String, String, String, String)> {
+    let search = web_sys::window()?.location().search().ok()?;
+    let values = search
+        .trim_start_matches('?')
+        .split('&')
+        .filter_map(|part| part.split_once('='))
+        .map(|(key, value)| {
+            let decoded: String = js_sys::decode_uri_component(value)
+                .unwrap_or_else(|_| value.into())
+                .into();
+            (key, decoded)
+        })
+        .collect::<std::collections::HashMap<_, _>>();
+    if values.get("add").map(String::as_str) != Some("1") {
+        return None;
+    }
+    let hostname = values.get("hostname")?.clone();
+    let configuration = values
+        .get("configuration")
+        .cloned()
+        .unwrap_or_else(|| hostname.clone());
+    let flake_name = values.get("flake_name")?.clone();
+    let branch = values.get("branch").cloned().unwrap_or_default();
+    Some((hostname, configuration, flake_name, branch))
 }
 
 #[component]

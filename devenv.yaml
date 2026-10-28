@@ -1,0 +1,35 @@
+# Native devenv project configuration for the TASK-462 parallel-worktree
+# development workflow. See devenv.nix for the process definitions and
+# docs/agents/devenv-workflow.md for how to use it.
+#
+# This is deliberately NOT devenv's flake-integration mode
+# (`devenv.lib.mkShell` in flake.nix). Flake integration evaluates
+# `processes.*.ports.<port>.value` through plain `nix build`/`nix develop`,
+# which never has devenv's own port-scanning primop available, so the
+# "resolved" port is always just the requested base value, unchanged, even
+# when that port is already in use — verified empirically while building
+# this task (see TASK-462.1 verification notes). Only devenv's native
+# project format (this file plus devenv.nix, driven by the real `devenv`
+# CLI binary, which embeds its own Nix evaluator with that primop) performs
+# genuine dynamic port allocation. `flake.nix`'s additive `devShells.devenv`
+# output exists only to put that CLI on `PATH`; it does not evaluate this
+# configuration itself.
+inputs:
+  # Pinned to the exact revision flake.nix's own `nixpkgs` input is locked
+  # to as of this task, so packages built here reuse the same store paths
+  # (and Nix store cache) as everything else in the repository instead of
+  # fetching and evaluating a second, independently-resolved nixpkgs tree.
+  # This is a point-in-time match, not a follow-forever link: update it by
+  # hand if it drifts meaningfully from flake.lock's `nixpkgs` node.
+  nixpkgs:
+    url: github:nixos/nixpkgs/ee3132cea5c2a76873cb5fc0d20b7e66a432d22f
+  # This repository's own flake, referenced by local path so devenv.nix can
+  # reuse its Snowfall-generated `overlays.default` (the `crystal-forge.*`
+  # package namespace) instead of re-deriving cf-server, cf-keygen, and the
+  # other dev-stack binaries a second time.
+  crystalForge:
+    url: path:.
+  # Dioxus CLI pinned to the same application-compatible 0.7.3 release
+  # flake.nix's `nixpkgs-dioxus-cli` input uses, for the same reason.
+  nixpkgsDioxusCli:
+    url: github:NixOS/nixpkgs/09061f748ee21f68a089cd5d91ec1859cd93d0be

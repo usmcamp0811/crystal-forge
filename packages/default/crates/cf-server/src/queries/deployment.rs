@@ -1,5 +1,4 @@
 use crate::models::systems::System;
-use crate::queries::system_events::set_pending_deployment_target_tx;
 use anyhow::Result;
 use sqlx::PgPool;
 
@@ -47,26 +46,41 @@ pub async fn update_desired_target_with_source(
     desired_target: Option<&str>,
     source: &str,
 ) -> Result<()> {
+    if let Some(target) = desired_target {
+        let system_id =
+            sqlx::query_scalar::<_, uuid::Uuid>("SELECT id FROM systems WHERE hostname = $1")
+                .bind(hostname)
+                .fetch_optional(pool)
+                .await?;
+        let Some(system_id) = system_id else {
+            return Ok(());
+        };
+        let authorization =
+            crate::services::composite_enforcement::authorize_and_set_system_target(
+                pool, system_id, target, source,
+            )
+            .await?;
+        if !authorization.allowed() {
+            anyhow::bail!(authorization.detail);
+        }
+        return Ok(());
+    }
+
     let mut tx = pool.begin().await?;
 
-    let system_id = sqlx::query_scalar::<_, uuid::Uuid>(
+    sqlx::query(
         r#"
         UPDATE systems
         SET desired_target = $1,
             desired_target_set_at = CASE WHEN $1::text IS NULL THEN NULL ELSE NOW() END,
             updated_at = NOW()
         WHERE hostname = $2
-        RETURNING id
         "#,
     )
     .bind(desired_target)
     .bind(hostname)
-    .fetch_optional(&mut *tx)
+    .execute(&mut *tx)
     .await?;
-
-    if let Some(system_id) = system_id {
-        set_pending_deployment_target_tx(&mut tx, system_id, desired_target, source).await?;
-    }
 
     tx.commit().await?;
 

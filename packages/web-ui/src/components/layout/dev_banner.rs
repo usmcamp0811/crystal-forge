@@ -92,6 +92,11 @@ fn EnvironmentBanner(
     }
 }
 
+/// Returns whether authenticated queue metadata identifies mock execution.
+///
+/// Includes session credentials when the API and frontend use different ports.
+/// An unavailable or unauthorized response leaves the banner disabled; that
+/// absence does not establish native execution mode.
 pub fn use_dev_mode_enabled() -> Signal<bool> {
     let mut is_mock_mode = use_signal(|| false);
     let mut checked = use_signal(|| false);
@@ -111,6 +116,13 @@ pub fn use_dev_mode_enabled() -> Signal<bool> {
 
             let mut opts = web_sys::RequestInit::new();
             opts.set_method("GET");
+            // Match the API client's credential setting without adding another
+            // web-sys feature to the browser toolchain.
+            let _ = js_sys::Reflect::set(
+                opts.as_ref(),
+                &wasm_bindgen::JsValue::from_str("credentials"),
+                &wasm_bindgen::JsValue::from_str("include"),
+            );
 
             if let Ok(request) = web_sys::Request::new_with_str_and_init(&url, &opts) {
                 let response_promise = window.fetch_with_request(&request);

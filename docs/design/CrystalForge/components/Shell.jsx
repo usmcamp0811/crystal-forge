@@ -265,8 +265,21 @@ function useAttentionFlash(key, hasAttention = true, opts = {}) {
     _flashedViews.add(key);
     if (ack) acknowledgeView(key);
     setFlash(true);
-    const t = setTimeout(() => setFlash(false), 3200);
-    return () => clearTimeout(t);
+    // The flash sits on clickable cards, so any sign the user has noticed it —
+    // a click, a hover, a keypress, a scroll — stops it immediately rather than
+    // making them wait out the animation on a target they're trying to hit.
+    let done = false;
+    const stop = () => {
+      if (done) return;
+      done = true;
+      setFlash(false);
+      clearTimeout(t);
+      EVENTS.forEach(ev => window.removeEventListener(ev, stop, true));
+    };
+    const EVENTS = ["pointerdown", "pointermove", "keydown", "wheel"];
+    const t = setTimeout(stop, 2600);
+    EVENTS.forEach(ev => window.addEventListener(ev, stop, true));
+    return stop;
   }, []);
   return flash;
 }
@@ -356,12 +369,17 @@ const NAV_OPS = [
   { key: "scanning", label: "Scanning",    icon: "shield", count: null, route: "scanning" },
 ];
 
+const _poamOverdue = (typeof POAMS !== "undefined" && typeof poamIsOverdue === "function") ? POAMS.filter(poamIsOverdue).length : 0;
+
 const NAV_COMPLIANCE = [
   { key: "cves",       label: "CVEs",       icon: "shield",
     count: _cveCritical || null, attention: _cveCritical > 0,
     countTitle: `${_cveCritical} critical CVEs open across the fleet`, route: "cves" },
   { key: "policies",   label: "Policies",   icon: "file",   route: "policies" },
-  { key: "compliance", label: "Compliance", icon: "check",  route: "compliance" },
+  { key: "compliance", label: "Bundles", icon: "check",  route: "compliance" },
+  { key: "poams",      label: "POA&M",   icon: "activity", route: "poams",
+    count: _poamOverdue || null, attention: _poamOverdue > 0,
+    countTitle: `${_poamOverdue} POA&M item${_poamOverdue === 1 ? "" : "s"} past target completion` },
 ];
 
 const NAV_SYS = [
@@ -521,7 +539,7 @@ function GlobalSearch({ onResult }) {
   );
 }
 
-function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult }) {
+function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult, guide }) {
   const [notifOpen, setNotifOpen] = React.useState(false);
   const bellRef = React.useRef(null);
 
@@ -540,7 +558,7 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
       APPROVAL_QUEUE.filter(a => a.status === "pending").forEach(a => {
         items.push({ id:`apr-${a.id}`, icon:"deploy", color:"#fbbf24",
           title:`${a.hostname} awaiting deploy approval`, sub:`${a.environment} · ${a.policyId} policy · ${a.approvals.length}/${a.neededApprovals} approved`,
-          at: timeAgoShort(a.requestedAt), route:"systems", unread:true });
+          at: timeAgoShort(a.requestedAt), route:"systems", sysId: a.systemId ?? a.system_id, hostname: a.hostname, sysTab:"deploy", unread:true });
       });
     }
     if (typeof ATTESTATION_RECORDS !== "undefined") {
@@ -551,25 +569,56 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
           at: timeAgoShort(r.lastObserved), route:"systems", unread:true });
       });
     }
-    if (typeof POAMS !== "undefined") {
-      POAMS.forEach(p => {
-        if (typeof poamIsOverdue === "function" && poamIsOverdue(p)) {
-          items.push({ id:`poam-overdue-${p.id}`, icon:"activity", color:"#f87171",
-            title:`${p.id} overdue: ${p.title}`, sub:`${p.owner} · was due ${p.due}`,
-            at:"—", route:"compliance", poamId:p.id, unread:true });
-        } else if (p.status === "awaiting_verification") {
-          items.push({ id:`poam-verify-${p.id}`, icon:"activity", color:"#a78bfa",
-            title:`${p.id} awaiting verification: ${p.title}`, sub:`${p.owner} · re-evaluate to confirm the fix`,
-            at:"—", route:"compliance", poamId:p.id, unread:true });
-        }
-      });
+    if (typeof POAMS !== "undefined" && typeof poamIsOverdue === "function") {
+      const od = POAMS.filter(poamIsOverdue);
+      const aw = POAMS.filter(p => p.status === "awaiting_verification");
+      if (od.length > 3) {
+        const cat1 = od.filter(p => p.severity === "high").length;
+        items.push({ id:"poam-overdue", icon:"activity", color:"#f87171",
+          title:`${od.length} POA&M items past target completion`, sub:`${cat1} CAT I · open the overdue queue`,
+          at:"—", route:"poams", focus:{ queue:"late" }, unread:true });
+      } else od.forEach(p => items.push({ id:`poam-overdue-${p.id}`, icon:"activity", color:"#f87171",
+          title:`${p.id} overdue: ${p.title}`, sub:`${p.owner} · was due ${p.due}`,
+          at:"—", route:"poams", poamId:p.id, unread:true }));
+      const ex = (typeof RISK_ACCEPTANCES !== "undefined" && typeof raIsExpired === "function") ? RISK_ACCEPTANCES.filter(raIsExpired) : [];
+      if (ex.length) items.push({ id:"ra-expired", icon:"shield", color:"#fb923c",
+        title:`${ex.length} risk acceptance${ex.length === 1 ? "" : "s"} past review date`, sub:"Renew or convert to a POA&M",
+        at:"—", route:"poams", focus:{ queue:"expired" }, unread:true });
+      if (aw.length > 3) {
+        items.push({ id:"poam-verify", icon:"activity", color:"#a78bfa",
+          title:`${aw.length} POA&M items awaiting verification`, sub:"Re-evaluate to confirm the fixes",
+          at:"—", route:"poams", focus:{ queue:"awaiting" }, unread:true });
+      } else aw.forEach(p => items.push({ id:`poam-verify-${p.id}`, icon:"activity", color:"#a78bfa",
+          title:`${p.id} awaiting verification: ${p.title}`, sub:`${p.owner} · re-evaluate to confirm the fix`,
+          at:"—", route:"poams", poamId:p.id, unread:true }));
     }
-    items.push(
-      { id:"b1", icon:"build",  color:"#f87171", title:"Build failed: openssl-3.3.2", sub:"hydra-02 · attempt 3", at:"12m ago", route:"builds", unread:true },
-      { id:"c1", icon:"shield", color:"#f87171", title:"New critical CVE: CVE-2026-31822", sub:"affects 6 systems · openssl", at:"38m ago", route:"cves", unread:true },
-      { id:"h1", icon:"warn",   color:"#fbbf24", title:"Heartbeat lost: edge-fra-01", sub:"no signal for 6h", at:"1h ago", route:"systems", unread:false },
-      { id:"e1", icon:"eval",   color:"#34d399", title:"Eval complete: infrastructure@a3f8c12", sub:"12 systems · all policies passed", at:"2h ago", route:"evals", unread:false },
-    );
+    // Demo notifications point at REAL fixture rows so clicking one lands on the
+    // actual thing: the failed build's log drawer, that CVE's drawer, that eval.
+    const failedBuild = (typeof HISTORY_BUILDS !== "undefined" ? HISTORY_BUILDS : []).find(b => b.status === "failed");
+    const critCve = (typeof CVES !== "undefined" ? CVES : []).find(c => c.severity === "critical");
+    const doneEval = (typeof HISTORY_EVALS !== "undefined" ? HISTORY_EVALS : []).find(e => e.status === "complete");
+    const staleSys = (typeof SYSTEMS !== "undefined" ? SYSTEMS : []).find(s => s.status === "Offline") ||
+      (typeof SYSTEMS !== "undefined" ? SYSTEMS : []).find(s => s.status === "Unknown" || s.status === "Critical");
+    if (failedBuild) items.push({ id:"b1", icon:"build", color:"#f87171",
+      title:`Build failed: ${failedBuild.failedPkg || failedBuild.name}`,
+      sub:`${failedBuild.system} · attempt ${failedBuild.attempts} · ${failedBuild.flake}`,
+      at:"12m ago", route:"builds", focus:{ sha: failedBuild.commit }, unread:true });
+    if (critCve) items.push({ id:"c1", icon:"shield", color:"#f87171",
+      title:`New critical CVE: ${critCve.id}`,
+      sub:`affects ${critCve.affectedCount} system${critCve.affectedCount===1?"":"s"} · ${critCve.pkg}`,
+      at:"38m ago", route:"cves", focus:{ id: critCve.id }, unread:true });
+    if (staleSys) {
+      const m = staleSys.heartbeatAge;
+      const dur = typeof m === "number" ? (m >= 60 ? `${Math.floor(m/60)}h ${m%60}m` : `${m}m`) : null;
+      items.push({ id:"h1", icon:"warn", color:"#fbbf24",
+        title:`Heartbeat lost: ${staleSys.hostname}`,
+        sub:`${staleSys.environment || staleSys.status}${dur ? ` · no signal for ${dur}` : ""}`,
+        at: staleSys.lastHeartbeat || "—", route:"systems", sysId:staleSys.id, hostname:staleSys.hostname, sysTab:"overview", unread:false });
+    }
+    if (doneEval) items.push({ id:"e1", icon:"eval", color: doneEval.policyFail ? "#fbbf24" : "#34d399",
+      title:`Eval complete: ${doneEval.flake}@${doneEval.commit}`,
+      sub:`${doneEval.systemCount} systems · ${doneEval.policyFail ? `${doneEval.policyFail} policy failure${doneEval.policyFail===1?"":"s"}` : "all policies passed"}`,
+      at:"2h ago", route:"evals", focus:{ sha: doneEval.commit }, unread:false });
     return items;
   }, []);
   const [dismissedIds, setDismissedIds] = React.useState(() => new Set());
@@ -590,6 +639,7 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
         <span className="crumb-current">{crumb?.current || "Systems"}</span>
       </div>
       <GlobalSearch onResult={onSearchResult} />
+      {guide}
       <div ref={bellRef} style={{ position:"relative" }}>
         <button className="btn-icon focus-ring topbar-bell" aria-label="Notifications"
           title="Notifications" onClick={() => setNotifOpen(o => !o)}>
@@ -608,7 +658,7 @@ function Topbar({ theme, onTheme, onTweaks, crumb, onNavigate, onSearchResult })
               )}
               {visibleNotifs.map(n => (
                 <button key={n.id} className={`notif-item focus-ring${n.unread ? " unread" : ""}`}
-                  onClick={() => { setNotifOpen(false); onNavigate?.(n.route); if (n.poamId && typeof openPoamDetail === "function") setTimeout(() => openPoamDetail(n.poamId), 60); }}>
+                  onClick={() => { setNotifOpen(false); if (n.sysId || n.hostname) { window.dispatchEvent(new CustomEvent("cf-open-system", { detail:{ id:n.sysId, hostname:n.hostname, tab:n.sysTab } })); return; } onNavigate?.(n.route, n.focus); if (n.poamId && typeof openPoamDetail === "function") setTimeout(() => openPoamDetail(n.poamId), 60); }}>
                   <span className="notif-icon" style={{ color:n.color, background:`color-mix(in oklab, ${n.color} 16%, transparent)` }}>
                     <Icon name={n.icon} size={13}/>
                   </span>

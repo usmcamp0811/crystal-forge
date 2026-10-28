@@ -23,12 +23,14 @@ const SD_NIX = {
   default: `# Service uses default systemd unit from upstream\n# Add overrides via:\nsystemd.services.<name>.serviceConfig = {\n  PrivateTmp = true;\n  NoNewPrivileges = true;\n  ProtectSystem = "strict";\n};`,
 };
 
-function sdScore(name, i) {
-  let s = name.split("").reduce((a,c) => a+c.charCodeAt(0), 0) + i*97;
+function sdScore(name, i, seed, ageRank) {
+  let s = name.split("").reduce((a,c) => a+c.charCodeAt(0), 0) + i*97 + (seed||0);
   const r = () => { s=(s*9301+49297)%233280; return s/233280; };
   // Well-known hardened services
   const good = ["sshd","crystal-forge-server","crystal-forge-builder","crystal-forge-agent","nix-daemon","prometheus-node-exporter"];
-  const prob = good.includes(name) ? 0.7 : 0.2 + r()*0.25;
+  // Older generations/commits had fewer directives enforced -- hardening accrues over time.
+  const decay = Math.max(0, (ageRank||0) * 0.05);
+  const prob = Math.max(0.05, (good.includes(name) ? 0.7 : 0.2 + r()*0.25) - decay);
   const enabled = SD_COLS.map(c => r() < prob);
   const pts = enabled.filter(Boolean).length;
   const score = Math.round(pts / SD_COLS.length * 100);
@@ -45,7 +47,9 @@ function sdScore(name, i) {
   };
 }
 
-const HARDENING_SERVICES = SD_SERVICES.map(sdScore);
+const HARDENING_SERVICES = SD_SERVICES.map((n,i) => sdScore(n, i, 0, 0));
+
+function _sdSeed(str) { let h = 2166136261; for (let i=0;i<str.length;i++){ h^=str.charCodeAt(i); h=Math.imul(h,16777619); } return h>>>0; }
 
 /* ─── Build workers ─── */
 const BUILD_WORKERS = (typeof __fx === "function" && __fx("builds.workers")) || [
@@ -119,9 +123,13 @@ const BUILD_STATS = {
   totalWorkers: BUILD_WORKERS.length,
 };
 
-// Exposed to Babel components via window
-window.buildSystemHardening = function(sys) {
-  return HARDENING_SERVICES;
+// Exposed to Babel components via window. `rev` identifies the generation/commit being
+// viewed (e.g. "gen7" or a sha) and `ageRank` is how many steps back it is from current
+// (0 = current) -- older revisions show less hardening enforced, as directives accrue over time.
+window.buildSystemHardening = function(sys, rev, ageRank) {
+  if (!rev || !ageRank) return HARDENING_SERVICES;
+  const seed = _sdSeed(String(sys.id) + "|" + rev);
+  return SD_SERVICES.map((n,i) => sdScore(n, i, seed, ageRank));
 };
 
 /* ─── Evaluations ─── */

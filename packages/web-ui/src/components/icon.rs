@@ -2,14 +2,23 @@
 
 use dioxus::prelude::*;
 
+/// Selects an inline SVG glyph rendered by [`Icon`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum IconName {
     Sync,
     Plus,
     Terminal,
+    /// Draws the evaluation list glyph from the approved EvalDrawer design.
+    Evaluation,
+    /// Draws the windowed terminal glyph used by the Evaluation drawer Log tab.
+    EvaluationLog,
+    /// Draws the branch glyph used by the Evaluation drawer graph tab.
+    EvaluationGraph,
     X,
     Download,
     Shield,
+    /// Draws the activity pulse used for remediation in the approved design.
+    Activity,
     Git,
     ChevronRight,
     ChevronDown,
@@ -45,6 +54,22 @@ pub enum IconName {
     /// Clock / history-time icon (design Icon.jsx "history").
     Clock,
     Star,
+    /// Maximizes a tray or drawer.
+    Maximize,
+    /// Restores a maximized tray or drawer.
+    Minimize,
+    /// Archive box icon for retained records.
+    Archive,
+    /// Question-mark circle used by the Guide button (design Icon.jsx "help").
+    Help,
+    /// Information circle (design Icon.jsx "info").
+    Info,
+    /// Points back in walkthrough navigation (design Icon.jsx "chevron-left").
+    ChevronLeft,
+    /// Environment cube used by the setup track (design Icon.jsx "env").
+    Env,
+    /// Binary cache cube used by the setup track (design Icon.jsx "cube").
+    Cube,
 }
 
 #[component]
@@ -68,6 +93,20 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
                 stroke_linecap: "round",
                 stroke_linejoin: "round"
             }
+        },
+        IconName::Evaluation => rsx! {
+            path { d: "M8 6h13M8 12h13M8 18h13", stroke_linecap: "round" }
+            path { d: "M4 6h.01M4 12h.01M4 18h.01", stroke_linecap: "round" }
+        },
+        IconName::EvaluationLog => rsx! {
+            rect { x: "3", y: "4", width: "18", height: "16", rx: "2" }
+            path { d: "m7 9 3 3-3 3M13 15h4", stroke_linecap: "round", stroke_linejoin: "round" }
+        },
+        IconName::EvaluationGraph => rsx! {
+            circle { cx: "6", cy: "6", r: "2.2" }
+            circle { cx: "6", cy: "18", r: "2.2" }
+            circle { cx: "18", cy: "12", r: "2.2" }
+            path { d: "M6 8.2v7.6M8.2 6h7.3a2.5 2.5 0 0 1 2.5 2.5v1.3", stroke_linecap: "round", stroke_linejoin: "round" }
         },
         IconName::Terminal => rsx! {
             polyline {
@@ -98,12 +137,22 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
                 stroke_linejoin: "round"
             }
         },
+        IconName::Archive => rsx! {
+            path {
+                d: "M4 7h16v13H4zM3 4h18v3H3zM9 11h6",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
         IconName::Shield => rsx! {
             path {
                 d: "M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z",
                 stroke_linecap: "round",
                 stroke_linejoin: "round"
             }
+        },
+        IconName::Activity => rsx! {
+            path { d: "M3 12h4l3 8 4-16 3 8h4" }
         },
         IconName::Git => rsx! {
             circle { cx: "12", cy: "18", r: "3" }
@@ -369,6 +418,47 @@ pub fn Icon(name: IconName, #[props(default = 16)] size: u32) -> Element {
                 stroke_linecap: "round",
                 stroke_linejoin: "round"
             }
+        },
+        IconName::Maximize => rsx! {
+            path {
+                d: "M8 3H5a2 2 0 0 0-2 2v3M16 3h3a2 2 0 0 1 2 2v3M8 21H5a2 2 0 0 1-2-2v-3M16 21h3a2 2 0 0 0 2-2v-3",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::Minimize => rsx! {
+            path {
+                d: "M8 3v3a2 2 0 0 1-2 2H3M21 8h-3a2 2 0 0 1-2-2V3M3 16h3a2 2 0 0 1 2 2v3M16 21v-3a2 2 0 0 1 2-2h3",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::Help => rsx! {
+            circle { cx: "12", cy: "12", r: "9" }
+            path {
+                d: "M9.5 9.2a2.6 2.6 0 0 1 5 1c0 1.8-2.5 2.2-2.5 3.8M12 17h.01",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+        },
+        IconName::Info => rsx! {
+            circle { cx: "12", cy: "12", r: "9" }
+            path { d: "M12 11v5M12 8h.01", stroke_linecap: "round", stroke_linejoin: "round" }
+        },
+        IconName::ChevronLeft => rsx! {
+            path { d: "m15 18-6-6 6-6", stroke_linecap: "round", stroke_linejoin: "round" }
+        },
+        IconName::Env => rsx! {
+            path { d: "M4 7l8-4 8 4v10l-8 4-8-4V7z", stroke_linecap: "round", stroke_linejoin: "round" }
+            path { d: "M12 3v18M4 7l8 4 8-4", stroke_linecap: "round", stroke_linejoin: "round" }
+        },
+        IconName::Cube => rsx! {
+            path {
+                d: "M21 16V8a2 2 0 0 0-1-1.7l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.7l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z",
+                stroke_linecap: "round",
+                stroke_linejoin: "round"
+            }
+            path { d: "m3.3 7 8.7 5 8.7-5M12 22V12", stroke_linecap: "round", stroke_linejoin: "round" }
         },
     };
 

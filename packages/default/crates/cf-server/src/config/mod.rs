@@ -29,6 +29,9 @@ use std::env;
 use std::time::Duration;
 use tokio_postgres::NoTls;
 
+#[cfg(test)]
+mod database_url_tests;
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Server-side database operations for CrystalForgeConfig
 //

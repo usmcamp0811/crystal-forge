@@ -5,9 +5,12 @@
 //! Crystal Forge extension namespace.
 //!
 //! Only database-free modules live here. Persistence-bound XCCDF code
-//! (`importer`, `import_models`, `export_models`, `xml_writer`,
-//! `disa_stig_adapter`) remains in `cf-server`.
+//! (`disa_stig_adapter` and the database queries behind
+//! `exact_technical_match`) remains in `cf-server`, as does the async
+//! `validate_cf_native_document_async` wrapper, because this crate depends on
+//! no async runtime.
 
+pub mod custom_check;
 pub mod exact_technical_match;
 pub mod export_models;
 pub mod import_models;

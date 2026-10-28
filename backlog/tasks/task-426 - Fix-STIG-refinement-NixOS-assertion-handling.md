@@ -1,11 +1,11 @@
 ---
 id: TASK-426
 title: Fix STIG refinement NixOS assertion handling
-status: In Progress
+status: To Do
 assignee:
   - '@Matt Camp'
 created_date: '2026-08-16 15:51'
-updated_date: '2026-08-16 16:33'
+updated_date: '2026-09-07 01:27'
 labels: []
 dependencies: []
 references:
@@ -52,6 +52,8 @@ Preserve structured inferred NixOS option assertions from STIG preview through r
 
 <!-- SECTION:NOTES:BEGIN -->
 Implemented and pushed as commit 057d5bda on remote branch task-426-stig-nixos-assertion-handling. Web UI build passed with 174 tests. Server inference test command was blocked by unavailable PostgreSQL/SQLx connection on the local environment.
+
+Backlog grooming (2026-09-06): Found In Progress with no active lock and no worktree. Notes claim a push to remote branch task-426-stig-nixos-assertion-handling, but no such branch currently exists on origin (a related regression was separately cherry-picked into TASK-422's branch per that task's notes). Returned to To Do.
 <!-- SECTION:NOTES:END -->
 
 ## Comments

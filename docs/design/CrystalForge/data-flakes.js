@@ -150,7 +150,10 @@ const FLAKE_COMMITS = (typeof __fx === "function" && __fx("flakes.commits")) || 
   const AUTHORS = ["mreyes","jpark","dchen","ops-bot","kthomas","arao","linus.h"];
   const TIMES = (i) => i < 1 ? "2h ago" : i < 4 ? `${i}d ago` : i < 14 ? `${Math.floor(i)}d ago` : i < 35 ? `${Math.floor(i/7)}w ago` : `${Math.floor(i/30)}mo ago`;
   const ALPHA = "abcdef0123456789";
-  const sha = (n) => Array.from({length:7}, (_,i)=>ALPHA[(n*i*53+i*17+n*7) % 16]).join("");
+  // Shas must be unique — a colliding sha breaks commit keys and makes any
+  // commit-focused deep link ambiguous. The low 3 hex digits encode the index,
+  // which guarantees uniqueness; the high 4 are cosmetic scatter.
+  const sha = (n) => Array.from({length:4}, (_,i)=>ALPHA[(n*i*53+i*17+n*7) % 16]).join("") + n.toString(16).padStart(3, "0");
 
   const extra = [];
   for (let i = base["fl-infra"].length; i < 78; i++) {
@@ -185,6 +188,13 @@ function flakeCommitFiles(sha, n) {
     .map((f,i) => ({...f, _sort:((seed*(i+1)*9301)%100)}))
     .sort((a,b)=>a._sort-b._sort)
     .slice(0, Math.min(n, CHANGED_FILE_POOL.length));
+}
+
+// Managed system count — DERIVED from the fleet, not a registry field, so the
+// number can't contradict the flake explorer's Systems tab.
+function flakeManagedCount(flake) {
+  const name = typeof flake === "string" ? flake : (flake && flake.name);
+  return (typeof SYSTEMS !== "undefined" ? SYSTEMS : []).filter(s => s.flake === name).length;
 }
 
 // Environments a flake currently spans — DERIVED from the systems that use it,

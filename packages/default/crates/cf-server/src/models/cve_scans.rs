@@ -112,12 +112,22 @@ pub enum SecurityRiskLevel {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, sqlx::Type)]
 #[sqlx(type_name = "varchar")]
 pub enum ScanStatus {
+    /// The exact derivation has not produced a build output.
+    #[sqlx(rename = "awaiting_build")]
+    AwaitingBuild,
+    /// The build exists but no completed cache publication is available.
+    #[sqlx(rename = "awaiting_closure")]
+    AwaitingClosure,
+    /// The scan can be claimed by an executor.
     #[sqlx(rename = "pending")]
     Pending,
+    /// An execution token and lease own the scan.
     #[sqlx(rename = "in_progress")]
     InProgress,
+    /// The scan produced terminal evidence.
     #[sqlx(rename = "completed")]
     Completed,
+    /// The scan ended without completed evidence.
     #[sqlx(rename = "failed")]
     Failed,
 }

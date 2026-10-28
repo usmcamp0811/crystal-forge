@@ -59,17 +59,17 @@ tags:
 
 ### File Structure
 
-```
-packages/web-ui/src/
-├── views/
-│   └── flakes_list.rs              ← Complete rewrite
-├── components/
-│   ├── flake_tray.rs               ← NEW: Side tray component
-│   ├── pipeline_status.rs          ← NEW: Pipeline pills/dots/arrows
-│   ├── diff_modal.rs               ← NEW: File diff viewer modal
-│   └── mod.rs                      ← Update exports
-└── api/
-    └── models.rs                   ← Add new data models
+```mermaid
+%% diagram-id: backlog-doc7-flakes-view-file-structure
+flowchart TD
+    root["packages/web-ui/src/"] --> views["views/"]
+    views --> list["flakes_list.rs — Complete rewrite"]
+    root --> components["components/"]
+    components --> tray["flake_tray.rs — NEW: Side tray component"]
+    components --> status["pipeline_status.rs — NEW: Pipeline pills/dots/arrows"]
+    components --> diff["diff_modal.rs — NEW: File diff viewer modal"]
+    components --> mod["mod.rs — Update exports"]
+    root --> api["api/"] --> models["models.rs — Add new data models"]
 ```
 
 ---

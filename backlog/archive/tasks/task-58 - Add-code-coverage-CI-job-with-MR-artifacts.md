@@ -60,15 +60,16 @@ Create a GitLab CI job that computes code coverage for Rust tests and generates 
 - Output formats: HTML (detailed), JSON (machine-readable), Markdown (MR summary)
 
 ### Artifact Structure
-```
-coverage-report/
-├── index.html          # Main HTML coverage report
-├── summary.md          # Markdown summary for MR
-├── coverage.json       # Machine-readable coverage data
-└── detailed/           # Per-file HTML reports
-    ├── src/
-    │   └── main.rs.html
-    └── ...
+```mermaid
+%% diagram-id: backlog-task58-coverage-report-artifact-tree
+flowchart TD
+    root["coverage-report/"] --> index["index.html — Main HTML coverage report"]
+    root --> summary["summary.md — Markdown summary for MR"]
+    root --> json["coverage.json — Machine-readable coverage data"]
+    root --> detailed["detailed/ — Per-file HTML reports"]
+    detailed --> src["src/"]
+    src --> main["main.rs.html"]
+    detailed --> other["..."]
 ```
 
 ### CI Integration

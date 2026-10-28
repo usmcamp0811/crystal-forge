@@ -21,11 +21,11 @@ use crystal_forge::{
         agent::{deployment_failed, deployment_started, heartbeat, state},
         agent_request::CFState,
         api::{
-            admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status, auth_whoami,
-            builders, caches, commits, compliance, config_health, cves, dashboard,
+            acceptance_register, admin, auth_dev, auth_local, auth_oidc, auth_session, auth_status,
+            auth_whoami, builders, caches, commits, compliance, config_health, cves, dashboard,
             deployment_policies, deployments, environments, flakes, framework_requirements,
-            hardening, navigation, scanning, setup_wizard, systems, user_notifications,
-            user_preferences, user_sessions,
+            hardening, navigation, nixos_options, poam, register_export, scanning, setup_wizard,
+            systems, user_notifications, user_preferences, user_sessions,
         },
         status,
         webhook::webhook_handler,
@@ -97,6 +97,52 @@ async fn main() -> anyhow::Result<()> {
     let pool = db_pool().await?;
     tokio::spawn(memory_monitor_task(pool.clone()));
     sqlx::migrate!("./migrations").run(&pool).await?;
+    let reclaimed =
+        crystal_forge::queries::evaluation_snapshots::reclaim_orphaned_snapshot_content(&pool)
+            .await?;
+    if !reclaimed.is_empty() {
+        info!(
+            deployment_binding_rows = reclaimed.deployment_binding_rows,
+            derivation_rows = reclaimed.derivation_rows,
+            commit_rows = reclaimed.commit_rows,
+            artifact_rows = reclaimed.artifact_rows,
+            option_content_rows = reclaimed.option_content_rows,
+            flake_content_rows = reclaimed.flake_content_rows,
+            "reclaimed orphaned snapshot content"
+        );
+    }
+    let snapshot_gc_pool = pool.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(std::time::Duration::from_secs(15 * 60));
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            // Each pass is bounded in SQL. Loop until both content tables are
+            // drained so a large evaluator retry cannot leave permanent debris.
+            loop {
+                match crystal_forge::queries::evaluation_snapshots::reclaim_orphaned_snapshot_content(
+                    &snapshot_gc_pool,
+                )
+                .await
+                {
+                    Ok(progress) if progress.is_empty() => break,
+                    Ok(progress) => info!(
+                        deployment_binding_rows = progress.deployment_binding_rows,
+                        derivation_rows = progress.derivation_rows,
+                        commit_rows = progress.commit_rows,
+                        artifact_rows = progress.artifact_rows,
+                        option_content_rows = progress.option_content_rows,
+                        flake_content_rows = progress.flake_content_rows,
+                        "reclaimed orphaned snapshot content"
+                    ),
+                    Err(error) => {
+                        warn!(error = %error, "snapshot content reclamation failed");
+                        break;
+                    }
+                }
+            }
+        }
+    });
     let encrypted_rows = encrypt_plaintext_cache_secrets(&pool).await?;
     if encrypted_rows > 0 {
         info!(
@@ -229,8 +275,90 @@ async fn main() -> anyhow::Result<()> {
         .route("/webhook", post(webhook_handler))
         // REST API v1
         .route(
+            "/api/v1/nixos/options",
+            get(nixos_options::search_nixos_options),
+        )
+        .route(
             "/api/v1/dashboard/summary",
             get(dashboard::dashboard_summary),
+        )
+        .route("/api/v1/poams", get(poam::list).post(poam::create))
+        .route("/api/v1/poams/cves", post(poam::create_cve))
+        .route("/api/v1/poams/dashboard", get(poam::dashboard))
+        .route("/api/v1/poams/dashboard/watchlist", get(poam::watchlist))
+        .route("/api/v1/poams/rollups/systems", get(poam::system_rollups))
+        .route("/api/v1/poams/rollups/bundles", get(poam::bundle_rollups))
+        .route(
+            "/api/v1/poams/relationships/findings",
+            get(poam::finding_relationships),
+        )
+        .route(
+            "/api/v1/poams/relationships/assignments",
+            get(poam::assignment_relationships),
+        )
+        .route(
+            "/api/v1/poams/relationships/cves",
+            get(poam::cve_relationships),
+        )
+        .route("/api/v1/poams/compatible", get(poam::compatible_poams))
+        .route("/api/v1/poams/assignees", get(poam::assignee_catalog))
+        .route("/api/v1/poams/:id", get(poam::get).patch(poam::update))
+        .route("/api/v1/poams/:id/transition", post(poam::transition))
+        .route("/api/v1/poams/:id/notes", post(poam::note))
+        .route("/api/v1/poams/:id/milestones", post(poam::add_milestone))
+        .route(
+            "/api/v1/poams/:id/milestones/:milestone_id",
+            patch(poam::update_milestone).delete(poam::remove_milestone),
+        )
+        .route("/api/v1/poams/:id/findings", post(poam::link_finding))
+        .route(
+            "/api/v1/poams/:id/findings/:finding_id",
+            delete(poam::unlink_finding),
+        )
+        .route(
+            "/api/v1/poams/:id/cve-findings",
+            post(poam::link_cve_finding),
+        )
+        .route(
+            "/api/v1/poams/:id/cve-findings/:finding_id",
+            delete(poam::unlink_cve_finding),
+        )
+        .route("/api/v1/poams/:id/assignments", post(poam::link_assignment))
+        .route(
+            "/api/v1/poams/:id/assignments/:assignment_version_id",
+            delete(poam::unlink_assignment),
+        )
+        .route("/api/v1/poams/:id/compatible", get(poam::compatible))
+        .route("/api/v1/poams/:id/verify", post(poam::verify))
+        .route("/api/v1/poams/:id/close", post(poam::close))
+        .route("/api/v1/poams/:id/reopen", post(poam::reopen))
+        .route(
+            "/api/v1/finding-waivers",
+            get(poam::list_waivers).post(poam::create_waiver),
+        )
+        .route("/api/v1/finding-waivers/:id", get(poam::get_waiver))
+        .route("/api/v1/acceptances", get(acceptance_register::list))
+        .route("/api/v1/poams/export", get(poam::export))
+        .route("/api/v1/register/export", get(register_export::export))
+        .route(
+            "/api/v1/acceptances/export",
+            get(acceptance_register::export),
+        )
+        .route(
+            "/api/v1/acceptances/:source/:id/renew",
+            post(acceptance_register::renew),
+        )
+        .route(
+            "/api/v1/acceptances/:source/:id/convert",
+            post(acceptance_register::convert),
+        )
+        .route(
+            "/api/v1/finding-waivers/:id/status",
+            post(poam::decide_waiver),
+        )
+        .route(
+            "/api/v1/dashboard/activity",
+            get(dashboard::dashboard_activity),
         )
         .route(
             "/api/v1/cves/summary",
@@ -279,6 +407,10 @@ async fn main() -> anyhow::Result<()> {
             post(user_notifications::read_all_notifications),
         )
         .route(
+            "/api/v1/user/notifications/dismiss-all",
+            post(user_notifications::dismiss_all_notifications_handler),
+        )
+        .route(
             "/api/v1/user/notifications/:notification_id/read",
             post(user_notifications::read_notification),
         )
@@ -297,13 +429,39 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/cves", get(cves::list_cves))
         .route("/api/v1/cves/grouped", get(cves::list_cves_grouped))
+        .route(
+            "/api/v1/cves/inventory/groups",
+            get(cves::list_inventory_groups),
+        )
+        .route(
+            "/api/v1/cves/inventory/members",
+            get(cves::list_inventory_members),
+        )
+        .route(
+            "/api/v1/cves/inventory/pairs",
+            get(cves::list_inventory_pairs),
+        )
         .route("/api/v1/cves/stats", get(cves::get_fleet_stats))
         .route("/api/v1/cves/packages", get(cves::list_package_names))
         .route(
             "/api/v1/cves/rescan-fleet",
             post(cves::trigger_fleet_rescan),
         )
+        .route(
+            "/api/v1/cves/rescan/:derivation_id",
+            post(cves::trigger_derivation_rescan),
+        )
         .route("/api/v1/cves/export", get(cves::export_cves))
+        .route(
+            "/api/v1/cves/batch-detail",
+            post(poam::fleet_cve_batch_detail),
+        )
+        .route(
+            "/api/v1/cves/batch-triage",
+            post(poam::triage_fleet_cves_batch),
+        )
+        .route("/api/v1/cves/:cve_id/fleet", get(poam::fleet_cve_detail))
+        .route("/api/v1/cves/:cve_id/triage", post(poam::triage_fleet_cve))
         .route("/api/v1/cves/:cve_id", get(cves::get_cve_detail))
         .route("/api/v1/cves/:cve_id/systems", get(cves::get_cve_systems))
         .route(
@@ -316,6 +474,14 @@ async fn main() -> anyhow::Result<()> {
         )
         .route("/api/v1/scanning/stats", get(scanning::get_scanning_stats))
         .route("/api/v1/scanning/queue", get(scanning::get_scanning_queue))
+        .route(
+            "/api/v1/scanning/scans",
+            get(scanning::get_scanning_scan_records).patch(scanning::update_scanning_archive),
+        )
+        .route(
+            "/api/v1/scanning/scans/:scan_id",
+            get(scanning::get_scanning_scan_detail),
+        )
         .route(
             "/api/v1/scanning/systems",
             get(scanning::get_scanning_systems),
@@ -356,10 +522,30 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/systems/:id",
             get(systems::get_system).patch(systems::update_system_handler),
         )
+        .route(
+            "/api/v1/systems/:id/evaluation-lifecycle",
+            put(systems::evaluation_lifecycle::put_evaluation_lifecycle),
+        )
         .route("/api/v1/systems/:id/cves", get(systems::get_system_cves))
+        .route(
+            "/api/v1/systems/:id/cve-inventory",
+            get(systems::get_system_cve_inventory),
+        )
+        .route(
+            "/api/v1/systems/:id/cve-inventory-page",
+            get(systems::get_system_cve_inventory_page),
+        )
+        .route(
+            "/api/v1/systems/:id/cve-inventory-sources",
+            get(systems::get_system_cve_inventory_candidates),
+        )
         .route(
             "/api/v1/systems/:id/cves/:cve_id/justification",
             put(systems::save_system_cve_justification),
+        )
+        .route(
+            "/api/v1/systems/:id/cves/:cve_id/triage",
+            get(poam::system_cve_triage_detail).post(poam::triage_system_cve),
         )
         .route(
             "/api/v1/systems/:id/cve-scan-eligibility",
@@ -372,6 +558,10 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/systems/:id/hardening",
             get(hardening::get_system_hardening),
+        )
+        .route(
+            "/api/v1/systems/:id/hardening-inventory",
+            get(hardening::get_system_hardening_inventory),
         )
         .route(
             "/api/v1/systems/:id/hardening/justifications",
@@ -414,6 +604,38 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/systems/:id/generations",
             get(systems::get_system_generations),
+        )
+        .route(
+            "/api/v1/systems/:id/evaluated-options",
+            get(systems::get_system_evaluated_options),
+        )
+        .route(
+            "/api/v1/systems/:id/evaluation-summary",
+            get(systems::get_system_evaluation_summary),
+        )
+        .route(
+            "/api/v1/systems/:id/evaluation-module-sources",
+            get(systems::get_system_evaluation_module_sources),
+        )
+        .route(
+            "/api/v1/systems/:id/evaluations/:revision",
+            post(systems::queue_system_evaluation_prerequisite),
+        )
+        .route(
+            "/api/v1/systems/:id/config-inspections/:revision",
+            post(systems::queue_system_config_inspection),
+        )
+        .route(
+            "/api/v1/systems/:id/config-observations/:revision",
+            post(systems::create_system_config_observation),
+        )
+        .route(
+            "/api/v1/systems/:id/config-observation-requests/:request_id",
+            get(systems::get_system_config_observation_request),
+        )
+        .route(
+            "/api/v1/systems/:id/config-observations/by-id/:observation_id",
+            get(systems::get_system_config_observation),
         )
         .route(
             "/api/v1/systems/:id/verify-generation-closure",
@@ -652,6 +874,10 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/deployment-policies/:id/deletion-eligibility",
             get(deployment_policies::get_deployment_policy_deletion_eligibility),
         )
+        .route(
+            "/api/v1/deployment-policies/bulk-delete",
+            post(deployment_policies::bulk_delete_deployment_policies),
+        )
         // Deployment policy workflow endpoints (approvals, rollout status)
         .route(
             "/api/v1/deployments/commit/:commit_id/approve",
@@ -694,6 +920,14 @@ async fn main() -> anyhow::Result<()> {
             post(flakes::accept_flake_history_rewrite),
         )
         .route("/api/v1/flakes/timelines", get(flakes::get_flake_timelines))
+        .route(
+            "/api/v1/flakes/:id/revisions/:revision/outputs",
+            get(flakes::get_flake_revision_outputs),
+        )
+        .route(
+            "/api/v1/flakes/:id/revisions/:revision/modules/:module/declarations",
+            get(flakes::get_flake_module_declarations),
+        )
         .route(
             "/api/v1/flakes/:id/commits/:hash/diff",
             get(flakes::get_commit_diff_handler),
@@ -755,6 +989,7 @@ async fn main() -> anyhow::Result<()> {
             "/api/v1/build-jobs/recent",
             get(builders::list_recent_build_jobs),
         )
+        .route("/api/v1/build-jobs/:id", get(builders::get_build_attempt))
         .route(
             "/api/v1/build-jobs/:id/prioritize",
             post(builders::prioritize_build_job),
@@ -783,6 +1018,26 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/builders/:id/next-job",
             get(builders::get_next_job).post(builders::get_next_job),
+        )
+        .route(
+            "/api/v1/builders/:id/cve-scans/claim",
+            post(builders::claim_cve_scan),
+        )
+        .route(
+            "/api/v1/builders/:id/cve-scans/heartbeat",
+            post(builders::heartbeat_cve_scan).layer(DefaultBodyLimit::max(
+                cf_protocol::builder::CVE_SCAN_HEARTBEAT_MAX_BODY_BYTES as usize,
+            )),
+        )
+        .route(
+            "/api/v1/builders/:id/cve-scans/complete",
+            post(builders::complete_cve_scan).layer(DefaultBodyLimit::max(
+                cf_protocol::builder::CVE_SCAN_MAX_BODY_BYTES as usize,
+            )),
+        )
+        .route(
+            "/api/v1/builders/:id/cve-scans/fail",
+            post(builders::fail_cve_scan),
         )
         .route(
             "/api/v1/builders/:id/jobs/:job_id/start",
@@ -855,6 +1110,10 @@ async fn main() -> anyhow::Result<()> {
             get(commits::get_eval_policy_matrix),
         )
         .route(
+            "/api/v1/commits/:commit_id/eval/attempts/:attempt_id/policy-matrix",
+            get(commits::get_eval_policy_matrix_at_attempt),
+        )
+        .route(
             "/api/v1/commits/:commit_id/eval/dependency-graph",
             get(commits::get_eval_dependency_graph),
         )
@@ -920,6 +1179,26 @@ async fn main() -> anyhow::Result<()> {
         .route(
             "/api/v1/caches/test-credentials",
             post(caches::test_cache_destination_credentials),
+        )
+        .route(
+            "/api/v1/caches/:id/test-credentials",
+            post(caches::test_stored_cache_destination_credentials),
+        )
+        .route(
+            "/api/v1/caches/niks3/discover",
+            post(caches::discover_niks3_cache),
+        )
+        .route(
+            "/api/caches/niks3/discover",
+            post(caches::discover_niks3_cache),
+        )
+        .route(
+            "/api/v1/caches/:id/niks3/discover",
+            post(caches::discover_stored_niks3_cache),
+        )
+        .route(
+            "/api/v1/caches/:id/metrics",
+            get(caches::get_cache_metrics),
         )
         .route(
             "/api/v1/caches/:id",
@@ -1003,22 +1282,39 @@ async fn main() -> anyhow::Result<()> {
         }
     }
 
-    #[cfg(feature = "embedded-ui")]
-    {
-        app = app.fallback(get(ui::serve_ui));
-    }
+    app = add_ui_fallback(app);
 
     // Add CORS layer for development (allows frontend dev server to talk to backend)
     // In production, the UI is served from the same origin, so this is permissive for dev
+    let mut allowed_dev_origins = vec![
+        HeaderValue::from_static("http://localhost:8080"),
+        HeaderValue::from_static("http://127.0.0.1:8080"),
+        HeaderValue::from_static("http://localhost:8081"),
+        HeaderValue::from_static("http://127.0.0.1:8081"),
+        HeaderValue::from_static("http://localhost:8000"),
+        HeaderValue::from_static("http://127.0.0.1:8000"),
+    ];
+    // The dynamic-port devenv dev workflow (see devenv.nix) allocates the
+    // web UI dev server's port at runtime, which is not guaranteed to be
+    // one of the fixed ports above (verified empirically while
+    // implementing TASK-462.1: a browser fetch to this server from an
+    // allocated port outside that fixed set fails with no
+    // `Access-Control-Allow-Origin` header, since CORS is an allowlist).
+    // That workflow sets this variable to its own resolved UI origin;
+    // every other workflow (run-ui-dev included) never sets it, so the
+    // fixed allowlist above is unchanged there.
+    if let Ok(dev_origin) = std::env::var("CRYSTAL_FORGE_CORS_DEV_ORIGIN") {
+        if let Ok(value) = HeaderValue::from_str(&dev_origin) {
+            allowed_dev_origins.push(value);
+        } else {
+            warn!(
+                "CRYSTAL_FORGE_CORS_DEV_ORIGIN is not a valid header value; ignoring: {}",
+                dev_origin
+            );
+        }
+    }
     let cors = CorsLayer::new()
-        .allow_origin([
-            HeaderValue::from_static("http://localhost:8080"),
-            HeaderValue::from_static("http://127.0.0.1:8080"),
-            HeaderValue::from_static("http://localhost:8081"),
-            HeaderValue::from_static("http://127.0.0.1:8081"),
-            HeaderValue::from_static("http://localhost:8000"),
-            HeaderValue::from_static("http://127.0.0.1:8000"),
-        ])
+        .allow_origin(allowed_dev_origins)
         .allow_methods([
             Method::GET,
             Method::POST,
@@ -1044,6 +1340,45 @@ async fn main() -> anyhow::Result<()> {
     .await?;
 
     Ok(())
+}
+
+/// Adds the single-page application fallback when the server embeds the UI.
+///
+/// Without the `embedded-ui` feature, the router remains unchanged. Axum then
+/// returns `404 Not Found` for `/` and every other unmatched route. This
+/// negative guarantee prevents a core server from appearing to serve a UI.
+fn add_ui_fallback<S>(app: Router<S>) -> Router<S>
+where
+    S: Clone + Send + Sync + 'static,
+{
+    #[cfg(feature = "embedded-ui")]
+    {
+        app.fallback(get(ui::serve_ui))
+    }
+
+    #[cfg(not(feature = "embedded-ui"))]
+    {
+        app
+    }
+}
+
+#[cfg(all(test, not(feature = "embedded-ui")))]
+mod core_server_tests {
+    use super::add_ui_fallback;
+    use axum::Router;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    #[tokio::test]
+    async fn unmatched_root_route_returns_not_found_without_embedded_ui() {
+        let response = add_ui_fallback(Router::new())
+            .oneshot(Request::new(Body::empty()))
+            .await
+            .expect("an infallible Axum router must return a response");
+
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    }
 }
 
 fn is_local_db_host(host: &str) -> bool {

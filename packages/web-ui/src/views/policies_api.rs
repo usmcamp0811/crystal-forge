@@ -9,7 +9,7 @@ use std::{collections::HashMap, future::Future};
 
 use uuid::Uuid;
 
-use crate::api::client::{fetch_deployment_policies, fetch_deployment_policy, ApiClientError};
+use crate::api::client::{ApiClientError, fetch_deployment_policies, fetch_deployment_policy};
 use crate::api::models::{DeploymentPoliciesListResponse, DeploymentPolicyRecord};
 use crate::components::policy::PolicyDefinition;
 use crate::components::policy::PolicyRevisionSummary;
@@ -152,19 +152,78 @@ pub async fn load_policy_version(
     let record = fetch_deployment_policy(&policy_id)
         .await
         .map_err(|error| error.to_string())?;
-    let mut definition = policy_record_to_definition(record);
-    if definition
+    let definition = policy_record_to_definition(record);
+    policy_definition_for_revision(&definition, policy_version_id).ok_or_else(|| {
+        format!("Policy version {policy_version_id} is not present in policy {policy_id}.")
+    })
+}
+
+/// Project one exact revision of a lineage into a self-contained
+/// `PolicyDefinition`.
+///
+/// Every editor entry point (catalog card/row, policy drawer, compliance
+/// drawer) must hand the editor a single coherent version rather than a
+/// lineage-current object with a different `version_id`. Classification,
+/// enforcement config, evidence, and imported provenance are all taken from the
+/// same revision.
+pub(crate) fn policy_definition_for_revision(
+    policy: &PolicyDefinition,
+    revision_id: Uuid,
+) -> Option<PolicyDefinition> {
+    let revision = policy
         .revisions
         .iter()
-        .any(|revision| revision.id == policy_version_id)
-    {
-        definition.version_id = Some(policy_version_id);
-        Ok(definition)
-    } else {
-        Err(format!(
-            "Policy version {policy_version_id} is not present in policy {policy_id}."
-        ))
-    }
+        .find(|revision| revision.id == revision_id)?;
+
+    let body = serde_json::to_string_pretty(&serde_json::json!({
+        "policy_type": revision.policy_type,
+        "enabled": revision.enabled,
+        "config": revision.config,
+    }))
+    .unwrap_or_else(|_| "{}".to_string());
+
+    Some(PolicyDefinition {
+        id: policy.id,
+        lineage_id: policy.lineage_id,
+        version_id: Some(revision.id),
+        revision: Some(revision.version.clone()),
+        publication_state: Some(revision.publication_state.clone()),
+        semantic_digest: Some(revision.semantic_digest.clone()),
+        revisions: policy.revisions.clone(),
+        name: revision.name.clone(),
+        description: revision
+            .description
+            .clone()
+            .unwrap_or_else(|| "No description".to_string()),
+        format: policy.format,
+        body,
+        policy_type: Some(revision.policy_type.clone()),
+        updated_at: policy.updated_at.clone(),
+        system_count: policy.system_count,
+        srg_ids: revision.srg_ids.clone(),
+        cci_ids: revision.cci_ids.clone(),
+        category: revision.category.clone(),
+        framework: revision.framework.clone(),
+        severity: revision.severity.clone(),
+        control_family: revision.control_family.clone(),
+        cmmc_level: revision.cmmc_level,
+        cis_section: revision.cis_section.clone(),
+        rationale: revision.rationale.clone(),
+        // Usage counts belong to the lineage-current version; a historical or
+        // freshly derived revision carries no authoritative count.
+        mapped_requirement_count: if Some(revision.id) == policy.version_id {
+            policy.mapped_requirement_count
+        } else {
+            0
+        },
+        bundle_usage_count: if Some(revision.id) == policy.version_id {
+            policy.bundle_usage_count
+        } else {
+            0
+        },
+        evidence_specs: Some(revision.evidence_specs.clone()),
+        provenance: revision.provenance.clone(),
+    })
 }
 
 /// Convert a freshly-created or freshly-fetched backend record to a
@@ -227,6 +286,7 @@ mod tests {
                 created_by: None,
                 created_by_display: None,
                 evidence_specs: Vec::new(),
+                provenance: Vec::new(),
             }],
             mapped_requirement_count: 0,
             bundle_usage_count: 0,
@@ -358,9 +418,11 @@ mod tests {
         for id in platform_ids {
             assert!(loaded.iter().any(|policy| policy.id == id));
         }
-        assert!(loaded
-            .iter()
-            .any(|policy| policy.name == "zzz-platform-004"));
+        assert!(
+            loaded
+                .iter()
+                .any(|policy| policy.name == "zzz-platform-004")
+        );
     }
 
     #[tokio::test]
@@ -612,6 +674,16 @@ fn policy_record_to_definition_with_count(
         .find(|v| Some(v.id) == current_version_id)
         .map(|v| v.evidence_specs.clone());
 
+    // Authoritative imported-origin provenance for the current version. Empty
+    // for policies authored in Crystal Forge; never derived from the name or
+    // any display string.
+    let current_provenance = record
+        .versions
+        .iter()
+        .find(|v| Some(v.id) == current_version_id)
+        .map(|v| v.provenance.clone())
+        .unwrap_or_default();
+
     let revisions: Vec<PolicyRevisionSummary> = record
         .versions
         .into_iter()
@@ -641,6 +713,7 @@ fn policy_record_to_definition_with_count(
             created_by: v.created_by,
             created_by_display: v.created_by_display,
             evidence_specs: v.evidence_specs,
+            provenance: v.provenance,
         })
         .collect();
 
@@ -673,5 +746,6 @@ fn policy_record_to_definition_with_count(
         mapped_requirement_count: record.mapped_requirement_count,
         bundle_usage_count: record.bundle_usage_count,
         evidence_specs: current_evidence_specs,
+        provenance: current_provenance,
     }
 }

@@ -1,24 +1,36 @@
-// Time window policy evaluation service
-// Checks if current time falls within configured deployment windows
+//! Evaluates deployment time-window policies.
+//!
+//! Windows use configured IANA time zones and inclusive start and end times.
+//! Overnight windows attribute their early-morning segment to the day on which
+//! the window started. Invalid configuration fails closed with a reason.
 
-use chrono::{Datelike, NaiveTime, Timelike, Utc};
+use chrono::{Datelike, Timelike, Utc};
 use chrono_tz::Tz;
 
 use crate::models::deployment_policies::TimeWindowConfig;
 
-/// Result of time window policy evaluation
+// The parsing and shared-field validation live in the database-free
+// `cf-compliance` crate so offline tools apply the same rules.
+pub use cf_compliance::time_window::{parse_time, validate_window_parts};
+
+/// Describes whether a time-window policy permits deployment.
 #[derive(Debug, Clone)]
 pub struct TimeWindowResult {
+    /// Indicates whether deployment may proceed.
     pub deployment_allowed: bool,
+    /// Explains a block or warning; `None` indicates an in-window decision.
     pub reason: Option<String>,
 }
 
-/// Evaluate a time window policy against current time
+/// Evaluates a time-window policy at the current UTC time.
 pub fn check_time_window(config: &TimeWindowConfig) -> TimeWindowResult {
     check_time_window_at(config, Utc::now())
 }
 
-/// Evaluate a time window policy against a specific timestamp (testable)
+/// Evaluates a time-window policy at a specific UTC timestamp.
+///
+/// Invalid time zones or clock values return a blocked result with a reason.
+/// An out-of-window `warn` action permits deployment and includes a warning.
 pub fn check_time_window_at(
     config: &TimeWindowConfig,
     now_utc: chrono::DateTime<Utc>,
@@ -60,8 +72,7 @@ pub fn check_time_window_at(
         }
     };
 
-    let current_time =
-        NaiveTime::from_hms_opt(now_local.hour(), now_local.minute(), now_local.second()).unwrap();
+    let current_time = now_local.time();
 
     // Helper to get short weekday name
     let weekday_name = |wd: chrono::Weekday| -> &str {
@@ -143,25 +154,22 @@ pub fn check_time_window_at(
     }
 }
 
-/// Parse time string in HH:MM format
-fn parse_time(time_str: &str) -> Result<NaiveTime, String> {
-    let parts: Vec<&str> = time_str.split(':').collect();
-    if parts.len() != 2 {
-        return Err(format!(
-            "Invalid time format '{}', expected HH:MM",
-            time_str
-        ));
+/// Validates a complete time-window policy configuration.
+///
+/// # Errors
+///
+/// Returns an error when the action is not `block` or `warn`, or when any
+/// window field fails [`validate_window_parts`].
+pub fn validate_config(config: &TimeWindowConfig) -> Result<(), String> {
+    if !matches!(config.action.as_str(), "block" | "warn") {
+        return Err("action must be block or warn".to_string());
     }
-
-    let hour: u32 = parts[0]
-        .parse()
-        .map_err(|_| format!("Invalid hour in '{}'", time_str))?;
-    let minute: u32 = parts[1]
-        .parse()
-        .map_err(|_| format!("Invalid minute in '{}'", time_str))?;
-
-    NaiveTime::from_hms_opt(hour, minute, 0)
-        .ok_or_else(|| format!("Hour {} or minute {} out of range", hour, minute))
+    validate_window_parts(
+        &config.days,
+        &config.start_time,
+        &config.end_time,
+        &config.timezone,
+    )
 }
 
 #[cfg(test)]

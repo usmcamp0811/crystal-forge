@@ -8,17 +8,20 @@ use crate::api::client::{
 };
 use crate::api::models::{
     AuthContext, AuthMode, AuthUser, ClassificationBannerConfig, Role, UpdateUserPreferences,
-    UserNotificationDto, UserPreferencesDto,
+    UserPreferencesDto,
 };
 use crate::components::layout::sidebar::{
     MobileDrawer, PreferencesContext, SidebarContext, SidebarNav,
+};
+use crate::components::layout::topbar::{
+    NotificationFeed, NotificationOwner, load_account_notifications,
 };
 use crate::components::layout::{AccountNotificationsContext, TopBar};
 use crate::components::layout::{
     BannerPlacement, DEV_MODE_BANNER_HEIGHT_PX, DevModeBanner, use_dev_mode_enabled,
 };
 use crate::components::notifications::{AlertBanner, AlertSeverity};
-use crate::components::onboarding::OnboardingCoachPanel;
+use crate::components::onboarding::{CoachCallout, CoachController, CoachRole, CoachRoot};
 use crate::routes::Route;
 use crate::state::app_state::{
     AppState, AuthFetchState, ConfigHealthFetchState, set_authenticated_context,
@@ -78,10 +81,8 @@ fn ui_check_mock_auth_context() -> AuthContext {
 }
 
 fn should_show_admin_denied(route: &Route, auth_context: &Option<AuthContext>) -> bool {
-    matches!(
-        route,
-        Route::AdminView { .. } | Route::CvesView { .. } | Route::ScanningView { .. }
-    ) && !auth::is_admin(auth_context)
+    matches!(route, Route::AdminView { .. } | Route::ScanningView { .. })
+        && !auth::is_admin(auth_context)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -168,12 +169,8 @@ pub fn AppShell() -> Element {
     let mut preference_save_in_flight = use_signal(|| false);
     let mut preference_save_user_id = use_signal(|| None::<String>);
     let mut preference_save_generation = use_signal(|| 0_u64);
-    let notification_items = use_signal(Vec::<UserNotificationDto>::new);
-    let unread_count = use_signal(|| 0_i64);
-    let notification_next_cursor = use_signal(|| None::<String>);
-    let notifications_loading = use_signal(|| false);
-    let notifications_loading_more = use_signal(|| false);
-    let notifications_error = use_signal(|| None::<String>);
+    let mut notification_feed = use_signal(NotificationFeed::default);
+    let mut notification_poll_owner = use_signal(|| 0_u64);
     let save_update = Callback::new(move |update: UpdateUserPreferences| {
         save_error.set(None);
         preference_save_pending.with_mut(|pending| {
@@ -185,10 +182,14 @@ pub fn AppShell() -> Element {
         });
     });
 
+    // The overdue count belongs to this authenticated shell. It must not
+    // persist into another user's navigation after the shell unmounts.
+    let poam_overdue = use_signal(|| None::<i64>);
     // Provide sidebar context
     use_context_provider(|| SidebarContext {
         is_mobile_drawer_open,
         is_collapsed,
+        poam_overdue,
     });
 
     // Provide preferences context
@@ -200,16 +201,62 @@ pub fn AppShell() -> Element {
     });
 
     use_context_provider(|| AccountNotificationsContext {
-        items: notification_items,
-        unread_count,
-        next_cursor: notification_next_cursor,
-        loading: notifications_loading,
-        loading_more: notifications_loading_more,
-        error: notifications_error,
+        feed: notification_feed,
+    });
+
+    let notification_auth = use_memo(move || {
+        let state = app_state.read();
+        let user_id = if matches!(state.auth_fetch_state, AuthFetchState::Loaded)
+            && auth::is_authenticated(&state.auth)
+        {
+            state
+                .auth
+                .as_ref()
+                .and_then(|auth| auth.user.as_ref().map(|user| user.id.clone()))
+        } else {
+            None
+        };
+        (user_id, state.auth_generation)
+    });
+
+    use_effect(move || {
+        let (auth_user_id, auth_generation) = notification_auth();
+
+        let poll_owner = (*notification_poll_owner.peek()).saturating_add(1);
+        notification_poll_owner.set(poll_owner);
+        let owner = auth_user_id.map(|user_id| NotificationOwner::new(user_id, auth_generation));
+        notification_feed.write().reset(owner.clone());
+
+        let Some(owner) = owner else {
+            return;
+        };
+
+        spawn(async move {
+            loop {
+                if *notification_poll_owner.peek() != poll_owner {
+                    break;
+                }
+                load_account_notifications(
+                    AccountNotificationsContext {
+                        feed: notification_feed,
+                    },
+                    owner.clone(),
+                    false,
+                    false,
+                );
+                gloo_timers::future::TimeoutFuture::new(30_000).await;
+            }
+        });
     });
 
     let breadcrumb_override = use_signal(|| None::<(String, String)>);
     use_context_provider(|| breadcrumb_override);
+
+    // The coach role comes from the authenticated session and is never chosen
+    // in the browser. The controller is shared by the top bar Guide button, the
+    // coach itself and the Server Management onboarding card.
+    let coach_role = use_memo(move || CoachRole::from_auth(&app_state.read().auth));
+    use_context_provider(|| CoachController::new(coach_role));
 
     // Apply density immediately on load and whenever it changes
     use_effect(move || {
@@ -383,6 +430,13 @@ pub fn AppShell() -> Element {
         };
 
         if preference_save_in_flight() {
+            return;
+        }
+
+        // Subscribe to queued edits before taking ownership. A write alone does
+        // not subscribe this effect, so an idle worker would miss later edits.
+        // Leave an empty queue untouched to avoid scheduling an idle save loop.
+        if preference_save_pending.read().is_none() {
             return;
         }
 
@@ -684,13 +738,17 @@ pub fn AppShell() -> Element {
                                 p { class: "text-sm text-amber-200/90", "This page requires an administrator role." }
                             }
                         } else {
+                            CoachCallout {}
                             Outlet::<Route> {}
                         }
                     }
                 }
 
-                if auth::is_admin(&auth_context) {
-                    OnboardingCoachPanel {}
+                // Every authenticated role gets the coach. Only Administrators
+                // load Setup progress, so other roles never call the
+                // Administrator-only setup-progress endpoint.
+                if is_authenticated {
+                    CoachRoot {}
                 }
             }
 
@@ -841,22 +899,18 @@ mod tests {
     }
 
     #[test]
-    fn cve_route_denied_for_non_admin() {
-        let route = Route::CvesView {};
-        assert!(should_show_admin_denied(
+    fn cve_route_uses_authenticated_api_visibility_for_every_role() {
+        let route = Route::CvesView {
+            query: String::new(),
+        };
+        assert!(!should_show_admin_denied(
             &route,
             &auth_context(true, vec![Role::Operator])
         ));
-        assert!(should_show_admin_denied(
+        assert!(!should_show_admin_denied(
             &route,
             &auth_context(true, vec![Role::Viewer])
         ));
-        assert!(should_show_admin_denied(&route, &None));
-    }
-
-    #[test]
-    fn cve_route_allowed_for_admin() {
-        let route = Route::CvesView {};
         assert!(!should_show_admin_denied(
             &route,
             &auth_context(true, vec![Role::Admin])

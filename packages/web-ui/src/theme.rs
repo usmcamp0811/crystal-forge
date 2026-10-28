@@ -82,6 +82,9 @@ pub mod cve {
 
     pub const LOW_TEXT: &str = "text-blue-400";
     pub const LOW_BG: &str = "bg-blue-400/10";
+
+    /// Uses neutral text for findings without a recognized severity.
+    pub const UNKNOWN_TEXT: &str = "text-gray-400";
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

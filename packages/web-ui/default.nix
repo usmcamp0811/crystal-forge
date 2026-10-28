@@ -7,6 +7,10 @@ let
     version = "0.1.0";
     src = ./.;
     cargoLock.lockFile = ./Cargo.lock;
+    # Test-only oracle used by policy-editor round-trip tests. The production
+    # editor does not consume the design fixture as metadata.
+    CRYSTAL_FORGE_DESIGN_ENFORCEMENT =
+      ../../docs/design/CrystalForge/data-enforcement.js;
 
     nativeBuildInputs = [
       pkgs.rustc

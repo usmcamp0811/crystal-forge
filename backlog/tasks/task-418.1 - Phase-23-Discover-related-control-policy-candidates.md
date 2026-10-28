@@ -1,11 +1,11 @@
 ---
 id: TASK-418.1
 title: 'Phase 23: Discover related-control policy candidates'
-status: In Progress
+status: Done
 assignee:
   - '@agent'
 created_date: '2026-08-12 19:26'
-updated_date: '2026-08-13 02:41'
+updated_date: '2026-09-07 01:27'
 labels: []
 milestone: m-23
 dependencies:
@@ -81,4 +81,6 @@ Phase 22 candidate-discovery slice is complete at pushed commit d94839bf. Verifi
 Correction: TASK-420 was an accidental split and has been returned to Backlog; its empty worktree and branch were deleted. Continue all production UI, mapping, coverage, pixel-parity, and final verification work on TASK-418-cross-framework-requirements only. No application changes were made outside TASK-418.
 
 Started production UI slice directly on TASK-418 branch. Extended web-ui XCCDF DTOs for foreign STIG candidates and mapping semantics; reconciliation now displays candidate match type/confidence/reasons, and reviewed existing-policy refinement captures relationship, coverage, and rationale into mapping_semantics. TASK-420 remains abandoned. web-ui cargo check passes; web-ui cargo fmt --check reports pre-existing formatting differences across unrelated files, so no broad formatter rewrite was applied.
+
+Backlog grooming (2026-09-06): Implementation notes record this subtask's UI/reconciliation slice was completed directly on the parent TASK-418 branch, and parent MR !315 is confirmed merged to dev. Acceptance-criteria checkboxes in this subtask record were never checked off. Status is moved to Done per merged-MR confirmation; the AC list is left unchecked rather than checked retroactively without direct re-verification. Flag for a follow-up audit if a clean AC record is needed.
 <!-- SECTION:NOTES:END -->

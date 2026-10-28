@@ -41,7 +41,7 @@ let
       $out/crystal-forge.html
   '';
 
-  parityDir = "${inputs.self}/checks/web-ui/design-parity";
+  parityDir = "${inputs.self}/packages/devScripts/web-ui/design-parity";
 
   script = pkgs.writeShellApplication {
     name = "cf-generate-design-targets";

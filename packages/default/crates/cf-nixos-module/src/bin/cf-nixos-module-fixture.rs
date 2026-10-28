@@ -1,6 +1,6 @@
 //! Emit deterministic Crystal Forge export fixtures on stdout.
 //!
-//! Used by the `nixos-module-generation` flake check and by integration tests,
+//! Used by the `cf-nixos-module.tests.generation` package test and integration tests,
 //! following the same generated-fixture pattern as `xccdf-export-fixture`.
 
 use std::process::ExitCode;
