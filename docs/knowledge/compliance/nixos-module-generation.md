@@ -69,6 +69,14 @@ Multiple inputs can be combined in one run. Identical duplicate definitions are
 collapsed. Two inputs that define the *same* immutable policy version with
 *different* content are rejected.
 
+A policy version UUID has one lineage across all inputs, not one per document.
+Exports that claim the same version UUID for different lineages are rejected.
+If duplicate policy or bundle versions disagree about `publication_state`
+(`accepted` versus `deprecated`), generation also fails. Lifecycle state is not
+part of the semantic digest, but is emitted in the manifest. Rejecting the
+disagreement prevents input order from choosing the manifest's lifecycle state.
+Obtain consistent exports before trying again.
+
 ## Output layout
 
 ```mermaid
@@ -268,10 +276,42 @@ Exported artifacts are treated as untrusted input:
 * every supplied semantic digest is recomputed and verified, for both policy
   documents and CF-native bundles;
 * Nix contained in an export is never evaluated in order to inspect it;
-* output is confined to `--output` using descriptor-relative, no-follow writes,
-  so a pre-existing symlink inside the output directory can never be written
-  through. For a ZIP input, `source_export_digests` identifies the archive the
-  user supplied, not just the XML member selected from it.
+* existing output files are never opened for writing. The writer creates fresh
+  files and publishes a complete generation by directory rename. Symlinks at
+  the final output name or inside an existing artifact are rejected; external
+  hardlinks retain their original contents;
+* for a ZIP input, `source_export_digests` identifies the archive the user
+  supplied, not just the XML member selected from it.
+
+### Atomic publication and output ownership
+
+`--output` names a dedicated generator-owned directory. An existing directory
+may contain only regular files named `default.nix`, `lib.nix`, and
+`manifest.json`; incomplete or empty directories are permitted. Unrelated
+entries, including the old `policies/` layout, are rejected without changing
+the artifact. Keep consumer files outside this directory.
+
+The generator stages and validates all three files in a private temporary
+sibling on the same filesystem. Initial publication renames that directory
+into place with an absence guard. Regeneration uses Linux
+`renameat2(RENAME_EXCHANGE)`, which publishes the complete directory in one
+operation. Unsupported atomic exchange fails without changing the existing
+artifact; there is no sequential-write or rollback fallback.
+
+The parent directory must allow sibling creation and renaming. Output paths
+such as `.`, `..`, `/`, or mount points that cannot be replaced are unsupported.
+Parent path symlinks are intentionally followed. Existing output directory
+access bits are retained; new output uses mode `0755`. Ownership, ACLs, and
+special mode bits are not copied to the replacement directory.
+
+Handled failures before publication leave the original artifact unchanged.
+Temporary siblings are cleaned after success or handled failure. If cleanup
+fails after publication, the error explicitly states that the new artifact is
+already published and names the retained temporary sibling. Abrupt process
+termination can also leave a temporary sibling. Do not concurrently rename or
+edit the output or staging directories during generation. Atomic publication
+does not promise power-loss durability or a snapshot for readers that open
+different files across the directory exchange.
 
 Because bundle generation uses the exact policy versions the exported bundle
 version froze, output does not change when Crystal Forge later publishes newer

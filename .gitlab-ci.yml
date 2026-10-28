@@ -226,6 +226,7 @@ component-tests:
           cp -rL --no-preserve=mode "$(nix eval --raw "$target.profile.outPath")" "coverage-artifacts/component-$component"
         fi
       done
+    - nix build .#cf-nixos-module .#cf-nixos-module.tests.helper .#cf-nixos-module.tests.generation --no-link -L --show-trace --builders '' --max-jobs 1 --cores 2
     - nix build .#nixos-options-metadata .#oscal-fixture .#okf-knowledge .#xccdf-1-2-schemas -L --show-trace --builders '' --max-jobs 1 --cores 2
     - nix build .#code-metrics.complexity-report --no-link --option substituters https://cache.nixos.org --option extra-substituters '' --option accept-flake-config false --builders '' --max-jobs 1 --cores 2
     - |

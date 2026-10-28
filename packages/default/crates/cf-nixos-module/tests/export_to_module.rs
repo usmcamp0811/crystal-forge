@@ -292,6 +292,43 @@ fn the_same_export_supplied_twice_is_deduplicated() {
 }
 
 #[test]
+fn different_exports_cannot_claim_one_version_for_different_lineages() {
+    let export: serde_json::Value = serde_json::from_str(&policy_set_json()).unwrap();
+    let first = export["policies"][0].clone();
+    let mut second = first.clone();
+    second["lineage_id"] = serde_json::json!("11111111-ffff-ffff-ffff-ffffffffffff");
+    // Lineage is not in the semantic digest: both documents must independently
+    // load successfully before combined-input selection catches the collision.
+    let inputs = load(vec![
+        ("first.json", serde_json::to_vec(&first).unwrap()),
+        ("second.json", serde_json::to_vec(&second).unwrap()),
+    ]);
+    let conflicts = select_policies(&inputs).expect_err("global version collision");
+    assert_eq!(conflicts[0].code, "CF_POLICY_VERSION_LINEAGE_CONFLICT");
+}
+
+#[test]
+fn accepted_and_deprecated_exports_cannot_choose_manifest_metadata_by_order() {
+    let export: serde_json::Value = serde_json::from_str(&policy_set_json()).unwrap();
+    let accepted = export["policies"][0].clone();
+    let mut deprecated = accepted.clone();
+    deprecated["publication_state"] = serde_json::json!("deprecated");
+    let mut inputs = load(vec![
+        ("accepted.json", serde_json::to_vec(&accepted).unwrap()),
+        ("deprecated.json", serde_json::to_vec(&deprecated).unwrap()),
+    ]);
+    assert_eq!(
+        inputs[0].policies[0].semantic_digest,
+        inputs[1].policies[0].semantic_digest
+    );
+    let forward = select_policies(&inputs).expect_err("lifecycle disagreement");
+    inputs.reverse();
+    let reverse = select_policies(&inputs).expect_err("lifecycle disagreement");
+    assert_eq!(forward[0].code, "CF_POLICY_VERSION_LIFECYCLE_CONFLICT");
+    assert_eq!(forward[0].message, reverse[0].message);
+}
+
+#[test]
 fn a_tampered_bundle_digest_is_rejected() {
     let xml = bundle_xccdf_xml();
     let marker = "canonical-model=\"cf-model-json-1\">";
