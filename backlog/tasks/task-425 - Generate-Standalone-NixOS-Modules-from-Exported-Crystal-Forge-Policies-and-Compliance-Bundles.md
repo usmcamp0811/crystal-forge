@@ -7,7 +7,7 @@ status: In Progress
 assignee:
   - '@claude-opus-5'
 created_date: '2026-08-16 15:17'
-updated_date: '2026-10-28 03:40'
+updated_date: '2026-10-28 04:00'
 labels:
   - cli
   - nixos
@@ -24,6 +24,8 @@ references:
   - >-
     https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/317#note_4104197357
   - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2997257917'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2997310583'
+  - 'https://gitlab.com/crystal-forge/crystal-forge/-/jobs/17525939483'
 documentation:
   - >-
     docs/design/CrystalForge/docs/crystal-forge-xccdf-interchange-profile-v0.1.md
@@ -227,10 +229,10 @@ produces `stig-hardening/` with `default.nix`, `manifest.json`, and `policies/*.
 - [ ] #23 cargo fmt --all --check passes
 - [x] #24 SQLX_OFFLINE=true cargo check passes for affected Rust packages
 - [ ] #25 Relevant Nix builds and flake checks pass
-- [ ] #26 Existing component-tests CI job explicitly builds cf-nixos-module plus its helper and generation package tests
-- [ ] #27 Combined inputs reject a policy version UUID claimed by different lineages and reject accepted/deprecated metadata disagreements independently of input order
-- [ ] #28 The three-file artifact is staged and validated before atomic directory publication; hardlinks and symlinks cannot modify external file contents; unrelated entries and unsupported exchange fail without changing existing output
-- [ ] #29 Filesystem regressions cover initial generation regeneration link safety unrelated entries and failed publication; MR description states the approved default-apply behavior
+- [x] #26 Existing component-tests CI job explicitly builds cf-nixos-module plus its helper and generation package tests
+- [x] #27 Combined inputs reject a policy version UUID claimed by different lineages and reject accepted/deprecated metadata disagreements independently of input order
+- [x] #28 The three-file artifact is staged and validated before atomic directory publication; hardlinks and symlinks cannot modify external file contents; unrelated entries and unsupported exchange fail without changing existing output
+- [x] #29 Filesystem regressions cover initial generation regeneration link safety unrelated entries and failed publication; MR description states the approved default-apply behavior
 <!-- AC:END -->
 
 ## Definition of Done
@@ -306,6 +308,12 @@ Local verification: cargo check --all-targets for cf-compliance/cf-nixos-module/
 Limitations: nix flake check --keep-going exceeded the 240-second tool deadline while building the integration derivations; no full-suite pass claimed. Earlier local full server lib run with devshell DATABASE_URL set failed 8 CVE tests (PoolTimedOut, no DB). With DATABASE_URL unset one run hit a child-readiness deadline in unchanged niks3_input_owner_acknowledges_reap_and_cleanup_after_detach; that test passed individually and the packaged full suite passed. No unrelated test changes or retries added. cargo fmt for compliance/generator passes; server fmt has pre-existing src/bin/server.rs drift, left unchanged. Task remains In Progress rather than complete/review-ready pending full verification. MR remains open; not merged.
 
 Refreshed GitLab state for head 4f16b41a: has_conflicts=false, merge_status=can_be_merged, detailed_merge_status=ci_still_running. Pipeline 2997257917 is running; no green current-head result claimed. Unchecked AC23/25 because repository-wide formatting and the full flake check are not green/completed for this revision. Local worktree clean after push; MR note records the exact verification commands and limitations. No merge/deployment performed.
+
+P2 review corrections committed and pushed as 7fefed8d6bd8ebdac357a8f71327101fd242f730 on MR !317 source branch; worktree clean. Exactly five files changed: .gitlab-ci.yml; cf-nixos-module/src/select.rs; src/write.rs; tests/export_to_module.rs; docs/knowledge/compliance/nixos-module-generation.md. Added CLI/helper/generation targets to existing component-tests; no new job/check. Version UUID ownership now checked globally across lineages. Accepted/deprecated disagreements for duplicate policies and bundles are rejected deterministically. Dedicated output directory contract approved by owner: exact three-file staging, atomic EXCHANGE regeneration (NOREPLACE initial publish), no fallback, no existing inode truncation, symlink/unrelated-entry rejection, cleanup and explicit post-publication cleanup errors. No dependencies added.
+
+Current P2 verification: nix develop cargo test -p cf-nixos-module passed (84 lib, 7 CLI, 18 integration); cargo check --all-targets and fmt check passed for generator; Nix CLI/helper/generation/okf-knowledge builds passed; packaged tests include 329 compliance tests and 1 doctest; helper retains 22 assertions; real NixOS module evaluation validates default-apply/explicit-disable plus deterministic bytes/provenance; filesystem tests cover all owner-requested link/failure cases. GitLab CI lint passed. Four integration-check inventory verified unchanged. DoD behavior items checked from these local command/generation/NixOS-evaluation regressions, not from pipeline status; task is NOT complete or merge-ready.
+
+CI blocker: exact-head pipeline 2997310583 remains pending. All check jobs still unassigned after >15 minutes; component-tests job 17525939483 has runner=null and started_at=null. API reports both project runners online/unpaused and runner 31882425 has required nix tag. Scheduling cause not established; no SSH/host access or runner mutation attempted. Need an eligible runner to pick up jobs before CI results can be inspected. Full local nix flake check --keep-going on 7fefed8d exceeded 900-second tool deadline and was interrupted; no aggregate pass claimed. AC23 (repo-wide format drift) and AC25 (full checks) remain unchecked. MR description replaced stale opt-in claims with default-apply/explicit-disable and records tests, publication boundaries and blockers. No merge/deployment.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
