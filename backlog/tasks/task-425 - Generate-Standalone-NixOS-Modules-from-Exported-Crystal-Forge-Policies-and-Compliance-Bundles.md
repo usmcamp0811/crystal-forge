@@ -3,11 +3,11 @@ id: TASK-425
 title: >-
   Generate Standalone NixOS Modules from Exported Crystal Forge Policies and
   Compliance Bundles
-status: Review
+status: In Progress
 assignee:
   - '@claude-opus-5'
-created_date: '2026-08-16 15:17'
-updated_date: '2026-09-02 02:49'
+created_date: 2026-08-16 15:17
+updated_date: '2026-10-29T02:22:00Z'
 labels:
   - cli
   - nixos
@@ -18,9 +18,9 @@ labels:
 dependencies:
   - TASK-412
 references:
-  - 'https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/317'
-  - docs/operator/nixos-module-generation.md
-  - checks/nixos-module-generation/default.nix
+  - https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/317
+  - docs/knowledge/compliance/nixos-module-generation.md
+  - packages/default/crates/cf-nixos-module/nix/tests-generation/default.nix
 documentation:
   - >-
     docs/design/CrystalForge/docs/crystal-forge-xccdf-interchange-profile-v0.1.md
@@ -221,16 +221,16 @@ produces `stig-hardening/` with `default.nix`, `manifest.json`, and `policies/*.
 - [x] #20 Unit tests cover policy selection, deduplication, unsupported policy handling, and conflicts
 - [x] #21 Integration tests cover policy export to generated module to NixOS evaluation
 - [x] #22 Existing Crystal Forge interchange and policy-resolution semantics are reused rather than reimplemented with incompatible behavior
-- [x] #23 cargo fmt --all --check passes
+- [ ] #23 cargo fmt --all --check passes
 - [x] #24 SQLX_OFFLINE=true cargo check passes for affected Rust packages
-- [x] #25 Relevant Nix builds and flake checks pass
+- [ ] #25 Relevant Nix builds and flake checks pass
 <!-- AC:END -->
 
 ## Definition of Done
 <!-- DOD:BEGIN -->
-- [ ] #1 A user can take a valid Crystal Forge policy or compliance-bundle export run one local command and commit or copy the generated module into an unrelated NixOS flake
-- [ ] #2 Importing the generated module yields the same supported NixOS configuration behavior represented by the exported Crystal Forge policy versions without a running Crystal Forge server
-- [ ] #3 The generated module is deterministic auditable standalone and explicit about any policy that could not be converted
+- [x] #1 A user can take a valid Crystal Forge policy or compliance-bundle export run one local command and commit or copy the generated module into an unrelated NixOS flake
+- [x] #2 Importing the generated module yields the same supported NixOS configuration behavior represented by the exported Crystal Forge policy versions without a running Crystal Forge server
+- [x] #3 The generated module is deterministic auditable standalone and explicit about any policy that could not be converted
 <!-- DOD:END -->
 
 ## Implementation Plan
@@ -280,15 +280,13 @@ P2 remediation on commit 696707c8: (1) keep task status In Progress and replace 
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
-Implemented TASK-425 through commit 29d39e2e, then fixed MR !317 review findings in commit 696707c8. The generated artifact is standalone and imports `lib.nix` plus data-only `manifest.json`; importing it applies the selected baseline by default. Consumers can explicitly disable it with `crystal-forge.compliance.<baseline>.enable = false`. There are no per-policy switches and generated definitions remain ordinary NixOS definitions.
+Current implementation: importing the three-file artifact applies the baseline by default; consumers can explicitly disable it. Rust owns compliance semantics; generated Nix applies typed assignments. Shared validation remains database-free, while Nix syntax checks use the packaged parser. Existing immutable identity/version-label checks and atomic directory writer are preserved.
 
-Commit 696707c8 specifically added default-apply/explicit-disable behavior, immutable accepted/deprecated policy lifecycle validation, accepted bundle lifecycle validation, manifest `generated_file`, history-independent output rejection, immutable bundle-version baseline identity, and discriminating regressions. It was rebased onto current `origin/dev` and pushed to MR !317.
+Safety review remediation (code commit fc4f3d20): JSON/TOML exports now run the shared policy configuration validator before extraction, including rule metadata, strict types, and composite execution phase. The missing-field_name regression was observed failing before the fix and passes afterward for JSON and TOML; valid metadata still generates assignments. The manual fixture now uses the shared validator-valid empty-rule form and remains explicitly skipped. The public generation/rendering APIs normalize baselines consistently, with quote/control/Nix interpolation regressions. Baseline normalization is idempotent and bounded to 64 bytes. File reads are bounded before accumulation (plain JSON/TOML/XML 10 MiB; ZIP 50 MiB by content signature); metadata plus a capped read handle oversized/growing inputs. Byte-slice input is checked before XCCDF cloning. Sparse oversized JSON/TOML/XML/ZIP regressions prove existing output remains unchanged.
 
-P2 remediation now in progress: add implemented-policy `publication_state` to `manifest.json` with a regression assertion, replace the broad XCCDF lifecycle mutation with a regression where the bundle remains accepted while one selected policy is draft, and rerun required verification. TASK-425 remains In Progress; DoD items remain unchecked until final verification and pipeline completion.
+Actual local verification via nix develop: cf-compliance 329 library tests passed/1 ignored; generator 93 library, 8 CLI and 20 export integration tests passed; 1 doctest in each crate passed. Generator formatting and all-targets check passed. Nix builds passed for cf-nixos-module, its helper/generation package tests, and okf-knowledge (194 concepts, 216 Mermaid blocks, zero errors). Real NixOS module evaluation proves default application, explicit disable, determinism and provenance. No server, shared digest/interchange, writer, selection or CI configuration changes in this remediation.
 
-P2 remediation committed and pushed as dbf49f81 (MR !317 branch). Changes: implemented policy manifest entries now emit `publication_state` from `ResolvedPolicy`, with `generate::tests::manifest_records_full_provenance` asserting `accepted`; the XCCDF lifecycle regression now mutates only selected policy version `22222222-0000-0000-0000-0000000000a1` to `draft`, asserts the bundle remains accepted, and verifies rejection names the policy lifecycle state and immutable version ID.
-
-Verification against dbf49f81/current origin/dev: `nix develop -c cargo fmt --all --check` passed; `nix develop -c env SQLX_OFFLINE=true cargo check -p cf-compliance -p cf-nixos-module -p cf-server --all-targets` passed; `nix develop -c env SQLX_OFFLINE=true cargo test -p cf-compliance -p cf-nixos-module` passed with 302 cf-compliance, 75 cf-nixos-module library, 7 CLI, and 16 integration tests passing, 1 cf-compliance test ignored; `nix develop -c env SQLX_OFFLINE=true cargo test -p cf-server --lib` passed with 889 tests and 376 ignored; `nix build .#checks.x86_64-linux.compliance-module --no-link -L` passed with 22 assertions; `nix build .#checks.x86_64-linux.nixos-module-generation --no-link -L` passed; `nix build .#cf-nixos-module --no-link -L` passed after retry with longer timeout; `nix build .#server --no-link -L` passed after retry and ran 891 package tests with 0 failures. `nix flake check --keep-going` evaluated outputs and began 108 checks but exceeded the local 120-second timeout while building broader checks; it was not completed. MR pipeline for dbf49f81 is pending, so keep TASK-425 In Progress and DoD unchecked.
+The three behavioral DoD items are checked from local CLI/export/NixOS-evaluation evidence, not just pipeline status. AC23 remains unchecked because repository-wide formatting has pre-existing server.rs drift. AC25 remains unchecked because a complete full nix flake check was not yet established (earlier runs timed out). Task remains In Progress until required verification is reconciled; do not mark Done before merge and worktree removal. The previous head 8b95dd0d passed pipeline 3000323177. That historical green result does not establish CI for these new commits; record the exact new-head pipeline in the MR after pushing. No merge or deployment authorized.
 <!-- SECTION:NOTES:END -->
 
 ## Comments
@@ -306,77 +304,3 @@ created: 2026-08-23 20:27
 Implementation preflight authorized: dedicated worktree TASK-425-cf-nixos-module, branch TASK-425-cf-nixos-module; scope is the five MR review findings and required regressions/verification. Rebase onto latest origin/dev before code changes.
 ---
 <!-- COMMENTS:END -->
-
-## Final Summary
-
-<!-- SECTION:FINAL_SUMMARY:BEGIN -->
-## Summary
-
-Added `cf-nixos-module`, a fully offline CLI that converts exported Crystal Forge policies and CF-native compliance bundle exports into ordinary NixOS modules importable into any existing flake. After export, no Crystal Forge server, database, or agent is required.
-
-MR: https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/317 (branch `TASK-425-cf-nixos-module` -> `dev`)
-
-## Corrections to the task's stated assumptions
-
-Verified against `dev`; three assumptions in the task description were wrong and shaped the implementation:
-
-1. `cf-server/src/compliance/interchange.rs` (named as "the existing interchange parsing layer") contains only frozen v0.1 constants and `InterchangeLimits` — no parsers. The policy-export parser was private in `handlers/api/compliance.rs`; XCCDF parsing is in `compliance/xccdf/`.
-2. **There is no JSON compliance-bundle export.** Bundles export as XCCDF 1.2 XML only; policies export as JSON/TOML. The CLI accepts both families.
-3. **No persisted field stores NixOS option assignments.** Policies store assertion expressions, so generation had to invert them rather than read a stored implementation.
-
-## What was built
-
-### `cf-compliance` crate extraction
-
-To satisfy AC #22 while keeping the binary free of database/HTTP dependencies, the database-free half of the interchange layer moved out of `cf-server`:
-
-- `canonical.rs`, `interchange.rs` (whole files)
-- `digest.rs` split — canonical DTOs and pure `compute_digest` moved; transactional `write_*`/`refresh_*`/`backfill_*` stayed
-- `xccdf/`: `models`, `parser`, `package`, `zip_extractor`, `inference`, `reconciliation`, `importer`, `import_models`, `export_models`, `xml_writer`
-- `exact_technical_match.rs` split — pure `RequirementTechnicalIdentity` moved; its two `sqlx` queries stayed in new `exact_technical_match_db.rs`
-- the private policy-document parser became `cf_compliance::policy_document`; the handler keeps two thin `MultipartUpload` wrappers
-
-`cf-server` re-exports everything under the original `crate::compliance::*` paths, so no existing call site changed. Git recorded all of these as renames.
-
-### Generator
-
-Layered library (`input` -> `select` -> `extract` -> `generate` -> `nix`) plus a thin CLI, so server/web-UI flows can reuse it without shelling out.
-
-- Selection, dedup, and identity conflicts reuse `plan_policy_reconciliation` — the same planner the server uses for CF-native import.
-- Eligibility inverts assertion expressions only: `native` `custom_check` whose rules are exactly `config.<path> == <literal>` in `all` mode, using the existing `xccdf::inference` grammar (made `pub` so the two cannot drift).
-- Manual/external/unbound/opaque, operational policy types, `require_packages`, `any` mode, self-contradictory policies, and arbitrary Nix are reported with explicit diagnostics and never implemented. A partially-representable policy is skipped entirely.
-
-## Verification (all commands actually run)
-
-| Command | Result |
-| --- | --- |
-| `cargo fmt --all --check` | clean |
-| `SQLX_OFFLINE=true cargo check -p cf-compliance -p cf-nixos-module -p cf-server --all-targets` | no errors, no new warnings |
-| `cargo test -p cf-compliance` | 294 passed, 1 ignored |
-| `cargo test -p cf-nixos-module` | 71 passed (54 lib + 7 CLI + 10 integration) |
-| `cargo test -p cf-server --lib` | 848 passed, 354 ignored (pre-existing, need a live DB) |
-| `nix build .#{cf-nixos-module,server,agent,builder,cf-keygen,test-agent}` | all pass |
-| `nix build .#checks.x86_64-linux.nixos-module-generation` | pass |
-| `nix build .#checks.x86_64-linux.xccdf-schema` | pass |
-| `nix build .#checks.x86_64-linux.stig` | pass |
-| `nix build .#checks.x86_64-linux.oscal-export` | pass |
-| `nix flake check --no-build` | all outputs evaluate |
-
-**Not run locally:** `web-ui`, `web-ui-reconciliation`, `ui-screenshots`, `integration`, `oidc-auth`. This change touches zero files under `packages/web-ui` (verified against the branch diff), and the server/agent/builder packages all build. CI is authoritative for these. `nix flake check --keep-going` was therefore not run to completion; the affected checks were built individually instead.
-
-### AC #19/#21 evidence
-
-`checks/nixos-module-generation` evaluates the generated directory through `nixos/lib/eval-config.nix` — the real NixOS module system with real option types — and asserts option values, rather than comparing strings:
-
-```
-{ "allowNullPassword": false, "fail2ban": false, "firewall": true,
-  "passwordAuthentication": false, "permitRootLogin": "no", "timesyncd": true }
-```
-
-`fail2ban` remaining at its NixOS default proves a policy version deselected by the exported bundle version is genuinely not applied (AC #15). The check also proves determinism across repeated and reordered inputs, that skipped policies never leak into the Nix, manifest identity/digest recording, digest rejection of tampered exports, both conflict classes, and `--check`/`--strict`/`--single-file` behavior.
-
-## Follow-ups (not in scope, no task created without approval)
-
-- Eligible-policy coverage depends on how many real policies use the strict `config.<path> == <literal>` shape. If real-world coverage proves low, a future task could consider a richer stored NixOS-implementation representation on the policy model — which would be a genuine product decision, not a generator change.
-- `--server` / `--bundle-id` retrieval from a running Crystal Forge is explicitly a non-goal here and remains available as future work.
-<!-- SECTION:FINAL_SUMMARY:END -->
