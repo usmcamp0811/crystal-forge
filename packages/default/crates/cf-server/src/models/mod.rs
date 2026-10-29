@@ -6,7 +6,7 @@ pub mod commits;
 pub mod config_inspector;
 pub mod config_observations;
 pub(crate) mod config_snapshot_artifact;
-pub mod custom_check;
+pub use cf_compliance::custom_check;
 pub mod cve_scans;
 pub mod cves;
 pub mod deployment_policies;

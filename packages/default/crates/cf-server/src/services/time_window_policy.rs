@@ -4,10 +4,14 @@
 //! Overnight windows attribute their early-morning segment to the day on which
 //! the window started. Invalid configuration fails closed with a reason.
 
-use chrono::{Datelike, NaiveTime, Timelike, Utc};
+use chrono::{Datelike, Timelike, Utc};
 use chrono_tz::Tz;
 
 use crate::models::deployment_policies::TimeWindowConfig;
+
+// The parsing and shared-field validation live in the database-free
+// `cf-compliance` crate so offline tools apply the same rules.
+pub use cf_compliance::time_window::{parse_time, validate_window_parts};
 
 /// Describes whether a time-window policy permits deployment.
 #[derive(Debug, Clone)]
@@ -148,56 +152,6 @@ pub fn check_time_window_at(
         deployment_allowed: true,
         reason: None,
     }
-}
-
-/// Parse time string in HH:MM format
-fn parse_time(time_str: &str) -> Result<NaiveTime, String> {
-    let parts: Vec<&str> = time_str.split(':').collect();
-    if parts.len() != 2 {
-        return Err(format!(
-            "Invalid time format '{}', expected HH:MM",
-            time_str
-        ));
-    }
-
-    let hour: u32 = parts[0]
-        .parse()
-        .map_err(|_| format!("Invalid hour in '{}'", time_str))?;
-    let minute: u32 = parts[1]
-        .parse()
-        .map_err(|_| format!("Invalid minute in '{}'", time_str))?;
-
-    NaiveTime::from_hms_opt(hour, minute, 0)
-        .ok_or_else(|| format!("Hour {} or minute {} out of range", hour, minute))
-}
-
-/// Validates the shared fields of a deployment time window.
-///
-/// # Errors
-///
-/// Returns an error when no valid weekday is supplied, a clock value is not in
-/// `HH:MM` form, or `timezone` is not a valid IANA time-zone identifier.
-pub fn validate_window_parts(
-    days: &[String],
-    start_time: &str,
-    end_time: &str,
-    timezone: &str,
-) -> Result<(), String> {
-    const WEEKDAYS: &[&str] = &["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
-
-    if days.is_empty()
-        || days
-            .iter()
-            .any(|day| !WEEKDAYS.contains(&day.to_ascii_lowercase().as_str()))
-    {
-        return Err("days must contain only mon, tue, wed, thu, fri, sat, or sun".to_string());
-    }
-    parse_time(start_time).map_err(|error| format!("invalid start time: {error}"))?;
-    parse_time(end_time).map_err(|error| format!("invalid end time: {error}"))?;
-    timezone
-        .parse::<Tz>()
-        .map_err(|_| format!("invalid IANA timezone: {timezone}"))?;
-    Ok(())
 }
 
 /// Validates a complete time-window policy configuration.

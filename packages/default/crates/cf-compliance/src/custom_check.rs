@@ -7,7 +7,7 @@ use std::collections::HashSet;
 
 use serde_json::Value;
 
-use super::deployment_policies::{is_reserved_policy_result_field, validate_custom_eval_syntax};
+use crate::policy_config::{is_reserved_policy_result_field, validate_custom_eval_syntax};
 
 /// Selects the executable binding accepted while validating expressions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

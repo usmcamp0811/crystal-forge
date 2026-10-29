@@ -5,6 +5,8 @@ members = [
     "crates/cf-agent",
     "crates/cf-builder",
     "crates/cf-keygen",
+    "crates/cf-compliance",
+    "crates/cf-nixos-module",
     "crates/cf-server",
 ]
 resolver = "2"

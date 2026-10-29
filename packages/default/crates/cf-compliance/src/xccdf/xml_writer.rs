@@ -353,14 +353,12 @@ fn write_cf_policy(
     let strict = if pv.policy_type == "require_cve_check"
         && pv.implementation_state == ImplementationState::Native
     {
-        serde_json::from_value::<crate::models::deployment_policies::CveCheckConfig>(
-            pv.config.clone(),
-        )
-        .map_err(|_| XccdfWriterError::MissingConfig {
-            policy_type: pv.policy_type.clone(),
-            field: "valid require_cve_check config",
-        })?
-        .strict
+        serde_json::from_value::<crate::policy_config::CveCheckConfig>(pv.config.clone())
+            .map_err(|_| XccdfWriterError::MissingConfig {
+                policy_type: pv.policy_type.clone(),
+                field: "valid require_cve_check config",
+            })?
+            .strict
     } else {
         true
     };
@@ -445,28 +443,23 @@ fn write_implementation(
         // prevents XCCDF round-trips from downgrading the policy type without
         // introducing Phase-4 execution semantics.
         "composite" => {
-            crate::models::deployment_policies::deserialize_policy_type_config(
-                &pv.policy_type,
-                &pv.config,
-            )
-            .map_err(|_| XccdfWriterError::MissingConfig {
-                policy_type: pv.policy_type.clone(),
-                field: "valid composite config",
-            })?;
+            crate::policy_config::deserialize_policy_type_config(&pv.policy_type, &pv.config)
+                .map_err(|_| XccdfWriterError::MissingConfig {
+                    policy_type: pv.policy_type.clone(),
+                    field: "valid composite config",
+                })?;
             cf_empty(writer, "composite")?;
         }
         "require_cve_check" => {
             let config =
-                serde_json::from_value::<crate::models::deployment_policies::CveCheckConfig>(
-                    pv.config.clone(),
-                )
-                .map_err(|_| XccdfWriterError::MissingConfig {
+                serde_json::from_value::<crate::policy_config::CveCheckConfig>(pv.config.clone())
+                    .map_err(|_| XccdfWriterError::MissingConfig {
                     policy_type: pv.policy_type.clone(),
                     field: "valid require_cve_check config",
                 })?;
             let no_scan = match config.when_no_scan {
-                crate::models::deployment_policies::WhenNoScan::Block => "block",
-                crate::models::deployment_policies::WhenNoScan::Skip => "skip",
+                crate::policy_config::WhenNoScan::Block => "block",
+                crate::policy_config::WhenNoScan::Skip => "skip",
             };
             let mut elem = BytesStart::new("cf:require-cve-check");
             elem.push_attribute(("max-critical", config.max_critical.to_string().as_str()));
@@ -1457,7 +1450,7 @@ pub fn write_bundle_xccdf_export(snapshot: &XccdfBundleExport) -> Result<String,
 mod tests {
     use super::super::export_models::{XccdfPolicyExport, XccdfSourceMapping};
     use super::*;
-    use crate::compliance::canonical::{ImplementationState, PublicationState};
+    use crate::canonical::{ImplementationState, PublicationState};
     use serde_json::json;
     use uuid::Uuid;
 
@@ -2186,10 +2179,10 @@ mod tests {
 
     #[test]
     fn current_custom_checks_round_trip_through_real_native_import() {
-        use crate::compliance::digest::{
+        use crate::digest::{
             BundleMembershipEntry, BundleVersionCanonical, PolicyVersionCanonical,
         };
-        use crate::compliance::xccdf::importer::validate_cf_native_document;
+        use crate::xccdf::importer::validate_cf_native_document;
 
         for config in [
             json!({
@@ -2255,6 +2248,68 @@ mod tests {
                 Some(expected_digest.as_str())
             );
         }
+    }
+
+    // Both the server and generator use this validator. The expression is
+    // structurally valid, so only the shared Nix parser check can reject it.
+    #[test]
+    fn native_validation_rejects_invalid_nix_syntax_after_crate_extraction() {
+        use crate::digest::{
+            BundleMembershipEntry, BundleVersionCanonical, PolicyVersionCanonical,
+        };
+        use crate::xccdf::importer::validate_cf_native_document;
+
+        let config = json!({
+            "expression": "(config.networking.firewall.enable",
+            "description": "Unbalanced parenthesis",
+            "field_name": "firewallEnabled",
+            "strict": true
+        });
+        let mut policy = test_policy("custom_check", ImplementationState::Native, config.clone());
+        policy.semantic_digest = PolicyVersionCanonical {
+            name: policy.name.clone(),
+            description: policy.description.clone(),
+            policy_type: policy.policy_type.clone(),
+            implementation_state: "native".into(),
+            execution_phase: policy.execution_phase.clone(),
+            config: config.clone(),
+            compliance_metadata: policy.compliance_metadata.clone(),
+            dependencies: policy.dependencies.clone(),
+            opaque_xml_digest: None,
+            enabled_by_default: Some(policy.enabled_default),
+        }
+        .compute_digest();
+        let policy_version_id = policy.policy_version_id;
+        let mut snapshot = make_single_policy_snapshot(vec![policy]);
+        snapshot.semantic_digest = BundleVersionCanonical {
+            name: snapshot.name.clone(),
+            framework: snapshot.framework.clone(),
+            framework_version: snapshot.framework_version.clone(),
+            description: snapshot.description.clone(),
+            layer: snapshot.layer.clone(),
+            owner: snapshot.owner.clone(),
+            members: vec![BundleMembershipEntry {
+                policy_version_id,
+                selected: true,
+            }],
+        }
+        .compute_digest();
+        let xml = write_bundle_xccdf_export(&snapshot).unwrap();
+        let parsed = parse_xccdf(
+            xml.as_bytes(),
+            Some("invalid-syntax.xml"),
+            &InterchangeLimits::default(),
+        )
+        .unwrap();
+
+        let Err(error) = validate_cf_native_document(&parsed) else {
+            panic!("the server validator must reject invalid Nix syntax");
+        };
+        assert!(
+            format!("{error:?}").contains("CF_NATIVE_PAYLOAD_INVALID"),
+            "unexpected error: {error:?}"
+        );
+        assert!(format!("{error:?}").contains("invalid Nix expression syntax"));
     }
 
     #[test]
@@ -3031,7 +3086,7 @@ mod tests {
     use super::super::models::DocumentClass;
     use super::super::models::Fidelity;
     use super::super::parser::parse_xccdf;
-    use crate::compliance::interchange::InterchangeLimits;
+    use crate::interchange::InterchangeLimits;
 
     #[test]
     fn dual_checks_survive_real_writer_parser_round_trip() {
@@ -3382,7 +3437,7 @@ mod tests {
         let classified_policy_version_id = snap.policies[0].policy_version_id;
         snap.policies[0].compliance_metadata = classification_metadata.clone();
         for policy in &mut snap.policies {
-            let canonical = crate::compliance::digest::PolicyVersionCanonical {
+            let canonical = crate::digest::PolicyVersionCanonical {
                 name: policy.name.clone(),
                 description: policy.description.clone(),
                 policy_type: policy.policy_type.clone(),
@@ -3391,10 +3446,9 @@ mod tests {
                 config: policy.config.clone(),
                 compliance_metadata: policy.compliance_metadata.clone(),
                 dependencies: policy.dependencies.clone(),
-                opaque_xml_digest:
-                    crate::compliance::digest::PolicyVersionCanonical::digest_opaque_xml(
-                        policy.opaque_xml.as_deref(),
-                    ),
+                opaque_xml_digest: crate::digest::PolicyVersionCanonical::digest_opaque_xml(
+                    policy.opaque_xml.as_deref(),
+                ),
                 enabled_by_default: Some(policy.enabled_default),
             };
             policy.semantic_digest = canonical.compute_digest();
@@ -3403,12 +3457,12 @@ mod tests {
         ordered_policies.sort_by_key(|policy| policy.policy_order);
         let members = ordered_policies
             .iter()
-            .map(|policy| crate::compliance::digest::BundleMembershipEntry {
+            .map(|policy| crate::digest::BundleMembershipEntry {
                 policy_version_id: policy.policy_version_id,
                 selected: policy.selected,
             })
             .collect();
-        snap.semantic_digest = crate::compliance::digest::BundleVersionCanonical {
+        snap.semantic_digest = crate::digest::BundleVersionCanonical {
             name: snap.name.clone(),
             framework: snap.framework.clone(),
             framework_version: snap.framework_version.clone(),
@@ -3420,7 +3474,7 @@ mod tests {
         .compute_digest();
         let xml = write_bundle_xccdf_export(&snap).unwrap();
         let parsed = parse_xccdf(xml.as_bytes(), None, &InterchangeLimits::default()).unwrap();
-        let (_, records) = crate::compliance::xccdf::importer::validate_cf_native_document(&parsed)
+        let (_, records) = crate::xccdf::importer::validate_cf_native_document(&parsed)
             .unwrap_or_else(|error| {
                 panic!(
                     "native round trip should validate: {} ({})",

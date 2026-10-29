@@ -7,15 +7,13 @@
 use std::collections::{HashMap, HashSet};
 use uuid::Uuid;
 
-use crate::compliance::digest::{
-    BundleMembershipEntry, BundleVersionCanonical, PolicyVersionCanonical,
-};
-use crate::compliance::interchange::{CANONICALIZATION_VERSION, DIGEST_ALGORITHM};
-use crate::compliance::xccdf::import_models::{
+use crate::digest::{BundleMembershipEntry, BundleVersionCanonical, PolicyVersionCanonical};
+use crate::interchange::{CANONICALIZATION_VERSION, DIGEST_ALGORITHM};
+use crate::xccdf::import_models::{
     ImportPlanError, ImportedPolicyRecord, MapExistingProof, ValidatedImportPlan, XccdfImportPlan,
     XccdfRuleImportAction,
 };
-use crate::compliance::xccdf::models::{DocumentClass, ParsedRule, ParsedXccdf};
+use crate::xccdf::models::{DocumentClass, ParsedRule, ParsedXccdf};
 
 // ── Document-class gate ───────────────────────────────────────────────────────
 
@@ -45,6 +43,10 @@ pub fn check_document_class(parsed: &ParsedXccdf) -> Option<ImportPlanError> {
 /// Validate the complete CF-native contract and construct portable records.
 /// This is intentionally typed and digest-checking: a document that claims to
 /// be CF-native is never silently downgraded to the foreign import path.
+///
+/// Custom expressions are additionally syntax-checked by one bounded
+/// `nix-instantiate --parse` subprocess per policy. This is the validation
+/// every server import boundary applies.
 pub fn validate_cf_native_document(
     parsed: &ParsedXccdf,
 ) -> Result<(ValidatedImportPlan, Vec<ImportedPolicyRecord>), ImportPlanError> {
@@ -193,14 +195,14 @@ pub fn validate_cf_native_document(
                     format!("rule {} is missing typed custom-check content", rule.id),
                 )
             })?;
-            let binding = crate::compliance::xccdf::custom_check::expression_binding(typed)
-                .map_err(|message| {
+            let binding =
+                crate::xccdf::custom_check::expression_binding(typed).map_err(|message| {
                     ImportPlanError::cf_native_invalid(
                         "CF_NATIVE_PAYLOAD_INVALID",
                         format!("rule {} custom-check is inconsistent: {message}", rule.id),
                     )
                 })?;
-            crate::models::custom_check::validate_config(&source_config, binding, true).map_err(
+            crate::custom_check::validate_config(&source_config, binding, true).map_err(
                 |message| {
                     ImportPlanError::cf_native_invalid(
                         "CF_NATIVE_PAYLOAD_INVALID",
@@ -225,7 +227,7 @@ pub fn validate_cf_native_document(
                 format!("rule {} is missing execution phase", rule.id),
             )
         })?;
-        if policy_type == crate::models::deployment_policies::COMPOSITE_POLICY_TYPE
+        if policy_type == crate::policy_config::COMPOSITE_POLICY_TYPE
             && execution_phase != "multi-phase"
         {
             return Err(ImportPlanError::cf_native_invalid(
@@ -271,21 +273,18 @@ pub fn validate_cf_native_document(
                     format!("rule {} is missing typed custom-check content", rule.id),
                 )
             })?;
-            let normalized = crate::models::custom_check::validate_and_normalize_config(
-                &source_config,
-                binding,
-                true,
-            )
-            .map_err(|message| {
-                ImportPlanError::cf_native_invalid(
-                    "CF_NATIVE_PAYLOAD_INVALID",
-                    format!(
-                        "rule {} has invalid custom-check config: {message}",
-                        rule.id
-                    ),
-                )
-            })?;
-            let projection = crate::compliance::xccdf::custom_check::project_custom_check(
+            let normalized =
+                crate::custom_check::validate_and_normalize_config(&source_config, binding, true)
+                    .map_err(|message| {
+                    ImportPlanError::cf_native_invalid(
+                        "CF_NATIVE_PAYLOAD_INVALID",
+                        format!(
+                            "rule {} has invalid custom-check config: {message}",
+                            rule.id
+                        ),
+                    )
+                })?;
+            let projection = crate::xccdf::custom_check::project_custom_check(
                 rule.title.as_deref().unwrap_or(&rule.id),
                 meta.policy_id,
                 rule.description.as_deref(),
@@ -300,21 +299,21 @@ pub fn validate_cf_native_document(
                     ),
                 )
             })?;
-            crate::compliance::xccdf::custom_check::reconcile_custom_check(typed, &projection)
-                .map_err(|message| {
+            crate::xccdf::custom_check::reconcile_custom_check(typed, &projection).map_err(
+                |message| {
                     ImportPlanError::cf_native_invalid(
                         "CF_NATIVE_PAYLOAD_INVALID",
                         format!("rule {} custom-check is inconsistent: {message}", rule.id),
                     )
-                })?;
+                },
+            )?;
             normalized
         } else {
             source_config
         };
-        crate::models::deployment_policies::validate_policy_type_config(&policy_type, &config)
-            .map_err(|message| {
-                ImportPlanError::cf_native_invalid("CF_NATIVE_PAYLOAD_INVALID", message)
-            })?;
+        crate::policy_config::validate_policy_type_config(&policy_type, &config).map_err(
+            |message| ImportPlanError::cf_native_invalid("CF_NATIVE_PAYLOAD_INVALID", message),
+        )?;
         let canonical = PolicyVersionCanonical {
             config: config.clone(),
             ..source_canonical
@@ -329,6 +328,7 @@ pub fn validate_cf_native_document(
             implementation_state,
             policy_type,
             version,
+            publication_state: Some(meta.publication_state.clone()),
             execution_phase: canonical.execution_phase.clone(),
             config,
             dependencies,
@@ -395,7 +395,7 @@ pub fn validate_cf_native_document(
     }
     let validated = ValidatedImportPlan {
         expected_sha256: parsed.source_sha256.clone(),
-        bundle: crate::compliance::xccdf::import_models::ImportedBundlePlan {
+        bundle: crate::xccdf::import_models::ImportedBundlePlan {
             name: bundle_canonical.name,
             framework: bundle_canonical.framework,
             version: benchmark.version.clone().unwrap_or_else(|| "1".into()),
@@ -410,30 +410,6 @@ pub fn validate_cf_native_document(
         shared_group_decisions: Vec::new(),
     };
     Ok((validated, records))
-}
-
-/// Validates a CF-native document without blocking the async executor.
-///
-/// The synchronous validator remains available for offline callers and tests.
-/// Production async import paths must use this wrapper because composite policy
-/// validation can invoke the bounded Nix parser.
-///
-/// # Errors
-///
-/// Returns the synchronous validator's error. Returns `CF_NATIVE_PAYLOAD_INVALID`
-/// if Tokio cannot join the blocking validation task, including after a panic.
-pub async fn validate_cf_native_document_async(
-    parsed: &ParsedXccdf,
-) -> Result<(ValidatedImportPlan, Vec<ImportedPolicyRecord>), ImportPlanError> {
-    let parsed = parsed.clone();
-    tokio::task::spawn_blocking(move || validate_cf_native_document(&parsed))
-        .await
-        .map_err(|error| {
-            ImportPlanError::cf_native_invalid(
-                "CF_NATIVE_PAYLOAD_INVALID",
-                format!("CF-native validation task failed: {error}"),
-            )
-        })?
 }
 
 // ── SHA-256 validation helpers ────────────────────────────────────────────────
@@ -775,6 +751,7 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
                 implementation_state: impl_state,
                 policy_type,
                 version: None,
+                publication_state: None,
                 execution_phase,
                 config,
                 dependencies: serde_json::json!([]),
@@ -801,14 +778,14 @@ pub fn build_policy_records(validated: &ValidatedImportPlan) -> Vec<ImportedPoli
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compliance::xccdf::import_models::{
+    use crate::xccdf::import_models::{
         ImportedBundlePlan, ImportedCustomCheck, ImportedCustomCheckRule, ImportedMappingSemantics,
         ImportedPolicyCustomization, MapExistingProof, XccdfImportPlan, XccdfRuleImportAction,
     };
-    use crate::compliance::xccdf::models::{DocumentClass, Fidelity, ParsedXccdf};
+    use crate::xccdf::models::{DocumentClass, Fidelity, ParsedXccdf};
 
     fn minimal_foreign_parsed(rule_ids: &[&str]) -> ParsedXccdf {
-        use crate::compliance::xccdf::models::{BenchmarkMeta, ParsedRule};
+        use crate::xccdf::models::{BenchmarkMeta, ParsedRule};
         ParsedXccdf {
             class: DocumentClass::ForeignXccdf,
             fidelity: Fidelity::PreservedOpaque,
@@ -913,11 +890,11 @@ mod tests {
         rule.severity = Some("high".into());
         rule.rationale = Some("The source rationale.".into());
         rule.identifiers = vec![
-            crate::compliance::xccdf::models::StandardIdentifier {
+            crate::xccdf::models::StandardIdentifier {
                 system: "https://public.cyber.mil/stigs/srg".into(),
                 value: "SRG-OS-000001".into(),
             },
-            crate::compliance::xccdf::models::StandardIdentifier {
+            crate::xccdf::models::StandardIdentifier {
                 system: "https://public.cyber.mil/stigs/cci".into(),
                 value: "CCI-000001".into(),
             },
@@ -1038,7 +1015,7 @@ mod tests {
     fn deterministic_proof_cannot_be_combined_with_related_review() {
         let parsed = minimal_foreign_parsed(&["rule-1"]);
         let policy_version_id = Uuid::new_v4();
-        let related = crate::compliance::xccdf::import_models::ReviewedRelatedCandidate {
+        let related = crate::xccdf::import_models::ReviewedRelatedCandidate {
             policy_version_id,
             related_requirement_version_id: Uuid::new_v4(),
             shared_cci_ids: vec!["CCI-000001".into()],
@@ -1076,7 +1053,7 @@ mod tests {
     fn reviewed_related_requires_explicit_mapping_semantics() {
         let parsed = minimal_foreign_parsed(&["rule-1"]);
         let policy_version_id = Uuid::new_v4();
-        let related = crate::compliance::xccdf::import_models::ReviewedRelatedCandidate {
+        let related = crate::xccdf::import_models::ReviewedRelatedCandidate {
             policy_version_id,
             related_requirement_version_id: Uuid::new_v4(),
             shared_cci_ids: vec!["CCI-000001".into()],
@@ -1315,7 +1292,7 @@ mod tests {
 
     #[test]
     fn rule_outside_profile_is_rejected() {
-        use crate::compliance::xccdf::models::ParsedProfile;
+        use crate::xccdf::models::ParsedProfile;
         let mut parsed = minimal_foreign_parsed(&["r1", "r2"]);
         parsed.profiles.push(ParsedProfile {
             id: "xccdf_profile_a".into(),

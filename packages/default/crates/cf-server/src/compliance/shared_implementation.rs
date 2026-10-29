@@ -509,6 +509,7 @@ mod tests {
             implementation_state: implementation_state.to_string(),
             policy_type: "imported_xccdf".to_string(),
             version: None,
+            publication_state: None,
             execution_phase: "not-applicable".to_string(),
             config: serde_json::json!({}),
             dependencies: serde_json::json!([]),

@@ -207,8 +207,8 @@ fn parse_check_boolean(
 /// # Examples
 ///
 /// ```
-/// use crystal_forge::compliance::interchange::InterchangeLimits;
-/// use crystal_forge::compliance::xccdf::parser::parse_xccdf;
+/// use cf_compliance::interchange::InterchangeLimits;
+/// use cf_compliance::xccdf::parser::parse_xccdf;
 ///
 /// let xml = br#"<Benchmark xmlns="http://checklists.nist.gov/xccdf/1.2" id="b">
 ///   <version>1</version>
@@ -2563,7 +2563,7 @@ mod tests {
         let path = std::env::var("CF_TEST_ANDURIL_STIG_ZIP")
             .expect("CF_TEST_ANDURIL_STIG_ZIP must be set");
         let zip_bytes = std::fs::read(&path).expect("read zip");
-        let pkg = crate::compliance::xccdf::package::process_xccdf_bytes(
+        let pkg = crate::xccdf::package::process_xccdf_bytes(
             zip_bytes,
             Some(
                 std::path::Path::new(&path)
