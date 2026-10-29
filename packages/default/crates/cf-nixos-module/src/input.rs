@@ -4,23 +4,27 @@
 //! shared `cf-compliance` interchange layer:
 //!
 //! * policy JSON/TOML goes through [`cf_compliance::policy_document`], which
-//!   applies the server's normalization, compatibility, and digest rules;
+//!   applies the server's normalization, compatibility, and digest rules,
+//!   followed by the shared policy configuration validator;
 //! * XCCDF XML/ZIP goes through [`cf_compliance::xccdf::package`] (DTDs,
 //!   external entities, network retrieval, and archive attacks disabled) and
 //!   then [`cf_compliance::xccdf::importer::validate_cf_native_document`],
 //!   which verifies every per-rule and whole-bundle semantic digest.
 //!
-//! No Nix contained in an export is evaluated. CF-native validation uses the
+//! No Nix contained in an export is evaluated. Policy validation uses the
 //! same bounded `nix-instantiate --parse` syntax check as server imports, so
 //! `nix-instantiate` must be available on `PATH` for custom expressions.
 
 use std::fmt;
+use std::io::{BufRead, BufReader, Read};
+use std::path::Path;
 
 use cf_compliance::interchange::InterchangeLimits;
 use cf_compliance::policy_document::{parse_policy_document, validate_policy_interchange_document};
 use cf_compliance::xccdf::importer::validate_cf_native_document;
 use cf_compliance::xccdf::models::DocumentClass;
 use cf_compliance::xccdf::package::{ProcessingError, process_xccdf_bytes};
+use cf_compliance::xccdf::zip_extractor::{PackageKind, detect_package_kind};
 use sha2::{Digest, Sha256};
 
 use crate::model::{PolicyOrigin, ResolvedBundle, ResolvedPolicy};
@@ -97,12 +101,76 @@ pub fn detect_input_kind(bytes: &[u8], label: &str) -> InputKind {
     InputKind::PolicyDocument
 }
 
-/// Load one exported artifact.
+/// Loads an exported artifact from a bounded byte slice.
+///
+/// Plain policy documents and XML share the interchange plain-document limit
+/// (10 MiB); ZIP packages use its archive limit (50 MiB). Size is checked before
+/// hashing, parsing, or cloning the input for XCCDF processing.
+///
+/// # Errors
+/// Returns an error for oversized input, invalid policy configuration or
+/// interchange metadata, unsupported bundle types, or mutable lifecycle state.
 pub fn load_input(bytes: &[u8], label: &str) -> Result<LoadedInput, InputError> {
+    check_input_size(bytes.len() as u64, input_byte_limit(bytes), label)?;
     match detect_input_kind(bytes, label) {
         InputKind::PolicyDocument => load_policy_document(bytes, label),
         InputKind::XccdfBundle => load_xccdf_bundle(bytes, label),
     }
+}
+
+/// Loads an exported file without allocating an unbounded input buffer.
+///
+/// Uses the same size limits as [`load_input`], selected from the file's content
+/// signature rather than its extension. Metadata rejects oversized regular
+/// files before accumulation. A bounded read also handles growth after the
+/// metadata check and files whose metadata does not report their full length.
+///
+/// # Errors
+/// Returns an error for file I/O failures and all errors from [`load_input`].
+pub fn load_input_file(path: &Path) -> Result<LoadedInput, InputError> {
+    let label = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| path.display().to_string());
+    let file = std::fs::File::open(path)
+        .map_err(|error| InputError::new(&label, format!("could not read input: {error}")))?;
+    let length = file
+        .metadata()
+        .map_err(|error| InputError::new(&label, format!("could not inspect input: {error}")))?
+        .len();
+    let mut reader = BufReader::new(file);
+    let prefix = reader
+        .fill_buf()
+        .map_err(|error| InputError::new(&label, format!("could not read input: {error}")))?;
+    let maximum = input_byte_limit(prefix);
+    check_input_size(length, maximum, &label)?;
+    let mut bytes = Vec::new();
+    reader
+        .take(maximum as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| InputError::new(&label, format!("could not read input: {error}")))?;
+    check_input_size(bytes.len() as u64, maximum, &label)?;
+    load_input(&bytes, &label)
+}
+
+fn input_byte_limit(prefix: &[u8]) -> usize {
+    let limits = InterchangeLimits::default();
+    if detect_package_kind(prefix) == Some(PackageKind::Zip) {
+        limits.max_zip_bytes
+    } else {
+        // Reuse the existing plain interchange document bound for JSON/TOML.
+        limits.max_xml_bytes
+    }
+}
+
+fn check_input_size(length: u64, maximum: usize, label: &str) -> Result<(), InputError> {
+    if length > maximum as u64 {
+        return Err(InputError::new(
+            label,
+            format!("input is {length} bytes, exceeding the {maximum} byte limit"),
+        ));
+    }
+    Ok(())
 }
 
 fn source_digest(bytes: &[u8]) -> String {
@@ -130,6 +198,27 @@ fn load_policy_document(bytes: &[u8], label: &str) -> Result<LoadedInput, InputE
     }
     validate_policy_interchange_document(&normalized)
         .map_err(|message| InputError::new(label, message))?;
+    for policy in &normalized {
+        let composite = cf_compliance::policy_config::validate_policy_type_config(
+            &policy.policy_type,
+            &policy.config,
+        )
+        .map_err(|message| {
+            InputError::new(
+                label,
+                format!("policy version {}: {message}", policy.version_id),
+            )
+        })?;
+        if composite.is_some() && policy.execution_phase != "multi-phase" {
+            return Err(InputError::new(
+                label,
+                format!(
+                    "composite policy version {} must use execution_phase multi-phase",
+                    policy.version_id
+                ),
+            ));
+        }
+    }
 
     let policies = normalized
         .into_iter()
@@ -343,6 +432,23 @@ mod tests {
     }
 
     #[test]
+    fn oversized_in_memory_input_is_rejected_before_parsing_or_cloning() {
+        let maximum = InterchangeLimits::default().max_xml_bytes;
+        let bytes = vec![b'<'; maximum + 1];
+        let error = load_input(&bytes, "large.xml").expect_err("reject before XCCDF processing");
+        assert!(
+            error
+                .message
+                .contains(&format!("exceeding the {maximum} byte limit")),
+            "{error}"
+        );
+        assert_eq!(
+            input_byte_limit(b"PK\x03\x04"),
+            InterchangeLimits::default().max_zip_bytes
+        );
+    }
+
+    #[test]
     fn detects_toml_policy_documents() {
         assert_eq!(
             detect_input_kind(b"[[policies]]\n", "policy-set.toml"),
@@ -369,6 +475,81 @@ mod tests {
         assert_eq!(loaded.policies.len(), 1);
         assert_eq!(loaded.policies[0].name, "firewall");
         assert_eq!(loaded.source_sha256.len(), 64);
+    }
+
+    #[test]
+    fn direct_exports_reject_invalid_custom_check_configuration() {
+        let expression = "config.networking.firewall.enable == true";
+        for (config, expected) in [
+            (
+                serde_json::json!({"rules": [{"expression": expression}]}),
+                "field_name",
+            ),
+            (
+                serde_json::json!({"expression": expression, "strict": "false"}),
+                "strict",
+            ),
+            (
+                serde_json::json!({"rules": [{"expression": expression, "field_name": "firewall", "strict": 1}]}),
+                "strict",
+            ),
+            (
+                serde_json::json!({"expression": expression, "rules": {}}),
+                "rules",
+            ),
+            (
+                serde_json::json!({"mode": "invalid", "rules": [{"expression": expression, "field_name": "firewall"}]}),
+                "mode",
+            ),
+        ] {
+            // Each invalid configuration still contains a convertible assertion.
+            // The shared validator, not extraction, must reject its metadata.
+            cf_compliance::policy_config::validate_policy_type_config("custom_check", &config)
+                .expect_err("authoritative validator rejects this configuration");
+            let document = serde_json::json!({
+                "name": "invalid-native-policy",
+                "publication_state": "accepted",
+                "policy_type": "custom_check",
+                "config": config,
+            });
+            for (label, bytes) in [
+                ("policy.json", serde_json::to_vec(&document).unwrap()),
+                (
+                    "policy.toml",
+                    toml::to_string(&document).unwrap().into_bytes(),
+                ),
+            ] {
+                let error = load_input(&bytes, label)
+                    .expect_err("invalid config must not generate assignments");
+                assert!(error.message.contains(expected), "{label}: {error}");
+            }
+        }
+    }
+
+    #[test]
+    fn direct_exports_with_valid_rule_metadata_still_generate_assignments() {
+        let document = serde_json::json!({
+            "name": "valid-native-policy", "publication_state": "accepted",
+            "policy_type": "custom_check",
+            "config": {"rules": [{
+                "expression": "config.networking.firewall.enable == true",
+                "field_name": "firewall", "strict": true,
+            }]},
+        });
+        for (label, bytes) in [
+            ("policy.json", serde_json::to_vec(&document).unwrap()),
+            (
+                "policy.toml",
+                toml::to_string(&document).unwrap().into_bytes(),
+            ),
+        ] {
+            let loaded = load_input(&bytes, label).expect("valid configuration");
+            let selection = crate::select::select_policies(&[loaded]).unwrap();
+            let generated = crate::generate::generate(&selection, "valid").unwrap();
+            assert!(generated.skipped.is_empty());
+            assert_eq!(generated.implemented.len(), 1);
+            assert_eq!(generated.implemented[0].assignments.len(), 1);
+        }
     }
 
     #[test]

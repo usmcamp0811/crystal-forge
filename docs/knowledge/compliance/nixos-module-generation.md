@@ -22,11 +22,21 @@ evaluation or deployment time.
 
 ## Building and running
 
-CF-native bundle validation shares the server's full policy validator. Custom
+Policy JSON/TOML and CF-native bundle validation share the server's full policy
+configuration validator. Required rule metadata, Boolean `strict` values, and
+configuration shape are checked before extraction. An otherwise convertible
+assertion cannot bypass an invalid configuration. Custom
 expressions require `nix-instantiate` on `PATH` for a bounded syntax-only parse;
 they are not evaluated. The Nix package wrapper supplies that executable. When
 running a Cargo-built binary directly, use the repository development shell or
 provide Nix on `PATH`. No server connection or database is required.
+
+The CLI bounds file reads before accumulating the input: plain JSON, TOML and
+XML documents are limited to 10 MiB, and ZIP packages to 50 MiB. ZIP content
+signatures, not filenames, select the archive limit. These reuse the shared
+interchange plain-document and archive bounds. The library byte-slice loader
+also checks size before parsing or cloning XCCDF input. Oversized input fails
+before any output is published.
 
 ```bash
 nix build .#cf-nixos-module
@@ -51,6 +61,12 @@ nix build .#cf-nixos-module.tests.helper .#cf-nixos-module.tests.generation -L
 | `--check` | Validate the inputs and report results without writing output. |
 | `--strict` | Exit non-zero if any policy could not be converted. |
 | `--baseline <NAME>` | Identifier for the generated baseline. Defaults to the bundle name plus immutable bundle-version ID, or the lexicographically first input's file stem. |
+
+Baseline names are normalized to safe lowercase ASCII identifiers of at most
+64 bytes. The public generation and rendering APIs apply the same normalization
+as the CLI, so quotes, control characters, or Nix syntax cannot enter generated
+source through a baseline name. The returned identifier, module and manifest
+use the same normalized value.
 
 ## Supported inputs
 

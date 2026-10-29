@@ -130,12 +130,26 @@ fn strip_extension(label: &str) -> &str {
     }
 }
 
-/// Build the artifact for a selection.
+/// Builds the artifact for a selection.
 ///
-/// Returns `Err` only for conflicting NixOS implementations, which are never
-/// resolved automatically. Policies that cannot be converted are returned in
-/// `skipped` and are never represented as implemented.
+/// Normalizes `baseline` with [`sanitize_baseline_name`] and uses the same safe
+/// identifier in the module, manifest, and returned [`Generated`] value.
+///
+/// Policies that cannot be converted are returned in `skipped` and are never
+/// represented as implemented.
+///
+/// # Errors
+/// Returns conflicting NixOS implementations, which are never resolved
+/// automatically.
+///
+/// # Examples
+/// ```
+/// use cf_nixos_module::{generate::generate, select::Selection};
+/// let artifact = generate(&Selection::default(), "My Baseline").unwrap();
+/// assert_eq!(artifact.baseline, "my-baseline");
+/// ```
 pub fn generate(selection: &Selection, baseline: &str) -> Result<Generated, Vec<OptionConflict>> {
+    let baseline = sanitize_baseline_name(baseline);
     let mut implemented: Vec<GeneratedPolicy> = Vec::new();
     let mut skipped: Vec<SkippedPolicy> = Vec::new();
 
@@ -160,7 +174,7 @@ pub fn generate(selection: &Selection, baseline: &str) -> Result<Generated, Vec<
     let files = vec![
         GeneratedFile {
             path: "default.nix".to_string(),
-            contents: render_default_module(baseline, implemented.len(), skipped.len()),
+            contents: render_default_module(&baseline, implemented.len(), skipped.len()),
         },
         GeneratedFile {
             path: LIB_FILE.to_string(),
@@ -168,7 +182,7 @@ pub fn generate(selection: &Selection, baseline: &str) -> Result<Generated, Vec<
         },
         GeneratedFile {
             path: MANIFEST_FILE.to_string(),
-            contents: render_manifest(selection, baseline, &implemented, &skipped),
+            contents: render_manifest(selection, &baseline, &implemented, &skipped),
         },
     ];
 
@@ -176,7 +190,7 @@ pub fn generate(selection: &Selection, baseline: &str) -> Result<Generated, Vec<
         files,
         implemented,
         skipped,
-        baseline: baseline.to_string(),
+        baseline,
     })
 }
 
@@ -547,6 +561,62 @@ mod tests {
     fn baseline_derivation_prefers_an_explicit_name() {
         let sel = selection(Vec::new());
         assert_eq!(derive_baseline(&sel, Some("My Baseline")), "my-baseline");
+    }
+
+    #[test]
+    fn generate_sanitizes_baselines_consistently_across_the_artifact() {
+        let sel = selection(vec![policy("alpha", L1, V1, "config.a.b == true")]);
+        for (input, expected) in [
+            ("prod\"; injected = true; #", "prod-injected-true"),
+            ("prod\n\r\t\0baseline", "prod-baseline"),
+            ("${builtins.abort \"injected\"}", "builtins-abort-injected"),
+            (
+                "prod\\\"; } // { injected = true; } #",
+                "prod-injected-true",
+            ),
+            ("\"\n${}\0", "baseline"),
+        ] {
+            let generated = generate(&sel, input).expect("no conflict");
+            assert_eq!(generated.baseline, expected, "input: {input:?}");
+            assert_eq!(manifest_of(&generated)["baseline"], expected);
+            assert_eq!(
+                file(&generated, "default.nix"),
+                file(
+                    &generate(&sel, expected).expect("no conflict"),
+                    "default.nix"
+                ),
+                "unsafe input must produce the same module as its safe identifier: {input:?}"
+            );
+            assert!(
+                file(&generated, "default.nix").contains(&format!("baseline = \"{expected}\";"))
+            );
+        }
+    }
+
+    #[test]
+    fn generate_preserves_safe_baseline_identifiers() {
+        for baseline in ["production-baseline", "b2024-baseline", "a", "baseline-42"] {
+            let generated = generate(&selection(Vec::new()), baseline).expect("no conflict");
+            assert_eq!(generated.baseline, baseline);
+            assert_eq!(manifest_of(&generated)["baseline"], baseline);
+            let module = file(&generated, "default.nix");
+            assert!(module.contains(&format!("baseline = \"{baseline}\";")));
+            assert!(module.contains(&format!(
+                "crystal-forge.compliance.{baseline}.enable = false;"
+            )));
+        }
+    }
+
+    #[test]
+    fn generate_keeps_long_digit_leading_baselines_identical() {
+        let input = "9".repeat(100);
+        let expected = sanitize_baseline_name(&input);
+        assert_eq!(expected.len(), 64);
+        assert_eq!(sanitize_baseline_name(&expected), expected);
+        let generated = generate(&selection(Vec::new()), &input).expect("no conflict");
+        assert_eq!(generated.baseline, expected);
+        assert_eq!(manifest_of(&generated)["baseline"], expected);
+        assert!(file(&generated, "default.nix").contains(&format!("baseline = \"{expected}\";")));
     }
 
     #[test]

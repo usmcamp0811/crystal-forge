@@ -9,7 +9,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use cf_nixos_module::generate::{Generated, derive_baseline, generate};
-use cf_nixos_module::input::{LoadedInput, load_input};
+use cf_nixos_module::input::{LoadedInput, load_input_file};
 use cf_nixos_module::select::select_policies;
 use cf_nixos_module::write::write_output;
 
@@ -143,13 +143,7 @@ fn run(args: &Args) -> Result<ExitCode, String> {
 
     let mut loaded: Vec<LoadedInput> = Vec::with_capacity(args.inputs.len());
     for path in &args.inputs {
-        let bytes = std::fs::read(path)
-            .map_err(|error| format!("could not read {}: {error}", path.display()))?;
-        let label = path
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| path.display().to_string());
-        let input = load_input(&bytes, &label).map_err(|error| error.to_string())?;
+        let input = load_input_file(path).map_err(|error| error.to_string())?;
         loaded.push(input);
     }
 
@@ -253,6 +247,58 @@ mod tests {
 
     fn args(items: &[&str]) -> Result<Args, String> {
         parse_args(items.iter().map(|s| s.to_string()))
+    }
+
+    #[test]
+    fn oversized_files_are_rejected_without_modifying_output() {
+        use cf_compliance::interchange::InterchangeLimits;
+        use std::io::Write;
+
+        let root = std::env::temp_dir().join(format!("cf-input-limit-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir(&root).unwrap();
+        let output = root.join("output");
+        std::fs::create_dir(&output).unwrap();
+        let names = ["default.nix", "lib.nix", "manifest.json"];
+        for name in names {
+            std::fs::write(output.join(name), "ORIGINAL").unwrap();
+        }
+        let limits = InterchangeLimits::default();
+        for (name, prefix, maximum) in [
+            ("large.json", b"{".as_slice(), limits.max_xml_bytes),
+            ("large.toml", b"name =".as_slice(), limits.max_xml_bytes),
+            ("large.xml", b"<".as_slice(), limits.max_xml_bytes),
+            // Deliberately mislabel the ZIP: content determines its bound.
+            (
+                "archive.bin",
+                b"PK\x03\x04".as_slice(),
+                limits.max_zip_bytes,
+            ),
+        ] {
+            let path = root.join(name);
+            let mut file = std::fs::File::create(&path).unwrap();
+            file.write_all(prefix).unwrap();
+            // A sparse file exercises metadata rejection without allocating
+            // the oversized contents in the test or the production reader.
+            file.set_len(maximum as u64 + 1).unwrap();
+            let error = run(&Args {
+                inputs: vec![path],
+                output: Some(output.clone()),
+                ..Default::default()
+            })
+            .expect_err("oversized input must fail before generation");
+            assert!(
+                error.contains(&format!("exceeding the {maximum} byte limit")),
+                "{error}"
+            );
+            for name in names {
+                assert_eq!(
+                    std::fs::read_to_string(output.join(name)).unwrap(),
+                    "ORIGINAL"
+                );
+            }
+            assert_eq!(std::fs::read_dir(&output).unwrap().count(), names.len());
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

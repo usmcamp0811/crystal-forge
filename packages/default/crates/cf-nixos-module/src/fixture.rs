@@ -96,7 +96,7 @@ pub fn policy_set_json() -> String {
             "require-physical-console-control",
             "custom_check",
             "manual",
-            json!({}),
+            json!({"mode": "all", "rules": []}),
         ),
         (
             "11111111-0000-0000-0000-000000000004",
