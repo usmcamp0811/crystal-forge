@@ -106,10 +106,17 @@ let
   agentCrates   = foundationalCrates ++ [ "cf-agent" ];
   builderCrates = foundationalCrates ++ [ "cf-builder" ];
   keygenCrates  = [ "cf-keygen" ];
-  # cf-server declares exactly two local path dependencies, cf-config and
-  # cf-protocol. It does not depend on cf-agent, cf-builder, or cf-keygen, so
-  # those crates are excluded from the server derivation input.
-  serverCrates  = foundationalCrates ++ [ "cf-server" ];
+  # cf-server declares exactly three local path dependencies: cf-config,
+  # cf-protocol, and cf-compliance (the database-free interchange crate that
+  # also serves the NixOS module generator). It does not depend on cf-agent,
+  # cf-builder, cf-keygen, or cf-nixos-module, so those crates are excluded
+  # from the server derivation input.
+  serverCrates  = foundationalCrates ++ [ "cf-compliance" "cf-server" ];
+
+  # The NixOS module generator depends only on the database-free compliance
+  # interchange crate, so it never pulls in sqlx, axum, or openssl. It has no
+  # foundational crates and no query cache.
+  nixosModuleCrates = [ "cf-compliance" "cf-nixos-module" ];
 
   # The cf-server build expands sqlx query macros offline. sqlx resolves the
   # offline query cache from the workspace root, so `.sqlx` at the workspace
@@ -127,6 +134,7 @@ let
   agentSrc   = mkWorkspaceSrc { crates = agentCrates; };
   builderSrc = mkWorkspaceSrc { crates = builderCrates; };
   keygenSrc  = mkWorkspaceSrc { crates = keygenCrates; };
+  nixosModuleSrc = mkWorkspaceSrc { crates = nixosModuleCrates; };
   serverSrc  = mkWorkspaceSrc {
     crates = serverCrates;
     rootPaths = serverRootPaths;
@@ -138,6 +146,8 @@ let
     mkComponentWorkspaceManifest "builder" builderCrates;
   keygenWorkspaceManifest =
     mkComponentWorkspaceManifest "keygen" keygenCrates;
+  nixosModuleWorkspaceManifest =
+    mkComponentWorkspaceManifest "nixos-module" nixosModuleCrates;
   serverWorkspaceManifest =
     mkComponentWorkspaceManifest "server" serverCrates;
 
@@ -502,6 +512,42 @@ let
   };
 
   # ─────────────────────────────────────────────────────────────────────────
+  # NixOS module generator — builds cf-nixos-module and cf-compliance only.
+  #
+  # Deliberately excludes cf-server so the generator carries no database,
+  # HTTP, or TLS dependency. Standalone; no SRC_HASH needed.
+  # ─────────────────────────────────────────────────────────────────────────
+  cf-nixos-module-drv = pkgs.rustPlatform.buildRustPackage rec {
+    src = nixosModuleSrc;
+    inherit version;
+    pname = "cf-nixos-module";
+    cargoLock = { lockFile = ./Cargo.lock; };
+    cargoBuildFlags = [ "--package" "cf-nixos-module" ];
+    cargoCheckFlags = cargoBuildFlags;
+    # Run the crate's unit and integration tests during the Nix build.
+    cargoTestFlags = [ "--package" "cf-nixos-module" "--package" "cf-compliance" ];
+
+    postPatch = ''
+      cp ${nixosModuleWorkspaceManifest} Cargo.toml
+    '';
+
+    nativeBuildInputs = commonNativeBuildInputs;
+    buildInputs = commonBuildInputs;
+
+    # Test phase only. cf-compliance's custom-expression tests run the
+    # `nix-instantiate --parse` syntax check that the server also applies. The
+    # same parser is supplied by the CLI wrapper for CF-native bundle input.
+    nativeCheckInputs = [ pkgs.nix ];
+
+    meta = with lib; {
+      description = "Generate standalone NixOS modules from exported Crystal Forge policies and compliance bundles";
+      license = licenses.agpl3Only;
+      platforms = platforms.all;
+      mainProgram = "cf-nixos-module";
+    };
+  };
+
+  # ─────────────────────────────────────────────────────────────────────────
   # Legacy "crystal-forge" combined output for backward compatibility.
   #
   # Previously a single buildRustPackage; now a symlinkJoin of the four
@@ -595,9 +641,24 @@ let
     text = ''${cf-builder-drv}/bin/builder "$@"'';
   };
 
+  cf-nixos-module = (pkgs.writeShellApplication {
+    name = "cf-nixos-module";
+    runtimeInputs = [ evaluatorNix ];
+    text = ''${cf-nixos-module-drv}/bin/cf-nixos-module "$@"'';
+  }).overrideAttrs (_: {
+    passthru.tests = {
+      helper = import ./crates/cf-nixos-module/nix/tests-helper {
+        inherit pkgs lib;
+      };
+      generation = import ./crates/cf-nixos-module/nix/tests-generation {
+        inherit pkgs lib;
+      };
+    };
+  });
+
 in crystal-forge // {
   inherit niks3 evaluatorNix;
-  inherit agent server builder cf-keygen test-agent migrate;
+  inherit agent server builder cf-keygen test-agent migrate cf-nixos-module;
   # Component derivations. Internal consumers such as NixOS module services,
   # checks, and test helpers must reference these directly rather than the
   # `crystal-forge`, `server`, or `agent` aggregates above, so that a component
@@ -608,6 +669,7 @@ in crystal-forge // {
   cf-agent-drv = withCoverage cf-agent-drv;
   cf-builder-drv = withCoverage cf-builder-drv;
   cf-keygen-drv = withCoverage cf-keygen-drv;
+  inherit cf-nixos-module-drv;
   # Expose component-specific source hashes for verification
   agentSrcHash = agentSrcHash;
   serverSrcHash = serverSrcHash;

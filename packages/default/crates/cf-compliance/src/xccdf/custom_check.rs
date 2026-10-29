@@ -8,7 +8,7 @@ use serde_json::Value;
 use uuid::Uuid;
 
 use super::models::{CfCustomCheck, CfCustomCheckRule};
-use crate::models::custom_check::ExpressionBinding;
+use crate::custom_check::ExpressionBinding;
 
 /// Identifies the current custom-check context emitted by Crystal Forge.
 pub const CURRENT_CONTEXT: &str = "nixos-configuration-v2";
@@ -73,7 +73,7 @@ pub fn project_custom_check(
     policy_description: Option<&str>,
     config: &Value,
 ) -> Result<CustomCheckProjection, String> {
-    let config = crate::models::custom_check::validate_and_normalize_config(
+    let config = crate::custom_check::validate_and_normalize_config(
         config,
         ExpressionBinding::Current,
         false,
@@ -179,7 +179,7 @@ fn project_rule(rule: &Value, index: usize) -> Result<CustomCheckRuleProjection,
 }
 
 fn require_canonical_expression(expression: &str) -> Result<(), String> {
-    if crate::models::custom_check::has_legacy_reference(expression) {
+    if crate::custom_check::has_legacy_reference(expression) {
         Err("expression uses the historical cfg.config binding".into())
     } else {
         Ok(())
@@ -249,10 +249,10 @@ fn parsed_rule(
         return Err(format!("typed rule {index} language must be nix"));
     }
     let expression = if legacy {
-        if crate::models::custom_check::has_current_reference(expression) {
+        if crate::custom_check::has_current_reference(expression) {
             return Err(format!("typed V1 rule {index} uses the V2 config binding"));
         }
-        crate::models::custom_check::normalize_expression(expression).0
+        crate::custom_check::normalize_expression(expression).0
     } else {
         require_canonical_expression(expression)?;
         expression.into()

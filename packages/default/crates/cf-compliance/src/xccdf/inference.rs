@@ -142,7 +142,11 @@ pub fn infer_nixos_assertions(fix_text: &str) -> Vec<NixosOptionAssertionDraft> 
 /// Accepts identifiers composed of ASCII letters, digits, hyphens, and
 /// underscores, separated by dots.  Rejects empty segments, leading/trailing
 /// dots, and any character outside the accepted set.
-fn is_valid_nix_option_path(s: &str) -> bool {
+///
+/// Public so that every consumer of this grammar (fix-text inference and the
+/// `cf-nixos-module` generator's assertion inversion) validates option paths
+/// identically.
+pub fn is_valid_nix_option_path(s: &str) -> bool {
     if s.is_empty() || s.starts_with('.') || s.ends_with('.') {
         return false;
     }
@@ -165,7 +169,10 @@ fn is_valid_nix_option_path(s: &str) -> bool {
 /// Accepts `true`, `false`, non-negative decimal integers, and double-quoted
 /// strings without interpolation (`${...}`) or escape sequences beyond `\\`
 /// and `\"`.  Returns `None` for anything else.
-fn parse_nix_literal(s: &str) -> Option<NixosLiteralValue> {
+///
+/// Public so that every consumer of this grammar accepts exactly the same set
+/// of literals.
+pub fn parse_nix_literal(s: &str) -> Option<NixosLiteralValue> {
     // Boolean
     if s == "true" {
         return Some(NixosLiteralValue::Boolean(true));

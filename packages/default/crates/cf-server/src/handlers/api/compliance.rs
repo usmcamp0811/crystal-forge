@@ -21,6 +21,13 @@ use crate::api::models::{
     PublishPolicyVersionRequest, SystemComplianceBundle, SystemComplianceBundlesResponse,
     TrustBundleVersionRequest, TrustPolicyVersionRequest, UpdateComplianceBundleRequest,
 };
+// The handler keeps its own `validate_policy_interchange_document*` functions
+// below. They add server-side composite-policy validation that the database-
+// free `cf_compliance::policy_document` version intentionally does not have.
+use cf_compliance::policy_document::{
+    NormalizedPolicyImport, normalize_policy_import, parse_policy_document,
+};
+
 use crate::compliance::interchange::{InterchangeLimits, MAX_XCCDF_UPLOAD_BYTES};
 use crate::compliance::resolver::ResolutionOutcome;
 use crate::compliance::shared_implementation::{
@@ -4126,24 +4133,6 @@ pub struct PolicyInterchangeExportFormatQuery {
     pub format: String,
 }
 
-#[derive(Debug)]
-struct NormalizedPolicyImport {
-    lineage_id: Uuid,
-    version_id: Uuid,
-    version: String,
-    name: String,
-    description: Option<String>,
-    policy_type: String,
-    implementation_state: String,
-    execution_phase: String,
-    config: serde_json::Value,
-    compliance_metadata: serde_json::Value,
-    dependencies: serde_json::Value,
-    opaque_xml: Option<String>,
-    enabled_by_default: Option<bool>,
-    semantic_digest: String,
-}
-
 // ── CF-native reconciliation DTOs ──────────────────────────────────────────
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -7177,37 +7166,6 @@ pub async fn policy_interchange_import(
         .into_response()
 }
 
-/// Generate a deterministic UUID for legacy compatibility policy imports.
-/// Used when a policy document lacks explicit portable lineage_id/version_id.
-///
-/// Creates stable UUIDs based on:
-/// - Crystal Forge namespace
-/// - source document SHA-256
-/// - policy ordinal within the document
-/// - field type (lineage or version)
-///
-/// Important: Same source bytes + same ordinal produce identical UUIDs across
-/// preview and import calls, enabling proper reconciliation without name-based matching.
-fn generate_compatibility_policy_uuid(
-    source_sha256: &str,
-    ordinal: usize,
-    field: &str, // "lineage" or "version"
-) -> Uuid {
-    use sha2::{Digest, Sha256};
-
-    let seed = format!(
-        "crystal-forge:policy-compat-{}:1:{}:{}",
-        field, source_sha256, ordinal
-    );
-    let hash = Sha256::digest(seed.as_bytes());
-
-    // Convert first 16 bytes of SHA-256 to UUID
-    // This is deterministic and collision-resistant
-    let mut bytes = [0u8; 16];
-    bytes.copy_from_slice(&hash[..16]);
-    Uuid::from_bytes(bytes)
-}
-
 /// Reconciliation preview for a single imported policy.
 /// Contains both reconciliation decision and local context information.
 #[derive(Debug, Clone, serde::Serialize)]
@@ -7700,206 +7658,17 @@ fn parse_policy_interchange_upload_with_source(
     upload: &MultipartUpload,
     source_sha256: &str,
 ) -> Result<Vec<NormalizedPolicyImport>, String> {
-    let policies = parse_policy_interchange_upload(upload)?;
-    // Re-normalize with source_sha256 to get deterministic IDs
-    let format = upload
-        .filename
-        .as_deref()
-        .and_then(|name| name.rsplit('.').next())
-        .unwrap_or("json")
-        .to_ascii_lowercase();
-    let document = match format.as_str() {
-        "toml" => std::str::from_utf8(&upload.bytes)
-            .ok()
-            .and_then(|text| toml::from_str::<toml::Value>(text).ok())
-            .and_then(|value| serde_json::to_value(value).ok())
-            .ok_or_else(|| "Policy TOML is invalid".to_string())?,
-        "json" => serde_json::from_slice::<serde_json::Value>(&upload.bytes)
-            .map_err(|_| "Policy JSON is invalid".to_string())?,
-        _ => return Err("Policy interchange format must be JSON or TOML".to_string()),
-    };
-    let raw_policies = match document.get("policies") {
-        Some(serde_json::Value::Array(policies)) => policies.clone(),
-        Some(_) => return Err("The policies field must be an array".to_string()),
-        None if document.get("policy_type").is_some() => vec![document],
-        None => return Err("Policy interchange document must contain policies".to_string()),
-    };
-    if raw_policies.is_empty() {
-        return Err("Policy interchange document contains no policies".to_string());
-    }
-    raw_policies
-        .into_iter()
-        .enumerate()
-        .map(|(idx, raw)| normalize_policy_import(raw, Some(source_sha256), None, idx))
-        .collect()
+    parse_policy_document(
+        &upload.bytes,
+        upload.filename.as_deref(),
+        Some(source_sha256),
+    )
 }
 
 fn parse_policy_interchange_upload(
     upload: &MultipartUpload,
 ) -> Result<Vec<NormalizedPolicyImport>, String> {
-    let format = upload
-        .filename
-        .as_deref()
-        .and_then(|name| name.rsplit('.').next())
-        .unwrap_or("json")
-        .to_ascii_lowercase();
-    let document = match format.as_str() {
-        "toml" => std::str::from_utf8(&upload.bytes)
-            .ok()
-            .and_then(|text| toml::from_str::<toml::Value>(text).ok())
-            .and_then(|value| serde_json::to_value(value).ok())
-            .ok_or_else(|| "Policy TOML is invalid".to_string())?,
-        "json" => serde_json::from_slice::<serde_json::Value>(&upload.bytes)
-            .map_err(|_| "Policy JSON is invalid".to_string())?,
-        _ => return Err("Policy interchange format must be JSON or TOML".to_string()),
-    };
-    let raw_policies = match document.get("policies") {
-        Some(serde_json::Value::Array(policies)) => policies.clone(),
-        Some(_) => return Err("The policies field must be an array".to_string()),
-        None if document.get("policy_type").is_some() => vec![document],
-        None => return Err("Policy interchange document must contain policies".to_string()),
-    };
-    if raw_policies.is_empty() {
-        return Err("Policy interchange document contains no policies".to_string());
-    }
-    raw_policies
-        .into_iter()
-        .enumerate()
-        .map(|(idx, raw)| normalize_policy_import(raw, None, None, idx))
-        .collect()
-}
-
-fn normalize_policy_import(
-    raw: serde_json::Value,
-    source_sha256: Option<&str>,
-    compat_seed: Option<&str>,
-    ordinal: usize,
-) -> Result<NormalizedPolicyImport, String> {
-    let object = raw
-        .as_object()
-        .ok_or_else(|| "Each imported policy must be an object".to_string())?;
-    let compatibility_expression = object.get("expression").and_then(serde_json::Value::as_str);
-
-    // Portable IDs: if explicit, use them; if missing, generate deterministically
-    let lineage_id =
-        if let Some(lid_str) = object.get("lineage_id").and_then(serde_json::Value::as_str) {
-            Uuid::parse_str(lid_str).map_err(|_| "lineage_id is not a UUID".to_string())?
-        } else if let (Some(source_sha), _) = (source_sha256, compat_seed) {
-            // Deterministic compatibility ID from source
-            generate_compatibility_policy_uuid(source_sha, ordinal, "lineage")
-        } else {
-            // For preview without source_sha256 context, use random
-            Uuid::new_v4()
-        };
-
-    let version_id =
-        if let Some(vid_str) = object.get("version_id").and_then(serde_json::Value::as_str) {
-            Uuid::parse_str(vid_str).map_err(|_| "version_id is not a UUID".to_string())?
-        } else if let (Some(source_sha), _) = (source_sha256, compat_seed) {
-            // Deterministic compatibility ID from source
-            generate_compatibility_policy_uuid(source_sha, ordinal, "version")
-        } else {
-            // For preview without source_sha256 context, use random
-            Uuid::new_v4()
-        };
-    let name = object
-        .get("name")
-        .and_then(serde_json::Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .ok_or_else(|| "Imported policy is missing name".to_string())?
-        .to_string();
-    let policy_type = object
-        .get("policy_type")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string)
-        .or_else(|| compatibility_expression.map(|_| "custom_check".to_string()))
-        .ok_or_else(|| "Imported policy is missing policy_type".to_string())?;
-    let config = object.get("config").cloned().unwrap_or_else(|| {
-        compatibility_expression
-            .map(|expression| {
-                serde_json::json!({
-                    "expression": expression,
-                    "strict": object
-                        .get("strict")
-                        .and_then(serde_json::Value::as_bool)
-                        .unwrap_or(true),
-                })
-            })
-            .unwrap_or_else(|| serde_json::json!({}))
-    });
-    let version = object
-        .get("version")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("0.1.0")
-        .to_string();
-    let description = object
-        .get("description")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let implementation_state = object
-        .get("implementation_state")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("native")
-        .to_string();
-    let execution_phase = object
-        .get("execution_phase")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or("nix-evaluation")
-        .to_string();
-    let compliance_metadata = object
-        .get("compliance_metadata")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!({}));
-    let dependencies = object
-        .get("dependencies")
-        .cloned()
-        .unwrap_or_else(|| serde_json::json!([]));
-    let opaque_xml = object
-        .get("opaque_xml")
-        .and_then(serde_json::Value::as_str)
-        .map(str::to_string);
-    let enabled_by_default = object
-        .get("enabled_by_default")
-        .and_then(serde_json::Value::as_bool);
-    let canonical = crate::compliance::digest::PolicyVersionCanonical {
-        name: name.clone(),
-        description: description.clone(),
-        policy_type: policy_type.clone(),
-        implementation_state: implementation_state.clone(),
-        execution_phase: execution_phase.clone(),
-        config: config.clone(),
-        compliance_metadata: compliance_metadata.clone(),
-        dependencies: dependencies.clone(),
-        opaque_xml_digest: crate::compliance::digest::PolicyVersionCanonical::digest_opaque_xml(
-            opaque_xml.as_deref(),
-        ),
-        enabled_by_default,
-    };
-    let computed_digest = canonical.compute_digest();
-    if let Some(expected) = object
-        .get("semantic_digest")
-        .and_then(serde_json::Value::as_str)
-    {
-        if expected != computed_digest {
-            return Err("semantic_digest does not match the imported policy fields".to_string());
-        }
-    }
-    Ok(NormalizedPolicyImport {
-        lineage_id,
-        version_id,
-        version,
-        name,
-        description,
-        policy_type,
-        implementation_state,
-        execution_phase,
-        config,
-        compliance_metadata,
-        dependencies,
-        opaque_xml,
-        enabled_by_default,
-        semantic_digest: computed_digest,
-    })
+    parse_policy_document(&upload.bytes, upload.filename.as_deref(), None)
 }
 
 /// Convert a serde_json::Value to a TOML string.
@@ -16740,6 +16509,7 @@ packages = ["git"]
                 enabled_by_default: Some(false),
                 semantic_digest: "abc123".into(),
                 version: "1.0".into(),
+                publication_state: "draft".into(),
             },
             NormalizedPolicyImport {
                 lineage_id: id2,
@@ -16756,6 +16526,7 @@ packages = ["git"]
                 enabled_by_default: Some(false),
                 semantic_digest: "def456".into(),
                 version: "2.0".into(),
+                publication_state: "draft".into(),
             },
         ];
 
@@ -16782,6 +16553,7 @@ packages = ["git"]
                 enabled_by_default: Some(false),
                 semantic_digest: "abc123".into(),
                 version: "1.0".into(),
+                publication_state: "draft".into(),
             },
             NormalizedPolicyImport {
                 lineage_id: Uuid::new_v4(),
@@ -16798,6 +16570,7 @@ packages = ["git"]
                 enabled_by_default: Some(false),
                 semantic_digest: "def456".into(),
                 version: "2.0".into(),
+                publication_state: "draft".into(),
             },
         ];
 
@@ -16808,6 +16581,7 @@ packages = ["git"]
     #[test]
     fn generic_interchange_cannot_bypass_composite_validation() {
         let policies = vec![NormalizedPolicyImport {
+            publication_state: "accepted".into(),
             lineage_id: Uuid::new_v4(),
             version_id: Uuid::new_v4(),
             name: "invalid composite".into(),
@@ -16839,6 +16613,7 @@ packages = ["git"]
     #[test]
     fn generic_interchange_accepts_target_specific_nixos_option_semantics() {
         let policies = vec![NormalizedPolicyImport {
+            publication_state: "accepted".into(),
             lineage_id: Uuid::new_v4(),
             version_id: Uuid::new_v4(),
             name: "target-specific composite".into(),
@@ -16878,6 +16653,7 @@ packages = ["git"]
             crate::compliance::xccdf::import_models::ImportedPolicyRecord {
                 policy_id: Uuid::new_v4(),
                 policy_version_id: Uuid::new_v4(),
+                publication_state: None,
                 source_rule_id: "target-specific-rule".into(),
                 source_rule_order: 0,
                 implementation_state: "native".into(),
@@ -16991,6 +16767,7 @@ packages = ["git"]
             crate::compliance::xccdf::import_models::ImportedPolicyRecord {
                 policy_id: Uuid::new_v4(),
                 policy_version_id: Uuid::new_v4(),
+                publication_state: None,
                 source_rule_id: "all-composite-rules".into(),
                 source_rule_order: 0,
                 implementation_state: "native".into(),
