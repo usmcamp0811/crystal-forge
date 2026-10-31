@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-10-31T18:59:00Z'
+updated_date: '2026-10-31T19:08:00Z'
 labels:
   - management-mode
   - assurance
@@ -175,4 +175,8 @@ Owner explicitly approved narrow listener correction: honor configured host, pre
 Backend foundation implemented, not complete feature: migration0311 adds mode/key/target/parent invariants; System key optional, typed mode and parent; managed constructor signature unchanged; config upsert cannot promote nonmanaged registration; agent authentication rejects nonmanaged/inactive/keyless even with valid signature. Three mode and18 agent_request tests pass through Nix offline. Migration not yet applied/verified, deployment and evidence boundaries still incomplete.
 
 Preview baseline reached processes ready: task PG PID16730 verified cwd TASK-508-management-modes/.devenv/state/postgres, frontend17060 cwd packages/web-ui port8081, baseline API16871 cwd task root port3447. API unexpectedly listened0.0.0.0; stopped only task api via devenv processes stop api, verified3447 absent. Need rebuild/start corrected task backend before calling preview ready. Design preview loopback18088 verified200; Chromium exercised management filtering and reference Add sections; screenshots /tmp/opencode/task508-design-{dashboard,external-list,reference-list,reference-form,config-form}.png. Mockup interaction is not production parity proof.
+
+Bounded scanning backend implemented in existing worktree; only application files touched by this continuation are packages/default/crates/cf-server/src/queries/scanning.rs, src/handlers/api/scanning.rs and scanning DTO section of src/api/models.rs. Operational coverage now unions exact built external/reference artifacts at the ready registered flake head, independently of heartbeat/on_build/recovery expiry, with existing operational populations. Every current/runtime classification is managed-only, including system-scoped records when a managed registration shares the artifact. Artifact queue/deployed/record responses add sorted distinct management_modes; system-scoped history reports only selected registration mode; systems rows add singular management_mode and retain actual registered UUID/name/environment. Artifact names remain config identities, not resource navigation IDs. Existing CVE selectors, schedule policy, logs, archive, queue/filter/history mechanics preserved.
+
+Verification: nix develop -c env SQLX_OFFLINE=true cargo test --manifest-path packages/default/Cargo.toml -p cf-server --lib scanning:: exited 0 on final code: 14 passed, 0 failed, 1 ignored. New pure tests: configuration_history_cursor_is_bound_to_registration_and_filters; scan_queue_response_preserves_shared_modes_and_registration_identity. New SQLx ignored test configuration_coverage_and_shared_modes_do_not_confer_runtime compiled but NOT EXECUTED (no authorized safe DB); covers no-heartbeat/old-build coverage, shared-mode deduplication, new unbuilt head excluding old evidence, retained-report runtime denial, per-resource environment/name/UUID, mixed managed sharing and renamed-registration history retention. Targeted Nix rustfmt --check for all three files and scoped git diff --check passed. Initial shorter test invocation timed out during compilation; later final selection succeeded. No commits, services or database access performed. Runtime SQL behavior remains unverified until coordinator runs the ignored regression in the isolated existing SQLx harness.
 <!-- SECTION:NOTES:END -->
