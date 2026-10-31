@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-10-31T17:59:00Z'
+updated_date: '2026-10-31T18:59:00Z'
 labels:
   - management-mode
   - assurance
@@ -149,6 +149,8 @@ Owner-approved listener correction (single existing TASK-508 branch/worktree): h
 Authorized listener startup correction is directly related to safe task preview. Keep default bind backward compatible, test exact production bind with real ephemeral sockets, then resume backend using task-owned generated config/PG and verify loopback. No additional networking feature or public config field.
 
 Guest-observation transport slice (same owner worktree, exclusive file scope): add defaulted signed reports and heartbeat targets binding external guest UUID/identity to validated microvm@identity.service; collect only fixed systemctl show ActiveState (runner None unless authoritative local runner proven); validate active managed parent/key, exact same-environment external association and identity under existing snapshot/system transaction locks; append separate evidence migration 0315; expose scoped latest observation without refresh or runtime/scan authority. Add compatibility, collector/validation and ignored isolated SQLx tests. Run targeted Nix-shell checks without services or DB access; owner handles broader docs/UI/integration.
+
+Bounded scanning backend continuation in existing TASK-508-management-modes worktree: exclusive edits to queries/scanning.rs, handlers/api/scanning.rs and scanning DTOs in api/models.rs. Add nonmanaged exact configuration artifacts to operational coverage independently of heartbeat/recovery eligibility; gate every scanning runtime/current selector to managed; expose distinct registration management modes on shared artifact rows and preserve per-resource system identity/environment. Preserve existing selectors, schedule, queue, logs, archive/history and filter contracts. Add pure response tests and ignored isolated-harness database regression tests in these files; run targeted pure scanning filters through Nix with SQLX_OFFLINE=true. No commits, services or database access.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
