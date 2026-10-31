@@ -68,7 +68,7 @@ function useDeployStages(pendingDeploy, onClear) {
   return stage;
 }
 
-function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, onOpenCommit, pendingDeploy, onStartPending, onClearPending, initialTab, initialRev }) {
+function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, onOpenCommit, pendingDeploy, onStartPending, onClearPending, initialTab, initialRev, onOpenSystem }) {
   const [tab, setTab] = React.useState(initialTab || "overview");
   const [cveScenarioKey, setCveScenarioKey] = React.useState(() => new URLSearchParams(window.location.search).get("sc1"));
   React.useEffect(() => {
@@ -83,6 +83,15 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
   const [deployPreselect, setDeployPreselect] = React.useState(null);
   React.useEffect(() => { setDeployPreselect(null); }, [sys.id]);
   const [sshOpen, setSshOpen] = React.useState(false);
+  const [rescan, setRescan] = React.useState(null);
+  React.useEffect(() => { setRescan(null); }, [sys.id]);
+  const [evalPeek, setEvalPeek] = React.useState(null);
+  const openEvalPeek = (sha) => {
+    const all = [...(typeof ACTIVE_EVALS !== "undefined" ? ACTIVE_EVALS : []), ...(typeof HISTORY_EVALS !== "undefined" ? HISTORY_EVALS : [])];
+    const m = (e) => e.commit && sha && (e.commit === sha || e.commit.startsWith(sha) || sha.startsWith(e.commit));
+    const ev = all.find(e => m(e) && e.flake === sys.flake) || all.find(m) || all.find(e => e.flake === sys.flake && e.status === "success") || all.find(e => e.flake === sys.flake);
+    if (ev) setEvalPeek(ev); else onNavigate?.("evals", { sha, flake: sys.flake });
+  };
   const [commitPeek, setCommitPeek] = React.useState(null); // {sha, msg, flake, author, at} | {capture,...}
   const openCommitPeek = (c) => {
     const f = FLAKE_REGISTRY.find(x => x.name === c.flake)
@@ -91,6 +100,7 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
     setCommitPeek({ flake: f, sha: c.capture ? null : c.sha, meta: { msg: c.msg, author: c.author, at: c.at } });
   };
   if (!sys) return null;
+  const ext = !isManagedSys(sys), A = sys.assurance;
   const sc1 = sys.hostname === "orion-db-02" && cveScenarioKey
     ? window.SC1_CVE_DESIGN?.states[cveScenarioKey]
     : null;
@@ -117,16 +127,30 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
               <div className="sd-fqdn mono">{sys.fqdn}</div>
             </div>
             <EnvBadge env={sys.environment} />
+            <MgmtChip sys={sys} />
             <StatusChip sys={sys} />
-            <DeploymentChip state={sys.deploymentState} />
+            {ext ? <DeploymentCell sys={sys} /> : <DeploymentChip state={sys.deploymentState} />}
           </div>
           <div className="sd-head-actions">
-            <button className="btn btn-ghost focus-ring" onClick={() => setSshOpen(true)}><Icon name="terminal" size={14} /> SSH</button>
+            {ext && rescan && <span className="chip chip-info"><Spinner size={10} /> {rescan} requested</span>}
+            {ext && !rescan && (["none", "queued", "building"].includes(A.build.state) || A.configState === "missing"
+              ? <span className="mg-dim" style={{ alignSelf: "center" }}>{A.configState === "missing" ? "Re-evaluate unavailable: configuration missing" : "Scan starts after the build"}</span>
+              : <button className="btn btn-ghost focus-ring" onClick={() => setRescan("Scan")}><Icon name="shield" size={14} /> Re-scan</button>)}
+            {!ext && <button className="btn btn-ghost focus-ring" onClick={() => setSshOpen(true)}><Icon name="terminal" size={14} /> SSH</button>}
             <button className="btn btn-ghost focus-ring" onClick={() => onEdit?.(sys)}><Icon name="gear" size={14} /> Edit</button>
           </div>
         </div>
 
         {/* Key metric strip */}
+        {ext ? (
+        <div className="sd-metric-strip">
+          <div className="sd-metric"><div className="sd-metric-label">Selected revision</div><div className="sd-metric-val-num mono" style={{ fontSize: 18 }}>{A.rev.sha}</div><div className="sd-metric-sub">{sys.branch} · eval {A.eval.state === "success" ? "ok" : "failed"} {A.eval.at}</div></div>
+          <div className="sd-metric"><div className="sd-metric-label">Build</div><div className="sd-metric-val-num" style={{ fontSize: 18, textTransform: "capitalize" }}>{A.build.state === "none" ? "Not built" : A.build.state}</div><div className="sd-metric-sub">{A.build.at || "—"}</div></div>
+          <div className="sd-metric"><div className="sd-metric-label">Scan</div><div className="sd-metric-val-num" style={{ fontSize: 18 }}>{(SCAN_EVIDENCE_META[A.scan.state] || {}).label}</div><div className="sd-metric-sub">{A.scan.at ? A.scan.at + " · rev " + A.scan.rev : "no completed scan"}</div></div>
+          <div className="sd-metric"><div className="sd-metric-label">CVEs</div><div className="sd-metric-val-num" style={{ color: !hasCveData(sys) ? undefined : sys.cves.critical > 0 ? "#f87171" : "#34d399" }}>{hasCveData(sys) ? sys.cves.total : "—"}</div><div className="sd-metric-sub">{hasCveData(sys) ? `${sys.cves.critical} critical · ${sys.cves.high} high${A.scan.state !== "current" ? " · " + (A.scan.state === "failed" ? "last good" : "historical") : ""}` : "scan evidence unavailable"}</div></div>
+          <div className="sd-metric"><div className="sd-metric-label">Runtime</div><div className="sd-metric-val-num" style={{ fontSize: 18, color: "var(--cf-text-secondary)" }}>{mgmtOf(sys) === "reference" ? "Not applicable" : sys.runtime ? "Host-observed" : "Unknown"}</div><div className="sd-metric-sub">{mgmtOf(sys) === "reference" ? "not a running machine" : sys.runtime ? "unit " + sys.runtime.unitState + " · " + sys.runtime.observedAt : "no observations"}</div></div>
+        </div>
+        ) : (
         <div className="sd-metric-strip">
           <div className="sd-metric">
             <div className="sd-metric-label">Heartbeat</div>
@@ -157,6 +181,7 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
             <div className="sd-metric-sub">env: {sys.environment}</div>
           </div>
         </div>
+        )}
 
         {deployStage && pendingDeploy && (
           <PendingDeployBanner
@@ -176,10 +201,10 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
           {[
             { k: "overview",   l: "Overview",  i: "dashboard" },
             { k: "deploy",     l: "Deploy",    i: "deploy" },
-            { k: "history",    l: "History",   i: "history" },
+            { k: "history",    l: ext ? "Evidence history" : "History",   i: "history" },
             { k: "logs",       l: "Logs",      i: "terminal" },
             { k: "config",     l: "Config",    i: "file" },
-            { k: "cves",       l: "CVEs",      i: "shield", badge: sys.cves.critical > 0 ? sys.cves.critical : null },
+            { k: "cves",       l: "CVEs",      i: "shield", badge: sys.cves.critical > 0 && hasCveData(sys) ? sys.cves.critical : null },
             { k: "hardening",  l: "Hardening", i: "key" },
             { k: "compliance", l: "Compliance",i: "shield" },
           ].map(t => (
@@ -199,14 +224,26 @@ function SystemDetail({ sys, onBack, onDeploy, onEdit, onNavigate, onTagFilter, 
 
       {/* Tab panels */}
       <div className="sd-body">
-        {tab === "overview"   && <OverviewTab sys={sys} onNavigate={onNavigate} onViewCves={() => setTab("cves")} onTagFilter={onTagFilter} deployStage={deployStage} pendingCommit={pendingDeploy?.commit} pendingKind={pendingDeploy?.kind} pendingGen={pendingDeploy?.gen} onViewHistory={() => setTab("history")} onOpenCommit={openCommitPeek} onOpenBuild={() => onNavigate?.("builds")} />}
-        {tab === "deploy"     && <DeployTab key={sys.id} sys={sys} onDeploy={onDeploy} onOpenCommit={openCommitPeek} preselect={deployPreselect} />}
-        {tab === "history"    && <HistoryTab sys={sys} onRollback={(sha,gen)=>{ setDeployPreselect({ sha, gen, nonce: Date.now() }); setTab("deploy"); }} onLogsJump={(id)=>{ setTab("logs"); setLogsJump({ id, nonce: Date.now() }); }} onOpenCommit={openCommitPeek} />}
-        {tab === "logs"       && <LogsTab sys={sys} jump={logsJump} />}
-        {tab === "config"     && window.ConfigExplorerTab && <window.ConfigExplorerTab sys={sys} initialRev={initialRev} onOpenFlake={openCommitPeek} />}
-        {tab === "cves"       && <CvesTab sys={sys} scenarioKey={cveScenarioKey} />}
-        {tab === "compliance" && <ComplianceTab sys={sys} onNavigate={onNavigate} />}
-        {tab === "hardening"  && <HardeningTab sys={sys} />}
+        {ext && tab === "overview" && <ExternalOverview sys={sys} onNavigate={onNavigate} onViewCves={() => setTab("cves")} onOpenCommit={openCommitPeek} onOpenSystem={onOpenSystem} onViewHistory={() => setTab("history")} />}
+        {ext && tab === "deploy" && <NotApplicable icon="deploy" title={mgmtOf(sys) === "external" ? "Deployment is controlled outside Crystal Forge" : "Reference configurations are not deployed"}
+          actions={<><button className="btn btn-ghost focus-ring" onClick={() => setTab("history")}>Evidence history</button><button className="btn btn-ghost focus-ring" onClick={() => onEdit?.(sys)}><Icon name="gear" size={12} /> Change management mode</button></>}>
+          {mgmtOf(sys) === "external" ? (sys.parentHost ? `${sys.hostname} is deployed by its parent host ${sys.parentHost}. ` : `${sys.hostname} is deployed by its own administrators. `) + "Crystal Forge evaluates, builds and scans the selected revision and keeps the evidence. It cannot deploy or roll back this system." : "This configuration is built and scanned on each revision to produce security evidence. There is no machine to deploy to."}</NotApplicable>}
+        {ext && tab === "logs" && <NotApplicable icon="terminal" title="No runtime logs"
+          actions={<button className="btn btn-ghost focus-ring" onClick={() => onNavigate?.("builds", { flake: sys.flake })}>Open build logs</button>}>
+          {mgmtOf(sys) === "external" ? "Without a CF agent there is no log stream. Evaluation, build and scan logs for this configuration are available from the Builds and Scanning views." : "Reference configurations produce evaluation, build and scan logs only. They are available from the Builds and Scanning views."}</NotApplicable>}
+        {ext && tab === "history" && <EvidenceHistory sys={sys} />}
+        {ext && tab === "cves" && <EvidenceGate sys={sys} what="CVE findings"><CvesTab sys={sys} scenarioKey={null} /></EvidenceGate>}
+        {ext && tab === "hardening" && <EvidenceGate sys={sys} what="Hardening results"><HardeningTab sys={sys} /></EvidenceGate>}
+        {ext && tab === "compliance" && <EvidenceGate sys={sys} what="Compliance results"><ComplianceTab sys={sys} onNavigate={onNavigate} /></EvidenceGate>}
+        {ext && tab === "config" && window.ConfigExplorerTab && <window.ConfigExplorerTab sys={sys} initialRev={initialRev} onOpenFlake={openCommitPeek} />}
+        {!ext && tab === "overview"   && <OverviewTab sys={sys} onNavigate={onNavigate} onViewCves={() => setTab("cves")} onTagFilter={onTagFilter} deployStage={deployStage} pendingCommit={pendingDeploy?.commit} pendingKind={pendingDeploy?.kind} pendingGen={pendingDeploy?.gen} onViewHistory={() => setTab("history")} onOpenCommit={openCommitPeek} onOpenBuild={() => onNavigate?.("builds")} />}
+        {!ext && tab === "deploy"     && <DeployTab key={sys.id} sys={sys} onDeploy={onDeploy} onOpenCommit={openCommitPeek} preselect={deployPreselect} />}
+        {!ext && tab === "history"    && <HistoryTab sys={sys} onRollback={(sha,gen)=>{ setDeployPreselect({ sha, gen, nonce: Date.now() }); setTab("deploy"); }} onLogsJump={(id)=>{ setTab("logs"); setLogsJump({ id, nonce: Date.now() }); }} onOpenCommit={openCommitPeek} />}
+        {!ext && tab === "logs"       && <LogsTab sys={sys} jump={logsJump} />}
+        {!ext && tab === "config"     && window.ConfigExplorerTab && <window.ConfigExplorerTab sys={sys} initialRev={initialRev} onOpenFlake={openCommitPeek} />}
+        {!ext && tab === "cves"       && <CvesTab sys={sys} scenarioKey={cveScenarioKey} />}
+        {!ext && tab === "compliance" && <ComplianceTab sys={sys} onNavigate={onNavigate} />}
+        {!ext && tab === "hardening"  && <HardeningTab sys={sys} />}
       </div>
       {sshOpen && <SshConnectModal sys={sys} onClose={() => setSshOpen(false)} />}
       {commitPeek && <FlakeTray flake={commitPeek.flake} focusSha={commitPeek.sha} focusMeta={commitPeek.meta} onClose={() => setCommitPeek(null)} onEdit={() => {}} onOpenEval={(c) => onNavigate?.("evals", c)} onOpenBuild={(c) => onNavigate?.("builds", c)} onOpenSystems={(flakeName) => onNavigate?.("systems", null, flakeName)} />}
@@ -436,7 +473,7 @@ function OverviewTab({ sys, onViewCves, onTagFilter, deployStage, pendingCommit,
             {sys.storePath}
             {" "}
             <button className="tl-commit-link mono focus-ring" style={{ fontSize:11 }} title={`Open the evaluation for ${sys.commit}`}
-              onClick={() => onNavigate?.("evals", { sha: sys.commit })}>
+              onClick={() => onNavigate?.("evals", { sha: sys.commit, flake: sys.flake })}>
               <Icon name="build" size={11} /> eval <Icon name="arrow-right" size={10} />
             </button>
           </dd>

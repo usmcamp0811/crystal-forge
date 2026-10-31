@@ -17,7 +17,8 @@ function ConfigExplorerTab({ sys, initialRev, onOpenFlake }) {
   const [module, setModule] = React.useState(null);
   const [mode, setMode] = React.useState("browse");
 
-  const gens = React.useMemo(() => window.buildGenerations(sys), [sys.id]);
+  const managed = isManagedSys(sys), homeMode = (managed && !initialRev) ? "generation" : "commit";
+  const gens = React.useMemo(() => managed ? window.buildGenerations(sys) : [], [sys.id]);
   const commits = React.useMemo(() => {
     const list = window.buildSystemCommits(sys);
     if (initialRev && !list.some(c => c.sha === initialRev)) {
@@ -25,10 +26,10 @@ function ConfigExplorerTab({ sys, initialRev, onOpenFlake }) {
     }
     return list;
   }, [sys.id, initialRev]);
-  const [revMode, setRevMode] = React.useState(initialRev ? "commit" : "generation");
+  const [revMode, setRevMode] = React.useState(homeMode);
   const [genId, setGenId] = React.useState(null);
   const [commitSha, setCommitSha] = React.useState(initialRev || null);
-  React.useEffect(() => { setRevMode(initialRev ? "commit" : "generation"); setGenId(null); setCommitSha(initialRev || null); }, [sys.id, initialRev]);
+  React.useEffect(() => { setRevMode(homeMode); setGenId(null); setCommitSha(initialRev || null); }, [sys.id, initialRev]);
 
   const activeGen = (genId !== null && gens.find(g => g.id === genId)) || gens[0];
   const activeCommit = (commitSha && commits.find(c => c.sha === commitSha)) || commits.find(c => c.sha === sys.commit) || commits[0];
@@ -154,10 +155,10 @@ function ConfigExplorerTab({ sys, initialRev, onOpenFlake }) {
         </div>
         <div className={`cfgx-revrow${isHistorical ? " is-hist" : ""}`}>
           <span className="cfgx-target-label">Revision</span>
-          <div className="seg xs">
+          {managed ? <div className="seg xs">
             <button className={!onCommits?"active":""} onClick={()=>setRevMode("generation")}>Generations</button>
             <button className={onCommits?"active":""} onClick={()=>setRevMode("commit")}>Commits</button>
-          </div>
+          </div> : <span className="mg-dim" title="Crystal Forge does not deploy this resource, so it has no generations">Commits only</span>}
           {onCommits ? (
             <select className="cfgx-select focus-ring" value={activeCommit.sha} onChange={e=>setCommitSha(e.target.value)}>
               {commits.map(c => <option key={c.sha} value={c.sha}>{c.sha}{c.sha === sys.commit ? " (deployed)" : ""} · {c.when}</option>)}
@@ -170,12 +171,12 @@ function ConfigExplorerTab({ sys, initialRev, onOpenFlake }) {
           <span className="cfgx-revnote">
             {isHistorical
               ? (onCommits
-                  ? <>evaluating at <span className="mono">{rev}</span>{deployedHere ? "" : ", never deployed here"}</>
+                  ? <>evaluating at <span className="mono">{rev}</span>{!managed || deployedHere ? "" : ", never deployed here"}</>
                   : <>evaluating generation #{activeGen.id} at <span className="mono">{rev}</span></>)
               : <>evaluating the configuration running now</>}
           </span>
           {isHistorical
-            ? <button className="cfgx-link" onClick={()=>{ setRevMode("generation"); setGenId(null); setCommitSha(null); }}>back to current</button>
+            ? <button className="cfgx-link" onClick={()=>{ setRevMode(homeMode); setGenId(null); setCommitSha(null); }}>back to current</button>
             : <span className="cfgx-live"><Icon name="check" size={9}/> live</span>}
         </div>
       </div>

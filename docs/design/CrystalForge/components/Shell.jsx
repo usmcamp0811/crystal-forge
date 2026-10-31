@@ -326,8 +326,8 @@ window.ClassificationBanner = ClassificationBanner;
 //                    condition got fixed — you have to read/act on it. It's the "what happened"
 //                    audit trail, the sidebar is the "what's wrong right now" gauge.
 function _cnt(list, pred) { return (typeof list !== "undefined" ? list : []).filter(pred).length; }
-const _sysAttention = _cnt(typeof SYSTEMS !== "undefined" ? SYSTEMS : [], s => s.health === "critical" || s.health === "offline");
-const _sysTotal     = typeof SYSTEMS !== "undefined" ? SYSTEMS.length : 0;
+const _sysAttention = _cnt(typeof managedSystems === "function" ? managedSystems() : [], s => s.health === "critical" || s.health === "offline");
+const _sysTotal     = typeof managedSystems === "function" ? managedSystems().length : 0;
 const _flakeErrors  = _cnt(typeof FLAKE_REGISTRY !== "undefined" ? FLAKE_REGISTRY : [], f => f.status === "error");
 const _flakeTotal   = typeof FLAKE_REGISTRY !== "undefined" ? FLAKE_REGISTRY.length : 0;
 const _envTotal     = typeof ENVIRONMENTS !== "undefined" ? ENVIRONMENTS.length : 0;

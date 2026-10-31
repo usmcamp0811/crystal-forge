@@ -268,6 +268,7 @@ function FlakeSystemsPane({ flake, out, commit, onPickCommit, onOpenSystem }) {
   // Registering a declared-but-unmanaged host: the flake already knows its
   // hostname and flake, so the add workflow opens prefilled.
   const [adding, setAdding] = React.useState(null);
+  const [menu, setMenu] = React.useState(null);
   React.useEffect(() => { setScope("all"); }, [out.sha]);
   const rows = out.systems.filter(s => {
     if (scope === "declared-only") return s.declared && !s.managedSystem;
@@ -315,14 +316,25 @@ function FlakeSystemsPane({ flake, out, commit, onPickCommit, onOpenSystem }) {
                 {!s.declared
                   ? <span className="chip chip-critical fx-chip">undeclared</span>
                   : s.managedSystem
-                    ? <span className="chip chip-healthy fx-chip">managed</span>
+                    ? <span className="chip chip-healthy fx-chip">{mgmtOf(s.managedSystem) === "managed" ? "managed" : mgmtOf(s.managedSystem)}</span>
                     : <span className="chip chip-warning fx-chip">not managed</span>}
                 {s.note && <span className="fx-note">{s.note}</span>}
               </td>
               <td className="fx-right">
                 {s.managedSystem
                   ? <button className="btn btn-ghost focus-ring xs" onClick={()=>onOpenSystem && onOpenSystem(s.managedSystem, out.sha)}>Open config</button>
-                  : <button className="btn btn-ghost focus-ring xs" onClick={()=>setAdding(s)}>Add to Forge</button>}
+                  : <div className="mg-menu-wrap">
+                      <button className="btn btn-ghost focus-ring xs" aria-haspopup="menu" aria-expanded={menu===s.hostname} onClick={()=>setMenu(menu===s.hostname?null:s.hostname)}>Add to Forge <Icon name="chevron-down" size={10}/></button>
+                      {menu===s.hostname && (
+                        <div className="mg-menu" role="menu">
+                          {["managed","external","reference"].map(k => (
+                            <button key={k} role="menuitem" className="mg-menu-item focus-ring" onClick={()=>{ setMenu(null); setAdding({ ...s, mode:k }); }}>
+                              <Icon name={MGMT_META[k].icon} size={13}/><span><b>{MGMT_META[k].long}</b><small>{MGMT_META[k].desc}</small></span>
+                            </button>
+                          ))}
+                        </div>
+                      )}
+                    </div>}
               </td>
             </tr>
           ))}
@@ -331,7 +343,7 @@ function FlakeSystemsPane({ flake, out, commit, onPickCommit, onOpenSystem }) {
       </table>
       {adding && (
         <AddSystemModal
-          prefill={{ hostname: adding.hostname, flake: flake.name, branch: flake.branch }}
+          prefill={{ hostname: adding.hostname, config: adding.hostname, mode: adding.mode, flake: flake.name, branch: flake.branch }}
           onClose={()=>setAdding(null)}/>
       )}
     </div>

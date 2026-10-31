@@ -59,7 +59,7 @@ const ENV_META = {
 };
 
 function envStats(env) {
-  const sys = SYSTEMS.filter(s => s.environment === env);
+  const sys = SYSTEMS.filter(s => s.environment === env && (typeof isManagedSys !== "function" || isManagedSys(s)));
   const pendingApprovals = (typeof APPROVAL_QUEUE !== "undefined" ? APPROVAL_QUEUE.filter(a => a.environment === env && a.status === "pending") : []);
   return {
     total: sys.length,

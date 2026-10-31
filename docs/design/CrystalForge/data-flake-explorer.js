@@ -92,16 +92,17 @@
     // Some commits are structural: a rewrite that drops most hosts and modules.
     const gutted = r() < 0.12;
 
-    const declaredManaged = managed.filter((s, i) => gutted ? i < Math.max(1, Math.floor(managed.length * 0.25)) : r() > 0.06);
+    const declaredManaged = managed.filter((s, i) => !(s.assurance && s.assurance.configState === "missing") && (gutted ? i < Math.max(1, Math.floor(managed.length * 0.25)) : r() > 0.06));
     const nUnmanaged = gutted ? 0 : Math.floor(r() * 3);
     const declaredOnly = UNMANAGED_POOL.slice(0, nUnmanaged).map(h => ({
       hostname: h, declared: true, managedSystem: null, arch: "x86_64-linux",
       note: h.startsWith("vm-") ? "VM host, never deployed" : "no agent check-in",
     }));
-    const declaredSet = new Set(declaredManaged.map(s => s.hostname));
+    const cfgName = (s) => s.configName || s.hostname;
+    const declaredSet = new Set(declaredManaged.map(cfgName));
     const systems = managed.map(s => ({
-      hostname: s.hostname,
-      declared: declaredSet.has(s.hostname),
+      hostname: cfgName(s),
+      declared: declaredSet.has(cfgName(s)),
       managedSystem: s,
       arch: "x86_64-linux",
       environment: s.environment,

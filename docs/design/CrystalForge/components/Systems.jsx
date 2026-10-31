@@ -244,6 +244,8 @@ function SystemPanel({ sys, onClose, onEdit, onOpenDetail, onTagClick, pendingDe
           </button>
         </div>
         <div className="panel-body">
+          {!isManagedSys(sys) && <ExternalPanelBody sys={sys} onOpenDetail={onOpenDetail} />}
+          {isManagedSys(sys) && <>
           {deployStage && pendingDeploy && (
             <section className="panel-section" style={{ paddingTop: 0 }}>
               <PendingDeployBanner
@@ -327,11 +329,13 @@ function SystemPanel({ sys, onClose, onEdit, onOpenDetail, onTagClick, pendingDe
               ))}
             </div>
           </section>
+          </>}
         </div>
         <div className="panel-actions">
           <button className="btn btn-ghost focus-ring" onClick={() => onOpenDetail?.(sys)}><Icon name="arrow-right" size={12} /> Open full detail</button>
           <button className="btn btn-ghost focus-ring" onClick={() => onEdit?.(sys)}><Icon name="gear" size={12} /> Edit</button>
-          <button className="btn btn-primary focus-ring" onClick={() => onOpenDetail?.(sys, "deploy")}><Icon name="deploy" size={12} /> Deploy</button>
+          {isManagedSys(sys) ? <button className="btn btn-primary focus-ring" onClick={() => onOpenDetail?.(sys, "deploy")}><Icon name="deploy" size={12} /> Deploy</button>
+            : <button className="btn btn-primary focus-ring" onClick={() => onOpenDetail?.(sys, "cves")}><Icon name="shield" size={12} /> View CVEs</button>}
         </div>
       </aside>
     </>
@@ -368,10 +372,19 @@ function SystemCard({ sys, compact, flash, pendingApproval, onOpen, onDeploy, on
           </div>
           <div className="sys-fqdn">{sys.fqdn}</div>
         </div>
-        <EnvBadge env={sys.environment} />
+        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", justifyContent: "flex-end" }}><MgmtChip sys={sys} /><EnvBadge env={sys.environment} /></div>
       </div>
 
-      {!compact && (
+      {!compact && !isManagedSys(sys) && (
+        <div className="sys-card-body">
+          <div><div className="sys-kv-key">Configuration</div><div className="sys-kv-val">{sys.flake}#{sys.assurance.configName}</div></div>
+          <div><div className="sys-kv-key">Revision</div><div className="sys-kv-val">{sys.assurance.rev.sha} · {sys.branch}</div></div>
+          <div><div className="sys-kv-key">Evidence</div><div className="sys-kv-val" style={{ fontFamily: "var(--font-sans)" }}>{sys.assurance.scan.at ? `scanned ${sys.assurance.scan.at}` : "not scanned"}</div></div>
+          <div><div className="sys-kv-key">Runtime</div><div className="sys-kv-val" style={{ fontFamily: "var(--font-sans)" }}><RuntimeLine sys={sys} /></div></div>
+        </div>
+      )}
+
+      {!compact && isManagedSys(sys) && (
         <div className="sys-card-body">
           <div>
             <div className="sys-kv-key">Flake · branch</div>
@@ -406,21 +419,21 @@ function SystemCard({ sys, compact, flash, pendingApproval, onOpen, onDeploy, on
       <div className="sys-card-foot">
         <div className="chips-row">
           <StatusChip sys={sys} />
-          <DeploymentChip state={sys.deploymentState} />
-          <CveChips cves={sys.cves} compact />
+          <DeploymentCell sys={sys} />
+          {isManagedSys(sys) ? <CveChips cves={sys.cves} compact /> : <EvidenceCves sys={sys} compact />}
           {pendingApproval && (
             <span className="chip chip-warning" style={{ cursor:"pointer" }} title="Deploy awaiting approval" onClick={(e)=>{ e.stopPropagation(); onDeploy(sys); }}>
               <Icon name="deploy" size={10}/> awaiting approval
             </span>
           )}
         </div>
-        <button
+        {isManagedSys(sys) ? <button
           className="btn btn-subtle focus-ring"
           style={{ padding: "4px 10px", fontSize: 12 }}
           onClick={(e) => { e.stopPropagation(); onDeploy(sys); }}
         >
           <Icon name="deploy" size={12} /> Deploy
-        </button>
+        </button> : <button className="btn btn-subtle focus-ring" style={{ padding: "4px 10px", fontSize: 12 }} title="Open configuration evidence" onClick={(e) => { e.stopPropagation(); onDeploy(sys, "cves"); }}><Icon name="shield" size={12} /> Evidence</button>}
       </div>
     </div>
   );
@@ -434,7 +447,7 @@ function SystemRow({ sys, compact, selected, flash, pendingApproval, onOpen, onD
         <div className="sys-host-cell">
           <span className="status-dot" style={{ "--status-color": sys.statusColor }} />
           <div style={{ minWidth: 0 }}>
-            <div className="hostname">{sys.hostname}</div>
+            <div className="hostname" style={{ display: "flex", alignItems: "center", gap: 6 }}>{sys.hostname}<MgmtChip sys={sys} /></div>
             <div className="fqdn truncate">{sys.fqdn}</div>
           </div>
         </div>
@@ -452,27 +465,28 @@ function SystemRow({ sys, compact, selected, flash, pendingApproval, onOpen, onD
       </td>
       <td>
         <div style={{ display: "flex", flexDirection: "column", lineHeight: 1.3 }}>
-          <span className="mono" style={{ fontSize: 12 }}>{sys.flake}</span>
+          <span className="mono" style={{ fontSize: 12 }}>{sys.flake}{isManagedSys(sys) ? "" : `#${sys.assurance.configName}`}</span>
           <span className="mono" style={{ fontSize: 11, color: "var(--cf-text-muted)" }}>{sys.commit} · {sys.branch}</span>
         </div>
       </td>
-      <td><DeploymentChip state={sys.deploymentState} /></td>
+      <td><DeploymentCell sys={sys} /></td>
       <td>
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          <CveChips cves={sys.cves} compact />
+          {isManagedSys(sys) ? <CveChips cves={sys.cves} compact /> : <EvidenceCves sys={sys} compact />}
         </div>
       </td>
       <td style={{ color: "var(--cf-text-secondary)", fontSize: 12 }}>
+        {!isManagedSys(sys) ? <div style={{ display: "flex", flexDirection: "column", gap: 2 }}><RuntimeLine sys={sys} />{sys.parentHost && <span className="mg-dim">on {sys.parentHost}</span>}</div> :
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <HeartbeatSpinner intervalSec={sys.heartbeatIntervalSec} nextInSec={sys.heartbeatNextInSec} size={20} showLabel={false} />
           <span>{sys.lastHeartbeat}</span>
-        </div>
+        </div>}
       </td>
       <td>
         <div className="row-actions">
-          <button className="btn-icon focus-ring" title="Deploy" onClick={(e) => { e.stopPropagation(); onDeploy(sys); }}>
+          {isManagedSys(sys) ? <button className="btn-icon focus-ring" title="Deploy" onClick={(e) => { e.stopPropagation(); onDeploy(sys); }}>
             <Icon name="deploy" size={14} />
-          </button>
+          </button> : <button className="btn-icon focus-ring" title="Open evidence" onClick={(e) => { e.stopPropagation(); onDeploy(sys, "cves"); }}><Icon name="shield" size={14} /></button>}
           <button className="btn-icon focus-ring" title="Edit" onClick={(e) => { e.stopPropagation(); onEdit?.(sys); }}>
             <Icon name="gear" size={14} />
           </button>

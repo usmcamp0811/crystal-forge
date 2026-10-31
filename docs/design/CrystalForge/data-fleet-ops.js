@@ -23,7 +23,7 @@ function _foMemo(fn) { let v, done = false; return () => { if (!done) { v = fn()
    up-to-date host sits on HEAD, and the rest are placed deterministically
    further back by hostname. */
 const fleetDriftData = _foMemo(() => {
-  const systems = typeof SYSTEMS !== "undefined" ? SYSTEMS : [];
+  const systems = (typeof managedSystems === "function" ? managedSystems() : (typeof SYSTEMS !== "undefined" ? SYSTEMS : []));
   const registry = typeof FLAKE_REGISTRY !== "undefined" ? FLAKE_REGISTRY : [];
   const commits = typeof FLAKE_COMMITS !== "undefined" ? FLAKE_COMMITS : {};
   const rows = systems.map(s => {
@@ -55,7 +55,7 @@ const fleetDriftData = _foMemo(() => {
    and genuinely tight disks land on hosts already flagged warning/critical/
    drifted/failed elsewhere. */
 const closurePressureData = _foMemo(() => {
-  const systems = typeof SYSTEMS !== "undefined" ? SYSTEMS : [];
+  const systems = (typeof managedSystems === "function" ? managedSystems() : (typeof SYSTEMS !== "undefined" ? SYSTEMS : []));
   const rows = systems.map(s => {
     const r = _foRand(_foHash(s.hostname + "closure"));
     const diskTotal = [120, 240, 500, 960][Math.floor(r() * 4)];
@@ -158,7 +158,7 @@ const deployStateData = _foMemo(() => {
    is the mean commits behind HEAD, inverted onto the same 0–100 health scale so
    the two metrics can share a legend and be combined. */
 function fleetCalendarData(scopeFilter) {
-  const systems = (typeof SYSTEMS !== "undefined" ? SYSTEMS : []).filter(scopeFilter || (() => true));
+  const systems = ((typeof managedSystems === "function" ? managedSystems() : (typeof SYSTEMS !== "undefined" ? SYSTEMS : []))).filter(scopeFilter || (() => true));
   const DAYS = 365;
   const today = new Date(); today.setHours(0, 0, 0, 0);
   const drift = fleetDriftData();
@@ -205,7 +205,7 @@ function fleetCalendarData(scopeFilter) {
 }
 /* ── Agent keys and secrets approaching expiry ── */
 const secretExpiryData = _foMemo(() => {
-  const systems = typeof SYSTEMS !== "undefined" ? SYSTEMS : [];
+  const systems = (typeof managedSystems === "function" ? managedSystems() : (typeof SYSTEMS !== "undefined" ? SYSTEMS : []));
   const out = [];
   systems.forEach(s => {
     const r = _foRand(_foHash(s.hostname + "key"));
@@ -231,7 +231,7 @@ const secretExpiryData = _foMemo(() => {
        /nix/var/nix/profiles/system) minus boot time (/proc/uptime).
    Anything the agent can't read reports as unknown rather than "no reboot". */
 const rebootRequiredData = _foMemo(() => {
-  const systems = typeof SYSTEMS !== "undefined" ? SYSTEMS : [];
+  const systems = (typeof managedSystems === "function" ? managedSystems() : (typeof SYSTEMS !== "undefined" ? SYSTEMS : []));
   const rows = systems.map(s => {
     const r = _foRand(_foHash(s.hostname + "reboot"));
     const needs = r() < 0.24;

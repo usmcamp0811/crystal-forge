@@ -271,7 +271,7 @@ function ScanTable({ rows, onNavigate, sel, onOpenLog, sort, onSort, showFreshne
               onMouseDown={sel ? (e)=>{ if(e.shiftKey) e.preventDefault(); } : undefined}
               onClick={sel ? (e)=>{ if (e.shiftKey || e.metaKey || e.ctrlKey) { sel.handleClick(e, s.id, cancellableIds); } else { onOpenLog?.(s); } } : ()=>onOpenLog?.(s)}>
               <td>
-                <div style={{ fontWeight:600, fontSize:13 }}>{s.name}</div>
+                <div style={{ fontWeight:600, fontSize:13, display:"flex", alignItems:"center", gap:6 }}>{s.name}{s.mode && s.mode !== "managed" && <MgmtChip mode={s.mode}/>}</div>
                 <div className={`mono${latestIds.has(s.id)?" commit-latest":""}`} style={{ fontSize:11, color:"var(--cf-text-muted)" }}>{s.flake} · {latestIds.has(s.id) && <Icon name="star" size={9} className="latest-star" style={{ marginRight:2, verticalAlign:"-1px" }}/>}{s.commit}</div>
               </td>
               {showFreshness && <td>{freshChip(s.freshness)}</td>}

@@ -16,6 +16,9 @@ function AddSystemModal({ onClose, coach, prefill }) {
     reachability: "direct",
     publicKey: "",
     tags: "",
+    mode: "managed",
+    config: "",
+    parentHost: "",
     // Prefill when the host is already declared in a flake and only needs
     // registering (e.g. opened from the flake explorer's Systems tab).
     ...(prefill || {}),
@@ -34,27 +37,32 @@ function AddSystemModal({ onClose, coach, prefill }) {
     return `SHA256:${s}`;
   }, [form.publicKey]);
   const keyValid = /^ssh-(ed25519|rsa|ecdsa)/.test((form.publicKey || "").trim());
-  const canRegister = form.hostname.trim().length > 0 && keyValid;
+  const M = form.mode;
+  const cfgOk = M === "managed" || (form.config.trim().length > 0 && declaredConfigs(form.flake).includes(form.config.trim()));
+  const canRegister = form.hostname.trim().length > 0 && cfgOk && (M !== "managed" || keyValid);
+  const blocker = !form.hostname.trim() ? (M === "managed" ? "hostname required" : "name required") : !cfgOk ? "configuration not found in flake" : M === "managed" && !keyValid ? "agent key required" : null;
 
   const register = () => {
     if (!canRegister) return;
-    if (coach) coach.serverObserve("system"); // mock: server now sees the saved system → agent step waits for first report
+    if (coach && M === "managed") coach.serverObserve("system"); // mock: server now sees the saved system → agent step waits for first report
     setPhase("registered");
   };
 
-  const [section, setSection] = React.useState("host");
+  const [section, setSection] = React.useState("type");
   const sections = [
-    { id:"host",   label:"Host & environment", icon:"server" },
-    { id:"agent",  label:"Agent identity",     icon:"key" },
-    { id:"flake",  label:"Flake assignment",   icon:"git" },
-    { id:"policy", label:"Policy & tags",      icon:"shield" },
+    { id:"type",   label:"Management",   icon:MGMT_META[M].icon },
+    { id:"host",   label: M === "managed" ? "Host & environment" : M === "external" ? "System & environment" : "Reference & environment", icon:"server" },
+    ...(M === "managed" ? [{ id:"agent", label:"Agent identity", icon:"key" }] : []),
+    { id:"flake",  label: M === "managed" ? "Flake assignment" : "Configuration", icon:"git" },
+    { id:"policy", label: M === "managed" ? "Policy & tags" : "Tags", icon:"shield" },
   ];
+  const setMode = (m) => setForm(p => ({ ...p, mode: m, config: p.config || (m !== "managed" ? p.hostname : "") }));
 
   if (phase === "registered") {
     return (
       <div className="modal-backdrop" onClick={onClose}>
         <div className="modal" onClick={e => e.stopPropagation()} style={{ width: "min(620px,96vw)", maxHeight: "92vh" }}>
-          <AgentDeploySteps form={form} fingerprint={fingerprint} onClose={onClose} />
+          {M === "managed" ? <AgentDeploySteps form={form} fingerprint={fingerprint} onClose={onClose} /> : <ExternalRegistered form={form} onClose={onClose} />}
         </div>
       </div>
     );
@@ -67,12 +75,12 @@ function AddSystemModal({ onClose, coach, prefill }) {
           <div style={{ minWidth:0, display:"flex", flexDirection:"column", gap:3 }}>
             <div style={{ display:"flex", alignItems:"center", gap:9, minWidth:0 }}>
               <Icon name="plus" size={15} style={{ color:"var(--cf-brand-purple)", flexShrink:0 }}/>
-              <span className="pe-head-title">{form.hostname || "Register system"}</span>
+              <span className="pe-head-title">{form.hostname || (M === "reference" ? "Add reference configuration" : "Register system")}</span><MgmtChip mode={M} />
               <span className="chip chip-info">{form.environment}</span>
               <span className="chip chip-unknown mono" style={{ fontSize:10 }}>{form.flake} · {form.branch}</span>
-              {!keyValid && <span className="chip" title="An agent public key is required to register.">No agent key</span>}
+              {M === "managed" && !keyValid && <span className="chip" title="An agent public key is required to register.">No agent key</span>}
             </div>
-            <span className="pe-head-sub">Add a NixOS host to the fleet and connect it to an environment and flake.</span>
+            <span className="pe-head-sub">{M === "managed" ? "Add a NixOS host to the fleet and connect it to an environment and flake." : M === "external" ? "Track a NixOS system that Crystal Forge scans but does not deploy." : "Track a NixOS configuration for security assurance. It is not a running machine."}</span>
           </div>
           <button className="btn-icon focus-ring" onClick={onClose} aria-label="Close"><Icon name="x" size={16}/></button>
         </header>
@@ -83,6 +91,7 @@ function AddSystemModal({ onClose, coach, prefill }) {
               <Icon name={s.icon} size={13}/>
               <span className="pe-rail-label">{s.label}</span>
               {s.id === "host" && !form.hostname.trim() && <span className="pe-rail-badge warn">!</span>}
+              {s.id === "type" && form.hostname.trim() && <span className="pe-rail-badge">{MGMT_META[M].label}</span>}
               {s.id === "agent" && <span className={`pe-rail-badge${keyValid?"":" warn"}`}>{keyValid ? "ok" : "!"}</span>}
               {s.id === "policy" && form.tags.trim() && <span className="pe-rail-badge">{form.tags.split(",").filter(x=>x.trim()).length}</span>}
             </button>
@@ -90,6 +99,16 @@ function AddSystemModal({ onClose, coach, prefill }) {
         </nav>
 
         <div className="pe-body">
+          {section === "type" && (
+            <>
+              <div className="pe-sec-head"><h3>Management mode</h3><p>Who controls deployment, and what Crystal Forge does with this configuration.</p></div>
+              <ModePicker value={M} onChange={setMode} />
+              {M === "external" && <MgmtNotice title="Crystal Forge does not deploy this system">It evaluates, builds and scans the selected configuration and keeps the evidence. No agent credentials are needed. Runtime state stays unknown unless a parent host reports it.</MgmtNotice>}
+              {M === "reference" && <MgmtNotice title="Not a running machine">It is built and scanned for each revision. It never appears offline or unhealthy, and is excluded from managed host counts.</MgmtNotice>}
+              {M === "managed" && <MgmtNotice title="Deploys and agent reporting">Needs an agent public key. Deployment policy, approvals and gates apply as for other managed systems.</MgmtNotice>}
+            </>
+          )}
+
           {section === "host" && (
             <>
               <div className="pe-sec-head">
@@ -98,8 +117,8 @@ function AddSystemModal({ onClose, coach, prefill }) {
               </div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
                 <div className="field">
-                  <label>Hostname <span style={{ color: "#f87171" }}>*</span></label>
-                  <input className="input focus-ring mono" value={form.hostname} onChange={e => set("hostname", e.target.value)} placeholder="web-server-1" autoFocus />
+                  <label>{M === "managed" ? "Hostname" : M === "external" ? "System name" : "Name"} <span style={{ color: "#f87171" }}>*</span></label>
+                  <input className="input focus-ring mono" value={form.hostname} onChange={e => set("hostname", e.target.value)} placeholder={M === "managed" ? "web-server-1" : M === "external" ? "vm-photos" : "golden-workstation"} autoFocus onBlur={() => M !== "managed" && !form.config && set("config", form.hostname)} />
                 </div>
                 <div className="field" style={{ marginTop: 0 }}>
                   <label>Environment</label>
@@ -108,6 +127,8 @@ function AddSystemModal({ onClose, coach, prefill }) {
                   </select>
                 </div>
               </div>
+              {M === "external" && <ParentHostField value={form.parentHost} onChange={(v) => set("parentHost", v)} />}
+              {M === "managed" && <>
               <div className="field">
                 <label>FQDN or address <span style={{ color: "var(--cf-text-muted)", fontWeight: 400 }}>· optional</span></label>
                 <input className="input focus-ring mono" value={form.fqdn} onChange={e => set("fqdn", e.target.value)} placeholder="web-server-1.prod.example.com or 10.0.4.12" />
@@ -132,6 +153,7 @@ function AddSystemModal({ onClose, coach, prefill }) {
                   </span>
                 </label>
               </div>
+              </>}
             </>
           )}
 
@@ -170,23 +192,9 @@ function AddSystemModal({ onClose, coach, prefill }) {
             <>
               <div className="pe-sec-head">
                 <h3>Flake assignment</h3>
-                <p>Which flake and branch declare this host's configuration.</p>
+                <p>{M === "managed" ? "Which flake and branch declare this host's configuration." : "Which flake, branch and NixOS configuration Crystal Forge evaluates."}</p>
               </div>
-              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14 }}>
-                <div className="field">
-                  <label>Flake</label>
-                  <select className="input focus-ring" value={form.flake} onChange={e => set("flake", e.target.value)}>
-                    {flakeList.map(fl => <option key={fl}>{fl}</option>)}
-                  </select>
-                </div>
-                <div className="field" style={{ marginTop: 0 }}>
-                  <label>Branch</label>
-                  <input className="input focus-ring mono" value={form.branch} onChange={e => set("branch", e.target.value)} />
-                </div>
-              </div>
-              <div className="help">
-                Crystal Forge looks for <span className="mono">nixosConfigurations.{form.hostname || "<hostname>"}</span> in this flake.
-              </div>
+              <FlakeConfigFields form={form} set={set} mode={M} />
             </>
           )}
 
@@ -194,9 +202,10 @@ function AddSystemModal({ onClose, coach, prefill }) {
             <>
               <div className="pe-sec-head">
                 <h3>Policy &amp; tags</h3>
-                <p>How deploys reach this host, and the labels used to group and filter it.</p>
+                <p>{M === "managed" ? "How deploys reach this host, and the labels used to group and filter it." : "Labels used to group and filter this resource."}</p>
               </div>
-              <div className="field">
+              {M !== "managed" && <MgmtNotice title="No deployment policy">Deployment is {M === "external" ? "controlled outside Crystal Forge" : "not applicable"}. Environment gate policies for CVEs and compliance still evaluate the configuration.</MgmtNotice>}
+              {M === "managed" && <div className="field">
                 <label>Deployment policy</label>
                 <div className="seg" style={{ width: "fit-content", flexWrap: "wrap" }}>
                   {["inherit", "manual", "auto_latest", "pinned"].map(p => (
@@ -209,7 +218,7 @@ function AddSystemModal({ onClose, coach, prefill }) {
                   {form.deploymentPolicy === "auto_latest" && "Auto-deploy the newest passing commit on the assigned flake/branch."}
                   {form.deploymentPolicy === "pinned" && "Stay on a chosen commit until manually changed (set the pin from System Detail after registering)."}
                 </div>
-              </div>
+              </div>}
               <div className="field">
                 <label>Tags <span style={{ color: "var(--cf-text-muted)", fontWeight: 400 }}>· optional</span></label>
                 <input className="input focus-ring" value={form.tags} onChange={e => set("tags", e.target.value)} placeholder="e.g. web, stig-enforced" />
@@ -234,21 +243,42 @@ function AddSystemModal({ onClose, coach, prefill }) {
 
         <footer className="pe-foot">
           <span className="pe-foot-state">
-            {form.hostname.trim() ? form.hostname : "Unnamed host"}
+            {form.hostname.trim() ? form.hostname : M === "managed" ? "Unnamed host" : "Unnamed"}
             <span className="pe-foot-dot">·</span>
             {form.environment}
             <span className="pe-foot-dot">·</span>
-            {keyValid ? "agent key valid" : "agent key required"}
+            {blocker ? <span style={{ color: "#fbbf24" }}>{blocker}</span> : M === "managed" ? "agent key valid" : MGMT_META[M].label}
           </span>
           <div style={{ display:"flex", gap:8 }}>
             <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
             <button className="btn btn-primary focus-ring" onClick={register} disabled={!canRegister}>
-              <Icon name="check" size={13} /> Register system
+              <Icon name="check" size={13} /> {M === "reference" ? "Add reference configuration" : "Register system"}
             </button>
           </div>
         </footer>
       </div>
     </div>
+  );
+}
+
+function ExternalRegistered({ form, onClose }) {
+  const M = form.mode, steps = ["Evaluate", "Build", "Scan"];
+  const [n, setN] = React.useState(0);
+  React.useEffect(() => { if (n < 3) { const t = setTimeout(() => setN(n + 1), 1100); return () => clearTimeout(t); } }, [n]);
+  return (
+    <>
+      <div className="modal-head" style={{ background: "rgba(96,165,250,0.06)" }}>
+        <h2 style={{ display: "flex", alignItems: "center", gap: 8 }}><Icon name="check" size={16} style={{ color: "#34d399" }} />{form.hostname} {M === "reference" ? "added" : "registered"} <MgmtChip mode={M} /></h2>
+        <p>Crystal Forge is evaluating <span className="mono">{form.flake}#{form.config}</span> at {form.branch}. {M === "external" ? "No agent is required." : "Nothing will be deployed."}</p>
+      </div>
+      <div className="modal-body">
+        <div className="mg-pipeline" style={{ gridTemplateColumns: "repeat(3,minmax(0,1fr))" }}>
+          {steps.map((s, i) => <div key={s} className="mg-stage" style={{ cursor: "default" }}><span className="mg-stage-label">{s}</span><span className="mg-stage-main">{i < n ? <><span className="chip-dot" style={{ background: "#34d399" }} />Done</> : i === n ? <><Spinner size={11} /> Running</> : <><span className="chip-dot" style={{ background: "#6b7280" }} />Waiting</>}</span></div>)}
+        </div>
+        <div className="help" style={{ marginTop: 12 }}>{M === "external" ? (form.parentHost ? `Parent host ${form.parentHost} can report whether this guest's unit is running. Until it does, runtime state shows as unknown.` : "Runtime state will show as unknown. Associate a parent host later from Edit to receive host observations.") : "Evidence appears on the Overview, CVEs, Hardening and Compliance tabs as each step finishes."}</div>
+      </div>
+      <div className="modal-foot"><button className="btn btn-primary focus-ring" onClick={onClose}><Icon name="check" size={13} /> Done</button></div>
+    </>
   );
 }
 

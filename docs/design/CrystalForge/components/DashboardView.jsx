@@ -552,13 +552,13 @@ function WPoamWatchlist({ onNavigate, rows }) {
 
 function WFleetHealth({ onNavigate }) {
   const counts = {
-    healthy: SYSTEMS.filter(s => s.health === "healthy").length,
-    warning: SYSTEMS.filter(s => s.health === "warning" || s.health === "drifted").length,
-    critical: SYSTEMS.filter(s => s.health === "critical").length,
-    offline: SYSTEMS.filter(s => s.health === "offline").length,
-    unknown: SYSTEMS.filter(s => s.health === "unknown").length,
+    healthy: (typeof managedSystems === "function" ? managedSystems() : SYSTEMS).filter(s => s.health === "healthy").length,
+    warning: (typeof managedSystems === "function" ? managedSystems() : SYSTEMS).filter(s => s.health === "warning" || s.health === "drifted").length,
+    critical: (typeof managedSystems === "function" ? managedSystems() : SYSTEMS).filter(s => s.health === "critical").length,
+    offline: (typeof managedSystems === "function" ? managedSystems() : SYSTEMS).filter(s => s.health === "offline").length,
+    unknown: (typeof managedSystems === "function" ? managedSystems() : SYSTEMS).filter(s => s.health === "unknown").length,
   };
-  const total = SYSTEMS.length;
+  const total = (typeof managedSystems === "function" ? managedSystems() : SYSTEMS).length;
   return (
     <>
       <WidgetHeader icon="server" title="Fleet Health" action="View →" onAction={() => onNavigate("systems")}/>

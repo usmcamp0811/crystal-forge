@@ -10,12 +10,14 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
   const [pendingDeploy, setPendingDeploy] = React.useState(null);
   const [editTarget, setEditTarget] = React.useState(null);
   const [addOpen, setAddOpen] = React.useState(false);
+  const [mode, setMode] = React.useState("all");
   const setTag = onTag || (() => {});
   React.useEffect(() => {
     if (initialFlake) { setFlake(initialFlake); onClearInitialFlake?.(); }
   }, [initialFlake]);
   const isAttention = (s) => s.health === "critical" || s.health === "offline";
-  const needsAttention = (s) => s.health === "critical" || s.health === "offline" || s.health === "warning" || s.health === "drifted";
+  const evidenceIssue = (s) => !isManagedSys(s) && ["scan-stale", "scan-failed", "scan-unavailable", "missing-config", "eval-failed", "build-failed"].includes(assuranceStatus(s.assurance).key);
+  const needsAttention = (s) => isManagedSys(s) ? (s.health === "critical" || s.health === "offline" || s.health === "warning" || s.health === "drifted") : evidenceIssue(s);
   const flashAttention = useAttentionFlash("systems", SYSTEMS.some(isAttention));
 
   React.useEffect(() => {setView(defaultView);}, [defaultView]);
@@ -26,7 +28,10 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
     if (env !== "all" && s.environment !== env) return false;
     if (flake !== "all" && s.flake !== flake) return false;
     if (tag !== "all" && !(s.tags || []).includes(tag)) return false;
+    if (mode !== "all" && mgmtOf(s) !== mode) return false;
     if (status !== "all") {
+      if (!isManagedSys(s)) { if (status === "evidence" || status === "attention") return evidenceIssue(s); return false; }
+      if (status === "evidence") return false;
       if (status === "online" && (s.health === "offline" || s.health === "unknown")) return false;
       if (status === "offline" && s.health !== "offline") return false;
       if (status === "warning" && s.health !== "warning" && s.health !== "drifted") return false;
@@ -39,17 +44,22 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
       !s.fqdn.toLowerCase().includes(q) &&
       !s.commit.toLowerCase().includes(q) &&
       !(s.tags || []).some((t) => t.toLowerCase().includes(q)) &&
-      !s.flake.toLowerCase().includes(q)) return false;
+      !s.flake.toLowerCase().includes(q) &&
+    !(s.parentHost || "").toLowerCase().includes(q) &&
+    !(s.configName || "").toLowerCase().includes(q)) return false;
     }
     return true;
   });
 
+  const MS = managedSystems();
+  const nExt = SYSTEMS.filter((s) => mgmtOf(s) === "external").length, nRef = SYSTEMS.filter((s) => mgmtOf(s) === "reference").length;
+  const nEvidence = SYSTEMS.filter(evidenceIssue).length;
   const counts = {
-    total: SYSTEMS.length,
-    healthy: SYSTEMS.filter((s) => s.health === "healthy").length,
-    warning: SYSTEMS.filter((s) => s.health === "warning" || s.health === "drifted").length,
-    critical: SYSTEMS.filter((s) => s.health === "critical").length,
-    offline: SYSTEMS.filter((s) => s.health === "offline").length,
+    total: MS.length,
+    healthy: MS.filter((s) => s.health === "healthy").length,
+    warning: MS.filter((s) => s.health === "warning" || s.health === "drifted").length,
+    critical: MS.filter((s) => s.health === "critical").length,
+    offline: MS.filter((s) => s.health === "offline").length,
     crit_cves: SYSTEMS.reduce((a, s) => a + s.cves.critical, 0)
   };
 
@@ -61,7 +71,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
         <div>
           <h1 className="page-title">Systems</h1>
           <p className="page-subtitle">
-            {counts.total} systems · {counts.healthy} healthy · <span className="link-action" onClick={() => setStatus("attention")}>{counts.warning + counts.critical + counts.offline} needing attention</span>
+            {counts.total} managed · {nExt} external · {nRef} reference · {counts.healthy} managed healthy · <span className="link-action" onClick={() => setStatus("attention")}>{counts.warning + counts.critical + counts.offline + nEvidence} needing attention</span>
           </p>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -73,9 +83,9 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
       <div className="stat-strip">
         <div className="stat">
           <span className="stat-accent" style={{ "--stat-color": "#a78bfa" }} />
-          <div className="stat-label">Total</div>
+          <div className="stat-label">Managed</div>
           <div className="stat-value">{counts.total}</div>
-          <div className="stat-meta">across 5 environments</div>
+          <div className="stat-meta">+ {nExt} external · {nRef} reference</div>
           <div className="spark-bar">
             {[
             ["production", counts.total],
@@ -84,7 +94,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
             ["edge", counts.total],
             ["lab", counts.total]].
             map(([env]) => {
-              const n = SYSTEMS.filter((s) => s.environment === env).length;
+              const n = MS.filter((s) => s.environment === env).length;
               return <div key={env} className="spark-seg" style={{ width: `${n / counts.total * 100}%`, background: ENV_STYLE[env].fg }} title={`${env}: ${n}`} />;
             })}
           </div>
@@ -93,7 +103,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
           <span className="stat-accent" style={{ "--stat-color": "#34d399" }} />
           <div className="stat-label">Healthy</div>
           <div className="stat-value" style={{ color: "#34d399" }}>{counts.healthy}</div>
-          <div className="stat-meta">{Math.round(counts.healthy / counts.total * 100)}% of fleet</div>
+          <div className="stat-meta">{Math.round(counts.healthy / counts.total * 100)}% of managed · agent-reported</div>
         </div>
         <div className="stat">
           <span className="stat-accent" style={{ "--stat-color": "#fbbf24" }} />
@@ -111,7 +121,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
           <span className="stat-accent" style={{ "--stat-color": "#60a5fa" }} />
           <div className="stat-label">CVEs (critical)</div>
           <div className="stat-value">{counts.crit_cves}</div>
-          <div className="stat-meta">across {SYSTEMS.filter((s) => s.cves.critical > 0).length} hosts</div>
+          <div className="stat-meta">across {SYSTEMS.filter((s) => s.cves.critical > 0).length} scanned resources</div>
         </div>
       </div>
 
@@ -126,16 +136,21 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
             onChange={(e) => setQuery(e.target.value)} />
           
         </div>
+        <select className="input filter-select focus-ring" style={{ width: "auto" }} value={mode} onChange={(e) => setMode(e.target.value)} title="Filter by management mode">
+          <option value="all">All management</option>
+          {Object.keys(MGMT_META).map((k) => <option key={k} value={k}>{MGMT_META[k].long} · {SYSTEMS.filter((s) => mgmtOf(s) === k).length}</option>)}
+        </select>
         <select className="input filter-select focus-ring" style={{ width: "auto" }} value={env} onChange={(e) => setEnv(e.target.value)}>
           <option value="all">All environments</option>
           {ENVIRONMENTS.map((e) => <option key={e.name} value={e.name}>{e.name}</option>)}
         </select>
         <select className="input filter-select focus-ring" style={{ width: "auto" }} value={status} onChange={(e) => setStatus(e.target.value)}>
           <option value="all">All statuses</option>
-          <option value="online">Online</option>
+          <option value="online">Online (managed)</option>
           <option value="warning">Warning / drift</option>
           <option value="critical">Critical</option>
           <option value="offline">Offline</option>
+          <option value="evidence">Evidence issues (external / reference)</option>
           <option value="attention">Needs attention</option>
         </select>
         <select className="input filter-select focus-ring" style={{ width: "auto" }} value={flake} onChange={(e) => setFlake(e.target.value)}>
@@ -164,6 +179,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
       <div className="empty">
           <h3>No systems match</h3>
           <div>Try clearing a filter or changing the search.</div>
+          {(mode !== "all" || status !== "all") && <button className="btn btn-ghost focus-ring" style={{ marginTop: 10 }} onClick={() => { setMode("all"); setStatus("all"); }}>Show all management modes</button>}
         </div> :
       view === "cards" ?
       <div className="cards-grid">
@@ -175,23 +191,23 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
           flash={flashAttention && isAttention(sys)}
           pendingApproval={(typeof APPROVAL_QUEUE !== "undefined" ? APPROVAL_QUEUE.find(a => a.system_id === sys.id && a.status === "pending") : null)}
           onOpen={setSelected}
-          onDeploy={(s) => onOpenDetail(s, "deploy")}
+          onDeploy={(s, t) => onOpenDetail(s, t || "deploy")}
           onEdit={setEditTarget} />
 
         )}
         </div> :
 
-      <div className="card" style={{ overflow: "hidden" }}>
-          <table className={`sys-table${compact ? " compact" : ""}`}>
+      <div className="card" style={{ overflowX: "auto" }}>
+          <table className={`sys-table sys-table-mg${compact ? " compact" : ""}`}>
             <thead>
               <tr>
-                <th style={{ width: "22%" }}>Host</th>
+                <th>Host</th>
                 <th>Env</th>
                 <th>Status</th>
                 <th>Flake · commit</th>
                 <th>Deploy</th>
                 <th>CVEs</th>
-                <th>Heartbeat</th>
+                <th>Heartbeat · runtime</th>
                 <th style={{ textAlign: "right" }}> </th>
               </tr>
             </thead>
@@ -205,7 +221,7 @@ function SystemsView({ density, defaultView, onDensity, onDefaultView, onOpenDet
               pendingApproval={(typeof APPROVAL_QUEUE !== "undefined" ? APPROVAL_QUEUE.find(a => a.system_id === sys.id && a.status === "pending") : null)}
               selected={selected?.id === sys.id}
               onOpen={setSelected}
-              onDeploy={(s) => onOpenDetail(s, "deploy")}
+              onDeploy={(s, t) => onOpenDetail(s, t || "deploy")}
               onEdit={setEditTarget} />
 
             )}
@@ -488,6 +504,7 @@ function App() {
             onTagFilter={(t) => { setSysTag(t); setTopView("systems"); setDetailSystem(null); }}
             onDeploy={(s) => setPendingDeploy({ sysId: detailSystem.id, commit: s.pendingCommit, at: Date.now() })}
             onEdit={(s) => setEditTarget(s)}
+            onOpenSystem={(s) => openDetail(s)}
             initialTab={detailTab}
             initialRev={detailRev}
             pendingDeploy={pendingDeploy && pendingDeploy.sysId === detailSystem.id ? pendingDeploy : null}

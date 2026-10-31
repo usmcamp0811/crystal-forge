@@ -13,7 +13,11 @@ function EditSystemModal({ sys, onClose }) {
     description: "",
     tags: sys.tags.join(", "),
     pinnedCommit: sys.commit,
+    mode: mgmtOf(sys), config: sys.configName || "", parentHost: sys.parentHost || "", publicKey: "",
   }));
+  const M = form.mode, orig = mgmtOf(sys), switching = M !== orig;
+  const keyOk = /^ssh-(ed25519|rsa|ecdsa)/.test((form.publicKey || "").trim());
+  const saveBlocked = switching && M === "managed" && !keyOk ? "Agent public key required to manage this system" : (M !== "managed" && !declaredConfigs(form.flake).includes((form.config || "").trim())) ? "Configuration not found in flake" : null;
   const [confirmDelete, setConfirmDelete] = React.useState(false);
   const [tab, setTab] = React.useState("general"); // general | deployment | security | danger
   const [rotatingKey, setRotatingKey] = React.useState(false);
@@ -66,8 +70,11 @@ function EditSystemModal({ sys, onClose }) {
 
   const SECTIONS = [
     { id:"general",    label:"General",     icon:"server" },
-    { id:"deployment", label:"Deployment",  icon:"deploy" },
-    { id:"security",   label:"Security",    icon:"key" },
+    ...(M === "managed" ? [
+      { id:"deployment", label:"Deployment",  icon:"deploy" },
+      { id:"security",   label:"Security",    icon:"key" },
+    ] : [{ id:"configuration", label:"Configuration", icon:"git" }]),
+    { id:"management", label:"Management",  icon:MGMT_META[M].icon },
     { id:"danger",     label:"Danger zone", icon:"warn", danger:true },
   ];
 
@@ -95,10 +102,10 @@ function EditSystemModal({ sys, onClose }) {
                 <div style={{ display:"flex", alignItems:"center", gap:9, minWidth:0 }}>
                   <Icon name="gear" size={15} style={{ color:"var(--cf-brand-purple)", flexShrink:0 }}/>
                   <span className="pe-head-title mono">{form.hostname}</span>
-                  <span className="chip chip-info">{form.environment}</span>
+                  <MgmtChip mode={M} /><span className="chip chip-info">{form.environment}</span>
                   <span className="chip chip-unknown mono" style={{ fontSize:10 }}>{form.flake}</span>
                 </div>
-                <span className="pe-head-sub">System registration, flake assignment, deployment policy, and agent identity.</span>
+                <span className="pe-head-sub">{M === "managed" ? "System registration, flake assignment, deployment policy, and agent identity." : "Name, environment, configuration and management mode."}</span>
               </div>
               <button className="btn-icon focus-ring" onClick={onClose} aria-label="Close"><Icon name="x" size={16}/></button>
             </header>
@@ -122,7 +129,7 @@ function EditSystemModal({ sys, onClose }) {
               </div>
               <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr", gap:14 }}>
                 <div className="field">
-                  <label>Hostname</label>
+                  <label>{M === "managed" ? "Hostname" : "Name"}</label>
                   <input className="input focus-ring mono" value={form.hostname} onChange={e=>set("hostname",e.target.value)}/>
                 </div>
                 <div className="field" style={{ marginTop:0 }}>
@@ -132,6 +139,7 @@ function EditSystemModal({ sys, onClose }) {
                   </select>
                 </div>
               </div>
+              {M === "managed" && <>
               <div className="field">
                 <label>FQDN or address <span style={{ color:"var(--cf-text-muted)", fontWeight:400 }}>· optional</span></label>
                 <input className="input focus-ring mono" value={form.fqdn} onChange={e=>set("fqdn",e.target.value)} placeholder="web-server-1.prod.example.com or 10.0.4.12"/>
@@ -156,6 +164,7 @@ function EditSystemModal({ sys, onClose }) {
                   </span>
                 </label>
               </div>
+              </>}
 
               <div style={{ marginTop:8 }}>
                 <div className="field" style={{ marginTop:0 }}>
@@ -182,6 +191,31 @@ function EditSystemModal({ sys, onClose }) {
                 <label>Description / notes</label>
                 <textarea className="input focus-ring" rows={2} value={form.description} onChange={e=>set("description",e.target.value)} placeholder="Optional context for operators…" style={{ resize:"vertical" }}/>
               </div>
+              </>
+              )}
+
+              {tab === "configuration" && (
+              <>
+              <div className="pe-sec-head"><h3>Configuration</h3><p style={{ margin:0, fontSize:12, color:"var(--cf-text-muted)" }}>Which NixOS configuration Crystal Forge evaluates, builds and scans.</p></div>
+              <FlakeConfigFields form={form} set={set} mode={M} />
+              {M === "external" && <ParentHostField value={form.parentHost} onChange={(v)=>set("parentHost", v)} />}
+              </>
+              )}
+
+              {tab === "management" && (
+              <>
+              <div className="pe-sec-head"><h3>Management mode</h3><p style={{ margin:0, fontSize:12, color:"var(--cf-text-muted)" }}>Who controls deployment. Evidence history is kept when the mode changes.</p></div>
+              <ModePicker value={M} current={orig} onChange={(m)=>{ set("mode", m); if (m !== "managed" && !form.config) set("config", sys.hostname); }} />
+              {switching && M !== "managed" && orig === "managed" && <MgmtNotice icon="warn" tone="warn" title={`Crystal Forge will stop managing ${sys.hostname}`}>Deploys and rollbacks are disabled and the deployment policy is removed. The agent key is revoked and heartbeat status is no longer shown. Evaluations, builds, scans and compliance evidence are kept.</MgmtNotice>}
+              {switching && M !== "managed" && orig !== "managed" && <MgmtNotice title={`Switching to ${MGMT_META[M].long.toLowerCase()}`}>{M === "reference" ? "The parent host association and runtime observations are removed from this resource. It will no longer be treated as a system." : "This resource will be treated as a system that is deployed elsewhere. You can associate a parent host on the Configuration section."}</MgmtNotice>}
+              {switching && M === "managed" && (
+                <>
+                  <MgmtNotice title={`Crystal Forge will manage ${sys.hostname}`}>Deployment policy, approvals and gates start to apply. The agent must register with the key below before heartbeat status appears; until then the system shows as pending.</MgmtNotice>
+                  <div className="field"><label>Agent public key <span style={{ color:"#f87171" }}>*</span></label>
+                    <textarea className="input focus-ring mono" rows={3} value={form.publicKey} onChange={e=>set("publicKey", e.target.value)} placeholder="ssh-ed25519 AAAAC3NzaC1lZDI1NTE5… crystal-forge@hostname" style={{ fontSize:11, resize:"vertical" }}/>
+                    {form.publicKey.trim() && !keyOk && <div className="help" style={{ color:"#fca5a5" }}>Expected a key starting with ssh-ed25519.</div>}</div>
+                </>
+              )}
               </>
               )}
 
@@ -391,7 +425,7 @@ function EditSystemModal({ sys, onClose }) {
                 <div>
                   <div className="pe-sec-head">
                     <h3>Danger zone</h3>
-                    <p style={{ margin:0, fontSize:12, color:"var(--cf-text-muted)" }}>Unregistering stops deploys — the agent keeps running its current generation.</p>
+                    <p style={{ margin:0, fontSize:12, color:"var(--cf-text-muted)" }}>{M === "managed" ? "Unregistering stops deploys — the agent keeps running its current generation." : "Removing stops evaluation and scanning. The system or configuration itself is not affected."}</p>
                   </div>
                   <button className="btn btn-ghost focus-ring" onClick={()=>setConfirmDelete(true)} style={{ color:"#f87171", borderColor:"rgba(248,113,113,0.3)" }}>
                     <Icon name="x" size={12}/> Remove system from registry
@@ -403,14 +437,16 @@ function EditSystemModal({ sys, onClose }) {
               <span className="pe-foot-state">
                 {form.flake}@{form.branch}
                 <span className="pe-foot-dot">·</span>
-                {(typeof POLICIES !== "undefined" ? POLICIES : []).find(p => p.id === form.deploymentPolicy)?.name || form.deploymentPolicy}
+                {M === "managed" ? <>{(typeof POLICIES !== "undefined" ? POLICIES : []).find(p => p.id === form.deploymentPolicy)?.name || form.deploymentPolicy}
                 <span className="pe-foot-dot">·</span>
-                heartbeat {form.heartbeatIntervalSec}s
+                heartbeat {form.heartbeatIntervalSec}s</> : MGMT_META[M].long}
+                {saveBlocked && <><span className="pe-foot-dot">·</span><span style={{ color:"#fbbf24" }}>{saveBlocked}</span></>}
+                {switching && !saveBlocked && <><span className="pe-foot-dot">·</span><span style={{ color:"#60a5fa" }}>mode: {MGMT_META[orig].label} → {MGMT_META[M].label}</span></>}
                 {rotated && <><span className="pe-foot-dot">·</span><span style={{ color:"#34d399" }}>key rotated</span></>}
               </span>
               <div style={{ display:"flex", gap:8 }}>
                 <button className="btn btn-ghost focus-ring" onClick={onClose}>Cancel</button>
-                <button className="btn btn-primary focus-ring" onClick={onClose}>
+                <button className="btn btn-primary focus-ring" onClick={onClose} disabled={!!saveBlocked}>
                   <Icon name="check" size={13}/> Save changes
                 </button>
               </div>

@@ -251,7 +251,7 @@ function WDeployHeatmap({ onNavigate, scope, rows }) {
 
 function WSecretExpiry({ onNavigate, scope, rows }) {
   const keep = opsScopeFilter(scope);
-  const systems = typeof SYSTEMS !== "undefined" ? SYSTEMS : [];
+  const systems = (typeof managedSystems === "function" ? managedSystems() : (typeof SYSTEMS !== "undefined" ? SYSTEMS : []));
   // Shared secrets have no host, so they only show at "all" scope.
   const list = secretExpiryData().filter(x => {
     if (!x.sysId) return !scope || scope === "all";
