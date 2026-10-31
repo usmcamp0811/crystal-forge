@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-10-31T16:43:00Z'
+updated_date: '2026-10-31T16:59:00Z'
 labels:
   - management-mode
   - assurance
@@ -141,6 +141,8 @@ Approved design commit 18b47eed on dev (present on origin/dev). No blocking back
 
 ## Initial code findings
 systems.public_key is NOT NULL and System decodes PublicKey eagerly; health views mark no heartbeat offline. Composite authorization locks system rows, manual queue has a separate lock path; auto-latest reads a snapshot and must recheck under lock. Evaluation registered-config selection already includes agentless registrations, but global agent policy and build queue SQL block agentless artifacts. Manual CVE artifact resolver exists; fleet scan selector is runtime-based. view_current_cve_authority depends on latest observed generation/path and must explicitly exclude modes after conversion. No UI simplification or mock backend data authorized.
+
+Bounded delegated backend increment in existing TASK-508-management-modes worktree: add migration 0311 mode/key/desired-target/parent constraints; preserve owner ManagementMode and tests; adapt System storage, config upsert with fail-closed mode conflict, nullable hostname lookup, and agent authentication regressions. Make only required mechanical System literal corrections. Verify changed Rust with nix develop rustfmt and SQLX_OFFLINE=true targeted management_mode_tests / agent_request tests. No database migration, services, preview, UI, commits or pushes. Parent authorization/observations, API transitions and transactional deployment gates remain owner follow-on work. Heartbeat nullable-key consumer adaptation requires scope clarification.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
