@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-10-31T19:59:00Z'
+updated_date: '2026-10-31T20:00:00Z'
 labels:
   - management-mode
   - assurance
@@ -155,6 +155,8 @@ Bounded scanning backend continuation in existing TASK-508-management-modes work
 Detail/Config Explorer delegated slice: use the existing TASK-508 worktree and owner preview UI8081/API3447. Implement approved nonmanaged detail presentation in a real management-detail submodule, preserve all managed tabs and edit wiring, use configuration-assurance exact identities and separate latest-observation GET. Use real scanning schedule for scan freshness; unavailable observation policy remains unknown. Gate artifact findings read-only; preserve POA&M drawer navigation. Verify meaningful state derivation with targeted native tests and WASM check. Owner handles backend refresh, browser design comparison/screenshots, knowledge and owning integration evidence. Exclusive edits: system_detail.rs, config_explorer.rs, cve/mod.rs only if required, and meaningful detail presentation submodule.
 
 Assigned Add/Edit UI packet: port approved management-first rails and conditional fields in add_system_form.rs/edit_system_modal.rs; scope systems_list.rs to registration/edit rendering, prefill and submit; Flake Explorer offers three registration modes. Reuse typed DTOs, real key workflows and create_system_request_via_api. Fetch real declared revision outputs and active same-environment managed parent candidates. Preserve error/cancel/history behavior and manual-only initial managed conversion. Verify native draft/transition/preselection tests and wasm check through Nix; reuse owner preview UI8081/API3447 without process or database operations. Browser endpoint verification depends on owner backend refresh.
+
+Continuation scope (owner-authorized same worktree; no commits/services/database operations): complete Systems list/cards/table/preview and Scanning/Dashboard/environment/sidebar bindings against approved 18b47eed app.jsx, Systems.jsx, MgmtParts.jsx and supporting designs. Preserve completed Add/Edit and detail work. Fetch configuration assurance once per nonmanaged selection snapshot without polling; latest guest read only for opened external preview. Keep loading/unavailable evidence distinct from no scan. Verify native tests and WASM compilation through Nix; read-only owner preview checks when available. Integration impact: Access lifecycle-local-bootstrap retains form/shell contracts; Assurance evidence-remediation-lifecycle needs extended mode/evidence/scan assertions; Delivery retains managed deployment behavior. No acceptance expectation is relaxed. Owner preview UI8081/API3447 stays under owner control; pending backend refresh limits real-browser evidence.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
