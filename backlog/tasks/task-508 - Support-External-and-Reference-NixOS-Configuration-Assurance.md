@@ -1,9 +1,11 @@
 ---
 id: TASK-508
 title: Support External and Reference NixOS Configuration Assurance
-status: To Do
-assignee: []
+status: In Progress
+assignee:
+  - '@claude-opus'
 created_date: '2026-10-31T15:50:00Z'
+updated_date: '2026-10-31T15:50:00Z'
 labels:
   - management-mode
   - assurance
@@ -105,3 +107,11 @@ Approved design commit 18b47eed on dev (present on origin/dev). No blocking back
 - [ ] #15 Automated tests cover domain/API, deployment safety (including concurrency and bypass attempts), evaluation/build/scan eligibility, CVE/POA&M authority, host observations, fleet metrics, and owning browser integration scenarios
 - [ ] #16 OKF knowledge pages document the management-mode model, deployment authority and transitions, external/reference registration, configuration vs runtime assurance, CVE evidence authority, MicroVM observation limits, scan scheduling, metric semantics, API and migration changes, and troubleshooting; nix build .#okf-knowledge passes
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+LOCK: claude-opus on sledge in /home/mcamp/code/crystal-forge/TASK-508-management-modes
+
+Preflight: branch TASK-508-management-modes created from origin/dev @ 18b47eed (design commit). Local dev worktree is 4 backlog commits ahead/3 behind origin/dev and has an uncommitted change to packages/default/crates/cf-agent/src/deployment/agent.rs (other work, untouched). No main worktree exists. Upstream tracking unset to prevent accidental push to dev.
+<!-- SECTION:NOTES:END -->
