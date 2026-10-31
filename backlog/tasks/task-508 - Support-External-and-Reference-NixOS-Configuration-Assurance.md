@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-10-31T16:59:00Z'
+updated_date: '2026-10-31T17:05:00Z'
 labels:
   - management-mode
   - assurance
@@ -155,4 +155,8 @@ Preflight: branch TASK-508-management-modes created from origin/dev @ 18b47eed (
 Lock correction for this continuation: the earlier agent self-label 'claude-opus' was incorrect. LOCK: openai-agent (gpt-6.1-sol) on sledge in /home/mcamp/code/crystal-forge/TASK-508-management-modes. Same requested task/worktree; clean HEAD 18b47eed verified. No application edits yet.
 
 Preview startup: default 8080/3445 occupied by unrelated processes; untouched. Existing supported per-worktree devenv workflow found (docs/agents/devenv-workflow.md). Invoked nix develop .#devenv --command devenv up -d twice; first exceeded 120s, second exceeded 600s while building baseline core backend and running package tests. Neither invocation establishes a usable preview. Logs /home/mcamp/.local/share/opencode/tool-output/tool_192cc40cc001SHjg66ialoJkkz and tool_192ce5c870010Q4CbPRJ0H270k. Do not claim test suite passed from partial build output.
+
+Bounded storage/auth increment implemented in TASK-508-management-modes via apply_patch. New 0311 follows latest existing 0310; adds exact modes, nullable mode-bound key, nonmanaged desired-target exclusions, external-only non-self parent FK and semantic comments. Primary System now has typed default mode, Option<PublicKey>, parent_host_id; legacy constructor remains managed with validated Some(key). Config upsert explicitly binds mode/key/parent and refuses every conflict unless both existing and incoming modes are managed; rejected conflicts return an explicit error, preserving nonmanaged rows and preventing silent promotion. Hostname lookup retains runtime FromRow decoding, now nullable through Option<PublicKey>. Authentication checks managed + active + present key before signature verification; signed denial regression covers external/reference with absent or retained keys, inactive managed, and keyless managed. Existing valid-signature and key-rotation regressions retained. Other edits are mechanical System test literal corrections only.
+
+Formatting via nix develop -c rustfmt --edition 2024 --config skip_children=true on the ten changed Rust files succeeded; git diff --check succeeded. Both requested SQLX_OFFLINE=true cf-server --lib cargo test filters (management_mode_tests and handlers::agent_request::tests) were attempted via nix develop with 600s tool timeout, but compilation failed with E0599 at handlers/agent/heartbeat.rs:139: Option<PublicKey> has no to_base64 method. No tests executed. The heartbeat consumer is outside the exclusive literal-only secondary-edit scope; requested approval for a minimal adaptation and left it untouched. No database migration/services/previews/commits/pushes; pre-existing devenv.lock and owner enum/tests preserved. Isolated migration application, SQLx metadata validation, upsert runtime verification, parent authorization/observations, API changes and transactional deployment gates remain owner follow-on work.
 <!-- SECTION:NOTES:END -->
