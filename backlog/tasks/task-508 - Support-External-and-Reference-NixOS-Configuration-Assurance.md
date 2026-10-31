@@ -3,9 +3,9 @@ id: TASK-508
 title: Support External and Reference NixOS Configuration Assurance
 status: In Progress
 assignee:
-  - '@claude-opus'
+  - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-10-31T15:50:00Z'
+updated_date: '2026-10-31T16:43:00Z'
 labels:
   - management-mode
   - assurance
@@ -108,10 +108,49 @@ Approved design commit 18b47eed on dev (present on origin/dev). No blocking back
 - [ ] #16 OKF knowledge pages document the management-mode model, deployment authority and transitions, external/reference registration, configuration vs runtime assurance, CVE evidence authority, MicroVM observation limits, scan scheduling, metric semantics, API and migration changes, and troubleshooting; nix build .#okf-knowledge passes
 <!-- AC:END -->
 
+## Implementation Plan
+
+<!-- SECTION:PLAN:BEGIN -->
+## Implementation sequence (single branch and MR)
+1. Preserve approved design at 18b47eed; inspect actual files and interact with mockup. Complete design-to-code inventory below. Start task-owned persistent preview through supported devenv isolated stack; verify process/database/API/browser ownership before any UI edits. No default-port stack reuse.
+2. Add typed management modes and a new migration: nullable agent key for nonmanaged resources, valid mode/key constraints, optional parent association and separately stored authenticated guest observations. Preserve unique resource IDs and effective configuration selection. Expose mode in APIs and defaults compatible with existing clients. Registration and transitions use existing RBAC/environment checks and transactional audit.
+3. Enforce deployment authority under existing system-row locks in composite authorization/claim, manual queue, automatic selection and agent authentication/delivery. Conversion clears desired targets, supersedes pending requests and removes legacy delivery bridge/reservations atomically; conversion into managed requires explicit credentials/policy and suppresses automatic deployment until explicit action. Preserve history, do not relax deployment agent requirements.
+4. Separate artifact eligibility from deployment eligibility in evaluation/build policy gates and queue selectors. Preserve actual cf_agent_enabled fact and configuration identity; shared configurations remain one evaluation/build artifact. Extend configuration-target scan selection and scheduled fleet scans without inventing runtime paths. Keep Current CVE/POA&M authority restricted to verified managed runtime evidence, including retained observations after conversion.
+5. Implement optional guest report fields through existing signed pull transport with backward-compatible defaults. Validate associated parent, environment, mode and unit; store observation separate from scan evidence. UI reloads latest observation and never claims synchronous guest refresh or guest attestation.
+6. Extend real evidence APIs and mode-aware fleet metrics. Implement approved Dioxus UI, all affected tabs and entry points, real completion/request outcomes. Update knowledge contracts and existing owning integration scenarios together.
+7. Run targeted Rust/SQLx/migration/browser verification in isolated environments, owning integration checks, knowledge validation and applicable flake checks. Perform requirements/backend/integrity/query/UI/empty-state/e2e/test review passes. Open exactly one complete MR to dev only after required verification.
+
+## Design-to-code acceptance checklist (source inventory; all unverified)
+- [ ] Identity/status: DTOs + systems/adapter.rs expose managed/external/reference; mode chips, distinct deployment labels, evidence issue precedence, absent evidence != zero CVEs; no reference/runtime unknown as offline.
+- [ ] Systems: views/systems_list.rs, systems_list_helpers.rs, systems_stat_strip.rs add global mode counts/filter, managed operational denominators, evidence/attention filters, config/parent search, reset empty state, preserve card/table controls.
+- [ ] Cards/table/preview: system_card_v2.rs, systems_table.rs and SystemPreviewPanel retain hierarchy, mode chips, selected config/revision/scan/runtime metadata, real evidence CVEs, Evidence actions, separate nonmanaged panel sections.
+- [ ] Detail Overview: views/system_detail.rs adds four-stage revision/eval/build/scan pipeline with exact identities/navigation, purpose/control card, external observations or reference recent evidence, missing-config diagnostics.
+- [ ] Deploy: explicit unavailable explanation and history/change-mode actions, no deploy/rollback for nonmanaged; server denial independently verified.
+- [ ] History: evidence timeline with All/Eval/Build/Scan filters and empty states; retain managed deployment history and historical evidence after conversion.
+- [ ] Logs: nonmanaged runtime-log unavailable state and real build-log navigation.
+- [ ] Config: components/system/config_explorer.rs offers commit/config evidence without fake host generations; deep links preserve revision.
+- [ ] CVEs/Hardening/Compliance/POA&M: separate configuration evidence banners/gates, waiting/failed/unavailable/stale/last-good/mismatch states, read-only artifact findings, no Current-authority mutation enablement; preserve existing sections/drawers.
+- [ ] Runtime: reporting parent/time/guest/unit/state/runner, verified guest unavailable, comparison not-comparable unless proved; recent observation reload only, preserve last observation on failure; reference has no runtime card.
+- [ ] Add: components/forms/add_system_form.rs + list modal adopt management-first rail and conditional identities/key/config/parent/policy/tags, exact declared config validation and preselection, real enrollment/completion outcomes.
+- [ ] Edit: components/system/edit_system_modal.rs retains General, conditional Deployment/Security or Configuration, Management warnings/credential requirements, Danger confirmation, real transactional save/error/cancel behavior.
+- [ ] Flakes: views/flakes_list.rs Add to Forge mode menu prefills config/mode/flake/branch, mode labels on registered configs, exact revision Open config, reconciliation and shared registration identities retained.
+- [ ] Scanning: views/scanning.rs mode chips + exact config evidence revisions/status/diagnostics, real rescan queue results, preserved filters/schedule/log drawers.
+- [ ] Dashboard/environments/sidebar: managed operational counts only; all applicable configurations remain in scan coverage; alerts do not treat missing observations as outage.
+- [ ] CSS: assets/app.css ports approved management components/tokens, spacing, hierarchy, responsive grids/table scrolling; inspect dark/light and long paths/narrow forms.
+- [ ] Browser compare and screenshots for every affected section; missing/loading/empty/error/restricted/unavailable states and full registration/edit/flake/evidence workflows exercised.
+
+## Initial code findings
+systems.public_key is NOT NULL and System decodes PublicKey eagerly; health views mark no heartbeat offline. Composite authorization locks system rows, manual queue has a separate lock path; auto-latest reads a snapshot and must recheck under lock. Evaluation registered-config selection already includes agentless registrations, but global agent policy and build queue SQL block agentless artifacts. Manual CVE artifact resolver exists; fleet scan selector is runtime-based. view_current_cve_authority depends on latest observed generation/path and must explicitly exclude modes after conversion. No UI simplification or mock backend data authorized.
+<!-- SECTION:PLAN:END -->
+
 ## Implementation Notes
 
 <!-- SECTION:NOTES:BEGIN -->
 LOCK: claude-opus on sledge in /home/mcamp/code/crystal-forge/TASK-508-management-modes
 
 Preflight: branch TASK-508-management-modes created from origin/dev @ 18b47eed (design commit). Local dev worktree is 4 backlog commits ahead/3 behind origin/dev and has an uncommitted change to packages/default/crates/cf-agent/src/deployment/agent.rs (other work, untouched). No main worktree exists. Upstream tracking unset to prevent accidental push to dev.
+
+Lock correction for this continuation: the earlier agent self-label 'claude-opus' was incorrect. LOCK: openai-agent (gpt-6.1-sol) on sledge in /home/mcamp/code/crystal-forge/TASK-508-management-modes. Same requested task/worktree; clean HEAD 18b47eed verified. No application edits yet.
+
+Preview startup: default 8080/3445 occupied by unrelated processes; untouched. Existing supported per-worktree devenv workflow found (docs/agents/devenv-workflow.md). Invoked nix develop .#devenv --command devenv up -d twice; first exceeded 120s, second exceeded 600s while building baseline core backend and running package tests. Neither invocation establishes a usable preview. Logs /home/mcamp/.local/share/opencode/tool-output/tool_192cc40cc001SHjg66ialoJkkz and tool_192ce5c870010Q4CbPRJ0H270k. Do not claim test suite passed from partial build output.
 <!-- SECTION:NOTES:END -->
