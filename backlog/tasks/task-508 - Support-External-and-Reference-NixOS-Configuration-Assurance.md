@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-10-31T17:19:00Z'
+updated_date: '2026-10-31T17:59:00Z'
 labels:
   - management-mode
   - assurance
@@ -147,6 +147,8 @@ Bounded delegated backend increment in existing TASK-508-management-modes worktr
 Owner-approved listener correction (single existing TASK-508 branch/worktree): honor loaded server.host and log that host; change cf-config ServerConfig::default host to 0.0.0.0 to preserve the previous effective wildcard bind with no override, with rationale adjacent to host. Scope is listener and directly related configuration/tests. No commit/push or preview process changes. No existing server-launch test infrastructure was found; main performs migrations and starts background jobs before binding. Use one tiny private bind function shared by main and focused real-socket tests to verify configured 127.0.0.1, omitted-server default, and explicit wildcard without database access. Run targeted tests/formatting through nix develop with SQLX_OFFLINE=true and database URLs unset; preserve existing owner edits and devenv.lock contents.
 
 Authorized listener startup correction is directly related to safe task preview. Keep default bind backward compatible, test exact production bind with real ephemeral sockets, then resume backend using task-owned generated config/PG and verify loopback. No additional networking feature or public config field.
+
+Guest-observation transport slice (same owner worktree, exclusive file scope): add defaulted signed reports and heartbeat targets binding external guest UUID/identity to validated microvm@identity.service; collect only fixed systemctl show ActiveState (runner None unless authoritative local runner proven); validate active managed parent/key, exact same-environment external association and identity under existing snapshot/system transaction locks; append separate evidence migration 0315; expose scoped latest observation without refresh or runtime/scan authority. Add compatibility, collector/validation and ignored isolated SQLx tests. Run targeted Nix-shell checks without services or DB access; owner handles broader docs/UI/integration.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
