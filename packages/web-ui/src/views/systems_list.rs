@@ -789,8 +789,6 @@ pub fn SystemsListView() -> Element {
                     },
                     environments: dropdown_environments.clone(),
                     flake_names: registered_flakes.clone(),
-                    title: "Register System".to_string(),
-                    submit_label: "Save System".to_string(),
                 }
             }
 

@@ -644,6 +644,7 @@ pub fn AddSystemForm(
                     }
                     div { button { class: "btn btn-ghost focus-ring", disabled: submitting, onclick: move |_| on_cancel.call(()), "Cancel" }
                         button { class: "btn btn-primary focus-ring", disabled: submitting || validation.is_err() || !config_valid(), onclick: move |_| on_submit.call(()),
+                            if !submitting { Icon { name: IconName::Check, size: 13 } }
                             if submitting { "Registering…" } else if mode == ManagementMode::Reference { "Add reference configuration" } else { "{submit_label}" }
                         }
                     }

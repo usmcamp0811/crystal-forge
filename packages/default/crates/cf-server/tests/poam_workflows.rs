@@ -85,6 +85,22 @@ async fn apply_migrations_through(pool: &PgPool, version: i64) {
     }
 }
 
+/// Lets pre-0322 rehearsals build fixtures with current composite helpers.
+///
+/// Before migration 0322 no derivation alias can exist, so
+/// `derivations_share_evidence_scope` is always false. Install this stub only
+/// in a rehearsal that never applies 0322 itself; the real migration would
+/// otherwise conflict with it.
+async fn install_pre_0322_evidence_scope_stub(pool: &PgPool) {
+    sqlx::query(
+        "CREATE FUNCTION derivations_share_evidence_scope(integer, integer)
+         RETURNS boolean LANGUAGE sql IMMUTABLE AS 'SELECT false'",
+    )
+    .execute(pool)
+    .await
+    .expect("install pre-0322 evidence-scope stub");
+}
+
 async fn apply_migration(pool: &PgPool, version: i64) {
     let migration = MIGRATOR
         .iter()
@@ -109,6 +125,7 @@ impl PoamClock for FixedClock {
 #[sqlx::test(migrations = false)]
 async fn migration_0258_preserves_populated_legacy_poams_and_adds_typed_shape(pool: PgPool) {
     apply_migrations_through(&pool, 257).await;
+    install_pre_0322_evidence_scope_stub(&pool).await;
     let fixture = failing_assessment_fixture(&pool).await;
     let finding_id: Uuid = sqlx::query_scalar(
         r#"SELECT finding.id
@@ -529,6 +546,7 @@ async fn migration_0295_to_0296_preserves_single_cve_history_and_admits_distinct
     pool: PgPool,
 ) {
     apply_migrations_through(&pool, 295).await;
+    install_pre_0322_evidence_scope_stub(&pool).await;
     let fixture = assessment_fixture(&pool).await;
     let actor = admin_actor(fixture.user_id);
     let environment_id = assign_environment(&pool, "0296-forward-upgrade", &[&fixture]).await;
@@ -12729,25 +12747,24 @@ async fn assessment_fixture_with_policy(
         .await
         .unwrap();
     let store_path = format!("/nix/store/{suffix}-poam-target");
-    let write = record_successful_eval_result(
-        pool,
-        Some(commit_id),
-        &hostname,
-        "nixos",
-        None,
-        &format!("{store_path}.drv"),
-        Some(&store_path),
-        Some(true),
-        true,
-        &serde_json::json!({}),
+    // Migration rehearsals build this fixture on historical schemas, before
+    // columns such as 0322's reuse binding exist. Insert the fresh evaluated
+    // row directly with columns present in every rehearsed schema; current
+    // evaluator persistence is covered by its own tests.
+    let derivation_id: i32 = sqlx::query_scalar(
+        r#"INSERT INTO derivations(commit_id,derivation_type,derivation_name,derivation_path,
+               expected_store_path,cf_agent_enabled,policy_requirements_met,policy_results,status_id)
+           VALUES($1,'nixos',$2,$3,$4,true,true,'{}'::jsonb,
+               (SELECT id FROM derivation_statuses WHERE name='dry-run-complete'))
+           RETURNING id"#,
     )
+    .bind(commit_id)
+    .bind(&hostname)
+    .bind(format!("{store_path}.drv"))
+    .bind(&store_path)
+    .fetch_one(pool)
     .await
     .unwrap();
-    let derivation_id = match write {
-        SuccessfulEvalWrite::Inserted { derivation_id }
-        | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => derivation_id,
-    };
     sqlx::query("UPDATE derivations SET store_path=$1,status_id=10 WHERE id=$2")
         .bind(&store_path)
         .bind(derivation_id)
