@@ -65,7 +65,10 @@ def configuration_assurance():
         for node in (builderA, services):
             node.succeed("nix-store --check-validity " + shlex.quote(output))
             expect_equal(node.succeed("cat " + shlex.quote(output + "/cf-it-source-nonce")).strip(), nonce, "actual authored built bytes")
-        builderA.fail("test -e " + shlex.quote(output + "/etc/systemd/system/crystal-forge-agent.service"))
+        # NixOS renders a disabled unit as a /dev/null mask; absent or masked
+        # both mean the built configuration cannot start the CF agent.
+        unit = shlex.quote(output + "/etc/systemd/system/crystal-forge-agent.service")
+        builderA.succeed("test ! -e " + unit + " || test \"$(readlink -f " + unit + ")\" = /dev/null")
         closure = builderA.succeed("nix-store --query --requisites " + shlex.quote(output)).splitlines()
         package = [p for p in closure if p.endswith("-" + FACTS["cve"]["package"] + "-" + FACTS["cve"]["vulnerableVersion"])]
         expect_equal(len(package), 1, "actual closure includes the independently authored vulnerable package")
