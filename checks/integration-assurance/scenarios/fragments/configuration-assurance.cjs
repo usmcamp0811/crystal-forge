@@ -92,7 +92,16 @@ exports.evidence = async ctx => {
         const detail = page.getByTestId("system-detail");
         await expect(detail.getByRole("heading", { name: "Configuration evidence", exact: true })).toBeVisible();
         await expect(detail.getByText(artifact.commit, { exact: false })).not.toHaveCount(0);
-        await expect(detail.getByText(scanId, { exact: false })).not.toHaveCount(0);
+        // Later manual/periodic cases seal newer scans of the same artifact, so
+        // the displayed selected scan is the server's current selection. It
+        // must still be a sealed scan of this exact artifact.
+        const evidenceRead = await ctx.context.request.get(ctx.url(`/api/v1/systems/${id}/configuration-assurance`));
+        expect(evidenceRead.status()).toBe(200);
+        const selected = (await evidenceRead.json()).selected_scan;
+        expect(selected.derivation_id).toBe(artifact.id);
+        expect(selected.cves).not.toBeNull();
+        await expect(detail.getByText(selected.scan_id, { exact: false })).not.toHaveCount(0);
+        expect(scanId).toBeTruthy();
         await expect(detail.getByRole("heading", { name: "Runtime observations", exact: true })).toHaveCount(mode === "external" ? 1 : 0);
         if (mode === "external") {
           await expect(detail.getByText("microvm@external-assurance.service", { exact: true })).toBeVisible();
