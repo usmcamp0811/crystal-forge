@@ -4262,7 +4262,7 @@ mod tests {
         // these columns must not independently derive runtime observations.
         assert!(
             source.contains(
-                "SELECT vsd.*, s.public_key, s.management_mode, s.parent_host_id\n         FROM view_system_detail vsd\n         JOIN systems s ON s.id = vsd.id"
+                "SELECT vsd.*, s.public_key, s.management_mode, s.parent_host_id, s.tags, s.description\n         FROM view_system_detail vsd\n         JOIN systems s ON s.id = vsd.id"
             ),
             "system detail query should source all detail fields from view_system_detail, \
               joining systems only for enrollment and management metadata"

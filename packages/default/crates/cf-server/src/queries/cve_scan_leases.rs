@@ -1870,6 +1870,14 @@ mod tests {
             .unwrap();
         tx.commit().await.unwrap();
         let replacement = Uuid::new_v4();
+        // Rotation is permitted only after the producing session goes stale.
+        sqlx::query(
+            "UPDATE builders SET last_heartbeat_at = now() - interval '10 minutes' WHERE id = $1",
+        )
+        .bind(builder.id)
+        .execute(&pool)
+        .await
+        .unwrap();
         establish_builder_session(&pool, &builder.id, &replacement, 60, "rotated scanner")
             .await
             .unwrap();

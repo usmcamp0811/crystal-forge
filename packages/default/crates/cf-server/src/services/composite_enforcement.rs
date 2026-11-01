@@ -2197,9 +2197,12 @@ async fn authorize_target_with_read_at(
         constrained_derivation_id = Some(derivation_id);
     }
 
-    let exact_target = sqlx::query_as::<_, (i32, String, i32, String)>(
-        r#"
-        SELECT d.id, d.store_path, c.id, d.derivation_name
+    // CONCURRENCY: The execution-evidence view contains an outer join, so it
+    // cannot be row-locked directly. Find the candidate, share-lock its real
+    // carrier, execution source and commit rows, then re-check the candidate
+    // under those locks. A row changed in between yields no target.
+    const EXACT_TARGET_SQL: &str = r#"
+        SELECT d.id, d.store_path, c.id, d.derivation_name, d.execution_derivation_id
         FROM systems s
         JOIN commits c ON c.flake_id = s.flake_id
         JOIN view_derivation_execution_evidence d ON d.commit_id = c.id
@@ -2222,14 +2225,38 @@ async fn authorize_target_with_read_at(
           AND ($3::integer IS NULL OR d.id = $3)
         ORDER BY d.id DESC
         LIMIT 1
-        FOR SHARE OF d, c
-        "#,
-    )
-    .bind(system_id)
-    .bind(target)
-    .bind(constrained_derivation_id)
-    .fetch_optional(&mut *tx)
-    .await?;
+        "#;
+    type ExactTargetRow = (i32, String, i32, String, i32);
+    let candidate = sqlx::query_as::<_, ExactTargetRow>(EXACT_TARGET_SQL)
+        .bind(system_id)
+        .bind(target)
+        .bind(constrained_derivation_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+    let exact_target = match candidate {
+        Some((carrier_id, _, commit_id, _, execution_id)) => {
+            sqlx::query("SELECT 1 FROM derivations WHERE id = ANY($1) ORDER BY id FOR SHARE")
+                .bind(vec![
+                    carrier_id.min(execution_id),
+                    carrier_id.max(execution_id),
+                ])
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query("SELECT 1 FROM commits WHERE id = $1 FOR SHARE")
+                .bind(commit_id)
+                .execute(&mut *tx)
+                .await?;
+            sqlx::query_as::<_, ExactTargetRow>(EXACT_TARGET_SQL)
+                .bind(system_id)
+                .bind(target)
+                .bind(Some(carrier_id))
+                .fetch_optional(&mut *tx)
+                .await?
+                .filter(|row| row.4 == execution_id)
+        }
+        None => None,
+    }
+    .map(|(id, store_path, commit_id, name, _)| (id, store_path, commit_id, name));
 
     let resolved = match resolve_system_effective_policies_in_tx(&mut tx, system_id).await? {
         ResolutionOutcome::Resolved(resolved) => resolved,

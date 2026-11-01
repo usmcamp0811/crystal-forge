@@ -780,8 +780,8 @@ mod tests {
         use uuid::Uuid;
 
         // Report identity must equal the authenticated registration.
-        let reported_hostname: String = serde_json::from_slice::<serde_json::Value>(&json)
-            .unwrap()["hostname"]
+        let reported_hostname: String = serde_json::from_slice::<serde_json::Value>(&json).unwrap()
+            ["hostname"]
             .as_str()
             .unwrap()
             .to_string();
@@ -867,8 +867,8 @@ mod tests {
         use uuid::Uuid;
 
         // Report identity must equal the authenticated registration.
-        let reported_hostname: String = serde_json::from_slice::<serde_json::Value>(&json)
-            .unwrap()["hostname"]
+        let reported_hostname: String = serde_json::from_slice::<serde_json::Value>(&json).unwrap()
+            ["hostname"]
             .as_str()
             .unwrap()
             .to_string();

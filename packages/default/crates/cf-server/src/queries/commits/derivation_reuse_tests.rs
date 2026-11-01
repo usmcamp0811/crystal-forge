@@ -428,7 +428,10 @@ async fn exact_reuse_failed_reevaluation_preserves_bound_identity_and_a_work(poo
     let binding = carrier(&pool, b).await;
     finish_evaluation(&pool, b).await;
     super::reset_commit_evaluation(&pool, b).await.unwrap();
-    let attempt = match super::mark_commit_evaluation_started(&pool, b).await.unwrap() {
+    let attempt = match super::mark_commit_evaluation_started(&pool, b)
+        .await
+        .unwrap()
+    {
         super::EvalStartOutcome::Started { attempt } => attempt,
         _ => panic!("fresh failure owner"),
     };
@@ -484,9 +487,11 @@ async fn exact_reuse_failed_reevaluation_preserves_bound_identity_and_a_work(poo
         .await
         .unwrap()
         .unwrap();
-    assert!(evidence.history.evaluations.iter().any(|event| {
-        event.revision.commit_id == b && event.evaluation.state == "eval_failed"
-    }));
+    assert!(
+        evidence.history.evaluations.iter().any(|event| {
+            event.revision.commit_id == b && event.evaluation.state == "eval_failed"
+        })
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
@@ -709,7 +714,7 @@ async fn exact_reuse_mismatch_scope_cache_and_gc_fail_closed(pool: PgPool) {
     .fetch_one(&pool)
     .await
     .unwrap();
-    let other_flake: i32 = sqlx::query_scalar("INSERT INTO flakes(name,repo_url,branch,snapshot_ready_at) VALUES('isolated-reuse','https://example.invalid/reuse','main',now()) RETURNING id")
+    let other_flake: i32 = sqlx::query_scalar("INSERT INTO flakes(name,repo_url,branch,snapshot_ready_at) VALUES('isolated-reuse','https://example.invalid/isolated-reuse','main',now()) RETURNING id")
         .fetch_one(&pool).await.unwrap();
     let consumer: Uuid = sqlx::query_scalar("INSERT INTO systems(hostname,system_configuration_name,flake_id,environment_id,management_mode,public_key,derivation,deployment_policy) VALUES('isolated-reuse-host','host',$1,$2,'reference',NULL,'','manual') RETURNING id")
         .bind(other_flake).bind(consumer_environment).fetch_one(&pool).await.unwrap();

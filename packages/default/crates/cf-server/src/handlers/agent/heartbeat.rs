@@ -706,7 +706,7 @@ mod tests {
                     .fetch_one(&pool)
                     .await
                     .unwrap();
-            let flake: i32 = sqlx::query_scalar("INSERT INTO flakes(name,repo_url) VALUES($1,'https://example.invalid/delivery') RETURNING id")
+            let flake: i32 = sqlx::query_scalar("INSERT INTO flakes(name,repo_url) VALUES($1,'https://example.invalid/'||$1) RETURNING id")
                 .bind(&hostname).fetch_one(&pool).await.unwrap();
             let id: Uuid = sqlx::query_scalar("INSERT INTO systems(hostname,environment_id,public_key,flake_id,derivation,deployment_policy) VALUES($1,$2,$3,$4,'','manual') RETURNING id")
                 .bind(&hostname).bind(environment).bind(STANDARD.encode(verifying.to_bytes())).bind(flake).fetch_one(&pool).await.unwrap();

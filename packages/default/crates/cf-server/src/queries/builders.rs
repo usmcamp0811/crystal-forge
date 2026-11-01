@@ -3605,8 +3605,29 @@ mod tests {
                         // derivation path or replace canonical preflight.
                         let path: String = sqlx::query_scalar("SELECT d.derivation_path FROM derivations d JOIN build_jobs j ON j.derivation_id=d.id WHERE j.id=$1")
                             .bind(job).fetch_one(&pool).await.unwrap();
-                        sqlx::query("UPDATE derivations d SET derivation_path=NULL FROM build_jobs j WHERE j.id=$1 AND d.id=j.derivation_id")
-                            .bind(job).execute(&pool).await.unwrap();
+                        let clear_path = "UPDATE derivations d SET derivation_path=NULL FROM build_jobs j WHERE j.id=$1 AND d.id=j.derivation_id";
+                        // 0322 forbids clearing a job-bound physical identity.
+                        assert!(
+                            sqlx::query(clear_path)
+                                .bind(job)
+                                .execute(&pool)
+                                .await
+                                .is_err()
+                        );
+                        // Pre-0322 databases can still hold such rows; selectors
+                        // must keep rejecting them. Create that legacy state with
+                        // triggers disabled for this fixture transaction only.
+                        let mut legacy = pool.begin().await.unwrap();
+                        sqlx::query("SET LOCAL session_replication_role = replica")
+                            .execute(&mut *legacy)
+                            .await
+                            .unwrap();
+                        sqlx::query(clear_path)
+                            .bind(job)
+                            .execute(&mut *legacy)
+                            .await
+                            .unwrap();
+                        legacy.commit().await.unwrap();
                         let missing_source = peek_next_verified_source_job(&pool, &environments)
                             .await
                             .unwrap();
