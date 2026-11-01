@@ -26,6 +26,7 @@ use crate::components::modals::{
 use crate::components::notifications::{AlertBanner, AlertSeverity};
 use crate::components::system::management_mode::{
     DeploymentCell, EvidenceCves, EvidenceFreshness, MgmtChip, evidence_status,
+    selected_head_scan_freshness,
 };
 use crate::components::system::{
     EditSystemModal, PendingDeployBanner, SystemCardV2, deployment_state_label,
@@ -249,6 +250,10 @@ pub fn SystemsListView() -> Element {
         }
     });
 
+    // One schedule read classifies every selected configuration scan. A failed
+    // read leaves freshness unknown; the browser never invents an interval.
+    let scan_schedule = use_resource(crate::api::client::fetch_scanning_schedule);
+
     let mut load_error = use_signal(|| None::<String>);
     let mut api_notice = use_signal(|| None::<String>);
     let mut loading = use_signal(|| true);
@@ -354,13 +359,30 @@ pub fn SystemsListView() -> Element {
         .unwrap_or_default();
     let evidence_loading = evidence_resource.state() == UseResourceState::Pending;
     let evidence_for = |id: &Uuid| evidence_results.get(id).and_then(|r| r.as_ref().ok());
+    let schedule = scan_schedule
+        .read()
+        .as_ref()
+        .and_then(|r| r.as_ref().ok())
+        .cloned();
+    let freshness_map: HashMap<Uuid, EvidenceFreshness> = {
+        let now = chrono::Utc::now();
+        evidence_results
+            .iter()
+            .filter_map(|(id, r)| r.as_ref().ok().map(|e| (*id, e)))
+            .map(|(id, e)| (id, selected_head_scan_freshness(e, schedule.as_ref(), now)))
+            .collect()
+    };
+    let freshness_for = |id: &Uuid| {
+        freshness_map
+            .get(id)
+            .copied()
+            .unwrap_or(EvidenceFreshness::Unknown)
+    };
     let needs_attention = |s: &SystemSummary| {
         if s.management_mode == ManagementMode::Managed {
             matches_status(s, "attention")
         } else {
-            evidence_issue(
-                evidence_for(&s.id).map(|e| evidence_status(e, EvidenceFreshness::Unknown)),
-            )
+            evidence_issue(evidence_for(&s.id).map(|e| evidence_status(e, freshness_for(&s.id))))
         }
     };
     let environments = unique_environments(&current_systems);
@@ -991,6 +1013,7 @@ pub fn SystemsListView() -> Element {
                         SystemCardV2 {
                             system: system.clone(),
                             evidence: evidence_for(&system.id).cloned(),
+                            freshness: freshness_map.get(&system.id).copied(),
                             evidence_loading,
                             can_mutate,
                             on_retry_evidence: move |_| evidence_resource.restart(),
@@ -1040,6 +1063,7 @@ pub fn SystemsListView() -> Element {
                 SystemsTable {
                     systems: filtered_systems.clone(),
                     evidence: evidence_results.clone(),
+                    freshness: freshness_map.clone(),
                     evidence_loading,
                     can_mutate,
                     on_retry_evidence: move |_| evidence_resource.restart(),
@@ -1726,6 +1750,7 @@ fn ConfigurationPreviewPanel(
     });
     // Retain successful reads only within this registration epoch. A failed
     // reload must not turn previously loaded evidence into an absence claim.
+    let schedule = use_resource(crate::api::client::fetch_scanning_schedule);
     let mut last_evidence = use_signal(|| None::<ConfigurationAssurance>);
     let mut last_observation = use_signal(|| None::<crate::api::models::GuestObservationRow>);
     use_effect(move || {
@@ -1818,7 +1843,14 @@ fn ConfigurationPreviewPanel(
                 section { class: "panel-section", h3 { "CVE exposure" }
                     match evidence.read().as_ref() {
                         Some(Ok(value)) if crate::components::system::management_mode::last_good_scan(value).is_some() => rsx! {
-                            EvidenceCves { evidence: value.clone(), freshness: EvidenceFreshness::Unknown }
+                            EvidenceCves {
+                                evidence: value.clone(),
+                                freshness: selected_head_scan_freshness(
+                                    value,
+                                    schedule.read().as_ref().and_then(|r| r.as_ref().ok()),
+                                    chrono::Utc::now(),
+                                ),
+                            }
                         },
                         None => rsx! { div { class: "mg-dim", "Loading…" } },
                         Some(Ok(_)) => rsx! { div { class: "mg-dim", "No sealed CVE findings are available." } },

@@ -42,6 +42,9 @@ pub fn SystemsTable(
     /// Contains bounded configuration reads keyed by resource identity.
     #[props(default)]
     evidence: HashMap<Uuid, Result<ConfigurationAssurance, String>>,
+    /// Selected-scan freshness from the real schedule; missing keys are unknown.
+    #[props(default)]
+    freshness: HashMap<Uuid, EvidenceFreshness>,
     /// Indicates a pending evidence snapshot, independent of operational health.
     #[props(default)]
     evidence_loading: bool,
@@ -236,7 +239,7 @@ pub fn SystemsTable(
                                         "{system.health_status.label()}"
                                     }
                                     } else if let Some(value) = assurance {
-                                        ScanEvidenceChip { status: evidence_status(value, EvidenceFreshness::Unknown) }
+                                        ScanEvidenceChip { status: evidence_status(value, freshness.get(&system.id).copied().unwrap_or(EvidenceFreshness::Unknown)) }
                                     } else {
                                         span { class: "chip chip-unknown", if evidence_loading { "Loading evidence…" } else { "Evidence unavailable" } }
                                     }
@@ -310,7 +313,7 @@ pub fn SystemsTable(
                                         }
                                     }
                                     } else if let Some(value) = assurance {
-                                        EvidenceCves { evidence: value.clone(), freshness: EvidenceFreshness::Unknown }
+                                        EvidenceCves { evidence: value.clone(), freshness: freshness.get(&system.id).copied().unwrap_or(EvidenceFreshness::Unknown) }
                                     } else { span { class: "mg-dim", if evidence_loading { "Loading CVE evidence…" } else { "CVE evidence unavailable" } } }
                                 }
                                 // Heartbeat countdown

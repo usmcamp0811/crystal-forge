@@ -401,21 +401,6 @@ fn selected_freshness(
     evidence_freshness(scan.completed_at, now, interval)
 }
 
-fn policy_duration(value: &str) -> Option<Duration> {
-    let value = value.trim();
-    let split = value.find(|c: char| !c.is_ascii_digit())?;
-    let number = value[..split].parse::<i64>().ok().filter(|n| *n > 0)?;
-    let seconds = number.checked_mul(match value[split..].trim() {
-        "s" | "second" | "seconds" => 1,
-        "m" | "minute" | "minutes" => 60,
-        "h" | "hour" | "hours" => 3600,
-        "d" | "day" | "days" => 86400,
-        "w" | "week" | "weeks" => 604800,
-        _ => return None,
-    })?;
-    Duration::try_seconds(seconds)
-}
-
 #[component]
 fn EvidenceMetrics(
     evidence: ConfigurationAssurance,

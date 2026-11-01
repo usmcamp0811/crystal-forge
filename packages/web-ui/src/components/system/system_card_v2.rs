@@ -133,6 +133,10 @@ pub fn SystemCardV2(
     /// Exact configuration evidence, absent while loading or unavailable.
     #[props(default)]
     evidence: Option<ConfigurationAssurance>,
+    /// Selected-scan freshness computed by the owning list from the real
+    /// schedule; absent when the schedule or evidence is unavailable.
+    #[props(default)]
+    freshness: Option<EvidenceFreshness>,
     /// Indicates that the bounded list evidence read is still pending.
     #[props(default)]
     evidence_loading: bool,
@@ -170,6 +174,7 @@ pub fn SystemCardV2(
     on_deploy: EventHandler<()>,
 ) -> Element {
     if system.management_mode != ManagementMode::Managed {
+        let freshness = freshness.unwrap_or(EvidenceFreshness::Unknown);
         let mode = system.management_mode;
         let selected_class = if selected { "selected" } else { "" };
         let config = system
@@ -220,7 +225,7 @@ pub fn SystemCardV2(
         };
         let evidence_color = match evidence
             .as_ref()
-            .map(|e| evidence_status(e, EvidenceFreshness::Unknown).chip_class())
+            .map(|e| evidence_status(e, freshness).chip_class())
         {
             Some("chip-critical") => "var(--cf-red)",
             Some("chip-warning") => "var(--cf-amber)",
@@ -266,9 +271,9 @@ pub fn SystemCardV2(
                 }
                 div { class: "sys-card-foot",
                     div { class: "chips-row",
-                        if let Some(value) = &evidence { ScanEvidenceChip { status: evidence_status(value, EvidenceFreshness::Unknown) } }
+                        if let Some(value) = &evidence { ScanEvidenceChip { status: evidence_status(value, freshness) } }
                         DeploymentCell { mode, status: system.deployment_status }
-                        if let Some(value) = evidence { EvidenceCves { evidence: value, freshness: EvidenceFreshness::Unknown } }
+                        if let Some(value) = evidence { EvidenceCves { evidence: value, freshness } }
                         else { span { class: "chip chip-unknown", role: "status", if evidence_loading { "Loading evidence…" } else { "Evidence unavailable" } } }
                     }
                     button { class: "btn btn-subtle focus-ring", style: "padding: 4px 10px; font-size: 12px;", title: "Open configuration evidence",

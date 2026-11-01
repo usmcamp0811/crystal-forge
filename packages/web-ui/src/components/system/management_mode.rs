@@ -42,6 +42,49 @@ pub fn evidence_freshness(
     }
 }
 
+/// Parses a scan-schedule interval such as `24h`, `7d` or `30 minutes`.
+///
+/// Returns `None` for zero, negative, malformed, or overflowing values. The
+/// browser never substitutes a default interval for an unparseable policy.
+pub fn policy_duration(value: &str) -> Option<Duration> {
+    let value = value.trim();
+    let split = value.find(|c: char| !c.is_ascii_digit())?;
+    let number = value[..split].parse::<i64>().ok().filter(|n| *n > 0)?;
+    let seconds = number.checked_mul(match value[split..].trim() {
+        "s" | "second" | "seconds" => 1,
+        "m" | "minute" | "minutes" => 60,
+        "h" | "hour" | "hours" => 3600,
+        "d" | "day" | "days" => 86400,
+        "w" | "week" | "weeks" => 604800,
+        _ => return None,
+    })?;
+    Duration::try_seconds(seconds)
+}
+
+/// Classifies the selected external/reference scan with the server cadence.
+///
+/// The server schedules the exact selected branch-head artifact of an
+/// external or reference registration on `deployed_interval` (a cadence label,
+/// not a deployment claim). `selected_scan` is always that artifact's newest
+/// lifecycle, so this matches scheduler and Scanning statistics without a
+/// per-system scan read. Managed registrations, a missing schedule, or a
+/// missing completion time return [`EvidenceFreshness::Unknown`].
+pub fn selected_head_scan_freshness(
+    evidence: &ConfigurationAssurance,
+    policy: Option<&crate::api::models::ScanSchedulePolicyResponse>,
+    now: DateTime<Utc>,
+) -> EvidenceFreshness {
+    if evidence.management_mode == ManagementMode::Managed {
+        return EvidenceFreshness::Unknown;
+    }
+    let interval = policy.and_then(|p| policy_duration(&p.deployed_interval));
+    evidence_freshness(
+        evidence.selected_scan.as_ref().and_then(|s| s.completed_at),
+        now,
+        interval,
+    )
+}
+
 /// Distinguishes configuration lifecycle problems from scan freshness.
 /// These states never describe Current runtime exposure or deployment readiness.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -585,6 +628,53 @@ mod tests {
         assert_eq!(
             build_stage_presentation("unavailable"),
             ("unavailable", "var(--cf-gray-dot)")
+        );
+    }
+
+    #[test]
+    fn selected_head_freshness_uses_deployed_cadence_and_never_invents_policy() {
+        let now = DateTime::from_timestamp(1_700_100_000, 0).unwrap();
+        let policy = |interval: &str| ScanSchedulePolicyResponse {
+            on_build: true,
+            deployed_interval: interval.into(),
+            recent_interval: "1h".into(),
+            archived_interval: "1h".into(),
+            archived_enabled: false,
+            rebuild_to_scan: false,
+            updated_at: now,
+        };
+        let mut value = evidence();
+        let mut selected = scan();
+        selected.completed_at = Some(now - Duration::hours(2));
+        value.selected_scan = Some(selected);
+        // The other cadence classes must not apply to the selected head.
+        assert_eq!(
+            selected_head_scan_freshness(&value, Some(&policy("1d")), now),
+            EvidenceFreshness::Fresh
+        );
+        assert_eq!(
+            selected_head_scan_freshness(&value, Some(&policy("90m")), now),
+            EvidenceFreshness::Stale
+        );
+        assert_eq!(
+            selected_head_scan_freshness(&value, None, now),
+            EvidenceFreshness::Unknown
+        );
+        assert_eq!(
+            selected_head_scan_freshness(&value, Some(&policy("never")), now),
+            EvidenceFreshness::Unknown
+        );
+        value.management_mode = ManagementMode::Managed;
+        assert_eq!(
+            selected_head_scan_freshness(&value, Some(&policy("1d")), now),
+            EvidenceFreshness::Unknown,
+            "managed runtime freshness is owned by Current authority"
+        );
+        value.management_mode = ManagementMode::External;
+        value.selected_scan.as_mut().unwrap().completed_at = None;
+        assert_eq!(
+            selected_head_scan_freshness(&value, Some(&policy("1d")), now),
+            EvidenceFreshness::Unknown
         );
     }
 
