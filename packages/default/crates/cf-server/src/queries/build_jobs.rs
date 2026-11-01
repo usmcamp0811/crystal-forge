@@ -591,8 +591,22 @@ const RESOURCE_TERMINAL_PREPARATION_PREDICATE: &str = r#"
     AND NULLIF(btrim(d.derivation_target), '') IS NOT NULL
     AND d.status_id IN (5, 7, 8, 10, 12)
     AND d.policy_results->'evaluation_attempt' = to_jsonb(c.evaluation_attempt_count)
-    AND (d.policy_results #> '{global,cfAgentEnabled,passed}' = 'true'::jsonb
-         OR d.policy_results #> '{global,artifactAdmission,passed}' = 'true'::jsonb)
+    -- INVARIANT: Each admission branch is complete on its own. Saved
+    -- artifact admission must not satisfy the managed branch, whose saved
+    -- agent evidence is independent of the cf_agent_enabled column, and the
+    -- agentless branch still requires an active external/reference subject.
+    AND (
+        (d.cf_agent_enabled IS TRUE AND d.policy_requirements_met IS TRUE
+         AND d.policy_results #> '{global,cfAgentEnabled,passed}' = 'true'::jsonb)
+        OR (d.policy_results #> '{global,artifactAdmission,passed}' = 'true'::jsonb
+            AND EXISTS (
+                SELECT 1 FROM systems registration
+                WHERE registration.is_active
+                  AND registration.management_mode IN ('external','reference')
+                  AND registration.flake_id = c.flake_id
+                  AND COALESCE(NULLIF(BTRIM(registration.system_configuration_name), ''),
+                      registration.hostname) = d.derivation_name))
+    )
     AND (
         d.build_preparation_state IN ('pending', 'failed')
         OR (d.build_preparation_state = 'queued' AND EXISTS (
