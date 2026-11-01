@@ -649,7 +649,12 @@ fn EvidenceTimeline(evidence: ConfigurationAssurance, #[props(default)] compact:
             }
             p { class: "mg-copy", "Evaluations, builds and scans of {evidence.configuration_name}. Retained prefix: at most {evidence.history.limit_per_kind} records per kind. This is configuration evidence, not a deployment timeline." }
         }
-        if rows.is_empty() { p { class: "mg-dim", "No {kind()} evidence records in the returned history." } }
+        if rows.is_empty() {
+            p { class: "mg-dim",
+                if kind() == "All" { "No evidence records in the returned history." }
+                else { "No {kind().to_lowercase()} evidence records in the returned history." }
+            }
+        }
         div { class: "timeline",
             for row in rows { div { class: "tl-item", key: "{row.kind}-{row.id}",
                 span { class: "tl-dot" }
