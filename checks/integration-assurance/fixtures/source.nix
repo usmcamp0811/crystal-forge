@@ -82,7 +82,8 @@
           # Both nonmanaged registrations select this same derivation. Force
           # agent disablement even when later managed revisions enable targetA.
           assuranceOnly = target.extendModules { modules = [({lib, ...}: {
-            networking.hostName = lib.mkForce "assuranceOnly";
+            # Identity is the output attribute. Keep targetA's hostname: the
+            # shared network-isolation fixture maps only real VM role names.
             # Priority 40 wins over targetA's revision-controlled mkForce (50).
             services.crystal-forge.enable = lib.mkOverride 40 false;
             services.crystal-forge.client.enable = lib.mkOverride 40 false;
