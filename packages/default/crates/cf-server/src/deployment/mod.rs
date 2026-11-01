@@ -232,8 +232,12 @@ impl DeploymentPolicyManager {
     async fn update_flake_systems_to_latest(
         &self,
         flake_id: i32,
-        systems: Vec<crate::models::systems::System>,
+        mut systems: Vec<crate::models::systems::System>,
     ) -> Result<usize> {
+        // SECURITY: Direct callers must not admit assurance-only resources to
+        // advanced gates or rollout groups. Final authorization rechecks the
+        // persisted mode and activity under the system-row lock.
+        systems.retain(|system| system.management_mode.permits_deployment() && system.is_active);
         if systems.is_empty() {
             return Ok(0);
         }
@@ -822,6 +826,176 @@ pub async fn spawn_deployment_policy_manager(
 mod tests {
     use super::*;
     use uuid::Uuid;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires a verified disposable DATABASE_URL"]
+    async fn deployment_authority_blocks_nonmanaged_and_inactive_bypass_paths(pool: PgPool) {
+        use crate::queries::{deployment, system_events};
+        use crate::services::composite_enforcement;
+
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (flake_id, derivation_id, store_path, config_name) =
+            cve_gate_artifact(&pool, &suffix).await;
+        let managed_id = cve_gate_system(
+            &pool,
+            &format!("managed-{suffix}"),
+            flake_id,
+            &config_name,
+            None,
+        )
+        .await;
+        let manager = DeploymentPolicyManager::new(CrystalForgeConfig::default(), pool.clone());
+        let stats = manager.update_auto_latest_policies().await.unwrap();
+        assert_eq!((stats.systems_checked, stats.systems_updated), (1, 1));
+        let (desired, _, pending) = cve_gate_system_state(&pool, managed_id).await;
+        assert_eq!(desired.as_deref(), Some(store_path.as_str()));
+        assert_eq!(pending, desired);
+        assert_eq!(
+            system_events::mark_pending_deployment_delivered(&pool, managed_id, &store_path)
+                .await
+                .unwrap(),
+            1,
+        );
+
+        // The production constraint prevents retained desired state in these
+        // modes. Remove it only inside this disposable SQLx test database to
+        // prove that application authorization also rejects corrupt/legacy
+        // state and cannot be bypassed through an existing pending row.
+        sqlx::query("ALTER TABLE systems DROP CONSTRAINT systems_management_mode_target_check")
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (mode, active) in [("external", true), ("reference", true), ("managed", false)] {
+            let hostname = format!("{mode}-active-{active}-{suffix}");
+            let id = cve_gate_system(&pool, &hostname, flake_id, &config_name, None).await;
+            let pending_id = system_events::set_pending_deployment_target(
+                &pool,
+                id,
+                Some(&store_path),
+                "manual_deploy",
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            sqlx::query(
+                "UPDATE systems SET management_mode = $2, is_active = $3,
+                 public_key = CASE WHEN $2 = 'managed' THEN public_key ELSE NULL END,
+                 desired_target = $4, desired_target_set_at = NOW() WHERE id = $1",
+            )
+            .bind(id)
+            .bind(mode)
+            .bind(active)
+            .bind(&store_path)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let before = cve_gate_system_state(&pool, id).await;
+
+            let check = composite_enforcement::authorize_system_target(&pool, id, &store_path)
+                .await
+                .unwrap();
+            assert!(!check.allowed(), "{mode}");
+            let set = composite_enforcement::authorize_and_set_system_target(
+                &pool,
+                id,
+                &store_path,
+                "manual_deploy",
+            )
+            .await
+            .unwrap();
+            assert!(!set.allowed(), "{mode}");
+            let automatic = composite_enforcement::authorize_and_set_system_target_for_derivation(
+                &pool,
+                id,
+                &store_path,
+                "auto_desired_target",
+                derivation_id,
+            )
+            .await
+            .unwrap();
+            assert!(!automatic.allowed(), "{mode}");
+            let delivery = composite_enforcement::authorize_and_claim_desired_target_with_read(
+                &pool,
+                id,
+                &store_path,
+                true,
+                Default::default(),
+            )
+            .await
+            .unwrap();
+            assert!(!delivery.authorization.allowed(), "{mode}");
+            assert!(delivery.target.is_none());
+            assert!(delivery.publication_read.is_none());
+            assert!(
+                deployment::update_desired_target(&pool, &hostname, Some(&store_path))
+                    .await
+                    .is_err()
+            );
+            if mode != "managed" {
+                assert!(
+                    deployment::update_deployment_policy(&pool, &hostname, "manual")
+                        .await
+                        .is_err()
+                );
+            }
+            assert!(
+                system_events::set_pending_deployment_target(
+                    &pool,
+                    id,
+                    Some(&store_path),
+                    "manual_rollback",
+                )
+                .await
+                .is_err()
+            );
+            assert_eq!(
+                system_events::mark_pending_deployment_delivered(&pool, id, &store_path)
+                    .await
+                    .unwrap(),
+                0
+            );
+            let mut tx = pool.begin().await.unwrap();
+            assert!(
+                system_events::mark_pending_deployment_applying_tx(&mut tx, id, &store_path)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            tx.commit().await.unwrap();
+
+            let selected = deployment::get_systems_with_auto_latest_policy(&pool)
+                .await
+                .unwrap();
+            assert!(!selected.iter().any(|system| system.id == id));
+            let system = sqlx::query_as::<_, crate::models::systems::System>(
+                "SELECT * FROM systems WHERE id = $1",
+            )
+            .bind(id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(
+                manager
+                    .update_flake_systems_to_latest(flake_id, vec![system])
+                    .await
+                    .unwrap(),
+                0
+            );
+            assert_eq!(cve_gate_system_state(&pool, id).await, before);
+            let pending_state: (String, Option<chrono::DateTime<chrono::Utc>>, i64) =
+                sqlx::query_as(
+                    "SELECT status, delivered_at,
+                     (SELECT count(*) FROM pending_system_deployments WHERE system_id = $2)
+                     FROM pending_system_deployments WHERE id = $1",
+                )
+                .bind(pending_id)
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            assert_eq!(pending_state, ("pending".into(), None, 1));
+        }
+    }
 
     // ── Shared fixtures for require_cve_check regressions ───────────────────
     //

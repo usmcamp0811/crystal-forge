@@ -28,7 +28,7 @@ The canonical knowledge corpus for Crystal Forge, following the Open Knowledge F
 * [components/](components/index.md) - Core component model, crate boundaries, and dependency direction. Open when adding crates or refactoring crate graph.
 
 ## Concepts
-* [concepts/](concepts/index.md) - Derivation status lifecycle, deployment flow, and domain models. Open for reference on domain entities and state machines.
+* [concepts/](concepts/index.md) - Management modes, configuration assurance, derivation status lifecycle, deployment flow, and domain models. Open for reference on domain entities and state machines.
 
 ## CVE
 * [cves/](cves/index.md) - Fleet CVE triage, current-CVE resolver, and POA&M lifecycle. Open when triaging vulnerabilities or managing remediation.

@@ -8,6 +8,65 @@ use sqlx::PgPool;
 use std::option::Option;
 use uuid::Uuid;
 
+/// Identifies deployment authority independently of configuration assurance.
+///
+/// All modes permit evaluation, builds and scans under their applicable
+/// policies. Only [`Self::Managed`] permits deployment authorization. The mode
+/// does not establish runtime health, evidence freshness or registration activity.
+/// Existing clients that omit the mode retain managed-system semantics.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq, sqlx::Type)]
+#[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "text", rename_all = "snake_case")]
+pub enum ManagementMode {
+    /// Represents a system whose enrolled agent can receive authorized deploys.
+    #[default]
+    Managed,
+    /// Represents a system deployed outside Crystal Forge's authority.
+    ///
+    /// Configuration evidence does not establish what this system is running.
+    External,
+    /// Represents a configuration for assurance, not a running machine.
+    Reference,
+}
+
+impl ManagementMode {
+    /// Returns the stable database and API representation of this mode.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Managed => "managed",
+            Self::External => "external",
+            Self::Reference => "reference",
+        }
+    }
+
+    /// Returns whether this mode permits deployment authorization.
+    ///
+    /// A positive result is necessary, not sufficient: enrollment, registration
+    /// activity, user authorization and deployment policies must also permit it.
+    pub const fn permits_deployment(self) -> bool {
+        matches!(self, Self::Managed)
+    }
+}
+
+impl std::fmt::Display for ManagementMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl std::str::FromStr for ManagementMode {
+    type Err = anyhow::Error;
+
+    fn from_str(value: &str) -> Result<Self> {
+        match value {
+            "managed" => Ok(Self::Managed),
+            "external" => Ok(Self::External),
+            "reference" => Ok(Self::Reference),
+            _ => anyhow::bail!("Invalid management mode"),
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub enum DeploymentPolicy {
     #[serde(rename = "manual")]
@@ -16,6 +75,43 @@ pub enum DeploymentPolicy {
     AutoLatest,
     #[serde(rename = "pinned")]
     Pinned,
+}
+
+#[cfg(test)]
+mod management_mode_tests {
+    use super::ManagementMode;
+
+    #[test]
+    fn management_modes_use_exact_database_and_api_values() {
+        for (mode, value) in [
+            (ManagementMode::Managed, "managed"),
+            (ManagementMode::External, "external"),
+            (ManagementMode::Reference, "reference"),
+        ] {
+            assert_eq!(mode.as_str(), value);
+            assert_eq!(mode.to_string(), value);
+            assert_eq!(value.parse::<ManagementMode>().unwrap(), mode);
+            let json = serde_json::to_string(&mode).unwrap();
+            assert_eq!(json, format!("\"{value}\""));
+            assert_eq!(serde_json::from_str::<ManagementMode>(&json).unwrap(), mode);
+        }
+    }
+
+    #[test]
+    fn invalid_modes_do_not_acquire_managed_authority() {
+        for value in ["", "Managed", "EXTERNAL", "external ", "unknown", "manual"] {
+            assert!(value.parse::<ManagementMode>().is_err());
+            assert!(serde_json::from_value::<ManagementMode>(serde_json::json!(value)).is_err());
+        }
+    }
+
+    #[test]
+    fn only_managed_mode_permits_deployment_authorization() {
+        assert_eq!(ManagementMode::default(), ManagementMode::Managed);
+        assert!(ManagementMode::Managed.permits_deployment());
+        assert!(!ManagementMode::External.permits_deployment());
+        assert!(!ManagementMode::Reference.permits_deployment());
+    }
 }
 
 impl std::fmt::Display for DeploymentPolicy {
@@ -41,13 +137,28 @@ impl std::str::FromStr for DeploymentPolicy {
     }
 }
 
+/// Represents a registered configuration and its independent agent authority.
+///
+/// Storage requires a key only for managed resources. Parent associations apply
+/// only to external resources and do not establish runtime evidence.
 #[derive(Debug, Clone, FromRow, Serialize, Deserialize)]
 pub struct System {
     pub id: Uuid,
     pub hostname: String,
     pub environment_id: Option<Uuid>,
     pub is_active: bool,
-    pub public_key: PublicKey,
+    /// Identifies deployment authority; omitted legacy input defaults to managed.
+    #[serde(default)]
+    pub management_mode: ManagementMode,
+    /// Records the server-owned re-enrollment boundary; None preserves legacy semantics.
+    /// Authentication retains this value to reject requests from an earlier enrollment.
+    #[serde(default)]
+    #[sqlx(default)]
+    pub agent_enrolled_at: Option<DateTime<Utc>>,
+    /// Contains the enrolled agent key only for managed resources.
+    pub public_key: Option<PublicKey>,
+    /// Associates an external resource with a host, without granting report authority.
+    pub parent_host_id: Option<Uuid>,
     pub flake_id: Option<i32>,
     pub derivation: String,
     pub system_configuration_name: Option<String>,
@@ -58,8 +169,12 @@ pub struct System {
 }
 
 impl System {
-    /// Creates a new validated System instance and inserts it using `insert_system()`.
+    /// Creates a managed system with a validated agent key using `insert_system()`.
     /// UUID & derivation are left for the database or later processing.
+    ///
+    /// # Errors
+    /// Returns an error for an invalid key or policy, a conflicting nonmanaged
+    /// registration, or a database failure. This constructor never converts modes.
     pub async fn new(
         pool: &PgPool,
         hostname: String,
@@ -79,7 +194,10 @@ impl System {
             hostname,
             environment_id,
             is_active,
-            public_key,
+            management_mode: ManagementMode::Managed,
+            agent_enrolled_at: None,
+            public_key: Some(public_key),
+            parent_host_id: None,
             flake_id,
             derivation: "".into(), // leave empty; DB or later logic sets it
             system_configuration_name,

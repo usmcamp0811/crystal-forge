@@ -436,6 +436,9 @@ pub(crate) fn parse_deployment_policy_record(
     let cfg = &record.config;
     match record.policy_type.as_str() {
         "require_cf_agent" => {
+            // An explicitly assigned agent policy remains a requirement for
+            // external/reference artifacts too. Only the implicit managed
+            // deployment prerequisite is separated at build admission.
             if cfg.get("strict").and_then(|v| v.as_bool()) == Some(false) {
                 warn!(
                     "Ignoring strict=false for require_cf_agent policy '{}' ({}); enforcing strict=true",

@@ -7,7 +7,7 @@ tags:
   - operations
   - configuration
   - toml
-implementation_status: implemented
+implementation_status: partial
 generated:
   by: opencode/claude-sonnet-5-5
   at: 2026-10-03T22:57:15-05:00
@@ -131,6 +131,10 @@ The server does not read `DATABASE_URL`. The database connection is built from t
 
 ### Defaults that differ between the Rust structs and the NixOS module
 
+**TASK-508 status: partial.** The listener change below is source-inspected.
+The owner reports passing R3 remote managed-agent cases in Delivery and
+Assurance; full exact-source owner results remain pending.
+
 The NixOS module (`modules/nixos/crystal-forge`) writes its own defaults into the generated `config.toml`. These differ from the struct defaults used when a key is absent:
 
 | Key | Rust struct default | NixOS module default |
@@ -138,12 +142,28 @@ The NixOS module (`modules/nixos/crystal-forge`) writes its own defaults into th
 | `deployment.deployment_poll_interval` | 60 s | `15m` |
 | `build.poll_interval` | 300 s | `5m` |
 | `cache.poll_interval` | 30 s | 5 s |
-| `server.host` / `server.port` | `127.0.0.1` / `3000` | not checked |
+| `server.host` / `server.port` | `0.0.0.0` / `3000` | `0.0.0.0` / `3000`; explicit loopback override remains supported |
 | `flakes.flake_polling_interval` | 600 s | `10m` |
 | `flakes.commit_evaluation_interval` | 60 s | `1m` |
 | `vulnix.poll_interval` | 60 s | `1m` |
 
-The server listens on `0.0.0.0:<server.port>` regardless of `server.host` (`TcpListener::bind(("0.0.0.0", port))` in `cf-server/src/bin/server.rs`).
+The server binds the configured `server.host` and `server.port` through
+`bind_listener` in `cf-server/src/bin/server.rs`. The source default host is
+`0.0.0.0`, which preserves the earlier effective wildcard bind. It is not
+`127.0.0.1`. For a loopback-only local instance, explicitly set
+`CRYSTAL_FORGE__SERVER__HOST=127.0.0.1` or `[server] host = "127.0.0.1"`.
+The NixOS module's existing `services.crystal-forge.server.host` option also
+defaults to `0.0.0.0`; an explicit `127.0.0.1` remains loopback-only. The earlier
+module default was `127.0.0.1`, but the server ignored it and listened on all
+interfaces. Updating the module default preserves that effective production
+behavior after the listener correction.
+
+A wildcard bind exposes the API on every IPv4 interface wherever existing
+network and firewall policies permit access. Use loopback behind a local reverse
+proxy when direct remote access is not required. Changing the bind address does
+not open firewall ports or change network access policy.
+TASK-508 listener source is inspected; this documentation pass did not run a
+listener service or runtime test.
 
 ## Related concepts
 
@@ -152,7 +172,7 @@ The server listens on `0.0.0.0:<server.port>` regardless of `server.host` (`TcpL
 
 ## Migration verification notes
 
-Scope: every key in the example, every environment variable, and the defaults table were compared with `cf-config`, `cf-server`, and the NixOS module. The NixOS server host and port defaults were not checked.
+Scope: every key in the example, every environment variable, and the defaults table were compared with `cf-config`, `cf-server`, and the NixOS module. Prior TASK-508 checks evaluated the module's wildcard host default and explicit loopback override, and exercised real sockets through the production Rust bind function. The owner now reports passing R3 remote managed-agent cases in Delivery and Assurance. Full exact-source owner results remain pending; this documentation pass ran no listener or application tests.
 
 - Claim: `[database]` has a `url` key.
   Finding: `DatabaseConfig` has `host`, `port` (default 5432), `user`, `password`, `name`; the URL is derived by `to_url()`.
@@ -187,6 +207,8 @@ Scope: every key in the example, every environment variable, and the defaults ta
   Evidence: `cf-config/src/config/mod.rs`, `cache.rs`, `server.rs`.
   Case: implemented.
 - Claim (added): `server.host` controls the bind address.
-  Finding: It does not. The listener binds `0.0.0.0`. `ServerConfig::bind_address()` exists but the server binary does not call it.
-  Evidence: `cf-server/src/bin/server.rs` (`TcpListener::bind(("0.0.0.0", ...))`).
-  Case: documentation stale (stated in the defaults section).
+  Finding: TASK-508 corrects the listener to use the configured host and port;
+  `ServerConfig::default()` now uses `0.0.0.0` to preserve effective behavior.
+  Evidence: `cf-config/src/config/server.rs`; `cf-server/src/bin/server.rs`
+  (`bind_listener`). Earlier code ignored the host field.
+  Case: source correction inspected; runtime verification not performed here.

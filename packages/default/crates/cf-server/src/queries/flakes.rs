@@ -640,6 +640,10 @@ pub async fn reset_flake_source(
         USING commits c
         WHERE d.commit_id = c.id
           AND c.flake_id = $1
+          AND NOT EXISTS (SELECT 1 FROM derivations alias
+                          WHERE alias.reused_from_derivation_id=d.id)
+          AND NOT EXISTS (SELECT 1 FROM build_jobs job JOIN derivations consumer
+                          ON consumer.reused_build_job_id=job.id WHERE job.derivation_id=d.id)
            AND NOT EXISTS (
                SELECT 1 FROM evaluation_generation_snapshots retained
                WHERE retained.derivation_id = d.id
@@ -684,7 +688,12 @@ pub async fn reset_flake_source(
     sqlx::query(
         "UPDATE commits c SET source_archived = true WHERE c.flake_id = $1
          AND (
-              EXISTS (
+               EXISTS (SELECT 1 FROM derivations origin JOIN derivations alias
+                       ON alias.reused_from_derivation_id=origin.id WHERE origin.commit_id=c.id)
+               OR EXISTS (SELECT 1 FROM derivations source JOIN build_jobs job ON job.derivation_id=source.id
+                          JOIN derivations consumer ON consumer.reused_build_job_id=job.id WHERE source.commit_id=c.id)
+               OR
+               EXISTS (
                   SELECT 1 FROM evaluation_generation_snapshots retained
                   WHERE retained.commit_id = c.id
                ) OR EXISTS (
@@ -1181,6 +1190,13 @@ pub async fn accept_history_rewrite_reset(pool: &PgPool, flake_id: i32) -> Resul
         USING commits c
         WHERE d.commit_id = c.id
           AND c.flake_id = $1
+          AND NOT EXISTS (
+              SELECT 1 FROM derivations alias WHERE alias.reused_from_derivation_id=d.id
+          )
+          AND NOT EXISTS (
+              SELECT 1 FROM build_jobs job JOIN derivations consumer
+              ON consumer.reused_build_job_id=job.id WHERE job.derivation_id=d.id
+          )
           AND NOT EXISTS (
               SELECT 1 FROM evaluation_generation_snapshots retained
               WHERE retained.derivation_id = d.id

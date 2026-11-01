@@ -9,11 +9,31 @@
 
 use dioxus::prelude::*;
 
-use crate::api::models::{HealthStatus, SystemSummary};
+use crate::api::models::{
+    ConfigurationAssurance, GuestObservationRow, HealthStatus, ManagementMode, SystemSummary,
+};
 use crate::components::chips::{Chip, ChipVariant, EnvBadge, StatusDot};
 use crate::components::environments::{normalize_color_hex, with_alpha};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
+use crate::components::icon::{Icon, IconName};
 use crate::components::system::helpers::deployment_state_label;
+use crate::components::system::management_mode::{
+    DeploymentCell, EvidenceCves, EvidenceFreshness, MgmtChip, ScanEvidenceChip, evidence_status,
+};
+
+/// Formats an elapsed time as the compact relative label used on cards.
+fn ago(at: chrono::DateTime<chrono::Utc>) -> String {
+    let diff = chrono::Utc::now().signed_duration_since(at);
+    if diff.num_seconds() < 60 {
+        format!("{}s ago", diff.num_seconds().max(0))
+    } else if diff.num_minutes() < 60 {
+        format!("{}m ago", diff.num_minutes().max(0))
+    } else if diff.num_hours() < 24 {
+        format!("{}h ago", diff.num_hours().max(0))
+    } else {
+        format!("{}d ago", diff.num_days().max(0))
+    }
+}
 
 /// Environment color configuration for badges and styling.
 struct EnvColors {
@@ -75,6 +95,7 @@ fn status_color(health: &HealthStatus) -> &'static str {
         HealthStatus::Warning => "#fbbf24",
         HealthStatus::Critical => "#f87171",
         HealthStatus::Offline => "#6b7280",
+        HealthStatus::Unknown => "#6b7280",
     }
 }
 
@@ -84,6 +105,7 @@ fn health_chip_variant(health: &HealthStatus) -> ChipVariant {
         HealthStatus::Warning => ChipVariant::Warning,
         HealthStatus::Critical => ChipVariant::Critical,
         HealthStatus::Offline => ChipVariant::Unknown,
+        HealthStatus::Unknown => ChipVariant::Unknown,
     }
 }
 
@@ -108,6 +130,30 @@ fn derived_fqdn(hostname: &str, environment: &str) -> String {
 #[component]
 pub fn SystemCardV2(
     system: SystemSummary,
+    /// Exact configuration evidence, absent while loading or unavailable.
+    #[props(default)]
+    evidence: Option<ConfigurationAssurance>,
+    /// Indicates that the bounded list evidence read is still pending.
+    #[props(default)]
+    evidence_loading: bool,
+    /// Contains the real read failure when evidence is unavailable.
+    #[props(default)]
+    evidence_error: Option<String>,
+    /// Contains the associated parent identity, without a guest health claim.
+    #[props(default)]
+    parent_label: Option<String>,
+    /// Contains a stored parent report, never verified guest health.
+    #[props(default)]
+    observation: Option<GuestObservationRow>,
+    /// Keeps a failed latest-report read distinct from an absent observation.
+    #[props(default)]
+    observation_error: Option<String>,
+    /// Retries the owning list's bounded evidence/observation reads.
+    #[props(default)]
+    on_retry_evidence: Option<EventHandler<()>>,
+    /// Permits mutation controls only for an authorized operator or administrator.
+    #[props(default)]
+    can_mutate: bool,
     #[props(default = false)] compact: bool,
     #[props(default = false)] selected: bool,
     #[props(default)] environment_colors: Vec<(String, String)>,
@@ -121,9 +167,126 @@ pub fn SystemCardV2(
     on_open: EventHandler<()>,
     on_remove: EventHandler<()>,
     on_update_key: EventHandler<()>,
-    on_edit: EventHandler<()>,
     on_deploy: EventHandler<()>,
 ) -> Element {
+    if system.management_mode != ManagementMode::Managed {
+        let mode = system.management_mode;
+        let selected_class = if selected { "selected" } else { "" };
+        let config = system
+            .system_configuration_name
+            .as_deref()
+            .unwrap_or(&system.hostname);
+        let flake = system
+            .flake_id
+            .and_then(|id| flake_context.iter().find(|(fid, ..)| *fid == id))
+            .map(|(_, name, ..)| name.as_str())
+            .unwrap_or("Not linked");
+        let environment = system.environment.as_deref().unwrap_or("unknown");
+        let env = env_colors(environment, &environment_colors);
+        let subtitle = match (mode, parent_label.as_deref()) {
+            (ManagementMode::External, Some(parent)) => format!("guest of {parent}"),
+            (ManagementMode::External, None) => "externally administered".to_string(),
+            _ => format!("{flake}#{config}"),
+        };
+        let revision = evidence
+            .as_ref()
+            .and_then(|e| {
+                let rev = e.selected_revision.as_ref()?;
+                let sha = rev.sha.get(..7).unwrap_or(&rev.sha);
+                Some(match e.branch.as_deref() {
+                    Some(branch) => format!("{sha} · {branch}"),
+                    None => sha.to_string(),
+                })
+            })
+            .unwrap_or_else(|| {
+                if evidence_loading {
+                    "Loading…".into()
+                } else {
+                    "Unavailable".into()
+                }
+            });
+        // The most recent terminal scan time, which may predate the selected
+        // revision; freshness and revision mismatch are shown by the scan chip.
+        let scanned = match &evidence {
+            Some(e) => e
+                .latest_terminal_scan
+                .as_ref()
+                .or(e.selected_scan.as_ref())
+                .and_then(|s| s.completed_at)
+                .map(|at| format!("scanned {}", ago(at)))
+                .unwrap_or_else(|| "not scanned".into()),
+            None if evidence_loading => "Loading evidence…".into(),
+            None => "Evidence unavailable".into(),
+        };
+        let evidence_color = match evidence
+            .as_ref()
+            .map(|e| evidence_status(e, EvidenceFreshness::Unknown).chip_class())
+        {
+            Some("chip-critical") => "var(--cf-red)",
+            Some("chip-warning") => "var(--cf-amber)",
+            Some("chip-info") => "var(--cf-blue)",
+            Some("chip-healthy") => "var(--cf-emerald)",
+            _ => "var(--cf-gray-dot)",
+        };
+        return rsx! {
+            div { class: "sys-card mg-list-card {selected_class}", onclick: move |_| on_open.call(()),
+                span { class: "status-rail", style: "--status-color: {evidence_color}" }
+                div { class: "sys-card-head",
+                    div { class: "sys-title", div { class: "sys-hostname", "{system.hostname}" }
+                        div { class: "sys-fqdn", "{subtitle}" }
+                    }
+                    div { class: "chips-row", MgmtChip { mode }
+                        for tag in &system.tags { span { class: "chip chip-unknown", "#{tag}" } }
+                        EnvBadge { name: environment.to_string(), fg: env.fg, bg: env.bg, border: env.border }
+                    }
+                }
+                if !compact {
+                    div { class: "sys-card-body",
+                        div { div { class: "sys-kv-key", "Configuration" } div { class: "sys-kv-val", "{flake}#{config}" } }
+                        div { div { class: "sys-kv-key", "Revision" } div { class: "sys-kv-val", "{revision}" } }
+                        div { div { class: "sys-kv-key", "Evidence" }
+                            div { class: "sys-kv-val", style: "font-family: var(--font-sans);", title: evidence_error.clone().unwrap_or_default(), "{scanned}" }
+                        }
+                        div { div { class: "sys-kv-key", "Runtime" }
+                            div { class: "sys-kv-val", style: "font-family: var(--font-sans);",
+                                if mode == ManagementMode::Reference { span { class: "mg-dim", "Not a running machine" } }
+                                else if let Some(report) = observation {
+                                    // SECURITY: a parent-reported unit state is neither guest
+                                    // health nor proof that the scanned configuration runs.
+                                    span { class: "mg-obs", title: "Parent-reported unit state; not guest health or configuration attestation",
+                                        span { class: "chip-dot", style: if report.unit_active_state.as_deref() == Some("active") { "background:#60a5fa" } else { "background:#fbbf24" } }
+                                        {format!("host-observed · unit {} · {}", report.unit_active_state.as_deref().unwrap_or("unknown"), ago(report.observed_at))}
+                                    }
+                                } else if observation_error.is_some() { span { class: "mg-dim", "Host observation unavailable" } }
+                                else if evidence_loading { span { class: "mg-dim", "Loading host observation…" } }
+                                else { span { class: "mg-dim", "Runtime unknown" } }
+                            }
+                        }
+                    }
+                }
+                div { class: "sys-card-foot",
+                    div { class: "chips-row",
+                        if let Some(value) = &evidence { ScanEvidenceChip { status: evidence_status(value, EvidenceFreshness::Unknown) } }
+                        DeploymentCell { mode, status: system.deployment_status }
+                        if let Some(value) = evidence { EvidenceCves { evidence: value, freshness: EvidenceFreshness::Unknown } }
+                        else { span { class: "chip chip-unknown", role: "status", if evidence_loading { "Loading evidence…" } else { "Evidence unavailable" } } }
+                    }
+                    button { class: "btn btn-subtle focus-ring", style: "padding: 4px 10px; font-size: 12px;", title: "Open configuration evidence",
+                        onclick: move |e| { e.stop_propagation(); on_deploy.call(()); },
+                        Icon { name: IconName::Shield, size: 12 } " Evidence"
+                    }
+                }
+                if let Some(error) = &evidence_error { p { class: "mg-dim", role: "status", "Configuration evidence unavailable: {error}" } }
+                if let Some(error) = &observation_error { p { class: "mg-dim", role: "status", "Host observation unavailable: {error}" } }
+                if evidence_error.is_some() || observation_error.is_some() {
+                    if let Some(retry) = on_retry_evidence {
+                        button { class: "btn btn-ghost xs focus-ring", disabled: evidence_loading,
+                            onclick: move |event| { event.stop_propagation(); retry.call(()); }, "Retry evidence reads" }
+                    }
+                }
+            }
+        };
+    }
     let environment = system
         .environment
         .clone()
@@ -153,19 +316,7 @@ pub fn SystemCardV2(
     // Format last seen as relative time
     let last_seen = system
         .last_seen
-        .map(|dt| {
-            let now = chrono::Utc::now();
-            let diff = now.signed_duration_since(dt);
-            if diff.num_seconds() < 60 {
-                format!("{}s ago", diff.num_seconds().max(0))
-            } else if diff.num_minutes() < 60 {
-                format!("{}m ago", diff.num_minutes().max(0))
-            } else if diff.num_hours() < 24 {
-                format!("{}h ago", diff.num_hours().max(0))
-            } else {
-                format!("{}d ago", diff.num_days().max(0))
-            }
-        })
+        .map(ago)
         .unwrap_or_else(|| "Never".to_string());
 
     let heartbeat_interval_sec = system.effective_heartbeat_interval_secs as i64;
@@ -234,6 +385,8 @@ pub fn SystemCardV2(
                     bg: env.bg,
                     border: env.border,
                 }
+                MgmtChip { mode: system.management_mode }
+                for tag in &system.tags { span { class: "chip chip-unknown", "#{tag}" } }
             }
 
             // Card body with two-column metadata
@@ -329,7 +482,7 @@ pub fn SystemCardV2(
                 }
                 div {
                     style: "display: flex; gap: 6px;",
-                    button {
+                    if can_mutate { button {
                         class: "btn btn-subtle focus-ring",
                         "data-testid": "system-update-key",
                         style: "padding: 4px 10px; font-size: 12px;",
@@ -338,8 +491,8 @@ pub fn SystemCardV2(
                             on_update_key.call(());
                         },
                         "Update Key"
-                    }
-                    button {
+                    } }
+                    if can_mutate { button {
                         class: "btn btn-subtle focus-ring",
                         style: "padding: 4px 10px; font-size: 12px;",
                         onclick: move |e| {
@@ -355,7 +508,7 @@ pub fn SystemCardV2(
                             path { d: "M7 16V4m0 0L3 8m4-4l4 4m6 0v12m0 0l4-4m-4 4l-4-4" }
                         }
                         " Deploy"
-                    }
+                    } }
                 }
             }
         }

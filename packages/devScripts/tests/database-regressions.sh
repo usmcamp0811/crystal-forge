@@ -465,6 +465,27 @@ SQL
     beginPhase selected-library-and-additional-integration-regressions
     runRegressionCommand cf-server-lib compile \
       cargo test --offline --package cf-server --lib --no-run
+    # Configuration assurance must not grant deployment or Current-runtime
+    # authority. Keep these real database regressions on the existing isolated
+    # CI path, including builder claims rather than queue admission alone.
+    cargo test --offline --package cf-server --lib -- \
+      --ignored --test-threads=1 \
+      management_mode_ \
+      deployment_authority_blocks_nonmanaged_and_inactive_bypass_paths \
+      artifact_admission_ \
+      exact_reuse_ \
+      completion_reconciliation_accepts_only_exact_agentless_artifact_evidence \
+      native_declarations_enable_registration_without_full_output_snapshot \
+      removed_head_retains_real_scan_history_without_promoting_it \
+      configuration_fleet_without_heartbeat_selects_head_once_and_preserves_failures \
+      retained_observation_loses_current_authority_but_keeps_exact_scan \
+      management_metrics_partition_machines_without_unobserved_outages \
+      guest_observations_require_current_parent_environment_and_identity \
+      configuration_hardening_selects_artifact_without_heartbeat_and_never_current \
+      configuration_coverage_and_shared_modes_do_not_confer_runtime \
+      scoped_scan_admission_serializes_composite_metadata_race \
+      manual_and_periodic_scan_affinity_preserves_session_and_environment_guards \
+      retained_observations_lose_runtime_authority_after_mode_conversion
     echo "=== Selected POA&M authorization, setup, notification, and overdue regressions ==="
     # Current counts and optional assignments have distinct database contracts.
     # Keep these ignored regressions on the normal isolated execution path.
@@ -960,6 +981,13 @@ TOML
       queries::cache_destinations::tests::niks3_assignment_writers_wait_for_publication_snapshot \
       handlers::agent::heartbeat::tests::niks3_signed_handler_preserves_pending_deployment_and_delivers_only_selected_reads \
       handlers::agent::heartbeat::tests::signed_heartbeat_classification_preserves_exact_state_lineage \
+      handlers::agent::state::tests::authenticated_state_waiting_across_reenrollment_is_rejected \
+      handlers::agent::state::tests::signed_agent_cannot_poison_another_registration_on_either_endpoint \
+      handlers::agent::state::tests::authenticated_state_cannot_follow_renamed_hostname_to_new_registration \
+      handlers::agent::state::tests::managed_detail_counts_require_exact_current_enrollment_not_configuration_history \
+      handlers::agent::heartbeat::tests::stale_signed_delivery_cannot_claim_reenrolled_target_or_private_cache \
+      queries::systems::tests::duplicate_cleanup_rechecks_enrollment_and_rolls_back_with_observation \
+      queries::system_states::tests::enrollment_epoch_uses_lock_acquisition_time_not_transaction_start \
       queries::system_states::tests::latest_state_decodes_migrated_history_without_boot_id \
       handlers::api::builders::tests::niks3_builder_and_agent_selection_share_assigned_first_policy \
       queries::builders::tests::niks3_canonical_environment_dispatch_rejects_ambiguity_before_credentials \

@@ -17,6 +17,55 @@ generated:
 
 ## Current status
 
+### TASK-508 management-mode regression additions (partial proof)
+
+Authority: TASK-508 AC 1–15 and approved design `18b47eed`, specifically
+`AddSystemModal.jsx`, `EditSystemModal.jsx`, `FlakeExplorer.jsx`, `Systems.jsx`,
+`SystemDetail.jsx`, `MgmtParts.jsx`, `ConfigExplorer.jsx` and `ScanningView.jsx`.
+These additions extend the existing registered lifecycles. They add no scenario,
+VM, harness, check owner, verification wrapper, or approved visual baseline.
+The historical execution records below do not verify these new inputs.
+
+| Contract | Existing owner/scenario and fragment | Added mandatory proof | Status |
+| --- | --- | --- | --- |
+| `access.configuration.resources` | Access `lifecycle-local-bootstrap`, `fragments/management-registration.py` | Keyless external/reference registration, descriptive reference identity, shared configuration with distinct resource IDs, mode filter, invalid mode/managed missing-key rejection, role/environment denials, conversion and audit persistence. Access's unavailable origin tests registration only; it does not claim declared-output evaluation. | Owner reports keyless registration and denied cases PASS. Full exact-source owner result remains pending. |
+| `delivery.activation` | Delivery `delivery-lifecycle`, `fragments/management-authority.{py,cjs}` | A real managed pending request against an existing built/published artifact; simultaneous conversion, replay and new deployment admission; revoked key/targets, superseded pending requests, invalidated reservations and absent legacy bridge; explicit deploy/rollback denials. | New case failed on missing target-PATH `cf-keygen`; fragment now uses builderA's existing tool. Rerun pending. Concurrent HTTP requests do not prove a measured row-lock interleaving. |
+| `assurance.scanning`, `assurance.remediation` | Assurance `evidence-remediation-lifecycle`, `fragments/configuration-assurance.{py,cjs}`, `fixtures/source.nix` | Actual Add to Forge menu preselection in all modes; browser external registration and API reference registration share the declared `assuranceOnly` output. Native evaluation must record agent disabled. One real build/publication and real vulnix post-build scan supply exact schema-1 identities and authored CVE/package observations. Neither registration receives Current authority, fabricated runtime state or POA&M authority. A real signed parent unit observation remains distinct from attestation. A later Git rename must report missing head while retaining exact history. | Browser registration failed with `NoFullOutputSnapshot`. Native declaration facet fix is source-implemented with owner-reported DB/pure-UI passes; VM rerun pending. Existing Assurance setup is reused within its own run; no Delivery runtime output is reused. |
+| `access.configuration`, assurance UI bindings | Same Assurance fragment and explicit `configuration-register`, `configuration-evidence`, `configuration-removed` browser registrations | Conditional enrollment/edit fields and mode confirmation; Systems mode filter; Overview, Deploy, Logs, Evidence history filters, Config, CVEs, Hardening and Compliance; exact artifact findings read-only, unavailable runtime/deploy/hardening states, scan request identity; dark/light tab captures and narrow unavailable state. | Authored semantic assertions and candidate captures; browser execution and independent design comparison unverified. |
+
+Owner-reported lower-level evidence is separate from these integration gates:
+all new epoch database tests pass through a disposable SQLx database, including
+CVE/POA&M authority, stale-signed state races, wall-clock stamping after row-lock
+acquisition, current Config reads/drift repair and inactive managed health.
+Metadata API and Native declaration database tests pass. The latest native
+frontend run reports 808 passed and one ignored. R3 remote managed-agent cases
+pass in Delivery and Assurance. These results do not establish full owner or
+browser/design parity. This documentation pass did not rerun application tests.
+
+Earlier owner runs failed first on a stale SQL assertion and then on the module
+loopback default; both have source fixes. Those fixes do not establish a passing
+final source run. The second normal state-machine full run still failed later
+at `required_inventory_exact_owner_success_and_conflict` with
+`EvaluationSuperseded`. Twenty targeted diagnostic runs passed, but the full-run
+failure is not classified as fixed.
+
+Remaining TASK-508 evidence obligations: complete the three focused gates and normal
+owners at the review source. Obtain independent equivalent-state design
+reference/actual/difference images before accepting visual baselines. The new
+captures alone cannot approve application appearance. The remote-only Assurance
+topology proves actual post-build scanning and manual request persistence, not
+successful manual or scheduled execution. Scheduled selection, failed evaluation,
+failed nonmanaged build/scan, full metrics arithmetic, signed unauthorized and
+cross-environment guest report rejection, old-agent omitted-field compatibility,
+old-key ingress after conversion, automatic/rollout bypasses, deterministic
+deployment/conversion interleaving, POA&M verification/closure after conversion,
+and broad responsive/error/loading/form-cancel coverage remain unproved by these
+additions. Existing lower-level regressions and Upgrade retain their separate
+obligations. Existing assertions are retained; no historical failure is relabeled.
+
+Focused commands remain the registered gates in the command table below. The
+top-level inventory must still evaluate to exactly the four owner names.
+
 The requested [pipeline 2985072087](https://gitlab.com/crystal-forge/crystal-forge/-/pipelines/2985072087)
 at `45fa3e2f` is **terminal failed**. Downloaded, source-matching owner artifacts
 passed Access **37/37**, Delivery **16/16**, Assurance **54/54 records / 48 names**,

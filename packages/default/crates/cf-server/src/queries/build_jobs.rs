@@ -10,28 +10,137 @@ use uuid::Uuid;
 
 use crate::models::builders::SERVER_FAILURE_CODE_EVALUATOR_CONTRACT_OBSOLETE;
 
+// INVARIANT: Alias d is the exact configuration/commit artifact. Agentless
+// permission requires both saved evaluation evidence and a current legitimate
+// registration. It never changes deployment eligibility. Legacy evidence keeps
+// its managed-only gate; no history is rewritten to manufacture permission.
+// Admission joins choose one stable active registration to retain its builder
+// environment, rather than fan out jobs or accidentally create a NULL wildcard
+// environment by comparing a full derivation target to a resource hostname.
+/// Defines artifact eligibility for job admission and builder job selectors.
+///
+/// SQL callers must bind alias `d` to the job's exact derivation. This gate
+/// supplies no deployment permission and does not replace claim authorization,
+/// environment selection, cache preflight, or verified-source prerequisites.
+pub(crate) const ARTIFACT_POLICY_PREDICATE: &str = r#"
+    d.build_preparation_state IS DISTINCT FROM 'not_required' AND
+    ((d.cf_agent_enabled IS TRUE AND d.policy_requirements_met IS TRUE)
+     OR (d.cf_agent_enabled IS NOT NULL
+         AND d.policy_results #> '{global,artifactAdmission,passed}' = 'true'::jsonb
+         AND EXISTS (
+             SELECT 1 FROM systems registration
+             JOIN commits artifact_commit ON artifact_commit.id=d.commit_id
+                 AND artifact_commit.flake_id=registration.flake_id
+             WHERE registration.is_active
+                 AND registration.management_mode IN ('external','reference')
+                 AND COALESCE(NULLIF(BTRIM(registration.system_configuration_name), ''),
+                     registration.hostname)=d.derivation_name
+         )))
+"#;
+
 /// Advisory lock serializing all build-queue-position allocations.
 /// Using the ASCII encoding of 'CFBQ' as a 64-bit integer (0x43464251).
 pub const BUILD_QUEUE_ORDER_LOCK_KEY: i64 = 0x4346_4251;
 /// Identifies the build-derivation transaction lock for admission and scan claims.
 pub(crate) const BUILD_DERIVATION_LOCK_NAMESPACE: i32 = 0x4346_4244;
 
-/// Serializes all attempt creation and terminal retry transitions for a derivation.
+/// Serializes attempt creation and retry transitions for a physical artifact.
 ///
 /// Callers MUST acquire this lock before a build-job row lock and before
 /// [`lock_build_queue_order`]. This order prevents manual retry, automatic retry,
 /// and authoritative obsolete replacement from deadlocking or creating two
 /// active attempts for one derivation.
+/// Proven aliases use the same root key, but retain their real job derivation
+/// and builder/session/environment authorization. Missing derivations are errors.
+///
+/// # Errors
+/// Returns an error when the physical identity or advisory lock cannot be read.
 pub async fn lock_build_derivation(
     tx: &mut Transaction<'_, Postgres>,
     derivation_id: i32,
 ) -> Result<()> {
+    let physical_id: i32 = sqlx::query_scalar("SELECT derivation_physical_id($1)")
+        .bind(derivation_id)
+        .fetch_one(&mut **tx)
+        .await?;
     sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
         .bind(BUILD_DERIVATION_LOCK_NAMESPACE)
-        .bind(derivation_id)
+        .bind(physical_id)
         .execute(&mut **tx)
         .await
         .context("Failed to lock build derivation attempt lineage")?;
+    Ok(())
+}
+
+/// Finds real reusable work without changing its source or job authorization.
+///
+/// Callers retain the physical build lock. Active work stays fenced to its
+/// original builder/environment. Successful work additionally needs an exact
+/// completed publication at a currently eligible destination. Delivery
+/// still rechecks destination assignments, credentials, transport and capability.
+/// Cross-flake/configuration job identity and diagnostics are never inherited.
+/// A failed origin does not prevent a newly admitted configuration from building.
+///
+/// # Errors
+/// Returns database errors. This read creates no execution or scan intent.
+pub(crate) async fn reusable_physical_build_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    derivation_id: i32,
+) -> Result<Option<(Uuid, String)>> {
+    sqlx::query_as(
+        r#"SELECT job.id,job.status FROM derivations target
+        JOIN commits target_commit ON target_commit.id=target.commit_id
+        JOIN derivations source ON derivations_share_evidence_scope(target.id,source.id)
+        JOIN build_jobs job ON job.derivation_id=source.id
+        LEFT JOIN LATERAL (
+            SELECT registration.environment_id FROM systems registration
+            WHERE registration.flake_id=target_commit.flake_id AND registration.is_active
+              AND COALESCE(NULLIF(BTRIM(registration.system_configuration_name),''),registration.hostname)=target.derivation_name
+              AND (target.cf_agent_enabled IS TRUE OR registration.management_mode IN ('external','reference'))
+            ORDER BY registration.id LIMIT 1
+        ) registration ON true
+        WHERE target.id=$1 AND source.id<>target.id
+          AND (job.status IN ('queued','building','cancelling') OR
+            (job.status='success' AND source.store_path=target.expected_store_path
+             AND derivation_publication_eligible(source.id,source.store_path,registration.environment_id)))
+        ORDER BY (job.status IN ('queued','building','cancelling')) DESC,
+                 job.completed_at DESC NULLS LAST,job.created_at DESC,job.id DESC LIMIT 1"#,
+    ).bind(derivation_id).fetch_optional(&mut **tx).await.map_err(Into::into)
+}
+
+/// Releases only queued work rejected by its own current source admission gate.
+///
+/// Callers hold the physical build lock after admitting their own configuration.
+/// A caller's policy results never cancel another source. The same predicate
+/// used by builder claims must reject the queued source itself. Job row locks
+/// prevent a claim racing cancellation; building/cancelling work is preserved.
+///
+/// # Errors
+/// Returns database or exact post-build intent terminalization errors.
+pub(crate) async fn retire_unclaimable_physical_jobs_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    derivation_id: i32,
+) -> Result<()> {
+    let stale: Vec<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT job.id FROM build_jobs job JOIN derivations d ON d.id=job.derivation_id
+         WHERE job.status='queued' AND job.derivation_id<>$1
+           AND derivation_physical_id(d.id)=derivation_physical_id($1)
+           AND ({ARTIFACT_POLICY_PREDICATE}) IS NOT TRUE
+         ORDER BY job.id FOR UPDATE OF job"
+    ))
+    .bind(derivation_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for job_id in stale {
+        sqlx::query("UPDATE build_jobs SET status='cancelled',completed_at=now(),updated_at=now(),logs=COALESCE(logs,'') || E'\nCancelled: source configuration no longer satisfies its own artifact admission' WHERE id=$1 AND status='queued'")
+            .bind(job_id).execute(&mut **tx).await?;
+        crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
+            tx,
+            job_id,
+            Some("Source configuration no longer satisfies its own artifact admission"),
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -89,75 +198,13 @@ pub async fn create_build_jobs_for_commit(pool: &PgPool, commit_id: i32) -> Resu
         .begin()
         .await
         .context("Failed to begin create_build_jobs_for_commit transaction")?;
-    lock_build_queue_order(&mut tx).await?;
-
-    let max_pos: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(queue_position), 0) FROM build_jobs WHERE status = 'queued' OR status = 'building'",
-    )
-    .fetch_one(&mut *tx)
-    .await
-    .context("Failed to read max queue_position")?;
-
-    let inserted_derivation_ids = sqlx::query_scalar::<_, i32>(
-        r#"
-        INSERT INTO build_jobs (
-            derivation_id,
-            environment_id,
-            priority_weight,
-            queue_position,
-            status
-        )
-        SELECT
-            d.id as derivation_id,
-            s.environment_id,
-            CASE
-                WHEN s.id IS NOT NULL THEN 10.0
-                ELSE 1.0
-            END *
-            CASE
-                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 3600 THEN 2.0
-                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
-                ELSE 1.0
-            END as priority_weight,
-            $2 + ROW_NUMBER() OVER (ORDER BY d.id) AS queue_position,
-            'queued' as status
-        FROM derivations d
-        INNER JOIN commits c ON d.commit_id = c.id
-        LEFT JOIN systems s ON (
-            d.derivation_target = s.hostname
-            AND s.flake_id = c.flake_id
-        )
-        WHERE d.commit_id = $1
-            AND d.status_id = 5
-            AND d.cf_agent_enabled = TRUE
-            AND d.policy_requirements_met = TRUE
-            AND NOT EXISTS (
-                SELECT 1 FROM build_jobs bj
-                WHERE bj.derivation_id = d.id
-            )
-        ON CONFLICT (derivation_id)
-            WHERE status IN ('queued', 'building', 'cancelling') DO NOTHING
-        RETURNING derivation_id
-        "#,
-    )
-    .bind(commit_id)
-    .bind(max_pos)
-    .fetch_all(&mut *tx)
-    .await
-    .context("Failed to create build jobs for commit")?;
-
-    crate::queries::cve_scan_leases::create_post_build_scan_intents_tx(
-        &mut tx,
-        &inserted_derivation_ids,
-    )
-    .await
-    .context("Failed to create post-build scan intents")?;
+    let inserted = create_build_jobs_for_commit_tx(&mut tx, commit_id).await?;
 
     tx.commit()
         .await
         .context("Failed to commit create_build_jobs_for_commit")?;
 
-    let count = inserted_derivation_ids.len();
+    let count = inserted.len();
 
     if count > 0 {
         info!("📋 Created {} build jobs for commit {}", count, commit_id);
@@ -184,70 +231,31 @@ pub async fn create_build_jobs_for_commit_tx(
     tx: &mut Transaction<'_, Postgres>,
     commit_id: i32,
 ) -> Result<Vec<QueuedBuild>> {
-    lock_build_queue_order(tx).await?;
-
-    let max_pos: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(queue_position), 0) FROM build_jobs WHERE status = 'queued' OR status = 'building'",
-    )
-    .fetch_one(&mut **tx)
-    .await
-    .context("Failed to read max queue_position")?;
-
-    let rows = sqlx::query_as::<_, QueuedBuild>(
-        r#"
-        INSERT INTO build_jobs (
-            derivation_id,
-            environment_id,
-            priority_weight,
-            queue_position,
-            status
-        )
-        SELECT
-            d.id as derivation_id,
-            s.environment_id,
-            CASE
-                WHEN s.id IS NOT NULL THEN 10.0
-                ELSE 1.0
-            END *
-            CASE
-                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 3600 THEN 2.0
-                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
-                ELSE 1.0
-            END as priority_weight,
-            $2 + ROW_NUMBER() OVER (ORDER BY d.id) AS queue_position,
-            'queued' as status
-        FROM derivations d
-        INNER JOIN commits c ON d.commit_id = c.id
-        LEFT JOIN systems s ON (
-            d.derivation_target = s.hostname
-            AND s.flake_id = c.flake_id
-        )
-        WHERE d.commit_id = $1
-            AND d.status_id = 5
-            AND d.cf_agent_enabled = TRUE
-            AND d.policy_requirements_met = TRUE
-            AND NOT EXISTS (
-                SELECT 1 FROM build_jobs bj
-                WHERE bj.derivation_id = d.id
-            )
-        ON CONFLICT (derivation_id)
-            WHERE status IN ('queued', 'building', 'cancelling') DO NOTHING
-        RETURNING id AS build_job_id, derivation_id, (
-            SELECT derivation_name FROM derivations WHERE derivations.id = build_jobs.derivation_id
-        ) AS system_name
-        "#,
-    )
+    let candidates: Vec<(i32, String)> = sqlx::query_as(&format!(
+        "SELECT d.id,d.derivation_name FROM derivations d WHERE d.commit_id=$1
+         AND d.status_id=5 AND ({ARTIFACT_POLICY_PREDICATE})
+         ORDER BY derivation_physical_id(d.id),d.id"
+    ))
     .bind(commit_id)
-    .bind(max_pos)
     .fetch_all(&mut **tx)
-    .await
-    .context("Failed to create build jobs for commit")?;
-
-    let derivation_ids = rows.iter().map(|row| row.derivation_id).collect::<Vec<_>>();
-    crate::queries::cve_scan_leases::create_post_build_scan_intents_tx(tx, &derivation_ids)
-        .await
-        .context("Failed to create post-build scan intents")?;
-
+    .await?;
+    // CONCURRENCY: Acquire every physical lock before the queue-order lock.
+    // Repeated per-row admission then retains the established lock order.
+    for (id, _) in &candidates {
+        lock_build_derivation(tx, *id).await?;
+    }
+    let mut rows = Vec::new();
+    for (derivation_id, system_name) in candidates {
+        if let Some(BuildJobInsertOutcome::Inserted { build_job_id }) =
+            create_build_job_for_derivation_tx(tx, derivation_id).await?
+        {
+            rows.push(QueuedBuild {
+                build_job_id,
+                derivation_id,
+                system_name,
+            });
+        }
+    }
     Ok(rows)
 }
 
@@ -270,6 +278,28 @@ pub async fn create_build_job_for_derivation_tx(
     derivation_id: i32,
 ) -> Result<Option<BuildJobInsertOutcome>> {
     lock_build_derivation(tx, derivation_id).await?;
+
+    // Admission belongs to B even when A supplied the physical identity. Never
+    // inherit A's policy pass, and never mint a fake B job for reused work.
+    let admitted: bool = sqlx::query_scalar(&format!(
+        "SELECT EXISTS (SELECT 1 FROM derivations d WHERE d.id=$1
+         AND ({ARTIFACT_POLICY_PREDICATE}))"
+    ))
+    .bind(derivation_id)
+    .fetch_one(&mut **tx)
+    .await?;
+    if !admitted {
+        return Ok(None);
+    }
+    retire_unclaimable_physical_jobs_tx(tx, derivation_id).await?;
+    if let Some((build_job_id, status)) = reusable_physical_build_tx(tx, derivation_id).await? {
+        sqlx::query("UPDATE derivations SET reused_build_job_id=$2,build_preparation_state='queued' WHERE id=$1")
+            .bind(derivation_id).bind(build_job_id).execute(&mut **tx).await?;
+        return Ok(Some(BuildJobInsertOutcome::AlreadyExists {
+            build_job_id,
+            status,
+        }));
+    }
 
     let obsolete_source: Option<(Uuid, Uuid)> = sqlx::query_as(
         r#"
@@ -303,6 +333,7 @@ pub async fn create_build_job_for_derivation_tx(
     .context("Failed to read max queue_position")?;
 
     let inserted: Option<(Uuid,)> = sqlx::query_as(
+        &format!(
         r#"
         WITH history AS (
             SELECT COALESCE(MAX(attempt_number), 0)::integer AS max_attempt_number
@@ -341,24 +372,27 @@ pub async fn create_build_job_for_derivation_tx(
         FROM derivations d
         INNER JOIN commits c ON d.commit_id = c.id
         CROSS JOIN history
-        LEFT JOIN systems s ON (
-            d.derivation_target = s.hostname
-            AND s.flake_id = c.flake_id
-        )
+        LEFT JOIN LATERAL (
+            SELECT registration.id, registration.environment_id FROM systems registration
+            WHERE registration.flake_id=c.flake_id AND registration.is_active
+              AND COALESCE(NULLIF(BTRIM(registration.system_configuration_name), ''),registration.hostname)=d.derivation_name
+              AND (d.cf_agent_enabled IS TRUE OR registration.management_mode IN ('external','reference'))
+            ORDER BY registration.id LIMIT 1
+        ) s ON TRUE
         WHERE d.id = $1
             AND d.status_id = 5
-            AND d.cf_agent_enabled = TRUE
-            AND d.policy_requirements_met = TRUE
+            AND ({ARTIFACT_POLICY_PREDICATE})
             AND (history.max_attempt_number = 0 OR $3::uuid IS NOT NULL)
             AND NOT EXISTS (
                 SELECT 1 FROM build_jobs active
-                WHERE active.derivation_id = d.id
+                WHERE COALESCE(active.physical_derivation_id,active.derivation_id)
+                      =derivation_physical_id(d.id)
                   AND active.status IN ('queued', 'building', 'cancelling')
             )
         ON CONFLICT (derivation_id)
             WHERE status IN ('queued', 'building', 'cancelling') DO NOTHING
         RETURNING id
-        "#,
+        "#),
     )
     .bind(derivation_id)
     .bind(next_pos)
@@ -369,6 +403,10 @@ pub async fn create_build_job_for_derivation_tx(
     .context("Failed to create build job for derivation")?;
 
     if let Some((build_job_id,)) = inserted {
+        sqlx::query("UPDATE derivations SET reused_build_job_id=NULL WHERE id=$1")
+            .bind(derivation_id)
+            .execute(&mut **tx)
+            .await?;
         crate::queries::cve_scan_leases::create_post_build_scan_intents_tx(tx, &[derivation_id])
             .await
             .context("Failed to create post-build scan intent")?;
@@ -416,77 +454,15 @@ pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32)
         .begin()
         .await
         .context("Failed to begin enqueue_build_job_for_derivation transaction")?;
-    lock_build_queue_order(&mut tx).await?;
-
-    let next_pos: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM build_jobs WHERE status = 'queued' OR status = 'building'",
-    )
-    .fetch_one(&mut *tx)
-    .await
-    .context("Failed to read max queue_position")?;
-
-    let inserted_derivation_id = sqlx::query_scalar::<_, i32>(
-        r#"
-        INSERT INTO build_jobs (
-            derivation_id,
-            environment_id,
-            priority_weight,
-            queue_position,
-            status
-        )
-        SELECT
-            d.id AS derivation_id,
-            s.environment_id,
-            CASE
-                WHEN s.id IS NOT NULL THEN 10.0
-                ELSE 1.0
-            END *
-            CASE
-                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 3600  THEN 2.0
-                WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
-                ELSE 1.0
-            END AS priority_weight,
-            $2,
-            'queued' AS status
-        FROM derivations d
-        INNER JOIN commits c ON d.commit_id = c.id
-        LEFT JOIN systems s ON (
-            d.derivation_target = s.hostname
-            AND s.flake_id = c.flake_id
-        )
-        WHERE d.id = $1
-          AND d.status_id = 5  -- DryRunComplete
-          AND d.cf_agent_enabled = TRUE
-          AND d.policy_requirements_met = TRUE
-          AND NOT EXISTS (
-              SELECT 1 FROM build_jobs existing
-              WHERE existing.derivation_id = d.id
-          )
-        ON CONFLICT (derivation_id)
-            WHERE status IN ('queued', 'building', 'cancelling') DO NOTHING
-        RETURNING derivation_id
-        "#,
-    )
-    .bind(derivation_id)
-    .bind(next_pos)
-    .fetch_optional(&mut *tx)
-    .await
-    .context("Failed to enqueue build job for derivation")?;
-
-    if let Some(inserted_derivation_id) = inserted_derivation_id {
-        crate::queries::cve_scan_leases::create_post_build_scan_intents_tx(
-            &mut tx,
-            &[inserted_derivation_id],
-        )
-        .await
-        .context("Failed to create post-build scan intent")?;
-    }
+    let created = matches!(
+        create_build_job_for_derivation_tx(&mut tx, derivation_id).await?,
+        Some(BuildJobInsertOutcome::Inserted { .. })
+    );
 
     tx.commit()
         .await
         .context("Failed to commit enqueue_build_job_for_derivation")?;
 
-    let created = inserted_derivation_id.is_some();
     if created {
         info!(
             "📋 Incremental build job created for derivation {}",
@@ -520,7 +496,7 @@ pub async fn enqueue_build_job_for_derivation(pool: &PgPool, derivation_id: i32)
 /// # Errors
 /// Returns an error when PostgreSQL cannot select or claim a build job.
 pub async fn get_next_job_for_builder(pool: &PgPool, builder_id: Uuid) -> Result<Option<Uuid>> {
-    let job = sqlx::query_scalar::<_, Uuid>(
+    let job = sqlx::query_scalar::<_, Uuid>(&format!(
         r#"
         WITH builder_environments AS (
             SELECT environment_id 
@@ -533,8 +509,7 @@ pub async fn get_next_job_for_builder(pool: &PgPool, builder_id: Uuid) -> Result
             JOIN derivations d ON d.id = bj.derivation_id
             WHERE bj.status = 'queued'
                 AND bj.retry_count < bj.max_retries
-                AND d.cf_agent_enabled IS TRUE
-                AND d.policy_requirements_met IS TRUE
+                AND ({ARTIFACT_POLICY_PREDICATE})
                 AND bj.available_at <= NOW()
                 AND (
                     -- No environment restrictions (wildcard builder)
@@ -562,8 +537,8 @@ pub async fn get_next_job_for_builder(pool: &PgPool, builder_id: Uuid) -> Result
         FROM available_jobs
         WHERE build_jobs.id = available_jobs.id
         RETURNING build_jobs.id
-        "#,
-    )
+        "#
+    ))
     .bind(builder_id)
     .fetch_optional(pool)
     .await
@@ -585,6 +560,21 @@ struct RecoveryCandidate {
     requires_resource_lease: bool,
 }
 
+// An adopted job may fail after B's evaluation committed. Only B's own saved,
+// current admission can start replacement work; failed A never supplies policy.
+const ADOPTED_WORK_FAILED_PREDICATE: &str = r#"
+    d.build_preparation_state='queued'
+    AND c.source_archived=false AND NOT COALESCE(c.cancellation_requested,false)
+    AND d.policy_results->'evaluation_attempt'=to_jsonb(c.evaluation_attempt_count)
+    AND EXISTS (SELECT 1 FROM build_jobs shared
+                WHERE shared.id=d.reused_build_job_id AND shared.derivation_id<>d.id
+                  AND derivations_share_evidence_scope(d.id,shared.derivation_id)
+                  AND shared.status IN ('failed','cancelled'))
+    AND NOT EXISTS (SELECT 1 FROM build_jobs shared
+                    WHERE COALESCE(shared.physical_derivation_id,shared.derivation_id)=derivation_physical_id(d.id)
+                      AND shared.status IN ('queued','building','cancelling'))
+"#;
+
 // SECURITY: Only this exact resource-terminal exception admits a failed
 // commit. Aliases d/c must identify the same derivation/commit. The marker was
 // written with validated evaluation metadata, before preparation could stop.
@@ -600,15 +590,16 @@ const RESOURCE_TERMINAL_PREPARATION_PREDICATE: &str = r#"
     AND d.derivation_path IS NOT NULL
     AND NULLIF(btrim(d.derivation_target), '') IS NOT NULL
     AND d.status_id IN (5, 7, 8, 10, 12)
-    AND d.cf_agent_enabled IS TRUE
-    AND d.policy_requirements_met IS TRUE
     AND d.policy_results->'evaluation_attempt' = to_jsonb(c.evaluation_attempt_count)
-    AND d.policy_results #> '{global,cfAgentEnabled,passed}' = 'true'::jsonb
+    AND (d.policy_results #> '{global,cfAgentEnabled,passed}' = 'true'::jsonb
+         OR d.policy_results #> '{global,artifactAdmission,passed}' = 'true'::jsonb)
     AND (
         d.build_preparation_state IN ('pending', 'failed')
         OR (d.build_preparation_state = 'queued' AND EXISTS (
             SELECT 1 FROM build_jobs prepared_job
             WHERE prepared_job.derivation_id = d.id
+               OR (prepared_job.id=d.reused_build_job_id
+                   AND derivations_share_evidence_scope(d.id,prepared_job.derivation_id))
         ))
         OR (d.build_preparation_state IS NULL AND EXISTS (
             SELECT 1 FROM build_jobs history WHERE history.derivation_id = d.id
@@ -656,6 +647,7 @@ pub(crate) async fn resource_terminal_build_preparation_allowed_in_tx(
     let query = format!(
         "SELECT EXISTS (SELECT 1 FROM derivations d JOIN commits c ON c.id = d.commit_id
          WHERE c.id = $1 AND c.evaluation_attempt_count = $2 AND d.id = $3
+           AND ({ARTIFACT_POLICY_PREDICATE})
            AND ({RESOURCE_TERMINAL_PREPARATION_PREDICATE}))"
     );
     sqlx::query_scalar(&query)
@@ -698,11 +690,10 @@ async fn record_recovery_failure(
         FROM commits c
         WHERE d.id = $1
           AND d.commit_id = $2
-          AND d.build_preparation_state IN ('pending', 'failed')
+          AND (d.build_preparation_state IN ('pending', 'failed') OR ({ADOPTED_WORK_FAILED_PREDICATE}))
           AND d.derivation_path IS NOT DISTINCT FROM $4
           AND d.status_id = 5
-          AND d.cf_agent_enabled = TRUE
-          AND d.policy_requirements_met = TRUE
+          AND ({ARTIFACT_POLICY_PREDICATE})
           AND c.id = d.commit_id
           AND (c.evaluation_status = 'complete' OR ({RESOURCE_TERMINAL_PREPARATION_PREDICATE}))
           AND c.evaluation_attempt_count = $3
@@ -796,10 +787,9 @@ async fn build_preparation_recovery_candidates<'e>(
             c.evaluation_status = 'failed' AS requires_resource_lease
         FROM derivations d
         LEFT JOIN commits c ON c.id = d.commit_id
-        WHERE d.build_preparation_state IN ('pending', 'failed')
+        WHERE (d.build_preparation_state IN ('pending', 'failed') OR ({ADOPTED_WORK_FAILED_PREDICATE}))
           AND d.status_id = 5                       -- DryRunComplete
-          AND d.cf_agent_enabled = TRUE
-          AND d.policy_requirements_met = TRUE
+          AND ({ARTIFACT_POLICY_PREDICATE})
           AND (c.evaluation_status = 'complete' OR ({RESOURCE_TERMINAL_PREPARATION_PREDICATE}))
           AND (d.build_preparation_next_attempt_at IS NULL
                OR d.build_preparation_next_attempt_at <= NOW())  -- backoff gate
@@ -978,7 +968,15 @@ async fn recover_build_preparation_candidates(
             }
         };
 
-        // Step 2: acquire build queue position lock.
+        // Step 2: physical admission precedes queue order and job row locks.
+        if let Err(err) = lock_build_derivation(&mut tx, derivation_id).await {
+            warn!(
+                derivation_id,
+                "Recovery: physical build lock failed: {err:#}"
+            );
+            tx.rollback().await?;
+            continue;
+        }
         if let Err(err) = lock_build_queue_order(&mut tx).await {
             let msg = format!("Recovery: failed to acquire queue lock: {err:#}");
             warn!(derivation_id, "{msg}");
@@ -1002,11 +1000,10 @@ async fn recover_build_preparation_candidates(
             FROM derivations d
             JOIN commits c ON c.id = d.commit_id
             WHERE d.id = $1
-              AND d.build_preparation_state IN ('pending', 'failed')
+              AND (d.build_preparation_state IN ('pending', 'failed') OR ({ADOPTED_WORK_FAILED_PREDICATE}))
               AND d.derivation_path = $2
               AND d.status_id = 5
-              AND d.cf_agent_enabled = TRUE
-              AND d.policy_requirements_met = TRUE
+              AND ({ARTIFACT_POLICY_PREDICATE})
               AND (c.evaluation_status = 'complete' OR (
                   c.evaluation_attempt_count = $3
                   AND ({RESOURCE_TERMINAL_PREPARATION_PREDICATE})
@@ -1046,74 +1043,16 @@ async fn recover_build_preparation_candidates(
             continue;
         };
 
-        // Step 4: read queue position and insert.
-        let next_pos: i64 = match sqlx::query_scalar(
-            "SELECT COALESCE(MAX(queue_position), 0) + 1 FROM build_jobs WHERE status = 'queued' OR status = 'building'",
-        )
-        .fetch_one(&mut *tx)
-        .await
-        {
-            Ok(p) => p,
-            Err(err) => {
-                let msg = format!("Recovery: failed to read max position: {err:#}");
-                warn!(derivation_id, "{msg}");
-                let _ = tx.rollback().await;
-                record_recovery_failure(
-                    pool, derivation_id, commit_id, expected_attempt, Some(drv_path.as_str()), &msg,
-                )
-                .await;
-                continue;
-            }
-        };
-
-        // Insert or detect existing build job.
-        let inserted: Result<Option<bool>, _> = sqlx::query_scalar(
-            r#"
-            INSERT INTO build_jobs (
-                derivation_id, environment_id, priority_weight, queue_position, status
-            )
-            SELECT
-                d.id,
-                s.environment_id,
-                CASE WHEN s.id IS NOT NULL THEN 10.0 ELSE 1.0 END *
-                CASE
-                    WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 3600  THEN 2.0
-                    WHEN EXTRACT(EPOCH FROM (NOW() - c.commit_timestamp)) < 86400 THEN 1.5
-                    ELSE 1.0
-                END,
-                $2,
-                'queued'
-            FROM derivations d
-            INNER JOIN commits c ON c.id = d.commit_id
-            LEFT JOIN systems s ON (
-                d.derivation_target = s.hostname AND s.flake_id = c.flake_id
-            )
-            WHERE d.id = $1
-              AND d.status_id = 5
-              AND d.cf_agent_enabled = TRUE
-              AND d.policy_requirements_met = TRUE
-              AND NOT EXISTS (
-                  SELECT 1 FROM build_jobs existing
-                  WHERE existing.derivation_id = d.id
-              )
-            ON CONFLICT (derivation_id)
-                WHERE status IN ('queued', 'building', 'cancelling') DO NOTHING
-            RETURNING TRUE
-            "#,
-        )
-        .bind(derivation_id)
-        .bind(next_pos)
-        .fetch_optional(&mut *tx)
-        .await;
+        // Step 4: use the same physical admission and scan-intent transaction
+        // as streaming evaluation. There is no recovery-only execution path.
+        let inserted = create_build_job_for_derivation_tx(&mut tx, derivation_id)
+            .await
+            .map(|outcome| {
+                outcome.map(|work| matches!(work, BuildJobInsertOutcome::Inserted { .. }))
+            });
 
         match inserted {
             Ok(Some(true)) => {
-                crate::queries::cve_scan_leases::create_post_build_scan_intents_tx(
-                    &mut tx,
-                    &[derivation_id],
-                )
-                .await
-                .context("Failed to create recovery post-build scan intent")?;
                 // Successfully inserted. Update state inside the same tx
                 // (never use a separate pooled connection while holding row locks).
                 match sqlx::query(
@@ -1174,7 +1113,8 @@ async fn recover_build_preparation_candidates(
                 // (INSERT was blocked by ON CONFLICT DO NOTHING) or eligibility
                 // changed between revalidation and INSERT.
                 let exists: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM build_jobs WHERE derivation_id = $1)",
+                    "SELECT EXISTS(SELECT 1 FROM build_jobs WHERE derivation_id = $1
+                     OR derivations_share_evidence_scope($1,derivation_id))",
                 )
                 .bind(derivation_id)
                 .fetch_one(&mut *tx)
@@ -1277,6 +1217,201 @@ mod tests {
     use crate::queue::QueueNotifier;
     use sqlx::PgPool;
     use uuid::Uuid;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn artifact_admission_agentless_shared_registration_uses_one_job(pool: PgPool) {
+        use serde_json::json;
+        let environment: Uuid = sqlx::query_scalar("SELECT id FROM environments WHERE name='dev'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let other_environment: Uuid =
+            sqlx::query_scalar("SELECT id FROM environments WHERE name='prod'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        for mode in ["external", "reference"] {
+            for admission in 0..4 {
+                let (commit, derivation) = insert_buildable_derivation(&pool, mode, "nixos").await;
+                let (flake, configuration): (i32, String) = sqlx::query_as(
+                    "SELECT c.flake_id,d.derivation_name FROM derivations d JOIN commits c ON c.id=d.commit_id WHERE d.id=$1",
+                ).bind(derivation).fetch_one(&pool).await.unwrap();
+                // Resource identity differs from config identity and from the
+                // full attribute target. Two registrations still yield one job.
+                for registration in [mode, "managed"] {
+                    sqlx::query(
+                        "INSERT INTO systems(hostname,flake_id,system_configuration_name,management_mode,public_key,is_active,environment_id,derivation)
+                         VALUES($1,$2,$3,$4,$5,TRUE,$6,$3)",
+                    ).bind(format!("{registration}-{configuration}"))
+                        .bind(flake).bind(&configuration).bind(registration)
+                        .bind(if registration == "managed" { Some("test-key") } else { None })
+                        .bind(if registration == "managed" { other_environment } else { environment })
+                        .execute(&pool).await.unwrap();
+                }
+                sqlx::query("UPDATE derivations SET cf_agent_enabled=FALSE,policy_requirements_met=FALSE,policy_results=$2,derivation_target=$3,build_preparation_state='pending' WHERE id=$1")
+                    .bind(derivation)
+                    .bind(json!({"evaluation_attempt":1,"global":{"cfAgentEnabled":{"passed":false},"artifactAdmission":{"passed":true}}}))
+                    .bind(format!("git+https://example.test/source#nixosConfigurations.{configuration}"))
+                    .execute(&pool).await.unwrap();
+                sqlx::query("UPDATE commits SET evaluation_status='complete',evaluation_attempt_count=1 WHERE id=$1")
+                    .bind(commit).execute(&pool).await.unwrap();
+                assert!(
+                    super::build_preparation_recovery_candidates(&pool)
+                        .await
+                        .unwrap()
+                        .iter()
+                        .any(|row| row.derivation_id == derivation)
+                );
+                match admission {
+                    0 => {
+                        assert_eq!(
+                            super::create_build_jobs_for_commit(&pool, commit)
+                                .await
+                                .unwrap(),
+                            1
+                        );
+                    }
+                    1 => {
+                        let mut tx = pool.begin().await.unwrap();
+                        assert_eq!(
+                            super::create_build_jobs_for_commit_tx(&mut tx, commit)
+                                .await
+                                .unwrap()
+                                .len(),
+                            1
+                        );
+                        tx.commit().await.unwrap();
+                    }
+                    2 => {
+                        let mut tx = pool.begin().await.unwrap();
+                        assert!(matches!(
+                            super::create_build_job_for_derivation_tx(&mut tx, derivation)
+                                .await
+                                .unwrap(),
+                            Some(super::BuildJobInsertOutcome::Inserted { .. })
+                        ));
+                        tx.commit().await.unwrap();
+                    }
+                    _ => {
+                        assert!(
+                            super::enqueue_build_job_for_derivation(&pool, derivation)
+                                .await
+                                .unwrap()
+                        );
+                    }
+                }
+                assert!(
+                    !super::enqueue_build_job_for_derivation(&pool, derivation)
+                        .await
+                        .unwrap()
+                );
+                let count: i64 =
+                    sqlx::query_scalar("SELECT COUNT(*) FROM build_jobs WHERE derivation_id=$1")
+                        .bind(derivation)
+                        .fetch_one(&pool)
+                        .await
+                        .unwrap();
+                assert_eq!(count, 1);
+                let job_environment: Option<Uuid> = sqlx::query_scalar(
+                    "SELECT environment_id FROM build_jobs WHERE derivation_id=$1",
+                )
+                .bind(derivation)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(job_environment, Some(environment));
+                let facts: (bool, bool) = sqlx::query_as(
+                    "SELECT cf_agent_enabled,policy_requirements_met FROM derivations WHERE id=$1",
+                )
+                .bind(derivation)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                assert_eq!(facts, (false, false));
+                sqlx::query("INSERT INTO evaluation_attempts(commit_id,attempt_number,status,failure_class,completed_at,error_message) VALUES($1,1,'failed','transient',NOW(),'resource_pressure: fixture')")
+                    .bind(commit).execute(&pool).await.unwrap();
+                sqlx::query("UPDATE commits SET evaluation_status='failed' WHERE id=$1")
+                    .bind(commit)
+                    .execute(&pool)
+                    .await
+                    .unwrap();
+                let mut tx = pool.begin().await.unwrap();
+                // This read does not activate work or bypass GC-root proof.
+                assert!(
+                    super::resource_terminal_build_preparation_allowed_in_tx(
+                        &mut tx, commit, 1, derivation,
+                    )
+                    .await
+                    .unwrap()
+                );
+                tx.rollback().await.unwrap();
+            }
+        }
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn artifact_admission_rejects_missing_managed_scope_and_policy_failures(pool: PgPool) {
+        use serde_json::json;
+        for case in [
+            "managed",
+            "wrong-config",
+            "inactive",
+            "strict-failure",
+            "legacy",
+            "excluded",
+        ] {
+            let (commit, derivation) = insert_buildable_derivation(&pool, case, "nixos").await;
+            let (flake, configuration): (i32, String) = sqlx::query_as(
+                "SELECT c.flake_id,d.derivation_name FROM derivations d JOIN commits c ON c.id=d.commit_id WHERE d.id=$1",
+            ).bind(derivation).fetch_one(&pool).await.unwrap();
+            sqlx::query("INSERT INTO systems(hostname,flake_id,system_configuration_name,management_mode,public_key,is_active,derivation) VALUES($1,$2,$3,$4,$5,$6,$3)")
+                .bind(format!("resource-{configuration}"))
+                .bind(flake).bind(if case == "wrong-config" { "missing" } else { &configuration })
+                .bind(if case == "managed" { "managed" } else { "reference" })
+                .bind(if case == "managed" { Some("test-key") } else { None })
+                .bind(case != "inactive").execute(&pool).await.unwrap();
+            let evidence = match case {
+                "legacy" => json!({}),
+                "strict-failure" => json!({"global":{"artifactAdmission":{"passed":false}}}),
+                _ => json!({"global":{"artifactAdmission":{"passed":true}}}),
+            };
+            sqlx::query("UPDATE derivations SET cf_agent_enabled=FALSE,policy_requirements_met=FALSE,policy_results=$2,build_preparation_state=$3 WHERE id=$1")
+                .bind(derivation).bind(evidence)
+                .bind(if case == "excluded" { "not_required" } else { "pending" })
+                .execute(&pool).await.unwrap();
+            assert_eq!(
+                super::create_build_jobs_for_commit(&pool, commit)
+                    .await
+                    .unwrap(),
+                0,
+                "{case}"
+            );
+            assert!(
+                !super::enqueue_build_job_for_derivation(&pool, derivation)
+                    .await
+                    .unwrap(),
+                "{case}"
+            );
+            let mut tx = pool.begin().await.unwrap();
+            assert!(
+                super::create_build_jobs_for_commit_tx(&mut tx, commit)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "{case}"
+            );
+            assert!(
+                super::create_build_job_for_derivation_tx(&mut tx, derivation)
+                    .await
+                    .unwrap()
+                    .is_none(),
+                "{case}"
+            );
+            tx.rollback().await.unwrap();
+        }
+    }
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires authoritative server-regressions sandbox PostgreSQL"]

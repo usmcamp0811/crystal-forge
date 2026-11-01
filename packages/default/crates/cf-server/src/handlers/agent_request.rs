@@ -59,6 +59,7 @@ impl SystemLookup for PgPool {
 /// - Missing X-Key-ID header
 /// - Missing X-Signature header
 /// - Unknown hostname (no matching system)
+/// - Nonmanaged or inactive registration, or absent agent key
 /// - Invalid signature verification
 ///
 /// Returns `StatusCode::BAD_REQUEST` for:
@@ -98,8 +99,14 @@ pub async fn authenticate_agent_request_with_lookup<L: SystemLookup>(
         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
         .ok_or(StatusCode::UNAUTHORIZED)?;
 
-    if system
-        .public_key
+    // SECURITY: A valid signature cannot grant authority to a nonmanaged or
+    // inactive resource. Check eligibility before cryptographic verification.
+    if !system.management_mode.permits_deployment() || !system.is_active {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let public_key = system.public_key.as_ref().ok_or(StatusCode::UNAUTHORIZED)?;
+
+    if public_key
         .verifying_key()
         .verify(&body, &signature)
         .is_err()
@@ -234,26 +241,31 @@ pub fn deserialize_agent_capabilities(
     Ok(serde_json::from_slice::<CapabilityBody>(&agent_request.body)?.capabilities)
 }
 
+/// Decodes a supported report and binds its hostname to the verified signer.
+///
+/// A signed body cannot select another registration. Callers must also recheck
+/// the registration's hostname, key and epoch under lock before writing, because
+/// a rename or re-enrollment can occur after authentication.
+///
+/// # Errors
+/// Returns an error for an unsupported body or a mismatched hostname.
 pub fn deserialize_system_state_versioned(
     agent_request: &VerifiedAgentRequest,
 ) -> Result<(SystemState, bool)> {
     let body = &agent_request.body;
 
-    // Try current version first
-    if let Ok(state) = serde_json::from_slice::<SystemState>(body) {
-        return Ok((state, true));
-    }
-
-    // Try previous versions with fallback
-    if let Ok(old_state) = serde_json::from_slice::<SystemStateV1>(body) {
-        let converted = SystemState::from_v1(old_state);
-        return Ok((converted, false));
-    }
-
-    Err(anyhow::anyhow!(
-        "Unable to deserialize any known SystemState version from system: {}",
-        agent_request.system.hostname
-    ))
+    let (state, compatible) = if let Ok(state) = serde_json::from_slice::<SystemState>(body) {
+        (state, true)
+    } else if let Ok(old_state) = serde_json::from_slice::<SystemStateV1>(body) {
+        (SystemState::from_v1(old_state), false)
+    } else {
+        anyhow::bail!("Unable to deserialize a supported system-state report");
+    };
+    anyhow::ensure!(
+        state.hostname == agent_request.system.hostname,
+        "Report hostname does not match the authenticated registration"
+    );
+    Ok((state, compatible))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -323,7 +335,10 @@ mod tests {
             hostname: hostname.to_string(),
             environment_id: None,
             is_active: true,
-            public_key,
+            management_mode: crate::models::systems::ManagementMode::Managed,
+            agent_enrolled_at: None,
+            public_key: Some(public_key),
+            parent_host_id: None,
             flake_id: Some(1),
             derivation: "/nix/store/test-system".to_string(),
             system_configuration_name: None,
@@ -450,7 +465,7 @@ mod tests {
 
         // Rotate: replace the stored public key exactly as the handler does.
         let (_new_signing_key, new_verifying_key) = generate_keypair();
-        system.public_key = PublicKey::from_verifying_key(new_verifying_key);
+        system.public_key = Some(PublicKey::from_verifying_key(new_verifying_key));
 
         let lookup = MockSystemLookup::new(Some(system));
         let result = authenticate_agent_request_with_lookup(&old_key_headers, body, &lookup).await;
@@ -468,7 +483,7 @@ mod tests {
         let body = Bytes::from(b"heartbeat payload".to_vec());
 
         let (new_signing_key, new_verifying_key) = generate_keypair();
-        system.public_key = PublicKey::from_verifying_key(new_verifying_key);
+        system.public_key = Some(PublicKey::from_verifying_key(new_verifying_key));
 
         let new_key_headers = create_signed_headers("rotating-host", &body, &new_signing_key);
         let lookup = MockSystemLookup::new(Some(system));
@@ -485,6 +500,39 @@ mod tests {
             old_signing_key.verifying_key().to_bytes(),
             new_signing_key.verifying_key().to_bytes()
         );
+    }
+
+    #[tokio::test]
+    async fn signed_requests_cannot_authenticate_ineligible_resources() {
+        use crate::models::systems::ManagementMode;
+
+        for (mode, active, has_key) in [
+            (ManagementMode::External, true, false),
+            (ManagementMode::Reference, true, false),
+            // Even a retained key must not bypass the management-mode gate.
+            (ManagementMode::External, true, true),
+            (ManagementMode::Reference, true, true),
+            (ManagementMode::Managed, false, true),
+            (ManagementMode::Managed, true, false),
+        ] {
+            let (key, mut system) = create_test_system("test-host");
+            system.management_mode = mode;
+            system.is_active = active;
+            if !has_key {
+                system.public_key = None;
+            }
+            let body = Bytes::from_static(b"signed heartbeat");
+            let headers = create_signed_headers("test-host", &body, &key);
+            let lookup = MockSystemLookup::new(Some(system));
+
+            assert_eq!(
+                authenticate_agent_request_with_lookup(&headers, body, &lookup)
+                    .await
+                    .unwrap_err(),
+                StatusCode::UNAUTHORIZED,
+                "mode={mode}, active={active}, has_key={has_key}",
+            );
+        }
     }
 
     #[tokio::test]
@@ -664,6 +712,31 @@ mod tests {
     }
 
     #[test]
+    fn signed_report_hostname_must_match_current_and_legacy_signer() {
+        let (key, system) = create_test_system("test-host");
+        let current =
+            serde_json::to_value(SystemStateBuilder::new().hostname("other-host").build()).unwrap();
+        let mut legacy = current.clone();
+        legacy.as_object_mut().unwrap().remove("change_reason");
+        legacy["context"] = serde_json::json!("agent-startup");
+        for value in [current, legacy] {
+            let body = Bytes::from(serde_json::to_vec(&value).unwrap());
+            // Both are otherwise valid supported reports, signed by test-host.
+            assert!(
+                serde_json::from_slice::<SystemState>(&body).is_ok()
+                    || serde_json::from_slice::<SystemStateV1>(&body).is_ok()
+            );
+            let request = VerifiedAgentRequest {
+                key_id: system.hostname.clone(),
+                signature: key.sign(&body),
+                system: system.clone(),
+                body,
+            };
+            assert!(deserialize_system_state_versioned(&request).is_err());
+        }
+    }
+
+    #[test]
     fn test_deserialize_current_version_system_state() {
         let state = SystemStateBuilder::new()
             .hostname("test-host")
@@ -686,7 +759,7 @@ mod tests {
         // Create a V1 SystemState with the old 'context' field
         let v1_state = super::SystemStateV1 {
             id: None,
-            hostname: "legacy-host".to_string(),
+            hostname: "test-host".to_string(),
             context: "agent-startup".to_string(), // V1 used 'context' instead of 'change_reason'
             timestamp: Some(Utc::now()),
             store_path: Some("/nix/store/legacy".to_string()),
@@ -728,7 +801,7 @@ mod tests {
                 .unwrap()
                 .supports_niks3
         );
-        assert_eq!(deserialized.hostname, "legacy-host");
+        assert_eq!(deserialized.hostname, "test-host");
         // V1 'agent-startup' maps to 'startup'
         assert_eq!(deserialized.change_reason, "startup");
     }

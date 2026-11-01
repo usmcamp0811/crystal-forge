@@ -32,8 +32,8 @@
     cat > "$out/flake.nix" <<'EOF'
     {
       inputs.nixpkgs.url = "github:nixos/nixpkgs/${inputs.nixpkgs.rev}";
-      outputs = {nixpkgs, ...}: {
-        nixosConfigurations.targetA = nixpkgs.lib.nixosSystem {
+      outputs = {nixpkgs, ...}: let
+        target = nixpkgs.lib.nixosSystem {
           system = "${pkgs.stdenv.hostPlatform.system}";
           pkgs = import nixpkgs {
             system = "${pkgs.stdenv.hostPlatform.system}";
@@ -74,6 +74,20 @@
               environment.etc."cf-assurance-demo".source = "${"$"}{selectedDemo}/share/cf-assurance";
             })
           ];
+        };
+      in {
+        nixosConfigurations = {
+          targetA = target;
+          # A real declared configuration, never enrolled or booted as a host.
+          # Both nonmanaged registrations select this same derivation. Force
+          # agent disablement even when later managed revisions enable targetA.
+          assuranceOnly = target.extendModules { modules = [({lib, ...}: {
+            networking.hostName = lib.mkForce "assuranceOnly";
+            # Priority 40 wins over targetA's revision-controlled mkForce (50).
+            services.crystal-forge.enable = lib.mkOverride 40 false;
+            services.crystal-forge.client.enable = lib.mkOverride 40 false;
+            systemd.services.crystal-forge-agent.enable = lib.mkOverride 40 false;
+          })]; };
         };
       };
     }

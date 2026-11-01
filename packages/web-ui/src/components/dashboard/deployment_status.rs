@@ -92,7 +92,7 @@ pub fn DeploymentStatusBreakdown(
                 DonutChartWithLegend {
                     segments: segments,
                     center_value: total_count,
-                    center_label: "DEPLOYED"
+                    center_label: "MANAGED"
                 }
             }
         }

@@ -716,8 +716,66 @@ pub fn policy_results_json(
     })
 }
 
+/// Returns whether evaluation satisfies the managed deployment prerequisite.
+///
+/// Artifact admission must use [`artifact_requirements_met`] instead. A passing
+/// artifact result never supplies an agent fact or deployment authority.
 pub fn policy_requirements_met(check: &PolicyCheckResult) -> bool {
     check.cf_agent_enabled == Some(true) && !check.failed_policies.iter().any(|(_, strict)| *strict)
+}
+
+// The compatibility failure list has no policy IDs. Only this parser-owned
+// implicit deployment prerequisite may be omitted for artifact admission;
+// assigned_results independently protects even identically worded policies.
+const IMPLICIT_AGENT_FAILURE: &str = "Crystal Forge agent is disabled";
+
+/// Returns whether a configuration may build under its evaluated assignments.
+///
+/// `agentless_registration` must prove an active external/reference registration
+/// for this exact flake and effective configuration name. Shared managed
+/// registrations retain their deployment prerequisite. Explicit agent policies
+/// remain assigned requirements, including their existing strict semantics.
+/// Missing agent metadata or assigned outcomes cannot admit an artifact.
+///
+/// # Examples
+///
+/// ```
+/// use crystal_forge::models::deployment_policies::{
+///     PolicyCheckResult, artifact_requirements_met, policy_requirements_met,
+/// };
+/// # fn main() -> Result<(), String> {
+/// let check = PolicyCheckResult::from_assigned(
+///     "baseline".into(), &serde_json::json!({"cfAgentEnabled": false}), &[],
+/// )?;
+/// // The caller has verified an active reference registration for baseline.
+/// assert!(artifact_requirements_met(&check, &[], true));
+/// assert!(!policy_requirements_met(&check));
+/// # Ok(())
+/// # }
+/// ```
+pub fn artifact_requirements_met(
+    check: &PolicyCheckResult,
+    assigned: &[AssignedPolicy],
+    agentless_registration: bool,
+) -> bool {
+    if policy_requirements_met(check) {
+        return true;
+    }
+    agentless_registration
+        && check.cf_agent_enabled.is_some()
+        && !check
+            .failed_policies
+            .iter()
+            .any(|(description, blocking)| *blocking && description != IMPLICIT_AGENT_FAILURE)
+        && assigned
+            .iter()
+            .filter(|ap| ap.policy.is_nix_evaluated())
+            .all(|ap| {
+                check
+                    .assigned_results
+                    .get(&ap.policy_id)
+                    .is_some_and(|outcome| outcome.passed.is_some() && !outcome.blocking)
+            })
 }
 
 /// Look up the assigned policies for a NixOS configuration name, returning an
@@ -1435,7 +1493,7 @@ impl PolicyCheckResult {
                 "Crystal Forge agent not enabled for {}",
                 system_name
             ));
-            failed_policies.push(("Crystal Forge agent is disabled".to_string(), true));
+            failed_policies.push((IMPLICIT_AGENT_FAILURE.to_string(), true));
         }
 
         let meets_requirements = cf_agent_enabled == Some(true)
@@ -2508,6 +2566,91 @@ pub struct UpdateDeploymentPolicyRequest {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn artifact_admission_separates_agent_fact_from_deployment_prerequisite() {
+        use super::*;
+        let check = PolicyCheckResult::from_assigned(
+            "shared".into(),
+            &serde_json::json!({"cfAgentEnabled": false}),
+            &[],
+        )
+        .unwrap();
+        assert!(artifact_requirements_met(&check, &[], true));
+        assert!(!artifact_requirements_met(&check, &[], false));
+        assert!(!policy_requirements_met(&check));
+        assert!(!check.meets_requirements);
+        assert_eq!(check.cf_agent_enabled, Some(false));
+        assert_eq!(
+            policy_results_json(&check, &[])["global"]["cfAgentEnabled"]["passed"],
+            false
+        );
+        assert!(
+            PolicyCheckResult::from_assigned("missing".into(), &serde_json::json!({}), &[])
+                .is_err()
+        );
+        let mut missing = check.clone();
+        missing.cf_agent_enabled = None;
+        assert!(!artifact_requirements_met(&missing, &[], true));
+        let mut rejected = check.clone();
+        rejected
+            .failed_policies
+            .push(("Strict compliance failure".into(), true));
+        assert!(!artifact_requirements_met(&rejected, &[], true));
+    }
+
+    #[test]
+    fn artifact_admission_keeps_explicit_agent_and_other_strict_requirements() {
+        use super::*;
+        for policy in [
+            DeploymentPolicy::RequireCrystalForgeAgent { strict: true },
+            DeploymentPolicy::RequirePackages {
+                packages: vec!["openssh".into()],
+                strict: true,
+            },
+        ] {
+            let id = Uuid::from_u128(508);
+            let assigned = vec![AssignedPolicy {
+                policy_id: id,
+                policy_name: "required".into(),
+                policy,
+                enforcement_mode: AssignedPolicyEnforcementMode::Enforce,
+            }];
+            let check = PolicyCheckResult::from_assigned(
+                "shared".into(),
+                &serde_json::json!({"cfAgentEnabled": false, policy_result_key(&id): false}),
+                &assigned,
+            )
+            .unwrap();
+            assert!(!artifact_requirements_met(&check, &assigned, true));
+            let mut missing = check.clone();
+            missing.assigned_results.clear();
+            assert!(!artifact_requirements_met(&missing, &assigned, true));
+        }
+    }
+
+    #[test]
+    fn artifact_admission_preserves_report_only_evidence() {
+        use super::*;
+        let id = Uuid::from_u128(509);
+        let assigned = vec![AssignedPolicy {
+            policy_id: id,
+            policy_name: "report".into(),
+            policy: DeploymentPolicy::RequirePackages {
+                packages: vec!["openssh".into()],
+                strict: true,
+            },
+            enforcement_mode: AssignedPolicyEnforcementMode::ReportOnly,
+        }];
+        let check = PolicyCheckResult::from_assigned(
+            "reference".into(),
+            &serde_json::json!({"cfAgentEnabled": false, policy_result_key(&id): false}),
+            &assigned,
+        )
+        .unwrap();
+        assert!(artifact_requirements_met(&check, &assigned, true));
+        assert_eq!(check.assigned_results[&id].passed, Some(false));
+        assert!(!policy_requirements_met(&check));
+    }
     use super::*;
 
     fn nix_eval_json(expression: &str) -> serde_json::Value {

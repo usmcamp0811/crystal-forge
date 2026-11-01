@@ -20,6 +20,15 @@ sources:
 
 # Dashboard and systems views
 
+**TASK-508 status: partial.** Mode-aware DTOs, forms and evidence/runtime views
+are being implemented against the approved management-mode design in
+`docs/design/CrystalForge` at `18b47eed`. Final browser/design comparisons and
+owning integration results are pending. The runtime workflow descriptions below
+apply to managed machines. External/reference views use configuration evidence;
+reference is not an online/offline machine. See
+[management modes](../concepts/management-modes-and-configuration-assurance.md)
+for neutral unknown health, artifact admission and remaining integration proof.
+
 ## Dashboard (`/`)
 
 **Route:** `/`
@@ -29,9 +38,9 @@ sources:
 ### What It Shows
 
 1. **Fleet Summary Card**
-   - Total systems count
-   - Online vs offline breakdown
-   - Systems per environment (e.g., "Prod: 5, Dev: 3")
+   - Active managed-machine total
+   - Managed health partition, including offline
+   - Environment registry count is separate from managed operational rollups
 
 2. **Build Queue Widget**
    - How many builds are pending
@@ -79,18 +88,32 @@ sequenceDiagram
    - **Table View:** Compact table for many systems
 
 2. **Filter Controls**
-   - **Environment Dropdown:** Filter by prod/staging/dev
-   - **Status Dropdown:** All / Online / Offline
-   - **Search Box:** Filter by name or hostname
+    - **Environment Dropdown:** Filter by prod/staging/dev
+    - **Management mode:** Managed / External / Reference; server filter applies before totals and pagination
+    - **Health:** Managed health categories; nonmanaged evidence is separate
+    - **Tags:** Exact tag filter with counts from the loaded authorized fleet
+    - **Search Box:** Filter by name, hostname or case-insensitive tag text
 
 3. **System Cards/Rows**
    Each card shows:
    - System name (bold)
    - Hostname (subtitle)
    - Environment badge (colored)
-   - Status indicator (green dot = online, red = offline)
-   - Last heartbeat time
-   - Currently deployed flake name
+    - Managed machine health and heartbeat; nonmanaged evidence status is separate
+    - Configuration identity and management mode
+    - Managed deployment state or nonmanaged deployment-unavailable explanation
+    - Nonmanaged cards show Configuration (`flake#configuration`), Revision
+      (short SHA and branch), Evidence (`scanned <age>` or `not scanned`) and
+      Runtime (`Not a running machine`, `Runtime unknown` or the latest
+      parent-reported unit state), plus a single **Evidence** action
+
+4. **Stat strip**
+   Managed, Healthy, Warning/drift and Critical/offline count active managed
+   machines only. **CVEs (critical)** totals critical CVEs "across N scanned
+   resources": managed machines contribute current runtime evidence; external
+   and reference resources contribute their latest sealed configuration scan.
+   A resource without sealed evidence contributes nothing; it is not counted as
+   clean.
 
 ### User Interactions
 
@@ -101,6 +124,19 @@ sequenceDiagram
 | Click "Deploy" | Open deployment modal |
 | Click "Add System" | Open add system modal |
 
+Add/edit forms persist tags and description/notes in every mode. Tags have live
+authorized-fleet suggestions and chips. Managed forms also persist address and
+reachability. Omitted edit fields preserve stored values; see the
+[Systems API](../api/systems-api.md) for clear/reset semantics. The fleet adapter
+loads all server pages when no explicit page is requested, so client filters,
+tag scopes, suggestions and counts are not limited to page one. A failed
+continuation reports an error rather than presenting a partial fleet as complete.
+Explicit page requests retain server pagination.
+
+The forms use the existing `manual`, `auto_latest` and `pinned` policies. Initial
+managed conversion requires fresh credentials and manual policy; tags do not
+create an inherited policy model.
+
 ### Data Flow
 
 ```mermaid
@@ -109,13 +145,15 @@ sequenceDiagram
   participant Frontend
   participant Backend
   Frontend->>Backend: GET /api/v1/systems?environment=prod
-  Backend-->>Frontend: { systems: [...] }
+  Backend-->>Frontend: { items, total, page, per_page }
 ```
 
 **Query Parameters:**
 - `?environment=prod` - Filter by environment
-- `?status=online` - Filter by status
+- `?management_mode=external` - Filter registered management authority
+- `?health_status=healthy` - Filter by managed health category
 - `?search=web` - Search name/hostname
+- `?tag=edge` - Exact persisted tag filter
 
 ### How to Modify
 
@@ -127,6 +165,27 @@ sequenceDiagram
 **Route:** `/systems/:id` (e.g., `/systems/abc-123`)
 
 **Purpose:** Manage a single system - deploy, rollback, view history.
+
+For external/reference resources, Overview/History present exact revision,
+evaluation, build and scan evidence. Deploy explains that CF has no authority;
+runtime deployment logs are unavailable. Config browsing does not invent a
+running generation. Evidence CVE/hardening/compliance views cannot enable runtime
+triage, remediation verification or POA&M closure from artifact evidence.
+The CVE tab requires an exact sealed CVE scan. Hardening uses exact derivation
+and build history independently: a missing or failed CVE scan does not hide a
+hardening assessment. Missing hardening evidence is unavailable, not a clean
+result. Compliance likewise selects captured evaluation-attempt evidence rather
+than treating CVE scan completion as its authority.
+External runtime shows only stored parent reports; reload calls the latest
+observation API and keeps the last report on request failure. Reference has no
+runtime health card. These are the TASK-508 contract and inspected source paths,
+not a claim that every affected tab has passed final UI verification.
+
+Configuration Re-scan sends the displayed artifact's expected derivation ID to
+the scoped system endpoint. A changed eligible target returns 409 and queues no
+replacement; pending intent is not scan execution. Inactive managed detail keeps
+mode/epoch-filtered telemetry under migration `0320`; registry deactivation alone
+does not mean offline and does not preserve Current CVE/POA&M authority.
 
 ### Layout (Tabs)
 

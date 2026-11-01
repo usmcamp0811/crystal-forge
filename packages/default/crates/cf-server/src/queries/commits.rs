@@ -1367,7 +1367,9 @@ async fn completion_committed_tx(
         "SELECT derivation_target, derivation_path, expected_store_path,
                 cf_agent_enabled, policy_requirements_met, status_id,
                 build_preparation_state, COALESCE(policy_results, '{}'::jsonb) AS policy_results,
-                EXISTS (SELECT 1 FROM build_jobs job WHERE job.derivation_id = derivations.id) AS has_build_job,
+                 EXISTS (SELECT 1 FROM build_jobs job WHERE job.derivation_id = derivations.id
+                         OR (job.id=derivations.reused_build_job_id
+                             AND derivations_share_evidence_scope(derivations.id,job.derivation_id))) AS has_build_job,
                 EXISTS (
                     SELECT 1 FROM build_jobs history WHERE history.derivation_id = derivations.id
                     AND ((derivations.status_id = 7 AND history.status = 'cancelled')
@@ -1426,7 +1428,16 @@ async fn completion_committed_tx(
     // Its cancelled queued job or running/terminal history keeps queued state
     // or pre-0195 NULL state. Exact compatible history proves completion, never
     // permission to create work from NULL or admit a rejected job.
-    let build_needed = result.build_eligible && requirements_met;
+    // PERSISTENCE: The attempt marker above binds saved artifact admission to
+    // this completion. It permits agentless preparation, not deployment; keep
+    // the actual agent fact and deployment policy checks independent below.
+    let artifact_admitted = requirements_met
+        || durable
+            .policy_results
+            .pointer("/global/artifactAdmission/passed")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+    let build_needed = result.build_eligible && artifact_admitted;
     anyhow::ensure!(
         if build_needed {
             matches!(
@@ -1438,7 +1449,7 @@ async fn completion_committed_tx(
                     && durable.has_compatible_build_history)
         } else {
             durable.build_preparation_state.as_deref() == Some("not_required")
-                || (!requirements_met
+                || (!artifact_admitted
                     && matches!(
                         durable.build_preparation_state.as_deref(),
                         None | Some("queued")
@@ -1473,6 +1484,10 @@ async fn completion_committed_tx(
     }
     Ok(true)
 }
+
+#[cfg(test)]
+#[path = "commits/derivation_reuse_tests.rs"]
+mod derivation_reuse_tests;
 
 /// Resolves lost COMMIT acknowledgement against the exact active attempt.
 ///
@@ -2978,6 +2993,153 @@ pub async fn fetch_eval_dependency_breakdown(
 #[cfg(test)]
 mod tests {
     use super::{fetch_eval_policy_matrix, validate_eval_queue_reorder_payload};
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn completion_reconciliation_accepts_only_exact_agentless_artifact_evidence(
+        pool: PgPool,
+    ) {
+        use crate::models::deployment_policies::{PolicyCheckResult, policy_results_json};
+        use crate::models::evaluate_with_policies::SuccessfulSystemResult;
+        use serde_json::json;
+
+        let flake = insert_throwaway_flake(&pool).await;
+        let commit = insert_throwaway_commit(&pool, flake).await;
+        let mut result = SuccessfulSystemResult {
+            system_name: "reference-baseline".into(),
+            derivation_target: "flake#nixosConfigurations.reference-baseline".into(),
+            drv_path: format!("/nix/store/{}-baseline.drv", "a".repeat(32)),
+            expected_store_path: Some(format!("/nix/store/{}-baseline", "b".repeat(32))),
+            cf_agent_enabled: Some(false),
+            build_eligible: true,
+        };
+        let check = PolicyCheckResult::from_assigned(
+            result.system_name.clone(),
+            &json!({"cfAgentEnabled": false}),
+            &[],
+        )
+        .unwrap();
+        let mut evidence = policy_results_json(&check, &[]);
+        evidence["evaluation_attempt"] = json!(7);
+        evidence["global"]["artifactAdmission"] = json!({"passed": true});
+        let derivation: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id,derivation_name,derivation_type,
+                 derivation_target,derivation_path,expected_store_path,cf_agent_enabled,
+                 policy_requirements_met,policy_results,status_id,build_preparation_state)
+             VALUES ($1,$2,'nixos',$3,$4,$5,FALSE,FALSE,$6,5,'pending') RETURNING id",
+        )
+        .bind(commit)
+        .bind(&result.system_name)
+        .bind(&result.derivation_target)
+        .bind(&result.drv_path)
+        .bind(&result.expected_store_path)
+        .bind(&evidence)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        assert!(
+            super::completion_committed_tx(&mut tx, commit, 7, &result, &check)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !super::completion_committed_tx(&mut tx, commit, 8, &result, &check)
+                .await
+                .unwrap()
+        );
+
+        for admission in [json!(false), json!(null), json!("true")] {
+            let mut rejected = evidence.clone();
+            rejected["global"]["artifactAdmission"]["passed"] = admission;
+            sqlx::query("UPDATE derivations SET policy_results=$2 WHERE id=$1")
+                .bind(derivation)
+                .bind(rejected)
+                .execute(&mut *tx)
+                .await
+                .unwrap();
+            assert!(
+                super::completion_committed_tx(&mut tx, commit, 7, &result, &check)
+                    .await
+                    .is_err()
+            );
+        }
+        sqlx::query("UPDATE derivations SET policy_results=$2 WHERE id=$1")
+            .bind(derivation)
+            .bind(&evidence)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        result.build_eligible = false;
+        assert!(
+            super::completion_committed_tx(&mut tx, commit, 7, &result, &check)
+                .await
+                .is_err(),
+            "artifact admission cannot override scoped exclusion"
+        );
+        result.build_eligible = true;
+        let mut wrong_identity = result.clone();
+        wrong_identity.system_name = "another-configuration".into();
+        assert!(
+            !super::completion_committed_tx(&mut tx, commit, 7, &wrong_identity, &check)
+                .await
+                .unwrap()
+        );
+        let mut wrong_agent = check.clone();
+        wrong_agent.cf_agent_enabled = Some(true);
+        assert!(
+            super::completion_committed_tx(&mut tx, commit, 7, &result, &wrong_agent)
+                .await
+                .is_err()
+        );
+        let mut missing_assignment = check.clone();
+        missing_assignment.assigned_results.insert(
+            uuid::Uuid::new_v4(),
+            crate::models::deployment_policies::AssignedPolicyCheckResult {
+                passed: Some(true),
+                blocking: false,
+                evaluation_error: None,
+                composite_outcomes: vec![],
+            },
+        );
+        assert!(
+            super::completion_committed_tx(&mut tx, commit, 7, &result, &missing_assignment)
+                .await
+                .is_err(),
+            "artifact admission does not replace assigned policy evidence"
+        );
+        let before: serde_json::Value =
+            sqlx::query_scalar("SELECT to_jsonb(d) FROM derivations d WHERE id=$1")
+                .bind(derivation)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        assert!(
+            super::completion_committed_tx(&mut tx, commit, 7, &result, &check)
+                .await
+                .unwrap()
+        );
+        let after: serde_json::Value =
+            sqlx::query_scalar("SELECT to_jsonb(d) FROM derivations d WHERE id=$1")
+                .bind(derivation)
+                .fetch_one(&mut *tx)
+                .await
+                .unwrap();
+        assert_eq!(
+            before, after,
+            "reconciliation does not publish or mutate identity"
+        );
+        let deployment_identities: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM evaluation_snapshots
+             WHERE commit_id=$1 AND deployment_identity IS NOT NULL",
+        )
+        .bind(commit)
+        .fetch_one(&mut *tx)
+        .await
+        .unwrap();
+        assert_eq!(deployment_identities, 0);
+        tx.rollback().await.unwrap();
+    }
 
     pub(super) async fn derivation_count_commit(pool: &PgPool) -> i32 {
         let flake = insert_throwaway_flake(pool).await;

@@ -270,7 +270,7 @@ pub fn EnvironmentsListView(initial_query: String) -> Element {
             div { class: "page-head", "data-coach-target": "env-page-head",
                 div {
                     h1 { class: "page-title", "Environments" }
-                    p { class: "page-subtitle", "{items.len()} tiers · {totals.systems} systems · {totals.caches} caches configured" }
+                    p { class: "page-subtitle", "{items.len()} tiers · {totals.systems} registered resources (all modes) · {totals.caches} caches configured" }
                 }
                 div { style: "display:flex; gap:8px;",
                     button {
@@ -784,7 +784,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
     };
     let display_bundle_assignments = env.bundle_assignments.clone();
     let is_production = env.is_production.unwrap_or(false);
-    let total = env.health.total().max(env.system_count).max(1) as f64;
+    let total = env.health.total().max(1) as f64;
     let no_health = env.health.total() == 0;
     let nav = use_navigator();
     let cache_nav = nav.clone();
@@ -875,7 +875,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
                 }
 
                 section { class: "panel-section",
-                    h3 { "Health" }
+                    h3 { "Health · active managed machines" }
                     div { class: "env-health-bar", style: "margin-bottom:8px;",
                         if env.health.healthy > 0 {
                             div { style: "width:{pct_f(env.health.healthy, total)}%; background:#34d399;", title: "{env.health.healthy} healthy" }
@@ -907,7 +907,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
                             span { span { class: "env-health-sw", style: "background:#6b7280;" } "{env.health.offline} offline" }
                         }
                         if no_health {
-                            span { style: "color:var(--cf-text-muted); font-size:11px;", "No health data" }
+                            span { style: "color:var(--cf-text-muted); font-size:11px;", "No active managed machines" }
                         }
                         if env.cve_critical_high > 0 {
                             span { style: "margin-left:auto;",
@@ -1050,6 +1050,8 @@ fn EnvPanelSystems(props: EnvPanelSystemsProps) -> Element {
         let env_name = env_name.clone();
         async move {
             fetch_systems(&SystemsListParams {
+                tag: None,
+                management_mode: None,
                 page: Some(1),
                 per_page: Some(200),
                 search: None,
@@ -1066,7 +1068,7 @@ fn EnvPanelSystems(props: EnvPanelSystemsProps) -> Element {
 
     rsx! {
         section { class: "panel-section",
-            h3 { "Systems ({props.expected_count})" }
+            h3 { "Registered resources ({props.expected_count}) · all modes" }
             match systems.read().as_ref() {
                 None => rsx! {
                     if props.expected_count == 0 {
@@ -1088,8 +1090,11 @@ fn EnvPanelSystems(props: EnvPanelSystemsProps) -> Element {
                                         nav.push(Route::SystemDetailView { id: system_id.clone(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() });
                                     }
                                 },
-                                span { class: "status-dot", style: "--status-color: {system_status_color(&system.health_status)};" }
+                                if system.management_mode == crate::api::models::ManagementMode::Managed {
+                                    span { class: "status-dot", style: "--status-color: {system_status_color(&system.health_status)};" }
+                                }
                                 span { class: "mono truncate", style: "flex:1; text-align:left;", "{system.hostname}" }
+                                crate::components::system::management_mode::MgmtChip { mode: system.management_mode }
                             }
                         }
                         if items.len() > 8 {
@@ -1129,6 +1134,7 @@ fn system_status_color(status: &HealthStatus) -> &'static str {
         HealthStatus::Warning => "#fbbf24",
         HealthStatus::Critical => "#f87171",
         HealthStatus::Offline => "#6b7280",
+        HealthStatus::Unknown => "#6b7280",
     }
 }
 

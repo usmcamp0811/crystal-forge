@@ -563,7 +563,6 @@ pub async fn create_cve_scan_with_trigger(
     scanner_version: Option<String>,
     source_trigger: ScanTrigger,
 ) -> Result<CreateCveScanOutcome> {
-    let scan_id = Uuid::new_v4();
     let mut tx = pool.begin().await?;
     if source_trigger == ScanTrigger::PostBuild {
         // CONCURRENCY: Build admission owns this lock before the POA&M lock.
@@ -578,6 +577,34 @@ pub async fn create_cve_scan_with_trigger(
     )
     .await?;
 
+    let outcome = create_cve_scan_with_trigger_tx(
+        &mut tx,
+        derivation_id,
+        scanner_name,
+        scanner_version,
+        source_trigger,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+/// Creates an immediate execution in the admission transaction.
+///
+/// The caller holds the derivation's CVE/POA&M writer locks. Execution starts
+/// only after commit, so no pool transaction can wait on an outer scope guard.
+///
+/// # Errors
+/// Returns database or scan-phase persistence errors.
+pub(crate) async fn create_cve_scan_with_trigger_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    derivation_id: i32,
+    scanner_name: &str,
+    scanner_version: Option<String>,
+    source_trigger: ScanTrigger,
+) -> Result<CreateCveScanOutcome> {
+    let scan_id = Uuid::new_v4();
+
     let inserted = sqlx::query(
         r#"
         INSERT INTO cve_scans (
@@ -591,6 +618,9 @@ pub async fn create_cve_scan_with_trigger(
             0, 0, 0, 0,
             1,
             jsonb_build_object(
+                'evidence_scope', 'exact_derivation',
+                'selection_basis', 'exact_derivation',
+                'selected_commit_id', (SELECT commit_id FROM derivations WHERE id = $2),
                 'execution_id', gen_random_uuid(),
                 'execution_started_at', NOW(),
                 'execution_heartbeat_at', NOW()
@@ -634,7 +664,7 @@ pub async fn create_cve_scan_with_trigger(
     .bind(scanner_name)
     .bind(scanner_version)
     .bind(source_trigger.as_str())
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
 
     let Some(inserted) = inserted else {
@@ -655,7 +685,7 @@ pub async fn create_cve_scan_with_trigger(
             "#,
             derivation_id
         )
-        .fetch_optional(&mut *tx)
+        .fetch_optional(&mut **tx)
         .await?
         .ok_or_else(|| {
             anyhow::anyhow!(
@@ -663,7 +693,6 @@ pub async fn create_cve_scan_with_trigger(
                 derivation_id
             )
         })?;
-        tx.commit().await?;
         return Ok(CreateCveScanOutcome::Existing(existing));
     };
 
@@ -672,9 +701,7 @@ pub async fn create_cve_scan_with_trigger(
         derivation_id: inserted.get("derivation_id"),
         execution_id: inserted.get("execution_id"),
     };
-    crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, claim.scan_id)
-        .await?;
-    tx.commit().await?;
+    crate::services::composite_enforcement::persist_scan_phase_in_tx(tx, claim.scan_id).await?;
     Ok(CreateCveScanOutcome::Created(claim))
 }
 
@@ -1992,6 +2019,8 @@ pub async fn get_active_scan_for_derivation(
 /// `awaiting_build`. A remote-built target without a usable completed cache
 /// publication waits in `awaiting_closure`. A server-local target or a
 /// cache-restorable remote target starts in `pending`.
+/// A live eligible producing job supplies remote affinity; otherwise the
+/// compatibility entry point retains its server-local execution fallback.
 ///
 /// # Errors
 ///
@@ -2013,6 +2042,55 @@ pub async fn enqueue_exact_cve_scan(
     )
     .await?;
 
+    let outcome = enqueue_cve_scan_tx(
+        &mut tx,
+        derivation_id,
+        scanner_name,
+        scanner_version,
+        ScanTrigger::Manual,
+        true,
+    )
+    .await?;
+    tx.commit().await?;
+    Ok(outcome)
+}
+
+/// Enqueues exact-artifact work using a real producing job or a local executor.
+///
+/// The caller holds the derivation's CVE writer locks. Remote affinity never
+/// invents build success or a session. Without either executor, a terminal
+/// failed lifecycle records `executor_unavailable` rather than stranding work.
+/// Existing active work retains its trigger and identity.
+///
+/// # Errors
+/// Returns database errors or a disappearing active-scan conflict.
+pub(crate) async fn enqueue_cve_scan_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    derivation_id: i32,
+    scanner_name: &str,
+    scanner_version: Option<String>,
+    source_trigger: ScanTrigger,
+    local_available: bool,
+) -> Result<Option<EnqueueCveScanOutcome>> {
+    let producer = eligible_scan_producer_tx(tx, derivation_id).await?;
+    if let Some((scan_id, status, trigger)) = sqlx::query_as::<_, (Uuid, String, String)>(
+        "SELECT id,status,COALESCE(source_trigger,'legacy') FROM cve_scans WHERE derivation_id=$1 AND status IN ('awaiting_build','awaiting_closure','pending','in_progress') ORDER BY created_at DESC,id DESC LIMIT 1",
+    ).bind(derivation_id).fetch_optional(&mut **tx).await? {
+        // Reuse active identity/provenance, but make pre-existing queued manual
+        // or fleet work consumable by its actual producer. Never change a live
+        // lease or the prerequisite of a post-build obligation.
+        if status == "pending" && matches!(trigger.as_str(), "manual" | "periodic" | "fleet") {
+            if let Some(producer) = producer {
+                sqlx::query("UPDATE cve_scans SET completed_build_job_id=$2 WHERE id=$1 AND status='pending'")
+                    .bind(scan_id).bind(producer).execute(&mut **tx).await?;
+            } else if !local_available {
+                sqlx::query("UPDATE cve_scans SET status='failed',completed_at=NOW(),scan_metadata=COALESCE(scan_metadata,'{}'::jsonb)||jsonb_build_object('terminal_reason','executor_unavailable','error','executor_unavailable: no local scanner or eligible producing builder session') WHERE id=$1 AND status='pending'")
+                    .bind(scan_id).execute(&mut **tx).await?;
+                crate::services::composite_enforcement::persist_scan_phase_in_tx(tx, scan_id).await?;
+            }
+        }
+        return Ok(Some(EnqueueCveScanOutcome { scan_id, derivation_id, created: false }));
+    }
     let initial_status = sqlx::query_scalar::<_, String>(
         r#"
         -- INVARIANT: API builder completions retain a builder-owned successful
@@ -2041,11 +2119,16 @@ pub async fn enqueue_exact_cve_scan(
         "#,
     )
     .bind(derivation_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?;
     let Some(initial_status) = initial_status else {
-        tx.commit().await?;
         return Ok(None);
+    };
+    let unavailable = initial_status != "awaiting_build" && producer.is_none() && !local_available;
+    let initial_status = if unavailable {
+        "failed"
+    } else {
+        initial_status.as_str()
     };
 
     let scan_id = Uuid::new_v4();
@@ -2055,12 +2138,19 @@ pub async fn enqueue_exact_cve_scan(
             id, derivation_id, scanner_name, scanner_version,
             status, total_packages, total_vulnerabilities,
             critical_count, high_count, medium_count, low_count,
-            attempts, source_trigger
+            attempts, source_trigger, scan_metadata, completed_build_job_id, completed_at
         ) VALUES (
             $1, $2, $3, $4,
             $5, 0, 0,
             0, 0, 0, 0,
-            0, 'manual'
+            0, $6, jsonb_build_object(
+                'evidence_scope', 'exact_derivation',
+                'selection_basis', 'exact_derivation',
+                'selected_commit_id', (SELECT commit_id FROM derivations WHERE id = $2)
+            ) || CASE WHEN $8 THEN jsonb_build_object(
+                'error', 'executor_unavailable: no local scanner or eligible producing builder session',
+                'terminal_reason', 'executor_unavailable') ELSE '{}'::jsonb END,
+            $7, CASE WHEN $8 THEN NOW() ELSE NULL END
         )
         ON CONFLICT (derivation_id) WHERE status IN (
             'awaiting_build', 'awaiting_closure', 'pending', 'in_progress'
@@ -2074,11 +2164,16 @@ pub async fn enqueue_exact_cve_scan(
     .bind(scanner_name)
     .bind(scanner_version)
     .bind(initial_status)
-    .fetch_optional(&mut *tx)
+    .bind(source_trigger.as_str())
+    .bind(producer)
+    .bind(unavailable)
+    .fetch_optional(&mut **tx)
     .await?;
 
     if let Some(scan_id) = inserted {
-        tx.commit().await?;
+        if unavailable {
+            crate::services::composite_enforcement::persist_scan_phase_in_tx(tx, scan_id).await?;
+        }
         return Ok(Some(EnqueueCveScanOutcome {
             scan_id,
             derivation_id,
@@ -2100,17 +2195,173 @@ pub async fn enqueue_exact_cve_scan(
         "#,
     )
     .bind(derivation_id)
-    .fetch_optional(&mut *tx)
+    .fetch_optional(&mut **tx)
     .await?
     .ok_or_else(|| {
         anyhow::anyhow!("active CVE scan conflict disappeared for derivation {derivation_id}")
     })?;
-    tx.commit().await?;
     Ok(Some(EnqueueCveScanOutcome {
         scan_id: existing,
         derivation_id,
         created: false,
     }))
+}
+
+/// Finds the exact artifact's successful producing job in a live scan session.
+///
+/// Environment and session checks match remote claim authorization. This read
+/// grants no lease; claim and result submission still revalidate the builder.
+///
+/// # Errors
+/// Returns database errors.
+async fn eligible_scan_producer_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    derivation_id: i32,
+) -> Result<Option<Uuid>> {
+    Ok(sqlx::query_scalar(
+        r#"SELECT job.id FROM build_jobs job
+        JOIN builders builder ON builder.id=job.builder_id
+          AND builder.current_session_id=job.builder_session_id
+        JOIN derivations d ON d.id=job.derivation_id
+        WHERE job.derivation_id=$1 AND job.status='success'
+          AND builder.enabled AND builder.registered AND builder.status='active'
+          AND builder.cve_scanning_enabled AND builder.cve_scan_schema_version=1
+          AND d.derivation_path ~ '^/nix/store/[^/]+[.]drv$'
+          AND d.store_path ~ '^/nix/store/[^/]+$'
+          AND NOT EXISTS (SELECT 1 FROM build_jobs newer
+            WHERE newer.derivation_id=job.derivation_id
+              AND (newer.created_at,newer.id)>(job.created_at,job.id))
+          AND (NOT EXISTS (SELECT 1 FROM builder_environment_assignments assignment
+                           WHERE assignment.builder_id=builder.id)
+            OR EXISTS (SELECT 1 FROM builder_environment_assignments assignment
+                       WHERE assignment.builder_id=builder.id AND assignment.environment_id=job.environment_id)
+            OR (job.environment_id IS NULL AND NOT EXISTS (
+              SELECT 1 FROM systems system JOIN commits commit ON commit.flake_id=system.flake_id
+              WHERE commit.id=d.commit_id
+                AND COALESCE(NULLIF(BTRIM(system.system_configuration_name),''),system.hostname)=d.derivation_name
+                AND system.environment_id NOT IN (SELECT environment_id FROM builder_environment_assignments
+                                                  WHERE builder_id=builder.id))))
+          AND EXISTS (SELECT 1 FROM cache_push_jobs push WHERE push.derivation_id=d.id
+            AND push.store_path=d.store_path AND push.status='completed'
+            AND NULLIF(BTRIM(push.cache_destination),'') IS NOT NULL)
+        ORDER BY job.created_at DESC,job.id DESC LIMIT 1"#,
+    ).bind(derivation_id).fetch_optional(&mut **tx).await?)
+}
+
+/// Admits a bounded cadence batch independently of server-local vulnix.
+///
+/// Selection retains schedule intervals, failure backoff and active-work
+/// exclusion. Admission uses the same exact queue and producing-session
+/// affinity as manual scans; it neither creates builds nor grants leases.
+///
+/// # Errors
+/// Returns schedule-selection or admission errors.
+pub(crate) async fn enqueue_due_cve_rescans(
+    pool: &PgPool,
+    limit: i64,
+    local_available: bool,
+) -> Result<usize> {
+    let targets = get_targets_needing_cve_rescan(pool, Some(limit)).await?;
+    let mut created = 0;
+    for target in targets {
+        let mut tx = pool.begin().await?;
+        crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+            &mut tx,
+            target.id,
+            &[],
+        )
+        .await?;
+        // A competing execution can finish between selection and this lock.
+        // Recheck cadence/backoff before admitting another scan of its result.
+        if !get_targets_needing_cve_rescan(&mut *tx, Some(limit))
+            .await?
+            .iter()
+            .any(|due| due.id == target.id)
+        {
+            continue;
+        }
+        if let Some(outcome) = enqueue_cve_scan_tx(
+            &mut tx,
+            target.id,
+            "vulnix",
+            None,
+            ScanTrigger::Periodic,
+            local_available,
+        )
+        .await?
+        {
+            created += usize::from(outcome.created);
+        }
+        tx.commit().await?;
+    }
+    Ok(created)
+}
+
+/// Reconciles producing-job affinity for queued manual, fleet and cadence work.
+///
+/// Runs only when the server has no local executor. Post-build obligations keep
+/// their existing recovery policy. Existing queued work can acquire a real
+/// eligible producing job without changing trigger or scan identity. Missing
+/// executors become terminal failures; the return value counts those failures.
+/// In-progress work remains governed by lease fencing and recovery.
+///
+/// # Errors
+/// Returns database or scan-phase persistence errors.
+pub(crate) async fn reconcile_scan_executors(pool: &PgPool, limit: i64) -> Result<usize> {
+    let candidates: Vec<(Uuid, i32, Option<Uuid>)> = sqlx::query_as(
+        "SELECT id,derivation_id,completed_build_job_id FROM cve_scans
+         WHERE status='pending' AND source_trigger IN ('manual','periodic','fleet')
+           AND scan_metadata->>'evidence_scope'='exact_derivation'
+           AND NOT EXISTS (SELECT 1 FROM build_jobs job JOIN builders builder ON builder.id=job.builder_id
+             WHERE job.id=cve_scans.completed_build_job_id AND job.derivation_id=cve_scans.derivation_id
+               AND job.status='success' AND builder.current_session_id=job.builder_session_id
+               AND builder.enabled AND builder.registered AND builder.status='active'
+                AND builder.cve_scanning_enabled AND builder.cve_scan_schema_version=1
+                AND NOT EXISTS (SELECT 1 FROM build_jobs newer WHERE newer.derivation_id=job.derivation_id
+                  AND (newer.created_at,newer.id)>(job.created_at,job.id))
+                AND (NOT EXISTS (SELECT 1 FROM builder_environment_assignments assignment WHERE assignment.builder_id=builder.id)
+                  OR EXISTS (SELECT 1 FROM builder_environment_assignments assignment
+                    WHERE assignment.builder_id=builder.id AND assignment.environment_id=job.environment_id)
+                  OR (job.environment_id IS NULL AND NOT EXISTS (
+                    SELECT 1 FROM systems system JOIN commits commit ON commit.flake_id=system.flake_id
+                    JOIN derivations d ON d.commit_id=commit.id AND d.id=job.derivation_id
+                    WHERE COALESCE(NULLIF(BTRIM(system.system_configuration_name),''),system.hostname)=d.derivation_name
+                      AND system.environment_id NOT IN (SELECT environment_id FROM builder_environment_assignments
+                        WHERE builder_id=builder.id)))))
+         ORDER BY created_at,id LIMIT $1",
+    ).bind(limit).fetch_all(pool).await?;
+    let mut failed = 0;
+    for (scan, derivation, affinity) in candidates {
+        let mut tx = pool.begin().await?;
+        crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+            &mut tx,
+            derivation,
+            &[],
+        )
+        .await?;
+        let producer = eligible_scan_producer_tx(&mut tx, derivation).await?;
+        if let Some(producer) = producer {
+            if affinity != Some(producer) {
+                sqlx::query("UPDATE cve_scans SET completed_build_job_id=$2 WHERE id=$1 AND status='pending'")
+                    .bind(scan).bind(producer).execute(&mut *tx).await?;
+            }
+        } else {
+            let changed = sqlx::query(
+                "UPDATE cve_scans SET status='failed',completed_at=NOW(),
+                  scan_metadata=COALESCE(scan_metadata,'{}'::jsonb)||jsonb_build_object(
+                    'error','executor_unavailable: producing builder session or scope is no longer eligible',
+                    'terminal_reason','executor_unavailable')
+                 WHERE id=$1 AND status='pending'",
+            ).bind(scan).execute(&mut *tx).await?.rows_affected();
+            if changed > 0 {
+                crate::services::composite_enforcement::persist_scan_phase_in_tx(&mut tx, scan)
+                    .await?;
+                failed += 1;
+            }
+        }
+        tx.commit().await?;
+    }
+    Ok(failed)
 }
 
 /// Resolves the preferred CVE scan target for one flake configuration.
@@ -2138,7 +2389,7 @@ pub async fn resolve_flake_config_cve_scan_target(
             LIMIT 1
         )
         SELECT
-            d.id AS derivation_id,
+            d.execution_derivation_id AS derivation_id,
             d.derivation_name AS config_name,
             (SELECT hostname FROM latest_host) AS hostname,
             CASE
@@ -2148,20 +2399,20 @@ pub async fn resolve_flake_config_cve_scan_target(
                 WHEN EXISTS (
                     SELECT 1
                     FROM build_jobs job
-                    WHERE job.derivation_id = d.id
+                    WHERE job.derivation_id = d.execution_derivation_id
                       AND job.status = 'success'
                       AND job.builder_id IS NOT NULL
                 ) AND NOT EXISTS (
                     SELECT 1
                     FROM cache_push_jobs cpj
-                    WHERE cpj.derivation_id = d.id
+                    WHERE cpj.derivation_id = d.execution_derivation_id
                       AND cpj.status = 'completed'
                       AND cpj.cache_destination IS NOT NULL
                       AND BTRIM(cpj.cache_destination) <> ''
                 ) THEN 'CVE scan requires a completed cache push for this configuration.'
                 ELSE NULL
             END AS blocked_reason
-        FROM derivations d
+        FROM view_derivation_execution_evidence d
         JOIN commits c ON c.id = d.commit_id
         WHERE c.flake_id = $1
           AND d.derivation_type = 'nixos'
@@ -2170,7 +2421,7 @@ pub async fn resolve_flake_config_cve_scan_target(
             (
                 SELECT MAX(cpj.completed_at)
                 FROM cache_push_jobs cpj
-                WHERE cpj.derivation_id = d.id
+                WHERE cpj.derivation_id = d.execution_derivation_id
                   AND cpj.status = 'completed'
             ) DESC NULLS LAST,
             d.completed_at DESC NULLS LAST,
@@ -2194,13 +2445,19 @@ pub async fn resolve_flake_config_cve_scan_target(
 /// Resolves the preferred CVE scan target for one active system.
 ///
 /// The returned target can include `blocked_reason`; presence does not imply
-/// that the target is executable.
+/// that the target is executable. External/reference registrations select only
+/// the registered flake's branch head and effective configuration. An older
+/// cached build must not hide a missing or failed build of that revision.
+/// Managed registrations retain their existing artifact preference.
 ///
 /// # Errors
 ///
 /// Returns an error when target resolution fails.
-pub async fn resolve_system_cve_scan_target(
-    pool: &PgPool,
+pub async fn resolve_system_cve_scan_target<
+    'e,
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+>(
+    executor: E,
     system_id: Uuid,
 ) -> Result<Option<CveScanEligibleTarget>> {
     let row = sqlx::query(
@@ -2210,6 +2467,7 @@ pub async fn resolve_system_cve_scan_target(
                 s.id,
                 s.hostname,
                 s.flake_id,
+                s.management_mode,
                 COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) AS config_name
             FROM systems s
             WHERE s.id = $1
@@ -2222,17 +2480,19 @@ pub async fn resolve_system_cve_scan_target(
             CASE
                 WHEN d.store_path IS NULL OR BTRIM(d.store_path) = ''
                   OR d.derivation_path IS NULL OR BTRIM(d.derivation_path) = ''
+                  OR (ss.management_mode <> 'managed'
+                      AND status.name NOT IN ('build-complete', 'complete'))
                     THEN 'Build output is unavailable for this system configuration.'
                 WHEN EXISTS (
                     SELECT 1
                     FROM build_jobs job
-                    WHERE job.derivation_id = d.id
+                    WHERE job.derivation_id = d.execution_derivation_id
                       AND job.status = 'success'
                       AND job.builder_id IS NOT NULL
                 ) AND NOT EXISTS (
                     SELECT 1
                     FROM cache_push_jobs cpj
-                    WHERE cpj.derivation_id = d.id
+                    WHERE cpj.derivation_id = d.execution_derivation_id
                       AND cpj.status = 'completed'
                       AND cpj.cache_destination IS NOT NULL
                       AND BTRIM(cpj.cache_destination) <> ''
@@ -2241,14 +2501,21 @@ pub async fn resolve_system_cve_scan_target(
             END AS blocked_reason
         FROM selected_system ss
         JOIN commits c ON c.flake_id = ss.flake_id
-        JOIN derivations d ON d.commit_id = c.id
+        JOIN view_derivation_execution_evidence d ON d.commit_id = c.id
+        JOIN derivation_statuses status ON status.id = d.execution_status_id
         WHERE d.derivation_type = 'nixos'
           AND d.derivation_name = ss.config_name
+          AND (ss.management_mode = 'managed' OR c.id = (
+              SELECT head.commit_id FROM flake_branch_commit_snapshot head
+              JOIN flakes selected_flake ON selected_flake.id = head.flake_id
+              WHERE head.flake_id = ss.flake_id AND head.position = 0
+                AND selected_flake.snapshot_ready_at IS NOT NULL
+          ))
         ORDER BY
             (
                 SELECT MAX(cpj.completed_at)
                 FROM cache_push_jobs cpj
-                WHERE cpj.derivation_id = d.id
+                WHERE cpj.derivation_id = d.execution_derivation_id
                   AND cpj.status = 'completed'
             ) DESC NULLS LAST,
             d.completed_at DESC NULLS LAST,
@@ -2257,7 +2524,7 @@ pub async fn resolve_system_cve_scan_target(
         "#,
     )
     .bind(system_id)
-    .fetch_optional(pool)
+    .fetch_optional(executor)
     .await?;
 
     Ok(row.map(|r| CveScanEligibleTarget {
@@ -2268,47 +2535,287 @@ pub async fn resolve_system_cve_scan_target(
     }))
 }
 
-/// Selects the derivation currently *running* on each active system.
+/// Describes an authorized system scan request without conflating acceptance
+/// with scanner completion.
+pub(crate) enum SystemScanAdmission {
+    /// Conceals missing registrations and lost mutation scope.
+    NotFound,
+    /// Rejects stale client intent or a target changed while locking.
+    TargetChanged,
+    /// Reports an exact target that cannot be scanned.
+    Ineligible(String),
+    /// Records terminal executor unavailability instead of permanent pending work.
+    Unavailable {
+        /// Identifies the retained failure lifecycle.
+        scan_id: Uuid,
+        /// Identifies the exact requested artifact.
+        derivation_id: i32,
+        /// Identifies the selected configuration carrier before reuse resolution.
+        configuration_derivation_id: i32,
+    },
+    /// Contains committed work and, for local managed execution, its token.
+    Admitted {
+        /// Identifies the committed scan lifecycle.
+        scan_id: Uuid,
+        /// Identifies the selected configuration artifact.
+        target: CveScanEligibleTarget,
+        /// Identifies the requested configuration, independently of scan source.
+        configuration_derivation_id: i32,
+        /// Starts only after this transaction has released every scope lock.
+        immediate: Option<CveScanExecutionClaim>,
+    },
+}
+
+/// Authorizes and admits one system scan in a single writer transaction.
+///
+/// Infrastructure derivation keys precede canonical CVE keys, environment rows,
+/// POA&M sentinels and system rows. Membership and role rows stay locked through
+/// commit. The preliminary target/scope is rechecked after locking; changes
+/// reject the request before any scan write. All admission helpers reborrow
+/// this transaction, so no inner pool transaction waits on an outer scope lock.
+///
+/// # Errors
+/// Returns database, admission, or audit persistence errors. Authorization loss
+/// returns `NotFound` and writes no scan.
+pub(crate) async fn admit_system_cve_scan(
+    pool: &PgPool,
+    actor: Uuid,
+    system_id: Uuid,
+    expected: Option<i32>,
+    local_available: bool,
+    scanner_version: Option<String>,
+    request_origin: Option<String>,
+) -> Result<SystemScanAdmission> {
+    use crate::services::composite_enforcement::{
+        lock_poam_derivations_for_store_path_tx, lock_poam_findings_for_derivation_tx,
+        lock_poam_system_key_tx,
+    };
+    let mut tx = pool.begin().await?;
+    let preliminary = resolve_system_cve_scan_target(&mut *tx, system_id).await?;
+    let preliminary_environment: Option<Option<Uuid>> =
+        sqlx::query_scalar("SELECT environment_id FROM systems WHERE id=$1")
+            .bind(system_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some(preliminary_environment) = preliminary_environment else {
+        return Ok(SystemScanAdmission::NotFound);
+    };
+    // CONCURRENCY: Alias producers and background scan admission take physical
+    // build keys before POA&M keys. Take the validated target's key before any
+    // metadata/system locks, including when its output becomes ready during
+    // this request. Revalidation below still owns scope and exact client intent.
+    if let Some(target) = preliminary.as_ref() {
+        crate::queries::build_jobs::lock_build_derivation(&mut tx, target.derivation_id).await?;
+    }
+    if let Some(target) = preliminary
+        .as_ref()
+        .filter(|target| target.blocked_reason.is_none())
+    {
+        let output: Option<String> = sqlx::query_scalar(
+            "SELECT store_path FROM view_derivation_execution_evidence WHERE id=$1",
+        )
+        .bind(target.derivation_id)
+        .fetch_one(&mut *tx)
+        .await?;
+        lock_poam_derivations_for_store_path_tx(&mut tx, output.as_deref()).await?;
+        // Canonical keys that the scan writer will reacquire must precede the
+        // metadata writer's environment/sentinel locks. Infrastructure locks
+        // stabilize exact scan observations and matching runtime publication.
+        sqlx::query(r#"SELECT lock_poam_cve_key(key.cve_id) FROM (
+            SELECT canonical_cve_id AS cve_id FROM cve_scan_vulnerability_observations observation
+               JOIN cve_scans scan ON scan.id=observation.scan_id WHERE scan.derivation_id=$1
+                 OR derivations_share_evidence_scope($1,scan.derivation_id)
+            UNION
+            SELECT canonical_cve_id FROM poam_cve_findings finding
+              WHERE finding.system_id=$2 OR finding.system_id IN (
+                SELECT system.id FROM systems system JOIN LATERAL (
+                  SELECT state.store_path FROM system_states state
+                  WHERE state.hostname=system.hostname AND NULLIF(BTRIM(state.store_path),'') IS NOT NULL
+                  ORDER BY state.timestamp DESC,state.id DESC LIMIT 1
+                ) current_state ON current_state.store_path=$3)
+            ORDER BY cve_id) key"#)
+            .bind(target.derivation_id).bind(system_id).bind(output)
+            .execute(&mut *tx).await?;
+    }
+    if let Some(environment) = preliminary_environment {
+        sqlx::query("SELECT id FROM environments WHERE id=$1 FOR SHARE")
+            .bind(environment)
+            .execute(&mut *tx)
+            .await?;
+    }
+    if let Some(target) = preliminary
+        .as_ref()
+        .filter(|target| target.blocked_reason.is_none())
+    {
+        lock_poam_findings_for_derivation_tx(&mut tx, target.derivation_id, &[]).await?;
+    }
+    lock_poam_system_key_tx(&mut tx, system_id).await?;
+    let registration: Option<(Option<Uuid>, String)> =
+        sqlx::query_as("SELECT environment_id,management_mode FROM systems WHERE id=$1 FOR SHARE")
+            .bind(system_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+    let Some((environment, mode)) = registration else {
+        return Ok(SystemScanAdmission::NotFound);
+    };
+    if crate::queries::systems::authorize_system_write_tx(&mut tx, actor, &[environment])
+        .await
+        .is_err()
+    {
+        return Ok(SystemScanAdmission::NotFound);
+    }
+    if environment != preliminary_environment {
+        return Ok(SystemScanAdmission::TargetChanged);
+    }
+    let Some(mut target) = resolve_system_cve_scan_target(&mut *tx, system_id).await? else {
+        return Ok(SystemScanAdmission::Ineligible(
+            "No build target found for this system configuration.".into(),
+        ));
+    };
+    if preliminary.as_ref().map(|t| t.derivation_id) != Some(target.derivation_id)
+        || expected.is_some_and(|id| id != target.derivation_id)
+    {
+        return Ok(SystemScanAdmission::TargetChanged);
+    }
+    if let Some(reason) = &target.blocked_reason {
+        return Ok(SystemScanAdmission::Ineligible(reason.clone()));
+    }
+    // Exact client intent was checked against B under the subject locks above.
+    // Admit the existing scanner against its real, visible execution source A.
+    // Lease affinity, cache verification, and scanner/session fencing stay on A.
+    let configuration_derivation_id = target.derivation_id;
+    target.derivation_id = sqlx::query_scalar("SELECT derivation_execution_source($1)")
+        .bind(configuration_derivation_id)
+        .fetch_one(&mut *tx)
+        .await?;
+    if target.derivation_id != configuration_derivation_id {
+        let eligible: bool = sqlx::query_scalar(
+            "SELECT derivation_publication_eligible($1,store_path,$3)
+             FROM derivations WHERE id=$1 AND derivations_share_evidence_scope($2,id)",
+        )
+        .bind(target.derivation_id)
+        .bind(configuration_derivation_id)
+        .bind(environment)
+        .fetch_optional(&mut *tx)
+        .await?
+        .unwrap_or(false);
+        if !eligible {
+            return Ok(SystemScanAdmission::Ineligible(
+                "Reused artifact has no completed publication eligible for this environment".into(),
+            ));
+        }
+    }
+    let (scan_id, immediate) = if mode == "managed" && local_available {
+        match create_cve_scan_with_trigger_tx(
+            &mut tx,
+            target.derivation_id,
+            "vulnix",
+            scanner_version,
+            ScanTrigger::Manual,
+        )
+        .await?
+        {
+            CreateCveScanOutcome::Created(claim) => (claim.scan_id, Some(claim)),
+            CreateCveScanOutcome::Existing(id) => (id, None),
+        }
+    } else {
+        let Some(outcome) = enqueue_cve_scan_tx(
+            &mut tx,
+            target.derivation_id,
+            "vulnix",
+            scanner_version,
+            ScanTrigger::Manual,
+            local_available,
+        )
+        .await?
+        else {
+            return Ok(SystemScanAdmission::Ineligible(
+                "The selected configuration has no built scan target".into(),
+            ));
+        };
+        (outcome.scan_id, None)
+    };
+    sqlx::query("INSERT INTO admin_audit_events(actor_user_id,actor_identifier,action,target,metadata,request_origin) VALUES($1,COALESCE((SELECT email FROM users WHERE id=$1),$1::text),'cve_scan_requested',$2,$3,$4)")
+        .bind(actor).bind(format!("{} ({system_id})", target.hostname.as_deref().unwrap_or(&target.config_name)))
+        .bind(serde_json::json!({"operation":"cve_scan","scan_id":scan_id,"derivation_id":target.derivation_id,"configuration_derivation_id":configuration_derivation_id,"config_name":target.config_name}))
+        .bind(request_origin)
+        .execute(&mut *tx).await?;
+    let unavailable: bool = sqlx::query_scalar(
+        "SELECT COALESCE(status='failed' AND scan_metadata->>'terminal_reason'='executor_unavailable',false) FROM cve_scans WHERE id=$1",
+    ).bind(scan_id).fetch_one(&mut *tx).await?;
+    tx.commit().await?;
+    if unavailable {
+        return Ok(SystemScanAdmission::Unavailable {
+            scan_id,
+            derivation_id: target.derivation_id,
+            configuration_derivation_id,
+        });
+    }
+    Ok(SystemScanAdmission::Admitted {
+        scan_id,
+        target,
+        configuration_derivation_id,
+        immediate,
+    })
+}
+
+/// Selects exact fleet scan artifacts according to registration mode.
 ///
 /// "Deployed" here means the same thing it means in
 /// [`get_targets_needing_cve_rescan`]: the derivation's `store_path` equals the
 /// latest `system_states.store_path` reported for that hostname. This
-/// deliberately excludes newer builds that have not been activated and older
-/// historical generations, so a fleet rescan reports on what is actually
-/// running rather than on what would ship next.
+/// deliberately excludes newer builds that have not been activated for managed
+/// registrations. External/reference registrations instead select a built
+/// artifact at their registered branch head. No observation is manufactured,
+/// and no older successful build substitutes for that selected revision.
 ///
 /// Systems sharing a derivation are collapsed to a single row so a fleet
 /// request cannot enqueue duplicate work for the same store path.
+/// Configuration selection takes provenance precedence when the artifact is
+/// also observed on a managed registration. It still grants no Current claim.
 const FLEET_TARGET_SELECT: &str = r#"
-    SELECT DISTINCT ON (d.id)
-        d.id AS derivation_id,
+    SELECT DISTINCT ON (d.execution_derivation_id)
+        d.execution_derivation_id AS derivation_id,
         d.derivation_name AS config_name,
-        s.hostname
+        s.hostname,
+        CASE WHEN s.management_mode = 'managed' THEN 'observed_runtime'
+             ELSE 'configuration_artifact' END AS selection_basis
     FROM systems s
     JOIN commits c ON c.flake_id = s.flake_id
-    JOIN derivations d ON d.commit_id = c.id
+    JOIN view_derivation_execution_evidence d ON d.commit_id = c.id
     WHERE s.is_active = TRUE
       AND d.derivation_type = 'nixos'
       AND d.store_path IS NOT NULL
       AND BTRIM(d.store_path) <> ''
       AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname)
           = d.derivation_name
-      AND d.store_path = (
+      AND ((s.management_mode = 'managed' AND d.store_path = (
           SELECT ss.store_path
-          FROM system_states ss
+          FROM view_agent_current_system_states ss
           WHERE ss.hostname = s.hostname
             AND ss.store_path IS NOT NULL
             AND BTRIM(ss.store_path) <> ''
-          ORDER BY ss.timestamp DESC
+          ORDER BY ss.timestamp DESC, ss.id DESC
           LIMIT 1
-      )
-    ORDER BY d.id, s.hostname
+      )) OR (s.management_mode IN ('external', 'reference')
+        AND d.derivation_path IS NOT NULL AND BTRIM(d.derivation_path) <> ''
+        AND EXISTS (SELECT 1 FROM derivation_statuses status
+                    WHERE status.id = d.execution_status_id
+                      AND status.name IN ('build-complete', 'complete'))
+        AND EXISTS (
+            SELECT 1 FROM flake_branch_commit_snapshot head
+            JOIN flakes selected_flake ON selected_flake.id = head.flake_id
+            WHERE head.flake_id = s.flake_id AND head.position = 0
+              AND head.commit_id = d.commit_id
+              AND selected_flake.snapshot_ready_at IS NOT NULL
+        )))
+    ORDER BY d.execution_derivation_id, (s.management_mode = 'managed'), s.hostname
 "#;
 
 /// Outcome of an atomic fleet enqueue.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FleetEnqueueOutcome {
-    /// Distinct derivations currently running across active systems.
+    /// Distinct runtime or selected configuration artifacts in the active fleet.
     pub eligible: i64,
     /// Rows newly inserted as `pending` by this request.
     pub created: i64,
@@ -2321,7 +2828,7 @@ impl FleetEnqueueOutcome {
     }
 }
 
-/// Resolve the distinct derivations currently running on active systems.
+/// Resolves distinct mode-aware exact artifacts across active registrations.
 ///
 /// # Errors
 ///
@@ -2340,8 +2847,7 @@ pub async fn get_fleet_cve_scan_targets(pool: &PgPool) -> Result<Vec<CveScanElig
         .collect())
 }
 
-/// Atomically enqueue `pending` CVE scans for every currently running
-/// derivation across the active fleet.
+/// Atomically enqueues CVE scans for the fleet's mode-aware exact artifacts.
 ///
 /// This performs the whole operation in a single statement so the request has
 /// no partial-failure window: either the enqueue succeeds and the returned
@@ -2373,7 +2879,7 @@ pub async fn enqueue_fleet_cve_scans(
                 id, derivation_id, scanner_name, scanner_version,
                 status, total_packages, total_vulnerabilities,
                 critical_count, high_count, medium_count, low_count,
-                attempts, source_trigger
+                attempts, source_trigger, scan_metadata
             )
             SELECT
                 gen_random_uuid(), t.derivation_id, $1, $2,
@@ -2398,7 +2904,11 @@ pub async fn enqueue_fleet_cve_scans(
                     ELSE 'awaiting_closure'
                 END, 0, 0,
                 0, 0, 0, 0,
-                0, 'fleet'
+                0, 'fleet', jsonb_build_object(
+                    'evidence_scope', 'exact_derivation',
+                    'selection_basis', t.selection_basis,
+                    'selected_commit_id', derivation.commit_id
+                )
             FROM targets t
             JOIN derivations derivation ON derivation.id = t.derivation_id
             ON CONFLICT (derivation_id) WHERE status IN (
@@ -3433,9 +3943,10 @@ async fn recover_stale_scans_with_options(
 /// The lifecycle class (deployed / recent / archived) is derived from actual
 /// system and build state, **not** from scan age:
 ///
-/// - **deployed** — the derivation's store path matches the latest state of
-///   an active system with the same flake and configuration. Uses
-///   `deployed_interval`.
+/// - **deployed** — a managed runtime artifact, or the selected built branch
+///   revision of an external/reference registration. Both use the existing
+///   `deployed_interval` cadence. The lifecycle label is scheduling policy,
+///   never proof that a nonmanaged registration runs that output.
 /// - **recent** — the derivation was built within the last 30 days but is not
 ///   currently deployed.  Uses `recent_interval`.
 /// - **archived** — built more than 30 days ago and not deployed.  Uses
@@ -3453,15 +3964,18 @@ async fn recover_stale_scans_with_options(
 /// # Errors
 ///
 /// Returns an error when the policy or target query fails.
-pub async fn get_targets_needing_cve_rescan(
-    pool: &PgPool,
+pub async fn get_targets_needing_cve_rescan<
+    'e,
+    E: sqlx::Executor<'e, Database = sqlx::Postgres>,
+>(
+    executor: E,
     limit: Option<i64>,
 ) -> anyhow::Result<Vec<Derivation>> {
     let limit = limit.unwrap_or(10);
 
-    let rows = sqlx::query(
+    let sql = format!(
         r#"
-        WITH policy AS (
+        WITH fleet_targets AS ({FLEET_TARGET_SELECT}), policy AS (
             SELECT
                 deployed_interval,
                 recent_interval,
@@ -3471,34 +3985,27 @@ pub async fn get_targets_needing_cve_rescan(
             FROM scan_schedule_policy
             WHERE id = 1
         ),
-        -- Lifecycle class derived from system deployment + build freshness,
-        -- NOT from scan age.
-        --
-        -- "deployed" uses an EXISTS check against active systems, matching on:
-        --   - flake (via commits → systems.flake_id)
-        --   - effective configuration name (system_configuration_name or hostname)
-        --   - the derivation's store path matches the latest system_states
-        --     store_path for that hostname (ensures only the currently deployed
-        --     generation is classified as deployed, not every historical build).
+        -- Share exact mode-aware selection with fleet admission. This cadence
+        -- classification grants no Current evidence or mutation authority.
         lifecycle AS (
             SELECT
                 d.id AS derivation_id,
                 CASE
                     WHEN EXISTS (
-                        SELECT 1
-                        FROM systems s
+                        SELECT 1 FROM systems s
                         JOIN commits c ON c.flake_id = s.flake_id
-                        WHERE c.id = d.commit_id
-                          AND s.is_active = TRUE
+                        WHERE c.id = d.commit_id AND s.is_active
+                          AND s.management_mode = 'managed'
                           AND COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) = d.derivation_name
-                          AND d.store_path IS NOT NULL
                           AND d.store_path = (
-                              SELECT ss.store_path
-                               FROM system_states ss
-                               WHERE ss.hostname = s.hostname
-                               ORDER BY ss.timestamp DESC, ss.id DESC
-                               LIMIT 1
+                              SELECT state.store_path FROM view_agent_current_system_states state
+                              WHERE state.hostname = s.hostname
+                              ORDER BY state.timestamp DESC, state.id DESC LIMIT 1
                           )
+                    ) OR EXISTS (
+                        SELECT 1 FROM fleet_targets target
+                        WHERE target.derivation_id = d.id
+                          AND target.selection_basis = 'configuration_artifact'
                     ) THEN 'deployed'
                     WHEN d.completed_at >= NOW() - INTERVAL '30 days' THEN 'recent'
                     ELSE 'archived'
@@ -3627,10 +4134,8 @@ pub async fn get_targets_needing_cve_rescan(
         ORDER BY lcs.completed_at ASC NULLS FIRST
         LIMIT $1
         "#,
-    )
-    .bind(limit)
-    .fetch_all(pool)
-    .await?;
+    );
+    let rows = sqlx::query(&sql).bind(limit).fetch_all(executor).await?;
 
     let derivations = rows
         .into_iter()
@@ -3677,6 +4182,134 @@ mod tests {
     use crate::queries::flakes::insert_flake;
     use futures::FutureExt;
     use serial_test::serial;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn scoped_scan_admission_serializes_composite_metadata_race(pool: PgPool) {
+        use crate::services::composite_enforcement::{
+            lock_poam_derivations_for_store_path_tx, lock_poam_system_key_tx,
+        };
+        let fixture = setup_fleet_fixture(&pool).await;
+        let (system, environment): (Uuid, Uuid) =
+            sqlx::query_as("SELECT id,environment_id FROM systems WHERE hostname=$1")
+                .bind(&fixture.hosts[0])
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        sqlx::query("UPDATE systems SET management_mode='reference',public_key=NULL WHERE id=$1")
+            .bind(system)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE flakes SET snapshot_ready_at=NOW() WHERE id=$1")
+            .bind(fixture.flake_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO flake_branch_commit_snapshot(flake_id,commit_id,position) SELECT $1,commit_id,0 FROM derivations WHERE id=$2")
+            .bind(fixture.flake_id).bind(fixture.newer_id).execute(&pool).await.unwrap();
+        let output: String = sqlx::query_scalar("UPDATE derivations SET expected_store_path=store_path WHERE id=$1 RETURNING store_path")
+            .bind(fixture.newer_id).fetch_one(&pool).await.unwrap();
+        let actor: Uuid = sqlx::query_scalar("INSERT INTO users(username,first_name,last_name,email,user_type) VALUES('scan-race','Scan','Operator','scan-race@example.invalid','human') RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO user_role_assignments(user_id,role) VALUES($1,'operator')")
+            .bind(actor)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO user_environment_memberships(user_id,environment_id) VALUES($1,$2)",
+        )
+        .bind(actor)
+        .bind(environment)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let config = serde_json::json!({"schema_version":1,"mode":"all","rules":[{"id":Uuid::new_v4(),"kind":"eval_passed","config":{}}]});
+        let policy: Uuid = sqlx::query_scalar("INSERT INTO deployment_policies(name,policy_type,config) VALUES('scan race composite','composite',$1) RETURNING id")
+            .bind(&config).fetch_one(&pool).await.unwrap();
+        let version: Uuid = sqlx::query_scalar("INSERT INTO deployment_policy_versions(policy_id,version,name,policy_type,config,semantic_digest) VALUES($1,'1','scan race composite','composite',$2,'scan-race') RETURNING id")
+            .bind(policy).bind(&config).fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO composite_policy_derivation_targets(derivation_id,target_store_path) VALUES($1,$2)")
+            .bind(fixture.newer_id).bind(&output).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO composite_policy_assessments(system_id,derivation_id,target_store_path,policy_lineage_id,policy_version_id,effective_set_digest,effective_config_digest,effective_config) VALUES($1,$2,$3,$4,$5,'scan-race','scan-race',$6)")
+            .bind(system).bind(fixture.newer_id).bind(&output).bind(policy).bind(version).bind(config).execute(&pool).await.unwrap();
+
+        // Gate the first infrastructure lock. The scan must wait here BEFORE
+        // acquiring any scope row. In the split-transaction implementation the
+        // outer shared system row instead prevents the writer below progressing.
+        let mut gate = pool.begin().await.unwrap();
+        let gate_pid: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *gate)
+            .await
+            .unwrap();
+        lock_poam_derivations_for_store_path_tx(&mut gate, Some(&output))
+            .await
+            .unwrap();
+        let request_pool = pool.clone();
+        let request = tokio::spawn(async move {
+            admit_system_cve_scan(
+                &request_pool,
+                actor,
+                system,
+                Some(fixture.newer_id),
+                true,
+                None,
+                None,
+            )
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE $1=ANY(pg_blocking_pids(pid)))")
+                    .bind(gate_pid).fetch_one(&pool).await.unwrap();
+                if waiting { break; }
+                tokio::task::yield_now().await;
+            }
+        }).await.expect("scan must reach the controlled infrastructure lock");
+        let mut writer = pool.begin().await.unwrap();
+        sqlx::query("SET LOCAL lock_timeout='2s'")
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        sqlx::query("SELECT id FROM environments WHERE id=$1 FOR UPDATE")
+            .bind(environment)
+            .execute(&mut *writer)
+            .await
+            .unwrap();
+        lock_poam_system_key_tx(&mut writer, system).await.unwrap();
+        sqlx::query("UPDATE systems SET description='metadata race committed' WHERE id=$1")
+            .bind(system)
+            .execute(&mut *writer)
+            .await
+            .expect("scope row must not be held while scan waits for its writer lock");
+        writer.commit().await.unwrap();
+        gate.commit().await.unwrap();
+        let admission = tokio::time::timeout(std::time::Duration::from_secs(5), request)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        assert!(matches!(admission, SystemScanAdmission::Admitted { .. }));
+        // Role/membership revocation is checked again under the same admission
+        // transaction, even if the handler authenticated this actor earlier.
+        sqlx::query("DELETE FROM user_environment_memberships WHERE user_id=$1")
+            .bind(actor)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(matches!(
+            admit_system_cve_scan(&pool, actor, system, None, true, None, None)
+                .await
+                .unwrap(),
+            SystemScanAdmission::NotFound
+        ));
+        let scans: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM cve_scans")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(scans, 1);
+    }
 
     #[test]
     fn exact_cve_identity_is_trimmed_and_ascii_uppercase() {
@@ -4579,6 +5212,134 @@ mod tests {
         );
 
         fixture.cleanup(&pool).await;
+    }
+
+    #[sqlx::test]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+    async fn configuration_fleet_without_heartbeat_selects_head_once_and_preserves_failures(
+        pool: PgPool,
+    ) {
+        let fixture = setup_fleet_fixture(&pool).await;
+        let managed = get_fleet_cve_scan_targets(&pool).await.unwrap();
+        assert_eq!(managed.len(), 1);
+        assert_eq!(managed[0].derivation_id, fixture.running_id);
+
+        sqlx::query("UPDATE flakes SET snapshot_ready_at=now() WHERE id=$1")
+            .bind(fixture.flake_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO flake_branch_commit_snapshot(flake_id,commit_id,position) SELECT $1,commit_id,0 FROM derivations WHERE id=$2")
+            .bind(fixture.flake_id)
+            .bind(fixture.newer_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        for (hostname, mode) in fixture.hosts[..2].iter().zip(["external", "reference"]) {
+            sqlx::query("UPDATE systems SET management_mode=$2,public_key=NULL WHERE hostname=$1")
+                .bind(hostname)
+                .bind(mode)
+                .execute(&pool)
+                .await
+                .unwrap();
+            sqlx::query("DELETE FROM system_states WHERE hostname=$1")
+                .bind(hostname)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let id: Uuid = sqlx::query_scalar("SELECT id FROM systems WHERE hostname=$1")
+                .bind(hostname)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+            let target = resolve_system_cve_scan_target(&pool, id)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(target.derivation_id, fixture.newer_id);
+            assert!(target.blocked_reason.is_none());
+        }
+        let targets = get_fleet_cve_scan_targets(&pool).await.unwrap();
+        assert_eq!(targets.len(), 1, "two registrations share one artifact");
+        assert_eq!(targets[0].derivation_id, fixture.newer_id);
+
+        let first = enqueue_fleet_cve_scans(&pool, "vulnix", None)
+            .await
+            .unwrap();
+        assert_eq!(
+            first,
+            FleetEnqueueOutcome {
+                eligible: 1,
+                created: 1
+            }
+        );
+        let second = enqueue_fleet_cve_scans(&pool, "vulnix", None)
+            .await
+            .unwrap();
+        assert_eq!(second.created, 0);
+        let metadata: serde_json::Value =
+            sqlx::query_scalar("SELECT scan_metadata FROM cve_scans WHERE derivation_id=$1")
+                .bind(fixture.newer_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(metadata["evidence_scope"], "exact_derivation");
+        assert_eq!(metadata["selection_basis"], "configuration_artifact");
+
+        // A failed attempt remains a failure, not completed zero-finding evidence.
+        sqlx::query("UPDATE cve_scans SET status='failed',completed_at=now(),scan_metadata=scan_metadata || '{\"error\":\"scanner unavailable\"}'::jsonb WHERE derivation_id=$1")
+            .bind(fixture.newer_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO build_jobs(derivation_id,status,completed_at,attempt_number) VALUES($1,'success',now()-interval '10 days',1)")
+            .bind(fixture.newer_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "UPDATE cve_scans SET completed_at=now()-interval '3 days' WHERE derivation_id=$1",
+        )
+        .bind(fixture.newer_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        sqlx::query("UPDATE scan_schedule_policy SET deployed_interval='1 day',recent_interval='never',archived_enabled=false WHERE id=1")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let periodic = get_targets_needing_cve_rescan(&pool, None).await.unwrap();
+        assert_eq!(periodic.len(), 1);
+        assert_eq!(periodic[0].id, fixture.newer_id);
+
+        // The selected revision's build failure must not select the older build.
+        sqlx::query("UPDATE derivations SET store_path=NULL WHERE id=$1")
+            .bind(fixture.newer_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(get_fleet_cve_scan_targets(&pool).await.unwrap().is_empty());
+        let id: Uuid = sqlx::query_scalar("SELECT id FROM systems WHERE hostname=$1")
+            .bind(&fixture.hosts[0])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let unavailable = resolve_system_cve_scan_target(&pool, id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unavailable.derivation_id, fixture.newer_id);
+        assert_eq!(
+            unavailable.blocked_reason.as_deref(),
+            Some("Build output is unavailable for this system configuration.")
+        );
+        let failed: String =
+            sqlx::query_scalar("SELECT status FROM cve_scans WHERE derivation_id=$1")
+                .bind(fixture.newer_id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(failed, "failed", "selection changes retain attempt history");
     }
 
     /// The fleet enqueue must be atomic and must not double-claim derivations

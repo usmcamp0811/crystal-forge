@@ -43,11 +43,11 @@ use crate::queries::cve_scans::create_cve_scan;
 use crate::queries::cve_scans::{
     CreateCveScanOutcome, CveScanExecutionClaim, ScanTrigger,
     acknowledge_revoked_cve_scan_execution, acquire_execution_lock, claim_queued_cve_scans,
-    create_cve_scan_with_trigger, get_targets_needing_cve_rescan, get_targets_needing_cve_scan,
-    heartbeat_cve_scan_execution, mark_cve_scan_failed_by_id_for_execution,
-    mark_cve_scan_failed_for_execution, mark_cve_scan_failed_with_diagnostics_for_execution,
-    promote_waiting_cve_scans, recover_stale_scans, release_execution_lock_or_close,
-    requeue_cve_scan_execution, save_scan_results_with_diagnostics_for_execution,
+    create_cve_scan_with_trigger, get_targets_needing_cve_scan, heartbeat_cve_scan_execution,
+    mark_cve_scan_failed_by_id_for_execution, mark_cve_scan_failed_for_execution,
+    mark_cve_scan_failed_with_diagnostics_for_execution, promote_waiting_cve_scans,
+    recover_stale_scans, release_execution_lock_or_close, requeue_cve_scan_execution,
+    save_scan_results_with_diagnostics_for_execution,
 };
 use crate::queries::derivations::get_derivation_by_id;
 use crate::queries::scanning::get_scan_schedule_policy;
@@ -319,6 +319,28 @@ pub async fn run_cve_scan_loop(
         // Retry vulnix availability every cycle so the loop survives a temporary
         // installation gap without requiring a server restart.
         if !VulnixRunner::check_vulnix_available().await {
+            // Coordination does not require a local executor. Actual successful
+            // producing jobs supply remote affinity; unavailable executors leave
+            // explicit terminal evidence instead of an unconsumable pending row.
+            let enabled_guard = enabled_rx.read().await;
+            if *enabled_guard {
+                if let Err(e) =
+                    crate::queries::cve_scans::reconcile_scan_executors(&pool, MAX_SCANS_PER_CYCLE)
+                        .await
+                {
+                    error!("Failed to reconcile unavailable CVE executors: {e}");
+                }
+                if let Err(e) = crate::queries::cve_scans::enqueue_due_cve_rescans(
+                    &pool,
+                    MAX_SCANS_PER_CYCLE,
+                    false,
+                )
+                .await
+                {
+                    error!("Failed to admit periodic CVE scans: {e}");
+                }
+            }
+            drop(enabled_guard);
             warn!("⚠️ vulnix is not available — will retry on next poll interval");
             set_cve_status_idle().await;
             *job.state.next_run_at.write().await = Some(
@@ -422,14 +444,14 @@ const MAX_SCANS_PER_CYCLE: i64 = 1;
 /// Runs one bounded stale-recovery pass and three scan phases.
 ///
 /// Stale recovery first processes bounded candidate and finalization batches.
-/// Phase 0 then processes at most [`MAX_SCANS_PER_CYCLE`] operator-queued scans
-/// before policy loading. Explicit requests therefore run independently of
+/// Phase 0 processes at most [`MAX_SCANS_PER_CYCLE`] queued scans even when
+/// cadence admission fails. Explicit requests therefore run independently of
 /// `scan_schedule_policy` availability and the `on_build` setting.
 ///
-/// Phase 1 processes at most [`MAX_SCANS_PER_CYCLE`] post-build targets; only
-/// admitted obligations can retry after `on_build` is disabled. Phase 2 processes at most
-/// [`MAX_SCANS_PER_CYCLE`] periodic rescan targets. No phase loops until its
-/// backlog is empty; later poll cycles continue each backlog.
+/// Cadence admission first adds at most [`MAX_SCANS_PER_CYCLE`] due targets to
+/// the shared queue. Phase 1 processes at most that many post-build targets;
+/// only admitted obligations can retry after `on_build` is disabled. No phase
+/// loops until its backlog is empty; later poll cycles continue each backlog.
 async fn scan_cycle(
     pool: &PgPool,
     vulnix_config: &crate::config::VulnixConfig,
@@ -455,6 +477,17 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
     enabled_rx: &tokio::sync::RwLock<bool>,
 ) -> Result<()> {
     set_cve_status_working("finding scan targets").await;
+
+    let enabled_guard = enabled_rx.read().await;
+    if *enabled_guard {
+        if let Err(e) =
+            crate::queries::cve_scans::enqueue_due_cve_rescans(pool, MAX_SCANS_PER_CYCLE, true)
+                .await
+        {
+            error!("Failed to admit periodic CVE scans: {e}");
+        }
+    }
+    drop(enabled_guard);
 
     // Derive stale-recovery threshold from both the vulnix timeout and the
     // worst-case single-cache materialization timeout, plus a small margin.
@@ -647,44 +680,8 @@ async fn scan_cycle_with_runner<R: CveScanRunner + Sync>(
         return Ok(());
     }
 
-    // --- Phase 2: periodic rescan (stale completed scans, bounded) ---
-    match get_targets_needing_cve_rescan(pool, Some(MAX_SCANS_PER_CYCLE)).await {
-        Ok(targets) if !targets.is_empty() => {
-            info!(
-                "🔄 [rescan] Re-scanning {} stale derivation(s)",
-                targets.len()
-            );
-            for derivation in &targets {
-                if !*enabled_rx.read().await {
-                    info!("🛑 CVE scan loop disabled — stopping rescan phase");
-                    return Ok(());
-                }
-                info!(
-                    "🔄 [rescan] Re-scanning stale derivation: {}",
-                    derivation.derivation_name
-                );
-                if let Err(e) = scan_one(
-                    pool,
-                    vulnix_runner,
-                    vulnix_version.clone(),
-                    derivation,
-                    enabled_rx,
-                    ScanTrigger::Periodic,
-                )
-                .await
-                {
-                    error!(
-                        "❌ [rescan] Scan failed for {}: {e}",
-                        derivation.derivation_name
-                    );
-                }
-            }
-        }
-        Ok(_) => {
-            debug!("🔍 No derivations need CVE rescanning");
-        }
-        Err(e) => error!("❌ Failed to get rescan targets: {e}"),
-    }
+    // Periodic work was admitted before Phase 0. The same durable queue serves
+    // local execution and producing-session remote claims.
 
     Ok(())
 }

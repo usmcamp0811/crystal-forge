@@ -715,6 +715,7 @@ pub async fn claim_remote_cve_scan(
           )
           AND affinity.builder_id = $1
           AND affinity.builder_session_id = $3
+          AND affinity.derivation_id = scan.derivation_id
           AND affinity.status = 'success'
           AND ($2::uuid IS NULL OR scan.completed_build_job_id = $2)
         ORDER BY
@@ -737,12 +738,13 @@ pub async fn claim_remote_cve_scan(
     // build_jobs::lock_build_derivation. Do not wait for it while holding the
     // builder row, since admission can hold it while waiting for that row.
     if source_trigger == "post_build" {
-        let build_uncontended: bool =
-            sqlx::query_scalar("SELECT pg_try_advisory_xact_lock($1::integer, $2::integer)")
-                .bind(crate::queries::build_jobs::BUILD_DERIVATION_LOCK_NAMESPACE)
-                .bind(derivation_id)
-                .fetch_one(&mut *tx)
-                .await?;
+        let build_uncontended: bool = sqlx::query_scalar(
+            "SELECT pg_try_advisory_xact_lock($1::integer, derivation_physical_id($2::integer))",
+        )
+        .bind(crate::queries::build_jobs::BUILD_DERIVATION_LOCK_NAMESPACE)
+        .bind(derivation_id)
+        .fetch_one(&mut *tx)
+        .await?;
         if !build_uncontended {
             tx.rollback().await?;
             return Ok(None);
@@ -1688,6 +1690,247 @@ mod tests {
     };
     use crate::queries::derivations::insert_derivation;
     use cf_protocol::builder::CvePackageEvidence;
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn manual_and_periodic_scan_affinity_preserves_session_and_environment_guards(
+        pool: PgPool,
+    ) {
+        use crate::queries::cve_scans::{ScanTrigger, enqueue_cve_scan_tx};
+        let dev: Uuid = sqlx::query_scalar("SELECT id FROM environments WHERE name='dev'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let prod: Uuid = sqlx::query_scalar("SELECT id FROM environments WHERE name='prod'")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let (builder, _) = create_builder(
+            &pool,
+            &CreateBuilderRequest {
+                name: "exact-scan-producer".into(),
+                host: None,
+                arch: "x86_64-linux".into(),
+                public_key: None,
+                max_cpu_cores: None,
+                max_memory_mb: None,
+                max_concurrent_jobs: Some(1),
+                enabled: Some(true),
+                environment_ids: vec![dev],
+            },
+        )
+        .await
+        .unwrap();
+        let session = Uuid::new_v4();
+        establish_builder_session(&pool, &builder.id, &session, 60, "exact scan test")
+            .await
+            .unwrap();
+        record_session_cve_capabilities(
+            &pool,
+            builder.id,
+            session,
+            cf_protocol::builder::BuilderCapabilities::current_cve_scanner("vulnix test".into()),
+        )
+        .await
+        .unwrap();
+        let d = insert_derivation(&pool, None, "exact-scan-artifact", "nixos")
+            .await
+            .unwrap();
+        let output = format!("/nix/store/{}-exact-scan", "a".repeat(32));
+        sqlx::query("UPDATE derivations SET derivation_path=$2,store_path=$3,status_id=10,completed_at=NOW() WHERE id=$1")
+            .bind(d.id).bind(format!("{output}.drv")).bind(&output).execute(&pool).await.unwrap();
+        let job: Uuid = sqlx::query_scalar("INSERT INTO build_jobs(derivation_id,environment_id,builder_id,builder_session_id,status,completed_at) VALUES($1,$2,$3,$4,'success',NOW()) RETURNING id")
+            .bind(d.id).bind(dev).bind(builder.id).bind(session).fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO cache_push_jobs(derivation_id,store_path,status,completed_at,cache_destination) VALUES($1,$2,'completed',NOW(),'test-cache')")
+            .bind(d.id).bind(&output).execute(&pool).await.unwrap();
+        // A pending manual lifecycle written before producing-job affinity was
+        // supported must acquire its real producer without changing identity.
+        let original_manual: Uuid = sqlx::query_scalar("INSERT INTO cve_scans(derivation_id,scanner_name,status,source_trigger,scan_metadata) VALUES($1,'vulnix','pending','manual','{\"evidence_scope\":\"exact_derivation\"}') RETURNING id")
+            .bind(d.id).fetch_one(&pool).await.unwrap();
+        assert_eq!(
+            crate::queries::cve_scans::reconcile_scan_executors(&pool, 10)
+                .await
+                .unwrap(),
+            0
+        );
+        for trigger in [ScanTrigger::Manual, ScanTrigger::Periodic] {
+            if trigger == ScanTrigger::Periodic {
+                sqlx::query(
+                    "UPDATE scan_schedule_policy SET recent_interval='1 microsecond' WHERE id=1",
+                )
+                .execute(&pool)
+                .await
+                .unwrap();
+                assert_eq!(
+                    crate::queries::cve_scans::enqueue_due_cve_rescans(&pool, 10, false)
+                        .await
+                        .unwrap(),
+                    1,
+                    "periodic admission must run without local vulnix and reuse the producing session"
+                );
+            }
+            let mut tx = pool.begin().await.unwrap();
+            crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+                &mut tx,
+                d.id,
+                &[],
+            )
+            .await
+            .unwrap();
+            let admission = enqueue_cve_scan_tx(&mut tx, d.id, "vulnix", None, trigger, false)
+                .await
+                .unwrap()
+                .unwrap();
+            tx.commit().await.unwrap();
+            assert!(!admission.created);
+            if trigger == ScanTrigger::Manual {
+                assert_eq!(admission.scan_id, original_manual);
+            }
+            let facts: (String, Uuid, String) = sqlx::query_as(
+                "SELECT status,completed_build_job_id,source_trigger FROM cve_scans WHERE id=$1",
+            )
+            .bind(admission.scan_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+            assert_eq!(facts, ("pending".into(), job, trigger.as_str().into()));
+            assert!(
+                claim_remote_cve_scan(&pool, builder.id, Uuid::new_v4(), None)
+                    .await
+                    .unwrap_err()
+                    .to_string()
+                    .contains("builder_session_mismatch")
+            );
+            sqlx::query(
+                "UPDATE builder_environment_assignments SET environment_id=$2 WHERE builder_id=$1",
+            )
+            .bind(builder.id)
+            .bind(prod)
+            .execute(&pool)
+            .await
+            .unwrap();
+            assert!(
+                claim_remote_cve_scan(&pool, builder.id, session, None)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+            sqlx::query(
+                "UPDATE builder_environment_assignments SET environment_id=$2 WHERE builder_id=$1",
+            )
+            .bind(builder.id)
+            .bind(dev)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let claim = claim_remote_cve_scan(&pool, builder.id, session, None)
+                .await
+                .unwrap()
+                .unwrap();
+            assert_eq!(claim.lease.scan_id, admission.scan_id);
+            assert_eq!(claim.lease.builder_session_id, session);
+            assert_eq!(claim.derivation.derivation_id, d.id);
+            let result = CveScanResult {
+                schema_version: CveScanSchemaVersion::V1,
+                scanner: claim.scanner.clone(),
+                derivation: claim.derivation.clone(),
+                entries: vec![],
+                observations: vec![],
+            };
+            let digest =
+                canonical_cve_result_digest(&canonicalize_result(result.clone(), &claim).unwrap())
+                    .unwrap();
+            assert_eq!(
+                complete_remote_cve_scan(
+                    &pool,
+                    CveScanCompleteRequest {
+                        lease: claim.lease,
+                        result,
+                        result_digest_sha256: digest.clone(),
+                        scan_duration_ms: 1,
+                        diagnostics: vec![],
+                    }
+                )
+                .await
+                .unwrap(),
+                RemoteCompletion::Completed(digest)
+            );
+        }
+        let mut tx = pool.begin().await.unwrap();
+        crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+            &mut tx,
+            d.id,
+            &[],
+        )
+        .await
+        .unwrap();
+        let queued = enqueue_cve_scan_tx(&mut tx, d.id, "vulnix", None, ScanTrigger::Manual, false)
+            .await
+            .unwrap()
+            .unwrap();
+        tx.commit().await.unwrap();
+        let replacement = Uuid::new_v4();
+        establish_builder_session(&pool, &builder.id, &replacement, 60, "rotated scanner")
+            .await
+            .unwrap();
+        assert!(
+            claim_remote_cve_scan(&pool, builder.id, session, None)
+                .await
+                .is_err()
+        );
+        assert!(
+            claim_remote_cve_scan(&pool, builder.id, replacement, None)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        assert_eq!(
+            crate::queries::cve_scans::reconcile_scan_executors(&pool, 10)
+                .await
+                .unwrap(),
+            1
+        );
+        let failure: (String, String) = sqlx::query_as(
+            "SELECT status,scan_metadata->>'terminal_reason' FROM cve_scans WHERE id=$1",
+        )
+        .bind(queued.scan_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(failure, ("failed".into(), "executor_unavailable".into()));
+        let mut tx = pool.begin().await.unwrap();
+        crate::services::composite_enforcement::lock_poam_findings_for_derivation_tx(
+            &mut tx,
+            d.id,
+            &[],
+        )
+        .await
+        .unwrap();
+        let unavailable =
+            enqueue_cve_scan_tx(&mut tx, d.id, "vulnix", None, ScanTrigger::Manual, false)
+                .await
+                .unwrap()
+                .unwrap();
+        tx.commit().await.unwrap();
+        let status: String = sqlx::query_scalar("SELECT status FROM cve_scans WHERE id=$1")
+            .bind(unavailable.scan_id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            status, "failed",
+            "missing producing sessions cannot create permanent pending work"
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM build_jobs WHERE derivation_id=$1")
+                .bind(d.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1,
+            "scanning never creates a substitute build job"
+        );
+    }
 
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]

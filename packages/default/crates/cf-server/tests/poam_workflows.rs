@@ -423,6 +423,12 @@ async fn migration_0279_to_0284_preserves_populated_retained_cve_poam(pool: PgPo
         .unwrap(),
         Some("accepted".into())
     );
+    // The historical assertions above exercise 0279..0284 in isolation.
+    // Current service code requires the current schema (including management
+    // authority). Continue the populated upgrade before invoking that code.
+    for migration in MIGRATOR.iter().filter(|migration| migration.version > 284) {
+        apply_migration(&pool, migration.version).await;
+    }
     let rows = fetch_cve_list(&pool, &CveReadScope::All, &CveFilters::default())
         .await
         .unwrap();
@@ -1424,8 +1430,7 @@ async fn add_scheduled_cve_target(
     let derivation_id = match write {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
-        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => derivation_id,
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => derivation_id,
     };
     sqlx::query("UPDATE derivations SET store_path=$1,status_id=10 WHERE id=$2")
         .bind(&store_path)
@@ -4876,8 +4881,7 @@ async fn external_cve_revision(
     let derivation_id = match write {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
-        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => derivation_id,
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => derivation_id,
     };
     sqlx::query("UPDATE derivations SET store_path=$1,status_id=10 WHERE id=$2")
         .bind(&store_path)
@@ -10393,8 +10397,7 @@ async fn exact_system_vulnerability_rows_exclude_newer_undeployed_scan(pool: PgP
     {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
-        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => derivation_id,
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => derivation_id,
     };
     seal_exact_cve_scan_for_derivation(
         &pool,
@@ -11029,8 +11032,7 @@ async fn record_later_legacy_result(
     let derivation_id = match write {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
-        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => derivation_id,
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => derivation_id,
     };
     sqlx::query("UPDATE derivations SET store_path=$1,status_id=10 WHERE id=$2")
         .bind(&store_path)
@@ -12744,8 +12746,7 @@ async fn assessment_fixture_with_policy(
     let derivation_id = match write {
         SuccessfulEvalWrite::Inserted { derivation_id }
         | SuccessfulEvalWrite::UpdatedEvaluationState { derivation_id }
-        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. }
-        | SuccessfulEvalWrite::LegacyPathConflict { derivation_id } => derivation_id,
+        | SuccessfulEvalWrite::PreservedBuildState { derivation_id, .. } => derivation_id,
     };
     sqlx::query("UPDATE derivations SET store_path=$1,status_id=10 WHERE id=$2")
         .bind(&store_path)

@@ -387,6 +387,11 @@ pub(super) fn build_system_detail(
     };
 
     SystemDetail {
+        tags: Vec::new(),
+        description: None,
+        management_mode: Default::default(),
+        parent_host_id: None,
+        management_transition: None,
         id: Uuid::from_u128(id),
         hostname: hostname.to_string(),
         fqdn: Some(format!("{}.{}.cf.internal", hostname, environment)),

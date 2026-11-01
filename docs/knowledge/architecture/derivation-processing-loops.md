@@ -96,8 +96,13 @@ pipeline.
   inside `cf-server`. The atomic finalize step writes each derivation as
   `dry-run-complete` and queues build jobs for derivations that pass the
   admission check.
-- **Admission:** a build job is queued only for a derivation with
-  `cf_agent_enabled` and `policy_requirements_met` true.
+- **Admission:** build creation accepts the managed prerequisite
+  (`cf_agent_enabled` and `policy_requirements_met` true), or saved exact
+  artifact-admission evidence backed by an active external/reference
+  registration. Build scope exclusion still applies. The agent fact is never
+  rewritten to true. Builder peek and claim selectors apply the same predicate
+  with their existing session, environment and source-transport guards. See
+  [management modes](../concepts/management-modes-and-configuration-assurance.md).
 
 ### Builder recovery loop
 

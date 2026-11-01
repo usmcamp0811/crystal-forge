@@ -8,7 +8,7 @@ tags:
   - agent
   - heartbeat
   - workflow
-implementation_status: implemented
+implementation_status: partial
 generated:
   by: opencode/claude-sonnet-5-5
   at: 2026-10-04T21:00:00-05:00
@@ -38,7 +38,15 @@ sources:
 
 # Deployment Flow
 
-The server decides **what** a system should run. The agent decides **when it can
+This flow applies only to active managed machines. External/reference resources
+have no CF deployment authority, even with a stored automatic policy or
+successful configuration scan. Automatic selection, rollout grouping, manual
+deploy/rollback, target writes, final claim and agent authentication check mode
+on the server. See [management modes and configuration assurance](../concepts/management-modes-and-configuration-assurance.md)
+for transactional revocation, manual-only initial conversion and pending
+integration proof.
+
+The server decides **what** a managed system should run. The agent decides **when it can
 apply** that target and applies it. The agent does not build. It copies a
 built store path from a binary cache and activates it.
 

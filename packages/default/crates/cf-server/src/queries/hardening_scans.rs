@@ -143,7 +143,8 @@ pub struct SystemHardeningInventory {
     /// This field is independent of `source`. A later failed attempt leaves an
     /// earlier completed `source` in place.
     pub attempt: Option<SystemHardeningAttempt>,
-    /// Is true for every historical target.
+    /// Is true for historical targets and unavailable Current targets.
+    /// Configuration-only evidence never grants runtime mutation authority.
     pub read_only: bool,
 }
 
@@ -174,8 +175,10 @@ pub fn parse_system_hardening_selection(
 
 /// Fetches hardening evidence for one exact server-authorized target.
 ///
-/// Current selection uses only the latest system state. Its store path must
-/// equal the derivation's realized store path, and the derivation must match the
+/// Current selection requires a managed registration and the latest system
+/// state. Retained observations do not grant nonmanaged runtime authority.
+/// Its store path must equal the derivation's realized store path, and the
+/// derivation must match the
 /// system flake and effective configuration name. The query never falls back to
 /// an older derivation or scan. Historical selections revalidate the same
 /// system, flake, configuration, and NixOS boundaries as CVE inventory.
@@ -215,12 +218,13 @@ async fn fetch_system_hardening_inventory_tx(
                             COALESCE(NULLIF(BTRIM(system.system_configuration_name),''),
                                      system.hostname) AS configuration_name
                      FROM systems system WHERE system.id=$1
+                       AND system.management_mode='managed'
                    ), latest_state AS (
                      SELECT state.store_path
                      FROM selected_system system
                      LEFT JOIN LATERAL (
                        SELECT candidate.store_path
-                       FROM system_states candidate
+                       FROM view_agent_current_system_states candidate
                        WHERE candidate.hostname=system.hostname
                        ORDER BY candidate.timestamp DESC NULLS LAST,candidate.id DESC
                        LIMIT 1
@@ -288,7 +292,7 @@ async fn fetch_system_hardening_inventory_tx(
             source: None,
             services: Vec::new(),
             attempt: None,
-            read_only: false,
+            read_only: true,
         });
     };
 
@@ -422,6 +426,13 @@ fn sanitize_hardening_failure(value: &str) -> String {
 /// `source_trigger` default from migration 0274 and carries no build
 /// provenance, which keeps it outside the automatic idempotency slot owned by
 /// [`enqueue_post_build_hardening_scan_tx`].
+/// Metadata identifies the exact derivation's selected commit independently
+/// of any runtime observation.
+///
+/// # Errors
+///
+/// Returns an error when admission fails or the conflicting active scan can no
+/// longer be read.
 pub async fn create_hardening_scan(pool: &PgPool, derivation_id: i32) -> Result<Uuid> {
     let scan_id = Uuid::new_v4();
 
@@ -430,8 +441,10 @@ pub async fn create_hardening_scan(pool: &PgPool, derivation_id: i32) -> Result<
         INSERT INTO hardening_scans (
             id, derivation_id, status, attempts,
             total_services, well_hardened_count, moderately_hardened_count,
-            poorly_hardened_count, vulnerable_count
-        ) VALUES ($1, $2, 'pending', 0, 0, 0, 0, 0, 0)
+            poorly_hardened_count, vulnerable_count, scan_metadata
+        ) VALUES ($1, $2, 'pending', 0, 0, 0, 0, 0, 0,
+            jsonb_build_object('evidence_scope', 'exact_derivation',
+                'selected_commit_id', (SELECT commit_id FROM derivations WHERE id = $2)))
         ON CONFLICT (derivation_id)
           WHERE status IN ('pending', 'in_progress')
         DO NOTHING
@@ -600,7 +613,7 @@ pub async fn enqueue_hardening_backfill_batch(
             FROM systems system
             JOIN LATERAL (
                 SELECT state.store_path
-                FROM system_states state
+                FROM view_agent_current_system_states state
                 WHERE state.hostname = system.hostname
                 ORDER BY state.timestamp DESC NULLS LAST, state.id DESC
                 LIMIT 1
@@ -612,7 +625,7 @@ pub async fn enqueue_hardening_backfill_batch(
              AND derivation.derivation_type = 'nixos'
              AND derivation.derivation_name = COALESCE(
                    NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname)
-            WHERE system.is_active = TRUE
+            WHERE system.is_active = TRUE AND system.management_mode = 'managed'
         ), latest_per_flake AS (
             SELECT DISTINCT ON (commit.flake_id, derivation.derivation_name)
                    derivation.id AS derivation_id
@@ -1328,7 +1341,15 @@ pub async fn get_active_scan_for_derivation(
     Ok(row.map(|r| r.id))
 }
 
-/// Create or update a hardening justification.
+/// Creates or updates a runtime hardening justification.
+///
+/// Only managed registrations can mutate runtime justifications. Artifact
+/// evidence for external/reference configurations remains read-only.
+///
+/// # Errors
+///
+/// Returns an error when the system is absent or nonmanaged, or persistence
+/// fails.
 pub async fn upsert_justification(
     pool: &PgPool,
     system_id: Uuid,
@@ -1339,6 +1360,19 @@ pub async fn upsert_justification(
     user_id: Option<Uuid>,
 ) -> Result<Uuid> {
     let inserted_id = Uuid::new_v4();
+    let mut transaction = pool.begin().await?;
+    // CONCURRENCY: A mode transition must wait until this mutation commits.
+    // Checking without the system-row lock would admit a post-conversion write.
+    let managed = sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM systems WHERE id=$1 AND management_mode='managed' FOR SHARE",
+    )
+    .bind(system_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    anyhow::ensure!(
+        managed.is_some(),
+        "runtime hardening justification requires a managed system"
+    );
 
     if let Some(directive_name) = directive_name {
         let id = sqlx::query_scalar::<_, Uuid>(
@@ -1362,9 +1396,10 @@ pub async fn upsert_justification(
         .bind(category)
         .bind(reason)
         .bind(user_id)
-        .fetch_one(pool)
+        .fetch_one(&mut *transaction)
         .await?;
 
+        transaction.commit().await?;
         Ok(id)
     } else {
         let id = sqlx::query_scalar::<_, Uuid>(
@@ -1387,9 +1422,10 @@ pub async fn upsert_justification(
         .bind(category)
         .bind(reason)
         .bind(user_id)
-        .fetch_one(pool)
+        .fetch_one(&mut *transaction)
         .await?;
 
+        transaction.commit().await?;
         Ok(id)
     }
 }
@@ -1426,8 +1462,28 @@ pub async fn get_justifications_for_system(
     Ok(justifications)
 }
 
-/// Delete a justification.
+/// Deletes a runtime justification owned by a managed registration.
+///
+/// # Errors
+///
+/// Returns an error when the justification is nonmanaged or the database
+/// operation fails. Returns `false` for an absent justification.
 pub async fn delete_justification(pool: &PgPool, justification_id: Uuid) -> Result<bool> {
+    let mut transaction = pool.begin().await?;
+    // CONCURRENCY: Use the same registration lock as justification insertion.
+    let mode = sqlx::query_scalar::<_, String>(
+        "SELECT system.management_mode FROM systems system JOIN hardening_justifications justification ON justification.system_id=system.id WHERE justification.id=$1 FOR SHARE OF system",
+    )
+    .bind(justification_id)
+    .fetch_optional(&mut *transaction)
+    .await?;
+    let Some(mode) = mode else {
+        return Ok(false);
+    };
+    anyhow::ensure!(
+        mode == "managed",
+        "runtime hardening justification requires a managed system"
+    );
     let result = sqlx::query!(
         r#"
         DELETE FROM hardening_justifications
@@ -1435,13 +1491,22 @@ pub async fn delete_justification(pool: &PgPool, justification_id: Uuid) -> Resu
         "#,
         justification_id
     )
-    .execute(pool)
+    .execute(&mut *transaction)
     .await?;
 
+    transaction.commit().await?;
     Ok(result.rows_affected() > 0)
 }
 
-/// Resolve a system's derivation for hardening scan (similar to CVE scan pattern).
+/// Resolves an exact hardening target using managed runtime or configuration.
+///
+/// Managed registrations retain observed-output selection. External/reference
+/// registrations use the selected branch revision, never a retained heartbeat.
+/// These scans provide read-only `ExactDerivation` evidence, not Current.
+///
+/// # Errors
+///
+/// Returns an error when target metadata cannot be read.
 pub async fn resolve_system_hardening_scan_target(
     pool: &PgPool,
     system_id: Uuid,
@@ -1453,6 +1518,7 @@ pub async fn resolve_system_hardening_scan_target(
                 s.id,
                 s.hostname,
                 s.flake_id,
+                s.management_mode,
                 COALESCE(NULLIF(BTRIM(s.system_configuration_name), ''), s.hostname) AS config_name
             FROM systems s
             WHERE s.id = $1
@@ -1461,8 +1527,9 @@ pub async fn resolve_system_hardening_scan_target(
         latest_state AS (
             SELECT ss.store_path
             FROM selected_system s
-            JOIN system_states ss ON ss.hostname = s.hostname
-            ORDER BY ss.timestamp DESC
+            JOIN view_agent_current_system_states ss ON ss.hostname = s.hostname
+            WHERE s.management_mode = 'managed'
+            ORDER BY ss.timestamp DESC, ss.id DESC
             LIMIT 1
         )
         SELECT
@@ -1472,17 +1539,30 @@ pub async fn resolve_system_hardening_scan_target(
             COALESCE(f.repo_url, '') as repo_url,
             COALESCE(c.git_commit_hash, '') as commit_hash,
             CASE
+                WHEN ss.management_mode <> 'managed' AND (
+                    d.store_path IS NULL OR BTRIM(d.store_path) = ''
+                    OR d.derivation_path IS NULL OR BTRIM(d.derivation_path) = ''
+                    OR status.name NOT IN ('build-complete', 'complete')
+                ) THEN 'Build output is unavailable for this system configuration.'
                 WHEN f.repo_url IS NULL OR BTRIM(f.repo_url) = ''
                   OR c.git_commit_hash IS NULL OR BTRIM(c.git_commit_hash) = ''
                 THEN 'Flake source metadata is unavailable for this system configuration.'
                 ELSE NULL
             END AS blocked_reason
         FROM selected_system ss
-        JOIN latest_state ls ON TRUE
+        LEFT JOIN latest_state ls ON TRUE
         JOIN derivations d
-          ON COALESCE(d.store_path, d.expected_store_path) = ls.store_path
+          ON (ss.management_mode = 'managed'
+              AND COALESCE(d.store_path, d.expected_store_path) = ls.store_path)
+            OR (ss.management_mode IN ('external', 'reference') AND d.commit_id = (
+                SELECT head.commit_id FROM flake_branch_commit_snapshot head
+                JOIN flakes selected_flake ON selected_flake.id = head.flake_id
+                WHERE head.flake_id = ss.flake_id AND head.position = 0
+                  AND selected_flake.snapshot_ready_at IS NOT NULL
+            ))
         JOIN commits c ON c.id = d.commit_id AND c.flake_id = ss.flake_id
         JOIN flakes f ON f.id = c.flake_id
+        JOIN derivation_statuses status ON status.id = d.status_id
         WHERE d.derivation_type = 'nixos'
           AND d.derivation_name = ss.config_name
         ORDER BY d.completed_at DESC NULLS LAST, d.id DESC

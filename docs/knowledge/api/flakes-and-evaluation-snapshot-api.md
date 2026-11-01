@@ -9,7 +9,7 @@ tags:
   - evaluation
   - snapshots
   - config-inspector
-implementation_status: implemented
+implementation_status: partial
 generated:
   by: opencode/claude-sonnet-5-5
   at: 2026-10-03T22:54:29-05:00
@@ -20,6 +20,12 @@ sources:
 ---
 
 # Flakes API and Evaluation and Flake Snapshot API
+
+**TASK-508 status: partial.** Native declaration fallback is source-inspected;
+the owner reports passing database and pure-UI checks. Assurance browser
+registration previously failed with `NoFullOutputSnapshot`; the owner VM rerun
+and full exact-source owner results remain pending. The fallback does not prove
+module/input snapshot availability or final browser/design parity.
 
 ## Flakes API
 
@@ -337,10 +343,35 @@ positive offset without `snapshot_token` retains the prior bounded offset
 semantics and does not receive this replacement guarantee. HTTP 409 applies
 only when the request supplied a stale or malformed token.
 
-`managed_system_count` is the authoritative visible active fleet count. It can
-exceed the bounded `systems` array. Non-admin responses remove hidden systems,
+`declared_system_names` is a bounded, distinct name page. A non-null array is
+authoritative, including an empty array; null means declaration discovery is
+unavailable. The server uses an available full cached snapshot, or the exact
+current native attempt inventory when that optional full snapshot is absent.
+It does not substitute mock inventory. Names and registration rows are paged
+independently, so shared configurations do not multiply name-fetch requests.
+`declared_system_count` remains the visible declaration total.
+
+The `lifecycle` still describes the full output snapshot. A native Systems pane
+and registration selector, including **Add to Forge**, can therefore work while
+Modules and Inputs remain unavailable. Clients render module/input counts as
+unknown in that state, not zero. Native-only continuation tokens bind the
+immutable attempt identity and first-parent context; full-snapshot/module tokens
+retain their content-digest
+contract. The Native inventory must match the commit's current attempt number
+and its immutable attempt ID and use `execution_mode = native`. Mock inventory
+does not establish Native declaration authority. None of these reads launches
+Nix, Git, evaluation or builds. Existing visibility filtering, bounded pages and
+the 2 MiB response budget still apply to the declaration facet.
+
+`managed_system_count` is the authoritative visible active registration count
+across all management modes, not a deployment-authority or machine denominator.
+It can exceed the bounded `systems` array. Each registered reconciliation row
+includes its `management_mode`; unregistered declarations return null. The
+legacy reconciliation state names describe registry matching, not deployment
+authority. Only managed rows can have a `deployed_revision`.
+Non-admin responses remove hidden systems,
 configuration names, and module consumers. A caller without a visible active
-managed system for the flake receives not-found.
+registration for the flake receives not-found.
 
 Exported-module entries in this response are summaries. `declaration_count`
 remains authoritative. `declarations` is empty, and `declarations_complete` is

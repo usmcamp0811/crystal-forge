@@ -286,8 +286,14 @@ Ambiguous carriers and unknown gate values are unavailable even during execution
 Requirement gates require all current and captured hosts sharing the configuration
 to remain authorized. Partial shared visibility cannot prove a pass or reveal
 hidden requirement results or diagnostics. An attributable intrinsic
-`cf_agent_enabled=false` can still prove configuration failure because the agent
-gate belongs to the shared configuration itself. Its failure entry has empty
+`cf_agent_enabled=false` remains a factual agent/deployment prerequisite failure,
+but does not necessarily mean artifact admission failed: TASK-508 saves
+`global.artifactAdmission.passed` separately for agentless assurance. With full
+requirements visibility, the configuration summary can count that saved
+admission as passed without changing the agent fact. Partial visibility must not
+reveal the hidden admission requirements. See
+[management modes](concepts/management-modes-and-configuration-assurance.md).
+The agent failure entry has empty
 detail under partial visibility. Per-host assigned checks remain separately
 scoped. Matching global failures populate `configuration_failures` once per
 configuration; they never become assigned policy columns, synthetic bundle

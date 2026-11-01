@@ -121,8 +121,19 @@ in harness.mkScenario {
     + builtins.readFile ./fragments/stig-import.py + "\n"
     + builtins.readFile ./evidence-remediation-lifecycle.py
     + "\nassurance_stig_import()\n"
+    + builtins.readFile ./fragments/exact-artifact-reuse.py + "\n"
+    + builtins.readFile ./fragments/configuration-assurance.py
   );
   browserSpecs = {
+    configuration-register = pkgs.writeText "configuration-register.cjs" ''
+      exports.run = require("${./fragments/configuration-assurance.cjs}").register;
+    '';
+    configuration-evidence = pkgs.writeText "configuration-evidence.cjs" ''
+      exports.run = require("${./fragments/configuration-assurance.cjs}").evidence;
+    '';
+    configuration-removed = pkgs.writeText "configuration-removed.cjs" ''
+      exports.run = require("${./fragments/configuration-assurance.cjs}").removed;
+    '';
     cve = cveSpec;
     cve-scan = wrapper "scan"; cve-current = wrapper "current";
     cve-missing = wrapper "missing"; cve-historical = wrapper "historical";

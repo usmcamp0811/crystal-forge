@@ -5,7 +5,7 @@
 
 use dioxus::prelude::*;
 
-use crate::api::models::{DeploymentStatus, HealthStatus, SystemSummary};
+use crate::api::models::{DeploymentStatus, HealthStatus, ManagementMode, SystemSummary};
 
 /// Systems statistics calculated from the systems list.
 #[derive(Clone, PartialEq)]
@@ -20,8 +20,15 @@ pub struct SystemsStats {
 }
 
 impl SystemsStats {
-    /// Calculate stats from a list of systems.
+    /// Calculates operational statistics for managed machines only.
     pub fn from_systems(systems: &[SystemSummary]) -> Self {
+        // Operational health and runtime CVEs apply only to managed machines.
+        let managed: Vec<_> = systems
+            .iter()
+            .filter(|s| s.management_mode == ManagementMode::Managed)
+            .cloned()
+            .collect();
+        let systems = managed.as_slice();
         let total = systems.len();
         let healthy = systems
             .iter()
@@ -132,10 +139,20 @@ fn env_color(env_name: &str, environment_colors: &[(String, String)]) -> String 
 pub fn SystemsStatStrip(
     systems: Vec<SystemSummary>,
     #[props(default)] environment_colors: Vec<(String, String)>,
+    /// Critical counts from the latest sealed configuration scan of each
+    /// external/reference resource that has one. Resources without sealed
+    /// evidence are absent, never counted as zero.
+    #[props(default)]
+    configuration_critical: Vec<i64>,
 ) -> Element {
     let stats = SystemsStats::from_systems(&systems);
-    let needing_attention = stats.warning + stats.critical + stats.offline;
-    let env_count = stats.env_distribution.len();
+    let managed_with_critical = systems
+        .iter()
+        .filter(|s| s.management_mode == ManagementMode::Managed && s.cve_counts.critical > 0)
+        .count();
+    let critical_total = stats.critical_cves as i64 + configuration_critical.iter().sum::<i64>();
+    let resources_with_critical =
+        managed_with_critical + configuration_critical.iter().filter(|c| **c > 0).count();
 
     rsx! {
         div {
@@ -143,9 +160,9 @@ pub fn SystemsStatStrip(
 
             // Total systems with spark bar
             StatCard {
-                label: "Total".to_string(),
+                label: "Managed".to_string(),
                 value: format!("{}", stats.total),
-                meta: format!("across {} environment{}", env_count, if env_count != 1 { "s" } else { "" }),
+                meta: format!("+ {} external · {} reference", systems.iter().filter(|s| s.management_mode == ManagementMode::External).count(), systems.iter().filter(|s| s.management_mode == ManagementMode::Reference).count()),
                 accent_color: "#a78bfa".to_string(),
                 value_color: None,
                 children: rsx! {
@@ -177,7 +194,7 @@ pub fn SystemsStatStrip(
             StatCard {
                 label: "Healthy".to_string(),
                 value: format!("{}", stats.healthy),
-                meta: format!("{}% of fleet", if stats.total > 0 { (stats.healthy * 100) / stats.total } else { 0 }),
+                meta: format!("{}% of managed · agent-reported", if stats.total > 0 { (stats.healthy * 100) / stats.total } else { 0 }),
                 accent_color: "#34d399".to_string(),
                 value_color: Some("#34d399".to_string()),
                 children: rsx! {}
@@ -203,14 +220,13 @@ pub fn SystemsStatStrip(
                 children: rsx! {}
             }
 
-            // CVEs (critical)
+            // CVEs (critical). Design: one total "across N scanned resources".
+            // Managed counts come from current runtime evidence; external and
+            // reference counts come from their latest sealed configuration scan.
             StatCard {
                 label: "CVEs (critical)".to_string(),
-                value: format!("{}", stats.critical_cves),
-                meta: format!("across {} host{}",
-                    systems.iter().filter(|s| s.cve_counts.critical > 0).count(),
-                    if systems.iter().filter(|s| s.cve_counts.critical > 0).count() != 1 { "s" } else { "" }
-                ),
+                value: format!("{critical_total}"),
+                meta: format!("across {resources_with_critical} scanned resources"),
                 accent_color: "#60a5fa".to_string(),
                 value_color: None,
                 children: rsx! {}

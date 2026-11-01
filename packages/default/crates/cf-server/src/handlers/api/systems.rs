@@ -72,7 +72,6 @@ use crate::queries::systems::{
     list_system_agent_event_rows, list_system_history_rows, resolve_observational_current_revision,
     touch_system_updated_at, update_public_key, update_system_metadata,
 };
-use crate::services::cve_scans::{CveScanError, trigger_immediate_cve_scan};
 use crate::services::poam::{self as poam_service, PoamActor, SystemClock};
 use crate::services::systems::SystemsListContext;
 
@@ -139,106 +138,26 @@ pub async fn create_system(
     if !caller_role.can_mutate_systems() {
         return forbidden_mutation();
     }
-    // Validate required fields
-    let hostname = payload.hostname.trim();
-    if hostname.is_empty() {
-        return bad_request("Hostname is required");
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
-
-    let public_key = payload.public_key.trim();
-    if public_key.is_empty() {
-        return bad_request("Public key is required");
-    }
-
-    // Validate deployment policy
-    if !matches!(
-        payload.deployment_policy.as_str(),
-        "manual" | "auto_latest" | "pinned"
-    ) {
-        return bad_request("Invalid deployment policy (must be: manual, auto_latest, or pinned)");
-    }
-
-    // Look up environment ID from name
-    let environment_id = if let Some(env_name) = payload.environment.as_ref() {
-        let env_name_trimmed = env_name.trim();
-        if !env_name_trimmed.is_empty() {
-            match sqlx::query_scalar::<_, Uuid>("SELECT id FROM environments WHERE name = $1")
-                .bind(env_name_trimmed)
-                .fetch_optional(&pool)
-                .await
-            {
-                Ok(id) => id,
-                Err(_) => return internal_error("Failed to lookup environment"),
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // Look up flake ID from name
-    let flake_id = if let Some(flake_name) = payload.flake_name.as_ref() {
-        let flake_name_trimmed = flake_name.trim();
-        if !flake_name_trimmed.is_empty() {
-            match sqlx::query_scalar::<_, i32>("SELECT id FROM flakes WHERE name = $1")
-                .bind(flake_name_trimmed)
-                .fetch_optional(&pool)
-                .await
-            {
-                Ok(id) => id,
-                Err(_) => return internal_error("Failed to lookup flake"),
-            }
-        } else {
-            None
-        }
-    } else {
-        None
-    };
-
-    // Use the System model to create and validate the system
-    use crate::models::systems::System;
-    let system = match System::new(
-        &pool,
-        hostname.to_string(),
-        environment_id,
-        true, // is_active
-        public_key.to_string(),
-        flake_id,
-        payload
-            .system_configuration_name
-            .as_ref()
-            .map(|value| value.trim().to_string())
-            .filter(|value| !value.is_empty()),
-        None, // desired_target
-        payload.deployment_policy.clone(),
-    )
-    .await
-    {
-        Ok(sys) => sys,
-        Err(e) => return bad_request(&format!("Failed to create system: {}", e)),
-    };
-
-    // Record audit event
-    if record_system_mutation_audit(
+    let detail = match crate::services::systems::create_system(
         &pool,
         user_id,
-        AuditAction::UserCreated, // Using UserCreated as placeholder - ideally would be SystemCreated
-        format!("{} ({})", system.hostname, system.id),
-        extract_request_origin(&headers),
-        serde_json::json!({ "operation": "create", "hostname": system.hostname }),
+        payload,
+        state.server_config.heartbeat_interval_secs,
     )
     .await
-    .is_err()
     {
-        return internal_error("Failed to write audit event");
-    }
-
-    // Fetch the created system from view to return complete data
-    let detail = match get_system_detail_by_id(&pool, system.id).await {
-        Ok(Some(row)) => detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs),
-        Ok(None) => return internal_error("System created but not found in view"),
-        Err(_) => return internal_error("Failed to fetch created system"),
+        Ok(detail) => detail,
+        Err(error) if error.to_string() == "System environment is not authorized" => {
+            return not_found();
+        }
+        Err(_) => {
+            return bad_request(
+                "Registration failed: verify name uniqueness, mode, key, configuration, environment and parent host",
+            );
+        }
     };
 
     (StatusCode::CREATED, Json(detail)).into_response()
@@ -2075,7 +1994,7 @@ pub async fn save_system_cve_justification(
         r#"SELECT EXISTS(
              SELECT 1 FROM systems system
              JOIN LATERAL (
-               SELECT state.store_path,state.generation FROM system_states state
+               SELECT state.store_path,state.generation FROM view_agent_current_system_states state
                WHERE state.hostname=system.hostname AND state.store_path IS NOT NULL
                  AND state.generation IS NOT NULL
                  AND state.generation_matches_current_store_path IS TRUE
@@ -2264,6 +2183,7 @@ pub async fn trigger_system_cve_scan(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
+    Query(intent): Query<crate::api::models::CveScanIntent>,
 ) -> impl IntoResponse {
     let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
@@ -2276,85 +2196,66 @@ pub async fn trigger_system_cve_scan(
     if !caller_role.can_mutate_systems() {
         return forbidden_mutation();
     }
-
-    let environment_memberships = match load_membership_environment_ids(&pool, user_id).await {
-        Ok(value) => value,
-        Err(_) => return internal_error("Failed to load environment memberships"),
-    };
-
-    let row = match find_system_access_row(&pool, system_id).await {
-        Ok(Some(value)) => value,
-        Ok(None) => return not_found(),
-        Err(_) => return internal_error("Failed to load system"),
-    };
-
-    if !caller_role.can_access_system_environment(row.environment_id, &environment_memberships) {
-        return not_found();
+    if let Err(response) = require_csrf(&headers) {
+        return response;
     }
 
-    let target = match resolve_system_cve_scan_target(&pool, system_id).await {
-        Ok(Some(value)) => value,
-        Ok(None) => {
-            return (
-                StatusCode::CONFLICT,
-                Json(ApiError {
-                    error: "scan_ineligible".to_string(),
-                    message: "No build target found for this system configuration.".to_string(),
-                    details: None,
-                }),
-            )
-                .into_response();
-        }
-        Err(_) => return internal_error("Failed to resolve CVE scan target"),
+    // Capability probing holds no database locks. Authorization, exact intent,
+    // admission and audit then share one writer transaction; local execution
+    // starts only after that transaction commits.
+    let local_available =
+        crate::vulnix::vulnix_runner::VulnixRunner::check_vulnix_available().await;
+    let version = if local_available {
+        crate::vulnix::vulnix_runner::VulnixRunner::get_vulnix_version()
+            .await
+            .ok()
+    } else {
+        None
     };
-
-    if let Some(reason) = target.blocked_reason.as_ref() {
-        return (
-            StatusCode::CONFLICT,
-            Json(ApiError {
-                error: "scan_ineligible".to_string(),
-                message: reason.clone(),
-                details: None,
-            }),
-        )
-            .into_response();
-    }
-
-    let scan_id = match trigger_immediate_cve_scan(pool.clone(), target.derivation_id).await {
-        Ok(value) => value,
-        Err(CveScanError::VulnixUnavailable) => return scan_ineligible_response(),
-        Err(CveScanError::Internal(err)) => {
-            return internal_error(&format!("Failed to queue CVE scan: {err}"));
-        }
-    };
-
-    if record_system_mutation_audit(
-        &pool,
-        user_id,
-        AuditAction::CveScanRequested,
-        format!("{} ({})", row.hostname, row.id),
+    use crate::queries::cve_scans::SystemScanAdmission;
+    let (scan_id, target, configuration_derivation_id, immediate) = match crate::queries::cve_scans::admit_system_cve_scan(
+        &pool, user_id, system_id, intent.expected_derivation_id, local_available, version.clone(),
         extract_request_origin(&headers),
-        serde_json::json!({
-            "operation": "cve_scan",
-            "derivation_id": target.derivation_id,
-            "scan_id": scan_id,
-            "config_name": target.config_name
-        }),
-    )
-    .await
-    .is_err()
-    {
-        return internal_error("Failed to write audit event");
+    ).await {
+        Ok(SystemScanAdmission::Admitted { scan_id, target, configuration_derivation_id, immediate }) => (scan_id, target, configuration_derivation_id, immediate),
+        Ok(SystemScanAdmission::NotFound) => return not_found(),
+        Ok(SystemScanAdmission::Unavailable { scan_id, derivation_id, configuration_derivation_id }) => return (
+            StatusCode::CONFLICT,
+            Json(ApiError { error: "scan_executor_unavailable".into(),
+                message: "No local scanner or eligible producing builder session is available. The failed scan lifecycle is retained.".into(),
+                details: Some(serde_json::json!({"scan_id":scan_id,"derivation_id":derivation_id,"configuration_derivation_id":configuration_derivation_id})) }),
+        ).into_response(),
+        Ok(SystemScanAdmission::TargetChanged) => return (
+            StatusCode::CONFLICT,
+            Json(ApiError { error: "scan_target_changed".into(),
+                message: "The selected configuration artifact changed. Reload evidence before requesting a scan.".into(), details: None }),
+        ).into_response(),
+        Ok(SystemScanAdmission::Ineligible(message)) => return (
+            StatusCode::CONFLICT,
+            Json(ApiError { error: "scan_ineligible".into(), message, details: None }),
+        ).into_response(),
+        Err(_) => return internal_error("Failed to admit system CVE scan"),
+    };
+    if let Some(claim) = immediate {
+        if crate::services::cve_scans::execute_admitted_immediate_scan(pool.clone(), claim, version)
+            .await
+            .is_err()
+        {
+            return internal_error("Failed to start admitted CVE scan");
+        }
     }
 
     (
         StatusCode::ACCEPTED,
         Json(CveScanTriggerResponse {
+            derivation_id: Some(target.derivation_id),
+            configuration_derivation_id: Some(configuration_derivation_id),
             scan_id,
             status: "accepted".to_string(),
             message: format!(
                 "CVE scan queued for {} ({})",
-                row.hostname, target.config_name
+                target.hostname.as_deref().unwrap_or(&target.config_name),
+                target.config_name
             ),
         }),
     )
@@ -2498,6 +2399,11 @@ pub async fn update_system_handler(
             }
         }
     };
+    if let FieldUpdate::Set(value) = &payload.reachability {
+        if let Err(error) = crate::services::systems::validate_reachability(value) {
+            return bad_request(&error.to_string());
+        }
+    }
 
     // PATCH semantics for heartbeat_interval_secs: omitted key preserves value,
     // null clears it (falls back to server default 600s), value sets it.
@@ -2659,8 +2565,17 @@ pub async fn update_system_handler(
         {
             return internal_error("Failed to lock system exact-CVE remediation scope");
         }
-        let current_environment_id = match sqlx::query_scalar::<_, Option<Uuid>>(
-            "SELECT environment_id FROM systems WHERE id=$1 FOR UPDATE",
+        let (current_environment_id, old_mode, old_parent, is_active) = match sqlx::query_as::<
+            _,
+            (
+                Option<Uuid>,
+                crate::models::systems::ManagementMode,
+                Option<Uuid>,
+                bool,
+            ),
+        >(
+            "SELECT environment_id, management_mode, parent_host_id, is_active
+             FROM systems WHERE id=$1 FOR UPDATE",
         )
         .bind(system_id)
         .fetch_optional(&mut *tx)
@@ -2731,6 +2646,80 @@ pub async fn update_system_handler(
             Ok(value) => value,
             Err(response) => return response,
         };
+        let mode = payload.management_mode.unwrap_or(old_mode);
+        let parent = if mode != crate::models::systems::ManagementMode::External {
+            if matches!(payload.parent_host_id, FieldUpdate::Set(_)) {
+                return bad_request("Only external resources can have a parent host");
+            }
+            None
+        } else {
+            match payload.parent_host_id {
+                FieldUpdate::Unset => old_parent,
+                FieldUpdate::Clear => None,
+                FieldUpdate::Set(id) => Some(id),
+            }
+        };
+        let key = match crate::services::systems::validate_management_update(old_mode, &payload) {
+            Ok(key) => key,
+            Err(error) => return bad_request(&error.to_string()),
+        };
+        if mode != crate::models::systems::ManagementMode::Managed
+            && (flake_id.is_none()
+                || payload
+                    .system_configuration_name
+                    .as_deref()
+                    .is_none_or(|name| name.trim().is_empty()))
+        {
+            return bad_request(
+                "Nonmanaged resources require a real flake and explicit system_configuration_name",
+            );
+        }
+        if let Err(error) = crate::queries::systems::validate_parent_host_tx(
+            &mut tx,
+            system_id,
+            mode,
+            parent,
+            environment_id,
+        )
+        .await
+        {
+            return bad_request(&error.to_string());
+        }
+        // CONCURRENCY: Source/destination environment locks serialize this
+        // check with child associations. A host cannot strand existing guests.
+        if mode != crate::models::systems::ManagementMode::Managed
+            || current_environment_id != environment_id
+        {
+            match sqlx::query_scalar::<_, bool>(
+                "SELECT EXISTS(SELECT 1 FROM systems WHERE parent_host_id=$1)",
+            )
+            .bind(system_id)
+            .fetch_one(&mut *tx)
+            .await
+            {
+                Ok(true) => {
+                    return bad_request(
+                        "Clear child parent associations before changing the host mode or environment",
+                    );
+                }
+                Ok(false) => {}
+                Err(_) => return internal_error("Failed to validate child associations"),
+            }
+        }
+        if let Err(error) = crate::queries::systems::update_management_authority_tx(
+            &mut tx,
+            system_id,
+            mode,
+            parent,
+            key.as_deref(),
+        )
+        .await
+        {
+            if retry < 2 && is_system_metadata_serialization_failure(&error) {
+                continue;
+            }
+            return internal_error("Failed to update management authority");
+        }
         if let Err(error) = update_system_metadata(
             &mut *tx,
             system_id,
@@ -2752,6 +2741,42 @@ pub async fn update_system_handler(
                 continue;
             }
             return internal_error("Failed to update system");
+        }
+        // PERSISTENCE: Operator metadata shares the authorized metadata transaction
+        // and system lock. Omission preserves values, including during conversion.
+        let tags = match &payload.tags {
+            FieldUpdate::Unset => None,
+            FieldUpdate::Clear => Some(Vec::new()),
+            FieldUpdate::Set(tags) => Some(crate::services::systems::normalize_tags(tags)),
+        };
+        let description = match &payload.description {
+            FieldUpdate::Set(value) => {
+                crate::services::systems::normalize_optional_text(Some(value))
+            }
+            _ => None,
+        };
+        let reachability = match &payload.reachability {
+            FieldUpdate::Unset => None,
+            FieldUpdate::Clear => Some("direct"),
+            FieldUpdate::Set(value) => Some(value.trim()),
+        };
+        if let Err(error) = sqlx::query(
+            "UPDATE systems SET tags=COALESCE($2,tags),
+             description=CASE WHEN $3 THEN $4 ELSE description END,
+             reachability=COALESCE($5,reachability) WHERE id=$1",
+        )
+        .bind(system_id)
+        .bind(tags)
+        .bind(!payload.description.is_unset())
+        .bind(description)
+        .bind(reachability)
+        .execute(&mut *tx)
+        .await
+        {
+            if retry < 2 && is_system_metadata_serialization_failure(&error.into()) {
+                continue;
+            }
+            return internal_error("Failed to update registration metadata");
         }
         if let Some(former_environment_id) = current_environment_id
             && Some(former_environment_id) != environment_id
@@ -2776,13 +2801,40 @@ pub async fn update_system_handler(
                 return internal_error("Failed to transfer system CVE environment ownership");
             }
         }
-        let detail = match get_system_detail_by_id(&mut *tx, system_id).await {
+        if crate::queries::systems::audit_system_metadata_tx(
+            &mut tx,
+            user_id,
+            system_id,
+            "system_updated",
+            serde_json::json!({"old_management_mode": old_mode, "management_mode": mode,
+                "old_parent_host_id": old_parent, "parent_host_id": parent,
+                "is_active": is_active,
+                "tags_updated": !payload.tags.is_unset(),
+                "description_updated": !payload.description.is_unset(),
+                "address_updated": !payload.fqdn.is_unset(),
+                "reachability_updated": !payload.reachability.is_unset(),
+                "initial_managed_policy": (old_mode != mode && mode.permits_deployment()).then_some("manual"),
+                "deployment_queued": false}),
+        )
+        .await
+        .is_err()
+        {
+            return internal_error("Failed to audit system update");
+        }
+        let mut detail = match get_system_detail_by_id(&mut *tx, system_id).await {
             Ok(Some(row)) => {
                 detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs)
             }
             Ok(None) => return not_found(),
             Err(_) => return internal_error("Failed to load updated system"),
         };
+        if old_mode != mode {
+            detail.management_transition = Some(crate::api::models::SystemManagementTransition {
+                previous_mode: old_mode,
+                management_mode: mode,
+                deployment_policy: detail.deployment_policy.clone(),
+            });
+        }
         if tx.commit().await.is_err() {
             return internal_error("Failed to commit system update");
         }
@@ -2924,6 +2976,9 @@ pub async fn rollback_system(
         return not_found();
     }
 
+    if !row.management_mode.permits_deployment() || !row.is_active {
+        return bad_request("Deployment requires an active managed system");
+    }
     match crate::services::composite_enforcement::authorize_and_set_system_target(
         &pool,
         system_id,
@@ -3031,6 +3086,9 @@ pub async fn rollback_system_generation(
     }
     if payload.generation_snapshot_id.is_none() && payload.generation.is_none() {
         return bad_request("generation_snapshot_id or generation is required");
+    }
+    if !row.management_mode.permits_deployment() || !row.is_active {
+        return bad_request("Deployment requires an active managed system");
     }
 
     // SECURITY: Resolve the deployment path from retained server-side lineage.
@@ -3284,12 +3342,14 @@ fn matches_filters(row: &SystemAccessRow, params: &SystemsListParams) -> bool {
     true
 }
 
+// Preserve the view's unknown runtime health instead of inventing an outage.
 fn parse_health_status(status: &str) -> crate::api::models::HealthStatus {
     match status {
         "healthy" => crate::api::models::HealthStatus::Healthy,
         "warning" => crate::api::models::HealthStatus::Warning,
         "critical" => crate::api::models::HealthStatus::Critical,
-        _ => crate::api::models::HealthStatus::Offline,
+        "offline" => crate::api::models::HealthStatus::Offline,
+        _ => crate::api::models::HealthStatus::Unknown,
     }
 }
 
@@ -3333,8 +3393,13 @@ pub(crate) fn public_key_fingerprint(
         .map(|key| key.fingerprint())
 }
 
-fn detail_row_to_api_model(row: SystemDetailRow, server_default_interval: u64) -> SystemDetail {
+fn detail_row_to_api_model(mut row: SystemDetailRow, server_default_interval: u64) -> SystemDetail {
     use crate::api::models::FlakeSummary;
+
+    // INVARIANT: Retained agent reports survive authority changes as history,
+    // not as current runtime facts of an external or reference registration.
+    // Parent observations have their own authenticated evidence endpoint.
+    crate::services::systems::mask_nonmanaged_runtime(&mut row);
 
     let effective_heartbeat_interval_secs = row
         .heartbeat_interval_secs
@@ -3344,6 +3409,11 @@ fn detail_row_to_api_model(row: SystemDetailRow, server_default_interval: u64) -
     let public_key_fingerprint = public_key_fingerprint(row.public_key.as_deref(), &row.hostname);
 
     SystemDetail {
+        tags: row.tags,
+        description: row.description,
+        management_transition: None,
+        management_mode: row.management_mode,
+        parent_host_id: row.parent_host_id,
         id: row.id,
         hostname: row.hostname,
         fqdn: row.fqdn,
@@ -3486,6 +3556,23 @@ async fn queue_deployment_target_prerequisite(
     system_id: Uuid,
     target: &str,
 ) -> String {
+    // CONCURRENCY: Keep authority stable until all prerequisite side effects
+    // finish. These existing build helpers do not mutate the system row.
+    let mut authority_guard = match state.pool.begin().await {
+        Ok(tx) => tx,
+        Err(_) => return "Failed to lock deployment authority".into(),
+    };
+    match sqlx::query_scalar::<_, Uuid>(
+        "SELECT id FROM systems WHERE id=$1 AND management_mode='managed'
+         AND is_active FOR SHARE",
+    )
+    .bind(system_id)
+    .fetch_optional(&mut *authority_guard)
+    .await
+    {
+        Ok(Some(_)) => {}
+        _ => return "Deployment requires an active managed system".into(),
+    }
     let row = match find_system_deployment_derivation(&state.pool, system_id, target).await {
         Ok(Some(row)) => row,
         Ok(None) => {
@@ -3665,6 +3752,8 @@ fn action_to_str(action: AuditAction) -> &'static str {
         AuditAction::SystemDeployRequested => "system_deploy_requested",
         AuditAction::SystemRollbackRequested => "system_rollback_requested",
         AuditAction::SystemKeyRotated => "system_key_rotated",
+        AuditAction::SystemCreated => "system_created",
+        AuditAction::SystemUpdated => "system_updated",
         AuditAction::CveScanRequested => "cve_scan_requested",
         AuditAction::SessionInvalidated => "session_invalidated",
     }
@@ -3832,6 +3921,9 @@ pub async fn deploy_system(
         return not_found();
     }
 
+    if !row.management_mode.permits_deployment() || !row.is_active {
+        return bad_request("Deployment requires an active managed system");
+    }
     // SECURITY: Resolve authorization before validating target details. An
     // unknown or hidden system must not disclose request-shape information.
     let commit_sha = payload.commit_sha.trim().to_ascii_lowercase();
@@ -4822,6 +4914,21 @@ async fn record_system_mutation_audit(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn health_status_mapping_preserves_unknown_and_managed_categories() {
+        use crate::api::models::HealthStatus;
+        for (wire, expected) in [
+            ("healthy", HealthStatus::Healthy),
+            ("warning", HealthStatus::Warning),
+            ("critical", HealthStatus::Critical),
+            ("offline", HealthStatus::Offline),
+            ("unknown", HealthStatus::Unknown),
+            ("", HealthStatus::Unknown),
+        ] {
+            assert_eq!(parse_health_status(wire), expected);
+        }
+    }
+
     use crate::auth::session::{
         CSRF_COOKIE_NAME, CSRF_HEADER_NAME, SESSION_COOKIE_NAME, hash_token,
     };
@@ -5079,6 +5186,7 @@ mod tests {
     #[test]
     fn matches_filters_checks_search_and_environment() {
         let row = SystemAccessRow {
+            management_mode: Default::default(),
             id: Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid"),
             hostname: "prod-edge-01".to_string(),
             environment_id: None,
@@ -5112,6 +5220,649 @@ mod tests {
             Arc::new(QueueNotifier::new()),
             crate::server::jobs::BackgroundJobRegistry::new(),
         )
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB; never use the preview database"]
+    async fn management_mode_api_registration_edit_scope_and_filter(pool: PgPool) {
+        use crate::models::systems::ManagementMode;
+        let state = CFState::new(
+            pool.clone(),
+            crate::config::ServerConfig::default(),
+            std::sync::Arc::new(crate::queue::QueueNotifier::new()),
+            crate::server::jobs::BackgroundJobRegistry::new(),
+        );
+        let admin = mutation_headers(&pool, AuthRole::Admin, "management-admin").await;
+        let operator = mutation_headers(&pool, AuthRole::Operator, "management-operator").await;
+        let environment_id: Uuid = sqlx::query_scalar(
+            "INSERT INTO environments(name) VALUES('management-test') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO flakes(name,repo_url) VALUES('management-flake','https://example.test/management')")
+            .execute(&pool).await.unwrap();
+        let registration = |name: &str, mode: ManagementMode| {
+            serde_json::from_value::<CreateSystemRequest>(serde_json::json!({
+                "hostname": name, "management_mode": mode, "environment": "management-test",
+                "flake_name": "management-flake", "system_configuration_name": "shared-config",
+                "deployment_policy": "manual",
+                "tags": [" fleet ", "fleet", mode.as_str(), ""],
+                "description": " Private operator context ",
+            }))
+            .unwrap()
+        };
+        let denied = create_system(
+            State(state.clone()),
+            State(pool.clone()),
+            operator.clone(),
+            Json(registration("Unauthorized", ManagementMode::Reference)),
+        )
+        .await
+        .into_response();
+        assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+        let mut ids = Vec::new();
+        for (name, mode) in [
+            ("Golden workstation / ISO", ManagementMode::Reference),
+            ("external-host", ManagementMode::External),
+            ("managed-host", ManagementMode::Managed),
+        ] {
+            let mut request = registration(name, mode);
+            if mode == ManagementMode::Managed {
+                request.public_key = Some(rotation_key_material(28).1);
+                request.fqdn = Some(" 192.0.2.28 ".into());
+                request.reachability = "pull".into();
+            }
+            let response = create_system(
+                State(state.clone()),
+                State(pool.clone()),
+                admin.clone(),
+                Json(request),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let detail: SystemDetail = response_json(response).await;
+            assert_eq!(detail.management_mode, mode);
+            assert_eq!(detail.tags, ["fleet", mode.as_str()]);
+            assert_eq!(
+                detail.description.as_deref(),
+                Some("Private operator context")
+            );
+            if mode == ManagementMode::Managed {
+                assert_eq!(detail.fqdn.as_deref(), Some("192.0.2.28"));
+                assert_eq!(detail.network.reachability, "pull");
+            } else {
+                assert!(detail.fqdn.is_none());
+            }
+            if mode != ManagementMode::Managed {
+                assert_eq!(
+                    detail.health_status,
+                    crate::api::models::HealthStatus::Unknown
+                );
+                assert!(detail.last_seen.is_none());
+                assert!(detail.current_store_path.is_none());
+            }
+            assert_eq!(
+                detail.public_key_fingerprint.is_some(),
+                mode == ManagementMode::Managed
+            );
+            ids.push(detail.id);
+        }
+        let duplicate = create_system(
+            State(state.clone()),
+            State(pool.clone()),
+            admin.clone(),
+            Json(registration("managed-host", ManagementMode::Reference)),
+        )
+        .await
+        .into_response();
+        assert_eq!(duplicate.status(), StatusCode::BAD_REQUEST);
+        for unknown_environment in [true, false] {
+            let mut request = registration("unknown-scope", ManagementMode::Reference);
+            if unknown_environment {
+                request.environment = Some("missing-environment".into());
+            } else {
+                request.flake_name = Some("missing-flake".into());
+            }
+            let response = create_system(
+                State(state.clone()),
+                State(pool.clone()),
+                admin.clone(),
+                Json(request),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        let params = SystemsListParams {
+            management_mode: Some(ManagementMode::Reference),
+            per_page: Some(1),
+            ..Default::default()
+        };
+        let response = list_systems(
+            State(state.clone()),
+            State(pool.clone()),
+            admin.clone(),
+            Query(params.clone()),
+        )
+        .await
+        .into_response();
+        let page: crate::api::models::PaginatedResponse<SystemSummary> =
+            response_json(response).await;
+        assert_eq!(page.total, 1);
+        assert_eq!(page.items[0].id, ids[0]);
+        let response = list_systems(
+            State(state.clone()),
+            State(pool.clone()),
+            operator.clone(),
+            Query(params),
+        )
+        .await
+        .into_response();
+        let page: crate::api::models::PaginatedResponse<SystemSummary> =
+            response_json(response).await;
+        assert_eq!(page.total, 0);
+        assert!(page.items.is_empty());
+        // Tags match before the page/total, and never broaden environment scope.
+        for (headers, tag, search, total) in [
+            (admin.clone(), Some("fleet"), None, 3),
+            (admin.clone(), Some("external"), None, 1),
+            (admin.clone(), Some("Fleet"), None, 0),
+            (admin.clone(), None, Some("FLEET"), 3),
+            (operator.clone(), Some("fleet"), None, 0),
+        ] {
+            let response = list_systems(
+                State(state.clone()),
+                State(pool.clone()),
+                headers,
+                Query(SystemsListParams {
+                    tag: tag.map(str::to_string),
+                    search: search.map(str::to_string),
+                    per_page: Some(1),
+                    ..Default::default()
+                }),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+            let page: crate::api::models::PaginatedResponse<SystemSummary> =
+                response_json(response).await;
+            assert_eq!(page.total, total);
+            assert_eq!(page.items.len(), usize::from(total > 0));
+            for item in page.items {
+                assert!(item.tags.contains(&"fleet".into()));
+                assert_eq!(
+                    item.description.as_deref(),
+                    Some("Private operator context")
+                );
+            }
+        }
+        let response = get_system(
+            State(state.clone()),
+            State(pool.clone()),
+            operator.clone(),
+            Path(ids[0]),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        let update =
+            |mode: Option<ManagementMode>, key: Option<String>, parent: FieldUpdate<Uuid>| {
+                UpdateSystemRequest {
+                    tags: FieldUpdate::Unset,
+                    description: FieldUpdate::Unset,
+                    reachability: FieldUpdate::Unset,
+                    hostname: "external-host".into(),
+                    management_mode: mode,
+                    public_key: key,
+                    parent_host_id: parent,
+                    fqdn: FieldUpdate::Unset,
+                    system_configuration_name: Some("shared-config".into()),
+                    environment: Some("management-test".into()),
+                    flake_name: Some("management-flake".into()),
+                    deployment_policy: "manual".into(),
+                    heartbeat_interval_secs: FieldUpdate::Unset,
+                }
+            };
+        // Every mode supports real metadata edits. Rejected scope and CSRF writes
+        // cannot modify even these non-authority fields.
+        for (index, name) in ["Golden workstation / ISO", "external-host", "managed-host"]
+            .into_iter()
+            .enumerate()
+        {
+            let mut request = update(None, None, FieldUpdate::Unset);
+            request.hostname = name.into();
+            request.tags = FieldUpdate::Set(vec![" edited ".into(), "edited".into()]);
+            request.description = FieldUpdate::Set(" Changed private notes ".into());
+            if index == 2 {
+                request.fqdn = FieldUpdate::Clear;
+                request.reachability = FieldUpdate::Set("direct".into());
+            }
+            let mut missing_csrf = admin.clone();
+            missing_csrf.remove("x-csrf-token");
+            for headers in [operator.clone(), missing_csrf] {
+                let response = update_system_handler(
+                    State(state.clone()),
+                    State(pool.clone()),
+                    headers,
+                    Path(ids[index]),
+                    Json(request.clone()),
+                )
+                .await
+                .into_response();
+                assert!(matches!(
+                    response.status(),
+                    StatusCode::NOT_FOUND | StatusCode::FORBIDDEN
+                ));
+                let stored = get_system_detail_by_id(&pool, ids[index])
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert!(stored.tags.contains(&"fleet".into()));
+                assert_eq!(
+                    stored.description.as_deref(),
+                    Some("Private operator context")
+                );
+            }
+            let response = update_system_handler(
+                State(state.clone()),
+                State(pool.clone()),
+                admin.clone(),
+                Path(ids[index]),
+                Json(request),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+            let detail: SystemDetail = response_json(response).await;
+            assert_eq!(detail.tags, ["edited"]);
+            assert_eq!(detail.description.as_deref(), Some("Changed private notes"));
+            if index == 2 {
+                assert!(detail.fqdn.is_none());
+                assert_eq!(detail.network.reachability, "direct");
+            }
+        }
+        let reconciled = crate::queries::systems::get_by_hostname(&pool, "managed-host")
+            .await
+            .unwrap()
+            .unwrap();
+        crate::queries::systems::insert_system(&pool, &reconciled)
+            .await
+            .unwrap();
+        let retained = get_system_detail_by_id(&pool, ids[2])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(retained.tags, ["edited"]);
+        assert_eq!(
+            retained.description.as_deref(),
+            Some("Changed private notes")
+        );
+        let response = update_system_handler(
+            State(state.clone()),
+            State(pool.clone()),
+            operator.clone(),
+            Path(ids[1]),
+            Json(update(None, None, FieldUpdate::Set(ids[2]))),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        for invalid_parent in [ids[0], ids[1], Uuid::new_v4()] {
+            let response = update_system_handler(
+                State(state.clone()),
+                State(pool.clone()),
+                admin.clone(),
+                Path(ids[1]),
+                Json(update(None, None, FieldUpdate::Set(invalid_parent))),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        }
+        let response = update_system_handler(
+            State(state.clone()),
+            State(pool.clone()),
+            admin.clone(),
+            Path(ids[1]),
+            Json(update(None, None, FieldUpdate::Set(ids[2]))),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let detail: SystemDetail = response_json(response).await;
+        assert_eq!(detail.management_mode, ManagementMode::External);
+        assert_eq!(detail.parent_host_id, Some(ids[2]));
+        let response = update_system_handler(
+            State(state.clone()),
+            State(pool.clone()),
+            admin.clone(),
+            Path(ids[1]),
+            Json(update(
+                Some(ManagementMode::Reference),
+                None,
+                FieldUpdate::Unset,
+            )),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let detail: SystemDetail = response_json(response).await;
+        assert_eq!(detail.management_mode, ManagementMode::Reference);
+        assert_eq!(detail.parent_host_id, None);
+        assert_eq!(detail.tags, ["edited"]);
+        assert_eq!(detail.description.as_deref(), Some("Changed private notes"));
+        let response = update_system_handler(
+            State(state.clone()),
+            State(pool.clone()),
+            admin.clone(),
+            Path(ids[1]),
+            Json(update(
+                Some(ManagementMode::Managed),
+                None,
+                FieldUpdate::Unset,
+            )),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = update_system_handler(
+            State(state.clone()),
+            State(pool.clone()),
+            admin.clone(),
+            Path(ids[1]),
+            Json(update(
+                Some(ManagementMode::Managed),
+                Some(rotation_key_material(29).1),
+                FieldUpdate::Unset,
+            )),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let detail: SystemDetail = response_json(response).await;
+        assert_eq!(detail.management_mode, ManagementMode::Managed);
+        assert_eq!(detail.parent_host_id, None);
+        assert_eq!(detail.tags, ["edited"]);
+        assert_eq!(detail.description.as_deref(), Some("Changed private notes"));
+        assert_eq!(detail.deployment_policy, "manual");
+        let transition = detail.management_transition.unwrap();
+        assert_eq!(transition.previous_mode, ManagementMode::Reference);
+        assert_eq!(transition.deployment_policy, "manual");
+        sqlx::query("UPDATE systems SET boot_id='retained-managed-boot' WHERE id=$1")
+            .bind(ids[1])
+            .execute(&pool)
+            .await
+            .unwrap();
+        let response = update_system_handler(
+            State(state.clone()),
+            State(pool.clone()),
+            admin.clone(),
+            Path(ids[1]),
+            Json(update(
+                Some(ManagementMode::Reference),
+                None,
+                FieldUpdate::Unset,
+            )),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = list_systems(
+            State(state.clone()),
+            State(pool.clone()),
+            admin.clone(),
+            Query(SystemsListParams {
+                management_mode: Some(ManagementMode::Reference),
+                ..Default::default()
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::OK);
+        let page: crate::api::models::PaginatedResponse<crate::api::models::SystemSummary> =
+            response_json(response).await;
+        assert!(
+            page.items
+                .iter()
+                .find(|s| s.id == ids[1])
+                .unwrap()
+                .boot_id
+                .is_none()
+        );
+        assert_eq!(
+            sqlx::query_scalar::<_, String>("SELECT boot_id FROM systems WHERE id=$1")
+                .bind(ids[1])
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            "retained-managed-boot"
+        );
+        // A registration can retain a former agent report after conversion.
+        // The current-response projection must not present it as runtime facts
+        // for either assurance-only mode; the persisted history is unchanged.
+        for mode in [ManagementMode::External, ManagementMode::Reference] {
+            let mut retained = get_system_detail_by_id(&pool, ids[1])
+                .await
+                .unwrap()
+                .unwrap();
+            retained.management_mode = mode;
+            retained.current_store_path = Some("/nix/store/former-managed-system".into());
+            retained.generation = Some(42);
+            retained.generation_matches_current_store_path = Some(true);
+            retained.agent_version = Some("former-agent".into());
+            retained.primary_ip_address = Some("192.0.2.42".into());
+            retained.last_seen = Some(chrono::Utc::now());
+            retained.boot_id = Some("former-boot".into());
+            retained.secure_boot_enabled = Some(true);
+            retained.critical_cve_count = 7;
+            let projected = detail_row_to_api_model(retained, 600);
+            assert!(projected.current_store_path.is_none());
+            assert!(projected.generation.is_none());
+            assert!(projected.generation_matches_current_store_path.is_none());
+            assert!(projected.agent_version.is_none());
+            assert!(projected.network.primary_ip.is_none());
+            assert!(projected.last_seen.is_none());
+            assert!(projected.boot_id.is_none());
+            assert!(projected.security.secure_boot_enabled.is_none());
+            assert_eq!(projected.cve_counts.critical, 0);
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM pending_system_deployments WHERE system_id=$1"
+            )
+            .bind(ids[1])
+            .fetch_one(&pool)
+            .await
+            .unwrap(),
+            0
+        );
+        let create_audits: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM admin_audit_events WHERE action='system_created'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(create_audits, 3);
+        let audits: Vec<serde_json::Value> = sqlx::query_scalar("SELECT metadata FROM admin_audit_events WHERE action IN ('system_created','system_updated')").fetch_all(&pool).await.unwrap();
+        for metadata in audits {
+            let encoded = metadata.to_string();
+            assert!(!encoded.contains("Private operator context"));
+            assert!(!encoded.contains("Changed private notes"));
+            assert!(!encoded.contains(&rotation_key_material(28).1));
+        }
+        for (tags, description) in [
+            (serde_json::json!([]), serde_json::json!("  ")),
+            (serde_json::Value::Null, serde_json::Value::Null),
+        ] {
+            let mut request = serde_json::to_value(update(None, None, FieldUpdate::Unset)).unwrap();
+            request["tags"] = tags;
+            request["description"] = description;
+            let response = update_system_handler(
+                State(state.clone()),
+                State(pool.clone()),
+                admin.clone(),
+                Path(ids[1]),
+                Json(serde_json::from_value(request).unwrap()),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::OK);
+            let detail: SystemDetail = response_json(response).await;
+            assert!(detail.tags.is_empty());
+            assert!(detail.description.is_none());
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, Uuid>("SELECT environment_id FROM systems WHERE id=$1")
+                .bind(ids[0])
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            environment_id
+        );
+
+        // Scoped operators request configuration scans through the system API,
+        // not the fleet-wide Admin-only derivation endpoint. Admission uses the
+        // exact built head, does not require local vulnix, and reuses an active
+        // scan shared by registrations of that artifact.
+        let flake: i32 = sqlx::query_scalar("SELECT flake_id FROM systems WHERE id=$1")
+            .bind(ids[0])
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let commit: i32 = sqlx::query_scalar(
+            "INSERT INTO commits(flake_id,git_commit_hash,commit_timestamp) VALUES ($1,repeat('a',40),NOW()) RETURNING id",
+        ).bind(flake).fetch_one(&pool).await.unwrap();
+        sqlx::query("UPDATE flakes SET snapshot_ready_at=NOW() WHERE id=$1")
+            .bind(flake)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO flake_branch_commit_snapshot(flake_id,commit_id,position) VALUES ($1,$2,0)")
+            .bind(flake).bind(commit).execute(&pool).await.unwrap();
+        let derivation: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations(commit_id,derivation_name,derivation_type,derivation_path,store_path,status_id)
+             VALUES ($1,'shared-config','nixos','/nix/store/scoped-assurance.drv','/nix/store/scoped-assurance',
+               (SELECT id FROM derivation_statuses WHERE name='build-complete')) RETURNING id",
+        ).bind(commit).fetch_one(&pool).await.unwrap();
+        // A derivation alone does not imply a usable remote executor. Retain
+        // the successful producing-job and live scanner-session identities.
+        let (producer, _) = crate::queries::builders::create_builder(
+            &pool,
+            &crate::models::builders::CreateBuilderRequest {
+                name: "scoped-scan-producer".into(),
+                host: None,
+                arch: "x86_64-linux".into(),
+                public_key: None,
+                max_cpu_cores: None,
+                max_memory_mb: None,
+                max_concurrent_jobs: Some(1),
+                enabled: Some(true),
+                environment_ids: vec![environment_id],
+            },
+        )
+        .await
+        .unwrap();
+        let session = Uuid::new_v4();
+        crate::queries::builders::establish_builder_session(
+            &pool,
+            &producer.id,
+            &session,
+            60,
+            "scoped scan test",
+        )
+        .await
+        .unwrap();
+        crate::queries::cve_scan_leases::record_session_cve_capabilities(
+            &pool,
+            producer.id,
+            session,
+            cf_protocol::builder::BuilderCapabilities::current_cve_scanner("vulnix test".into()),
+        )
+        .await
+        .unwrap();
+        sqlx::query("INSERT INTO build_jobs(derivation_id,environment_id,builder_id,builder_session_id,status,completed_at) VALUES($1,$2,$3,$4,'success',NOW())")
+            .bind(derivation).bind(environment_id).bind(producer.id).bind(session).execute(&pool).await.unwrap();
+        sqlx::query("INSERT INTO cache_push_jobs(derivation_id,store_path,status,completed_at,cache_destination) VALUES($1,'/nix/store/scoped-assurance','completed',NOW(),'test-cache')")
+            .bind(derivation).execute(&pool).await.unwrap();
+        let denied = trigger_system_cve_scan(
+            State(pool.clone()),
+            operator.clone(),
+            Path(ids[0]),
+            Query(Default::default()),
+        )
+        .await
+        .into_response();
+        assert_eq!(denied.status(), StatusCode::NOT_FOUND);
+        let (operator_id, _) = authenticated_user_roles(&pool, &operator).await.unwrap();
+        sqlx::query(
+            "INSERT INTO user_environment_memberships(user_id,environment_id) VALUES ($1,$2)",
+        )
+        .bind(operator_id)
+        .bind(environment_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut without_csrf = operator.clone();
+        without_csrf.remove("x-csrf-token");
+        let denied = trigger_system_cve_scan(
+            State(pool.clone()),
+            without_csrf,
+            Path(ids[0]),
+            Query(Default::default()),
+        )
+        .await
+        .into_response();
+        assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+        let stale = trigger_system_cve_scan(
+            State(pool.clone()),
+            operator.clone(),
+            Path(ids[0]),
+            Query(crate::api::models::CveScanIntent {
+                expected_derivation_id: Some(derivation + 1),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(stale.status(), StatusCode::CONFLICT);
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM cve_scans")
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            0,
+            "stale intent queues no substitute artifact"
+        );
+        let mut scan_id = None;
+        for system_id in [ids[0], ids[1]] {
+            let response = trigger_system_cve_scan(
+                State(pool.clone()),
+                operator.clone(),
+                Path(system_id),
+                Query(crate::api::models::CveScanIntent {
+                    expected_derivation_id: Some(derivation),
+                }),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            let response: CveScanTriggerResponse = response_json(response).await;
+            assert_eq!(response.derivation_id, Some(derivation));
+            if let Some(previous) = scan_id {
+                assert_eq!(response.scan_id, previous);
+            }
+            scan_id = Some(response.scan_id);
+        }
+        assert_eq!(
+            sqlx::query_scalar::<_, i64>("SELECT count(*) FROM cve_scans WHERE derivation_id=$1")
+                .bind(derivation)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -5238,7 +5989,10 @@ mod tests {
                 hostname: format!("cve-source-route-{suffix}"),
                 environment_id: None,
                 is_active: true,
-                public_key: PublicKey::from_verifying_key(signing_key.verifying_key()),
+                management_mode: crate::models::systems::ManagementMode::Managed,
+                agent_enrolled_at: None,
+                public_key: Some(PublicKey::from_verifying_key(signing_key.verifying_key())),
+                parent_host_id: None,
                 flake_id: Some(flake.id),
                 derivation: String::new(),
                 system_configuration_name: Some(format!("cve-source-route-{suffix}")),
@@ -5510,6 +6264,7 @@ mod tests {
             State(pool),
             HeaderMap::new(),
             Path(Uuid::parse_str("00000000-0000-0000-0000-000000000001").expect("uuid")),
+            Query(Default::default()),
         )
         .await
         .into_response();
@@ -6217,7 +6972,10 @@ mod tests {
                 hostname: format!("hidden-system-{suffix}"),
                 environment_id: Some(hidden.id),
                 is_active: true,
-                public_key: PublicKey::from_verifying_key(key.verifying_key()),
+                management_mode: crate::models::systems::ManagementMode::Managed,
+                agent_enrolled_at: None,
+                public_key: Some(PublicKey::from_verifying_key(key.verifying_key())),
+                parent_host_id: None,
                 flake_id: Some(flake.id),
                 derivation: String::new(),
                 system_configuration_name: None,
@@ -6397,7 +7155,10 @@ mod tests {
                 hostname: hostname.clone(),
                 environment_id: Some(environment.id),
                 is_active: true,
-                public_key: PublicKey::from_verifying_key(key.verifying_key()),
+                management_mode: crate::models::systems::ManagementMode::Managed,
+                agent_enrolled_at: None,
+                public_key: Some(PublicKey::from_verifying_key(key.verifying_key())),
+                parent_host_id: None,
                 flake_id: Some(flake.id),
                 derivation: String::new(),
                 system_configuration_name: Some(hostname.clone()),
@@ -6440,7 +7201,10 @@ mod tests {
                 hostname: format!("v2-api-hidden-{suffix}"),
                 environment_id: Some(hidden_environment.id),
                 is_active: true,
-                public_key: PublicKey::from_verifying_key(hidden_key.verifying_key()),
+                management_mode: crate::models::systems::ManagementMode::Managed,
+                agent_enrolled_at: None,
+                public_key: Some(PublicKey::from_verifying_key(hidden_key.verifying_key())),
+                parent_host_id: None,
                 flake_id: Some(hidden_flake.id),
                 derivation: String::new(),
                 system_configuration_name: Some(format!("v2-api-hidden-{suffix}")),
@@ -7216,7 +7980,10 @@ mod tests {
             hostname: hostname.clone(),
             environment_id: None,
             is_active: true,
-            public_key,
+            management_mode: crate::models::systems::ManagementMode::Managed,
+            agent_enrolled_at: None,
+            public_key: Some(public_key),
+            parent_host_id: None,
             flake_id: Some(flake.id),
             derivation: String::new(),
             system_configuration_name: Some(hostname.clone()),
@@ -7595,8 +8362,13 @@ mod tests {
             hostname: hostname.to_string(),
             environment_id,
             is_active: true,
-            public_key: PublicKey::from_base64(public_key_base64, hostname)
-                .expect("seed public key should parse"),
+            management_mode: crate::models::systems::ManagementMode::Managed,
+            agent_enrolled_at: None,
+            public_key: Some(
+                PublicKey::from_base64(public_key_base64, hostname)
+                    .expect("seed public key should parse"),
+            ),
+            parent_host_id: None,
             flake_id: None,
             derivation: String::new(),
             system_configuration_name: Some(hostname.to_string()),

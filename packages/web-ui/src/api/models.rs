@@ -88,14 +88,84 @@ where
 // Common Enums
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Health status derived from heartbeat recency.
+/// Identifies deployment authority, independently of scan evidence and activity.
+/// Legacy responses and registration requests default to managed enrollment.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ManagementMode {
+    /// Crystal Forge deploys the system through its enrolled agent.
+    #[default]
+    Managed,
+    /// Another operator deploys the system; configuration scans prove no runtime.
+    External,
+    /// Tracks a configuration for assurance, not a running machine.
+    Reference,
+}
+
+impl ManagementMode {
+    /// Returns the exact server wire value and management CSS suffix.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Managed => "managed",
+            Self::External => "external",
+            Self::Reference => "reference",
+        }
+    }
+
+    /// Returns the approved compact management label.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Managed => "Managed",
+            Self::External => "External",
+            Self::Reference => "Reference",
+        }
+    }
+
+    /// Returns the approved long label used by the management-mode picker
+    /// and mode-filter options.
+    pub fn long_label(self) -> &'static str {
+        match self {
+            Self::Managed => "Managed system",
+            Self::External => "Externally managed",
+            Self::Reference => "Reference configuration",
+        }
+    }
+
+    /// Returns the approved management description, without claiming scan success.
+    pub fn description(self) -> &'static str {
+        match self {
+            Self::Managed => "Crystal Forge deploys this system and an agent reports its state.",
+            Self::External => {
+                "Another system or team deploys it. Crystal Forge evaluates, builds and scans the configuration."
+            }
+            Self::Reference => {
+                "A configuration tracked for security assurance. It is not a running machine."
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for ManagementMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// Reports server operational health without inferring runtime from configuration evidence.
+/// Nonmanaged registrations use [`Self::Unknown`], which is not an outage.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum HealthStatus {
+    /// Reports a managed machine in the healthy operational category.
     Healthy,
+    /// Reports a managed machine requiring operational review.
     Warning,
+    /// Reports a managed machine in the critical operational category.
     Critical,
+    /// Reports a managed machine with an absent or overdue heartbeat.
     Offline,
+    /// Reports unavailable or inapplicable runtime health, not an offline machine.
+    Unknown,
 }
 
 impl HealthStatus {
@@ -107,6 +177,7 @@ impl HealthStatus {
             Self::Warning => health::WARNING_TEXT,
             Self::Critical => health::CRITICAL_TEXT,
             Self::Offline => health::OFFLINE_TEXT,
+            Self::Unknown => health::OFFLINE_TEXT,
         }
     }
 
@@ -118,6 +189,7 @@ impl HealthStatus {
             Self::Warning => health::WARNING_BG,
             Self::Critical => health::CRITICAL_BG,
             Self::Offline => health::OFFLINE_BG,
+            Self::Unknown => health::OFFLINE_BG,
         }
     }
 
@@ -129,6 +201,7 @@ impl HealthStatus {
             Self::Warning => health::WARNING_DOT,
             Self::Critical => health::CRITICAL_DOT,
             Self::Offline => health::OFFLINE_DOT,
+            Self::Unknown => health::OFFLINE_DOT,
         }
     }
 
@@ -139,6 +212,7 @@ impl HealthStatus {
             Self::Warning => "Warning",
             Self::Critical => "Critical",
             Self::Offline => "Offline",
+            Self::Unknown => "Unknown",
         }
     }
 }
@@ -1061,6 +1135,10 @@ pub struct ScanningScanRecordQuery {
 /// Describes one exact persisted scan lifecycle.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScanningScanRecordResponse {
+    /// Lists all registered management modes associated with the exact artifact.
+    /// Empty means no association was returned, not implicitly managed.
+    #[serde(default)]
+    pub management_modes: Vec<ManagementMode>,
     /// Identifies the immutable scan lifecycle.
     pub scan_id: Uuid,
     /// Identifies the exact derivation.
@@ -1071,6 +1149,7 @@ pub struct ScanningScanRecordResponse {
     pub flake_name: Option<String>,
     /// Contains the full immutable revision when available.
     pub commit_hash: Option<String>,
+    /// Relates the artifact to a managed reported runtime; not proof of Current CVE authority.
     #[serde(default)]
     pub is_current: bool,
     #[serde(default)]
@@ -1141,6 +1220,9 @@ pub struct UpdateScanningArchiveResponse {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScanningQueueItemResponse {
+    /// Lists every registered management mode associated with this artifact.
+    #[serde(default)]
+    pub management_modes: Vec<ManagementMode>,
     /// Identifies the exact derivation represented by the row.
     pub derivation_id: i32,
     /// Is `true` when the derivation has a built store path that can be scanned.
@@ -1159,7 +1241,8 @@ pub struct ScanningQueueItemResponse {
     /// Freshness class: `deployed`, `recent`, or `archived`.
     #[serde(default)]
     pub freshness: String,
-    /// True when this is the latest scan row for its derivation.
+    /// Relates the artifact to a managed reported runtime. External/reference
+    /// associations never establish this relation or Current CVE authority.
     #[serde(default)]
     pub is_current: bool,
     /// True when this derivation's commit is position-0 in the ready branch
@@ -1183,6 +1266,9 @@ pub struct ScanningDeployedResponse {
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScanningSystemsItemResponse {
+    /// Contains the resource mode; older responses describe managed systems.
+    #[serde(default)]
+    pub management_mode: ManagementMode,
     pub system_id: Uuid,
     pub hostname: String,
     pub flake_name: Option<String>,
@@ -1387,6 +1473,18 @@ pub enum DashboardActivityStatus {
 /// Lightweight system representation for list views.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemSummary {
+    /// Stores real operator labels, independent of runtime mode.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Stores optional registration notes.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Identifies deployment authority; absent legacy fields mean managed.
+    #[serde(default)]
+    pub management_mode: ManagementMode,
+    /// Identifies the associated reporting parent, not a runtime observation.
+    #[serde(default)]
+    pub parent_host_id: Option<Uuid>,
     pub id: Uuid,
     pub hostname: String,
     #[serde(default)]
@@ -1424,6 +1522,21 @@ pub struct SystemSummary {
 /// Full system representation for the detail view.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SystemDetail {
+    /// Stores operator labels retained across mode changes.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Stores optional operator context, separate from runtime observations.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// Reports a transition made by this edit only; ordinary reads omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_transition: Option<SystemManagementTransition>,
+    /// Identifies deployment authority independently of configuration evidence.
+    #[serde(default)]
+    pub management_mode: ManagementMode,
+    /// Identifies the associated reporting parent, not a runtime observation.
+    #[serde(default)]
+    pub parent_host_id: Option<Uuid>,
     pub id: Uuid,
     pub hostname: String,
     #[serde(default)]
@@ -1474,6 +1587,224 @@ pub struct SystemDetail {
     /// the server could not parse the stored key.
     #[serde(default)]
     pub public_key_fingerprint: Option<String>,
+}
+
+/// Reports an atomic mode change without implying deployment or runtime proof.
+/// Conversion into managed commits manual policy; enabling automation is a later edit.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SystemManagementTransition {
+    /// Identifies the prior authority re-read under the server lock.
+    pub previous_mode: ManagementMode,
+    /// Identifies the authority committed by this edit.
+    pub management_mode: ManagementMode,
+    /// Contains the committed policy, including manual initial enrollment.
+    pub deployment_policy: String,
+}
+
+/// Contains configuration-only evidence from one server snapshot, never Current.
+/// Histories are bounded prefixes. Missing counts are unknown, not zero findings.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ConfigurationAssurance {
+    /// Identifies the registration, not the shared artifact owner.
+    pub system_id: Uuid,
+    /// Identifies deployment authority independently of evidence.
+    pub management_mode: ManagementMode,
+    /// Contains the effective registered configuration name.
+    pub configuration_name: String,
+    /// Identifies the registered flake, if assigned.
+    pub flake_id: Option<i32>,
+    /// Contains the registered branch, if assigned.
+    pub branch: Option<String>,
+    /// Identifies the ready branch snapshot head, not the last successful build.
+    pub selected_revision: Option<RevisionEvidence>,
+    /// Separates discovery from configuration and attempt outcomes.
+    pub evaluation: EvaluationEvidence,
+    /// Contains only the exact selected-revision/configuration artifact.
+    pub selected_artifact: Option<ArtifactEvidence>,
+    /// Contains the newest lifecycle for the selected artifact, including failures.
+    pub selected_scan: Option<ScanEvidence>,
+    /// Contains the newest completed or failed scan across revisions.
+    pub latest_terminal_scan: Option<ScanEvidence>,
+    /// Contains the newest sealed successful scan, possibly historical.
+    pub latest_good_scan: Option<ScanEvidence>,
+    /// Contains bounded retained evidence, not runtime history.
+    pub history: EvidenceHistory,
+}
+
+/// Identifies an immutable source revision.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct RevisionEvidence {
+    /// Identifies the persisted commit.
+    pub commit_id: i32,
+    /// Contains the full Git revision.
+    pub sha: String,
+    /// Contains the Git commit date.
+    pub committed_at: DateTime<Utc>,
+    /// Contains the recorded commit message.
+    pub message: Option<String>,
+}
+
+/// Separates native discovery availability from evaluation success.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvaluationEvidence {
+    /// Contains available, removed, or unavailable; only discovery proves removal.
+    pub availability: String,
+    /// Contains evaluated, eval_failed, an attempt state, or unavailable.
+    pub state: String,
+    /// Identifies the exact native evaluation attempt.
+    pub attempt_id: Option<Uuid>,
+    /// Contains a bounded redacted outcome or attempt failure.
+    pub error: Option<String>,
+    /// Contains outcome capture or attempt completion time.
+    pub completed_at: Option<DateTime<Utc>>,
+}
+
+/// Identifies an exact derivation and its independent build/publication evidence.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ArtifactEvidence {
+    /// Identifies the derivation.
+    pub derivation_id: i32,
+    /// Identifies its source revision.
+    pub revision: RevisionEvidence,
+    /// Contains the persisted configuration name.
+    pub configuration_name: String,
+    /// Contains the derivation status name, not inferred publication status.
+    pub state: String,
+    /// Contains the evaluated derivation path, if available.
+    pub derivation_path: Option<String>,
+    /// Contains an actual output path, never an expected or running path.
+    pub output_path: Option<String>,
+    /// Contains the evaluated expected output, independent of completion.
+    pub expected_output_path: Option<String>,
+    /// Records an exact completed cache push, not present cache reachability.
+    pub published_at: Option<DateTime<Utc>>,
+    /// Contains a bounded redacted derivation failure.
+    pub error: Option<String>,
+    /// Contains the latest persisted build attempt, independent of artifact state.
+    pub build: Option<BuildEvidence>,
+}
+
+/// Identifies one real build attempt without treating success as publication.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct BuildEvidence {
+    /// Identifies the build job.
+    pub job_id: Uuid,
+    /// Contains the persisted job status.
+    pub state: String,
+    /// Records queue creation time.
+    pub created_at: DateTime<Utc>,
+    /// Records execution start, if started.
+    pub started_at: Option<DateTime<Utc>>,
+    /// Records terminal time, if finished.
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Contains the server failure code, if recorded.
+    pub failure_code: Option<String>,
+}
+
+/// Counts distinct non-whitelisted CVEs in one sealed scan; not runtime exposure.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceCveCounts {
+    /// Includes unknown-severity findings as well as the named severities.
+    pub total: i64,
+    /// Counts catalog CRITICAL CVEs.
+    pub critical: i64,
+    /// Counts catalog HIGH CVEs.
+    pub high: i64,
+    /// Counts catalog MEDIUM CVEs.
+    pub medium: i64,
+    /// Counts catalog LOW CVEs.
+    pub low: i64,
+}
+
+/// Identifies a scan independently of the selected revision and runtime state.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ScanEvidence {
+    /// Identifies the persisted lifecycle.
+    pub scan_id: Uuid,
+    /// Identifies the exact scanned derivation.
+    pub derivation_id: i32,
+    /// Identifies the scanned revision, which can differ from the selection.
+    pub revision: RevisionEvidence,
+    /// Contains the scanned configuration name.
+    pub configuration_name: String,
+    /// Contains the persisted lifecycle status.
+    pub state: String,
+    /// Records lifecycle creation time.
+    pub created_at: DateTime<Utc>,
+    /// Records terminal time, if completed.
+    pub completed_at: Option<DateTime<Utc>>,
+    /// Identifies the evidence schema; only version 1 permits counts.
+    pub evidence_schema_version: i32,
+    /// Contains sealed counts, or null for unsealed or missing evidence.
+    pub cves: Option<EvidenceCveCounts>,
+    /// Contains a bounded redacted failure.
+    pub error: Option<String>,
+    /// Contains newest-first bounded persisted diagnostics.
+    pub diagnostics: Vec<DiagnosticEvidence>,
+    /// Reports omitted diagnostics beyond the server's limit.
+    pub diagnostics_truncated: bool,
+}
+
+/// Contains one redacted scan diagnostic without execution credentials.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct DiagnosticEvidence {
+    /// Records event time.
+    pub occurred_at: DateTime<Utc>,
+    /// Contains the persisted severity.
+    pub level: String,
+    /// Contains the persisted event type.
+    pub event_type: String,
+    /// Contains bounded redacted diagnostic text.
+    pub message: String,
+}
+
+/// Contains a native evaluation event with exact source identity.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvaluationEvent {
+    /// Identifies the evaluated revision.
+    pub revision: RevisionEvidence,
+    /// Contains native configuration or attempt outcomes.
+    pub evaluation: EvaluationEvidence,
+    /// Records capture, completion, start, or queue time.
+    pub occurred_at: DateTime<Utc>,
+}
+
+/// Contains newest-first prefixes, not an exhaustive or runtime timeline.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct EvidenceHistory {
+    /// States the server's fixed per-kind response limit.
+    pub limit_per_kind: i32,
+    /// Contains native evaluation events for this flake/configuration.
+    pub evaluations: Vec<EvaluationEvent>,
+    /// Contains build attempts with exact derivation/revision identity.
+    pub builds: Vec<ArtifactEvidence>,
+    /// Contains scan lifecycles with exact derivation/revision identity.
+    pub scans: Vec<ScanEvidence>,
+}
+
+/// Retains a parent report, not a guest generation or proof of scanned runtime.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GuestObservationRow {
+    /// Identifies the immutable observation.
+    pub id: i64,
+    /// Identifies the external guest registration.
+    pub guest_id: Uuid,
+    /// Identifies the authenticated reporting parent at receipt time.
+    pub parent_host_id: Uuid,
+    /// Identifies the shared environment at receipt time.
+    pub environment_id: Uuid,
+    /// Retains the guest identity at receipt time.
+    pub guest_identity: String,
+    /// Contains the exact MicroVM systemd unit inspected.
+    pub unit: String,
+    /// Contains ActiveState, or null when collection was unavailable.
+    pub unit_active_state: Option<String>,
+    /// Contains a runner store object, never a guest current-system closure.
+    pub runner_store_path: Option<String>,
+    /// Records parent collection time; can be stale.
+    pub observed_at: DateTime<Utc>,
+    /// Records server receipt time; does not prove guest freshness.
+    pub received_at: DateTime<Utc>,
 }
 
 /// Hardware information subset for system detail.
@@ -2294,6 +2625,10 @@ pub enum ReconciledFlakeSystemState {
 /// Represents one system in authoritative flake reconciliation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReconciledFlakeSystem {
+    /// Registered deployment authority; absent for unregistered declarations or
+    /// older servers. Reconciliation state is not management authority.
+    #[serde(default)]
+    pub management_mode: Option<ManagementMode>,
     /// Declared or managed configuration name.
     pub configuration_name: String,
     /// Managed Crystal Forge system.
@@ -2510,6 +2845,9 @@ pub struct FlakeOutputPayload {
 /// Returns cached revision-scoped flake outputs and reconciliation.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FlakeOutputSnapshotResponse {
+    /// Declared-name page independent of modules/inputs; None means unavailable.
+    #[serde(default)]
+    pub declared_system_names: Option<Vec<String>>,
     /// Snapshot lifecycle.
     pub lifecycle: SnapshotLifecycle,
     /// Full selected revision SHA.
@@ -4845,6 +5183,10 @@ impl<T> PaginatedResponse<T> {
 /// Query parameters for the systems list endpoint.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SystemsListParams {
+    /// Filters an exact operator label before pagination and counting.
+    pub tag: Option<String>,
+    /// Filters authorized registrations by authority before server pagination.
+    pub management_mode: Option<ManagementMode>,
     pub page: Option<i64>,
     pub per_page: Option<i64>,
     pub search: Option<String>,
@@ -5137,6 +5479,12 @@ pub struct CveScanEligibilityResponse {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CveScanTriggerResponse {
+    /// Identifies the selected configuration separately from actual scan source.
+    #[serde(default)]
+    pub configuration_derivation_id: Option<i32>,
+    /// Identifies the server-resolved artifact; absent on older servers.
+    #[serde(default)]
+    pub derivation_id: Option<i32>,
     pub scan_id: uuid::Uuid,
     pub status: String,
     pub message: String,
@@ -5321,21 +5669,60 @@ pub struct HardeningScanStatusResponse {
     pub overall_score: Option<i32>,
 }
 
+/// Registers a resource; managed mode requires a real agent enrollment key.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CreateSystemRequest {
+    /// Supplies labels in all modes; the server trims and deduplicates them.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Supplies optional operator notes; blank text clears them.
+    pub description: Option<String>,
+    /// Records the managed host address without changing agent transport.
+    pub fqdn: Option<String>,
+    /// Records direct/pull reachability using the existing server column.
+    #[serde(default = "default_system_reachability")]
+    pub reachability: String,
+    /// Defaults legacy requests to managed enrollment.
+    #[serde(default)]
+    pub management_mode: ManagementMode,
+    /// Associates external resources only; the server validates host scope.
+    pub parent_host_id: Option<Uuid>,
     pub hostname: String,
     pub system_configuration_name: Option<String>,
-    pub public_key: String,
+    /// Supplies a real managed enrollment key; omit for external/reference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
     pub environment: Option<String>,
     pub flake_name: Option<String>,
     pub deployment_policy: String,
 }
 
+/// Updates metadata and explicitly requested management authority atomically.
+/// Conversion into managed requires new credentials and explicit manual policy.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UpdateSystemRequest {
+    /// Preserves omission; null or an empty array clears labels.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub tags: FieldUpdate<Vec<String>>,
+    /// Preserves omission; null or blank text clears notes.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub description: FieldUpdate<String>,
+    /// Preserves omission; null resets to direct reachability.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub reachability: FieldUpdate<String>,
+    /// Preserves stored authority when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub management_mode: Option<ManagementMode>,
+    /// Supplies credentials only for an explicit managed conversion.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_key: Option<String>,
+    /// Preserves, clears, or sets the external resource's parent association.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub parent_host_id: FieldUpdate<Uuid>,
     pub hostname: String,
-    #[serde(default)]
-    pub fqdn: Option<String>,
+    /// Preserves omission; null or blank text clears the operator address.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub fqdn: FieldUpdate<String>,
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub flake_name: Option<String>,
@@ -6006,6 +6393,10 @@ pub enum AuditAction {
     UserRoleAssigned,
     UserEnvironmentMembershipUpdated,
     OidcMappingChanged,
+    /// A system or configuration registration was created.
+    SystemCreated,
+    /// Registration metadata, management authority or parent association changed.
+    SystemUpdated,
     SystemSyncRequested,
     SystemDeployRequested,
     SystemRollbackRequested,
@@ -7222,6 +7613,86 @@ mod reconciliation_tests {
     use super::*;
 
     #[test]
+    fn management_contract_defaults_and_optional_credentials() {
+        let legacy = serde_json::json!({"hostname":"node", "deployment_policy":"manual"});
+        let request: CreateSystemRequest = serde_json::from_value(legacy).unwrap();
+        assert_eq!(request.management_mode, ManagementMode::Managed);
+        assert_eq!(request.public_key, None);
+        assert_eq!(request.parent_host_id, None);
+        for (mode, wire) in [
+            (ManagementMode::Managed, "managed"),
+            (ManagementMode::External, "external"),
+            (ManagementMode::Reference, "reference"),
+        ] {
+            assert_eq!(serde_json::to_value(mode).unwrap(), wire);
+        }
+        assert!(serde_json::from_str::<ManagementMode>("\"other\"").is_err());
+        let external: CreateSystemRequest = serde_json::from_value(serde_json::json!({
+            "hostname":"guest", "deployment_policy":"manual", "management_mode":"external"
+        }))
+        .unwrap();
+        assert!(
+            serde_json::to_value(external)
+                .unwrap()
+                .get("public_key")
+                .is_none()
+        );
+
+        let mut summary =
+            serde_json::to_value(crate::systems::adapter::fallback_systems().remove(0)).unwrap();
+        summary.as_object_mut().unwrap().remove("management_mode");
+        summary.as_object_mut().unwrap().remove("parent_host_id");
+        let decoded: SystemSummary = serde_json::from_value(summary).unwrap();
+        assert_eq!(decoded.management_mode, ManagementMode::Managed);
+        assert_eq!(decoded.parent_host_id, None);
+
+        let mut detail =
+            serde_json::to_value(crate::systems::adapter::fallback_system_detail()).unwrap();
+        for key in ["management_mode", "parent_host_id", "management_transition"] {
+            detail.as_object_mut().unwrap().remove(key);
+        }
+        let decoded: SystemDetail = serde_json::from_value(detail).unwrap();
+        assert_eq!(decoded.management_mode, ManagementMode::Managed);
+        assert!(decoded.management_transition.is_none());
+    }
+
+    #[test]
+    fn management_patch_preserves_omission_and_parent_tristate() {
+        let original = serde_json::json!({"hostname":"guest", "deployment_policy":"manual"});
+        let mut request: UpdateSystemRequest = serde_json::from_value(original).unwrap();
+        assert_eq!(request.parent_host_id, FieldUpdate::Unset);
+        let encoded = serde_json::to_value(&request).unwrap();
+        for key in ["management_mode", "public_key", "parent_host_id"] {
+            assert!(encoded.get(key).is_none(), "{key} must stay omitted");
+        }
+        request.parent_host_id = FieldUpdate::Clear;
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded["parent_host_id"], serde_json::Value::Null);
+        assert_eq!(
+            serde_json::from_value::<UpdateSystemRequest>(encoded)
+                .unwrap()
+                .parent_host_id,
+            FieldUpdate::Clear
+        );
+        let parent = Uuid::from_u128(508);
+        request.parent_host_id = FieldUpdate::Set(parent);
+        let encoded = serde_json::to_value(&request).unwrap();
+        assert_eq!(encoded["parent_host_id"], parent.to_string());
+        assert_eq!(
+            serde_json::from_value::<UpdateSystemRequest>(encoded)
+                .unwrap()
+                .parent_host_id,
+            FieldUpdate::Set(parent)
+        );
+        request.management_mode = Some(ManagementMode::Managed);
+        request.public_key = Some("operator-supplied-key".into());
+        let encoded = serde_json::to_value(request).unwrap();
+        assert_eq!(encoded["management_mode"], "managed");
+        assert_eq!(encoded["public_key"], "operator-supplied-key");
+        assert_eq!(encoded["deployment_policy"], "manual");
+    }
+
+    #[test]
     fn field_update_default_is_unset() {
         let value: FieldUpdate<i32> = FieldUpdate::default();
         assert_eq!(value, FieldUpdate::Unset);
@@ -7233,8 +7704,14 @@ mod reconciliation_tests {
         // interpreted as Clear by the server, wiping the stored override
         // during unrelated edits (the original P1-3 bug).
         let request = UpdateSystemRequest {
+            tags: FieldUpdate::Unset,
+            description: FieldUpdate::Unset,
+            reachability: FieldUpdate::Unset,
+            management_mode: None,
+            public_key: None,
+            parent_host_id: FieldUpdate::Unset,
             hostname: "web01".into(),
-            fqdn: None,
+            fqdn: FieldUpdate::Unset,
             system_configuration_name: None,
             environment: None,
             flake_name: None,
@@ -7255,8 +7732,14 @@ mod reconciliation_tests {
     #[test]
     fn update_system_request_serializes_clear_heartbeat_interval_as_null() {
         let request = UpdateSystemRequest {
+            tags: FieldUpdate::Unset,
+            description: FieldUpdate::Unset,
+            reachability: FieldUpdate::Unset,
+            management_mode: None,
+            public_key: None,
+            parent_host_id: FieldUpdate::Unset,
             hostname: "web01".into(),
-            fqdn: None,
+            fqdn: FieldUpdate::Unset,
             system_configuration_name: None,
             environment: None,
             flake_name: None,
@@ -7275,8 +7758,14 @@ mod reconciliation_tests {
     #[test]
     fn update_system_request_serializes_set_heartbeat_interval_as_value() {
         let request = UpdateSystemRequest {
+            tags: FieldUpdate::Unset,
+            description: FieldUpdate::Unset,
+            reachability: FieldUpdate::Unset,
+            management_mode: None,
+            public_key: None,
+            parent_host_id: FieldUpdate::Unset,
             hostname: "web01".into(),
-            fqdn: None,
+            fqdn: FieldUpdate::Unset,
             system_configuration_name: None,
             environment: None,
             flake_name: None,
@@ -7486,6 +7975,23 @@ pub struct UpdatePolicyMappingRequest {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn health_status_unknown_round_trip_keeps_neutral_label() {
+        use super::HealthStatus;
+        let unknown: HealthStatus = serde_json::from_str(r#""unknown""#).unwrap();
+        assert_eq!(unknown, HealthStatus::Unknown);
+        assert_eq!(unknown.label(), "Unknown");
+        assert_eq!(serde_json::to_string(&unknown).unwrap(), r#""unknown""#);
+        assert_eq!(
+            serde_json::from_str::<HealthStatus>(r#""offline""#).unwrap(),
+            HealthStatus::Offline
+        );
+        assert_ne!(unknown, HealthStatus::Offline);
+        assert_eq!(unknown.color_class(), crate::theme::health::OFFLINE_TEXT);
+        assert_eq!(unknown.bg_class(), crate::theme::health::OFFLINE_BG);
+        assert_eq!(unknown.dot_class(), crate::theme::health::OFFLINE_DOT);
+    }
+
     #[test]
     fn cache_probe_evidence_defaults_untested_for_legacy_results() {
         let result: super::CacheCredentialTestResult =

@@ -799,6 +799,35 @@ pub async fn fetch_system(id: &uuid::Uuid) -> Result<SystemDetail, ApiClientErro
     fetch_json(&url).await
 }
 
+/// Reads configuration-only evidence and bounded history without starting work.
+///
+/// # Errors
+/// Returns transport, authorization, HTTP, or response-decoding failures.
+pub async fn fetch_configuration_assurance(
+    id: &uuid::Uuid,
+) -> Result<ConfigurationAssurance, ApiClientError> {
+    fetch_json(&format!(
+        "{}/systems/{id}/configuration-assurance",
+        base_url()
+    ))
+    .await
+}
+
+/// Reads the latest retained observation for the current external association.
+/// A null response means no applicable report. This never contacts the parent.
+///
+/// # Errors
+/// Returns transport, authorization, HTTP, or response-decoding failures.
+pub async fn fetch_latest_guest_observation(
+    id: &uuid::Uuid,
+) -> Result<Option<GuestObservationRow>, ApiClientError> {
+    fetch_json(&format!(
+        "{}/systems/{id}/guest-observations/latest",
+        base_url()
+    ))
+    .await
+}
+
 /// Fetches one bounded page of cached evaluated options without launching evaluation.
 ///
 /// # Errors
@@ -1356,6 +1385,19 @@ pub async fn trigger_system_cve_scan(
     id: &uuid::Uuid,
 ) -> Result<CveScanTriggerResponse, ApiClientError> {
     let url = format!("{}/systems/{}/cve-scan", base_url(), id);
+    send_json_with_csrf("POST", &url, None::<&()>).await
+}
+
+/// Requests a scoped scan only if the displayed artifact is still the target.
+///
+/// # Errors
+/// Returns authorization, transport or decoding errors. A changed selected
+/// artifact returns a conflict without queuing a different derivation.
+pub async fn trigger_system_cve_scan_for_artifact(
+    id: &Uuid,
+    expected_derivation_id: i32,
+) -> Result<CveScanTriggerResponse, ApiClientError> {
+    let url = format!("{}/systems/{id}/cve-scan?expected_derivation_id={expected_derivation_id}", base_url());
     send_json_with_csrf("POST", &url, None::<&()>).await
 }
 

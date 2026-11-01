@@ -8,7 +8,7 @@ tags:
   - queue
   - eval
   - build
-implementation_status: implemented
+implementation_status: partial
 generated:
   by: opencode/claude-sonnet-5-5
   at: 2026-10-04T15:30:00-05:00
@@ -154,7 +154,17 @@ all of these conditions, using `FOR UPDATE ... SKIP LOCKED`:
 - `status = 'queued'` and `available_at <= NOW()`;
 - the job's environment matches the builder's environment assignments, or the
   job has no environment, or the builder has no assignments (wildcard);
-- the derivation has `cf_agent_enabled` and `policy_requirements_met` true.
+- the derivation requires build preparation and passes the shared artifact gate:
+  either `cf_agent_enabled` and `policy_requirements_met` are true, or saved
+  `global.artifactAdmission.passed` is true, agent metadata is non-null, and an
+  active external/reference registration matches its exact flake/configuration.
+
+Both peeks and all four atomic claim variants use the same artifact predicate
+as job admission/recovery. Agentless artifacts can be claimed without changing
+the evaluated agent fact. Session, environment, verified-source and cache
+prerequisites remain independent. Queue admission alone is not execution proof; see
+[management modes](../concepts/management-modes-and-configuration-assurance.md)
+for the artifact/deployment distinction and remaining integration proof.
 
 Order among eligible jobs is:
 

@@ -721,6 +721,133 @@ async fn backfill_batch_respects_disabled_configuration(pool: PgPool) {
 
 #[sqlx::test]
 #[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+async fn configuration_hardening_selects_artifact_without_heartbeat_and_never_current(
+    pool: PgPool,
+) {
+    use crate::queries::hardening_scans::{
+        create_hardening_scan, delete_justification, resolve_system_hardening_scan_target,
+        upsert_justification,
+    };
+
+    let suffix = Uuid::new_v4().simple().to_string();
+    let repo_url = format!("https://example.test/config-hardening-{suffix}.git");
+    let config = format!("baseline-{suffix}");
+    let path = format!("/nix/store/{suffix}-baseline");
+    let derivation_id = insert_hardening_test_derivation(
+        &pool,
+        &repo_url,
+        &format!("commit-{suffix}"),
+        &config,
+        &path,
+    )
+    .await;
+    sqlx::query("UPDATE derivations SET status_id=(SELECT id FROM derivation_statuses WHERE name='build-complete'),derivation_path=$2 WHERE id=$1")
+        .bind(derivation_id)
+        .bind(format!("{path}.drv"))
+        .execute(&pool)
+        .await
+        .unwrap();
+    let flake_id: i32 = sqlx::query_scalar(
+        "SELECT flake_id FROM commits WHERE id=(SELECT commit_id FROM derivations WHERE id=$1)",
+    )
+    .bind(derivation_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    sqlx::query("UPDATE flakes SET snapshot_ready_at=now() WHERE id=$1")
+        .bind(flake_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO flake_branch_commit_snapshot(flake_id,commit_id,position) SELECT $1,commit_id,0 FROM derivations WHERE id=$2")
+        .bind(flake_id)
+        .bind(derivation_id)
+        .execute(&pool)
+        .await
+        .unwrap();
+    let mut shared_scan = None;
+    for mode in ["external", "reference"] {
+        let hostname = format!("{mode}-{suffix}");
+        let system_id: Uuid = sqlx::query_scalar("INSERT INTO systems(hostname,is_active,management_mode,public_key,flake_id,derivation,system_configuration_name,deployment_policy) VALUES($1,true,$2,NULL,$3,'',$4,'manual') RETURNING id")
+            .bind(&hostname)
+            .bind(mode)
+            .bind(flake_id)
+            .bind(&config)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        let target = resolve_system_hardening_scan_target(&pool, system_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(target.derivation_id, derivation_id);
+        assert!(target.blocked_reason.is_none());
+        let scan = create_hardening_scan(&pool, derivation_id).await.unwrap();
+        if let Some(existing) = shared_scan {
+            assert_eq!(scan, existing, "registrations must share the active scan");
+        }
+        shared_scan = Some(scan);
+        let exact = fetch_system_hardening_inventory(
+            &pool,
+            system_id,
+            SystemCveInventorySelection::ExactDerivation { derivation_id },
+        )
+        .await
+        .unwrap();
+        assert!(exact.read_only);
+        assert_eq!(
+            exact.attempt.as_ref().map(|attempt| attempt.scan_id),
+            Some(scan)
+        );
+        assert!(
+            upsert_justification(
+                &pool,
+                system_id,
+                "sshd",
+                None,
+                None,
+                "configuration evidence",
+                None,
+            )
+            .await
+            .is_err()
+        );
+        let retained_justification: Uuid = sqlx::query_scalar(
+            "INSERT INTO hardening_justifications(system_id,service_name,reason) VALUES($1,'sshd','retained managed decision') RETURNING id",
+        )
+        .bind(system_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(
+            delete_justification(&pool, retained_justification)
+                .await
+                .is_err()
+        );
+
+        // Retained pre-conversion state must not re-enable Current evidence.
+        sqlx::query("INSERT INTO system_states(hostname,change_reason,store_path,timestamp) VALUES($1,'startup',$2,now())")
+            .bind(&hostname)
+            .bind(&path)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let current = fetch_system_hardening_inventory(
+            &pool,
+            system_id,
+            SystemCveInventorySelection::Current,
+        )
+        .await
+        .unwrap();
+        assert!(current.read_only);
+        assert!(current.derivation_id.is_none());
+        assert!(current.source.is_none());
+        assert!(current.attempt.is_none());
+    }
+}
+
+#[sqlx::test]
+#[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
 async fn exact_target_lifecycle_reports_never_queued_scanning_failed_and_completed(pool: PgPool) {
     let suffix = Uuid::new_v4().simple().to_string();
     let repo_url = format!("https://example.com/lifecycle-{suffix}.git");
