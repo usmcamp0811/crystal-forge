@@ -127,7 +127,9 @@ def configuration_assurance():
                 "title": "Forbidden artifact-only remediation", "plan": "Configuration evidence is not running evidence.",
                 "risk": "high", "target_date": "2027-02-01",
             }, session="delivery-admin", csrf=True)
-            expect_equal(status, 409, "configuration occurrence cannot authorize a runtime plan")
+            # Existing contract: an observation without Current authority is a
+            # failed precondition (412 stale_cve_observation), not a conflict.
+            expect_equal(status, 412, "configuration occurrence cannot authorize a runtime plan")
             expect_equal(error["error"], "stale_cve_observation", "denial is evidence authority, not invalid input")
         expect_equal(_assurance_remediation_snapshot(), before, "artifact bypass changes no remediation rows")
 
