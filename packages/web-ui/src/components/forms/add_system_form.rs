@@ -125,7 +125,7 @@ pub fn EnrollmentTagsField(value: String, on_change: EventHandler<String>) -> El
         .unwrap_or_default();
     rsx! {
         label { class: "field", "Tags · optional",
-            input { class: "input focus-ring", value: "{value}", placeholder: "e.g. builder, stig-enforced",
+            input { class: "input focus-ring", aria_label: "Tags · optional", value: "{value}", placeholder: "e.g. builder, stig-enforced",
                 oninput: move |e| on_change.call(e.value()) }
         }
         div { class: "help", style: "display:flex;gap:6px;flex-wrap:wrap;",
@@ -162,7 +162,7 @@ pub fn EnrollmentNetworkFields(
 ) -> Element {
     rsx! {
         label { class: "field", "FQDN or address · optional",
-            input { class: "input focus-ring mono", value: "{fqdn}", placeholder: "host.example.com or 10.0.4.12", oninput: move |e| on_address.call(e.value()) }
+            input { class: "input focus-ring mono", aria_label: "FQDN or address · optional", value: "{fqdn}", placeholder: "host.example.com or 10.0.4.12", oninput: move |e| on_address.call(e.value()) }
         }
         label { class: "field",
             input { r#type: "checkbox", checked: reachability == "direct", onchange: move |e| on_reachability.call(if e.checked() { "direct".into() } else { "pull".into() }) }
@@ -394,21 +394,21 @@ pub fn EnrollmentConfigurationFields(
     rsx! {
         div { class: "management-form-grid",
             label { class: "field", "Flake",
-                select { class: "input focus-ring", value: "{flake_name}",
+                select { class: "input focus-ring", aria_label: "Flake", value: "{flake_name}",
                     onchange: move |e| on_change.call((e.value(), String::new(), config_for_flake.clone())),
                     option { value: "", "Select flake" }
                     for name in flake_names { option { value: "{name}", "{name}" } }
                 }
             }
             label { class: "field", "Branch",
-                input { class: "input mono", readonly: true,
+                input { class: "input mono", readonly: true, aria_label: "Branch",
                     value: loaded.as_ref().and_then(|r| r.as_ref().ok()).map(|(_, b)| b.clone()).unwrap_or(branch.clone()),
                 }
                 span { class: "help", "Follows the registered flake branch." }
             }
         }
         label { class: "field", "NixOS configuration *",
-            input { class: "input focus-ring mono", list: "enrollment-configurations", value: "{configuration}",
+            input { class: "input focus-ring mono", aria_label: "NixOS configuration *", list: "enrollment-configurations", value: "{configuration}",
                 oninput: move |e| { on_valid.call(false); on_change.call((flake_for_config.clone(), branch_for_config.clone(), e.value())); },
                 placeholder: "Exact nixosConfigurations output name",
                 aria_invalid: !configuration.is_empty() && !valid,
@@ -488,7 +488,7 @@ pub fn EnrollmentParentField(
     ));
     rsx! {
         label { class: "field", "Parent host · optional",
-            select { class: "input focus-ring mono", value: value.map(|v| v.to_string()).unwrap_or_default(),
+            select { class: "input focus-ring mono", aria_label: "Parent host · optional", value: value.map(|v| v.to_string()).unwrap_or_default(),
                 onchange: move |e| on_change.call(Uuid::parse_str(&e.value()).ok()),
                 option { value: "", "None" }
                 if let Some(Ok(hosts)) = parents.read().as_ref() {
@@ -575,10 +575,10 @@ pub fn AddSystemForm(
                             div { class: "pe-sec-head", h3 { "Identity & environment" } p { "Choose a unique resource identity and its authorized environment." } }
                             div { class: "management-form-grid",
                                 label { class: "field", match mode { ManagementMode::Managed => "Hostname *", ManagementMode::External => "System name *", ManagementMode::Reference => "Reference name *" },
-                                    input { class: "input focus-ring", value: "{form.hostname}", oninput: move |e| draft.write().hostname = e.value() }
+                                    input { class: "input focus-ring", aria_label: match mode { ManagementMode::Managed => "Hostname *", ManagementMode::External => "System name *", ManagementMode::Reference => "Reference name *" }, value: "{form.hostname}", oninput: move |e| draft.write().hostname = e.value() }
                                 }
                                 label { class: "field", "Environment *",
-                                    select { class: "input focus-ring", value: "{form.environment}", onchange: move |e| { let mut d = draft.write(); d.environment = e.value(); d.parent_host_id = None; },
+                                    select { class: "input focus-ring", aria_label: "Environment *", value: "{form.environment}", onchange: move |e| { let mut d = draft.write(); d.environment = e.value(); d.parent_host_id = None; },
                                         option { value: "", "Select environment" }
                                         for env in environments { option { value: "{env}", "{env}" } }
                                     }
@@ -590,7 +590,7 @@ pub fn AddSystemForm(
                         }
                         if section() == "agent" && mode == ManagementMode::Managed {
                             div { class: "pe-sec-head", h3 { "Agent identity" } p { "Register the real base64 Ed25519 public key. The private key stays on the host." } }
-                            label { class: "field", "Agent public key *", textarea { class: "input focus-ring mono", rows: 4, value: "{form.public_key}", placeholder: "Base64 Ed25519 public key", oninput: move |e| draft.write().public_key = e.value() } }
+                            label { class: "field", "Agent public key *", textarea { class: "input focus-ring mono", aria_label: "Agent public key *", rows: 4, value: "{form.public_key}", placeholder: "Base64 Ed25519 public key", oninput: move |e| draft.write().public_key = e.value() } }
                             button { class: "btn btn-ghost focus-ring", onclick: move |_| on_generate_keys.call(()), "Generate keypair" }
                             if let Some(fingerprint) = key_fingerprint { p { class: "help mono", "Fingerprint: {fingerprint}" } }
                             else if !form.public_key.is_empty() { p { role: "alert", "Enter a valid base64-encoded Ed25519 public key (32 bytes). SSH-formatted keys are not accepted." } }
@@ -633,7 +633,7 @@ pub fn AddSystemForm(
                                 }
                             } else { div { class: "mg-notice", "No deployment policy applies. Crystal Forge retains configuration evidence without deployment authority." } }
                             EnrollmentTagsField { value: form.tags.clone(), on_change: move |value| draft.write().tags = value }
-                            label { class: "field", "Description / notes", textarea { class: "input focus-ring", rows: 2, value: "{form.description}", placeholder: "Optional context for operators…", oninput: move |e| draft.write().description = e.value() } }
+                            label { class: "field", "Description / notes", textarea { class: "input focus-ring", aria_label: "Description / notes", rows: 2, value: "{form.description}", placeholder: "Optional context for operators…", oninput: move |e| draft.write().description = e.value() } }
                         }
                     }
                     if let Some(message) = error() { div { class: "sd-callout sd-callout-danger", role: "alert", "{message}" } }

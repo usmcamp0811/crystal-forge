@@ -896,6 +896,7 @@ pub fn EditSystemModal(
                                 textarea {
                                     class: "input focus-ring",
                                     rows: "2",
+                                    aria_label: "Description / notes",
                                     value: "{description}",
                                     oninput: move |e| description.set(e.value()),
                                     placeholder: "Optional context for operators…",
@@ -926,7 +927,7 @@ pub fn EditSystemModal(
                             }
                             if management_mode() == ManagementMode::Managed {
                                 label { class: "field", "New agent public key *",
-                                    textarea { class: "input focus-ring mono", rows: 3, value: "{enrollment_key}", placeholder: "Base64 Ed25519 public key", oninput: move |e| enrollment_key.set(e.value()) }
+                                    textarea { class: "input focus-ring mono", aria_label: "New agent public key *", rows: 3, value: "{enrollment_key}", placeholder: "Base64 Ed25519 public key", oninput: move |e| enrollment_key.set(e.value()) }
                                 }
                             }
                             label { class: "management-transition-confirm",
