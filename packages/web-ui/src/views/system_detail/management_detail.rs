@@ -294,10 +294,6 @@ pub(super) fn ManagementDetail(
                             ConfigurationHardening { system_id, evidence: e.clone(), selection: artifact_selection }
                         },
                         Tab::Compliance => rsx! {
-                            div { class: "mg-notice", div { class: "mg-notice-body",
-                                div { class: "mg-notice-title", "Configuration compliance evidence" }
-                                p { class: "mg-notice-text", "Captured policy outcomes describe an exact evaluation attempt, not what a system is running. A CVE scan is not the authority for these outcomes, and configuration evidence cannot authorize remediation verification or POA&M closure." }
-                            } }
                             ConfigurationCompliance { system_id, evidence: e.clone() }
                             // Existing POA&M history remains inspectable without granting
                             // configuration evidence runtime-remediation authority.
@@ -996,7 +992,7 @@ fn ConfigurationCompliance(system_id: Uuid, evidence: ConfigurationAssurance) ->
                     for (id, revision, state) in attempts { option { value: "{id}", "{revision.sha} · {state} · {id}" } }
                 }
             }
-            p { class: "mg-copy", "Captured bundle versions and control outcomes describe this exact configuration evaluation. They do not attest runtime compliance or authorize remediation verification." }
+            p { class: "mg-copy", "Captured bundle versions and control outcomes describe this exact configuration evaluation attempt, not what a system is running. A CVE scan is not the authority for these outcomes. They do not attest runtime compliance or authorize remediation verification or POA&M closure." }
             if let Some((attempt, revision, _)) = &target { p { class: "mg-dim mono", "revision {revision.sha} · attempt {attempt}" } }
             if let (Some(matrix), Some(row), Some((attempt_id, revision, _))) = (matrix, row, &target) {
                 if matrix.bundles.is_empty() { p { class: "mg-dim", "No captured bundle contexts are available. Missing capture is not proof that no bundles apply." } }
