@@ -30,7 +30,9 @@ pub struct NewSystemDraft {
     pub flake_branch: String,
     /// Exact declared NixOS output name.
     pub system_configuration_name: String,
-    /// Managed deployment policy; nonmanaged requests use manual without authority.
+    /// Managed deployment policy or [`ENVIRONMENT_DEFAULT_POLICY`], which the
+    /// server copies from the environment when saved. Nonmanaged requests use
+    /// manual without authority.
     pub deployment_policy: String,
     /// Explicit deployment authority.
     pub management_mode: ManagementMode,
@@ -39,10 +41,11 @@ pub struct NewSystemDraft {
 }
 
 impl NewSystemDraft {
-    /// Creates an empty managed enrollment with manual deployment policy.
+    /// Creates an empty managed enrollment that inherits the environment default
+    /// policy (copied at save time), matching the approved registration design.
     pub fn new() -> Self {
         Self {
-            deployment_policy: "manual".into(),
+            deployment_policy: ENVIRONMENT_DEFAULT_POLICY.into(),
             reachability: "direct".into(),
             ..Self::default()
         }
@@ -234,9 +237,14 @@ pub fn validate_new_system(
         key_rotation::validate_public_key_input(&draft.public_key)?;
         if !matches!(
             draft.deployment_policy.as_str(),
-            "manual" | "auto_latest" | "pinned"
+            "manual" | "auto_latest" | "pinned" | ENVIRONMENT_DEFAULT_POLICY
         ) {
-            return Err("Select manual, auto_latest, or pinned deployment policy.".into());
+            return Err("Select inherit, manual, auto_latest, or pinned deployment policy.".into());
+        }
+        if draft.deployment_policy == ENVIRONMENT_DEFAULT_POLICY
+            && draft.environment.trim().is_empty()
+        {
+            return Err("Select an environment to inherit its default deployment policy.".into());
         }
     }
     Ok(())
@@ -599,12 +607,30 @@ pub fn AddSystemForm(
                         if section() == "policy" {
                             div { class: "pe-sec-head", h3 { "Policy & tags" } }
                             if mode == ManagementMode::Managed {
-                                label { class: "field", "Deployment policy",
-                                    select { class: "input focus-ring", value: "{form.deployment_policy}", onchange: move |e| draft.write().deployment_policy = e.value(),
-                                        option { value: "manual", "Manual — explicit operator action" } option { value: "auto_latest", "Auto latest" } option { value: "pinned", "Pinned" }
+                                div { class: "field",
+                                    label { "Deployment policy" }
+                                    div { class: "seg", style: "width: fit-content; flex-wrap: wrap;", role: "radiogroup", aria_label: "Deployment policy",
+                                        for (value, label) in [(ENVIRONMENT_DEFAULT_POLICY, "inherit"), ("manual", "manual"), ("auto_latest", "auto_latest"), ("pinned", "pinned")] {
+                                            button { r#type: "button", role: "radio", aria_checked: form.deployment_policy == value,
+                                                class: if form.deployment_policy == value { "active focus-ring" } else { "focus-ring" },
+                                                onclick: move |_| draft.write().deployment_policy = value.to_string(),
+                                                "{label}"
+                                            }
+                                        }
+                                    }
+                                    p { class: "help",
+                                        match form.deployment_policy.as_str() {
+                                            ENVIRONMENT_DEFAULT_POLICY => rsx! {
+                                                "Use the default policy of the "
+                                                span { class: "mono", if form.environment.is_empty() { "selected" } else { "{form.environment}" } }
+                                                " environment. The current default is copied when you register; later changes to it do not update this system."
+                                            },
+                                            "manual" => rsx! { "Operator must explicitly approve every deploy." },
+                                            "auto_latest" => rsx! { "Auto-deploy the newest passing commit on the assigned flake/branch." },
+                                            _ => rsx! { "Stay on a chosen commit until manually changed (set the pin from System Detail after registering)." },
+                                        }
                                     }
                                 }
-                                p { class: "help", "Environment gates still apply. Set a pinned target from System Detail after registration." }
                             } else { div { class: "mg-notice", "No deployment policy applies. Crystal Forge retains configuration evidence without deployment authority." } }
                             EnrollmentTagsField { value: form.tags.clone(), on_change: move |value| draft.write().tags = value }
                             label { class: "field", "Description / notes", textarea { class: "input focus-ring", rows: 2, value: "{form.description}", placeholder: "Optional context for operators…", oninput: move |e| draft.write().description = e.value() } }

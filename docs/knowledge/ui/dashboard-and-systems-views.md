@@ -133,9 +133,18 @@ tag scopes, suggestions and counts are not limited to page one. A failed
 continuation reports an error rather than presenting a partial fleet as complete.
 Explicit page requests retain server pagination.
 
-The forms use the existing `manual`, `auto_latest` and `pinned` policies. Initial
-managed conversion requires fresh credentials and manual policy; tags do not
-create an inherited policy model.
+The forms store only the existing `manual`, `auto_latest` and `pinned` policies.
+Add offers `inherit` (the default, per the approved design) and Edit offers
+**Environment default**. Both send `environment_default`; the server copies the
+environment's current default when saved. The help text states that later
+environment-default changes do not update the system, and Edit always reopens
+with the stored concrete policy. Initial managed conversion requires fresh
+credentials and manual policy.
+
+When Edit selects `pinned`, it shows the approved pinned-commit list from the
+same System Detail commit list. Saving a changed selection sends
+`pinned_commit`; it is metadata and never requests a deployment. Add keeps the
+design's "set the pin from System Detail after registering" guidance.
 
 ### Data Flow
 

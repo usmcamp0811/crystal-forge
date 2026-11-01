@@ -3,7 +3,8 @@
 //! Section rail with mode-specific configuration, real key rotation and removal.
 
 use crate::api::models::{
-    CommitInfo, FieldUpdate, ManagementMode, SystemDetail, UpdateSystemRequest,
+    CommitInfo, ENVIRONMENT_DEFAULT_POLICY, FieldUpdate, ManagementMode, SystemDetail,
+    UpdateSystemRequest,
 };
 use crate::components::forms::add_system_form::{
     EnrollmentConfigurationFields, EnrollmentNetworkFields, EnrollmentParentField,
@@ -38,6 +39,23 @@ fn text_update(original: &str, value: &str) -> FieldUpdate<String> {
         FieldUpdate::Clear
     } else {
         FieldUpdate::Set(value.trim().into())
+    }
+}
+
+/// Returns the pin change to send. Only an edit that stays managed with the
+/// pinned policy can set a pin, and only a changed selection is sent. Other
+/// policies omit it: the server clears a pin when the policy leaves `pinned`.
+fn pin_update(
+    stays_managed: bool,
+    policy: &str,
+    original: Option<&str>,
+    selected: Option<&str>,
+) -> FieldUpdate<String> {
+    match selected {
+        Some(sha) if stays_managed && policy == "pinned" && Some(sha) != original => {
+            FieldUpdate::Set(sha.to_string())
+        }
+        _ => FieldUpdate::Unset,
     }
 }
 
@@ -209,6 +227,47 @@ mod management_registration_tests {
     }
 
     #[test]
+    fn pin_selection_is_sent_only_for_changed_managed_pinned_edits() {
+        let a = "a".repeat(40);
+        let b = "b".repeat(40);
+        assert_eq!(
+            pin_update(true, "pinned", Some(&a), Some(&b)),
+            FieldUpdate::Set(b.clone())
+        );
+        assert_eq!(
+            pin_update(true, "pinned", None, Some(&a)),
+            FieldUpdate::Set(a.clone())
+        );
+        assert_eq!(
+            pin_update(true, "pinned", Some(&a), Some(&a)),
+            FieldUpdate::Unset
+        );
+        assert_eq!(
+            pin_update(true, "manual", Some(&a), Some(&b)),
+            FieldUpdate::Unset
+        );
+        assert_eq!(
+            pin_update(true, ENVIRONMENT_DEFAULT_POLICY, None, Some(&a)),
+            FieldUpdate::Unset
+        );
+        assert_eq!(
+            pin_update(false, "pinned", None, Some(&a)),
+            FieldUpdate::Unset
+        );
+        // Unset never serializes, so omission keeps the stored pin.
+        let request: UpdateSystemRequest = serde_json::from_value(
+            serde_json::json!({"hostname":"host", "deployment_policy":"pinned"}),
+        )
+        .unwrap();
+        assert!(
+            serde_json::to_value(&request)
+                .unwrap()
+                .get("pinned_commit")
+                .is_none()
+        );
+    }
+
+    #[test]
     fn conversion_into_managed_cannot_enable_automatic_deployment() {
         for original in [ManagementMode::External, ManagementMode::Reference] {
             for policy in ["manual", "auto_latest", "pinned"] {
@@ -365,7 +424,10 @@ pub fn EditSystemModal(
     let mut is_saving = use_signal(|| false);
     let mut show_remove_modal = use_signal(|| false);
     // Deployment targets have a separate API and remain owned by System Detail.
-    let _ = recent_commits;
+    // The pinned picker reuses the System Detail commit list. Selecting a pin
+    // is metadata only; deployment stays a separate, authorized action.
+    let original_pin = system.pinned_commit.clone();
+    let mut pinned_commit = use_signal(|| original_pin.clone());
 
     // Seed heartbeat interval from the persisted system value.
     // 0 is a sentinel meaning "use server default" (NULL in the database).
@@ -539,6 +601,7 @@ pub fn EditSystemModal(
     let original_for_save = original_assignment.clone();
     let registered_flakes_for_save = flake_names.clone();
 
+    let save_original_pin = original_pin.clone();
     let handle_save = move |_| {
         if rotate_in_flight() || is_saving() {
             return;
@@ -647,6 +710,13 @@ pub fn EditSystemModal(
                 original_mode,
                 management_mode(),
                 &deployment_policy(),
+            ),
+            pinned_commit: pin_update(
+                original_mode == ManagementMode::Managed
+                    && management_mode() == ManagementMode::Managed,
+                &deployment_policy(),
+                save_original_pin.as_deref(),
+                pinned_commit().as_deref(),
             ),
             heartbeat_interval_secs: if management_mode() == ManagementMode::Managed {
                 heartbeat_interval
@@ -906,15 +976,58 @@ pub fn EditSystemModal(
                                         onclick: move |_| deployment_policy.set("pinned".to_string()),
                                         "Pinned"
                                     }
+                                    button {
+                                        class: if *deployment_policy.read() == ENVIRONMENT_DEFAULT_POLICY { "active" } else { "" },
+                                        onclick: move |_| deployment_policy.set(ENVIRONMENT_DEFAULT_POLICY.to_string()),
+                                        "Environment default"
+                                    }
                                 }
                                 p {
                                     class: "help",
                                     match deployment_policy.read().as_str() {
-                                        "manual" => "Operator must explicitly approve every deploy.",
-                                        "auto_latest" => "Automatically deploy the latest commit.",
-                                        "pinned" => "Deploy only specific pinned commits.",
-                                        _ => ""
+                                        "manual" => "Operator must explicitly approve every deploy.".to_string(),
+                                        "auto_latest" => "Automatically deploy the latest commit.".to_string(),
+                                        "pinned" => "System will not auto-advance off the pinned commit. Saving a pin does not deploy it.".to_string(),
+                                        ENVIRONMENT_DEFAULT_POLICY => format!(
+                                            "Copies the {} environment's current default policy when you save. Later changes to that default do not update this system.",
+                                            if environment().trim().is_empty() { "selected".to_string() } else { environment() }
+                                        ),
+                                        _ => String::new(),
                                     }
+                                }
+                            }
+                            if deployment_policy() == "pinned" {
+                                div { class: "field", "data-testid": "pinned-commit-field",
+                                    label { "Pinned commit" }
+                                    if recent_commits.is_empty() {
+                                        p { class: "help", "No commits of the registered flake are available to pin." }
+                                    } else {
+                                        div { class: "sd-commit-list", style: "max-height: 200px;", role: "listbox", aria_label: "Pinned commit",
+                                            for commit in recent_commits.clone() {
+                                                {
+                                                    let selected = pinned_commit().as_deref() == Some(commit.sha.as_str());
+                                                    let sha = commit.sha.clone();
+                                                    rsx! {
+                                                        button {
+                                                            r#type: "button",
+                                                            role: "option",
+                                                            aria_selected: selected,
+                                                            class: if selected { "sd-commit-item focus-ring selected" } else { "sd-commit-item focus-ring" },
+                                                            onclick: move |_| pinned_commit.set(Some(sha.clone())),
+                                                            span { class: "mono sd-commit-sha", "{commit.short_sha}" }
+                                                            span { class: "sd-commit-msg", "{commit.message}" }
+                                                            span { class: "sd-commit-meta mono", "{commit.author}" }
+                                                            span { class: "sd-commit-meta", "{commit.timestamp}" }
+                                                            if original_pin.as_deref() == Some(commit.sha.as_str()) {
+                                                                span { class: "chip chip-info", style: "font-size:10px", "pinned" }
+                                                            }
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                        }
+                                    }
+                                    p { class: "help", "System will not auto-advance off this commit. Operators can change the pin or temporarily deploy a different commit from System Detail. Saving the pin does not deploy it." }
                                 }
                             }
                             }
@@ -943,7 +1056,6 @@ pub fn EditSystemModal(
                                 }
                                 p { class: "help", "Agent heartbeat cadence. \"Use server default\" clears any per-system override (inherits the server-configured default). Takes effect on the agent's next check-in after saving." }
                             }
-                            if deployment_policy() == "pinned" { p { class: "help", "Choose the pinned deployment target from System Detail after saving. This form does not change the target." } }
                             }
                         }
                     }

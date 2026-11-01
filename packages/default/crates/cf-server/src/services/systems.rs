@@ -280,6 +280,9 @@ pub async fn create_system(
         environment_id,
     )
     .await?;
+    // The environment row is locked above, so the copied default is consistent.
+    let deployment_policy =
+        resolve_requested_policy_tx(&mut tx, &payload.deployment_policy, environment_id).await?;
     // PERSISTENCE: Registration is insert-only. A name conflict must never
     // overwrite another resource's credentials, mode, or configuration.
     let id = sqlx::query_scalar::<_, Uuid>(
@@ -293,7 +296,7 @@ pub async fn create_system(
     .bind(payload.public_key.as_deref().map(str::trim))
     .bind(flake_id)
     .bind(payload.system_configuration_name.as_deref().map(str::trim))
-    .bind(&payload.deployment_policy)
+    .bind(&deployment_policy)
     .bind(payload.management_mode)
     .bind(payload.parent_host_id)
     .bind(normalize_tags(&payload.tags))
@@ -343,9 +346,11 @@ pub fn validate_registration(payload: &CreateSystemRequest) -> Result<()> {
         !payload.hostname.trim().is_empty(),
         "Resource name is required"
     );
-    payload
-        .deployment_policy
-        .parse::<crate::models::systems::DeploymentPolicy>()?;
+    if payload.deployment_policy.trim() != crate::api::models::ENVIRONMENT_DEFAULT_POLICY {
+        payload
+            .deployment_policy
+            .parse::<crate::models::systems::DeploymentPolicy>()?;
+    }
     if payload.management_mode == ManagementMode::Managed {
         PublicKey::from_base64(
             payload.public_key.as_deref().unwrap_or("").trim(),
@@ -376,6 +381,45 @@ pub fn validate_registration(payload: &CreateSystemRequest) -> Result<()> {
         "Only external resources can have a parent host"
     );
     Ok(())
+}
+
+/// Returns the concrete policy to store for a registration request.
+///
+/// A concrete `manual`, `auto_latest`, or `pinned` value is returned as is.
+/// [`ENVIRONMENT_DEFAULT_POLICY`](crate::api::models::ENVIRONMENT_DEFAULT_POLICY)
+/// copies the target environment's `default_policy` once; the caller MUST
+/// already hold that environment row lock so a concurrent default change
+/// cannot interleave. The copied value is never updated later.
+///
+/// # Errors
+/// Returns an error for an unknown policy, an environment-default request
+/// without an environment, a missing environment, or an environment default
+/// that is not a supported concrete policy.
+pub async fn resolve_requested_policy_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    requested: &str,
+    environment_id: Option<Uuid>,
+) -> Result<String> {
+    use crate::models::systems::DeploymentPolicy;
+    let requested = requested.trim();
+    if requested != crate::api::models::ENVIRONMENT_DEFAULT_POLICY {
+        return Ok(requested.parse::<DeploymentPolicy>()?.to_string());
+    }
+    let environment_id = environment_id
+        .ok_or_else(|| anyhow::anyhow!("The environment default requires an environment"))?;
+    let default_policy: String =
+        sqlx::query_scalar("SELECT default_policy FROM environments WHERE id=$1")
+            .bind(environment_id)
+            .fetch_optional(&mut **tx)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Environment not found"))?;
+    let policy = default_policy
+        .trim()
+        .parse::<DeploymentPolicy>()
+        .map_err(|_| {
+            anyhow::anyhow!("The environment default policy is not a supported deployment policy")
+        })?;
+    Ok(policy.to_string())
 }
 
 // === Helper functions ===
@@ -569,6 +613,7 @@ fn detail_row_to_api_model(
         environment: row.environment,
         is_active: row.is_active,
         deployment_policy: row.deployment_policy,
+        pinned_commit: row.pinned_commit,
         health_status: parse_health_status(&row.health_status),
         deployment_status: parse_deployment_status(&row.deployment_status),
         pipeline_stage: Some(parse_pipeline_stage(&row.pipeline_stage)),

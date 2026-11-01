@@ -86,6 +86,16 @@ omit that field. Moving out of
 managed removes credentials/targets, supersedes pending work and invalidates
 request reservations atomically. Old request IDs cannot revive revoked work.
 
+`deployment_policy` accepts `manual`, `auto_latest`, `pinned`, or the
+request-only `environment_default` on create and PATCH. The token is resolved
+against the locked target environment and the concrete policy is stored and
+returned; it is not live inheritance. PATCH `pinned_commit` (tri-state, full
+SHA) records the declared pin of a managed `pinned` system and returns it as
+`pinned_commit` on detail responses. It returns 400 for another policy or mode,
+a commit outside the registered flake, or an archived commit, and never queues
+a deployment. Audit metadata records `deployment_policy`,
+`deployment_policy_from_environment_default`, and `pinned_commit_updated`.
+
 The PATCH DTO is not a generic sparse patch: existing required fields such as
 `hostname` and `deployment_policy` still apply. Nonmanaged edits require a real
 flake and explicit configuration. Never infer omitted-field preservation for

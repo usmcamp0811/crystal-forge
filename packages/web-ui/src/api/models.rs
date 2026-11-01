@@ -1545,7 +1545,11 @@ pub struct SystemDetail {
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub is_active: bool,
+    /// Stored concrete policy; an environment default was copied when saved.
     pub deployment_policy: String,
+    /// Declared pin SHA for a managed `pinned` system; not a deployment target.
+    #[serde(default)]
+    pub pinned_commit: Option<String>,
     pub health_status: HealthStatus,
     pub deployment_status: DeploymentStatus,
     pub pipeline_stage: Option<PipelineStage>,
@@ -5726,7 +5730,12 @@ pub struct UpdateSystemRequest {
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub flake_name: Option<String>,
+    /// Concrete policy or [`ENVIRONMENT_DEFAULT_POLICY`], resolved when saved.
     pub deployment_policy: String,
+    /// Full SHA to hold a `pinned` managed system on. Omission preserves the
+    /// pin; null clears it. Saving a pin never requests a deployment.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub pinned_commit: FieldUpdate<String>,
     /// Tri-state heartbeat interval in seconds. Omitting the key preserves the persisted value;
     /// sending `null` clears it (falls back to server default of 600s); sending a value sets it.
     /// Valid range: 15-900 seconds.
@@ -5736,6 +5745,11 @@ pub struct UpdateSystemRequest {
     #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
     pub heartbeat_interval_secs: FieldUpdate<i32>,
 }
+
+/// Request-only policy token: the server copies the environment's current
+/// default policy when saved and stores that concrete value. Later changes to
+/// the environment default do not update the registration.
+pub const ENVIRONMENT_DEFAULT_POLICY: &str = "environment_default";
 
 fn default_flake_build_scope() -> String {
     "cf_systems_only".to_string()
@@ -7716,6 +7730,7 @@ mod reconciliation_tests {
             environment: None,
             flake_name: None,
             deployment_policy: "manual".into(),
+            pinned_commit: FieldUpdate::Unset,
             heartbeat_interval_secs: FieldUpdate::Unset,
         };
 
@@ -7744,6 +7759,7 @@ mod reconciliation_tests {
             environment: None,
             flake_name: None,
             deployment_policy: "manual".into(),
+            pinned_commit: FieldUpdate::Unset,
             heartbeat_interval_secs: FieldUpdate::Clear,
         };
 
@@ -7770,6 +7786,7 @@ mod reconciliation_tests {
             environment: None,
             flake_name: None,
             deployment_policy: "manual".into(),
+            pinned_commit: FieldUpdate::Unset,
             heartbeat_interval_secs: FieldUpdate::Set(120),
         };
 

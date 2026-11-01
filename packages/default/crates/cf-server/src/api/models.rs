@@ -2665,7 +2665,12 @@ pub struct SystemDetail {
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub is_active: bool,
+    /// Stored concrete policy; an environment default was copied when saved.
     pub deployment_policy: String,
+    /// Declared pin (full SHA) for a managed `pinned` system, if recorded.
+    /// This is not a deployment target or an observation of running state.
+    #[serde(default)]
+    pub pinned_commit: Option<String>,
 
     /// Status indicators.
     pub health_status: HealthStatus,
@@ -3890,8 +3895,18 @@ pub struct CreateSystemRequest {
     pub public_key: Option<String>,
     pub environment: Option<String>,
     pub flake_name: Option<String>,
+    /// `manual`, `auto_latest`, `pinned`, or [`ENVIRONMENT_DEFAULT_POLICY`].
+    /// The last is resolved to the environment's current concrete policy when
+    /// saved; only the concrete value is stored.
     pub deployment_policy: String,
 }
+
+/// Request-only deployment policy token.
+///
+/// The server copies the target environment's current `default_policy` at save
+/// time and stores that concrete value. Later environment-default changes do
+/// not update the registration; there is no live inheritance.
+pub const ENVIRONMENT_DEFAULT_POLICY: &str = "environment_default";
 
 /// Updates metadata and explicitly requested management authority atomically.
 /// Conversion into managed requires a new key and an explicit manual policy;
@@ -3922,7 +3937,13 @@ pub struct UpdateSystemRequest {
     pub system_configuration_name: Option<String>,
     pub environment: Option<String>,
     pub flake_name: Option<String>,
+    /// Concrete policy or [`ENVIRONMENT_DEFAULT_POLICY`], resolved when saved.
     pub deployment_policy: String,
+    /// Full commit SHA of the registered flake to hold a `pinned` managed
+    /// system on. Omission preserves the pin; null clears it. Saving a pin
+    /// never requests or queues a deployment.
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_unset")]
+    pub pinned_commit: FieldUpdate<String>,
     /// Tri-state heartbeat interval in seconds. Omitting the key preserves the persisted value;
     /// sending `null` clears it (falls back to server default of 600s); sending a value sets it.
     /// Valid range: 15-900 seconds.
@@ -5394,6 +5415,7 @@ mod tests {
             environment: None,
             flake_name: None,
             deployment_policy: "manual".into(),
+            pinned_commit: FieldUpdate::Unset,
             heartbeat_interval_secs: FieldUpdate::Unset,
         };
 
@@ -5422,6 +5444,7 @@ mod tests {
             environment: None,
             flake_name: None,
             deployment_policy: "manual".into(),
+            pinned_commit: FieldUpdate::Unset,
             heartbeat_interval_secs: FieldUpdate::Clear,
         };
 
@@ -5448,6 +5471,7 @@ mod tests {
             environment: None,
             flake_name: None,
             deployment_policy: "manual".into(),
+            pinned_commit: FieldUpdate::Unset,
             heartbeat_interval_secs: FieldUpdate::Set(120),
         };
 

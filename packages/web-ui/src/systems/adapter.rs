@@ -765,6 +765,7 @@ pub fn fallback_system_detail() -> SystemDetail {
         environment: None,
         is_active: false,
         deployment_policy: "manual".to_string(),
+        pinned_commit: None,
         health_status: HealthStatus::Offline,
         deployment_status: DeploymentStatus::Unknown,
         pipeline_stage: Some(PipelineStage::Unknown),

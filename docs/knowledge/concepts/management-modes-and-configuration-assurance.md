@@ -43,9 +43,23 @@ nonempty, case-sensitive, and deduplicated in first-occurrence order. Notes are
 trimmed; blank notes become null. Managed create also persists `fqdn` and
 `reachability` (`direct` or `pull`). PATCH omission preserves these fields;
 explicit null clears tags, notes, or address, and resets reachability to
-`direct`. Configuration synchronization preserves operator metadata. These
-fields do not introduce an inherited deployment policy: the existing three
-policies remain separate from management mode.
+`direct`. Configuration synchronization preserves operator metadata.
+
+There is no live policy inheritance. Create/edit requests may send the
+request-only token `environment_default`; under the environment row lock the
+server copies that environment's current `default_policy` and stores the
+concrete `manual`, `auto_latest`, or `pinned` value. An unsupported environment
+default is rejected (400). Later environment-default changes never update the
+registration.
+
+Migration `0324_system_pinned_commit.sql` adds `systems.pinned_commit_id`, the
+declared pin of a managed `pinned` system. PATCH `pinned_commit` (full SHA of
+an unarchived commit in the registered flake) sets it; omission preserves it;
+null clears it. Saving a pin never sets `desired_target` or queues a
+deployment; automatic selection already ignores `pinned` systems. A trigger
+clears the pin whenever the registration is no longer managed with policy
+`pinned`, or its flake no longer contains the commit, so conversion,
+convert-to-manual and flake reassignment cannot leave a stale pin.
 
 The UUID identifies the registration. The legacy field `hostname` holds its
 unique resource name; a reference can use a descriptive name rather than a DNS
@@ -160,6 +174,40 @@ session fencing, environment filters, verified-source prerequisites and cache
 preflight remain enforced. Isolated database tests cover actual claims; full
 remote evaluation/build/scan integration proof remains pending.
 
+### Exact derivation reuse
+
+A new commit can evaluate a configuration to a `.drv` that an earlier commit
+already owns, for example after a documentation-only change. Migration
+`0322_exact_derivation_reuse.sql` keeps the new evaluation as its own carrier
+row (commit, attempt, policy results, real `.drv` and expected output) and
+records `reused_from_derivation_id`, a flat reference to the physical origin.
+Database triggers enforce:
+
+- the binding is flat, native-only, and requires an identical `.drv` and
+  expected output; an expected output alone never creates a binding;
+- a referenced or job-bound physical identity is immutable;
+- the origin path stays unique (`derivations_origin_path_unique`), and at
+  most one queued, building, or cancelling job exists per physical artifact;
+- `reused_build_job_id` adopts only a real active or successful job of the
+  same flake/configuration. No job, success, publication, or scan is copied.
+
+`view_derivation_execution_evidence` exposes the evaluation carrier separately
+from the actual execution source. Configuration assurance reports the selected
+revision and evaluation as the new commit, and the build/publication/scan as the
+real origin with its own revision. A blocked or failed origin does not prevent
+one real job under the new carrier's own authorized policy; a rejected carrier
+cannot cancel shared work. Evidence joins require the same flake and
+configuration (`derivations_share_evidence_scope`). Physical equality never
+grants another scope's evidence or cache credentials.
+
+Current exact-CVE authority counts enforced aliases as one physical artifact,
+so a reused head does not become ambiguous. Two different `.drv`s with the same
+output remain ambiguous. The returned commit is scan provenance, never inferred
+runtime Git revision. Migration `0323_external_reconciliation_reuse_epoch.sql`
+applies the same alias rule, and the enrollment epoch from `0318`, to external
+generation reconciliation. Before `0323` that trigger required a scan on the
+carrier itself and read raw observations.
+
 CVE scans reuse the existing derivation runner, cache verification, diagnostics,
 and execution fencing. Fleet admission deduplicates derivations. Scheduled CVE
 rescans include all modes: selected built external/reference head artifacts use
@@ -174,8 +222,9 @@ and diagnostics.
 See [scan operations](../api/cve-scan-operations-api.md) for denominator details.
 
 Current exact-CVE authority requires an active **managed** registration, its
-latest consistent reported generation/store path, exactly one matching
-registered derivation, and that derivation's newest completed schema-1 scan.
+latest consistent observation in the current enrollment epoch, exactly one
+matching physical artifact (enforced aliases count once), and the newest
+completed schema-1 scan of that artifact within the same configuration scope.
 Retained observations after conversion do not preserve Current authority.
 Configuration-only scans and parent unit reports cannot authorize runtime CVE
 triage, remediation verification, POA&M closure, or deployment attestation.
@@ -190,6 +239,37 @@ resolves the target independently. A changed eligible target returns HTTP 409
 `scan_target_changed` and queues no substitute. Nonmanaged admission uses the
 existing durable queue without requiring local vulnix; managed scans keep the
 immediate local path. An accepted request is not proof of execution.
+
+Durable manual and periodic admission attaches an eligible successful producing
+build job for the exact artifact. That job must have the exact output, a
+completed cache publication, a matching environment, scanner capability, and the
+current builder session. Remote claims verify that producer and keep session
+fencing. If no executor can run the scan, a scoped request returns HTTP 409
+`scan_executor_unavailable`, and queued rows without an executor are failed with
+retained evidence. They do not remain pending. Periodic target selection and
+admission run even when the server has no local vulnix; only local execution is
+skipped. Authorization, expected-ID validation, admission, and audit share one
+transaction. Its lock order is derivation, canonical CVE, environment, POA&M
+sentinel, then system and actor scope.
+
+Per-system scan statistics classify a selected external/reference head on the
+same `deployed_interval` cadence as the scheduler and aggregate statistics.
+The Systems list derives selected-scan freshness from one schedule read with the
+same rule. A missing or unparseable schedule leaves freshness unknown.
+
+### Agent report identity and delivery
+
+Both agent write paths reject a report whose `hostname` differs from the
+authenticated registration. Each path then rechecks the locked registration's
+UUID, hostname, key, enrollment epoch, mode, and activity before writing. Final
+deployment delivery receives the authenticated registration snapshot. It
+rechecks the enrollment inside the authorization transaction before claiming a
+target or returning publication-read credentials, so a heartbeat from a revoked
+enrollment cannot claim work queued for a later one. Duplicate-key cleanup runs
+only after that recheck, in the same transaction as the observation, behind a
+savepoint. Migration `0321_current_detail_cve_counts.sql` makes managed detail
+CVE counts use exact Current authority instead of name-based historical scan
+views.
 
 An ISO-oriented reference still names a `nixosConfigurations` closure. Scanning
 that closure is not inspection of a generated ISO, VM image, boot medium, or

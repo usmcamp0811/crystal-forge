@@ -2363,7 +2363,7 @@ pub async fn update_system_handler(
     State(pool): State<PgPool>,
     headers: HeaderMap,
     Path(system_id): Path<Uuid>,
-    Json(payload): Json<UpdateSystemRequest>,
+    Json(mut payload): Json<UpdateSystemRequest>,
 ) -> impl IntoResponse {
     let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
@@ -2427,10 +2427,19 @@ pub async fn update_system_handler(
 
     if !matches!(
         payload.deployment_policy.as_str(),
-        "manual" | "auto_latest" | "pinned"
+        "manual" | "auto_latest" | "pinned" | crate::api::models::ENVIRONMENT_DEFAULT_POLICY
     ) {
-        return bad_request("Invalid deployment policy (must be: manual, auto_latest, or pinned)");
+        return bad_request(
+            "Invalid deployment policy (must be: manual, auto_latest, pinned, or environment_default)",
+        );
     }
+    if let FieldUpdate::Set(sha) = &payload.pinned_commit
+        && let Err(message) = validate_target_commit(sha.trim())
+    {
+        return bad_request(&message);
+    }
+    // Retries re-resolve the request token against the then-locked environment.
+    let requested_policy = payload.deployment_policy.clone();
 
     let environment_name = payload
         .environment
@@ -2646,6 +2655,18 @@ pub async fn update_system_handler(
             Ok(value) => value,
             Err(response) => return response,
         };
+        // Source and destination environments are locked above, so the copied
+        // default cannot change while this edit commits.
+        payload.deployment_policy = match crate::services::systems::resolve_requested_policy_tx(
+            &mut tx,
+            &requested_policy,
+            environment_id,
+        )
+        .await
+        {
+            Ok(policy) => policy,
+            Err(error) => return bad_request(&error.to_string()),
+        };
         let mode = payload.management_mode.unwrap_or(old_mode);
         let parent = if mode != crate::models::systems::ManagementMode::External {
             if matches!(payload.parent_host_id, FieldUpdate::Set(_)) {
@@ -2778,6 +2799,55 @@ pub async fn update_system_handler(
             }
             return internal_error("Failed to update registration metadata");
         }
+        // PERSISTENCE: The pin is declarative metadata in this transaction. It
+        // never writes desired_target or queues a deployment. The database
+        // trigger also clears a pin whenever mode, policy or flake no longer
+        // permit it, so omission cannot retain a stale pin.
+        let pin_update = match &payload.pinned_commit {
+            FieldUpdate::Unset => None,
+            FieldUpdate::Clear => Some(None),
+            FieldUpdate::Set(sha) => {
+                if mode != crate::models::systems::ManagementMode::Managed
+                    || payload.deployment_policy != "pinned"
+                {
+                    return bad_request(
+                        "A pinned commit requires a managed system with the pinned deployment policy",
+                    );
+                }
+                let Some(flake_id) = flake_id else {
+                    return bad_request("A pinned commit requires a registered flake");
+                };
+                match sqlx::query_scalar::<_, i32>(
+                    "SELECT id FROM commits WHERE flake_id=$1
+                       AND LOWER(git_commit_hash)=LOWER($2) AND source_archived=false",
+                )
+                .bind(flake_id)
+                .bind(sha.trim())
+                .fetch_optional(&mut *tx)
+                .await
+                {
+                    Ok(Some(commit_id)) => Some(Some(commit_id)),
+                    Ok(None) => {
+                        return bad_request(
+                            "The pinned commit is not an available commit of the registered flake",
+                        );
+                    }
+                    Err(_) => return internal_error("Failed to resolve pinned commit"),
+                }
+            }
+        };
+        if let Some(pin) = pin_update
+            && let Err(error) = sqlx::query("UPDATE systems SET pinned_commit_id=$2 WHERE id=$1")
+                .bind(system_id)
+                .bind(pin)
+                .execute(&mut *tx)
+                .await
+        {
+            if retry < 2 && is_system_metadata_serialization_failure(&error.into()) {
+                continue;
+            }
+            return internal_error("Failed to update pinned commit");
+        }
         if let Some(former_environment_id) = current_environment_id
             && Some(former_environment_id) != environment_id
         {
@@ -2813,6 +2883,10 @@ pub async fn update_system_handler(
                 "description_updated": !payload.description.is_unset(),
                 "address_updated": !payload.fqdn.is_unset(),
                 "reachability_updated": !payload.reachability.is_unset(),
+                "deployment_policy": payload.deployment_policy,
+                "deployment_policy_from_environment_default":
+                    requested_policy == crate::api::models::ENVIRONMENT_DEFAULT_POLICY,
+                "pinned_commit_updated": !payload.pinned_commit.is_unset(),
                 "initial_managed_policy": (old_mode != mode && mode.permits_deployment()).then_some("manual"),
                 "deployment_queued": false}),
         )
@@ -3421,6 +3495,7 @@ fn detail_row_to_api_model(mut row: SystemDetailRow, server_default_interval: u6
         environment: row.environment,
         is_active: row.is_active,
         deployment_policy: row.deployment_policy,
+        pinned_commit: row.pinned_commit,
         health_status: parse_health_status(&row.health_status),
         deployment_status: parse_deployment_status(&row.deployment_status),
         pipeline_stage: Some(parse_pipeline_stage(&row.pipeline_stage)),
@@ -5423,6 +5498,7 @@ mod tests {
                     environment: Some("management-test".into()),
                     flake_name: Some("management-flake".into()),
                     deployment_policy: "manual".into(),
+                    pinned_commit: FieldUpdate::Unset,
                     heartbeat_interval_secs: FieldUpdate::Unset,
                 }
             };
@@ -5863,6 +5939,158 @@ mod tests {
                 .unwrap(),
             1
         );
+    }
+
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB; never use the preview database"]
+    async fn management_mode_environment_default_copy_and_pin_never_deploy(pool: PgPool) {
+        let state = CFState::new(
+            pool.clone(),
+            crate::config::ServerConfig::default(),
+            std::sync::Arc::new(crate::queue::QueueNotifier::new()),
+            crate::server::jobs::BackgroundJobRegistry::new(),
+        );
+        let admin = mutation_headers(&pool, AuthRole::Admin, "pin-admin").await;
+        sqlx::query("INSERT INTO environments(name,default_policy) VALUES('pin-env','auto_latest'),('bad-env','legacy-custom')")
+            .execute(&pool).await.unwrap();
+        let flake: i32 = sqlx::query_scalar("INSERT INTO flakes(name,repo_url) VALUES('pin-flake','https://example.test/pin') RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        let other: i32 = sqlx::query_scalar("INSERT INTO flakes(name,repo_url) VALUES('pin-other','https://example.test/pin-other') RETURNING id")
+            .fetch_one(&pool).await.unwrap();
+        let pinned_sha = "a".repeat(40);
+        let foreign_sha = "b".repeat(40);
+        sqlx::query("INSERT INTO commits(flake_id,git_commit_hash,commit_timestamp) VALUES($1,$2,now()),($3,$4,now())")
+            .bind(flake).bind(&pinned_sha).bind(other).bind(&foreign_sha)
+            .execute(&pool).await.unwrap();
+        let create = |environment: &str| {
+            serde_json::from_value::<CreateSystemRequest>(serde_json::json!({
+                "hostname": format!("pin-host-{environment}"), "environment": environment,
+                "flake_name": "pin-flake", "system_configuration_name": "pin-host",
+                "public_key": rotation_key_material(37).1,
+                "deployment_policy": crate::api::models::ENVIRONMENT_DEFAULT_POLICY,
+            }))
+            .unwrap()
+        };
+        // An unsupported environment default is rejected, never stored.
+        let rejected = create_system(
+            State(state.clone()),
+            State(pool.clone()),
+            admin.clone(),
+            Json(create("bad-env")),
+        )
+        .await
+        .into_response();
+        assert_eq!(rejected.status(), StatusCode::BAD_REQUEST);
+        let response = create_system(
+            State(state.clone()),
+            State(pool.clone()),
+            admin.clone(),
+            Json(create("pin-env")),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let created: SystemDetail = response_json(response).await;
+        assert_eq!(
+            created.deployment_policy, "auto_latest",
+            "default copied at save time"
+        );
+        // A later environment-default change does not follow (no live inheritance).
+        sqlx::query("UPDATE environments SET default_policy='manual' WHERE name='pin-env'")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let stored: String =
+            sqlx::query_scalar("SELECT deployment_policy FROM systems WHERE id=$1")
+                .bind(created.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, "auto_latest");
+
+        let edit = |policy: &str, pin: serde_json::Value| {
+            let mut body = serde_json::json!({
+                "hostname": "pin-host-pin-env", "environment": "pin-env",
+                "flake_name": "pin-flake", "system_configuration_name": "pin-host",
+                "deployment_policy": policy,
+            });
+            if !pin.is_null() || policy == "manual" {
+                body["pinned_commit"] = pin;
+            }
+            serde_json::from_value::<UpdateSystemRequest>(body).unwrap()
+        };
+        let save = |request: UpdateSystemRequest| {
+            let (state, pool, admin) = (state.clone(), pool.clone(), admin.clone());
+            async move {
+                update_system_handler(
+                    State(state),
+                    State(pool),
+                    admin,
+                    Path(created.id),
+                    Json(request),
+                )
+                .await
+                .into_response()
+            }
+        };
+        // The re-resolved environment default is copied again only on request.
+        let response = save(edit(
+            crate::api::models::ENVIRONMENT_DEFAULT_POLICY,
+            serde_json::Value::Null,
+        ))
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response_json::<SystemDetail>(response)
+                .await
+                .deployment_policy,
+            "manual"
+        );
+        // A pin requires the pinned policy and a commit of the registered flake.
+        let response = save(edit("manual", serde_json::json!(pinned_sha))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = save(edit("pinned", serde_json::json!(foreign_sha))).await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let response = save(edit("pinned", serde_json::json!(pinned_sha))).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let pinned: SystemDetail = response_json(response).await;
+        assert_eq!(pinned.deployment_policy, "pinned");
+        assert_eq!(pinned.pinned_commit.as_deref(), Some(pinned_sha.as_str()));
+        // Saving a pin is metadata only: no desired target and no deployment.
+        let (target, pending): (Option<String>, i64) = sqlx::query_as(
+            "SELECT desired_target,(SELECT count(*) FROM pending_system_deployments WHERE system_id=$1)
+             FROM systems WHERE id=$1",
+        )
+        .bind(created.id).fetch_one(&pool).await.unwrap();
+        assert_eq!((target, pending), (None, 0));
+        // Omission keeps the pin; leaving the pinned policy clears it.
+        let response = save(edit("pinned", serde_json::Value::Null)).await;
+        assert_eq!(
+            response_json::<SystemDetail>(response)
+                .await
+                .pinned_commit
+                .as_deref(),
+            Some(pinned_sha.as_str())
+        );
+        let mut keep_pin = edit("manual", serde_json::Value::Null);
+        keep_pin.pinned_commit = FieldUpdate::Unset;
+        let response = save(keep_pin).await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response_json::<SystemDetail>(response)
+                .await
+                .pinned_commit
+                .is_none()
+        );
+        let audited: bool = sqlx::query_scalar(
+            "SELECT bool_or((metadata->>'pinned_commit_updated')::boolean)
+               AND bool_or((metadata->>'deployment_policy_from_environment_default')::boolean)
+             FROM admin_audit_events WHERE action='system_updated'",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert!(audited);
     }
 
     #[tokio::test]

@@ -399,6 +399,7 @@ pub(super) fn build_system_detail(
         environment: Some(environment.to_string()),
         is_active,
         deployment_policy: deployment_policy.to_string(),
+        pinned_commit: None,
         health_status,
         deployment_status,
         pipeline_stage,

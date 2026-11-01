@@ -2124,6 +2124,8 @@ pub async fn get_user_environment_membership_ids(
 /// Row type for view_system_detail
 #[derive(Debug, sqlx::FromRow)]
 pub struct SystemDetailRow {
+    /// Declared pin SHA for a managed `pinned` registration; not a target.
+    pub pinned_commit: Option<String>,
     /// Contains operator labels joined from the registration, not runtime views.
     pub tags: Vec<String>,
     /// Contains optional operator notes; excluded from audit payloads.
@@ -2207,7 +2209,8 @@ where
     E: Executor<'e, Database = Postgres>,
 {
     let row = sqlx::query_as::<_, SystemDetailRow>(
-        "SELECT vsd.*, s.public_key, s.management_mode, s.parent_host_id, s.tags, s.description
+        "SELECT vsd.*, s.public_key, s.management_mode, s.parent_host_id, s.tags, s.description,
+                (SELECT c.git_commit_hash FROM commits c WHERE c.id = s.pinned_commit_id) AS pinned_commit
          FROM view_system_detail vsd
          JOIN systems s ON s.id = vsd.id
          WHERE vsd.id = $1",
@@ -4262,7 +4265,7 @@ mod tests {
         // these columns must not independently derive runtime observations.
         assert!(
             source.contains(
-                "SELECT vsd.*, s.public_key, s.management_mode, s.parent_host_id, s.tags, s.description\n         FROM view_system_detail vsd\n         JOIN systems s ON s.id = vsd.id"
+                "SELECT vsd.*, s.public_key, s.management_mode, s.parent_host_id, s.tags, s.description,\n                (SELECT c.git_commit_hash FROM commits c WHERE c.id = s.pinned_commit_id) AS pinned_commit\n         FROM view_system_detail vsd\n         JOIN systems s ON s.id = vsd.id"
             ),
             "system detail query should source all detail fields from view_system_detail, \
               joining systems only for enrollment and management metadata"
