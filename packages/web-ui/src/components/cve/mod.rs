@@ -40,7 +40,7 @@ struct GroupedCve {
 }
 
 /// A single CVE entry within a package group (design "package-first" view).
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 struct PackageCve {
     stable_identity: SystemCveInventoryRowIdentity,
     cve_id: String,
@@ -288,44 +288,59 @@ pub fn CvesTab(
         .first()
         .map(|group| group.cves.clone())
         .unwrap_or_default();
-    use_effect(move || {
-        if !default_expansion_applied() {
-            if let Some(package) = first_package.clone() {
-                expanded_cve.set(Some(package));
-                default_expansion_applied.set(true);
-                // A successful mutation refresh discards the old detail cache.
-                // Hydrate the automatically expanded package as well, so a
-                // persisted decision never looks like an unsaved new action
-                // merely because no one manually toggled the package.
-                if exact_remediation_allowed {
-                    let generation = (*triage_hydration_generation.peek()).wrapping_add(1);
-                    triage_hydration_generation.set(generation);
-                    for target in first_package_rows.clone() {
-                        if system_triage_row_state(inventory_authority, &target, system_id, None)
-                            != SystemTriageRowState::Review
-                            || triage_details.read().contains_key(&target.stable_identity)
-                        {
-                            continue;
-                        }
-                        let identity = target.stable_identity.clone();
-                        let cve_id = target.cve_id.clone();
-                        let package = identity.canonical_package_name.clone();
-                        triage_details
-                            .write()
-                            .insert(identity.clone(), SystemTriageCacheEntry::Loading);
-                        triage_hydration_tokens
-                            .write()
-                            .insert(identity.clone(), generation);
-                        spawn(async move {
-                            let result = poam_api::fetch_system_cve_triage_detail(
-                                system_id, &cve_id, &package,
-                            )
-                            .await;
-                            if triage_hydration_tokens.peek().get(&identity) != Some(&generation) {
-                                return;
+    // The inventory can arrive after mount (for example, an exact configuration
+    // artifact read). Track the grouping so the designed first-package default
+    // applies once real rows exist, not only to the first render's props.
+    use_effect(use_reactive(
+        (
+            &first_package,
+            &first_package_rows,
+            &exact_remediation_allowed,
+        ),
+        move |(first_package, first_package_rows, exact_remediation_allowed)| {
+            if !default_expansion_applied() {
+                if let Some(package) = first_package.clone() {
+                    expanded_cve.set(Some(package));
+                    default_expansion_applied.set(true);
+                    // A successful mutation refresh discards the old detail cache.
+                    // Hydrate the automatically expanded package as well, so a
+                    // persisted decision never looks like an unsaved new action
+                    // merely because no one manually toggled the package.
+                    if exact_remediation_allowed {
+                        let generation = (*triage_hydration_generation.peek()).wrapping_add(1);
+                        triage_hydration_generation.set(generation);
+                        for target in first_package_rows.clone() {
+                            if system_triage_row_state(
+                                inventory_authority,
+                                &target,
+                                system_id,
+                                None,
+                            ) != SystemTriageRowState::Review
+                                || triage_details.read().contains_key(&target.stable_identity)
+                            {
+                                continue;
                             }
-                            triage_hydration_tokens.write().remove(&identity);
-                            let entry = match result {
+                            let identity = target.stable_identity.clone();
+                            let cve_id = target.cve_id.clone();
+                            let package = identity.canonical_package_name.clone();
+                            triage_details
+                                .write()
+                                .insert(identity.clone(), SystemTriageCacheEntry::Loading);
+                            triage_hydration_tokens
+                                .write()
+                                .insert(identity.clone(), generation);
+                            spawn(async move {
+                                let result = poam_api::fetch_system_cve_triage_detail(
+                                    system_id, &cve_id, &package,
+                                )
+                                .await;
+                                if triage_hydration_tokens.peek().get(&identity)
+                                    != Some(&generation)
+                                {
+                                    return;
+                                }
+                                triage_hydration_tokens.write().remove(&identity);
+                                let entry = match result {
                                 Ok(detail)
                                     if system_triage_detail_matches(&identity, system_id, &detail) =>
                                 {
@@ -339,13 +354,14 @@ pub fn CvesTab(
                                     "Authoritative triage is unavailable: {error}"
                                 )),
                             };
-                            triage_details.write().insert(identity, entry);
-                        });
+                                triage_details.write().insert(identity, entry);
+                            });
+                        }
                     }
                 }
             }
-        }
-    });
+        },
+    ));
 
     let shown_package_count = filtered_groups.len();
     let shown_package_suffix = if shown_package_count == 1 { "" } else { "s" };
