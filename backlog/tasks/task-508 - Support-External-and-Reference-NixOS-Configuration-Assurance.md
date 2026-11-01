@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-10-31T22:53:00Z'
+updated_date: '2026-11-01T03:59:00Z'
 labels:
   - management-mode
   - assurance
@@ -159,6 +159,8 @@ Assigned Add/Edit UI packet: port approved management-first rails and conditiona
 Continuation scope (owner-authorized same worktree; no commits/services/database operations): complete Systems list/cards/table/preview and Scanning/Dashboard/environment/sidebar bindings against approved 18b47eed app.jsx, Systems.jsx, MgmtParts.jsx and supporting designs. Preserve completed Add/Edit and detail work. Fetch configuration assurance once per nonmanaged selection snapshot without polling; latest guest read only for opened external preview. Keep loading/unavailable evidence distinct from no scan. Verify native tests and WASM compilation through Nix; read-only owner preview checks when available. Integration impact: Access lifecycle-local-bootstrap retains form/shell contracts; Assurance evidence-remediation-lifecycle needs extended mode/evidence/scan assertions; Delivery retains managed deployment behavior. No acceptance expectation is relaxed. Owner preview UI8081/API3447 stays under owner control; pending backend refresh limits real-browser evidence.
 
 Owner-expanded follow-up: preserve SQL `unknown` runtime health through server HealthStatus and the exact two Systems parsers (services/systems.rs and handlers/api/systems.rs), then browser HealthStatus plus mechanically exhaustive consumers and unknown-safe list filters. Keep valid managed categories unchanged. Add pure parser/wire/UI classification regressions and run SQLx-offline server native selection plus UI native/WASM checks; no scan/eval/builder/POA&M/migration changes or services/database operations.
+
+AC14 owner-directed form completion unit in existing TASK-508-management-modes worktree: persist managed address/reachability and all-mode tags/description using migration 0319 and existing authorized metadata transaction; expose list/detail metadata and pre-pagination tag filtering; wire approved Add/Edit fields, real fleet suggestions/chips/search/filter. Preserve enrollment epochs, Native declarations, CveScanIntent expected-ID guard and concurrent runtime selectors. No processes, database access, commits or pushes. Run offline Nix backend and native/WASM UI checks; owner retains browser, isolated database and knowledge-documentation proof. Design authority 18b47eed AddSystemModal/EditSystemModal/app/Systems/MgmtParts; Access lifecycle-local-bootstrap owns form persistence interactions; existing management_mode_ ignored regressions will extend metadata/retention/RBAC proof without removing assertions.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
