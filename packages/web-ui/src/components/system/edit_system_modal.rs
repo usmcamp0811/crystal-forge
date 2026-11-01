@@ -1017,7 +1017,11 @@ pub fn EditSystemModal(
                                                             span { class: "mono sd-commit-sha", "{commit.short_sha}" }
                                                             span { class: "sd-commit-msg", "{commit.message}" }
                                                             span { class: "sd-commit-meta mono", "{commit.author}" }
-                                                            span { class: "sd-commit-meta", "{commit.timestamp}" }
+                                                            span { class: "sd-commit-meta", title: "{commit.timestamp}",
+                                                                {chrono::DateTime::parse_from_rfc3339(&commit.timestamp)
+                                                                    .map(|at| crate::components::system::system_card_v2::ago(at.with_timezone(&chrono::Utc)))
+                                                                    .unwrap_or_else(|_| commit.timestamp.clone())}
+                                                            }
                                                             if original_pin.as_deref() == Some(commit.sha.as_str()) {
                                                                 span { class: "chip chip-info", style: "font-size:10px", "pinned" }
                                                             }

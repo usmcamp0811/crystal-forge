@@ -21,8 +21,9 @@ use crate::components::system::management_mode::{
     DeploymentCell, EvidenceCves, EvidenceFreshness, MgmtChip, ScanEvidenceChip, evidence_status,
 };
 
-/// Formats an elapsed time as the compact relative label used on cards.
-fn ago(at: chrono::DateTime<chrono::Utc>) -> String {
+/// Formats an elapsed time as the compact relative label used on cards and
+/// the Edit pinned-commit list.
+pub(crate) fn ago(at: chrono::DateTime<chrono::Utc>) -> String {
     let diff = chrono::Utc::now().signed_duration_since(at);
     if diff.num_seconds() < 60 {
         format!("{}s ago", diff.num_seconds().max(0))
