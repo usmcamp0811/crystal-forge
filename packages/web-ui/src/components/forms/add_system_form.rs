@@ -639,8 +639,19 @@ pub fn AddSystemForm(
                     if let Some(message) = error() { div { class: "sd-callout sd-callout-danger", role: "alert", "{message}" } }
                 }
                 footer { class: "pe-foot",
-                    span { class: "pe-foot-state", "{form.hostname} · {form.environment} · ",
-                        if let Err(message) = validation.as_ref() { "{message}" } else if !config_valid() { "Declared configuration required" } else { "Ready to register" }
+                    span { class: "pe-foot-state",
+                        {
+                            let status = match validation.as_ref() {
+                                Err(message) => message.clone(),
+                                Ok(_) if !config_valid() => "Declared configuration required".to_string(),
+                                Ok(_) => "Ready to register".to_string(),
+                            };
+                            [form.hostname.trim(), form.environment.trim(), status.as_str()]
+                                .into_iter()
+                                .filter(|part| !part.is_empty())
+                                .collect::<Vec<_>>()
+                                .join(" · ")
+                        }
                     }
                     div { button { class: "btn btn-ghost focus-ring", disabled: submitting, onclick: move |_| on_cancel.call(()), "Cancel" }
                         button { class: "btn btn-primary focus-ring", disabled: submitting || validation.is_err() || !config_valid(), onclick: move |_| on_submit.call(()),
