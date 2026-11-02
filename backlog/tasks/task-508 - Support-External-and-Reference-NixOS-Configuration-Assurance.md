@@ -1,11 +1,11 @@
 ---
 id: TASK-508
 title: Support External and Reference NixOS Configuration Assurance
-status: Review
+status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-11-02T01:39:00Z'
+updated_date: '2026-11-02T02:09:00Z'
 labels:
   - management-mode
   - assurance
@@ -271,6 +271,8 @@ Evidence per AC: full nix flake check @5176d483 exit 0 (Access 40, Delivery 17, 
 Late fixes found by verification: resource-terminal admission branch mixing (security), delivery FOR SHARE on outer-joined view, external reconciliation alias/epoch (0323), CVE first-package reactivity, accessible names, approved action labels, assurance fixture hostname, scenario contract corrections (412 stale_cve_observation, masked disabled unit, schedule API instead of SQL writes).
 Follow-ups recorded: TASK-512 (stale pre-existing fixture), TASK-513 (session-bound remote scan affinity limits periodic rescans after builder restart). TASK-510 field gap implemented in this MR. Migration 0313 intentionally unused.
 Preview left running: unit cf-task508-preview, http://127.0.0.1:8080 (API 3445, PG 5432 task-owned), migrations through 0324, mock execution.
+
+MR !340 review (HEAD 9122782b): changes requested. P1 scan coverage CTE excludes reused configuration carriers; P2 nonmanaged Re-scan compares response.derivation_id (execution source A) to requested carrier B; P1 integration-coverage-map still records superseded failures/unverified proof and exact-HEAD CI pipeline 3015806381 had not finished; parent shown as UUID instead of hostname. Returned to In Progress to fix on the same branch/MR.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
