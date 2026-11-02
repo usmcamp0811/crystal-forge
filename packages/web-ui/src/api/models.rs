@@ -1686,6 +1686,28 @@ pub struct ArtifactEvidence {
     pub error: Option<String>,
     /// Contains the latest persisted build attempt, independent of artifact state.
     pub build: Option<BuildEvidence>,
+    /// Identifies the physical derivation that actually built, which differs
+    /// from `derivation_id` when this configuration reuses an exact artifact.
+    /// Absent before execution evidence exists or from older servers.
+    #[serde(default)]
+    pub execution_derivation_id: Option<i32>,
+    /// Source revision of the execution, which may predate `revision`.
+    #[serde(default)]
+    pub execution_revision: Option<RevisionEvidence>,
+}
+
+impl ArtifactEvidence {
+    /// Returns the derivation that holds this artifact's build, scan and
+    /// hardening evidence: the execution source when known, else itself.
+    pub fn evidence_derivation_id(&self) -> i32 {
+        self.execution_derivation_id.unwrap_or(self.derivation_id)
+    }
+
+    /// Returns true when this configuration reuses another derivation's build.
+    pub fn reuses_execution(&self) -> bool {
+        self.execution_derivation_id
+            .is_some_and(|source| source != self.derivation_id)
+    }
 }
 
 /// Identifies one real build attempt without treating success as publication.

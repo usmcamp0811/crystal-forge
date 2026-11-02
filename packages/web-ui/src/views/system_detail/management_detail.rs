@@ -117,7 +117,7 @@ pub(super) fn ManagementDetail(
         request_notice.set(Some("Submitting scan request…".into()));
         spawn(async move {
             match client::trigger_system_cve_scan_for_artifact(&system_id, derivation_id).await {
-                Ok(response) if response.derivation_id == Some(derivation_id) => {
+                Ok(response) if scan_response_matches_request(derivation_id, &response) => {
                     requested_scan.set(Some(response.scan_id));
                     request_notice.set(Some(format!(
                         "{} · scan {}",
@@ -369,6 +369,18 @@ fn configuration_revision(
     }
 }
 
+/// Returns whether an accepted scan response answers the request for carrier
+/// `requested`. With exact reuse (0322) the request names the selected
+/// configuration carrier, while `derivation_id` names the physical execution
+/// source, which may differ. Older servers omit the carrier field; their
+/// `derivation_id` is then the requested artifact itself.
+fn scan_response_matches_request(requested: i32, response: &CveScanTriggerResponse) -> bool {
+    match response.configuration_derivation_id {
+        Some(carrier) => carrier == requested && response.derivation_id.is_some(),
+        None => response.derivation_id == Some(requested),
+    }
+}
+
 // The scanning API supplies the lifecycle class; the browser must not invent
 // a recent/archive age boundary from commit dates or registration mode.
 fn selected_freshness(
@@ -479,6 +491,10 @@ fn EvidenceIdentities(evidence: ConfigurationAssurance) -> Element {
             if let Some(id) = evidence.evaluation.attempt_id { " · attempt {id}" }
         }
         if let Some(a) = evidence.selected_artifact { dt { "Artifact" } dd { "derivation {a.derivation_id} · {a.state}"
+            if a.reuses_execution() {
+                " · reuses the identical build of derivation {a.evidence_derivation_id()}"
+                if let Some(source) = &a.execution_revision { " at {source.sha.get(..7).unwrap_or(&source.sha)}" }
+            }
             if let Some(build) = a.build { " · job {build.job_id} · {build.state}" }
         } }
         if let Some(scan) = evidence.selected_scan {
@@ -814,16 +830,17 @@ fn ArtifactFindings(
 
 // Hardening assessments are independent of CVE scans. Keep exact derivation
 // identity even when no CVE scan has completed, and retain historical choices.
+// Assessments belong to the physical execution source, so a carrier that
+// reuses an exact artifact (0322) is one choice with its source.
 fn hardening_choices(evidence: &ConfigurationAssurance) -> Vec<ArtifactEvidence> {
     evidence
         .selected_artifact
         .iter()
         .chain(evidence.history.builds.iter())
         .fold(Vec::new(), |mut choices, artifact| {
-            if !choices
-                .iter()
-                .any(|a: &ArtifactEvidence| a.derivation_id == artifact.derivation_id)
-            {
+            if !choices.iter().any(|a: &ArtifactEvidence| {
+                a.evidence_derivation_id() == artifact.evidence_derivation_id()
+            }) {
                 choices.push(artifact.clone());
             }
             choices
@@ -839,13 +856,15 @@ fn ConfigurationHardening(
     let choices = hardening_choices(&evidence);
     let selected = match selection() {
         SystemCveInventorySelection::Current => choices.first(),
-        SystemCveInventorySelection::ExactDerivation { derivation_id } => {
-            choices.iter().find(|a| a.derivation_id == derivation_id)
-        }
+        SystemCveInventorySelection::ExactDerivation { derivation_id } => choices
+            .iter()
+            .find(|a| a.evidence_derivation_id() == derivation_id),
         SystemCveInventorySelection::RetainedGeneration { .. } => None,
     }
     .cloned();
-    let target = selected.as_ref().map(|a| a.derivation_id);
+    let target = selected
+        .as_ref()
+        .map(ArtifactEvidence::evidence_derivation_id);
     let mut retry = use_signal(|| 0_u64);
     let inventory = use_resource(use_reactive(&target, move |target| {
         let _ = retry();
@@ -880,15 +899,20 @@ fn ConfigurationHardening(
                     }
                 },
                 if target.is_none() { option { value: "", "Selected artifact unavailable" } }
-                for artifact in choices { option { value: "{artifact.derivation_id}", "{artifact.revision.sha} · derivation {artifact.derivation_id}" } }
+                for artifact in choices { option { value: "{artifact.evidence_derivation_id()}", "{artifact.revision.sha} · derivation {artifact.evidence_derivation_id()}" } }
             }
         }
         if let Some(artifact) = selected {
             p { class: "mg-copy", "Inspecting configuration {artifact.configuration_name} at {artifact.revision.sha} · derivation {artifact.derivation_id}. This selection does not establish Current runtime authority or permit POA&M closure." }
+            if artifact.reuses_execution() {
+                p { class: "mg-dim", "Reuses the identical build of derivation {artifact.evidence_derivation_id()}"
+                    if let Some(source) = &artifact.execution_revision { " at {source.sha.get(..7).unwrap_or(&source.sha)}" }
+                    ". Assessments of that build apply to this exact configuration." }
+            }
             match inventory.read().as_ref() {
-                Some(Some(Ok(page))) if page.read_only && page.derivation_id == target && page.selection == (SystemCveInventorySelection::ExactDerivation { derivation_id: artifact.derivation_id }) => rsx! {
+                Some(Some(Ok(page))) if page.read_only && page.derivation_id == target && page.selection == (SystemCveInventorySelection::ExactDerivation { derivation_id: artifact.evidence_derivation_id() }) => rsx! {
                     if page.source.is_none() { div { class: "mg-empty", h3 { "Hardening evidence unavailable" } p { "No completed hardening assessment is available for this exact artifact." } } }
-                    HardeningTab { system_id, inventory_target_key: format!("artifact:{}", artifact.derivation_id), results: page.services.clone(), justifications: vec![], source: page.source.clone(), attempt: page.attempt.clone(), read_only: true, loading: false, error: None, allow_mutations: false, can_check_now: false, checking: false, check_now_disabled_reason: "Configuration artifact inspection is read-only", on_check_now: move |_| {}, on_saved: move |_| {} }
+                    HardeningTab { system_id, inventory_target_key: format!("artifact:{}", artifact.evidence_derivation_id()), results: page.services.clone(), justifications: vec![], source: page.source.clone(), attempt: page.attempt.clone(), read_only: true, loading: false, error: None, allow_mutations: false, can_check_now: false, checking: false, check_now_disabled_reason: "Configuration artifact inspection is read-only", on_check_now: move |_| {}, on_saved: move |_| {} }
                 },
                 result => rsx! { div { class: "mg-empty", h3 { "Hardening evidence unavailable" }
                     match result {
@@ -1040,6 +1064,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn reused_carrier_scan_response_matches_requested_carrier_not_source() {
+        let response = |carrier: Option<i32>, source: Option<i32>| CveScanTriggerResponse {
+            configuration_derivation_id: carrier,
+            derivation_id: source,
+            scan_id: Uuid::from_u128(508),
+            status: "accepted".into(),
+            message: "Queued".into(),
+        };
+        // Carrier B (20) reuses physical source A (10): accepted, not a mismatch.
+        assert!(scan_response_matches_request(
+            20,
+            &response(Some(20), Some(10))
+        ));
+        // A response for a different carrier is rejected even if the source matches.
+        assert!(!scan_response_matches_request(
+            20,
+            &response(Some(21), Some(20))
+        ));
+        assert!(!scan_response_matches_request(
+            20,
+            &response(Some(20), None)
+        ));
+        // Older servers report only the artifact they scanned.
+        assert!(scan_response_matches_request(10, &response(None, Some(10))));
+        assert!(!scan_response_matches_request(
+            10,
+            &response(None, Some(11))
+        ));
+    }
+
+    #[test]
     fn retained_managed_events_keep_identity_and_outcomes_without_current_runtime() {
         let entries = [
             "cf_deployment_started",
@@ -1140,6 +1195,8 @@ mod tests {
             published_at: None,
             error: None,
             build: None,
+            execution_derivation_id: None,
+            execution_revision: None,
         };
         value.selected_artifact = Some(artifact.clone());
         value.history.builds.push(artifact.clone());
@@ -1160,6 +1217,25 @@ mod tests {
             hardening_choices(&value).len(),
             2,
             "removed configurations retain exact historical choices"
+        );
+        // Carrier B (12) reuses source A (10): one choice, fetched as A.
+        let mut carrier = value.history.builds[0].clone();
+        carrier.derivation_id = 12;
+        carrier.execution_derivation_id = Some(10);
+        assert!(carrier.reuses_execution());
+        assert_eq!(carrier.evidence_derivation_id(), 10);
+        value.selected_artifact = Some(carrier);
+        let choices = hardening_choices(&value);
+        assert_eq!(
+            choices
+                .iter()
+                .map(ArtifactEvidence::evidence_derivation_id)
+                .collect::<Vec<_>>(),
+            vec![10, 11]
+        );
+        assert_eq!(
+            choices[0].derivation_id, 12,
+            "the selected carrier is the listed configuration"
         );
     }
 

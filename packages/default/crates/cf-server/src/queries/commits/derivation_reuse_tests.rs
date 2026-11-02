@@ -145,6 +145,113 @@ async fn successful_fixture(pool: &PgPool, derivation: i32) -> (Uuid, i32, Uuid)
 
 #[sqlx::test(migrations = "./migrations")]
 #[ignore = "requires owner-run isolated PostgreSQL"]
+async fn exact_reuse_scan_coverage_counts_reused_head_by_execution_source(pool: PgPool) {
+    use crate::queries::scanning::{get_scan_stats, get_scan_systems};
+    let (flake, _) = registration(&pool).await;
+    let (a, _, _, _, _) = evaluate(&pool, flake, 'a', "host", true).await;
+    let origin = carrier(&pool, a).await;
+    // A real build and publication of A, without any completed scan yet.
+    let job = match admit(&pool, origin).await.unwrap() {
+        build_jobs::BuildJobInsertOutcome::Inserted { build_job_id } => build_job_id,
+        _ => panic!("fixture requires one real job identity"),
+    };
+    sqlx::query("UPDATE build_jobs SET status='success',completed_at=now() WHERE id=$1")
+        .bind(job)
+        .execute(&pool)
+        .await
+        .unwrap();
+    sqlx::query("UPDATE derivations SET status_id=10,store_path=$2,completed_at=now(),build_preparation_state='queued' WHERE id=$1")
+        .bind(origin).bind(OUT).execute(&pool).await.unwrap();
+    let cache: i32 = sqlx::query_scalar("INSERT INTO cache_destinations(name,cache_type,enabled,push_to,niks3_public_keys,niks3_read_auth_mode,niks3_write_auth_mode,niks3_auth_token,niks3_server_url) VALUES('reuse-cache','Niks3',true,'https://cache.example.invalid',ARRAY['cache:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA='],'none','token','fixture-write-token','https://cache.example.invalid') RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO cache_push_jobs(derivation_id,store_path,status,completed_at,cache_destination_id,cache_destination_source,cache_destination) VALUES($1,$2,'completed',now(),$3,'database','reuse-cache')")
+        .bind(origin).bind(OUT).bind(cache).execute(&pool).await.unwrap();
+    sqlx::query("UPDATE cve_scans SET status='failed',completed_at=now() WHERE derivation_id=$1 AND status IN ('awaiting_build','awaiting_closure','pending')")
+        .bind(origin).execute(&pool).await.unwrap();
+    finish_evaluation(&pool, a).await;
+    // B evaluates to the identical drv and adopts A's real job.
+    let (b, _, _, _, _) = evaluate(&pool, flake, 'b', "host", true).await;
+    let binding = carrier(&pool, b).await;
+    let adopted: (Option<i32>, Option<Uuid>, Option<String>) = sqlx::query_as(
+        "SELECT reused_from_derivation_id,reused_build_job_id,store_path FROM derivations WHERE id=$1",
+    )
+    .bind(binding).fetch_one(&pool).await.unwrap();
+    assert_eq!(
+        adopted,
+        (Some(origin), Some(job), None),
+        "B is a carrier without its own build"
+    );
+    sqlx::query(
+        "INSERT INTO flake_branch_commit_snapshot(flake_id,commit_id,position) VALUES($1,$2,0)",
+    )
+    .bind(flake)
+    .bind(b)
+    .execute(&pool)
+    .await
+    .unwrap();
+    let external: Uuid = sqlx::query_scalar(
+        "INSERT INTO systems(hostname,system_configuration_name,flake_id,management_mode,derivation,deployment_policy)
+         VALUES('reuse-external','host',$1,'external','','manual') RETURNING id",
+    )
+    .bind(flake).fetch_one(&pool).await.unwrap();
+    let row = |rows: Vec<crate::queries::scanning::ScanSystemRow>| {
+        rows.into_iter()
+            .find(|r| r.system_id == external)
+            .expect("external scan row")
+    };
+
+    let before = row(get_scan_systems(&pool, 100).await.unwrap());
+    assert_eq!(
+        before.total_configs, 2,
+        "A and B remain distinct evaluated configurations"
+    );
+    assert_eq!(
+        before.needs_build, 0,
+        "reused carrier B is built through its execution source"
+    );
+    assert_eq!(before.unscanned, 2);
+    assert_eq!(before.scanned, 0);
+    // Hardening assesses the physical artifact that actually built.
+    let hardening =
+        crate::queries::hardening_scans::resolve_system_hardening_scan_target(&pool, external)
+            .await
+            .unwrap()
+            .expect("reused head has a hardening target");
+    assert_eq!(hardening.derivation_id, origin);
+    assert_eq!(
+        hardening.commit_hash,
+        "a".repeat(40),
+        "assessment uses the source that built A"
+    );
+    assert!(
+        hardening.blocked_reason.is_none(),
+        "reused head is not reported unbuilt"
+    );
+
+    let scan: Uuid = sqlx::query_scalar("INSERT INTO cve_scans(derivation_id,status,scanner_name) VALUES($1,'in_progress','vulnix') RETURNING id")
+        .bind(origin).fetch_one(&pool).await.unwrap();
+    sqlx::query("UPDATE cve_scans SET status='completed',completed_at=now(),evidence_schema_version=1 WHERE id=$1")
+        .bind(scan).execute(&pool).await.unwrap();
+
+    let stats = get_scan_stats(&pool).await.unwrap();
+    assert_eq!(stats.never_scanned, 0);
+    assert_eq!(
+        stats.coverage_percent, 100,
+        "the selected reused head's physical artifact is in the denominator and covered"
+    );
+    let after = row(get_scan_systems(&pool, 100).await.unwrap());
+    assert_eq!(
+        (after.scanned, after.unscanned, after.needs_build),
+        (2, 0, 0)
+    );
+    assert!(
+        after.current_scan_id.is_none(),
+        "configuration coverage grants no Current authority"
+    );
+}
+
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires owner-run isolated PostgreSQL"]
 async fn exact_reuse_selected_b_keeps_real_a_execution_scan_and_completion(pool: PgPool) {
     let (flake, system) = registration(&pool).await;
     let (a, _, _, _, _) = evaluate(&pool, flake, 'a', "host", true).await;

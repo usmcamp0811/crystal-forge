@@ -713,6 +713,8 @@ mod tests {
                 published_at: None,
                 error: None,
                 build: None,
+                execution_derivation_id: None,
+                execution_revision: None,
             }),
             selected_scan: None,
             latest_terminal_scan: None,

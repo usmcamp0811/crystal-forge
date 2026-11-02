@@ -1533,11 +1533,14 @@ pub async fn resolve_system_hardening_scan_target(
             LIMIT 1
         )
         SELECT
-            d.id AS derivation_id,
+            -- A reused selected head (0322) is assessed through the physical
+            -- artifact that actually built, with that source's commit. Other
+            -- rows resolve to themselves, so managed selection is unchanged.
+            d.execution_derivation_id AS derivation_id,
             ss.config_name as config_name,
             ss.hostname as hostname,
             COALESCE(f.repo_url, '') as repo_url,
-            COALESCE(c.git_commit_hash, '') as commit_hash,
+            COALESCE(ec.git_commit_hash, '') as commit_hash,
             CASE
                 WHEN ss.management_mode <> 'managed' AND (
                     d.store_path IS NULL OR BTRIM(d.store_path) = ''
@@ -1545,13 +1548,13 @@ pub async fn resolve_system_hardening_scan_target(
                     OR status.name NOT IN ('build-complete', 'complete')
                 ) THEN 'Build output is unavailable for this system configuration.'
                 WHEN f.repo_url IS NULL OR BTRIM(f.repo_url) = ''
-                  OR c.git_commit_hash IS NULL OR BTRIM(c.git_commit_hash) = ''
+                  OR ec.git_commit_hash IS NULL OR BTRIM(ec.git_commit_hash) = ''
                 THEN 'Flake source metadata is unavailable for this system configuration.'
                 ELSE NULL
             END AS blocked_reason
         FROM selected_system ss
         LEFT JOIN latest_state ls ON TRUE
-        JOIN derivations d
+        JOIN view_derivation_execution_evidence d
           ON (ss.management_mode = 'managed'
               AND COALESCE(d.store_path, d.expected_store_path) = ls.store_path)
             OR (ss.management_mode IN ('external', 'reference') AND d.commit_id = (
@@ -1562,7 +1565,8 @@ pub async fn resolve_system_hardening_scan_target(
             ))
         JOIN commits c ON c.id = d.commit_id AND c.flake_id = ss.flake_id
         JOIN flakes f ON f.id = c.flake_id
-        JOIN derivation_statuses status ON status.id = d.status_id
+        JOIN commits ec ON ec.id = d.execution_commit_id
+        JOIN derivation_statuses status ON status.id = d.execution_status_id
         WHERE d.derivation_type = 'nixos'
           AND d.derivation_name = ss.config_name
         ORDER BY d.completed_at DESC NULLS LAST, d.id DESC

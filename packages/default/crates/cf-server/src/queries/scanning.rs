@@ -478,7 +478,11 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
             WHERE system.is_active AND system.management_mode = 'managed'
         ),
         configuration_artifacts AS (
-            SELECT DISTINCT derivation.id AS derivation_id
+            -- INVARIANT: Count the physical artifact that actually executed.
+            -- A reused head carrier (0322) has no own build or store path;
+            -- its build output and scans belong to the execution source. One
+            -- physical artifact counts once however many carriers reuse it.
+            SELECT DISTINCT derivation.execution_derivation_id AS derivation_id
             FROM systems system
             JOIN flakes flake ON flake.id = system.flake_id
                 AND flake.snapshot_ready_at IS NOT NULL
@@ -486,12 +490,12 @@ pub async fn get_scan_stats(pool: &PgPool) -> Result<ScanStatsRow> {
                 AND head.position = 0
             JOIN commits commit ON commit.id = head.commit_id
                 AND commit.flake_id = system.flake_id
-            JOIN derivations derivation ON derivation.commit_id = commit.id
+            JOIN view_derivation_execution_evidence derivation ON derivation.commit_id = commit.id
                 AND derivation.derivation_type = 'nixos'
                 AND derivation.derivation_name = COALESCE(
                     NULLIF(BTRIM(system.system_configuration_name), ''), system.hostname
                 )
-            JOIN derivation_statuses status ON status.id = derivation.status_id
+            JOIN derivation_statuses status ON status.id = derivation.execution_status_id
                 AND status.name IN ('build-complete', 'complete')
             WHERE system.is_active
               AND system.management_mode IN ('external', 'reference')
@@ -1733,6 +1737,10 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
             SELECT
                 s.id AS system_id,
                 d.id AS derivation_id,
+                -- A reused carrier (0322) is still one evaluated configuration
+                -- row, but its build output and scans belong to the execution
+                -- source. Never treat it as unbuilt or never scanned.
+                d.execution_derivation_id,
                 s.hostname,
                 f.name AS flake_name,
                 d.store_path,
@@ -1753,7 +1761,7 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
                     AND NULLIF(BTRIM(d.store_path),'') IS NOT NULL
                     AND NULLIF(BTRIM(d.derivation_path),'') IS NOT NULL
                     AND EXISTS (SELECT 1 FROM derivation_statuses status
-                      WHERE status.id=d.status_id AND status.name IN ('build-complete','complete'))
+                      WHERE status.id=d.execution_status_id AND status.name IN ('build-complete','complete'))
                     THEN 'deployed'
                   WHEN d.completed_at >= NOW()-INTERVAL '30 days' THEN 'recent'
                   ELSE 'archived'
@@ -1761,7 +1769,7 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
             FROM systems s
             JOIN flakes f ON f.id=s.flake_id
             JOIN commits c ON c.flake_id=s.flake_id
-            JOIN derivations d
+            JOIN view_derivation_execution_evidence d
               ON d.commit_id = c.id
              AND d.derivation_name = COALESCE(
                     NULLIF(BTRIM(s.system_configuration_name), ''),
@@ -1887,7 +1895,7 @@ pub async fn get_scan_systems(pool: &PgPool, limit: i64) -> Result<Vec<ScanSyste
               AND COUNT(current_exact.scan_id)=0) AS historical_evidence,
             MAX(current_derivation.derivation_id) AS current_derivation_id
         FROM derivation_scope scope
-        LEFT JOIN latest_completed_per_derivation completed ON completed.derivation_id=scope.derivation_id
+        LEFT JOIN latest_completed_per_derivation completed ON completed.derivation_id=scope.execution_derivation_id
         JOIN systems s ON s.id=scope.system_id
         LEFT JOIN environments e ON e.id = s.environment_id
         LEFT JOIN current_exact ON current_exact.system_id=s.id
