@@ -282,14 +282,19 @@ pub fn scan_evidence_status(
     }
 }
 
-/// Renders the approved compact mode label and explanatory tooltip.
-#[component]
-pub fn MgmtChip(mode: ManagementMode) -> Element {
-    let icon = match mode {
+/// Returns the approved icon for a management mode (`MGMT_META[mode].icon`).
+pub fn mode_icon(mode: ManagementMode) -> IconName {
+    match mode {
         ManagementMode::Managed => IconName::Server,
         ManagementMode::External => IconName::Link,
         ManagementMode::Reference => IconName::File,
-    };
+    }
+}
+
+/// Renders the approved compact mode label and explanatory tooltip.
+#[component]
+pub fn MgmtChip(mode: ManagementMode) -> Element {
+    let icon = mode_icon(mode);
     rsx! { span { class: "chip mg-chip mg-{mode.as_str()}", title: mode.description(),
         Icon { name: icon, size: 10 } "{mode.label()}"
     } }

@@ -172,6 +172,12 @@ exports.evidence = async ctx => {
   await editor.getByRole("radio", { name: /^Managed/ }).click();
   await expect(editor.getByLabel("New agent public key *", { exact: true })).toBeVisible();
   await expect(editor.getByRole("button", { name: "Save changes", exact: true })).toBeDisabled();
+  // Approved rail: Security appears for the managed form mode. Before the
+  // conversion is saved there is no enrolled key to show or rotate.
+  await editor.getByRole("button", { name: "Security", exact: true }).click();
+  await expect(editor.getByText("No agent key is enrolled yet", { exact: true })).toBeVisible();
+  await expect(editor.getByRole("button", { name: /Rotate key/ })).toHaveCount(0);
+  await expect(editor.getByRole("button", { name: "Danger zone", exact: true })).toBeVisible();
   await editor.getByRole("button", { name: "Cancel", exact: true }).click();
   await expect(editor).toHaveCount(0);
   const unchanged = await ctx.context.request.get(ctx.url(`/api/v1/systems/${external}`));

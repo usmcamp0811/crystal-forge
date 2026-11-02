@@ -14,6 +14,7 @@ use crate::components::icon::{Icon, IconName};
 use crate::components::modals::{GeneratedKeyPair, RemoveSystemDialog, generate_key_pair};
 use crate::components::system::MgmtChip;
 use crate::components::system::key_rotation;
+use crate::components::system::management_mode::mode_icon;
 use crate::systems::adapter::{
     SystemPublicKeyRotationOutcome, update_system_public_key_and_reconcile,
 };
@@ -589,6 +590,12 @@ pub fn EditSystemModal(
             || flake_names
                 .iter()
                 .any(|name| name == &selected_assignment.0));
+    // Approved footer state: the per-system heartbeat override, where 0 means
+    // the server-configured default.
+    let heartbeat_label = match heartbeat_interval_sec() {
+        0 => "server default".to_string(),
+        seconds => format!("{seconds}s"),
+    };
     let declared = declared_assignment().as_ref() == Some(&selected_assignment);
     let can_keep_assignment = assignment_allowed(
         (&original_assignment.0, &original_assignment.1),
@@ -746,13 +753,15 @@ pub fn EditSystemModal(
 
                 div {
                     class: "pe-head",
-                    div {
-                    h2 {
-                        span { style: "margin-right:6px; display:inline-flex; vertical-align:text-bottom;",
-                            Icon { name: IconName::Gear, size: 14 }
+                    div { style: "min-width:0; display:flex; flex-direction:column; gap:3px;",
+                    div { style: "display:flex; align-items:center; gap:9px; min-width:0; flex-wrap:wrap;",
+                        span { style: "display:inline-flex; color:var(--cf-brand-purple); flex-shrink:0;",
+                            Icon { name: IconName::Gear, size: 15 }
                         }
-                        "Edit {system.hostname}"
+                        h2 { class: "pe-head-title mono", aria_label: "Edit {system.hostname}", "{hostname}" }
                         MgmtChip { mode: management_mode() }
+                        if !environment().trim().is_empty() { span { class: "chip chip-info", "{environment}" } }
+                        if !flake_name().trim().is_empty() { span { class: "chip chip-unknown mono", style: "font-size:10px", "{flake_name}" } }
                     }
                     p {
                         class: "pe-head-sub",
@@ -769,64 +778,58 @@ pub fn EditSystemModal(
                     div {
                         class: "management-form-nav",
                         button {
-                            class: if *active_tab.read() == Tab::General { "pe-rail-item active" } else { "pe-rail-item" },
+                            class: if *active_tab.read() == Tab::General { "pe-rail-item active focus-ring" } else { "pe-rail-item focus-ring" },
                             disabled: rotate_in_flight(),
                             onclick: move |_| {
                                 if !rotate_in_flight() {
                                     active_tab.set(Tab::General);
                                 }
                             },
-                            span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
-                                Icon { name: IconName::Gear, size: 12 }
-                            }
-                            "General"
+                            Icon { name: IconName::Server, size: 13 }
+                            span { class: "pe-rail-label", "General" }
                         }
                         button {
-                            class: if *active_tab.read() == Tab::Deployment { "pe-rail-item active" } else { "pe-rail-item" },
+                            class: if *active_tab.read() == Tab::Deployment { "pe-rail-item active focus-ring" } else { "pe-rail-item focus-ring" },
                             disabled: rotate_in_flight(),
                             onclick: move |_| {
                                 if !rotate_in_flight() {
                                     active_tab.set(Tab::Deployment);
                                 }
                             },
-                            span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
-                                Icon { name: IconName::Git, size: 12 }
-                            }
-                            if management_mode() == ManagementMode::Managed { "Deployment" } else { "Configuration" }
+                            Icon { name: if management_mode() == ManagementMode::Managed { IconName::Deploy } else { IconName::Git }, size: 13 }
+                            span { class: "pe-rail-label", if management_mode() == ManagementMode::Managed { "Deployment" } else { "Configuration" } }
                         }
-                        if management_mode() == ManagementMode::Managed && original_mode == ManagementMode::Managed {
+                        if management_mode() == ManagementMode::Managed {
                         button {
-                            class: if *active_tab.read() == Tab::Security { "pe-rail-item active" } else { "pe-rail-item" },
+                            class: if *active_tab.read() == Tab::Security { "pe-rail-item active focus-ring" } else { "pe-rail-item focus-ring" },
                             disabled: rotate_in_flight(),
                             onclick: move |_| {
                                 if !rotate_in_flight() {
                                     active_tab.set(Tab::Security);
                                 }
                             },
-                            span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
-                                Icon { name: IconName::Key, size: 12 }
-                            }
-                            "Security"
+                            Icon { name: IconName::Key, size: 13 }
+                            span { class: "pe-rail-label", "Security" }
                         }
                         }
                         button {
-                            class: if active_tab() == Tab::Management { "pe-rail-item active" } else { "pe-rail-item" },
+                            class: if active_tab() == Tab::Management { "pe-rail-item active focus-ring" } else { "pe-rail-item focus-ring" },
                             disabled: rotate_in_flight() || is_saving(),
                             onclick: move |_| active_tab.set(Tab::Management),
-                            "Management"
+                            Icon { name: mode_icon(management_mode()), size: 13 }
+                            span { class: "pe-rail-label", "Management" }
                         }
                         button {
-                            class: if *active_tab.read() == Tab::Danger { "pe-rail-item active" } else { "pe-rail-item" },
+                            class: if *active_tab.read() == Tab::Danger { "pe-rail-item active focus-ring" } else { "pe-rail-item focus-ring" },
+                            style: if *active_tab.read() != Tab::Danger { "color:#f87171" } else { "" },
                             disabled: rotate_in_flight(),
                             onclick: move |_| {
                                 if !rotate_in_flight() {
                                     active_tab.set(Tab::Danger);
                                 }
                             },
-                            span { style: "margin-right: 4px; display:inline-flex; vertical-align:text-bottom;",
-                                Icon { name: IconName::Warn, size: 12 }
-                            }
-                            "Danger"
+                            Icon { name: IconName::Warn, size: 13 }
+                            span { class: "pe-rail-label", "Danger zone" }
                         }
                     }
                 }
@@ -838,10 +841,14 @@ pub fn EditSystemModal(
                     // GENERAL TAB
                     fieldset { disabled: is_saving(),
                     if *active_tab.read() == Tab::General {
+                        div { class: "pe-sec-head", h3 { "General" }
+                            p { if management_mode() == ManagementMode::Managed { "Identity, environment, and how the server reaches this host." } else { "Name, environment, tags and notes." } }
+                        }
                         div {
-                            // Two-column: Hostname + Environment (design layout)
+                            // Two-column: Hostname + Environment (design layout). The
+                            // shared grid class resets the second field's top margin.
                             div {
-                                style: "display: grid; grid-template-columns: 1fr 1fr; gap: 14px;",
+                                class: "management-form-grid",
                                 div {
                                     class: "field",
                                     label { if management_mode() == ManagementMode::Managed { "Hostname" } else { "Name" } }
@@ -908,7 +915,7 @@ pub fn EditSystemModal(
                     }
 
                     if active_tab() == Tab::Management {
-                        div { class: "pe-sec-head", h3 { "Management mode" } p { "Who controls deployment. Configuration evidence and history are retained." } }
+                        div { class: "pe-sec-head", h3 { "Management mode" } p { "Who controls deployment. Evidence history is kept when the mode changes." } }
                         ManagementModePicker { value: management_mode(), current: original_mode,
                             on_change: move |mode| { management_mode.set(mode); transition_confirmed.set(false); validation_error.set(None); }
                         }
@@ -939,6 +946,10 @@ pub fn EditSystemModal(
 
                     // Keep discovery mounted while navigating the section rail.
                     div { hidden: active_tab() != Tab::Deployment,
+                        div { class: "pe-sec-head",
+                            h3 { if management_mode() == ManagementMode::Managed { "Deployment" } else { "Configuration" } }
+                            p { if management_mode() == ManagementMode::Managed { "Which flake this system tracks, and how it picks up new configuration." } else { "Which NixOS configuration Crystal Forge evaluates, builds and scans." } }
+                        }
                         div {
                             EnrollmentConfigurationFields {
                                 flake_name: selected_assignment.0.clone(), branch: flake_branch(), configuration: selected_assignment.1.clone(), flake_names: flake_names.clone(),
@@ -1066,6 +1077,21 @@ pub fn EditSystemModal(
                     }
 
                     // SECURITY TAB
+                    if *active_tab.read() == Tab::Security && management_mode() == ManagementMode::Managed {
+                        div { class: "pe-sec-head", h3 { "Security" } p { "The Ed25519 key the agent presents on every heartbeat." } }
+                    }
+                    // A resource that is converting into managed mode has no
+                    // enrolled key yet: its key is entered in Management and
+                    // takes effect when Save changes succeeds. Rotation applies
+                    // only to an existing enrollment.
+                    if *active_tab.read() == Tab::Security && management_mode() == ManagementMode::Managed && original_mode != ManagementMode::Managed {
+                        div { class: "mg-notice", role: "status",
+                            div { class: "mg-notice-body",
+                                b { "No agent key is enrolled yet" }
+                                p { "Enter the agent public key in Management. Key rotation is available after the conversion is saved." }
+                            }
+                        }
+                    }
                     if *active_tab.read() == Tab::Security && management_mode() == ManagementMode::Managed && original_mode == ManagementMode::Managed {
                         div {
                             div {
@@ -1393,13 +1419,12 @@ pub fn EditSystemModal(
                     // DANGER TAB
                     if *active_tab.read() == Tab::Danger {
                         div {
-                            p { class: "help",
-                                if management_mode() == ManagementMode::Managed { "Unregistering stops deployments. The agent keeps running its current generation." }
-                                else { "Removal stops configuration evaluation and scanning. It does not change an external system or the source configuration." }
-                            }
-                            div {
-                                style: "font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--cf-text-muted); margin-bottom: 8px;",
-                                "Danger zone"
+                            div { class: "pe-sec-head",
+                                h3 { "Danger zone" }
+                                p {
+                                    if management_mode() == ManagementMode::Managed { "Unregistering stops deploys — the agent keeps running its current generation." }
+                                    else { "Removing stops evaluation and scanning. The system or configuration itself is not affected." }
+                                }
                             }
                             button {
                                 class: "btn btn-ghost focus-ring",
@@ -1427,10 +1452,11 @@ pub fn EditSystemModal(
                 div {
                     class: "pe-foot",
                     span { class: "pe-foot-state",
-                        "{flake_name} · {management_mode().label()}",
+                        if flake_branch().trim().is_empty() { "{flake_name}" } else { "{flake_name}@{flake_branch}" }
+                        if management_mode() == ManagementMode::Managed { " · {deployment_policy} · heartbeat {heartbeat_label}" } else { " · {management_mode().long_label()}" }
                         if !can_keep_assignment { " · Registered flake and declared configuration required for a new assignment" }
                         else if !declared { " · Keeping existing assignment; declaration unconfirmed" }
-                        if management_mode() != original_mode { " · {original_mode.label()} → {management_mode().label()}" }
+                        if management_mode() != original_mode { " · mode: {original_mode.label()} → {management_mode().label()}" }
                     }
                     div {
 
