@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-11-02T02:09:00Z'
+updated_date: '2026-11-02T03:16:00Z'
 labels:
   - management-mode
   - assurance
@@ -273,6 +273,8 @@ Follow-ups recorded: TASK-512 (stale pre-existing fixture), TASK-513 (session-bo
 Preview left running: unit cf-task508-preview, http://127.0.0.1:8080 (API 3445, PG 5432 task-owned), migrations through 0324, mock execution.
 
 MR !340 review (HEAD 9122782b): changes requested. P1 scan coverage CTE excludes reused configuration carriers; P2 nonmanaged Re-scan compares response.derivation_id (execution source A) to requested carrier B; P1 integration-coverage-map still records superseded failures/unverified proof and exact-HEAD CI pipeline 3015806381 had not finished; parent shown as UUID instead of hostname. Returned to In Progress to fix on the same branch/MR.
+
+2026-11-02 user decision (TASK-513 scope): accept the remote-only cross-session rescan limitation as a known limitation; TASK-513 stays a separate security-design task. Conditions: document it; preserve the failed lifecycle and report scan_executor_unavailable, never as clean/current; verify initial post-build and same-session rescans for external and reference; keep/add regressions for builder-session invalidation, unavailable executors and evidence preservation; do not weaken builder authorization, provenance, environment isolation or lease fencing. The decision waives nothing else (ACs, review findings, CI, browser/design verification).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
