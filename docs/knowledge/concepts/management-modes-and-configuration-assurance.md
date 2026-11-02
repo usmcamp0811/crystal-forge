@@ -200,6 +200,16 @@ cannot cancel shared work. Evidence joins require the same flake and
 configuration (`derivations_share_evidence_scope`). Physical equality never
 grants another scope's evidence or cache credentials.
 
+A successful origin job is adopted, and a reused head is admitted for scanning,
+only when `derivation_publication_eligible` finds a completed publication to an
+enabled destination that the carrier's environment may use. Only `database`
+publications and unambiguous `legacy` publications qualify. A `static`
+publication never qualifies, because the SQL predicate cannot verify the
+server's current static configuration. In a static-only deployment, a carrier
+therefore does not adopt a successful origin job and builds again. Queued or
+running origin work is still adopted. This fails closed;
+TASK-514 tracks a static provenance decision.
+
 Current exact-CVE authority counts enforced aliases as one physical artifact,
 so a reused head does not become ambiguous. Two different `.drv`s with the same
 output remain ambiguous. The returned commit is scan provenance, never inferred
