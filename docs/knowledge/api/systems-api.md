@@ -152,8 +152,15 @@ the existing ineligible response rather than queueing a substitute.
 
 Nonmanaged requests use the durable scan queue without local vulnix admission
 requirements. Managed requests retain immediate local execution. The 202
-response includes `scan_id` and `derivation_id`. Pending intent does not prove
-execution. See [scan operations](cve-scan-operations-api.md).
+response includes `scan_id`, `derivation_id`, and `configuration_derivation_id`.
+`configuration_derivation_id` is the selected configuration carrier that
+`expected_derivation_id` is compared with. `derivation_id` is the execution
+source that the scan runs on. The two IDs differ only for an exact-reuse head:
+the scan runs on the origin derivation that actually built, and is never
+relabelled as the carrier. Clients MUST match a response to their request by
+`configuration_derivation_id`. A 409 `scan_executor_unavailable` response
+carries the same two IDs in `details`. Pending intent does not prove execution.
+See [scan operations](cve-scan-operations-api.md).
 
 ## Configuration-assurance read
 
@@ -181,7 +188,12 @@ success.
 
 Artifacts contain `derivation_id`, `revision`, `configuration_name`, `state`,
 `derivation_path`, actual `output_path`, `expected_output_path`, `published_at`,
-`error`, and nullable `build`. Build fields are `job_id`, `state`, `created_at`,
+`error`, nullable `build`, and nullable `execution_derivation_id` and
+`execution_revision`. The execution fields identify the derivation and commit
+whose job or output supplies the artifact. They equal the artifact's own
+identity unless it is an exact-reuse head; then they identify the origin that
+actually built, and `build` is that origin's job. They are null when the
+artifact has neither a build job nor an output. Build fields are `job_id`, `state`, `created_at`,
 `started_at`, `completed_at`, and `failure_code`. Publication time means an exact
 completed cache push, not current reachability or runtime activation.
 

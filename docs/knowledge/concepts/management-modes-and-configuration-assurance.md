@@ -215,6 +215,10 @@ the existing `deployed_interval` cadence label. That scheduler label is not a
 deployment claim. Recent/archived artifact cadences and post-build recovery
 remain separate. Active scans and existing failure backoff still govern retries.
 Hardening target selection also uses the exact selected nonmanaged branch head.
+For an exact-reuse head, scan admission, hardening selection, and Scanning
+coverage resolve the head to its execution source derivation. A scoped scan
+response returns that source as `derivation_id` and the requested carrier as
+`configuration_derivation_id`; the Web UI matches its request by the carrier.
 The Web UI offers its exact derivation/build history without requiring a CVE
 scan. Hardening reads return exact-derivation evidence, not Current runtime
 authority. CVE scans and hardening assessments retain independent availability
