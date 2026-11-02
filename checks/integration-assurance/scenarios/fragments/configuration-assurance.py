@@ -177,23 +177,28 @@ def configuration_assurance():
             "conversion erased historical parent observations")
 
     with case("configuration-periodic-remote-scan-executes-without-local-vulnix"):
-        policy = sql_json(controller, "SELECT deployed_interval,recent_interval,archived_enabled FROM scan_schedule_policy WHERE id=1")[0]
+        policy = delivery_api("GET", "/api/v1/scanning/schedule")
         prior = [row["id"] for row in sql_json(controller, "SELECT id::text FROM cve_scans WHERE derivation_id=" + str(artifact["id"]))]
+        schedule_fields = ("on_build", "deployed_interval", "recent_interval",
+            "archived_interval", "archived_enabled", "rebuild_to_scan")
         try:
-            # Change only the existing scheduling policy. Do not manufacture an
-            # old completed scan or a successful build. The one-second cadence
-            # makes the actual sealed manual result become due in this VM run.
-            sql_json(controller, "UPDATE scan_schedule_policy SET deployed_interval='1 second',recent_interval='never',archived_enabled=false WHERE id=1 RETURNING id")
+            # Change only the scheduling policy, through the real admin API
+            # (minimum interval 1h). Advance every VM clock together, as this
+            # scenario does at start, so the actual sealed manual result
+            # becomes due. No scan, build or session row is manufactured.
+            delivery_api("PUT", "/api/v1/scanning/schedule", dict(
+                {field: policy[field] for field in schedule_fields},
+                deployed_interval="1h", recent_interval="never", archived_enabled=False))
+            for node in machines:
+                node.succeed("date -s '+2 hours'")
             def periodic_created():
                 rows = sql_json(controller, "SELECT id::text FROM cve_scans WHERE derivation_id=" + str(artifact["id"]) +
                     " AND source_trigger='periodic' ORDER BY created_at,id")
                 return next((row["id"] for row in rows if row["id"] not in prior), None)
-            periodic = wait_for(periodic_created, "periodic admission with controller-local vulnix inaccessible", timeout=150)
+            periodic = wait_for(periodic_created, "periodic admission with controller-local vulnix inaccessible", timeout=300)
             receipt("management.periodicScan", completed_configuration_scan(periodic, "periodic"))
         finally:
-            sql_json(controller, "UPDATE scan_schedule_policy SET deployed_interval=" + literal(policy["deployed_interval"]) +
-                ",recent_interval=" + literal(policy["recent_interval"]) + ",archived_enabled=" +
-                ("true" if policy["archived_enabled"] else "false") + " WHERE id=1 RETURNING id")
+            delivery_api("PUT", "/api/v1/scanning/schedule", {field: policy[field] for field in schedule_fields})
         for system_id in (external_id, reference["id"]):
             expect_equal(sql_json(controller, "SELECT scan_id FROM view_current_cve_authority WHERE system_id=" + literal(system_id) + "::uuid"),
                 [], "periodic configuration evidence grants no runtime authority")
