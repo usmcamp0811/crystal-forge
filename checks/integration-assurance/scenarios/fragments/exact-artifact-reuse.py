@@ -34,7 +34,7 @@ def configuration_exact_artifact_reuse(config, system_ids, origin, job, origin_c
         binding = wait_for(bound, "production native B carrier, adopted work and durable completion proof", timeout=300)
         expect(binding["id"] != origin["id"], "B must retain its own configuration/evaluation carrier")
         for field, expected in (("derivation_path", origin["derivation_path"]),
-            ("expected_store_path", origin["output"]), ("reused_from_derivation_id", origin["id"]),
+            ("expected_store_path", origin["expected_store_path"]), ("reused_from_derivation_id", origin["id"]),
             ("reused_build_job_id", job["id"])):
             expect_equal(binding[field], expected, "exact reuse binding " + field)
         expect_equal(sql_json(controller, "SELECT id::text,derivation_id,status,builder_id::text,builder_session_id::text "
