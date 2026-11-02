@@ -2242,11 +2242,14 @@ async fn add_report_only_non_composite_assignment(pool: &PgPool, system_id: Uuid
         pool,
         &CreateDeploymentPolicyRequest {
             name: format!("report-only-assessment-policy-{}", Uuid::new_v4()),
-            policy_type: "custom_check".to_string(),
+            // Any non-composite version changes the complete compliance
+            // identity. A parser-free type keeps this authorization test
+            // independent of the bounded Nix parser subprocess, whose own
+            // contract is tested in cf-compliance policy_config.
+            policy_type: "require_packages".to_string(),
             config: serde_json::json!({
-                "expression": "true",
+                "packages": ["openssh"],
                 "description": "report-only authorization regression",
-                "field_name": "reportOnlyAuthorizationRegression",
                 "strict": true
             }),
             enabled: Some(true),

@@ -189,7 +189,7 @@ fn validate_config_inner(
 
     if validate_nix_syntax && !expressions.is_empty() {
         validate_custom_eval_syntax(&expressions.iter().map(String::as_str).collect::<Vec<_>>())
-            .map_err(|error| format!("custom_check expression is invalid: {error}"))?;
+            .map_err(|error| error.into_message("custom_check expression"))?;
     }
     Ok(normalized)
 }

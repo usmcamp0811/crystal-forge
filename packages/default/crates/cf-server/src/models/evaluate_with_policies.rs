@@ -8617,28 +8617,50 @@ mod tests {
     #[tokio::test]
     #[cfg(unix)]
     async fn preflight_stalled_progress_logger_does_not_delay_child_deadline() {
+        use std::os::fd::AsRawFd;
+
+        // The runner's deadline starts at spawn, and neither child startup nor
+        // stderr scheduling is bounded relative to it. Establish both orderings
+        // here instead of racing the 100 ms deadline:
+        // - progress is observed before the operation starts, so the logger
+        //   starts and stalls on the first poll while the child still runs;
+        // - the child records its PID before exec, so before spawn returns.
         let directory = tempfile::tempdir().unwrap();
-        let pid_file = directory.path().join("logger-child");
+        let pid_path = directory.path().join("logger-child");
+        let pid_file = std::fs::File::create(&pid_path).unwrap();
+        let pid_fd = pid_file.as_raw_fd();
         let (progress, observed) = tokio::sync::watch::channel(false);
+        progress.send_replace(true);
         let logged = std::sync::atomic::AtomicBool::new(false);
         let mut command = Command::new("sh");
-        command
-            .args([
-                "-c",
-                "printf '%s' \"$$\" > \"$1\"; printf \"unpacking '\" >&2; exec sleep 60",
-                "--",
-            ])
-            .arg(&pid_file);
+        command.args(["-c", "exec sleep 60"]);
+        // SAFETY: The closure runs in the forked child before exec. It calls
+        // only async-signal-safe getpid and write on a descriptor that the
+        // parent opened and keeps open until spawn returns. It formats into a
+        // stack buffer, so it neither allocates nor takes a lock.
+        unsafe {
+            command.pre_exec(move || {
+                let mut pid = libc::getpid() as u32;
+                let mut digits = [0u8; 10];
+                let mut start = digits.len();
+                loop {
+                    start -= 1;
+                    digits[start] = b'0' + (pid % 10) as u8;
+                    pid /= 10;
+                    if pid == 0 {
+                        break;
+                    }
+                }
+                let remaining = &digits[start..];
+                libc::write(pid_fd, remaining.as_ptr().cast(), remaining.len());
+                Ok(())
+            });
+        }
+        let deadline = std::time::Duration::from_millis(100);
         let started = tokio::time::Instant::now();
         let operation = super::DISCOVERY_INPUT_PROGRESS.scope(
             progress,
-            run_nix_command_bounded(
-                &mut command,
-                "stalled log fixture",
-                std::time::Duration::from_millis(100),
-                16,
-                16,
-            ),
+            run_nix_command_bounded(&mut command, "stalled log fixture", deadline, 16, 16),
         );
         let error = super::with_discovery_progress(operation, observed, async {
             logged.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -8646,19 +8668,97 @@ mod tests {
         })
         .await
         .unwrap_err();
-        assert!(logged.load(std::sync::atomic::Ordering::SeqCst));
-        assert!(started.elapsed() < std::time::Duration::from_secs(1));
+        drop(pid_file);
         assert!(
-            error
-                .downcast_ref::<super::BoundedProcessTimeout>()
-                .is_some()
+            logged.load(std::sync::atomic::Ordering::SeqCst),
+            "the logger must have started and stalled during child execution"
         );
-        let pgid = tokio::fs::read_to_string(pid_file)
-            .await
-            .unwrap()
-            .parse()
-            .unwrap();
+        // Contract bound from spawn: the deadline plus the cleanup
+        // acknowledgement budget. A stalled logger adds nothing; the exact
+        // no-delay property is proven in virtual time by
+        // `discovery_progress_logger_never_extends_operation`.
+        assert!(started.elapsed() < deadline + super::BOUNDED_PROCESS_CLEANUP_ACK_TIMEOUT);
+        let timeout = error
+            .downcast_ref::<super::BoundedProcessTimeout>()
+            .expect("deadline expiry must stay a typed runner timeout");
+        assert!(timeout.cleanup_confirmed);
+        let pgid = std::fs::read_to_string(pid_path).unwrap().parse().unwrap();
         assert!(super::process_group_absent(pgid));
+    }
+
+    /// Proves in virtual time that discovery logging never extends discovery.
+    ///
+    /// Paused tokio time makes each case exact: a stalled logger is bounded by
+    /// `DISCOVERY_LOG_BUDGET`, and the operation result is returned at the
+    /// operation's own completion time in every ordering.
+    #[tokio::test(start_paused = true)]
+    async fn discovery_progress_logger_never_extends_operation() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        let operation_time = std::time::Duration::from_millis(100);
+        assert!(operation_time < super::DISCOVERY_LOG_BUDGET);
+
+        // Progress before completion: the logger starts and stalls, and the
+        // result still returns when the operation completes.
+        let (progress, observed) = tokio::sync::watch::channel(false);
+        let logged = AtomicBool::new(false);
+        let started = tokio::time::Instant::now();
+        let result = super::with_discovery_progress(
+            async move {
+                progress.send_replace(true);
+                tokio::time::sleep(operation_time).await;
+                Ok::<_, anyhow::Error>(7)
+            },
+            observed,
+            async {
+                logged.store(true, Ordering::SeqCst);
+                std::future::pending::<()>().await;
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, 7);
+        assert!(logged.load(Ordering::SeqCst));
+        assert_eq!(started.elapsed(), operation_time);
+
+        // An operation slower than the log budget: the stalled logger expires
+        // at the budget, and the result still returns at operation completion.
+        let slow = super::DISCOVERY_LOG_BUDGET * 4;
+        let (progress, observed) = tokio::sync::watch::channel(true);
+        let started = tokio::time::Instant::now();
+        let result = super::with_discovery_progress(
+            async move {
+                tokio::time::sleep(slow).await;
+                drop(progress);
+                Ok::<_, anyhow::Error>(8)
+            },
+            observed,
+            std::future::pending::<()>(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, 8);
+        assert_eq!(started.elapsed(), slow);
+
+        // Completion in the same poll as progress: logging is best effort and
+        // is dropped instead of delaying the result.
+        let (progress, observed) = tokio::sync::watch::channel(false);
+        let logged = AtomicBool::new(false);
+        let started = tokio::time::Instant::now();
+        let result = super::with_discovery_progress(
+            async move {
+                progress.send_replace(true);
+                Ok::<_, anyhow::Error>(9)
+            },
+            observed,
+            async {
+                logged.store(true, Ordering::SeqCst);
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(result, 9);
+        assert!(!logged.load(Ordering::SeqCst));
+        assert_eq!(started.elapsed(), std::time::Duration::ZERO);
     }
 
     #[tokio::test]
