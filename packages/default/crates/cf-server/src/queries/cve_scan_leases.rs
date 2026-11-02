@@ -1938,6 +1938,24 @@ mod tests {
             1,
             "scanning never creates a substitute build job"
         );
+        // Executor loss fails only the new lifecycles. The manual and periodic
+        // results sealed earlier remain completed, sealed evidence.
+        let sealed: Vec<(String, String, i32)> = sqlx::query_as(
+            "SELECT status,source_trigger,evidence_schema_version FROM cve_scans
+             WHERE derivation_id=$1 AND result_digest_sha256 IS NOT NULL ORDER BY created_at,id",
+        )
+        .bind(d.id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            sealed,
+            vec![
+                ("completed".into(), "manual".into(), 1),
+                ("completed".into(), "periodic".into(), 1),
+            ],
+            "unavailable executors never erase or relabel earlier sealed evidence"
+        );
     }
 
     #[sqlx::test(migrations = "./migrations")]
