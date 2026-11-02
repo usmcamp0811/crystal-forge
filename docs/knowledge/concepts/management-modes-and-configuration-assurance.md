@@ -248,8 +248,13 @@ fencing. If no executor can run the scan, a scoped request returns HTTP 409
 `scan_executor_unavailable`, and queued rows without an executor are failed with
 retained evidence. They do not remain pending. Periodic target selection and
 admission run even when the server has no local vulnix; only local execution is
-skipped. Authorization, expected-ID validation, admission, and audit share one
-transaction. Its lock order is derivation, canonical CVE, environment, POA&M
+skipped. Producer affinity is bound to the builder **session** that produced
+the job, as in the pre-existing remote claim design. In a remote-only deployment
+without a server-local scanner, a rescan of an artifact built in an earlier
+builder session therefore fails as `scan_executor_unavailable` until the
+artifact is rebuilt or a local scanner is available; TASK-513 tracks a
+session-independent trust model. Authorization, expected-ID validation,
+admission, and audit share one transaction. Its lock order is derivation, canonical CVE, environment, POA&M
 sentinel, then system and actor scope.
 
 Per-system scan statistics classify a selected external/reference head on the
