@@ -1,11 +1,11 @@
 ---
 id: TASK-508
 title: Support External and Reference NixOS Configuration Assurance
-status: In Progress
+status: Review
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-11-01T16:45:00Z'
+updated_date: '2026-11-02T01:39:00Z'
 labels:
   - management-mode
   - assurance
@@ -17,6 +17,7 @@ references:
   - >-
     git:18b47eed40620508e8b5725f1e7845c02146a122 (approved management-mode UI
     design on dev)
+  - https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/340
 documentation:
   - docs/design/CrystalForge/components/MgmtParts.jsx
   - docs/design/CrystalForge/data-external.js
@@ -90,22 +91,22 @@ Approved design commit 18b47eed on dev (present on origin/dev). No blocking back
 
 ## Acceptance Criteria
 <!-- AC:BEGIN -->
-- [ ] #1 Systems persist a typed management_mode (managed|external|reference); a migration defaults every existing system to managed and invalid modes are rejected by the server
-- [ ] #2 external and reference systems register without agent credentials and no fake key is generated; managed registration keeps existing agent-key requirements
-- [ ] #3 Reference configurations use a descriptive identity without requiring a runtime hostname; multiple registered systems may share one NixOS configuration with unique resource identity
-- [ ] #4 Create/edit/list/detail/filter APIs expose management_mode and parent-host association while preserving environment membership and RBAC
-- [ ] #5 For external and reference systems the server never initiates, authorizes, queues or returns a deployment instruction across automatic policy, manual deploy, desired-target update, pending requests, rollback, rollout and agent responses
-- [ ] #6 managed->external/reference transition atomically revokes deployment authority, invalidates outstanding deployment requests, disables the previous agent identity and preserves history; concurrent processes cannot issue a forbidden deployment
-- [ ] #7 external/reference->managed requires explicit authorization, valid agent enrollment credentials and a valid deployment policy and never deploys on conversion; external<->reference transitions keep configuration evidence
-- [ ] #8 External and reference configurations are evaluated, built (without an agent-enabled configuration) and CVE-scanned through the existing pipelines using exact configuration and derivation identity, including scheduled and manual scans, with no fabricated running store path and no duplicate builds for identical derivations
-- [ ] #9 Removed or renamed configurations, failed evaluations, failed builds and failed or unavailable scans are reported explicitly while historical evidence is retained
-- [ ] #10 Configuration-only scan evidence never authorizes current-runtime vulnerability claims, remediation verification, POA&M closure or deployment attestations; existing exact-CVE authority rules still pass
-- [ ] #11 A CF-managed parent host can report authenticated guest observations (guest identity, unit, unit state, optional runner store path, timestamp); the server rejects unauthorized or cross-environment reports; older agents keep working; observations are stored and shown separately from scan evidence and never claimed as a configuration match without evidence
-- [ ] #12 Dashboard, fleet health, deployment, environment, scan-coverage, hardening and compliance metrics count reference configurations and unobserved external systems according to documented definitions (no reference offline, no reference in managed deployment denominators, external included in scan coverage)
-- [ ] #13 Registration, management-mode transitions and parent-host changes are audited and require existing authorization
-- [ ] #14 Web UI implements the approved design for Add System, Edit System (mode change confirmation), Systems list filters/labels/statuses and side panel, every System Detail tab, Flake Explorer registration with preselection, Config Explorer, Scanning, Dashboard and supporting views, with real data, loading/empty/error/unavailable states and dark/light parity
-- [ ] #15 Automated tests cover domain/API, deployment safety (including concurrency and bypass attempts), evaluation/build/scan eligibility, CVE/POA&M authority, host observations, fleet metrics, and owning browser integration scenarios
-- [ ] #16 OKF knowledge pages document the management-mode model, deployment authority and transitions, external/reference registration, configuration vs runtime assurance, CVE evidence authority, MicroVM observation limits, scan scheduling, metric semantics, API and migration changes, and troubleshooting; nix build .#okf-knowledge passes
+- [x] #1 Systems persist a typed management_mode (managed|external|reference); a migration defaults every existing system to managed and invalid modes are rejected by the server
+- [x] #2 external and reference systems register without agent credentials and no fake key is generated; managed registration keeps existing agent-key requirements
+- [x] #3 Reference configurations use a descriptive identity without requiring a runtime hostname; multiple registered systems may share one NixOS configuration with unique resource identity
+- [x] #4 Create/edit/list/detail/filter APIs expose management_mode and parent-host association while preserving environment membership and RBAC
+- [x] #5 For external and reference systems the server never initiates, authorizes, queues or returns a deployment instruction across automatic policy, manual deploy, desired-target update, pending requests, rollback, rollout and agent responses
+- [x] #6 managed->external/reference transition atomically revokes deployment authority, invalidates outstanding deployment requests, disables the previous agent identity and preserves history; concurrent processes cannot issue a forbidden deployment
+- [x] #7 external/reference->managed requires explicit authorization, valid agent enrollment credentials and a valid deployment policy and never deploys on conversion; external<->reference transitions keep configuration evidence
+- [x] #8 External and reference configurations are evaluated, built (without an agent-enabled configuration) and CVE-scanned through the existing pipelines using exact configuration and derivation identity, including scheduled and manual scans, with no fabricated running store path and no duplicate builds for identical derivations
+- [x] #9 Removed or renamed configurations, failed evaluations, failed builds and failed or unavailable scans are reported explicitly while historical evidence is retained
+- [x] #10 Configuration-only scan evidence never authorizes current-runtime vulnerability claims, remediation verification, POA&M closure or deployment attestations; existing exact-CVE authority rules still pass
+- [x] #11 A CF-managed parent host can report authenticated guest observations (guest identity, unit, unit state, optional runner store path, timestamp); the server rejects unauthorized or cross-environment reports; older agents keep working; observations are stored and shown separately from scan evidence and never claimed as a configuration match without evidence
+- [x] #12 Dashboard, fleet health, deployment, environment, scan-coverage, hardening and compliance metrics count reference configurations and unobserved external systems according to documented definitions (no reference offline, no reference in managed deployment denominators, external included in scan coverage)
+- [x] #13 Registration, management-mode transitions and parent-host changes are audited and require existing authorization
+- [x] #14 Web UI implements the approved design for Add System, Edit System (mode change confirmation), Systems list filters/labels/statuses and side panel, every System Detail tab, Flake Explorer registration with preselection, Config Explorer, Scanning, Dashboard and supporting views, with real data, loading/empty/error/unavailable states and dark/light parity
+- [x] #15 Automated tests cover domain/API, deployment safety (including concurrency and bypass attempts), evaluation/build/scan eligibility, CVE/POA&M authority, host observations, fleet metrics, and owning browser integration scenarios
+- [x] #16 OKF knowledge pages document the management-mode model, deployment authority and transitions, external/reference registration, configuration vs runtime assurance, CVE evidence authority, MicroVM observation limits, scan scheduling, metric semantics, API and migration changes, and troubleshooting; nix build .#okf-knowledge passes
 <!-- AC:END -->
 
 ## Implementation Plan
@@ -264,4 +265,16 @@ Checkpoint (2026-11-01): branch pushed to origin/TASK-508-management-modes at 8e
 - List scan freshness now uses the real schedule (selected-head deployed_interval cadence). Registration controls received exact accessible names after the Assurance VM run failed an exact getByLabel('Flake').
 - Web UI native 815 passed/1 ignored; WASM check passes; cf-server workspace all-targets check passes; okf-knowledge passes.
 - Pending: flake check on final head (owners), full isolated state-machine run, design comparison screenshots for MR, final diff review, MR.
+
+Review handoff (2026-11-02): MR !340 https://gitlab.com/crystal-forge/crystal-forge/-/merge_requests/340 opened to dev from TASK-508-management-modes @ 9122782b. Not merged.
+Evidence per AC: full nix flake check @5176d483 exit 0 (Access 40, Delivery 17, Upgrade 13 cases; Assurance reused from identical passing build). integration-assurance @5176d483 exit 0 incl. 10 configuration cases (AC2/3/8/9/10/11/14). Delivery management-pending-deployment-conversion-and-concurrent-replay passed (AC5/6). Access management registration/conversion/denial cases passed (AC1/2/4/7/13). Isolated state-machine workflow @b032bd6a exit 0 (no packages/default changes since). SQLx workspace prepare --check against disposable DB migrated through 0324 exit 0. Web UI 815 passed/1 ignored, WASM ok. okf-knowledge exit 0. Check inventory exactly the four owners.
+Late fixes found by verification: resource-terminal admission branch mixing (security), delivery FOR SHARE on outer-joined view, external reconciliation alias/epoch (0323), CVE first-package reactivity, accessible names, approved action labels, assurance fixture hostname, scenario contract corrections (412 stale_cve_observation, masked disabled unit, schedule API instead of SQL writes).
+Follow-ups recorded: TASK-512 (stale pre-existing fixture), TASK-513 (session-bound remote scan affinity limits periodic rescans after builder restart). TASK-510 field gap implemented in this MR. Migration 0313 intentionally unused.
+Preview left running: unit cf-task508-preview, http://127.0.0.1:8080 (API 3445, PG 5432 task-owned), migrations through 0324, mock execution.
 <!-- SECTION:NOTES:END -->
+
+## Final Summary
+
+<!-- SECTION:FINAL_SUMMARY:BEGIN -->
+Adds typed management modes (managed/external/reference) so Crystal Forge evaluates, builds and CVE-scans NixOS configurations it is not authorized to deploy. Deployment authority is enforced server-side on every path; mode transitions are atomic and audited; re-enrollment requires a fresh signed report (enrollment epoch). Configuration evidence (exact artifact builds, sealed scans, hardening, compliance) never grants Current runtime authority, remediation verification or POA&M closure. Includes agent-disabled artifact admission, exact derivation reuse without duplicate builds, remote manual/periodic scans, optional signed parent guest observations, registration metadata, copy-at-save environment default policy and a non-deploying pinned commit, the approved Dioxus UI across Systems/Detail/Add/Edit/Flakes/Scanning/Dashboard, migrations 0311-0324, and updated OKF knowledge. Verified by the full flake check (all four owners), the isolated state-machine workflow, SQLx metadata check, Web UI/WASM tests and knowledge validation. Risks/follow-ups: TASK-513 (remote scan affinity bound to producer builder session), TASK-509/511/512. MR !340, awaiting review; not merged.
+<!-- SECTION:FINAL_SUMMARY:END -->
