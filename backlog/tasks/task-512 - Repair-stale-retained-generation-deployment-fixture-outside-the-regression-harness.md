@@ -6,6 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-11-01T15:39:00Z'
+updated_date: '2026-11-02T02:26:00Z'
 labels:
   - tests
   - database
@@ -27,3 +28,9 @@ ordinal: 563000
 - [ ] #2 The test passes in an isolated migration-backed database without weakening its retained-generation or commit-deletion assertions
 - [ ] #3 The test is either added to the isolated regression harness or the reason it is excluded is documented
 <!-- AC:END -->
+
+## Implementation Notes
+
+<!-- SECTION:NOTES:BEGIN -->
+Second instance found during TASK-508 review fixes: queries::scanning_tests::waiting_scan_promotes_through_exact_prerequisites (ignored, not in the regression harness) inserts cache_push_jobs without store_path. promote_waiting_cve_scans is byte-identical to dev @18b47eed and requires push.store_path = derivation.store_path, so the concurrent promotion assertion sees 0 promotions. Same stale-fixture class; not caused by TASK-508.
+<!-- SECTION:NOTES:END -->
