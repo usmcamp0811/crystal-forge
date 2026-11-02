@@ -299,24 +299,43 @@ fn dom_key(event: &KeyboardData) -> Option<String> {
 
 /// Reads every declared output from one immutable registry-head snapshot.
 /// Continuation tokens prevent mixed revisions; unavailable discovery is an error.
+///
+/// Returns the registered branch whenever the flake itself resolves, also when
+/// output discovery fails, so the form can show the branch with the error.
 async fn declared_configurations(
     name: String,
     branch: String,
-) -> Result<(Vec<String>, String), String> {
-    let flakes = client::fetch_flakes().await.map_err(|e| e.to_string())?;
-    let flake = flakes
-        .into_iter()
-        .find(|f| f.name == name)
-        .ok_or("Select a registered flake to load its declared outputs.")?;
-    if !branch.is_empty() && branch != flake.branch {
-        return Err(format!(
-            "This flake tracks {}. Registration cannot override its branch; choose the registered branch.",
-            flake.branch
-        ));
+) -> (Option<String>, Result<Vec<String>, String>) {
+    let flakes = match client::fetch_flakes().await {
+        Ok(flakes) => flakes,
+        Err(error) => return (None, Err(error.to_string())),
+    };
+    let Some(flake) = flakes.into_iter().find(|f| f.name == name) else {
+        return (
+            None,
+            Err("Select a registered flake to load its declared outputs.".into()),
+        );
+    };
+    let registered = flake.branch.clone();
+    if !branch.is_empty() && branch != registered {
+        return (
+            Some(registered.clone()),
+            Err(format!(
+                "This flake tracks {registered}. Registration cannot override its branch; choose the registered branch."
+            )),
+        );
     }
+    (Some(registered), declared_outputs_at_head(flake).await)
+}
+
+/// Reads the declared-output inventory of the flake's latest synchronized commit.
+async fn declared_outputs_at_head(
+    flake: crate::api::models::FlakeRegistryItem,
+) -> Result<Vec<String>, String> {
     let revision = flake
         .latest_commit_hash
         .ok_or("No synchronized revision is available. Sync and evaluate the flake first.")?;
+    let short = revision.chars().take(10).collect::<String>();
     let mut offset = 0;
     let mut token = None;
     let mut configs = Vec::new();
@@ -333,12 +352,17 @@ async fn declared_configurations(
         .await
         .map_err(|e| e.to_string())?;
         if page.declared_system_names.is_none() && page.lifecycle != SnapshotLifecycle::Available {
-            return Err(page.error.unwrap_or_else(|| {
-                format!(
-                    "Declared outputs are {:?}. Sync and evaluate the flake, then retry.",
-                    page.lifecycle
-                )
-            }));
+            // The stored error is the server's raw evaluation error, which can
+            // be a bare context string. Name the revision and the state.
+            let state = format!("{:?}", page.lifecycle).to_lowercase();
+            return Err(match page.error {
+                Some(error) => format!(
+                    "Declared outputs for latest revision {short} are {state}. Server error: {error}. Fix evaluation on the server, then retry."
+                ),
+                None => format!(
+                    "Declared outputs for latest revision {short} are {state}. Sync and evaluate the flake, then retry."
+                ),
+            });
         }
         if *declared_count.get_or_insert(page.declared_system_count) != page.declared_system_count {
             return Err("The declared-output inventory changed. Reload the flake.".into());
@@ -368,7 +392,7 @@ async fn declared_configurations(
     if Some(configs.len() as i64) != declared_count {
         return Err("The declared-output response is incomplete. Reload the flake.".into());
     }
-    Ok((configs, flake.branch))
+    Ok(configs)
 }
 
 /// Renders exact-output autocomplete and reports whether selection is proven.
@@ -384,20 +408,24 @@ pub fn EnrollmentConfigurationFields(
     on_valid: EventHandler<bool>,
 ) -> Element {
     let source = use_reactive((&flake_name, &branch), |(name, branch)| async move {
-        let result = declared_configurations(name.clone(), branch.clone()).await;
-        (name, branch, result)
+        let (registered_branch, result) =
+            declared_configurations(name.clone(), branch.clone()).await;
+        (name, branch, registered_branch, result)
     });
     let mut outputs = use_resource(source);
     // A retained response from the previous source cannot validate a new source.
-    let loaded = outputs
+    let current = outputs
         .read()
         .as_ref()
-        .filter(|(name, requested_branch, _)| name == &flake_name && requested_branch == &branch)
-        .map(|(_, _, result)| result.clone());
-    let valid = loaded.as_ref().is_some_and(|r| {
-        r.as_ref()
-            .is_ok_and(|(names, _)| names.contains(&configuration))
-    });
+        .filter(|(name, requested_branch, _, _)| name == &flake_name && requested_branch == &branch)
+        .map(|(_, _, registered, result)| (registered.clone(), result.clone()));
+    let registered_branch = current
+        .as_ref()
+        .and_then(|(registered, _)| registered.clone());
+    let loaded = current.map(|(_, result)| result);
+    let valid = loaded
+        .as_ref()
+        .is_some_and(|r| r.as_ref().is_ok_and(|names| names.contains(&configuration)));
     use_effect(use_reactive(
         (&valid, &configuration, &flake_name, &branch),
         move |(valid, _, _, _)| on_valid.call(valid),
@@ -416,7 +444,7 @@ pub fn EnrollmentConfigurationFields(
             }
             label { class: "field", "Branch",
                 input { class: "input mono", readonly: true, aria_label: "Branch",
-                    value: loaded.as_ref().and_then(|r| r.as_ref().ok()).map(|(_, b)| b.clone()).unwrap_or(branch.clone()),
+                    value: registered_branch.unwrap_or(branch.clone()),
                 }
                 span { class: "help", "Follows the registered flake branch." }
             }
@@ -438,7 +466,7 @@ pub fn EnrollmentConfigurationFields(
                 p { class: "sd-callout sd-callout-warn", role: "alert", "{message}" }
                 button { class: "btn btn-ghost focus-ring", onclick: move |_| outputs.restart(), "Retry discovery" }
             },
-            Some(Ok((names, _))) => rsx! {
+            Some(Ok(names)) => rsx! {
                 datalist { id: "enrollment-configurations", for name in names { option { value: "{name}" } } }
                 if valid { p { class: "help", "Declared output: nixosConfigurations.{configuration}. Evidence describes this configuration, not a running machine." } }
                 else { p { class: "help", role: "status", "Choose an exact declared configuration. Names are case-sensitive." } }

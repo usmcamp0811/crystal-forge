@@ -1972,11 +1972,14 @@ async fn process_pending_commits(
         let cfg = match CrystalForgeConfig::load() {
             Ok(cfg) => cfg,
             Err(e) => {
-                error!("❌ Failed to load config: {}", e);
+                // `{:#}` keeps the anyhow cause chain. The outer context alone
+                // ("loading configuration") hides the file or parse failure
+                // that operators must fix, and the UI shows this stored text.
+                error!("❌ Failed to load config: {:#}", e);
                 let _ = mark_commit_evaluation_failed(
                     pool,
                     commit.id,
-                    &e.to_string(),
+                    &format!("{e:#}"),
                     attempt,
                     crate::models::retry_policy::RetryFailureClass::Deterministic,
                 )
