@@ -248,6 +248,48 @@ async fn exact_reuse_scan_coverage_counts_reused_head_by_execution_source(pool: 
         after.current_scan_id.is_none(),
         "configuration coverage grants no Current authority"
     );
+
+    // A scoped scan request names carrier B; admission reports B as the
+    // configuration identity and A as the scanned execution source.
+    use crate::queries::cve_scans::{SystemScanAdmission, admit_system_cve_scan};
+    let actor: Uuid = sqlx::query_scalar("INSERT INTO users(username,first_name,last_name,email,user_type) VALUES('reuse-admin','Reuse','Admin','reuse-admin@example.invalid','human') RETURNING id")
+        .fetch_one(&pool).await.unwrap();
+    sqlx::query("INSERT INTO user_role_assignments(user_id,role) VALUES($1,'admin')")
+        .bind(actor)
+        .execute(&pool)
+        .await
+        .unwrap();
+    assert!(
+        matches!(
+            admit_system_cve_scan(&pool, actor, external, Some(origin), false, None, None)
+                .await
+                .unwrap(),
+            SystemScanAdmission::TargetChanged
+        ),
+        "client intent is the selected carrier B, not execution source A"
+    );
+    let identity =
+        match admit_system_cve_scan(&pool, actor, external, Some(binding), false, None, None)
+            .await
+            .unwrap()
+        {
+            SystemScanAdmission::Admitted {
+                target,
+                configuration_derivation_id,
+                ..
+            } => (target.derivation_id, configuration_derivation_id),
+            SystemScanAdmission::Unavailable {
+                derivation_id,
+                configuration_derivation_id,
+                ..
+            } => (derivation_id, configuration_derivation_id),
+            _ => panic!("reused head B must be admissible"),
+        };
+    assert_eq!(
+        identity,
+        (origin, binding),
+        "response derivation_id is source A; configuration_derivation_id is B"
+    );
 }
 
 #[sqlx::test(migrations = "./migrations")]
