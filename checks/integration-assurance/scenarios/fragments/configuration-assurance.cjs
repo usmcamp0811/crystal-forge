@@ -215,9 +215,10 @@ exports.reuseRescan = async ctx => {
     page.waitForResponse(r => new URL(r.url()).pathname === `/api/v1/systems/${receipts["management.referenceId"]}/cve-scan` && r.request().method() === "POST"),
     page.getByRole("button", { name: "Re-scan", exact: true }).click(),
   ]);
-  expect(requested.status()).toBe(202);
+  const body = await requested.text();
+  expect(requested.status(), `reused-head scan admission response: ${body}`).toBe(202);
   expect(new URL(requested.url()).searchParams.get("expected_derivation_id")).toBe(String(binding.id));
-  const result = await requested.json();
+  const result = JSON.parse(body);
   expect(result.configuration_derivation_id).toBe(binding.id);
   expect(result.derivation_id).toBe(binding.reused_from_derivation_id);
   await expect(page.getByRole("status").filter({ hasText: result.scan_id })).not.toHaveCount(0);
