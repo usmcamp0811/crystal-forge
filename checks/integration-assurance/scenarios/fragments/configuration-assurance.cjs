@@ -104,6 +104,14 @@ exports.evidence = async ctx => {
         expect(scanId).toBeTruthy();
         await expect(detail.getByRole("heading", { name: "Runtime observations", exact: true })).toHaveCount(mode === "external" ? 1 : 0);
         if (mode === "external") {
+          // The parent is named by hostname, in the control card and in the
+          // header of the observation that this parent reported.
+          const parentRead = await ctx.context.request.get(ctx.url(`/api/v1/systems/${receipts["delivery.targetId"]}`));
+          expect(parentRead.status()).toBe(200);
+          const parentHostname = (await parentRead.json()).hostname;
+          await expect(detail.getByRole("link", { name: parentHostname, exact: true })).toHaveAttribute("href", new RegExp(`^/systems/${receipts["delivery.targetId"]}(\\?|$)`));
+          await expect(detail.getByText(`Reported by host ${parentHostname} ·`, { exact: false })).toBeVisible();
+          await expect(detail.getByText(`Reported by host ${receipts["delivery.targetId"]}`, { exact: false })).toHaveCount(0);
           await expect(detail.getByText("microvm@external-assurance.service", { exact: true })).toBeVisible();
           await expect(detail.getByText("not comparable", { exact: true })).toBeVisible();
           await expect(detail.getByText("Verified guest state: not available", { exact: true })).toBeVisible();
@@ -194,6 +202,28 @@ exports.evidence = async ctx => {
   await ctx.screenshot("configuration-real-scan-request-receipt");
   ctx.emit("management.visualAuthority", { revision: "18b47eed", components: ["SystemDetail.jsx", "MgmtParts.jsx", "AddSystemModal.jsx", "EditSystemModal.jsx", "FlakeExplorer.jsx"],
     disposition: "candidate captures; independent equivalent-state reference comparison pending" });
+};
+
+// A reused head B requests its own carrier. The server scans execution source
+// A; the browser must accept that response as a match for B.
+exports.reuseRescan = async ctx => {
+  const { page, expect, receipts } = ctx;
+  await login(ctx);
+  const binding = receipts["management.reuseBinding"];
+  await page.goto(ctx.url(`/systems/${receipts["management.referenceId"]}`));
+  const [requested] = await Promise.all([
+    page.waitForResponse(r => new URL(r.url()).pathname === `/api/v1/systems/${receipts["management.referenceId"]}/cve-scan` && r.request().method() === "POST"),
+    page.getByRole("button", { name: "Re-scan", exact: true }).click(),
+  ]);
+  expect(requested.status()).toBe(202);
+  expect(new URL(requested.url()).searchParams.get("expected_derivation_id")).toBe(String(binding.id));
+  const result = await requested.json();
+  expect(result.configuration_derivation_id).toBe(binding.id);
+  expect(result.derivation_id).toBe(binding.reused_from_derivation_id);
+  await expect(page.getByRole("status").filter({ hasText: result.scan_id })).not.toHaveCount(0);
+  await expect(page.getByText("Scan response identity did not match the requested artifact.", { exact: false })).toHaveCount(0);
+  ctx.emit("management.reuseRescan", result.scan_id);
+  await ctx.screenshot("configuration-reused-head-rescan-receipt");
 };
 
 exports.removed = async ctx => {

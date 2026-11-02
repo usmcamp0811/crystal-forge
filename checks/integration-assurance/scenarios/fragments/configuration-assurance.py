@@ -207,6 +207,12 @@ def configuration_assurance():
 
     configuration_exact_artifact_reuse(config, (external_id, reference["id"]), artifact, jobs[0], commit)
 
+    with case("configuration-reused-head-browser-rescan-scans-execution-source"):
+        run_browser(controller, "configuration-reuse-rescan")
+        # The browser request names carrier B; the sealed scan must run on
+        # source A with A's producing job and session.
+        completed_configuration_scan(receipts()["management.reuseRescan"], "manual")
+
     with case("configuration-renamed-head-reports-missing-and-preserves-exact-history"):
         services.succeed("sed -i 's/assuranceOnly = target.extendModules/renamedAssurance = target.extendModules/' "
             "/tmp/delivery-source/flake.nix && git -C /tmp/delivery-source add flake.nix && "

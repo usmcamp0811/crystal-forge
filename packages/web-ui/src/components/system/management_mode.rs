@@ -545,10 +545,15 @@ pub fn EvidenceCves(evidence: ConfigurationAssurance, freshness: EvidenceFreshne
 /// Only use for external systems. Reload invokes a latest-only read owned by the
 /// view; retain the previous observation on error. Runner paths are not guest
 /// closures and cannot establish a match with the scanned configuration.
+///
+/// `parent_label` is a display name for the reporting parent. The caller MUST
+/// pass it only for the parent that `observation.parent_host_id` identifies.
+/// When it is absent, the header shows the parent UUID.
 #[component]
 pub fn RuntimeCard(
     observation: Option<GuestObservationRow>,
     freshness: EvidenceFreshness,
+    #[props(default)] parent_label: Option<String>,
     #[props(default)] loading: bool,
     #[props(default)] error: Option<String>,
     #[props(default)] on_reload: Option<EventHandler<()>>,
@@ -577,7 +582,7 @@ pub fn RuntimeCard(
             }
         }
         if let Some(report) = observation {
-            div { class: "mg-obs-head", "Reported by host {report.parent_host_id} · {report.observed_at.to_rfc3339()}" }
+            div { class: "mg-obs-head", "Reported by host {parent_label.clone().unwrap_or_else(|| report.parent_host_id.to_string())} · {report.observed_at.to_rfc3339()}" }
             p { class: "mg-dim", "{age}" }
             dl { class: "kv-grid",
                 dt { "Guest name" } dd { "{report.guest_identity}" }

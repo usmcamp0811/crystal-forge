@@ -131,6 +131,9 @@ in harness.mkScenario {
     configuration-evidence = pkgs.writeText "configuration-evidence.cjs" ''
       exports.run = require("${./fragments/configuration-assurance.cjs}").evidence;
     '';
+    configuration-reuse-rescan = pkgs.writeText "configuration-reuse-rescan.cjs" ''
+      exports.run = require("${./fragments/configuration-assurance.cjs}").reuseRescan;
+    '';
     configuration-removed = pkgs.writeText "configuration-removed.cjs" ''
       exports.run = require("${./fragments/configuration-assurance.cjs}").removed;
     '';

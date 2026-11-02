@@ -507,9 +507,27 @@ fn EvidenceIdentities(evidence: ConfigurationAssurance) -> Element {
     } }
 }
 
+/// Returns the parent host's hostname for display.
+///
+/// The value is `None` while loading, when no parent is associated, or when
+/// the viewer cannot read the parent registration. Callers then show the
+/// parent UUID. The read reveals no data beyond what the parent's own detail
+/// endpoint already authorizes.
+fn use_parent_hostname(parent: Option<Uuid>) -> Option<String> {
+    let resource = use_resource(use_reactive!(|parent| async move {
+        let id = parent?;
+        client::fetch_system(&id)
+            .await
+            .ok()
+            .map(|system| system.hostname)
+    }));
+    resource.read().clone().flatten()
+}
+
 #[component]
 fn ControlCard(system: SystemDetail, evidence: ConfigurationAssurance) -> Element {
     let external = system.management_mode == ManagementMode::External;
+    let parent_hostname = use_parent_hostname(system.parent_host_id);
     rsx! { section { class: "card sd-card",
         div { class: "sd-card-head", h2 { if external { "Deployment control" } else { "Purpose" } } MgmtChip { mode: system.management_mode } }
         p { class: "mg-copy", if external { "Deployed by its own administrators or parent host. Crystal Forge does not deploy, roll back or restart this system." } else { "A configuration tracked for security assurance. It is not a running machine. Closure evidence does not establish that a generated ISO or VM image was scanned." } }
@@ -518,7 +536,7 @@ fn ControlCard(system: SystemDetail, evidence: ConfigurationAssurance) -> Elemen
             dt { "Configuration" } dd { "nixosConfigurations.{evidence.configuration_name}" }
             dt { "Branch" } dd { {evidence.branch.as_deref().unwrap_or("Unassigned")} }
             dt { "Environment" } dd { {system.environment.as_deref().unwrap_or("Unassigned")} }
-            if let Some(id) = system.parent_host_id { dt { "Parent host" } dd { Link { to: Route::SystemDetailView { id: id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() }, "{id}" } } }
+            if let Some(id) = system.parent_host_id { dt { "Parent host" } dd { Link { to: Route::SystemDetailView { id: id.to_string(), tab: String::new(), poam: String::new(), config_mode: String::new(), revision: String::new(), generation: String::new(), deploy_generation: String::new(), cve_target: String::new(), cve_mode: String::new() }, {parent_hostname.clone().unwrap_or_else(|| id.to_string())} } } }
             if let Some(path) = evidence.selected_artifact.as_ref().and_then(|a| a.output_path.as_ref()) { dt { "Built output" } dd { "{path}" } }
         }
     } }
@@ -529,6 +547,7 @@ fn StoredRuntime(system_id: Uuid, parent_host_id: Option<Uuid>) -> Element {
     let mut observation = use_signal(|| None::<GuestObservationRow>);
     let mut error = use_signal(|| None::<String>);
     let mut reload = use_signal(|| 0_u64);
+    let parent_label = use_parent_hostname(parent_host_id);
     let result = use_resource(move || {
         let _ = reload();
         async move { client::fetch_latest_guest_observation(&system_id).await }
@@ -553,7 +572,10 @@ fn StoredRuntime(system_id: Uuid, parent_host_id: Option<Uuid>) -> Element {
     });
     rsx! {
         div {
+            // The observation is shown only when its parent equals
+            // `parent_host_id`, so this label names the reporting parent.
             RuntimeCard { observation: observation(), freshness: EvidenceFreshness::Unknown,
+                parent_label,
                 loading: result.state() == UseResourceState::Pending, error: error(),
                 on_reload: move |_| reload.set(reload().wrapping_add(1)),
             }
