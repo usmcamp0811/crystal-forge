@@ -34,6 +34,18 @@ exports.register = async ctx => {
     await expect(form.getByLabel("Branch", { exact: true })).toHaveValue(facts.flake.branch);
     await expect(form.getByLabel("NixOS configuration *", { exact: true })).toHaveValue("assuranceOnly");
     await expect(form.getByText(/Declared output: nixosConfigurations.assuranceOnly/)).toBeVisible();
+    // Chromium sends a keydown without `key` when a datalist suggestion is
+    // picked. Before the fix it panicked the WASM app and froze this dialog.
+    const pageErrors = [];
+    const onPageError = error => pageErrors.push(String(error));
+    page.on("pageerror", onPageError);
+    await form.getByLabel("NixOS configuration *", { exact: true })
+      .evaluate(el => el.dispatchEvent(new Event("keydown", { bubbles: true })));
+    await form.getByRole("button", { name: "Management", exact: true }).click();
+    await expect(form.getByRole("heading", { name: "Management mode", exact: true })).toBeVisible();
+    await form.getByRole("button", { name: "Configuration", exact: true }).click();
+    page.off("pageerror", onPageError);
+    expect(pageErrors).toEqual([]);
     if (mode !== "External") {
       await form.getByRole("button", { name: "Cancel", exact: true }).click();
       continue;

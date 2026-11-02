@@ -283,6 +283,20 @@ pub fn ManagementModePicker(
     }
 }
 
+/// Returns the DOM `key` of a keyboard event, or `None` when the browser omits it.
+///
+/// COMPATIBILITY: Chromium dispatches a `keydown` event without `key` when the
+/// user picks an autofill or `<datalist>` suggestion. Dioxus 0.7
+/// [`KeyboardData::key`] reads `key` through a non-catching web-sys getter, so
+/// that event panics and stops the whole Dioxus runtime. Handlers that can
+/// receive such an event read the key through this function instead.
+fn dom_key(event: &KeyboardData) -> Option<String> {
+    let raw = event.downcast::<web_sys::KeyboardEvent>()?;
+    js_sys::Reflect::get(raw.as_ref(), &"key".into())
+        .ok()?
+        .as_string()
+}
+
 /// Reads every declared output from one immutable registry-head snapshot.
 /// Continuation tokens prevent mixed revisions; unavailable discovery is an error.
 async fn declared_configurations(
@@ -410,6 +424,10 @@ pub fn EnrollmentConfigurationFields(
         label { class: "field", "NixOS configuration *",
             input { class: "input focus-ring mono", aria_label: "NixOS configuration *", list: "enrollment-configurations", value: "{configuration}",
                 oninput: move |e| { on_valid.call(false); on_change.call((flake_for_config.clone(), branch_for_config.clone(), e.value())); },
+                // A datalist pick sends a key-less keydown. Keep it away from
+                // ancestor handlers (Add/Edit dialogs, tab lists) that call
+                // `KeyboardData::key`; see `dom_key`.
+                onkeydown: move |e| { if dom_key(&e).is_none() { e.stop_propagation(); } },
                 placeholder: "Exact nixosConfigurations output name",
                 aria_invalid: !configuration.is_empty() && !valid,
             }
@@ -535,7 +553,7 @@ pub fn AddSystemForm(
         div { class: "modal-backdrop", onclick: move |_| { if !submitting { on_cancel.call(()); } },
             div { class: "pe-shell management-form-shell", role: "dialog", aria_modal: "true", aria_label: "Register system",
                 onclick: |e| e.stop_propagation(),
-                onkeydown: move |e| { if e.key() == Key::Escape && !submitting { on_cancel.call(()); } },
+                onkeydown: move |e| { if dom_key(&e).as_deref() == Some("Escape") && !submitting { on_cancel.call(()); } },
                 header { class: "pe-head",
                     div { style: "min-width:0;",
                         span { class: "pe-head-title",
