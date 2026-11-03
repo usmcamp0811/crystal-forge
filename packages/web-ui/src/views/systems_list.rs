@@ -1789,6 +1789,20 @@ fn ConfigurationPreviewPanel(
                     div { style: "display:flex;gap:8px;flex-wrap:wrap;",
                         if let Some(env) = &detail.environment { span { class: "chip chip-info", "{env}" } }
                         MgmtChip { mode }
+                        // The same assurance status the card and table show, from the
+                        // same schedule-aware freshness. Absent until evidence loads.
+                        if let Some(Ok(value)) = evidence.read().as_ref() {
+                            crate::components::system::ScanEvidenceChip {
+                                status: crate::components::system::management_mode::evidence_status(
+                                    value,
+                                    selected_head_scan_freshness(
+                                        value,
+                                        schedule.read().as_ref().and_then(|r| r.as_ref().ok()),
+                                        chrono::Utc::now(),
+                                    ),
+                                ),
+                            }
+                        }
                         DeploymentCell { mode, status: detail.deployment_status }
                         for tag in &detail.tags { span { class: "chip chip-unknown", "#{tag}" } }
                     }
