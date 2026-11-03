@@ -201,14 +201,33 @@ configuration (`derivations_share_evidence_scope`). Physical equality never
 grants another scope's evidence or cache credentials.
 
 A successful origin job is adopted, and a reused head is admitted for scanning,
-only when `derivation_publication_eligible` finds a completed publication to an
-enabled destination that the carrier's environment may use. Only `database`
-publications and unambiguous `legacy` publications qualify. A `static`
-publication never qualifies, because the SQL predicate cannot verify the
-server's current static configuration. In a static-only deployment, a carrier
-therefore does not adopt a successful origin job and builds again. Queued or
-running origin work is still adopted. This fails closed;
-TASK-514 tracks a static provenance decision.
+only when `derivation_publication_eligible` finds a completed publication of the
+exact output. Three publication provenances can qualify:
+
+- `database`: to an enabled destination that the carrier's environment may use.
+- `legacy`: only while exactly one destination answers to the recorded name or
+  URL. A second matching destination, enabled or not, makes it ambiguous.
+- `static` (migration `0328`): only when the recorded destination equals the
+  destination of the **currently effective static cache configuration**. That is
+  `cache.push_to` while `cache.push_after_build` is true. It is none when
+  publication is disabled, when `push_to` is missing or blank, when the
+  destination was changed after the publication, or when the configuration
+  cannot be loaded. The database cannot read the configuration, so the server
+  passes the destination in (`cache_push::effective_static_destination`). It
+  applies the same rule as the static job resolver and the scanner's
+  materialization check; a test asserts the two never disagree.
+
+Admission is a yes/no decision and grants nothing. A scan claim carries no cache
+source or credential. The server-local scanner re-resolves a static source
+against the configuration in force when it runs and refuses a record whose
+destination no longer matches. Delivery to an agent resolves read sources from
+database destinations only, so a static publication yields no read source, even
+when a database destination has the same URL. A failed, pending or in-progress
+publication, a publication of another output, and a publication of another
+derivation never qualify. Queued or running origin work is adopted regardless of
+publication. Anything that does not qualify fails closed: the carrier builds
+under its own policy and a scan of a reused head is refused with
+`scan_ineligible`.
 
 Current exact-CVE authority counts enforced aliases as one physical artifact,
 so a reused head does not become ambiguous. Two different `.drv`s with the same
@@ -383,6 +402,7 @@ Apply normal migrations in order; do not edit applied migrations:
 | `0325_current_authority_scan_lookup.sql` | Restores the indexed newest-scan lookup in `view_current_cve_authority` (0322 made it a scan of every completed scan per managed system) without changing its result |
 | `0326_evidence_peer_lookup.sql` | `derivation_evidence_peers(T)` replaces `x = T OR derivations_share_evidence_scope(T, x)` in hot paths; evidence view calls the execution-source function only for adopted jobs; restores the `derivation_path` index and indexes `reused_build_job_id` |
 | `0327_enrollment_epoch_on_registration_and_rename.sql` | A managed registration or rename that claims a hostname with earlier reports starts a new observation boundary, so those reports are history |
+| `0328_static_publication_reuse.sql` | `derivation_publication_eligible` gains a 4-argument overload that also accepts a completed static publication of the exact output whose destination equals the currently effective static cache destination; the 3-argument rule is unchanged |
 
 Existing enrolled rows remain managed; migration does not infer external or
 reference resources. Constraint failures on legacy blank enrollment keys require
@@ -433,8 +453,8 @@ for commands and scope):
 - The isolated state-machine workflow passed at `bcb3b79e`.
 - Disposable SQLx tests for derivation reuse, build admission, CVE scans, scan
   leases, hardening, configuration assurance and POA&M conversion pass on a
-  database migrated through `0326`. Composite-policy integration tests pass
-  (38 of 38). `cargo sqlx prepare --check` passes against `0326`.
+  database migrated through `0328`. Composite-policy integration tests pass
+  (38 of 38). `cargo sqlx prepare --check` passes against `0328`.
 - The Web UI native tests pass (838 passed, one ignored) and the WASM build
   compiles.
 
@@ -443,9 +463,13 @@ Known limits that remain documented decisions, not hidden defects:
 - Remote-only CVE rescans of an artifact built in an earlier builder session fail
   with `scan_executor_unavailable` after a builder restart (TASK-513). The user
   accepted this limit for TASK-508.
-- Exact reuse does not adopt a successful job whose publication used a
-  `static` cache destination, so a static-only deployment builds the carrier
-  again (TASK-514). This is not yet decided.
+- Static publication reuse (TASK-514) is implemented and decided: see
+  [Exact derivation reuse](#exact-derivation-reuse). It is verified by six
+  PostgreSQL tests and two unit tests, and by an Assurance case that re-records
+  the real publication as static (an injected prerequisite, named in the case)
+  and then exercises the real evaluator, scanner and rescan. No real static
+  publication exists in that topology, which publishes through a database
+  destination.
 
 Not verified: complete exact-source integration results at the final commit,
 independent design reference/actual/difference images, and old-agent integration
