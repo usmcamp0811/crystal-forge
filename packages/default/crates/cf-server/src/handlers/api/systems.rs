@@ -5964,6 +5964,265 @@ mod tests {
         );
     }
 
+    /// Drives every management-mode transition through the update handler, with its
+    /// guards: a parent only on an external system, a host with guests cannot change
+    /// mode, conversion into managed needs a key, leaving managed revokes it, and
+    /// each change is audited without queueing a deployment.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB; never use the preview database"]
+    async fn management_mode_transitions_cover_every_pair_with_guards_and_audit(pool: PgPool) {
+        use crate::models::systems::ManagementMode::{self, External, Managed, Reference};
+        let state = CFState::new(
+            pool.clone(),
+            crate::config::ServerConfig::default(),
+            std::sync::Arc::new(crate::queue::QueueNotifier::new()),
+            crate::server::jobs::BackgroundJobRegistry::new(),
+        );
+        let admin = mutation_headers(&pool, AuthRole::Admin, "transition-admin").await;
+        sqlx::query("INSERT INTO environments(name) VALUES('transition-env')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO flakes(name,repo_url) VALUES('transition-flake','https://example.test/transition')")
+            .execute(&pool)
+            .await
+            .unwrap();
+        let create = |name: &str, mode: ManagementMode, seed: u8| {
+            let mut request = serde_json::from_value::<CreateSystemRequest>(serde_json::json!({
+                "hostname": name, "management_mode": mode, "environment": "transition-env",
+                "flake_name": "transition-flake", "system_configuration_name": "cfg",
+                "deployment_policy": "manual",
+            }))
+            .unwrap();
+            if mode == Managed {
+                request.public_key = Some(rotation_key_material(seed).1);
+            }
+            request
+        };
+        let mut ids = std::collections::HashMap::new();
+        for (name, mode, seed) in [
+            ("parent-host", Managed, 41),
+            ("guest", External, 0),
+            ("config", Reference, 0),
+        ] {
+            let response = create_system(
+                State(state.clone()),
+                State(pool.clone()),
+                admin.clone(),
+                Json(create(name, mode, seed)),
+            )
+            .await
+            .into_response();
+            assert_eq!(response.status(), StatusCode::CREATED);
+            let detail: SystemDetail = response_json(response).await;
+            ids.insert(name, detail.id);
+        }
+        let update = |name: &str,
+                      mode: Option<ManagementMode>,
+                      key: Option<String>,
+                      parent: FieldUpdate<Uuid>| UpdateSystemRequest {
+            tags: FieldUpdate::Unset,
+            description: FieldUpdate::Unset,
+            reachability: FieldUpdate::Unset,
+            hostname: name.into(),
+            management_mode: mode,
+            public_key: key,
+            parent_host_id: parent,
+            fqdn: FieldUpdate::Unset,
+            system_configuration_name: Some("cfg".into()),
+            environment: Some("transition-env".into()),
+            flake_name: Some("transition-flake".into()),
+            deployment_policy: "manual".into(),
+            pinned_commit: FieldUpdate::Unset,
+            heartbeat_interval_secs: FieldUpdate::Unset,
+        };
+        let send = |name: &'static str, request: UpdateSystemRequest| {
+            let (state, pool, admin) = (state.clone(), pool.clone(), admin.clone());
+            let id = ids[name];
+            async move {
+                update_system_handler(State(state), State(pool), admin, Path(id), Json(request))
+                    .await
+                    .into_response()
+            }
+        };
+        let stored_key_is_null = |name: &'static str| {
+            let (pool, id) = (pool.clone(), ids[name]);
+            async move {
+                sqlx::query_scalar::<_, bool>("SELECT public_key IS NULL FROM systems WHERE id=$1")
+                    .bind(id)
+                    .fetch_one(&pool)
+                    .await
+                    .unwrap()
+            }
+        };
+
+        // reference -> external: allowed, and a parent may be attached.
+        let response = send(
+            "config",
+            update(
+                "config",
+                Some(External),
+                None,
+                FieldUpdate::Set(ids["parent-host"]),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let detail: SystemDetail = response_json(response).await;
+        assert_eq!(detail.management_mode, External);
+        assert_eq!(detail.parent_host_id, Some(ids["parent-host"]));
+        assert!(
+            stored_key_is_null("config").await,
+            "an external system holds no key"
+        );
+
+        // A host with guests cannot change mode while it has children.
+        for target in [External, Reference] {
+            let response = send(
+                "parent-host",
+                update("parent-host", Some(target), None, FieldUpdate::Unset),
+            )
+            .await;
+            assert_eq!(
+                response.status(),
+                StatusCode::BAD_REQUEST,
+                "guests block {target:?}"
+            );
+        }
+        assert!(
+            !stored_key_is_null("parent-host").await,
+            "a rejected change revokes nothing"
+        );
+
+        // A parent applies only to an external system: external -> reference with a
+        // parent is rejected, and the registration is unchanged.
+        let response = send(
+            "config",
+            update(
+                "config",
+                Some(Reference),
+                None,
+                FieldUpdate::Set(ids["parent-host"]),
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let unchanged = get_system_detail_by_id(&pool, ids["config"])
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(unchanged.management_mode, External);
+
+        // external -> reference clears the parent.
+        let response = send(
+            "config",
+            update("config", Some(Reference), None, FieldUpdate::Unset),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let detail: SystemDetail = response_json(response).await;
+        assert_eq!(
+            (detail.management_mode, detail.parent_host_id),
+            (Reference, None)
+        );
+
+        // external -> managed: needs a real key; the first answer without one fails.
+        let response = send(
+            "guest",
+            update("guest", Some(Managed), None, FieldUpdate::Unset),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(stored_key_is_null("guest").await);
+        let response = send(
+            "guest",
+            update(
+                "guest",
+                Some(Managed),
+                Some(rotation_key_material(42).1),
+                FieldUpdate::Unset,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let detail: SystemDetail = response_json(response).await;
+        assert_eq!(detail.management_mode, Managed);
+        assert_eq!(
+            detail.deployment_policy, "manual",
+            "conversion never enables automatic deployment"
+        );
+        let transition = detail.management_transition.unwrap();
+        assert_eq!(
+            (
+                transition.previous_mode,
+                transition.deployment_policy.as_str()
+            ),
+            (External, "manual")
+        );
+        assert!(!stored_key_is_null("guest").await);
+
+        // managed -> external revokes the key; managed -> reference does too.
+        let response = send(
+            "guest",
+            update("guest", Some(External), None, FieldUpdate::Unset),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            stored_key_is_null("guest").await,
+            "leaving managed revokes the agent key"
+        );
+        let response = send(
+            "guest",
+            update(
+                "guest",
+                Some(Managed),
+                Some(rotation_key_material(43).1),
+                FieldUpdate::Unset,
+            ),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = send(
+            "guest",
+            update("guest", Some(Reference), None, FieldUpdate::Unset),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(stored_key_is_null("guest").await);
+
+        // Nothing above queued a deployment, and every change is audited.
+        let pending: i64 = sqlx::query_scalar("SELECT count(*) FROM pending_system_deployments")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(pending, 0);
+        let guest_id = ids["guest"].to_string();
+        let audited: Vec<(String, String, bool)> = sqlx::query_as(
+            "SELECT metadata->>'old_management_mode', metadata->>'management_mode',
+                    (metadata->>'deployment_queued')::boolean
+             FROM admin_audit_events
+             WHERE action='system_updated' AND target LIKE '%' || $1 || '%'
+               AND metadata->>'old_management_mode' <> metadata->>'management_mode'
+             ORDER BY created_at, id",
+        )
+        .bind(&guest_id)
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        let pair = |a: &str, b: &str| (a.to_string(), b.to_string(), false);
+        assert_eq!(
+            audited,
+            vec![
+                pair("external", "managed"),
+                pair("managed", "external"),
+                pair("external", "managed"),
+                pair("managed", "reference"),
+            ],
+            "each mode change is audited with the previous and new mode and no queued deployment"
+        );
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB; never use the preview database"]
     async fn management_mode_environment_default_copy_and_pin_never_deploy(pool: PgPool) {
