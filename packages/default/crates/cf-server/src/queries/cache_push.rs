@@ -131,6 +131,34 @@ pub async fn eligible_cache_destinations_for_derivation(
     eligible_cache_destinations_for_environment(pool, environment).await
 }
 
+/// Returns the destination of the currently effective static cache publication.
+///
+/// This is `cache.push_to` when `cache.push_after_build` is true and the value is
+/// not blank. It returns `None` when static publication is disabled or has no
+/// destination. The rule is the one that [`select_job_destination`] and
+/// `materialization_source_for_reference` apply to a recorded `static` job, so
+/// admission of a reused artifact cannot accept a publication that execution
+/// would refuse.
+pub fn effective_static_destination(config: &CacheConfig) -> Option<String> {
+    config
+        .push_after_build
+        .then(|| config.push_to.as_deref())
+        .flatten()
+        .filter(|destination| !destination.trim().is_empty())
+        .map(str::to_owned)
+}
+
+/// Loads the static destination in force now, for admission of a reused artifact.
+///
+/// SECURITY: A configuration that cannot be loaded yields `None`, so admission
+/// accepts no static publication. A load failure can therefore only cause a
+/// rebuild; it can never adopt work.
+pub fn current_static_destination() -> Option<String> {
+    crate::config::CrystalForgeConfig::load()
+        .ok()
+        .and_then(|config| effective_static_destination(config.get_cache_config()))
+}
+
 fn select_job_destination<'a>(
     source: &str,
     id: Option<i32>,
@@ -1740,5 +1768,61 @@ mod niks3_tests {
                 .await
                 .is_err()
         );
+    }
+}
+
+#[cfg(test)]
+mod effective_static_destination_tests {
+    use super::*;
+
+    fn config(push_to: Option<&str>, push_after_build: bool) -> CacheConfig {
+        CacheConfig {
+            push_to: push_to.map(str::to_owned),
+            push_after_build,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn effective_destination_requires_publication_enabled_and_a_destination() {
+        assert_eq!(
+            effective_static_destination(&config(Some("ssh-ng://cache@host"), true)),
+            Some("ssh-ng://cache@host".to_string())
+        );
+        // Publication disabled: no static publication is effective.
+        assert_eq!(
+            effective_static_destination(&config(Some("ssh-ng://cache@host"), false)),
+            None
+        );
+        // No destination, or a blank one.
+        assert_eq!(effective_static_destination(&config(None, true)), None);
+        assert_eq!(effective_static_destination(&config(Some(""), true)), None);
+        assert_eq!(
+            effective_static_destination(&config(Some("  "), true)),
+            None
+        );
+    }
+
+    /// Admission must accept exactly what execution accepts: a recorded static job
+    /// is usable by `select_job_destination` only for the effective destination.
+    #[test]
+    fn effective_destination_matches_the_static_job_resolver() {
+        let record = "ssh-ng://cache@host";
+        for (push_to, enabled) in [
+            (Some(record), true),
+            (Some(record), false),
+            (Some("ssh-ng://cache@other"), true),
+            (None, true),
+            (Some(""), true),
+        ] {
+            let cfg = config(push_to, enabled);
+            let resolver_accepts =
+                select_job_destination("static", None, Some(record), &[], &cfg).is_ok();
+            let admission_accepts = effective_static_destination(&cfg).as_deref() == Some(record);
+            assert_eq!(
+                resolver_accepts, admission_accepts,
+                "push_to={push_to:?} push_after_build={enabled}"
+            );
+        }
     }
 }

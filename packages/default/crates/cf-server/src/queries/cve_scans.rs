@@ -2586,6 +2586,39 @@ pub(crate) async fn admit_system_cve_scan(
     scanner_version: Option<String>,
     request_origin: Option<String>,
 ) -> Result<SystemScanAdmission> {
+    let static_destination = crate::queries::cache_push::current_static_destination();
+    admit_system_cve_scan_with_static(
+        pool,
+        actor,
+        system_id,
+        expected,
+        local_available,
+        scanner_version,
+        request_origin,
+        static_destination.as_deref(),
+    )
+    .await
+}
+
+/// Like [`admit_system_cve_scan`], with the currently effective static cache
+/// destination supplied by the caller. See
+/// `cache_push::effective_static_destination` for its meaning. The reused-head
+/// publication check accepts a completed static publication to exactly that
+/// destination and nothing else; `None` accepts none.
+///
+/// # Errors
+/// Same as [`admit_system_cve_scan`].
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn admit_system_cve_scan_with_static(
+    pool: &PgPool,
+    actor: Uuid,
+    system_id: Uuid,
+    expected: Option<i32>,
+    local_available: bool,
+    scanner_version: Option<String>,
+    request_origin: Option<String>,
+    static_destination: Option<&str>,
+) -> Result<SystemScanAdmission> {
     use crate::services::composite_enforcement::{
         lock_poam_derivations_for_store_path_tx, lock_poam_findings_for_derivation_tx,
         lock_poam_system_key_tx,
@@ -2690,12 +2723,13 @@ pub(crate) async fn admit_system_cve_scan(
         .await?;
     if target.derivation_id != configuration_derivation_id {
         let eligible: bool = sqlx::query_scalar(
-            "SELECT derivation_publication_eligible($1,store_path,$3)
+            "SELECT derivation_publication_eligible($1,store_path,$3,$4)
              FROM derivations WHERE id=$1 AND derivations_share_evidence_scope($2,id)",
         )
         .bind(target.derivation_id)
         .bind(configuration_derivation_id)
         .bind(environment)
+        .bind(static_destination)
         .fetch_optional(&mut *tx)
         .await?
         .unwrap_or(false);

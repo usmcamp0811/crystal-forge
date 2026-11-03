@@ -1830,6 +1830,13 @@ mod tests {
             assert_eq!(claim.lease.scan_id, admission.scan_id);
             assert_eq!(claim.lease.builder_session_id, session);
             assert_eq!(claim.derivation.derivation_id, d.id);
+            // SECURITY: A publication record, of any provenance, grants a remote
+            // scanner nothing. It scans from its own store, and the lease carries
+            // no cache source, URL or credential.
+            assert!(
+                claim.cache_source.is_none(),
+                "a remote claim must not carry a cache source"
+            );
             let result = CveScanResult {
                 schema_version: CveScanSchemaVersion::V1,
                 scanner: claim.scanner.clone(),

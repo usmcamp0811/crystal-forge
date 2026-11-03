@@ -11,9 +11,9 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 const DRV: &str = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-reuse.drv";
-const OUT: &str = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-reuse";
+pub(super) const OUT: &str = "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-reuse";
 
-async fn registration(pool: &PgPool) -> (i32, Uuid) {
+pub(super) async fn registration(pool: &PgPool) -> (i32, Uuid) {
     let flake=sqlx::query_scalar("INSERT INTO flakes(name,repo_url,branch,snapshot_ready_at) VALUES('reuse','https://example.invalid/reuse','main',now()) RETURNING id")
         .fetch_one(pool).await.unwrap();
     let system=sqlx::query_scalar("INSERT INTO systems(hostname,system_configuration_name,flake_id,management_mode,public_key,derivation,deployment_policy) VALUES('reuse-host','host',$1,'managed','fixture-key','','manual') RETURNING id")
@@ -21,7 +21,7 @@ async fn registration(pool: &PgPool) -> (i32, Uuid) {
     (flake, system)
 }
 
-async fn evaluate(
+pub(super) async fn evaluate(
     pool: &PgPool,
     flake: i32,
     sha: char,
@@ -91,7 +91,7 @@ async fn evaluate(
     (commit, attempt, result, check, outcome)
 }
 
-async fn finish_evaluation(pool: &PgPool, commit: i32) {
+pub(super) async fn finish_evaluation(pool: &PgPool, commit: i32) {
     sqlx::query("UPDATE evaluation_attempts SET status='complete',completed_at=now() WHERE commit_id=$1 AND status='in_progress'")
         .bind(commit).execute(pool).await.unwrap();
     sqlx::query("UPDATE commits SET evaluation_status='complete' WHERE id=$1")
@@ -101,7 +101,7 @@ async fn finish_evaluation(pool: &PgPool, commit: i32) {
         .unwrap();
 }
 
-async fn carrier(pool: &PgPool, commit: i32) -> i32 {
+pub(super) async fn carrier(pool: &PgPool, commit: i32) -> i32 {
     sqlx::query_scalar("SELECT id FROM derivations WHERE commit_id=$1 AND derivation_type='nixos'")
         .bind(commit)
         .fetch_one(pool)

@@ -1488,6 +1488,9 @@ async fn completion_committed_tx(
 #[cfg(test)]
 #[path = "commits/derivation_reuse_tests.rs"]
 mod derivation_reuse_tests;
+#[cfg(test)]
+#[path = "commits/static_publication_reuse_tests.rs"]
+mod static_publication_reuse_tests;
 
 /// Resolves lost COMMIT acknowledgement against the exact active attempt.
 ///

@@ -87,6 +87,26 @@ pub(crate) async fn reusable_physical_build_tx(
     tx: &mut Transaction<'_, Postgres>,
     derivation_id: i32,
 ) -> Result<Option<(Uuid, String)>> {
+    let static_destination = crate::queries::cache_push::current_static_destination();
+    reusable_physical_build_with_static_tx(tx, derivation_id, static_destination.as_deref()).await
+}
+
+/// Like [`reusable_physical_build_tx`], with the currently effective static cache
+/// destination supplied by the caller.
+///
+/// `static_destination` is `cache.push_to` while `cache.push_after_build` is true
+/// and `None` otherwise (see `cache_push::effective_static_destination`). A
+/// completed static publication to that exact destination qualifies a successful
+/// job for adoption; with `None` no static publication does. The seam exists so
+/// every configuration state is testable without reading a configuration file.
+///
+/// # Errors
+/// Returns database errors. This read creates no execution or scan intent.
+pub(crate) async fn reusable_physical_build_with_static_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    derivation_id: i32,
+    static_destination: Option<&str>,
+) -> Result<Option<(Uuid, String)>> {
     sqlx::query_as(
         r#"SELECT job.id,job.status FROM derivations target
         JOIN commits target_commit ON target_commit.id=target.commit_id
@@ -105,10 +125,10 @@ pub(crate) async fn reusable_physical_build_tx(
         WHERE target.id=$1 AND source.id<>target.id
           AND (job.status IN ('queued','building','cancelling') OR
             (job.status='success' AND source.store_path=target.expected_store_path
-             AND derivation_publication_eligible(source.id,source.store_path,registration.environment_id)))
+             AND derivation_publication_eligible(source.id,source.store_path,registration.environment_id,$2)))
         ORDER BY (job.status IN ('queued','building','cancelling')) DESC,
                  job.completed_at DESC NULLS LAST,job.created_at DESC,job.id DESC LIMIT 1"#,
-    ).bind(derivation_id).fetch_optional(&mut **tx).await.map_err(Into::into)
+    ).bind(derivation_id).bind(static_destination).fetch_optional(&mut **tx).await.map_err(Into::into)
 }
 
 /// Releases only queued work rejected by its own current source admission gate.

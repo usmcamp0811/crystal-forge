@@ -8847,14 +8847,63 @@ mod tests {
         .await
         .expect("create_user_session should succeed");
 
+        // Key rotation requires CSRF credentials like every other mutating system
+        // endpoint, so the session carries the matching cookie and header.
+        let csrf = format!("csrf-{suffix}");
         let mut headers = HeaderMap::new();
         headers.insert(
             header::COOKIE,
-            format!("{}={}", SESSION_COOKIE_NAME, session_token)
-                .parse()
-                .expect("cookie header should parse"),
+            format!(
+                "{}={}; {}={}",
+                SESSION_COOKIE_NAME, session_token, CSRF_COOKIE_NAME, csrf
+            )
+            .parse()
+            .expect("cookie header should parse"),
+        );
+        headers.insert(
+            CSRF_HEADER_NAME.clone(),
+            csrf.parse().expect("CSRF header should parse"),
         );
         headers
+    }
+
+    /// Key rotation was the one mutating system endpoint without a CSRF check. A
+    /// session without the matching CSRF credentials must be refused before any
+    /// authorization or write, and the stored key must not change.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn system_key_rotation_requires_csrf_credentials() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (_old, old_public_key) = rotation_key_material(61);
+        let (_new, new_public_key) = rotation_key_material(62);
+        let system = rotation_insert_system(
+            &pool,
+            &format!("csrf-rotation-{suffix}"),
+            &old_public_key,
+            None,
+        )
+        .await;
+        let mut headers = rotation_session_headers(&pool, &suffix, AuthRole::Admin).await;
+        headers.remove(CSRF_HEADER_NAME.clone());
+        let response = update_system_public_key(
+            State(pool.clone()),
+            headers,
+            Path(system.id),
+            Json(UpdateSystemPublicKeyRequest {
+                public_key: new_public_key,
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let stored =
+            sqlx::query_scalar::<_, String>("SELECT public_key FROM systems WHERE id = $1")
+                .bind(system.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(stored, old_public_key, "a refused rotation changes nothing");
     }
 
     /// Insert a system carrying `public_key_base64`, optionally scoped to an environment.

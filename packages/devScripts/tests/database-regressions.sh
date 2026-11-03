@@ -489,6 +489,10 @@ SQL
       registration_and_rename_start_a_new_observation_boundary \
       key_rotation_applies_only_to_an_active_managed_registration \
       cascade_delete_removes_guest_observations_and_detaches_foreign_guests \
+      static_publication_ \
+      database_and_legacy_publication_rules_are_unchanged \
+      legacy_publication_identity_must_stay_unambiguous \
+      scan_of_a_reused_head_fails_closed_without_a_matching_static_publication \
       reenrollment_current_config_reads_and_repairs_preserve_history
     echo "=== Selected POA&M authorization, setup, notification, and overdue regressions ==="
     # Current counts and optional assignments have distinct database contracts.
