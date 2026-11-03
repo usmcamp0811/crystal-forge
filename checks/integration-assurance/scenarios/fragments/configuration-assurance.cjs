@@ -146,8 +146,17 @@ exports.evidence = async ctx => {
           await ctx.screenshot(`configuration-${mode}-${tab.toLowerCase()}-${theme}`);
         }
         for (const tab of ["Evidence history", "Config", "CVEs", "Hardening", "Compliance"]) {
-          await detail.getByRole("tab", { name: tab, exact: true }).click();
-          await expect(detail.getByRole("tab", { name: tab, exact: true })).toHaveAttribute("aria-selected", "true");
+          // The CVEs tab carries the critical count of the last good scan as part
+          // of its accessible name ("CVEs 2"), so match the name with an optional count.
+          const tabName = new RegExp(`^${tab}( \\d+)?$`);
+          await detail.getByRole("tab", { name: tabName }).click();
+          await expect(detail.getByRole("tab", { name: tabName })).toHaveAttribute("aria-selected", "true");
+          if (tab === "CVEs") {
+            // The expected count comes from the API read above, not from the page.
+            const badge = detail.getByRole("tab", { name: tabName }).locator(".sd-tab-badge");
+            if (selected.cves.critical > 0) await expect(badge).toHaveText(String(selected.cves.critical));
+            else await expect(badge).toHaveCount(0);
+          }
           if (tab === "Evidence history") {
             for (const kind of ["Eval", "Build", "Scan", "All"]) {
               await detail.getByRole("button", { name: kind, exact: true }).click();
