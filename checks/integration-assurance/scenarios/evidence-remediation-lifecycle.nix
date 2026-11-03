@@ -56,6 +56,15 @@ in harness.mkScenario {
         build.remote_execution_strategy = "server_derivation";
         flakes = {flake_polling_interval = "1h"; commit_evaluation_interval = "2s"; build_processing_interval = "2s";};
         vulnix.poll_interval = "2s";
+        # The effective static cache configuration. The scenario registers a
+        # database cache destination for every real publication, so this static
+        # destination publishes nothing here. It is the configuration against
+        # which exact-reuse admission accepts a recorded static publication
+        # (case static-publication-reuses-exact-real-artifact-and-rescans).
+        cache = {
+          push_to = "ssh-ng://cache@services";
+          push_after_build = true;
+        };
       };
       # The packaged server wrapper adds vulnix to PATH. Make only that optional
       # executable unavailable in the server's mount namespace, preserving its

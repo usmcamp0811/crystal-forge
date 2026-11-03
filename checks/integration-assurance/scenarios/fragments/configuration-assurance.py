@@ -207,22 +207,28 @@ def configuration_assurance():
 
     configuration_exact_artifact_reuse(config, (external_id, reference["id"]), artifact, jobs[0], commit)
 
-    with case("configuration-reused-head-browser-rescan-scans-execution-source"):
-        # The periodic case advanced VM clocks, so the server can mark the
-        # producing builder offline until its next heartbeat. Admission then
-        # fails closed with scan_executor_unavailable. This case proves a
-        # same-session rescan, so it waits for the producing session; a rotated
-        # session is the TASK-513 limitation and fails this wait explicitly.
+    # The periodic case advanced VM clocks, so the server can mark the producing
+    # builder offline until its next heartbeat. Admission then fails closed with
+    # scan_executor_unavailable. A same-session rescan therefore waits for the
+    # producing session; a rotated session is the TASK-513 limitation and fails
+    # this wait explicitly.
+    def wait_for_producer_session():
         def producer_live():
             rows = sql_json(controller, "SELECT status, current_session_id::text AS session FROM builders WHERE id="
                 + literal(jobs[0]["builder_id"]) + "::uuid")
             return rows[0] if len(rows) == 1 and rows[0]["status"] == "active" \
                 and rows[0]["session"] == jobs[0]["builder_session_id"] else None
         wait_for(producer_live, "producing builder active in its producing session", timeout=180)
+
+    with case("configuration-reused-head-browser-rescan-scans-execution-source"):
+        wait_for_producer_session()
         run_browser(controller, "configuration-reuse-rescan")
         # The browser request names carrier B; the sealed scan must run on
         # source A with A's producing job and session.
         completed_configuration_scan(receipts()["management.reuseRescan"], "manual")
+
+    configuration_static_publication_reuse(config, reference["id"], artifact, jobs[0],
+        completed_configuration_scan, wait_for_producer_session)
 
     with case("ui-background-work-is-bounded-and-pauses-when-hidden"):
         run_browser(controller, "ui-background-work")
