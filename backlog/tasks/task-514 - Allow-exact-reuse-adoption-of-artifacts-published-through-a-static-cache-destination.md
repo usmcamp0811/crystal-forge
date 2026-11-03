@@ -3,7 +3,7 @@ id: TASK-514
 title: >-
   Allow exact-reuse adoption of artifacts published through a static cache
   destination
-status: Review
+status: In Progress
 assignee: []
 created_date: '2026-11-02T03:35:00Z'
 updated_date: '2026-11-03T13:55:00Z'
