@@ -1612,7 +1612,7 @@ async fn latest_scan_in_tx(
         SELECT id, derivation_id, status, critical_count, high_count, medium_count, low_count,
                scan_metadata, created_at, completed_at, composite_phase_order
         FROM cve_scans
-        WHERE derivation_id = $1 OR derivations_share_evidence_scope($1,derivation_id)
+        WHERE derivation_id IN (SELECT derivation_evidence_peers($1))
         ORDER BY composite_phase_order DESC
         LIMIT 1
         FOR SHARE
@@ -1692,7 +1692,7 @@ pub(crate) async fn lock_poam_findings_for_derivation_tx(
                  FROM cve_scans scan
                  JOIN cve_scan_vulnerability_observations observation
                    ON observation.scan_id=scan.id
-                  WHERE scan.derivation_id=$1 OR derivations_share_evidence_scope($1,scan.derivation_id)
+                  WHERE scan.derivation_id IN (SELECT derivation_evidence_peers($1))
                  ORDER BY canonical_cve_id
                ) key"#,
         )
@@ -1709,7 +1709,7 @@ pub(crate) async fn lock_poam_findings_for_derivation_tx(
            FROM (
              SELECT assessment.system_id
              FROM composite_policy_assessments assessment
-              WHERE assessment.derivation_id=$1 OR derivations_share_evidence_scope($1,assessment.derivation_id)
+              WHERE assessment.derivation_id IN (SELECT derivation_evidence_peers($1))
              UNION
              SELECT system.id AS system_id
              FROM derivations derivation
@@ -1737,7 +1737,7 @@ pub(crate) async fn lock_poam_findings_for_derivation_tx(
            FROM (
              SELECT assessment.system_id,assessment.policy_lineage_id
              FROM composite_policy_assessments assessment
-              WHERE assessment.derivation_id=$1 OR derivations_share_evidence_scope($1,assessment.derivation_id)
+              WHERE assessment.derivation_id IN (SELECT derivation_evidence_peers($1))
              UNION
              SELECT finding.system_id,finding.policy_lineage_id
              FROM derivations derivation

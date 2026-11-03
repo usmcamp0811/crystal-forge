@@ -2623,8 +2623,8 @@ pub(crate) async fn admit_system_cve_scan(
         // stabilize exact scan observations and matching runtime publication.
         sqlx::query(r#"SELECT lock_poam_cve_key(key.cve_id) FROM (
             SELECT canonical_cve_id AS cve_id FROM cve_scan_vulnerability_observations observation
-               JOIN cve_scans scan ON scan.id=observation.scan_id WHERE scan.derivation_id=$1
-                 OR derivations_share_evidence_scope($1,scan.derivation_id)
+               JOIN cve_scans scan ON scan.id=observation.scan_id
+              WHERE scan.derivation_id IN (SELECT derivation_evidence_peers($1))
             UNION
             SELECT canonical_cve_id FROM poam_cve_findings finding
               WHERE finding.system_id=$2 OR finding.system_id IN (

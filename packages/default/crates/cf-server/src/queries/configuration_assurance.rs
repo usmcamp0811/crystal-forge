@@ -304,8 +304,8 @@ WITH registration AS (
   ORDER BY COALESCE(scan.completed_at,scan.created_at) DESC,scan.id DESC LIMIT 20)
  UNION
   (SELECT scan.id FROM cve_scans scan JOIN selected_artifact d
-     ON d.execution_derivation_id=scan.derivation_id
-        OR derivations_share_evidence_scope(d.derivation_id,scan.derivation_id)
+     ON scan.derivation_id IN (SELECT derivation_evidence_peers(d.derivation_id)
+                               UNION SELECT d.execution_derivation_id)
   ORDER BY scan.created_at DESC,scan.id DESC LIMIT 1)
  UNION
  (SELECT scan.id FROM cve_scans scan JOIN artifacts d ON d.id=scan.derivation_id

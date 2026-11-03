@@ -90,7 +90,10 @@ pub(crate) async fn reusable_physical_build_tx(
     sqlx::query_as(
         r#"SELECT job.id,job.status FROM derivations target
         JOIN commits target_commit ON target_commit.id=target.commit_id
-        JOIN derivations source ON derivations_share_evidence_scope(target.id,source.id)
+        -- PERFORMANCE: enumerate the evidence peers through their indexes. A bare
+        -- function join scanned every derivation once per admitted derivation.
+        JOIN LATERAL derivation_evidence_peers(target.id) AS peer(id) ON true
+        JOIN derivations source ON source.id=peer.id
         JOIN build_jobs job ON job.derivation_id=source.id
         LEFT JOIN LATERAL (
             SELECT registration.environment_id FROM systems registration
@@ -1127,8 +1130,8 @@ async fn recover_build_preparation_candidates(
                 // (INSERT was blocked by ON CONFLICT DO NOTHING) or eligibility
                 // changed between revalidation and INSERT.
                 let exists: bool = sqlx::query_scalar(
-                    "SELECT EXISTS(SELECT 1 FROM build_jobs WHERE derivation_id = $1
-                     OR derivations_share_evidence_scope($1,derivation_id))",
+                    "SELECT EXISTS(SELECT 1 FROM build_jobs
+                     WHERE derivation_id IN (SELECT derivation_evidence_peers($1)))",
                 )
                 .bind(derivation_id)
                 .fetch_one(&mut *tx)
