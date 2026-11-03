@@ -8,7 +8,7 @@ use crate::api::models::{
 };
 use crate::components::forms::add_system_form::{
     EnrollmentConfigurationFields, EnrollmentNetworkFields, EnrollmentParentField,
-    EnrollmentTagsField, ManagementModePicker, parse_tags,
+    EnrollmentTagsField, ManagementModePicker, dom_key, parse_tags,
 };
 use crate::components::icon::{Icon, IconName};
 use crate::components::modals::{GeneratedKeyPair, RemoveSystemDialog, generate_key_pair};
@@ -592,6 +592,41 @@ pub fn EditSystemModal(
                 .any(|name| name == &selected_assignment.0));
     // Approved footer state: the per-system heartbeat override, where 0 means
     // the server-configured default.
+    // Approved mode-switch notices: stopping management warns, the others inform.
+    let host = system.hostname.clone();
+    let (notice_class, notice_title) = if original_mode == ManagementMode::Managed {
+        (
+            "mg-notice mg-notice-warn",
+            format!("Crystal Forge will stop managing {host}"),
+        )
+    } else if management_mode() == ManagementMode::Managed {
+        ("mg-notice", format!("Crystal Forge will manage {host}"))
+    } else {
+        (
+            "mg-notice",
+            format!(
+                "Switching to {}",
+                management_mode().long_label().to_lowercase()
+            ),
+        )
+    };
+    // The reason Save is unavailable. Shown in the footer, as in the design.
+    let converting_to_managed =
+        management_mode() == ManagementMode::Managed && original_mode != ManagementMode::Managed;
+    let key_error = (converting_to_managed && !enrollment_key().trim().is_empty())
+        .then(|| key_rotation::validate_public_key_input(&enrollment_key()).err())
+        .flatten();
+    let save_blocker = if management_mode() != original_mode && !transition_confirmed() {
+        Some("Confirm the management change")
+    } else if converting_to_managed
+        && key_rotation::validate_public_key_input(&enrollment_key()).is_err()
+    {
+        Some("Agent public key required to manage this system")
+    } else if hostname.read().trim().is_empty() {
+        Some("A name is required")
+    } else {
+        None
+    };
     let heartbeat_label = match heartbeat_interval_sec() {
         0 => "server default".to_string(),
         seconds => format!("{seconds}s"),
@@ -749,7 +784,18 @@ pub fn EditSystemModal(
                 class: "pe-shell management-form-shell",
                 "data-testid": "edit-system-modal",
                 "aria-busy": rotate_in_flight(),
+                role: "dialog",
+                "aria-modal": "true",
+                "aria-label": "Edit {system.hostname}",
                 onclick: move |e| e.stop_propagation(),
+                // Escape closes the dialog unless a save or key rotation is in flight.
+                // The key is read through `dom_key`: a key-less keydown (a datalist
+                // pick) would otherwise panic the runtime.
+                onkeydown: move |e| {
+                    if dom_key(&e).as_deref() == Some("Escape") && !is_saving() && !rotate_in_flight() {
+                        on_close.call(());
+                    }
+                },
 
                 div {
                     class: "pe-head",
@@ -920,9 +966,9 @@ pub fn EditSystemModal(
                             on_change: move |mode| { management_mode.set(mode); transition_confirmed.set(false); validation_error.set(None); }
                         }
                         if management_mode() != original_mode {
-                            div { class: "mg-notice mg-notice-warn",
+                            div { class: "{notice_class}",
                                 div { class: "mg-notice-body",
-                                    b { "Confirm management change: {original_mode.label()} → {management_mode().label()}" }
+                                    b { "{notice_title}" }
                                     if original_mode == ManagementMode::Managed {
                                         p { "Saving atomically revokes the agent key and deployment authority, invalidates pending deployments, and disables deploys and rollbacks. Evidence and history remain available." }
                                     } else if management_mode() == ManagementMode::Managed {
@@ -935,6 +981,7 @@ pub fn EditSystemModal(
                             if management_mode() == ManagementMode::Managed {
                                 label { class: "field", "New agent public key *",
                                     textarea { class: "input focus-ring mono", aria_label: "New agent public key *", rows: 3, value: "{enrollment_key}", placeholder: "Base64 Ed25519 public key", oninput: move |e| enrollment_key.set(e.value()) }
+                                    if let Some(message) = key_error.clone() { span { class: "help", role: "alert", style: "color:#fca5a5", "{message}" } }
                                 }
                             }
                             label { class: "management-transition-confirm",
@@ -1457,6 +1504,7 @@ pub fn EditSystemModal(
                         if !can_keep_assignment { " · Registered flake and declared configuration required for a new assignment" }
                         else if !declared { " · Keeping existing assignment; declaration unconfirmed" }
                         if management_mode() != original_mode { " · mode: {original_mode.label()} → {management_mode().label()}" }
+                        if let Some(reason) = save_blocker { span { style: "color:#fbbf24", " · {reason}" } }
                     }
                     div {
 

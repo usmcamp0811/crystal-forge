@@ -125,6 +125,75 @@ fn env_color(env_name: &str, environment_colors: &[(String, String)]) -> String 
     }
 }
 
+/// Returns the value and caption of the "CVEs (critical)" card.
+///
+/// Managed counts come from current runtime evidence. External and reference
+/// counts come from their latest sealed configuration scan; a resource without
+/// one is absent, never zero. `unavailable` counts external/reference resources
+/// whose evidence is loading or unreadable. Their findings are unknown, so the
+/// total becomes a lower bound (`N+`) and the caption says how many are missing.
+/// The card never shows `0` while any resource is unread.
+pub(crate) fn critical_cve_card(
+    managed_critical: i64,
+    managed_with_critical: usize,
+    configuration_critical: &[i64],
+    unavailable: usize,
+) -> (String, String) {
+    let total = managed_critical + configuration_critical.iter().sum::<i64>();
+    let resources_with_critical =
+        managed_with_critical + configuration_critical.iter().filter(|c| **c > 0).count();
+    let value = if unavailable > 0 {
+        format!("{total}+")
+    } else {
+        total.to_string()
+    };
+    let mut meta = format!("across {resources_with_critical} scanned resources");
+    if unavailable > 0 {
+        meta.push_str(&format!(
+            " · {unavailable} configuration {} not read yet",
+            if unavailable == 1 { "scan" } else { "scans" }
+        ));
+    }
+    (value, meta)
+}
+
+#[cfg(test)]
+mod critical_card_tests {
+    use super::critical_cve_card;
+
+    #[test]
+    fn complete_evidence_shows_an_exact_total() {
+        assert_eq!(
+            critical_cve_card(3, 2, &[4, 0, 1], 0),
+            ("8".to_string(), "across 4 scanned resources".to_string())
+        );
+    }
+
+    #[test]
+    fn unread_configuration_evidence_makes_the_total_a_lower_bound() {
+        let (value, meta) = critical_cve_card(3, 2, &[4], 2);
+        assert_eq!(value, "7+");
+        assert!(
+            meta.ends_with("2 configuration scans not read yet"),
+            "{meta}"
+        );
+        let (value, meta) = critical_cve_card(0, 0, &[], 1);
+        assert_eq!(value, "0+", "nothing read yet is not zero findings");
+        assert!(
+            meta.ends_with("1 configuration scan not read yet"),
+            "{meta}"
+        );
+    }
+
+    #[test]
+    fn no_resources_at_all_stays_a_plain_zero() {
+        assert_eq!(
+            critical_cve_card(0, 0, &[], 0),
+            ("0".to_string(), "across 0 scanned resources".to_string())
+        );
+    }
+}
+
 /// Systems statistics strip with 5 key metrics.
 ///
 /// # Example
@@ -144,15 +213,22 @@ pub fn SystemsStatStrip(
     /// evidence are absent, never counted as zero.
     #[props(default)]
     configuration_critical: Vec<i64>,
+    /// External/reference resources whose evidence is still loading or could not
+    /// be read. Their findings are unknown, so the total is a lower bound.
+    #[props(default)]
+    configuration_unavailable: usize,
 ) -> Element {
     let stats = SystemsStats::from_systems(&systems);
     let managed_with_critical = systems
         .iter()
         .filter(|s| s.management_mode == ManagementMode::Managed && s.cve_counts.critical > 0)
         .count();
-    let critical_total = stats.critical_cves as i64 + configuration_critical.iter().sum::<i64>();
-    let resources_with_critical =
-        managed_with_critical + configuration_critical.iter().filter(|c| **c > 0).count();
+    let (critical_value, critical_meta) = critical_cve_card(
+        stats.critical_cves as i64,
+        managed_with_critical,
+        &configuration_critical,
+        configuration_unavailable,
+    );
 
     rsx! {
         div {
@@ -225,8 +301,8 @@ pub fn SystemsStatStrip(
             // reference counts come from their latest sealed configuration scan.
             StatCard {
                 label: "CVEs (critical)".to_string(),
-                value: format!("{critical_total}"),
-                meta: format!("across {resources_with_critical} scanned resources"),
+                value: critical_value,
+                meta: critical_meta,
                 accent_color: "#60a5fa".to_string(),
                 value_color: None,
                 children: rsx! {}

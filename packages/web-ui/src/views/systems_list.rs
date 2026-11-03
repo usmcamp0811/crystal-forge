@@ -702,6 +702,11 @@ pub fn SystemsListView() -> Element {
                         .filter_map(crate::components::system::management_mode::last_good_scan)
                         .filter_map(|scan| scan.cves.as_ref().map(|c| c.critical))
                         .collect::<Vec<i64>>(),
+                    configuration_unavailable: current_systems
+                        .iter()
+                        .filter(|s| s.management_mode != ManagementMode::Managed)
+                        .filter(|s| evidence_for(&s.id).is_none())
+                        .count(),
                 }
             }
 

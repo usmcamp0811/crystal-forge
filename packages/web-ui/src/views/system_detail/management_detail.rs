@@ -25,6 +25,22 @@ pub(super) fn ManagementDetail(
 ) -> Element {
     let nav = navigator();
     let system_id = system.id;
+    // One read of the parent's name serves the Deploy tab, the control card and
+    // the runtime card.
+    let parent_hostname = use_parent_hostname(system.parent_host_id);
+    // Approved Deploy-tab copy: it names the deploying party when it is known.
+    let deploy_copy = match (system.management_mode, system.parent_host_id) {
+        (ManagementMode::External, Some(_)) => format!(
+            "{} is deployed by its parent host{}. Crystal Forge evaluates, builds and scans the selected revision and keeps the evidence. It cannot deploy or roll back this system.",
+            system.hostname,
+            parent_hostname.as_deref().map(|name| format!(" {name}")).unwrap_or_default()
+        ),
+        (ManagementMode::External, None) => format!(
+            "{} is deployed by its own administrators. Crystal Forge evaluates, builds and scans the selected revision and keeps the evidence. It cannot deploy or roll back this system.",
+            system.hostname
+        ),
+        _ => "This configuration is built and scanned on each revision to produce security evidence. There is no machine to deploy to.".to_string(),
+    };
     let mut refresh = use_signal(|| 0_u64);
     let assurance = use_resource(move || {
         let _ = refresh();
@@ -205,10 +221,10 @@ pub(super) fn ManagementDetail(
                 if active_tab() == Tab::Deploy {
                     div { class: "mg-empty mg-na", Icon { name: IconName::Deploy, size: 22 }
                         h3 { if system.management_mode == ManagementMode::External { "Deployment is controlled outside Crystal Forge" } else { "Reference configurations are not deployed" } }
-                        p { "Crystal Forge evaluates, builds and scans the configuration. It cannot deploy, roll back or restart this resource." }
+                        p { "{deploy_copy}" }
                         div { class: "mg-notice-actions",
-                            button { class: "btn btn-ghost focus-ring", onclick: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::History, true), "Evidence and retained deployment history" }
-                            if can_mutate { button { class: "btn btn-ghost focus-ring", onclick: move |_| on_edit.call(()), "Change management mode" } }
+                            button { class: "btn btn-ghost focus-ring", onclick: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::History, true), "Evidence history" }
+                            if can_mutate { button { class: "btn btn-ghost focus-ring", onclick: move |_| on_edit.call(()), Icon { name: IconName::Gear, size: 12 } " Change management mode" } }
                         }
                     }
                 } else if active_tab() == Tab::Logs {
@@ -261,9 +277,9 @@ pub(super) fn ManagementDetail(
                                     EvidenceIdentities { evidence: e.clone() }
                                 }
                                 div { class: "mg-cols",
-                                    ControlCard { system: system.clone(), evidence: e.clone() }
+                                    ControlCard { system: system.clone(), evidence: e.clone(), parent_hostname: parent_hostname.clone() }
                                     if system.management_mode == ManagementMode::External {
-                                        StoredRuntime { system_id, parent_host_id: system.parent_host_id }
+                                        StoredRuntime { system_id, parent_host_id: system.parent_host_id, parent_label: parent_hostname.clone() }
                                     } else {
                                         section { class: "card sd-card", div { class: "sd-card-head", h2 { "Recent evidence" }
                                             button { class: "link-action focus-ring", onclick: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::History, true), "All history" }
@@ -525,12 +541,23 @@ fn use_parent_hostname(parent: Option<Uuid>) -> Option<String> {
 }
 
 #[component]
-fn ControlCard(system: SystemDetail, evidence: ConfigurationAssurance) -> Element {
+fn ControlCard(
+    system: SystemDetail,
+    evidence: ConfigurationAssurance,
+    parent_hostname: Option<String>,
+) -> Element {
     let external = system.management_mode == ManagementMode::External;
-    let parent_hostname = use_parent_hostname(system.parent_host_id);
+    let control_copy = match (external, system.parent_host_id) {
+        (true, Some(_)) => format!(
+            "Deployed by parent host {}. Crystal Forge does not deploy, roll back or restart this system.",
+            parent_hostname.as_deref().unwrap_or("(name unavailable)")
+        ),
+        (true, None) => "Deployed by its own administrators. Crystal Forge does not deploy or roll back this system.".to_string(),
+        (false, _) => "A configuration tracked for security assurance. It is not a running machine. Closure evidence does not establish that a generated ISO or VM image was scanned.".to_string(),
+    };
     rsx! { section { class: "card sd-card",
         div { class: "sd-card-head", h2 { if external { "Deployment control" } else { "Purpose" } } MgmtChip { mode: system.management_mode } }
-        p { class: "mg-copy", if external { "Deployed by its own administrators or parent host. Crystal Forge does not deploy, roll back or restart this system." } else { "A configuration tracked for security assurance. It is not a running machine. Closure evidence does not establish that a generated ISO or VM image was scanned." } }
+        p { class: "mg-copy", "{control_copy}" }
         dl { class: "kv-grid", style: "overflow-wrap:anywhere",
             dt { "Flake" } dd { {system.flake.as_ref().map(|f| f.name.as_str()).unwrap_or("Unassigned")} }
             dt { "Configuration" } dd { "nixosConfigurations.{evidence.configuration_name}" }
@@ -543,11 +570,14 @@ fn ControlCard(system: SystemDetail, evidence: ConfigurationAssurance) -> Elemen
 }
 
 #[component]
-fn StoredRuntime(system_id: Uuid, parent_host_id: Option<Uuid>) -> Element {
+fn StoredRuntime(
+    system_id: Uuid,
+    parent_host_id: Option<Uuid>,
+    parent_label: Option<String>,
+) -> Element {
     let mut observation = use_signal(|| None::<GuestObservationRow>);
     let mut error = use_signal(|| None::<String>);
     let mut reload = use_signal(|| 0_u64);
-    let parent_label = use_parent_hostname(parent_host_id);
     let result = use_resource(move || {
         let _ = reload();
         async move { client::fetch_latest_guest_observation(&system_id).await }

@@ -290,7 +290,7 @@ pub fn ManagementModePicker(
 /// [`KeyboardData::key`] reads `key` through a non-catching web-sys getter, so
 /// that event panics and stops the whole Dioxus runtime. Handlers that can
 /// receive such an event read the key through this function instead.
-fn dom_key(event: &KeyboardData) -> Option<String> {
+pub(crate) fn dom_key(event: &KeyboardData) -> Option<String> {
     let raw = event.downcast::<web_sys::KeyboardEvent>()?;
     js_sys::Reflect::get(raw.as_ref(), &"key".into())
         .ok()?
@@ -614,9 +614,14 @@ pub fn AddSystemForm(
                         if section() == "management" {
                             div { class: "pe-sec-head", h3 { "Management mode" } p { "Who controls deployment, and what Crystal Forge does with this configuration." } }
                             ManagementModePicker { value: mode, on_change: move |mode| { draft.write().management_mode = mode; } }
-                            div { class: "mg-notice", div { class: "mg-notice-body", b { "{mode.label()}" } p { "{mode.description()}" }
-                                if mode != ManagementMode::Managed { p { "No agent credentials are needed. Configuration evidence never proves runtime state." } }
-                            } }
+                            {
+                                let (title, body) = match mode {
+                                    ManagementMode::Managed => ("Deploys and agent reporting", "Needs an agent public key. Deployment policy, approvals and gates apply as for other managed systems."),
+                                    ManagementMode::External => ("Crystal Forge does not deploy this system", "It evaluates, builds and scans the selected configuration and keeps the evidence. No agent credentials are needed. Runtime state stays unknown unless a parent host reports it."),
+                                    ManagementMode::Reference => ("Not a running machine", "It is built and scanned for each revision. It never appears offline or unhealthy, and is excluded from managed host counts."),
+                                };
+                                rsx! { div { class: "mg-notice", div { class: "mg-notice-body", b { "{title}" } p { "{body}" } } } }
+                            }
                         }
                         if section() == "identity" {
                             div { class: "pe-sec-head", h3 { "Identity & environment" } p { "Choose a unique resource identity and its authorized environment." } }
