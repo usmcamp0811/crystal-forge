@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-11-01T15:39:00Z'
-updated_date: '2026-11-03T03:53:00Z'
+updated_date: '2026-11-03T05:02:00Z'
 labels:
   - tests
   - database
@@ -35,4 +35,6 @@ ordinal: 563000
 Second instance found during TASK-508 review fixes: queries::scanning_tests::waiting_scan_promotes_through_exact_prerequisites (ignored, not in the regression harness) inserts cache_push_jobs without store_path. promote_waiting_cve_scans is byte-identical to dev @18b47eed and requires push.store_path = derivation.store_path, so the concurrent promotion assertion sees 0 promotions. Same stale-fixture class; not caused by TASK-508.
 
 Third instance, verified at the base commit 18b47eed in a scratch worktree: queries::cves::tests::newest_attempt_keeps_completed_evidence_after_failed_queued_and_scanning fails there with the same assertion as on the TASK-508 branch (left: Exact, right: MappedRunning at cves.rs). It is #[ignore] and not selected by packages/devScripts/tests/database-regressions.sh, so CI never runs it. It predates TASK-508 (added by TASK-326.2). Not caused by TASK-508 or its 0325/0326 migrations.
+
+Fourth batch, verified at base commit 18b47eed in a scratch worktree (same four failures there as on the TASK-508 branch; none is selected by database-regressions.sh): queries::systems::tests::cve_dedup_migration_counts_distinct_per_severity_correctly and cve_dedup_migration_counts_each_cve_id_once_despite_package_fanout (replaying migration 0111 into a fully migrated schema fails with 'cannot drop columns from view'), hotfix_system_views_cve_counts_from_view_system_vulnerabilities ('cannot create temporary relation in non-temporary schema'), and stale_manual_target_clear_does_not_delete_concurrent_replacement ('operator does not exist: uuid = text'). Not caused by TASK-508.
 <!-- SECTION:NOTES:END -->
