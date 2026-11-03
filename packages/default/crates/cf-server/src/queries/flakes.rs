@@ -1511,6 +1511,29 @@ pub async fn cascade_delete_flake(
     .await
     .context("Failed to resolve build/eval attention occurrences during cascade delete")?;
 
+    // Parent observations and parent associations reference systems without an ON
+    // DELETE action, so deleting those systems would fail. The deleted
+    // registrations' observations go with them. A guest that belongs to another
+    // flake loses only its association: it stays registered, with no parent.
+    sqlx::query(
+        "DELETE FROM guest_observations
+         WHERE guest_id IN (SELECT id FROM systems WHERE flake_id = $1)
+            OR parent_host_id IN (SELECT id FROM systems WHERE flake_id = $1)",
+    )
+    .bind(flake_id)
+    .execute(&mut **tx)
+    .await
+    .context("Failed to delete guest observations during cascade delete")?;
+    sqlx::query(
+        "UPDATE systems SET parent_host_id = NULL, updated_at = NOW()
+         WHERE flake_id IS DISTINCT FROM $1
+           AND parent_host_id IN (SELECT id FROM systems WHERE flake_id = $1)",
+    )
+    .bind(flake_id)
+    .execute(&mut **tx)
+    .await
+    .context("Failed to detach guests of deleted hosts during cascade delete")?;
+
     // Note: ON DELETE CASCADE on commits FK will handle most cleanup
     // But we explicitly delete systems first to be safe
     sqlx::query("DELETE FROM systems WHERE flake_id = $1")
@@ -2638,5 +2661,115 @@ mod attention_lifecycle_tests {
             .bind(flake_id)
             .execute(&pool)
             .await;
+    }
+}
+
+#[cfg(test)]
+mod cascade_delete_observation_tests {
+    use super::*;
+
+    /// Deleting a flake deletes its registrations. Guest observations and parent
+    /// associations reference systems without an ON DELETE action, so the cascade
+    /// must remove or clear them first. A guest of another flake stays registered.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB; never use the preview database"]
+    async fn cascade_delete_removes_guest_observations_and_detaches_foreign_guests(pool: PgPool) {
+        let env: uuid::Uuid = sqlx::query_scalar(
+            "INSERT INTO environments(name) VALUES('cascade-obs-env') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let flake = |name: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i32>(
+                    "INSERT INTO flakes(name,repo_url,branch) VALUES($1,$2,'main') RETURNING id",
+                )
+                .bind(name)
+                .bind(format!("https://example.test/{name}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let (doomed, other) = (flake("doomed").await, flake("other").await);
+        let system = |hostname: &'static str,
+                      mode: &'static str,
+                      flake: i32,
+                      parent: Option<uuid::Uuid>| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, uuid::Uuid>(
+                    "INSERT INTO systems(hostname,management_mode,public_key,derivation,environment_id,flake_id,parent_host_id)
+                     VALUES($1,$2,CASE WHEN $2='managed' THEN 'fixture-key' END,'',$3,$4,$5) RETURNING id",
+                )
+                .bind(hostname)
+                .bind(mode)
+                .bind(env)
+                .bind(flake)
+                .bind(parent)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let doomed_host = system("doomed-host", "managed", doomed, None).await;
+        let doomed_guest = system("doomed-guest", "external", doomed, Some(doomed_host)).await;
+        let foreign_guest = system("foreign-guest", "external", other, Some(doomed_host)).await;
+        let survivor_host = system("survivor-host", "managed", other, None).await;
+        let survivor_guest = system("survivor-guest", "external", other, Some(survivor_host)).await;
+        for (guest, parent) in [
+            (doomed_guest, doomed_host),
+            (foreign_guest, doomed_host),
+            (survivor_guest, survivor_host),
+        ] {
+            sqlx::query(
+                "INSERT INTO guest_observations(guest_id,parent_host_id,environment_id,guest_identity,unit,unit_active_state,observed_at)
+                 SELECT $1,$2,$3,hostname,'microvm@'||hostname||'.service','active',now() FROM systems WHERE id=$1",
+            )
+            .bind(guest)
+            .bind(parent)
+            .bind(env)
+            .execute(&pool)
+            .await
+            .unwrap();
+        }
+
+        let mut tx = pool.begin().await.unwrap();
+        cascade_delete_flake(&mut tx, doomed)
+            .await
+            .expect("a flake with observed guests must be deletable");
+        tx.commit().await.unwrap();
+
+        let remaining: Vec<String> =
+            sqlx::query_scalar("SELECT hostname FROM systems ORDER BY hostname")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            remaining,
+            ["foreign-guest", "survivor-guest", "survivor-host"]
+        );
+        let parent_of_foreign: Option<uuid::Uuid> =
+            sqlx::query_scalar("SELECT parent_host_id FROM systems WHERE id=$1")
+                .bind(foreign_guest)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            parent_of_foreign, None,
+            "a guest of another flake loses only its association"
+        );
+        let observed: Vec<uuid::Uuid> =
+            sqlx::query_scalar("SELECT guest_id FROM guest_observations")
+                .fetch_all(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            observed,
+            [survivor_guest],
+            "only observations of the deleted registrations are removed"
+        );
     }
 }

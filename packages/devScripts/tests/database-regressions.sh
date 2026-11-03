@@ -488,6 +488,7 @@ SQL
       retained_observations_lose_runtime_authority_after_mode_conversion \
       registration_and_rename_start_a_new_observation_boundary \
       key_rotation_applies_only_to_an_active_managed_registration \
+      cascade_delete_removes_guest_observations_and_detaches_foreign_guests \
       reenrollment_current_config_reads_and_repairs_preserve_history
     echo "=== Selected POA&M authorization, setup, notification, and overdue regressions ==="
     # Current counts and optional assignments have distinct database contracts.
