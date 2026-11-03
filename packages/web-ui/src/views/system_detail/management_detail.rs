@@ -88,6 +88,14 @@ pub(super) fn ManagementDetail(
         .and_then(|result| result.as_ref().ok())
         .cloned()
         .filter(|e| e.system_id == system_id && e.management_mode == system.management_mode);
+    // The design shows the critical count on the CVEs tab when CVE data exists. It
+    // comes from the last good sealed scan only: failed, waiting or missing
+    // evidence shows no number instead of a zero.
+    let cve_tab_badge = evidence
+        .as_ref()
+        .and_then(crate::components::system::management_mode::last_good_scan)
+        .and_then(|scan| scan.cves.as_ref().map(|cves| cves.critical))
+        .filter(|critical| *critical > 0);
     let freshness = evidence.as_ref().map_or(EvidenceFreshness::Unknown, |e| {
         selected_freshness(
             e,
@@ -213,6 +221,11 @@ pub(super) fn ManagementDetail(
                                 Tab::Hardening => IconName::Key,
                             }, size: 13 }
                             if tab == Tab::History { "Evidence history" } else { "{tab.label()}" }
+                            if tab == Tab::Cves {
+                                if let Some(critical) = cve_tab_badge {
+                                    span { class: "sd-tab-badge", title: "{critical} critical in the last good scan", "{critical}" }
+                                }
+                            }
                         }
                     }
                 }

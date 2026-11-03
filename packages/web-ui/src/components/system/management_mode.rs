@@ -376,13 +376,46 @@ pub fn EvidenceGate(
 ) -> Element {
     let status = evidence_status(&evidence, freshness);
     let has_evidence = last_good_scan(&evidence).is_some();
+    // Approved empty states: waiting for a build, scanning unavailable, and no scan
+    // yet each have their own title and explanation. Other statuses keep their
+    // label; the banner above carries their diagnostics.
+    let revision = evidence
+        .selected_revision
+        .as_ref()
+        .map(|r| r.sha.chars().take(7).collect::<String>())
+        .unwrap_or_else(|| "the selected revision".into());
+    let (title, body) = match status {
+        EvidenceStatus::AwaitingBuild | EvidenceStatus::Building => (
+            "Waiting for a build".to_string(),
+            format!("Findings appear after the build of revision {revision} completes and is scanned."),
+        ),
+        EvidenceStatus::Unavailable => (
+            "Scanning isn't available for this configuration".to_string(),
+            evidence
+                .selected_scan
+                .as_ref()
+                .and_then(|scan| scan.error.clone())
+                .unwrap_or_else(|| "No scanner can run for this configuration.".into()),
+        ),
+        EvidenceStatus::Missing => (
+            "No scan evidence yet".to_string(),
+            format!(
+                "No completed scan exists for {} at {revision}. Use Re-scan to request one.",
+                evidence.configuration_name
+            ),
+        ),
+        _ => (
+            status.label().to_string(),
+            "No sealed configuration scan is available. Findings appear after an exact build is scanned successfully.".to_string(),
+        ),
+    };
     rsx! {
         EvidenceBanner { evidence, freshness }
         if has_evidence { {children} } else {
             div { class: "mg-empty",
                 Icon { name: IconName::Shield, size: 22 }
-                h3 { "{status.label()}" }
-                p { "No sealed configuration scan is available. Findings appear after an exact build is scanned successfully." }
+                h3 { "{title}" }
+                p { "{body}" }
             }
         }
     }

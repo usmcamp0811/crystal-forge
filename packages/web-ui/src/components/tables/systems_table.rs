@@ -360,13 +360,28 @@ pub fn SystemsTable(
                                         }
                                     }
                                     } else {
-                                        div { class: "mg-dim", if system.management_mode == ManagementMode::Reference { "Not a running machine" } else { "Runtime state unknown" } }
+                                        // One runtime line, as designed: the host-observed unit state when a
+                                        // parent reported one, otherwise "unknown". Never both.
+                                        {
+                                            let observed = match observations.get(&system.id) {
+                                                Some(Ok(Some(report))) if system.management_mode == ManagementMode::External => Some(report),
+                                                _ => None,
+                                            };
+                                            rsx! {
+                                                div { class: "mg-dim",
+                                                    title: observed.map(|r| format!("{} · observed {} · a host unit observation, not guest health or configuration attestation", r.unit, r.observed_at.to_rfc3339())).unwrap_or_default(),
+                                                    if system.management_mode == ManagementMode::Reference { "Not a running machine" }
+                                                    else if let Some(report) = observed { {format!("Host-observed · unit {} · {}", report.unit_active_state.as_deref().unwrap_or("unknown"), crate::components::system::system_card_v2::ago(report.observed_at))} }
+                                                    else { "Runtime state unknown" }
+                                                }
+                                            }
+                                        }
                                         if let Some(parent) = system.parent_host_id {
                                             div { class: "mg-dim", "Parent: {parent_names.get(&parent).cloned().unwrap_or_else(|| parent.to_string())}" }
                                         }
                                         if system.management_mode == ManagementMode::External {
                                             match observations.get(&system.id) {
-                                                Some(Ok(Some(report))) => rsx! { div { class: "mg-dim", title: "Host unit observation; not guest health or configuration attestation", {format!("{}: {} · {}", report.unit, report.unit_active_state.as_deref().unwrap_or("unknown"), report.observed_at.to_rfc3339())} } },
+                                                Some(Ok(Some(_))) => rsx! {},
                                                 Some(Ok(None)) => rsx! { div { class: "mg-dim", "No applicable host observation" } },
                                                 Some(Err(error)) => rsx! { div { class: "mg-dim", role: "status", "Host observation unavailable: {error}" } },
                                                 None => rsx! { div { class: "mg-dim", if evidence_loading { "Loading host observation…" } else { "Host observation unavailable" } } },
