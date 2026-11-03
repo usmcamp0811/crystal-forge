@@ -403,6 +403,7 @@ Apply normal migrations in order; do not edit applied migrations:
 | `0326_evidence_peer_lookup.sql` | `derivation_evidence_peers(T)` replaces `x = T OR derivations_share_evidence_scope(T, x)` in hot paths; evidence view calls the execution-source function only for adopted jobs; restores the `derivation_path` index and indexes `reused_build_job_id` |
 | `0327_enrollment_epoch_on_registration_and_rename.sql` | A managed registration or rename that claims a hostname with earlier reports starts a new observation boundary, so those reports are history |
 | `0328_static_publication_reuse.sql` | `derivation_publication_eligible` gains a 4-argument overload that also accepts a completed static publication of the exact output whose destination equals the currently effective static cache destination; the 3-argument rule is unchanged |
+| `0329_guest_observation_indexes.sql` | Composite index for the current-parent observation read (277 ms to 0.24 ms with 400,000 former-parent rows) and indexes for the `parent_host_id` and `environment_id` foreign keys |
 
 Existing enrolled rows remain managed; migration does not infer external or
 reference resources. Constraint failures on legacy blank enrollment keys require
@@ -453,8 +454,8 @@ for commands and scope):
 - The isolated state-machine workflow passed at `bcb3b79e`.
 - Disposable SQLx tests for derivation reuse, build admission, CVE scans, scan
   leases, hardening, configuration assurance and POA&M conversion pass on a
-  database migrated through `0328`. Composite-policy integration tests pass
-  (38 of 38). `cargo sqlx prepare --check` passes against `0328`.
+  database migrated through `0329`. Composite-policy integration tests pass
+  (38 of 38). `cargo sqlx prepare --check` passes against `0329`.
 - The Web UI native tests pass (838 passed, one ignored) and the WASM build
   compiles.
 

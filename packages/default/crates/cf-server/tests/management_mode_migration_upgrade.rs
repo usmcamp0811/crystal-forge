@@ -130,8 +130,8 @@ async fn existing_enrolled_systems_survive_the_management_mode_upgrade(pool: PgP
 
     let applied = apply_migrations_after(&pool, LEGACY_VERSION).await;
     assert!(
-        applied.contains(&311) && applied.contains(&328),
-        "the upgrade covers management modes through static publication reuse"
+        applied.contains(&311) && applied.contains(&329),
+        "the upgrade covers management modes through the guest observation indexes"
     );
 
     // The same systems, with the same keys, policies and activity.
