@@ -500,7 +500,7 @@ pub fn CvesView(query: String) -> Element {
     use_effect(move || {
         spawn(async move {
             loop {
-                gloo_timers::future::TimeoutFuture::new(60_000).await;
+                crate::hooks::visibility::visible_tick(60_000).await;
                 seen_clock.set(Utc::now());
             }
         });
@@ -753,10 +753,12 @@ pub fn CvesView(query: String) -> Element {
             && request.environment_id == environment_filter()
             && request.filters == current_pair_filters
         {
-            let Some(cursor) = NAV_BADGES.read_unchecked().observed_at.clone() else {
+            // INVARIANT: Read NAV_BADGES with `peek`. A subscription would rerun this
+            // effect on every acknowledgment response, which carries a new cursor.
+            let Some(cursor) = NAV_BADGES.peek().observed_at.clone() else {
                 return;
             };
-            let occurrence_ids = NAV_BADGES.read_unchecked().cves_occurrence_ids.clone();
+            let occurrence_ids = NAV_BADGES.peek().cves_occurrence_ids.clone();
             acknowledge_with_cursor_and_ids("cves", cursor, occurrence_ids);
         }
     });

@@ -1385,7 +1385,7 @@ pub fn SystemDetailView(
     use_effect(move || {
         spawn(async move {
             loop {
-                gloo_timers::future::TimeoutFuture::new(1000).await;
+                crate::hooks::visibility::visible_tick(1000).await;
                 now_tick.set(Utc::now());
             }
         });
@@ -1562,7 +1562,7 @@ pub fn SystemDetailView(
         loop {
             #[cfg(target_arch = "wasm32")]
             {
-                gloo_timers::future::TimeoutFuture::new(4000).await;
+                crate::hooks::visibility::visible_tick(4000).await;
                 deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1);
             }
         }
@@ -1580,7 +1580,7 @@ pub fn SystemDetailView(
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
-                    gloo_timers::future::TimeoutFuture::new(4000).await;
+                    crate::hooks::visibility::visible_tick(4000).await;
                     if dep_resource.read_unchecked().is_some() {
                         tick.set(tick() + 1);
                     }
@@ -1629,7 +1629,7 @@ pub fn SystemDetailView(
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
-                    gloo_timers::future::TimeoutFuture::new(3000).await;
+                    crate::hooks::visibility::visible_tick(3000).await;
                     if *active_tab_for_events.read() == Tab::Logs {
                         agent_events_poll_tick.set(agent_events_poll_tick() + 1);
                     }
@@ -1709,8 +1709,7 @@ pub fn SystemDetailView(
             loop {
                 #[cfg(target_arch = "wasm32")]
                 {
-                    gloo_timers::future::TimeoutFuture::new(HARDENING_ACTIVE_POLL_INTERVAL_MS)
-                        .await;
+                    crate::hooks::visibility::visible_tick(HARDENING_ACTIVE_POLL_INTERVAL_MS).await;
                     let active = {
                         let snapshot = inventory_resource.read_unchecked();
                         snapshot.as_ref().is_some_and(|(_, result)| {

@@ -131,6 +131,9 @@ in harness.mkScenario {
     configuration-evidence = pkgs.writeText "configuration-evidence.cjs" ''
       exports.run = require("${./fragments/configuration-assurance.cjs}").evidence;
     '';
+    ui-background-work = pkgs.writeText "ui-background-work.cjs" ''
+      exports.run = require("${./fragments/configuration-assurance.cjs}").backgroundWork;
+    '';
     configuration-reuse-rescan = pkgs.writeText "configuration-reuse-rescan.cjs" ''
       exports.run = require("${./fragments/configuration-assurance.cjs}").reuseRescan;
     '';

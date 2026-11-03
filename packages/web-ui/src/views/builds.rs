@@ -421,7 +421,7 @@ pub fn BuildsView(query: String) -> Element {
     // loaded row (including logs) on every tick.
     use_future(move || async move {
         loop {
-            gloo_timers::future::TimeoutFuture::new(5_000).await;
+            crate::hooks::visibility::visible_tick(5_000).await;
             if active_view() == BuildsTab::ActiveQueue {
                 active_refresh_trigger.set(active_refresh_trigger() + 1);
             } else {
@@ -1921,7 +1921,7 @@ fn LiveIndicator() -> Element {
 
     use_future(move || async move {
         loop {
-            gloo_timers::future::TimeoutFuture::new(1_000).await;
+            crate::hooks::visibility::visible_tick(1_000).await;
             secs.set((secs() + 1) % 60);
         }
     });

@@ -56,7 +56,7 @@ pub(super) fn ManagementDetail(
     use_future(move || async move {
         #[cfg(target_arch = "wasm32")]
         loop {
-            gloo_timers::future::TimeoutFuture::new(5_000).await;
+            crate::hooks::visibility::visible_tick(5_000).await;
             if requested_scan.peek().is_some()
                 && !request_status.peek().as_ref().is_some_and(|result| {
                     matches!(result, Some(Ok(status)) if matches!(status.status.as_str(), "completed" | "failed" | "cancelled"))

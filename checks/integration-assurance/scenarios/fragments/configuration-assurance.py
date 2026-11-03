@@ -224,6 +224,9 @@ def configuration_assurance():
         # source A with A's producing job and session.
         completed_configuration_scan(receipts()["management.reuseRescan"], "manual")
 
+    with case("ui-background-work-is-bounded-and-pauses-when-hidden"):
+        run_browser(controller, "ui-background-work")
+
     with case("configuration-renamed-head-reports-missing-and-preserves-exact-history"):
         services.succeed("sed -i 's/assuranceOnly = target.extendModules/renamedAssurance = target.extendModules/' "
             "/tmp/delivery-source/flake.nix && git -C /tmp/delivery-source add flake.nix && "

@@ -135,6 +135,9 @@ pub fn AppShell() -> Element {
     let nav = navigator();
     let theme_signal = use_context::<Signal<crate::state::theme::UiTheme>>();
 
+    // One shared clock drives every heartbeat spinner below this shell.
+    crate::components::use_heartbeat_clock_provider();
+
     // Initialize sidebar state
     let is_mobile_drawer_open = use_signal(|| false);
     let is_collapsed = use_signal(|| {
@@ -244,7 +247,7 @@ pub fn AppShell() -> Element {
                     false,
                     false,
                 );
-                gloo_timers::future::TimeoutFuture::new(30_000).await;
+                crate::hooks::visibility::visible_tick(30_000).await;
             }
         });
     });

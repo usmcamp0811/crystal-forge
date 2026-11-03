@@ -1072,7 +1072,7 @@ pub fn ScanningView() -> Element {
 
     use_future(move || async move {
         loop {
-            gloo_timers::future::TimeoutFuture::new(LIVE_REFRESH_MS).await;
+            crate::hooks::visibility::visible_tick(LIVE_REFRESH_MS).await;
             live_refresh.set(live_refresh().wrapping_add(1));
         }
     });
@@ -2294,7 +2294,7 @@ fn ScanDetailDrawer(
         if running {
             let refresh_selection = poll_selection.clone();
             spawn(async move {
-                gloo_timers::future::TimeoutFuture::new(DETAIL_POLL_MS).await;
+                crate::hooks::visibility::visible_tick(DETAIL_POLL_MS).await;
                 if selected.peek().as_ref().map(|item| item.scan_id)
                     == Some(refresh_selection.scan_id)
                     && matches!(&*state.peek(), ScanDetailState::Loaded(detail) if detail.status == "in_progress")
@@ -2304,17 +2304,20 @@ fn ScanDetailDrawer(
             });
         }
     });
-    use_effect(move || {
-        if matches!(&*state.read(), ScanDetailState::Loaded(detail) if detail.status == "in_progress")
-        {
-            spawn(async move {
-                while selected.peek().is_some()
-                    && matches!(&*state.peek(), ScanDetailState::Loaded(detail) if detail.status == "in_progress")
-                {
-                    gloo_timers::future::TimeoutFuture::new(1_000).await;
-                    now.set(Utc::now());
-                }
-            });
+    // One elapsed-time clock per running scan. The previous effect read `state`
+    // and spawned a new loop on every detail refresh, so tickers accumulated for
+    // as long as the scan ran. The memo changes only when the scan starts or stops
+    // running, and `use_resource` drops the previous task before it starts another.
+    let running = use_memo(
+        move || matches!(&*state.read(), ScanDetailState::Loaded(detail) if detail.status == "in_progress"),
+    );
+    let _elapsed_clock = use_resource(move || async move {
+        if !running() {
+            return;
+        }
+        while selected.peek().is_some() {
+            crate::hooks::visibility::visible_tick(1_000).await;
+            now.set(Utc::now());
         }
     });
 

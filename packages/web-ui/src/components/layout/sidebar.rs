@@ -162,7 +162,7 @@ pub fn SidebarNav() -> Element {
             // This count is not an attention notification. Use the actor-scoped
             // POA&M dashboard, never loaded register rows or design fixtures.
             poam_overdue.set(poam_api::dashboard_summary().await.ok().map(|s| s.overdue));
-            gloo_timers::future::TimeoutFuture::new(30_000).await;
+            crate::hooks::visibility::visible_tick(30_000).await;
         }
     });
     // NAV_BADGES is the sole source of truth for badge visibility and counts

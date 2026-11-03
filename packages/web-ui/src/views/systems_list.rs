@@ -266,8 +266,12 @@ pub fn SystemsListView() -> Element {
                 // Will be handled by early return below
                 return;
             }
+            // INVARIANT: This effect depends on the loaded systems only. It reads
+            // NAV_BADGES with `peek`, never `read`: the acknowledgment response
+            // replaces NAV_BADGES with a new server cursor, so a subscription
+            // would rerun this effect and acknowledge again without end.
             let ack_snapshot = {
-                let badges = NAV_BADGES.read_unchecked();
+                let badges = NAV_BADGES.peek();
                 badges.observed_at.clone()
             };
             local_systems.set(result.systems.clone());
@@ -275,7 +279,7 @@ pub fn SystemsListView() -> Element {
             loading.set(false);
             if result.notice.is_none() {
                 if let Some(cursor) = ack_snapshot {
-                    let occurrence_ids = NAV_BADGES.read_unchecked().systems_occurrence_ids.clone();
+                    let occurrence_ids = NAV_BADGES.peek().systems_occurrence_ids.clone();
                     acknowledge_with_cursor_and_ids("systems", cursor, occurrence_ids);
                 }
             }
@@ -1374,7 +1378,7 @@ fn SystemPreviewPanel(
     use_effect(move || {
         spawn(async move {
             loop {
-                gloo_timers::future::TimeoutFuture::new(1000).await;
+                crate::hooks::visibility::visible_tick(1000).await;
                 now_tick.set(chrono::Utc::now());
             }
         });
@@ -1394,7 +1398,7 @@ fn SystemPreviewPanel(
         let mut deployment_progress_poll_tick = deployment_progress_poll_tick.clone();
         move || async move {
             loop {
-                gloo_timers::future::TimeoutFuture::new(4_000).await;
+                crate::hooks::visibility::visible_tick(4_000).await;
                 deployment_progress_poll_tick.set(deployment_progress_poll_tick() + 1);
             }
         }

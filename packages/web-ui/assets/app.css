@@ -6125,6 +6125,15 @@ button.pm-col-note:hover { color: var(--cf-text-secondary); text-decoration: und
   }
 }
 
+/* Each spinner runs two infinite animations. Colour and label already carry the
+   state, so a reduced-motion preference removes the motion and its repaint cost. */
+@media (prefers-reduced-motion: reduce) {
+  .hb-pulse,
+  .hb-ring svg circle:last-child {
+    animation: none;
+  }
+}
+
 .hb-label {
   display: flex;
   flex-direction: column;

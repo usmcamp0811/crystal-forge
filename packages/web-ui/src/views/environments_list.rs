@@ -118,8 +118,10 @@ pub fn EnvironmentsListView(initial_query: String) -> Element {
                 .filter(|env| env.health.critical > 0 || env.health.offline > 0)
                 .collect::<Vec<_>>();
             let attention_count = attention_items.len() as i64;
+            // INVARIANT: Read NAV_BADGES with `peek`. A subscription would rerun this
+            // effect on every acknowledgment response, which carries a new cursor.
             let ack_snapshot = {
-                let badges = NAV_BADGES.read_unchecked();
+                let badges = NAV_BADGES.peek();
                 badges.observed_at.clone()
             };
             let loaded_without_notice = result.notice.is_none() && policies_result.notice.is_none();
@@ -135,10 +137,7 @@ pub fn EnvironmentsListView(initial_query: String) -> Element {
             loading.set(false);
             if loaded_without_notice {
                 if let Some(cursor) = ack_snapshot {
-                    let occurrence_ids = NAV_BADGES
-                        .read_unchecked()
-                        .environments_occurrence_ids
-                        .clone();
+                    let occurrence_ids = NAV_BADGES.peek().environments_occurrence_ids.clone();
                     acknowledge_with_cursor_and_ids("environments", cursor, occurrence_ids);
                 }
             }

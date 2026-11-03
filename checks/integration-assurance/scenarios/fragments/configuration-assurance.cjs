@@ -232,6 +232,49 @@ exports.evidence = async ctx => {
     disposition: "candidate captures; independent equivalent-state reference comparison pending" });
 };
 
+// Background work is bounded. The Systems page must not acknowledge navigation
+// badges in a loop (it once sent about 60 requests per second), and a hidden
+// document must stop polling and refresh as soon as it is shown again. Hidden is
+// simulated: headless Chromium keeps its real visibility, so this exercises the
+// application's reaction to `visibilitychange`, not the browser's tab handling.
+exports.backgroundWork = async ctx => {
+  const { page, expect } = ctx;
+  await login(ctx);
+  const calls = [];
+  page.on("request", request => {
+    const url = new URL(request.url());
+    if (url.pathname.startsWith("/api/")) calls.push(`${request.method()} ${url.pathname}`);
+  });
+  const hits = call => calls.filter(entry => entry === call).length;
+  const setHidden = hidden => page.evaluate(value => {
+    Object.defineProperty(document, "hidden", { configurable: true, get: () => value });
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => (value ? "hidden" : "visible") });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }, hidden);
+
+  await page.goto(ctx.url("/systems"));
+  await page.waitForTimeout(3000);
+  calls.length = 0;
+  await page.waitForTimeout(6000);
+  expect(hits("POST /api/v1/navigation/acknowledge")).toBeLessThanOrEqual(1);
+
+  // Visible: the Builds page keeps its live refresh.
+  await page.goto(ctx.url("/builds"));
+  await page.waitForTimeout(2500);
+  calls.length = 0;
+  await expect.poll(() => hits("GET /api/v1/build-jobs"), { timeout: 9000 }).toBeGreaterThan(0);
+  // Hidden: no polling of any kind.
+  await setHidden(true);
+  await page.waitForTimeout(1000);
+  calls.length = 0;
+  await page.waitForTimeout(8000);
+  expect(calls.filter(entry => entry.startsWith("GET "))).toEqual([]);
+  // Shown again: the stale data is refreshed without a reload.
+  await setHidden(false);
+  await expect.poll(() => hits("GET /api/v1/build-jobs"), { timeout: 3000 }).toBeGreaterThan(0);
+  await ctx.screenshot("ui-background-work-resumed");
+};
+
 // A reused head B requests its own carrier. The server scans execution source
 // A; the browser must accept that response as a match for B.
 exports.reuseRescan = async ctx => {

@@ -133,7 +133,7 @@ pub(super) fn RetainedAttemptDrawer(
                     break;
                 }
                 #[cfg(target_arch = "wasm32")]
-                gloo_timers::future::TimeoutFuture::new(5_000).await;
+                crate::hooks::visibility::visible_tick(5_000).await;
                 poll_again = cfg!(target_arch = "wasm32");
             }
         }

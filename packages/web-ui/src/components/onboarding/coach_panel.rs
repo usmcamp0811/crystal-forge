@@ -24,7 +24,6 @@
 
 use dioxus::prelude::*;
 use dioxus_router::Navigator;
-use gloo_timers::future::TimeoutFuture;
 
 use super::figures::CoachFigure;
 use super::layout::{
@@ -88,7 +87,7 @@ fn SetupProgressSource() -> Element {
     use_future(move || async move {
         let mut refresh = ctrl.refresh;
         loop {
-            TimeoutFuture::new(SETUP_POLL_MS).await;
+            crate::hooks::visibility::visible_tick(SETUP_POLL_MS).await;
             refresh.set(refresh() + 1);
         }
     });
@@ -174,7 +173,9 @@ pub fn CoachRoot() -> Element {
     };
 
     let surroundings = (ctrl.surroundings)();
-    let viewport = measure_viewport();
+    // The shared measurement is event-driven; measuring here as well would read
+    // layout on every render of the coach.
+    let viewport = surroundings.viewport;
     let narrow = layout::is_narrow(viewport.width);
     let overlay = surroundings.overlay_open;
     // A drawer/modal owns the working surface. On a narrow viewport, use the
@@ -234,8 +235,13 @@ fn CoachBubble() -> Element {
     let page_key = destination.map(setup_page_key).unwrap_or_default();
     let mut position = use_signal(|| None::<(f64, f64)>);
 
-    use_future(move || async move {
-        loop {
+    // Geometry is measured only while the bubble is wanted. The task is keyed on
+    // the target and page and restarts when any condition below changes, which
+    // drops the previous task; otherwise it holds no timer. Values that did not
+    // change are not published.
+    let _tracker = use_resource(use_reactive(
+        (&target, &page_key),
+        move |(target, page_key)| async move {
             let hidden = ctrl
                 .ui
                 .read()
@@ -243,26 +249,33 @@ fn CoachBubble() -> Element {
                 .get(page_key)
                 .copied()
                 .unwrap_or(false);
-            if ctrl.is_admin()
+            let wanted = ctrl.is_admin()
                 && (ctrl.active)().is_none()
                 && ctrl.ui.read().panel == Panel::Minimized
                 && !(ctrl.surroundings)().overlay_open
-                && !hidden
-                && let Some(target) = target
-                && let Some(rect) = find_target_rect(&[target])
-            {
-                let width = web_sys::window()
-                    .and_then(|window| window.inner_width().ok())
-                    .and_then(|value| value.as_f64())
-                    .unwrap_or(1280.0);
-                let x = (rect.left + rect.width / 2.0).min(width - 150.0);
-                position.set(Some((rect.top + rect.height + 12.0, x)));
-            } else {
-                position.set(None);
+                && !hidden;
+            let Some(target) = target.filter(|_| wanted) else {
+                if position.peek().is_some() {
+                    position.set(None);
+                }
+                return;
+            };
+            loop {
+                let next = find_target_rect(&[target]).map(|rect| {
+                    let width = web_sys::window()
+                        .and_then(|window| window.inner_width().ok())
+                        .and_then(|value| value.as_f64())
+                        .unwrap_or(1280.0);
+                    let x = (rect.left + rect.width / 2.0).min(width - 150.0);
+                    (rect.top + rect.height + 12.0, x)
+                });
+                if *position.peek() != next {
+                    position.set(next);
+                }
+                crate::hooks::visibility::visible_tick(600).await;
             }
-            TimeoutFuture::new(600).await;
-        }
-    });
+        },
+    ));
 
     let Some(step) = step else {
         return rsx! {};
