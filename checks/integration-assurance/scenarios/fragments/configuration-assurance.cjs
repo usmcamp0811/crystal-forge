@@ -52,8 +52,18 @@ exports.register = async ctx => {
     }
     await form.getByRole("button", { name: "System & environment", exact: true }).click();
     await form.getByLabel("System name *", { exact: true }).fill("external-assurance");
+    // The parent picker lists registered managed systems from the Systems list
+    // alone: no per-system detail request and no flake lookup.
+    const pickerCalls = [];
+    const onPickerRequest = request => pickerCalls.push(new URL(request.url()).pathname);
+    page.on("request", onPickerRequest);
     await form.getByLabel("Environment *", { exact: true }).selectOption("delivery-proof");
-    await form.getByLabel("Parent host · optional", { exact: true }).selectOption(receipts["delivery.targetId"]);
+    const parentPicker = form.getByLabel("Parent host · optional", { exact: true });
+    await expect(parentPicker.locator(`option[value="${receipts["delivery.targetId"]}"]`)).toHaveCount(1);
+    page.off("request", onPickerRequest);
+    expect(pickerCalls.filter(path => /^\/api\/v1\/systems\/[0-9a-f-]{36}$/.test(path))).toEqual([]);
+    expect(pickerCalls.filter(path => path.startsWith("/api/v1/flakes"))).toEqual([]);
+    await parentPicker.selectOption(receipts["delivery.targetId"]);
     await form.getByRole("button", { name: "Tags", exact: true }).click();
     await expect(form.getByText(/No deployment policy applies/)).toBeVisible();
     await expect(form.getByLabel("Deployment policy", { exact: true })).toHaveCount(0);

@@ -475,10 +475,18 @@ pub fn EnrollmentConfigurationFields(
     }
 }
 
+/// Lists the managed systems already registered in Crystal Forge for one
+/// environment. One list request per page; no per-system detail request and no
+/// flake lookup.
+///
+/// The Systems list contains active registrations only. The server accepts a
+/// parent that is active, managed and in the same environment, so this list
+/// applies the same rule and does not filter by health. An offline parent stays
+/// eligible: it can still be the registered parent of a guest.
 async fn eligible_parents(
     environment: String,
     exclude: Option<Uuid>,
-) -> Result<Vec<SystemDetail>, String> {
+) -> Result<Vec<SystemSummary>, String> {
     if environment.is_empty() {
         return Ok(Vec::new());
     }
@@ -495,31 +503,21 @@ async fn eligible_parents(
         .await
         .map_err(|e| e.to_string())?;
         let last = page >= response.total_pages();
-        for item in response.items {
-            if Some(item.id) == exclude {
-                continue;
-            }
-            // List summaries omit is_active. Verify eligibility from authoritative detail.
-            let detail = client::fetch_system(&item.id)
-                .await
-                .map_err(|e| e.to_string())?;
-            if detail.is_active
-                && detail.management_mode == ManagementMode::Managed
-                && detail.health_status != crate::api::models::HealthStatus::Offline
-                && detail.environment.as_deref() == Some(environment.as_str())
-            {
-                hosts.push(detail);
-            }
-        }
+        hosts.extend(response.items.into_iter().filter(|item| {
+            Some(item.id) != exclude
+                && item.management_mode == ManagementMode::Managed
+                && item.environment.as_deref() == Some(environment.as_str())
+        }));
         if last {
             break;
         }
         page += 1;
     }
+    hosts.sort_by(|a, b| a.hostname.cmp(&b.hostname));
     Ok(hosts)
 }
 
-/// Offers active, nonoffline managed parents in the selected environment.
+/// Offers the registered managed systems of the selected environment as parents.
 /// The server revalidates the association when the request commits.
 #[component]
 pub fn EnrollmentParentField(
@@ -548,7 +546,10 @@ pub fn EnrollmentParentField(
         match parents.read().as_ref() {
             None => rsx! { p { class: "help", "Loading eligible parent hosts…" } },
             Some(Err(message)) => rsx! { p { role: "alert", "Could not load parents: {message}" } button { class: "btn btn-ghost", onclick: move |_| parents.restart(), "Retry parents" } },
-            Some(Ok(hosts)) => rsx! { if hosts.is_empty() { p { class: "help", "No active managed hosts are available in this environment." } } },
+            Some(Ok(hosts)) => rsx! {
+                if environment.is_empty() { p { class: "help", "Select an environment to list its managed systems." } }
+                else if hosts.is_empty() { p { class: "help", "No managed systems are registered in this environment." } }
+            },
         }
         p { class: "help", "A parent can report guest-unit observations. Crystal Forge never starts, stops or deploys the guest. No observation means runtime unknown." }
     }
