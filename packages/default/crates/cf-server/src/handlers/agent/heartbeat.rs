@@ -117,8 +117,10 @@ fn handle_duplicate_active_system_cleanup_result(
 /// publication source failure suppresses the target before claiming deployment;
 /// heartbeat ingestion still commits and the deployment remains retryable.
 /// Optional signed guest reports are validated under the same writer transaction.
-/// Invalid or revoked guest targets reject the heartbeat with 403; older agents
-/// without reports still receive a normal response. Guest evidence never updates
+/// An invalid guest batch, or one naming a guest that is no longer an authorized
+/// target, is discarded whole and stores nothing; the heartbeat itself still
+/// commits and the response carries the parent's current authorized targets.
+/// Older agents without reports receive a normal response. Guest evidence never updates
 /// a guest's system state, scan evidence, or Current CVE/POA&M authority.
 pub async fn log(
     State(state): State<CFState>,

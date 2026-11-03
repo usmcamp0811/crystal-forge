@@ -2704,6 +2704,13 @@ pub async fn update_system_handler(
         )
         .await
         {
+            // A validation failure is the caller's input. A database failure,
+            // including a deadlock or serialization conflict, is not: it must not
+            // reach the client as a 400 carrying SQL error text.
+            if error.downcast_ref::<sqlx::Error>().is_some() {
+                tracing::error!(%system_id, error = %error, "Parent host validation failed to read");
+                return internal_error("Failed to validate parent host");
+            }
             return bad_request(&error.to_string());
         }
         // CONCURRENCY: Source/destination environment locks serialize this
@@ -3243,6 +3250,11 @@ pub async fn update_system_public_key(
     Path(system_id): Path<Uuid>,
     Json(payload): Json<UpdateSystemPublicKeyRequest>,
 ) -> impl IntoResponse {
+    // SECURITY: Replacing an agent key changes who can speak for a host. Like every
+    // other mutating system endpoint, it requires the matching CSRF credentials.
+    if let Err(response) = require_csrf(&headers) {
+        return response;
+    }
     let Some((user_id, roles)) = authenticated_user_roles(&pool, &headers).await else {
         return forbidden();
     };
@@ -3282,12 +3294,23 @@ pub async fn update_system_public_key(
         return bad_request(&format!("Invalid public key: {}", e));
     }
 
-    // Update the public key
-    if update_public_key(&pool, system_id, new_public_key)
-        .await
-        .is_err()
-    {
-        return internal_error("Failed to update public key");
+    // Update the public key. Only an active managed system holds a key: external
+    // and reference registrations hold none, and a conversion that wins the race
+    // makes this a no-op instead of overwriting the newly enrolled key.
+    match update_public_key(&pool, system_id, new_public_key).await {
+        Ok(true) => {}
+        Ok(false) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(ApiError {
+                    error: "key_rotation_not_applicable".into(),
+                    message: "Key rotation applies only to an active managed system.".into(),
+                    details: None,
+                }),
+            )
+                .into_response();
+        }
+        Err(_) => return internal_error("Failed to update public key"),
     }
 
     // Pre-existing behaviour, deliberately unchanged: the key row is already

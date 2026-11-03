@@ -287,13 +287,33 @@ pub async fn update_hostname(pool: &PgPool, system: &System, new_hostname: &str)
     Ok(())
 }
 
-pub async fn update_public_key(pool: &PgPool, system_id: Uuid, new_public_key: &str) -> Result<()> {
-    sqlx::query("UPDATE systems SET public_key = $1, updated_at = NOW() WHERE id = $2")
-        .bind(new_public_key)
-        .bind(system_id)
-        .execute(pool)
-        .await?;
-    Ok(())
+/// Rotates the agent key of an active managed registration.
+///
+/// Returns `true` when the key was replaced and `false` when the registration is
+/// not an active managed system, in which case nothing changes.
+///
+/// CONCURRENCY: The mode check and the write are one statement, so PostgreSQL
+/// evaluates the condition against the locked, current row. A conversion that
+/// commits while this statement waits for the row lock is therefore seen: a
+/// rotation cannot overwrite a key that a conversion just enrolled, and it cannot
+/// write a key onto a nonmanaged registration, which holds none.
+///
+/// # Errors
+/// Returns the database error when the statement fails.
+pub async fn update_public_key(
+    pool: &PgPool,
+    system_id: Uuid,
+    new_public_key: &str,
+) -> Result<bool> {
+    let updated = sqlx::query(
+        "UPDATE systems SET public_key = $1, updated_at = NOW()
+         WHERE id = $2 AND management_mode = 'managed' AND is_active",
+    )
+    .bind(new_public_key)
+    .bind(system_id)
+    .execute(pool)
+    .await?;
+    Ok(updated.rows_affected() == 1)
 }
 
 /// How an update should treat the `fqdn` column.
@@ -2705,6 +2725,71 @@ mod tests {
         tx.rollback().await.unwrap();
     }
 
+    /// Key rotation applies only to an active managed registration. The mode check
+    /// shares the statement with the write, so a conversion cannot be overwritten.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB; never use the preview database"]
+    async fn key_rotation_applies_only_to_an_active_managed_registration(pool: PgPool) {
+        let (_, old_key) = crate::test_utils::crypto::test_public_key_base64();
+        let new_key =
+            PublicKey::from_verifying_key(SigningKey::from_bytes(&[91; 32]).verifying_key())
+                .to_base64();
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems(hostname,public_key,derivation) VALUES('rotating',$1,'') RETURNING id",
+        )
+        .bind(&old_key)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let stored = |pool: PgPool| async move {
+            sqlx::query_scalar::<_, Option<String>>("SELECT public_key FROM systems WHERE id=$1")
+                .bind(id)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+        };
+
+        assert!(update_public_key(&pool, id, &new_key).await.unwrap());
+        assert_eq!(
+            stored(pool.clone()).await.as_deref(),
+            Some(new_key.as_str())
+        );
+
+        // A converted registration holds no key and receives none.
+        sqlx::query("UPDATE systems SET management_mode='reference',public_key=NULL WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!update_public_key(&pool, id, &old_key).await.unwrap());
+        assert_eq!(stored(pool.clone()).await, None);
+
+        // Re-enrolled with a new key, a rotation that arrives later still applies,
+        // but an inactive registration is left alone.
+        sqlx::query("UPDATE systems SET management_mode='managed',public_key=$2 WHERE id=$1")
+            .bind(id)
+            .bind(&old_key)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE systems SET is_active=false WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(!update_public_key(&pool, id, &new_key).await.unwrap());
+        assert_eq!(
+            stored(pool.clone()).await.as_deref(),
+            Some(old_key.as_str())
+        );
+        assert!(
+            !update_public_key(&pool, Uuid::new_v4(), &new_key)
+                .await
+                .unwrap(),
+            "an unknown system is not rotated"
+        );
+    }
+
     /// Reports are keyed by hostname text, so a registration that takes over a
     /// used hostname must not inherit that hostname's earlier reports as current
     /// evidence. Covers registration and rename (migration 0327).
@@ -2712,11 +2797,13 @@ mod tests {
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB; never use the preview database"]
     async fn registration_and_rename_start_a_new_observation_boundary(pool: PgPool) {
         async fn current(pool: &PgPool, hostname: &str) -> i64 {
-            sqlx::query_scalar("SELECT count(*) FROM view_agent_current_system_states WHERE hostname=$1")
-                .bind(hostname)
-                .fetch_one(pool)
-                .await
-                .unwrap()
+            sqlx::query_scalar(
+                "SELECT count(*) FROM view_agent_current_system_states WHERE hostname=$1",
+            )
+            .bind(hostname)
+            .fetch_one(pool)
+            .await
+            .unwrap()
         }
         async fn report(pool: &PgPool, hostname: &str, age: &str) {
             sqlx::query(
@@ -2748,7 +2835,10 @@ mod tests {
         .await
         .unwrap();
         let registered = boundary(&pool, id).await;
-        assert!(registered.is_some(), "a managed registration owns a boundary");
+        assert!(
+            registered.is_some(),
+            "a managed registration owns a boundary"
+        );
         assert_eq!(
             current(&pool, "reused-host").await,
             0,
@@ -2759,11 +2849,13 @@ mod tests {
         assert_eq!(current(&pool, "reused-host").await, 1);
 
         // Metadata edits and key changes keep the boundary.
-        sqlx::query("UPDATE systems SET description='edited',public_key='fixture-key-2' WHERE id=$1")
-            .bind(id)
-            .execute(&pool)
-            .await
-            .unwrap();
+        sqlx::query(
+            "UPDATE systems SET description='edited',public_key='fixture-key-2' WHERE id=$1",
+        )
+        .bind(id)
+        .execute(&pool)
+        .await
+        .unwrap();
         assert_eq!(boundary(&pool, id).await, registered);
         // Callers cannot move it.
         sqlx::query("UPDATE systems SET agent_enrolled_at=now()-interval '1 day' WHERE id=$1")

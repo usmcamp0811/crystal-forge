@@ -83,8 +83,11 @@ pub async fn ingest_tx(
     verified_public_key: &str,
     reports: &[GuestObservation],
 ) -> Result<Option<Vec<GuestObservationTarget>>> {
-    // CONCURRENCY: The snapshot writer serializes mode/association mutations.
-    // Row locks also protect against independent key rotation and deactivation.
+    // CONCURRENCY: This function does not take the snapshot-writer lock. Row locks
+    // serialize it: the parent row is locked FOR UPDATE here, and a guest edit
+    // locks the guest row and then the parent row FOR SHARE, so a mode change,
+    // re-association, key rotation or deactivation either waits for this batch or
+    // is seen by it. The conditions below are re-read under that lock.
     let parent: Option<(Option<Uuid>,)> = sqlx::query_as(
         "SELECT environment_id FROM systems WHERE id=$1 AND management_mode='managed'
          AND is_active AND public_key=$2 FOR UPDATE",

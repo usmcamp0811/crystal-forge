@@ -487,6 +487,7 @@ SQL
       manual_and_periodic_scan_affinity_preserves_session_and_environment_guards \
       retained_observations_lose_runtime_authority_after_mode_conversion \
       registration_and_rename_start_a_new_observation_boundary \
+      key_rotation_applies_only_to_an_active_managed_registration \
       reenrollment_current_config_reads_and_repairs_preserve_history
     echo "=== Selected POA&M authorization, setup, notification, and overdue regressions ==="
     # Current counts and optional assignments have distinct database contracts.
