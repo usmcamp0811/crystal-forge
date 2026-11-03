@@ -2705,6 +2705,116 @@ mod tests {
         tx.rollback().await.unwrap();
     }
 
+    /// Reports are keyed by hostname text, so a registration that takes over a
+    /// used hostname must not inherit that hostname's earlier reports as current
+    /// evidence. Covers registration and rename (migration 0327).
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires an isolated PostgreSQL database with CREATEDB; never use the preview database"]
+    async fn registration_and_rename_start_a_new_observation_boundary(pool: PgPool) {
+        async fn current(pool: &PgPool, hostname: &str) -> i64 {
+            sqlx::query_scalar("SELECT count(*) FROM view_agent_current_system_states WHERE hostname=$1")
+                .bind(hostname)
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        }
+        async fn report(pool: &PgPool, hostname: &str, age: &str) {
+            sqlx::query(
+                "INSERT INTO system_states(hostname,change_reason,store_path,generation,
+                    generation_matches_current_store_path,timestamp)
+                 VALUES($1,'startup',$2,3,true,now()-$3::interval)",
+            )
+            .bind(hostname)
+            .bind(format!("/nix/store/{}-{hostname}", "a".repeat(32)))
+            .bind(age)
+            .execute(pool)
+            .await
+            .unwrap();
+        }
+        async fn boundary(pool: &PgPool, id: Uuid) -> Option<chrono::DateTime<chrono::Utc>> {
+            sqlx::query_scalar("SELECT agent_enrolled_at FROM systems WHERE id=$1")
+                .bind(id)
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        }
+
+        // A hostname with history but no registration, as after a removal.
+        report(&pool, "reused-host", "1 hour").await;
+        let id: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems(hostname,public_key,derivation) VALUES('reused-host','fixture-key','') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let registered = boundary(&pool, id).await;
+        assert!(registered.is_some(), "a managed registration owns a boundary");
+        assert_eq!(
+            current(&pool, "reused-host").await,
+            0,
+            "the earlier registration's report is history, not current evidence"
+        );
+        // A report stored after the registration is current.
+        report(&pool, "reused-host", "0 seconds").await;
+        assert_eq!(current(&pool, "reused-host").await, 1);
+
+        // Metadata edits and key changes keep the boundary.
+        sqlx::query("UPDATE systems SET description='edited',public_key='fixture-key-2' WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(boundary(&pool, id).await, registered);
+        // Callers cannot move it.
+        sqlx::query("UPDATE systems SET agent_enrolled_at=now()-interval '1 day' WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(boundary(&pool, id).await, registered);
+
+        // A rename onto a name with history starts a new boundary.
+        report(&pool, "taken-name", "2 hours").await;
+        sqlx::query("UPDATE systems SET hostname='taken-name' WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert!(boundary(&pool, id).await > registered);
+        assert_eq!(
+            current(&pool, "taken-name").await,
+            0,
+            "history under the new name belongs to its earlier user"
+        );
+
+        // A hostname with no report has no history to exclude, so its first
+        // report is current without a boundary. A rename onto such a name keeps
+        // the boundary the registration already had.
+        let fresh: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems(hostname,public_key,derivation) VALUES('fresh-host','fixture-key','') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(boundary(&pool, fresh).await, None);
+        let before_rename = boundary(&pool, id).await;
+        sqlx::query("UPDATE systems SET hostname='unused-name' WHERE id=$1")
+            .bind(id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        assert_eq!(boundary(&pool, id).await, before_rename);
+
+        // Nonmanaged registrations hold no boundary.
+        let reference: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems(hostname,management_mode,derivation) VALUES('golden','reference','') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(boundary(&pool, reference).await, None);
+    }
+
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires an isolated PostgreSQL database with CREATEDB; never use the preview database"]
     async fn management_mode_revocation_blocks_replay_and_cleans_pending_atomically(pool: PgPool) {

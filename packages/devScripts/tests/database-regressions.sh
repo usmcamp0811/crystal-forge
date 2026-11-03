@@ -485,7 +485,9 @@ SQL
       configuration_coverage_and_shared_modes_do_not_confer_runtime \
       scoped_scan_admission_serializes_composite_metadata_race \
       manual_and_periodic_scan_affinity_preserves_session_and_environment_guards \
-      retained_observations_lose_runtime_authority_after_mode_conversion
+      retained_observations_lose_runtime_authority_after_mode_conversion \
+      registration_and_rename_start_a_new_observation_boundary \
+      reenrollment_current_config_reads_and_repairs_preserve_history
     echo "=== Selected POA&M authorization, setup, notification, and overdue regressions ==="
     # Current counts and optional assignments have distinct database contracts.
     # Keep these ignored regressions on the normal isolated execution path.
