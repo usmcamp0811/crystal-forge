@@ -112,7 +112,8 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
 
             div { class: "env-card-stat",
                 div { class: "env-card-stat-num", "{env.system_count}" }
-                div { class: "env-card-stat-label", "systems" }
+                // The count covers every registration, inactive and all modes included.
+                div { class: "env-card-stat-label", "resources" }
                 div { style: "flex:1;" }
                 div { class: "env-card-flakes",
                     if env.flake_names.is_empty() {
@@ -163,7 +164,7 @@ pub fn EnvironmentTable(props: EnvironmentTableProps) -> Element {
                 thead {
                     tr {
                         th { "Environment" }
-                        th { "Systems" }
+                        th { "Resources" }
                         th { "Health" }
                         th { "Deploy" }
                         th { "Enforcement" }

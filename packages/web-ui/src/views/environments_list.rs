@@ -513,7 +513,7 @@ fn StatStrip(props: StatStripProps) -> Element {
     rsx! {
         div { class: "stat-strip",
             StatCard { label: "Total tiers", value: props.total_tiers.to_string(), color: "#a78bfa" }
-            StatCard { label: "Systems", value: props.totals.systems.to_string(), color: "#60a5fa" }
+            StatCard { label: "Resources", value: props.totals.systems.to_string(), color: "#60a5fa" }
             StatCard { label: "Caches", value: cache_value, color: "#34d399" }
             StatCard { label: "Manual policy", value: props.totals.manual_policy.to_string(), color: "#fbbf24" }
             StatCard { label: "Auto-sync off", value: props.totals.auto_sync_off.to_string(), color: "#f87171" }

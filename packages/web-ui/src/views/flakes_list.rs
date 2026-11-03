@@ -3242,7 +3242,10 @@ mod tests {
         invalid.snapshot_token = None;
         assert!(validate_flake_output_page_zero(invalid, &first.revision).is_err());
         let merged = merge_flake_output_pages(first.clone(), page(1, "b")).unwrap();
-        assert_eq!(merged.declared_system_names, Some(vec!["a".into(), "b".into()]));
+        assert_eq!(
+            merged.declared_system_names,
+            Some(vec!["a".into(), "b".into()])
+        );
         assert!(merged.outputs.is_none());
         let mut unknown = first;
         unknown.declared_system_names = None;
@@ -5840,10 +5843,11 @@ pub(crate) fn FlakeTrayNew(
         .and_then(|result| result.as_ref().err())
         .map(flake_snapshot_request_error);
     let output_system_alert = output_snapshot.as_ref().is_some_and(|snapshot| {
-        flake_output_pane_available(FlakePane::Systems, snapshot) && (snapshot.declared_unmanaged_count > 0
-            || snapshot.managed_undeclared_count > 0
-            || snapshot.output_collapsed_count > 0
-            || snapshot.pinned_revision_count > 0)
+        flake_output_pane_available(FlakePane::Systems, snapshot)
+            && (snapshot.declared_unmanaged_count > 0
+                || snapshot.managed_undeclared_count > 0
+                || snapshot.output_collapsed_count > 0
+                || snapshot.pinned_revision_count > 0)
     });
     let output_input_alert = output_snapshot
         .as_ref()
@@ -7207,7 +7211,10 @@ fn merge_flake_output_pages(
     accumulated.previous_outputs =
         merge_flake_output_payloads(accumulated.previous_outputs, page.previous_outputs);
     accumulated.systems.extend(page.systems);
-    if let (Some(names), Some(next)) = (accumulated.declared_system_names.as_mut(), page.declared_system_names) {
+    if let (Some(names), Some(next)) = (
+        accumulated.declared_system_names.as_mut(),
+        page.declared_system_names,
+    ) {
         names.extend(next);
         deduplicate_strings(names);
     }
@@ -7449,10 +7456,13 @@ fn encode_query_component(value: &str) -> String {
         .collect()
 }
 
+/// Navigates to an in-app address through the router.
+///
+/// A full page load (`location.set_href`) restarts the WASM runtime and drops all
+/// client state; the router changes the route and the address in place. The target
+/// page reads its prefill from the address when it mounts.
 fn navigate_href(href: &str) {
-    if let Some(window) = web_sys::window() {
-        let _ = window.location().set_href(href);
-    }
+    navigator().push(href.to_string());
 }
 
 // ============================================================================
