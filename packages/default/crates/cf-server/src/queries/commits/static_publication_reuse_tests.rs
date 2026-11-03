@@ -465,3 +465,34 @@ async fn a_static_publication_never_resolves_a_delivery_source(pool: PgPool) {
         "a static publication yields no delivery read source or credential"
     );
 }
+
+/// Removing a flake removes an origin, its alias and the job the alias adopted.
+/// The alias references the origin and the job with RESTRICT foreign keys, so the
+/// cascade must not trip over its own ordering.
+#[sqlx::test(migrations = "./migrations")]
+#[ignore = "requires owner-run isolated PostgreSQL"]
+async fn flake_deletion_removes_origin_alias_and_adopted_job_together(pool: PgPool) {
+    let f = fixture(&pool).await;
+    adopt(&pool, &f).await;
+    let before: (i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM derivations WHERE reused_build_job_id IS NOT NULL),
+                (SELECT count(*) FROM build_jobs)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(before, (1, 1), "an alias adopted the origin's real job");
+    let mut tx = pool.begin().await.unwrap();
+    crate::queries::flakes::cascade_delete_flake(&mut tx, f.flake)
+        .await
+        .expect("a flake with an adopted job must be deletable");
+    tx.commit().await.unwrap();
+    let after: (i64, i64, i64) = sqlx::query_as(
+        "SELECT (SELECT count(*) FROM derivations), (SELECT count(*) FROM build_jobs),
+                (SELECT count(*) FROM commits)",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(after, (0, 0, 0));
+}

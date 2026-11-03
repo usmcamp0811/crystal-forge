@@ -447,6 +447,7 @@ SQL
       evidence_for_ato \
       framework_version_id_lifecycle \
       hardening_admission_migration_upgrade \
+      management_mode_migration_upgrade \
       policy_counts_defect \
       policy_editor_phase2 \
       poam_workflows \
@@ -493,6 +494,7 @@ SQL
       database_and_legacy_publication_rules_are_unchanged \
       legacy_publication_identity_must_stay_unambiguous \
       scan_of_a_reused_head_fails_closed_without_a_matching_static_publication \
+      flake_deletion_removes_origin_alias_and_adopted_job_together \
       reenrollment_current_config_reads_and_repairs_preserve_history
     echo "=== Selected POA&M authorization, setup, notification, and overdue regressions ==="
     # Current counts and optional assignments have distinct database contracts.
