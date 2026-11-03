@@ -376,6 +376,13 @@ Apply normal migrations in order; do not edit applied migrations:
 | `0318_agent_enrollment_epoch.sql` | Adds the DB-owned nullable epoch, current-enrollment state projection, and Current/POA&M SQL bindings; existing null epochs retain legacy semantics |
 | `0319_system_registration_metadata.sql` | Adds persistent tags and description independently of runtime mode |
 | `0320_inactive_managed_detail_observations.sql` | Preserves inactive managed detail telemetry within its enrollment epoch; Current authority remains active-only |
+| `0321_current_detail_cve_counts.sql` | Detail CVE counts require current enrollment and exact Current authority, never configuration history |
+| `0322_exact_derivation_reuse.sql` | Exact `.drv` reuse (`reused_from_derivation_id`, `reused_build_job_id`), `derivations_share_evidence_scope`, `derivation_publication_eligible`, `view_derivation_execution_evidence`, reuse-aware Current authority |
+| `0323_external_reconciliation_reuse_epoch.sql` | External generation reconciliation applies the same alias and enrollment-epoch rules as Current authority |
+| `0324_system_pinned_commit.sql` | Pinned commit display metadata; a trigger clears it when mode, policy or flake no longer permit it; it never deploys |
+| `0325_current_authority_scan_lookup.sql` | Restores the indexed newest-scan lookup in `view_current_cve_authority` (0322 made it a scan of every completed scan per managed system) without changing its result |
+| `0326_evidence_peer_lookup.sql` | `derivation_evidence_peers(T)` replaces `x = T OR derivations_share_evidence_scope(T, x)` in hot paths; evidence view calls the execution-source function only for adopted jobs; restores the `derivation_path` index and indexes `reused_build_job_id` |
+| `0327_enrollment_epoch_on_registration_and_rename.sql` | A managed registration or rename that claims a hostname with earlier reports starts a new observation boundary, so those reports are history |
 
 Existing enrolled rows remain managed; migration does not infer external or
 reference resources. Constraint failures on legacy blank enrollment keys require
@@ -413,33 +420,34 @@ Source inspected: migrations above; server `models/systems.rs`,
 and queries, scan selectors, dashboard/environment queries, runtime authority
 and POA&M gates; protocol `agent.rs`; agent `guest_observations.rs`; Web UI mode
 components, DTOs, forms, adapters and System Detail evidence/runtime views.
-These are worktree observations, not immutable committed provenance.
 
 The approved TASK-508 presentation is in `docs/design/CrystalForge` at commit
-`18b47eed`. The owner reports the following results; this documentation pass did
-not rerun application tests:
+`18b47eed`. Results below name the commit at which each check ran. A result is
+not evidence for a later commit.
 
-- Disposable SQLx database tests pass for CVE/POA&M enrollment authority,
-  stale-signed state races, wall-clock stamping after row-lock acquisition,
-  current Config reads/drift repair, and inactive managed health. Metadata API
-  and Native declaration database tests also pass.
-- Native frontend tests report 808 passed and one ignored on the latest owner
-  run. This does not prove WASM browser behavior or visual parity.
-- R3 remote managed-agent cases pass in Delivery and Assurance. Access keyless
-  registration and denied cases pass. Delivery's new case failed because
-  `cf-keygen` was absent from the target PATH; the fragment now uses builderA's
-  existing tool, but its rerun remains pending.
-- Assurance browser registration failed with `NoFullOutputSnapshot`. The Native
-  Systems-facet fix is present and has database/pure-UI proof; the VM rerun
-  remains pending. Earlier owner runs failed on a stale SQL assertion and the
-  module loopback default; source fixes do not prove the final owner run.
-- The second normal state-machine full run still failed later at
-  `required_inventory_exact_owner_success_and_conflict` with
-  `EvaluationSuperseded`. Twenty targeted diagnostic runs passed. The full-run
-  failure is not classified as fixed.
+Verified on the branch (see the [coverage map](../testing/integration-coverage-map.md)
+for commands and scope):
 
-Full exact-source integration-access, integration-delivery,
-integration-assurance and upgrade results, final design comparison, dark/light
-and empty/error-state parity, and final SQLx/source alignment remain pending.
-See the [coverage map](../testing/integration-coverage-map.md) for proof scope.
-No fixture observation or simulated Refresh is production evidence.
+- `nix flake check` at `bcb3b79e`: Access 40, Delivery 17, Assurance 65 and
+  Upgrade 13 cases passed.
+- The isolated state-machine workflow passed at `bcb3b79e`.
+- Disposable SQLx tests for derivation reuse, build admission, CVE scans, scan
+  leases, hardening, configuration assurance and POA&M conversion pass on a
+  database migrated through `0326`. Composite-policy integration tests pass
+  (38 of 38). `cargo sqlx prepare --check` passes against `0326`.
+- The Web UI native tests pass (838 passed, one ignored) and the WASM build
+  compiles.
+
+Known limits that remain documented decisions, not hidden defects:
+
+- Remote-only CVE rescans of an artifact built in an earlier builder session fail
+  with `scan_executor_unavailable` after a builder restart (TASK-513). The user
+  accepted this limit for TASK-508.
+- Exact reuse does not adopt a successful job whose publication used a
+  `static` cache destination, so a static-only deployment builds the carrier
+  again (TASK-514). This is not yet decided.
+
+Not verified: complete exact-source integration results at the final commit,
+independent design reference/actual/difference images, and old-agent integration
+with an older agent binary. No fixture observation or simulated Refresh is
+production evidence.
