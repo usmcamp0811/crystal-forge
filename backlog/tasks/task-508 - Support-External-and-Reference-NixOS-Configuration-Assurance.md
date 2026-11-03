@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-11-02T03:16:00Z'
+updated_date: '2026-11-03T15:14:00Z'
 labels:
   - management-mode
   - assurance
@@ -275,6 +275,16 @@ Preview left running: unit cf-task508-preview, http://127.0.0.1:8080 (API 3445, 
 MR !340 review (HEAD 9122782b): changes requested. P1 scan coverage CTE excludes reused configuration carriers; P2 nonmanaged Re-scan compares response.derivation_id (execution source A) to requested carrier B; P1 integration-coverage-map still records superseded failures/unverified proof and exact-HEAD CI pipeline 3015806381 had not finished; parent shown as UUID instead of hostname. Returned to In Progress to fix on the same branch/MR.
 
 2026-11-02 user decision (TASK-513 scope): accept the remote-only cross-session rescan limitation as a known limitation; TASK-513 stays a separate security-design task. Conditions: document it; preserve the failed lifecycle and report scan_executor_unavailable, never as clean/current; verify initial post-build and same-session rescans for external and reference; keep/add regressions for builder-session invalidation, unavailable executors and evidence preservation; do not weaken builder authorization, provenance, environment isolation or lease fencing. The decision waives nothing else (ACs, review findings, CI, browser/design verification).
+
+2026-11-03 maintainer correction pass on MR !340 (head fd8320d9 at time of writing). Corrected: CI failure A (component-tests: preflight_stalled_progress_logger_does_not_delay_child_deadline assumed child startup, stderr read and logger poll all finish within 100 ms; test now sets progress first and records the PID in pre_exec, and a paused-time test proves the no-delay contract) and failure B (state-machine: a Nix parser deadline expiry under CPU starvation was reported as 'custom_check expression is invalid'; now 'Nix syntax validation unavailable' / HTTP 503, still bounded at 2 s, never accepting unparsed input). Both pre-exist on dev @18b47eed.
+
+Migrations added in this pass: 0325 (restores the indexed newest-scan lookup in view_current_cve_authority; single-system read 5.5 s -> 0.75 ms and fleet read >120 s -> 74 ms on 1000 systems / 180k scans), 0326 (derivation_evidence_peers replaces `x = T OR scope(T,x)`; per-admission 1145 ms -> 0.03 ms), 0327 (a managed registration or rename onto a hostname that already has reports starts a new observation boundary), 0328 (static publication reuse, TASK-514), 0329 (guest observation indexes; 277 ms -> 0.24 ms).
+
+Decisions recorded: TASK-513 accepted as a documented limit by the user (remote-only rescans of an earlier builder session fail closed with scan_executor_unavailable). TASK-514 is implemented inside this MR on the user's instruction.
+
+Defects found and fixed: agent key rotation endpoint had no CSRF check and no mode guard (now CSRF + managed/active guard in the same statement, 409 key_rotation_not_applicable); flake deletion failed for systems with guest observations; parent validation returned SQL errors as 400; two comments contradicted the code; Systems page issued ~60 acknowledge requests per second (NAV_BADGES read reactively in the acknowledging effects). Refuted: hard flake delete with RESTRICT alias keys works (tested with 1000 aliases and an adopted job).
+
+Known limits, not defects fixed here: migration 0311 aborts on a legacy managed row with a blank key (documented; applied migrations are not edited); compliance bundle system lists key off view_system_list and were characterized by code reading only (their CVE count fields are crate-internal and not surfaced); remote scans after builder session rotation (TASK-513); the Assurance case for static publication re-records a real database publication as static (named injected prerequisite) because the topology publishes through a database destination.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
