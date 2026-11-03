@@ -88,9 +88,10 @@ async fn apply_migrations_through(pool: &PgPool, version: i64) {
 /// Lets pre-0322 rehearsals build fixtures with current composite helpers.
 ///
 /// Before migration 0322 no derivation alias can exist, so
-/// `derivations_share_evidence_scope` is always false. Install this stub only
-/// in a rehearsal that never applies 0322 itself; the real migration would
-/// otherwise conflict with it.
+/// `derivations_share_evidence_scope` is always false and a derivation's only
+/// evidence peer is itself (`derivation_evidence_peers`, migration 0326). Install
+/// these stubs only in a rehearsal that never applies 0322 or 0326 itself; the
+/// real migrations would otherwise conflict with them.
 async fn install_pre_0322_evidence_scope_stub(pool: &PgPool) {
     sqlx::query(
         "CREATE FUNCTION derivations_share_evidence_scope(integer, integer)
@@ -99,6 +100,13 @@ async fn install_pre_0322_evidence_scope_stub(pool: &PgPool) {
     .execute(pool)
     .await
     .expect("install pre-0322 evidence-scope stub");
+    sqlx::query(
+        "CREATE FUNCTION derivation_evidence_peers(integer)
+         RETURNS SETOF integer LANGUAGE sql STABLE AS 'SELECT $1'",
+    )
+    .execute(pool)
+    .await
+    .expect("install pre-0326 evidence-peers stub");
 }
 
 async fn apply_migration(pool: &PgPool, version: i64) {
