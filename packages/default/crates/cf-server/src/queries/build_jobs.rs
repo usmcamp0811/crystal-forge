@@ -154,7 +154,19 @@ pub(crate) async fn retire_unclaimable_physical_jobs_tx(
     .bind(derivation_id)
     .fetch_all(&mut **tx)
     .await?;
-    for job_id in stale {
+    cancel_unadmitted_queued_jobs_tx(tx, stale).await
+}
+
+/// Cancels queued jobs whose source no longer satisfies artifact admission.
+///
+/// Callers MUST hold the build-derivation lock of every job's physical
+/// derivation and MUST have locked the job rows. Only rows still `queued` change.
+/// Building and cancelling jobs, and completed build or scan history, are kept.
+async fn cancel_unadmitted_queued_jobs_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    job_ids: Vec<Uuid>,
+) -> Result<()> {
+    for job_id in job_ids {
         sqlx::query("UPDATE build_jobs SET status='cancelled',completed_at=now(),updated_at=now(),logs=COALESCE(logs,'') || E'\nCancelled: source configuration no longer satisfies its own artifact admission' WHERE id=$1 AND status='queued'")
             .bind(job_id).execute(&mut **tx).await?;
         crate::queries::cve_scan_leases::fail_post_build_scan_for_terminal_build_tx(
@@ -165,6 +177,69 @@ pub(crate) async fn retire_unclaimable_physical_jobs_tx(
         .await?;
     }
     Ok(())
+}
+
+/// Cancels queued builds that a registration's authority change made unclaimable.
+///
+/// A queued agentless artifact is admitted only while an active external or
+/// reference registration names its configuration. When the registration
+/// becomes managed, the builder claim predicate ([`ARTIFACT_POLICY_PREDICATE`])
+/// rejects the job, which would otherwise stay `queued` forever. The caller's
+/// transaction already holds the system-row lock and has applied the change, so
+/// the predicate sees the new authority. Only the registration's current
+/// configuration name is reconciled; a rename is not covered.
+///
+/// Locks follow the documented order: build-derivation locks (by ascending
+/// physical ID), then job rows. This function cancels only `queued` jobs of the
+/// registration's flake and configuration name. Other registrations that still
+/// qualify keep the job. It does not change completed builds, scans or evidence.
+///
+/// # Errors
+/// Returns database errors; callers roll back the authority change.
+pub(crate) async fn reconcile_queued_jobs_for_registration_tx(
+    tx: &mut Transaction<'_, Postgres>,
+    system_id: Uuid,
+) -> Result<()> {
+    let physical_ids: Vec<i32> = sqlx::query_scalar(&format!(
+        "SELECT DISTINCT derivation_physical_id(d.id) AS physical_id
+         FROM systems registration
+         JOIN commits c ON c.flake_id=registration.flake_id
+         JOIN derivations d ON d.commit_id=c.id
+          AND d.derivation_name=COALESCE(NULLIF(BTRIM(registration.system_configuration_name),''),
+              registration.hostname)
+         JOIN build_jobs job ON job.derivation_id=d.id AND job.status='queued'
+         WHERE registration.id=$1 AND ({ARTIFACT_POLICY_PREDICATE}) IS NOT TRUE
+         ORDER BY physical_id"
+    ))
+    .bind(system_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    for physical_id in &physical_ids {
+        sqlx::query("SELECT pg_advisory_xact_lock($1, $2)")
+            .bind(BUILD_DERIVATION_LOCK_NAMESPACE)
+            .bind(physical_id)
+            .execute(&mut **tx)
+            .await
+            .context("Failed to lock build derivation for registration reconciliation")?;
+    }
+    if physical_ids.is_empty() {
+        return Ok(());
+    }
+    let stale: Vec<Uuid> = sqlx::query_scalar(&format!(
+        "SELECT job.id FROM systems registration
+         JOIN commits c ON c.flake_id=registration.flake_id
+         JOIN derivations d ON d.commit_id=c.id
+          AND d.derivation_name=COALESCE(NULLIF(BTRIM(registration.system_configuration_name),''),
+              registration.hostname)
+         JOIN build_jobs job ON job.derivation_id=d.id
+         WHERE registration.id=$1 AND job.status='queued'
+           AND ({ARTIFACT_POLICY_PREDICATE}) IS NOT TRUE
+         ORDER BY job.id FOR UPDATE OF job"
+    ))
+    .bind(system_id)
+    .fetch_all(&mut **tx)
+    .await?;
+    cancel_unadmitted_queued_jobs_tx(tx, stale).await
 }
 
 /// Acquire the transaction-level advisory lock before reading MAX(queue_position).
@@ -1384,6 +1459,71 @@ mod tests {
                 );
                 tx.rollback().await.unwrap();
             }
+        }
+    }
+
+    /// A mode transition cancels queued agentless builds that lose their only
+    /// qualifying registration. It keeps jobs another registration still
+    /// qualifies and jobs already building. The derivation row is unchanged.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn external_to_managed_transition_reconciles_queued_builds(pool: PgPool) {
+        use crate::models::systems::ManagementMode;
+        use serde_json::json;
+        for (case, second_registration, started_status) in [
+            ("sole", false, "queued"),
+            ("peer-still-qualifies", true, "queued"),
+            ("already-building", false, "building"),
+        ] {
+            let (_commit, derivation) = insert_buildable_derivation(&pool, case, "nixos").await;
+            let (flake, configuration): (i32, String) = sqlx::query_as(
+                "SELECT c.flake_id,d.derivation_name FROM derivations d JOIN commits c ON c.id=d.commit_id WHERE d.id=$1",
+            ).bind(derivation).fetch_one(&pool).await.unwrap();
+            let mut registrations = Vec::new();
+            for index in 0..(1 + usize::from(second_registration)) {
+                let id: Uuid = sqlx::query_scalar(
+                    "INSERT INTO systems(hostname,flake_id,system_configuration_name,management_mode,is_active,derivation)
+                     VALUES($1,$2,$3,'external',TRUE,$3) RETURNING id",
+                ).bind(format!("{case}-{index}-{configuration}")).bind(flake).bind(&configuration)
+                    .fetch_one(&pool).await.unwrap();
+                registrations.push(id);
+            }
+            sqlx::query("UPDATE derivations SET cf_agent_enabled=FALSE,policy_requirements_met=FALSE,policy_results=$2,build_preparation_state='pending' WHERE id=$1")
+                .bind(derivation)
+                .bind(json!({"evaluation_attempt":1,"global":{"cfAgentEnabled":{"passed":false},"artifactAdmission":{"passed":true}}}))
+                .execute(&pool).await.unwrap();
+            assert!(
+                super::enqueue_build_job_for_derivation(&pool, derivation)
+                    .await
+                    .unwrap(),
+                "{case}"
+            );
+            if started_status != "queued" {
+                sqlx::query("UPDATE build_jobs SET status=$2 WHERE derivation_id=$1")
+                    .bind(derivation).bind(started_status).execute(&pool).await.unwrap();
+            }
+
+            let mut tx = pool.begin().await.unwrap();
+            crate::queries::systems::update_management_authority_tx(
+                &mut tx, registrations[0], ManagementMode::Managed, None, Some("test-key"),
+            ).await.unwrap();
+            tx.commit().await.unwrap();
+
+            let (status, logs): (String, Option<String>) = sqlx::query_as(
+                "SELECT status,logs FROM build_jobs WHERE derivation_id=$1",
+            ).bind(derivation).fetch_one(&pool).await.unwrap();
+            if case == "sole" {
+                assert_eq!(status, "cancelled", "{case}");
+                assert!(logs.unwrap_or_default().contains("artifact admission"), "{case}");
+            } else {
+                assert_eq!(status, started_status, "{case}");
+            }
+            // The artifact and its evaluation evidence are unchanged.
+            let (cf_agent, state): (bool, String) = sqlx::query_as(
+                "SELECT cf_agent_enabled,build_preparation_state FROM derivations WHERE id=$1",
+            ).bind(derivation).fetch_one(&pool).await.unwrap();
+            assert!(!cf_agent, "{case}");
+            assert_eq!(state, "pending", "{case}");
         }
     }
 

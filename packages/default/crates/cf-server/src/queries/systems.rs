@@ -2531,7 +2531,8 @@ pub async fn audit_system_metadata_tx(
 /// Callers must validate enrollment, parent and policy before calling. Revocation
 /// supersedes pending instructions and tombstones reservations in the same
 /// transaction as key/target removal. Historical scans and events are retained.
-/// This function never queues deployment work.
+/// This function never queues deployment work. It cancels queued builds that the
+/// new authority makes unclaimable and keeps completed build and scan history.
 /// # Errors
 /// Returns persistence errors; callers must roll back the metadata transaction.
 pub async fn update_management_authority_tx(
@@ -2575,6 +2576,10 @@ pub async fn update_management_authority_tx(
             .execute(&mut **tx)
             .await?;
     }
+    // A queued agentless build stays admitted only while an external or
+    // reference registration names it. Cancel it in this transaction when this
+    // change removes that registration's qualification.
+    crate::queries::build_jobs::reconcile_queued_jobs_for_registration_tx(tx, system_id).await?;
     Ok(())
 }
 

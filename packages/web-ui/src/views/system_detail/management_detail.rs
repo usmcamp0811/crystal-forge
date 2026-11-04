@@ -582,6 +582,48 @@ fn ControlCard(
     } }
 }
 
+/// Returns the observation only when it belongs to this guest and the guest's
+/// current parent. A guest without a parent shows no observation.
+fn observation_for_parent(
+    report: Option<&GuestObservationRow>,
+    system_id: Uuid,
+    parent_host_id: Option<Uuid>,
+) -> Option<GuestObservationRow> {
+    report
+        .filter(|r| r.guest_id == system_id && Some(r.parent_host_id) == parent_host_id)
+        .cloned()
+}
+
+/// Computes the retained observation and the error text after a reload.
+///
+/// A matching reload replaces the observation. A reload for another guest or
+/// parent clears it. A failed reload keeps the previous observation only while
+/// it still belongs to the current parent, because the card must never pair an
+/// old parent's report with the new parent's name.
+fn reconcile_observation(
+    previous: Option<&GuestObservationRow>,
+    reloaded: Result<&Option<GuestObservationRow>, String>,
+    system_id: Uuid,
+    parent_host_id: Option<Uuid>,
+) -> (Option<GuestObservationRow>, Option<String>) {
+    match reloaded {
+        Ok(report)
+            if report.is_none()
+                || observation_for_parent(report.as_ref(), system_id, parent_host_id).is_some() =>
+        {
+            (report.clone(), None)
+        }
+        Ok(_) => (
+            None,
+            Some("Observation identity or parent association did not match.".into()),
+        ),
+        Err(message) => (
+            observation_for_parent(previous, system_id, parent_host_id),
+            Some(message),
+        ),
+    }
+}
+
 #[component]
 fn StoredRuntime(
     system_id: Uuid,
@@ -591,33 +633,38 @@ fn StoredRuntime(
     let mut observation = use_signal(|| None::<GuestObservationRow>);
     let mut error = use_signal(|| None::<String>);
     let mut reload = use_signal(|| 0_u64);
+    // A parent change makes the retained observation stale. Refetch once when
+    // the association changes; the first render is fetched by the resource.
+    let mut loaded_parent = use_signal(|| parent_host_id);
+    use_effect(use_reactive((&parent_host_id,), move |(parent,)| {
+        if *loaded_parent.peek() != parent {
+            loaded_parent.set(parent);
+            reload.with_mut(|count| *count = count.wrapping_add(1));
+        }
+    }));
     let result = use_resource(move || {
         let _ = reload();
         async move { client::fetch_latest_guest_observation(&system_id).await }
     });
     use_effect(move || {
         if let Some(result) = result.read().as_ref() {
-            match result {
-                Ok(report)
-                    if report.as_ref().is_none_or(|r| {
-                        r.guest_id == system_id && Some(r.parent_host_id) == parent_host_id
-                    }) =>
-                {
-                    observation.set(report.clone());
-                    error.set(None);
-                }
-                Ok(_) => error.set(Some(
-                    "Observation identity or parent association did not match.".into(),
-                )),
-                Err(message) => error.set(Some(message.to_string())),
-            }
+            let (next, message) = reconcile_observation(
+                observation.peek().as_ref(),
+                result.as_ref().map_err(|e| e.to_string()),
+                system_id,
+                parent_host_id,
+            );
+            observation.set(next);
+            error.set(message);
         }
     });
+    // INVARIANT: the card names the current parent, so it renders only an
+    // observation that this parent reported. The filter runs at render time
+    // because a parent change can precede the reload.
+    let shown = observation_for_parent(observation().as_ref(), system_id, parent_host_id);
     rsx! {
         div {
-            // The observation is shown only when its parent equals
-            // `parent_host_id`, so this label names the reporting parent.
-            RuntimeCard { observation: observation(), freshness: EvidenceFreshness::Unknown,
+            RuntimeCard { observation: shown, freshness: EvidenceFreshness::Unknown,
                 parent_label,
                 loading: result.state() == UseResourceState::Pending, error: error(),
                 on_reload: move |_| reload.set(reload().wrapping_add(1)),
@@ -1127,6 +1174,74 @@ fn ConfigurationCompliance(system_id: Uuid, evidence: ConfigurationAssurance) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn report(guest: u128, parent: u128) -> GuestObservationRow {
+        GuestObservationRow {
+            id: 1,
+            guest_id: Uuid::from_u128(guest),
+            parent_host_id: Uuid::from_u128(parent),
+            environment_id: Uuid::from_u128(9),
+            guest_identity: "vm".into(),
+            unit: "microvm@vm.service".into(),
+            unit_active_state: Some("active".into()),
+            runner_store_path: None,
+            observed_at: Utc::now(),
+            received_at: Utc::now(),
+        }
+    }
+
+    #[test]
+    fn observation_is_shown_only_for_the_current_parent() {
+        let old = report(1, 10);
+        let guest = Uuid::from_u128(1);
+        // Same parent: shown.
+        assert!(observation_for_parent(Some(&old), guest, Some(Uuid::from_u128(10))).is_some());
+        // Parent reassigned: the old parent's report is hidden before any reload.
+        assert!(observation_for_parent(Some(&old), guest, Some(Uuid::from_u128(11))).is_none());
+        // Parent removed: nothing is shown.
+        assert!(observation_for_parent(Some(&old), guest, None).is_none());
+        // Another guest's report is never shown.
+        assert!(
+            observation_for_parent(Some(&report(2, 10)), guest, Some(Uuid::from_u128(10)))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn reload_outcomes_never_keep_another_parents_observation() {
+        let guest = Uuid::from_u128(1);
+        let (old_parent, new_parent) = (Some(Uuid::from_u128(10)), Some(Uuid::from_u128(11)));
+        let old = report(1, 10);
+        let fresh = Some(report(1, 11));
+
+        // A matching reload replaces the observation and clears the error.
+        assert_eq!(
+            reconcile_observation(Some(&old), Ok(&fresh), guest, new_parent),
+            (fresh.clone(), None)
+        );
+        // No observation for the new parent yet: cleared, no error.
+        assert_eq!(
+            reconcile_observation(Some(&old), Ok(&None), guest, new_parent),
+            (None, None)
+        );
+        // A reload that returns the old parent's report is rejected and cleared.
+        let stale = Some(old.clone());
+        let (kept, error) = reconcile_observation(None, Ok(&stale), guest, new_parent);
+        assert!(kept.is_none() && error.is_some());
+        // Failed reload after reassignment: the old parent's report is dropped.
+        let (kept, error) =
+            reconcile_observation(Some(&old), Err("offline".into()), guest, new_parent);
+        assert!(kept.is_none());
+        assert_eq!(error.as_deref(), Some("offline"));
+        // Failed reload for an unchanged parent keeps the last report.
+        let (kept, error) =
+            reconcile_observation(Some(&old), Err("offline".into()), guest, old_parent);
+        assert_eq!(kept, Some(old));
+        assert_eq!(error.as_deref(), Some("offline"));
+        // Failed reload after the parent was removed: nothing is kept.
+        let (kept, _) = reconcile_observation(Some(&report(1, 10)), Err("x".into()), guest, None);
+        assert!(kept.is_none());
+    }
 
     #[test]
     fn reused_carrier_scan_response_matches_requested_carrier_not_source() {
