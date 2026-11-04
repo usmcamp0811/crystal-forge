@@ -6,7 +6,7 @@ title: >-
 status: Backlog
 assignee: []
 created_date: '2026-11-01T15:39:00Z'
-updated_date: '2026-11-03T05:02:00Z'
+updated_date: '2026-11-04T04:20:00Z'
 labels:
   - tests
   - database
@@ -37,4 +37,6 @@ Second instance found during TASK-508 review fixes: queries::scanning_tests::wai
 Third instance, verified at the base commit 18b47eed in a scratch worktree: queries::cves::tests::newest_attempt_keeps_completed_evidence_after_failed_queued_and_scanning fails there with the same assertion as on the TASK-508 branch (left: Exact, right: MappedRunning at cves.rs). It is #[ignore] and not selected by packages/devScripts/tests/database-regressions.sh, so CI never runs it. It predates TASK-508 (added by TASK-326.2). Not caused by TASK-508 or its 0325/0326 migrations.
 
 Fourth batch, verified at base commit 18b47eed in a scratch worktree (same four failures there as on the TASK-508 branch; none is selected by database-regressions.sh): queries::systems::tests::cve_dedup_migration_counts_distinct_per_severity_correctly and cve_dedup_migration_counts_each_cve_id_once_despite_package_fanout (replaying migration 0111 into a fully migrated schema fails with 'cannot drop columns from view'), hotfix_system_views_cve_counts_from_view_system_vulnerabilities ('cannot create temporary relation in non-temporary schema'), and stale_manual_target_clear_does_not_delete_concurrent_replacement ('operator does not exist: uuid = text'). Not caused by TASK-508.
+
+2026-11-04: two more pre-existing failures found while running the full queries::builders::tests family against a disposable migrated database. queries::builders::tests::test_concurrent_claims_take_top_two_without_duplicates and queries::builders::tests::test_dashboard_queue_matches_next_claim_order_for_queued_items fail the same way at base 18b47eed (verified in a scratch worktree) and at 967b7ea5. Neither runs in the CI harness. Fourteen other tests in that family fail only in a shared run: eleven need a role named postgres, and three ordering tests pass in isolation once earlier failures stop leaving jobs in the shared database. Not caused by TASK-508.
 <!-- SECTION:NOTES:END -->
