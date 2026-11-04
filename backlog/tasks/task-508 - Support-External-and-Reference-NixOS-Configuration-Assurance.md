@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-11-03T15:14:00Z'
+updated_date: '2026-11-04T03:37:00Z'
 labels:
   - management-mode
   - assurance
@@ -287,6 +287,12 @@ Defects found and fixed: agent key rotation endpoint had no CSRF check and no mo
 Known limits, not defects fixed here: migration 0311 aborts on a legacy managed row with a blank key (documented; applied migrations are not edited); compliance bundle system lists key off view_system_list and were characterized by code reading only (their CVE count fields are crate-internal and not surfaced); remote scans after builder session rotation (TASK-513); the Assurance case for static publication re-records a real database publication as static (named injected prerequisite) because the topology publishes through a database destination.
 
 Acceptance honesty, 2026-11-03: AC #12 and #14 were unchecked. #12: compliance metrics for nonmanaged resources have no documented definition row and no mode-aware test (compliance bundle lists were characterized by code reading only). #14: the design-parity review found remaining P2/P3 deviations (for example Add form header copy, Edit footer detail, Systems 'needing attention' count while evidence loads, Scanning/Dashboard denominators) and no independent design reference/actual/difference images exist. AC #8 stays checked: its remote-only session-rotation gap is the user-accepted TASK-513 limit, and static publication reuse (TASK-514) is implemented. AC #15 depends on the Assurance and full exact-head CI results recorded in the MR.
+
+Review response, 2026-11-04 (commits 967b7ea5 and 239dd1ff). P2 queued builds after a mode change: update_management_authority_tx now calls retire_unclaimable_queued_jobs_tx in the same transaction, which cancels queued jobs that fail ARTIFACT_POLICY_PREDICATE; building jobs and the derivation row are kept. Test external_to_managed_transition_reconciles_queued_builds (red/green verified: without the call the job stays queued). P2 stale parent observation: StoredRuntime refetches when parent_host_id changes and shows an observation only when observation.parent_host_id equals the current parent (observation_for_parent, reconcile_observation); two unit tests cover reassignment, removal, mismatch and failed reload.
+
+P1 shared configuration across environments. Decision (user): a configuration is an artifact; full support needs explicit multi-environment build authorization and per-environment cache publication, which is a substantial architectural change, so the documented fail-closed restriction applies (TASK-518 holds the full design). Implemented: migration 0330 derivation_environment(commit,name) is the single rule (config-name beats hostname; one environment = owner; several = ambiguous; no match = absent). ARTIFACT_POLICY_PREDICATE rejects ambiguity, so admission, recovery, all peeks/claims and exact-artifact reuse refuse it; the job environment now comes from the function, not ORDER BY registration.id; the cache resolver calls the same function and raises a typed AmbiguousDerivationEnvironment that the builder API maps to 409 instead of 500; activation records an actionable preparation error; the builder recovery loop runs retire_unclaimable_queued_jobs. A NULL environment was rejected as the fallback: every builder can claim a NULL-environment job and NULL publication selects global destinations. Cost: derivation_environment is about 15 microseconds per call on the 200k-derivation benchmark database. Tests: derivation_environment_rule_is_unique_ambiguous_or_absent, cross_environment_shared_configuration_fails_closed_until_resolved (red/green verified), updated artifact_admission_agentless_shared_registration_uses_one_job (its managed registration in a second environment contradicted the approved restriction, so both registrations now share one environment). Not claimed: no VM integration scenario covers the refusal, and no shared-environment build, publication and scan workflow exists. A cancelled attempt needs a manual retry after the registrations share one environment.
+
+Filed: TASK-517 (queue visibility and queued_jobs wildcard undercount) and TASK-518 (shared-environment execution).
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
