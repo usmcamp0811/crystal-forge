@@ -58,9 +58,8 @@ pub struct AmbiguousDerivationEnvironment;
 
 impl std::fmt::Display for AmbiguousDerivationEnvironment {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(
-            "Ambiguous derivation environment: registrations of this configuration are in more than one environment",
-        )
+        // COMPATIBILITY: tests and log filters match this exact text.
+        f.write_str("Ambiguous derivation environment")
     }
 }
 
