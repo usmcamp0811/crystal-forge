@@ -3595,6 +3595,17 @@ pub async fn activate_evaluated_system_build(
             .fetch_optional(&mut *tx)
             .await?;
 
+            let environment_ambiguous: bool = match &state {
+                Some(state) => {
+                    sqlx::query_scalar("SELECT ambiguous FROM derivation_environment($1, $2)")
+                        .bind(commit_id)
+                        .bind(&state.derivation_name)
+                        .fetch_one(&mut *tx)
+                        .await?
+                }
+                None => false,
+            };
+
             tx.rollback().await?;
 
             let Some(state) = state else {
@@ -3603,6 +3614,16 @@ pub async fn activate_evaluated_system_build(
                     derivation_id,
                 );
             };
+
+            // TEMPORARY RESTRICTION (TASK-518): fail closed with an actionable
+            // reason. The preparation retry admits the job after the registrations
+            // share one environment.
+            if environment_ambiguous {
+                bail!(
+                    "Build refused for configuration {}: its registrations are in more than one environment. Register the configuration in one environment, or remove or move the other registrations. Sharing one configuration across environments is not supported yet.",
+                    state.derivation_name,
+                );
+            }
 
             bail!(
                 "Build activation could not create a build job for derivation {} ({}) with status_id={}, cf_agent_enabled={:?}, policy_requirements_met={}, derivation_path={:?}",

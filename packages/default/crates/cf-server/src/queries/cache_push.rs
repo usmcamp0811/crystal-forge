@@ -46,32 +46,40 @@ pub struct CachePushJob {
     pub cache_destination_source: String,
 }
 
-fn select_derivation_environment(matches: &[(uuid::Uuid, i32)]) -> Result<Option<uuid::Uuid>> {
-    let Some((environment, priority)) = matches.first() else {
-        return Ok(None);
-    };
-    anyhow::ensure!(
-        matches
-            .iter()
-            .filter(|(_, rank)| rank == priority)
-            .all(|(id, _)| id == environment),
-        "Ambiguous derivation environment"
-    );
-    Ok(Some(*environment))
+/// Reports that a derivation's registrations lie in more than one environment.
+///
+/// TEMPORARY RESTRICTION (TASK-518): a configuration shared across
+/// environments has no single owner environment for builders or cache
+/// credentials. Build admission refuses such a derivation, so this error
+/// reaches a caller only for work that was admitted before the registrations
+/// changed. Callers answer with an actionable conflict, not a server error.
+#[derive(Debug)]
+pub struct AmbiguousDerivationEnvironment;
+
+impl std::fmt::Display for AmbiguousDerivationEnvironment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(
+            "Ambiguous derivation environment: registrations of this configuration are in more than one environment",
+        )
+    }
 }
+
+impl std::error::Error for AmbiguousDerivationEnvironment {}
 
 /// Resolves the canonical publication environment on the caller's connection.
 ///
-/// Uses active systems in the commit's flake. Configuration-name matches take
-/// precedence over hostname matches. Equally preferred matches must identify
-/// one environment; no matches (including no commit) select global fallback.
-/// Transactions use this query and decision before reading cache credentials,
-/// so dispatch and completion cannot accept an ambiguity rejected by the pool.
-/// This helper does not acquire destination or assignment locks.
+/// Delegates to the `derivation_environment` SQL function, the same rule that
+/// build admission and builder claims use: active systems in the commit's
+/// flake, configuration-name matches before hostname matches, and equally
+/// preferred matches must identify one environment. No match (including no
+/// commit) selects the global fallback. Transactions use this decision before
+/// reading cache credentials, so dispatch and completion cannot accept an
+/// ambiguity that admission rejected. This helper does not acquire destination
+/// or assignment locks.
 ///
 /// # Errors
-/// Returns an error for equally preferred cross-environment matches or a
-/// database query failure.
+/// Returns [`AmbiguousDerivationEnvironment`] for equally preferred
+/// cross-environment matches, or a database query failure.
 pub(crate) async fn resolve_derivation_environment<'e, E>(
     executor: E,
     commit_id: Option<i32>,
@@ -80,19 +88,14 @@ pub(crate) async fn resolve_derivation_environment<'e, E>(
 where
     E: sqlx::Executor<'e, Database = sqlx::Postgres>,
 {
-    let matches = sqlx::query_as::<_, (uuid::Uuid, i32)>(
-        r#"SELECT s.environment_id,
-                  CASE WHEN NULLIF(s.system_configuration_name, '') = $2 THEN 0 ELSE 1 END
-           FROM systems s JOIN commits c ON c.flake_id = s.flake_id
-           WHERE c.id = $1 AND s.environment_id IS NOT NULL AND s.is_active = TRUE
-             AND (s.hostname = $2 OR NULLIF(s.system_configuration_name, '') = $2)
-           ORDER BY 2"#,
-    )
-    .bind(commit_id)
-    .bind(derivation_name)
-    .fetch_all(executor)
-    .await?;
-    select_derivation_environment(&matches)
+    let (environment, ambiguous): (Option<uuid::Uuid>, bool) =
+        sqlx::query_as("SELECT environment_id, ambiguous FROM derivation_environment($1, $2)")
+            .bind(commit_id)
+            .bind(derivation_name)
+            .fetch_one(executor)
+            .await?;
+    anyhow::ensure!(!ambiguous, AmbiguousDerivationEnvironment);
+    Ok(environment)
 }
 
 /// Returns current enabled destinations eligible for a derivation's environment.
@@ -1542,22 +1545,6 @@ mod niks3_tests {
             select_job_destination("static", None, Some("s3://legacy"), &[], &static_config)
                 .is_err()
         );
-    }
-
-    #[test]
-    fn canonical_environment_rejects_ties_and_preserves_configuration_precedence() {
-        let a = uuid::Uuid::new_v4();
-        let b = uuid::Uuid::new_v4();
-        assert_eq!(select_derivation_environment(&[]).unwrap(), None);
-        assert_eq!(
-            select_derivation_environment(&[(a, 0), (b, 1)]).unwrap(),
-            Some(a)
-        );
-        assert_eq!(
-            select_derivation_environment(&[(a, 0), (a, 0)]).unwrap(),
-            Some(a)
-        );
-        assert!(select_derivation_environment(&[(a, 0), (b, 0)]).is_err());
     }
 
     #[sqlx::test(migrations = "./migrations")]

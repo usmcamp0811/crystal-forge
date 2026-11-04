@@ -2579,7 +2579,7 @@ pub async fn update_management_authority_tx(
     // A queued agentless build stays admitted only while an external or
     // reference registration names it. Cancel it in this transaction when this
     // change removes that registration's qualification.
-    crate::queries::build_jobs::reconcile_queued_jobs_for_registration_tx(tx, system_id).await?;
+    crate::queries::build_jobs::retire_unclaimable_queued_jobs_tx(tx).await?;
     Ok(())
 }
 

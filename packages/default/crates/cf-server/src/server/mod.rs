@@ -1857,6 +1857,19 @@ async fn run_builder_recovery_loop(
             error!("❌ Builder recovery cycle failed: {:#}", err);
         }
 
+        // Registration changes can leave a queued job that no builder may claim.
+        // Cancel it so it does not wait indefinitely.
+        match crate::queries::build_jobs::retire_unclaimable_queued_jobs(&pool).await {
+            Ok(count) if count > 0 => {
+                warn!(
+                    "🧹 Cancelled {} queued builds that no longer satisfy artifact admission",
+                    count
+                );
+            }
+            Ok(_) => {}
+            Err(e) => error!("❌ Queued build revalidation failed: {:#}", e),
+        }
+
         // Periodically recover derivations whose build-preparation task failed.
         // This runs regardless of service restarts so a build job is eventually
         // created without requiring manual intervention or a service restart.

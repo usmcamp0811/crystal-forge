@@ -495,7 +495,10 @@ SQL
       legacy_publication_identity_must_stay_unambiguous \
       scan_of_a_reused_head_fails_closed_without_a_matching_static_publication \
       flake_deletion_removes_origin_alias_and_adopted_job_together \
-      reenrollment_current_config_reads_and_repairs_preserve_history
+      reenrollment_current_config_reads_and_repairs_preserve_history \
+      external_to_managed_transition_reconciles_queued_builds \
+      cross_environment_shared_configuration_fails_closed_until_resolved \
+      derivation_environment_rule_is_unique_ambiguous_or_absent
     echo "=== Selected POA&M authorization, setup, notification, and overdue regressions ==="
     # Current counts and optional assignments have distinct database contracts.
     # Keep these ignored regressions on the normal isolated execution path.

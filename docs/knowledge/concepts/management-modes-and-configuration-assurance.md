@@ -168,6 +168,47 @@ their enforcement semantics. Shared registrations do not fan out build jobs for
 one derivation. Older results without artifact-admission evidence need a new
 evaluation; the server does not rewrite historical policy results.
 
+### One configuration in several environments
+
+A configuration may have several registrations. The SQL function
+`derivation_environment(commit, name)` (migration `0330`) is the single rule that
+build admission, builder claims, exact-artifact reuse and cache publication use
+to find the environment that owns the artifact:
+
+- Only active registrations in the commit's flake count. A registration without
+  an environment is ignored.
+- A `system_configuration_name` match outranks a hostname match. Only the best
+  rank counts.
+- If all counted registrations are in one environment, that environment owns the
+  job and the cache credentials. Two registrations in one environment still give
+  one deduplicated build.
+- If they are in more than one environment, the result is **ambiguous**.
+
+**Temporary restriction (TASK-518).** Sharing one configuration across
+environments is not supported. Safe support needs an explicit multi-environment
+build authorization and per-environment cache publication, so that no builder
+holds another environment's cache credentials. Until then the server fails
+closed:
+
+- `ARTIFACT_POLICY_PREDICATE` rejects an ambiguous derivation. Build admission,
+  recovery, every builder peek and claim, and exact-artifact reuse refuse it.
+  It never becomes a NULL-environment job. Every builder can claim a NULL
+  environment, and NULL publication selects global destinations.
+- Activation records the preparation error "Build refused for configuration X:
+  its registrations are in more than one environment" with the action to take.
+- A job that was queued before the registrations spread is cancelled by the
+  revalidation sweep (`retire_unclaimable_queued_jobs`, run by the builder
+  recovery loop) and by the management-mode transition. A cancelled attempt is
+  history. After the registrations share one environment, retry the build
+  manually. A derivation that was refused before it had any attempt becomes a
+  build-preparation recovery candidate once one environment owns it. Recovery
+  applies its normal retry backoff.
+- A job already building when the registrations spread keeps running. A cache
+  publication step for it answers HTTP 409, not 500.
+
+Build, cache and scan evidence for configurations that share one environment is
+unchanged. Per-registration access control on scans and evidence is unchanged.
+
 Build creation/recovery in `queries/build_jobs.rs` and both peeks and all four
 atomic claim variants in `queries/builders.rs` use this admission. Builder
 session fencing, environment filters, verified-source prerequisites and cache
@@ -404,6 +445,7 @@ Apply normal migrations in order; do not edit applied migrations:
 | `0327_enrollment_epoch_on_registration_and_rename.sql` | A managed registration or rename that claims a hostname with earlier reports starts a new observation boundary, so those reports are history |
 | `0328_static_publication_reuse.sql` | `derivation_publication_eligible` gains a 4-argument overload that also accepts a completed static publication of the exact output whose destination equals the currently effective static cache destination; the 3-argument rule is unchanged |
 | `0329_guest_observation_indexes.sql` | Composite index for the current-parent observation read (277 ms to 0.24 ms with 400,000 former-parent rows) and indexes for the `parent_host_id` and `environment_id` foreign keys |
+| `0330_derivation_environment_resolution.sql` | `derivation_environment(commit, name)` returns the one owner environment of a derivation or reports ambiguity; build admission, claims, reuse and cache publication share it |
 
 Existing enrolled rows remain managed; migration does not infer external or
 reference resources. Constraint failures on legacy blank enrollment keys require
@@ -415,6 +457,10 @@ this documentation pass.
   `artifactAdmission` result and that an active external/reference registration
   still matches the exact flake and configuration; then check builder session,
   environment filter and source prerequisites as for managed builds.
+- **Build refused or cancelled with "more than one environment":** two active
+  registrations of the configuration are in different environments. Move or
+  remove one so that all share one environment, then retry the build if its
+  earlier attempt was cancelled.
 - **No selected artifact/scan:** inspect branch snapshot readiness, exact
   configuration discovery, evaluation outcome, build status and cache push.
   Historical evidence is not a substitute for the selected head.
@@ -460,6 +506,13 @@ for commands and scope):
   compiles.
 
 Known limits that remain documented decisions, not hidden defects:
+
+- A configuration registered in more than one environment cannot be built
+  (TASK-518). The server refuses it with an explicit reason instead of choosing
+  an environment. See [One configuration in several
+  environments](#one-configuration-in-several-environments). No complete
+  shared-environment build, publication and scan workflow exists, so none is
+  claimed.
 
 - Remote-only CVE rescans of an artifact built in an earlier builder session fail
   with `scan_executor_unavailable` after a builder restart (TASK-513). The user
