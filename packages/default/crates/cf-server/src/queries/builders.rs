@@ -53,9 +53,9 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
         FROM build_jobs
         JOIN derivations d ON d.id = build_jobs.derivation_id
         WHERE build_jobs.status = 'queued'
-            AND build_jobs.available_at <= NOW()
+          AND build_jobs.available_at <= NOW()
           AND ($3::uuid IS NULL OR build_jobs.id = $3)
-          AND ({artifact_policy})
+          AND ({artifact_policy_with_env})
         ORDER BY
             build_jobs.queue_position DESC NULLS LAST,
             build_jobs.priority_weight DESC,
@@ -89,7 +89,7 @@ const CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL: &str = r#"
           AND build_jobs.available_at <= NOW()
           AND ($4::uuid IS NULL OR build_jobs.id = $4)
           AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
-          AND ({artifact_policy})
+          AND ({artifact_policy_with_env})
         ORDER BY
             build_jobs.queue_position DESC NULLS LAST,
             build_jobs.priority_weight DESC,
@@ -123,7 +123,7 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL: &str = r#"
         LEFT JOIN flakes f ON f.id = c.flake_id AND f.deleted_at IS NULL
         WHERE build_jobs.status = 'queued'
           AND build_jobs.available_at <= NOW()
-          AND ({artifact_policy})
+          AND ({artifact_policy_with_env})
           AND build_jobs.id = $2
           AND d.commit_id IS NOT NULL
           AND d.derivation_path IS NOT NULL
@@ -159,7 +159,7 @@ const CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL: &str = r#"
         WHERE build_jobs.status = 'queued'
           AND build_jobs.available_at <= NOW()
           AND (build_jobs.environment_id = ANY($2) OR build_jobs.environment_id IS NULL)
-          AND ({artifact_policy})
+          AND ({artifact_policy_with_env})
           AND build_jobs.id = $3
           AND d.commit_id IS NOT NULL
           AND d.derivation_path IS NOT NULL
@@ -1085,7 +1085,7 @@ pub async fn claim_next_job_atomic(
         match execution_strategy {
             RemoteBuildExecutionStrategy::ServerDerivation => sqlx::query_as::<_, BuildJobRow>(
                 &CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL
-                    .replace("{artifact_policy}", ARTIFACT_POLICY_PREDICATE),
+                    .replace("{artifact_policy_with_env}", ARTIFACT_POLICY_WITH_CURRENT_ENVIRONMENT),
             )
             .bind(builder_id)
             .bind(builder_session_id)
@@ -1098,7 +1098,7 @@ pub async fn claim_next_job_atomic(
                     .context("verified-source claim requires a preflighted job ID")?;
                 sqlx::query_as::<_, BuildJobRow>(
                     &CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL
-                        .replace("{artifact_policy}", ARTIFACT_POLICY_PREDICATE),
+                        .replace("{artifact_policy_with_env}", ARTIFACT_POLICY_WITH_CURRENT_ENVIRONMENT),
                 )
                 .bind(builder_id)
                 .bind(job_id)
@@ -1115,7 +1115,7 @@ pub async fn claim_next_job_atomic(
         match execution_strategy {
             RemoteBuildExecutionStrategy::ServerDerivation => sqlx::query_as::<_, BuildJobRow>(
                 &CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL
-                    .replace("{artifact_policy}", ARTIFACT_POLICY_PREDICATE),
+                    .replace("{artifact_policy_with_env}", ARTIFACT_POLICY_WITH_CURRENT_ENVIRONMENT),
             )
             .bind(builder_id)
             .bind(environment_ids)
@@ -1129,7 +1129,7 @@ pub async fn claim_next_job_atomic(
                     .context("verified-source claim requires a preflighted job ID")?;
                 sqlx::query_as::<_, BuildJobRow>(
                     &CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL
-                        .replace("{artifact_policy}", ARTIFACT_POLICY_PREDICATE),
+                        .replace("{artifact_policy_with_env}", ARTIFACT_POLICY_WITH_CURRENT_ENVIRONMENT),
                 )
                 .bind(builder_id)
                 .bind(environment_ids)

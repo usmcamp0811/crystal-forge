@@ -2902,6 +2902,17 @@ pub async fn update_system_handler(
         {
             return internal_error("Failed to audit system update");
         }
+        // CONCURRENCY: Reconcile queued jobs after all registration metadata changes
+        // (mode, parent, environment, flake, config name). A job's stored environment
+        // must match the current derivation_environment() result to remain claimable.
+        if let Err(error) =
+            crate::queries::build_jobs::retire_unclaimable_queued_jobs_tx(&mut tx).await
+        {
+            if retry < 2 && is_system_metadata_serialization_failure(&error) {
+                continue;
+            }
+            return internal_error("Failed to reconcile queued jobs");
+        }
         let mut detail = match get_system_detail_by_id(&mut *tx, system_id).await {
             Ok(Some(row)) => {
                 detail_row_to_api_model(row, state.server_config.heartbeat_interval_secs)

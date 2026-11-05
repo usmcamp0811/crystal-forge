@@ -2991,6 +2991,46 @@ pub async fn get_next_job(
             }
         };
 
+    // SECURITY: Validate that the job's stored environment still matches the
+    // current derivation environment before dispatching cache credentials.
+    // A registration environment change between queue and claim cannot leak
+    // credentials across environment boundaries.
+    match crate::queries::cache_push::resolve_derivation_environment(
+        &state.pool,
+        derivation.commit_id,
+        &derivation.derivation_name,
+    )
+    .await
+    {
+        Ok(current_env) if current_env != job.environment_id => {
+            let status = fail_claimed_job_at_dispatch(
+                &state.pool,
+                &job.id,
+                &builder_id,
+                session_id,
+                "environment_changed",
+                DispatchFailureClass::Fatal,
+                "Job environment no longer matches current derivation environment (stale after registration change)",
+            )
+            .await;
+            return Err(status);
+        }
+        Err(e) => {
+            let status = fail_claimed_job_at_dispatch(
+                &state.pool,
+                &job.id,
+                &builder_id,
+                session_id,
+                "environment_resolution",
+                DispatchFailureClass::Transient,
+                &format!("failed to resolve current derivation environment: {e}"),
+            )
+            .await;
+            return Err(status);
+        }
+        Ok(_) => {} // Environment matches, continue
+    }
+
     let mut source = match verified_source_identity_for_derivation(&state.pool, &derivation).await {
         Ok(source) => source,
         Err(e) => {

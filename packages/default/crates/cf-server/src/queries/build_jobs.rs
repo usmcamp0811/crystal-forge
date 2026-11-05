@@ -46,6 +46,29 @@ pub(crate) const ARTIFACT_POLICY_PREDICATE: &str = r#"
          )))
 "#;
 
+/// Validates that a build_jobs row still satisfies artifact admission AND
+/// its stored environment_id matches the current derivation environment.
+/// Used for claims and reconciliation to detect stale environment ownership.
+pub(crate) const ARTIFACT_POLICY_WITH_CURRENT_ENVIRONMENT: &str = r#"
+    d.build_preparation_state IS DISTINCT FROM 'not_required' AND
+    NOT (SELECT shared.ambiguous FROM derivation_environment(d.commit_id, d.derivation_name) shared) AND
+    build_jobs.environment_id IS NOT DISTINCT FROM (
+        SELECT env.environment_id FROM derivation_environment(d.commit_id, d.derivation_name) env
+    ) AND
+    ((d.cf_agent_enabled IS TRUE AND d.policy_requirements_met IS TRUE)
+     OR (d.cf_agent_enabled IS NOT NULL
+         AND d.policy_results #> '{global,artifactAdmission,passed}' = 'true'::jsonb
+         AND EXISTS (
+             SELECT 1 FROM systems registration
+             JOIN commits artifact_commit ON artifact_commit.id=d.commit_id
+                 AND artifact_commit.flake_id=registration.flake_id
+             WHERE registration.is_active
+                 AND registration.management_mode IN ('external','reference')
+                 AND COALESCE(NULLIF(BTRIM(registration.system_configuration_name), ''),
+                     registration.hostname)=d.derivation_name
+         )))
+"#;
+
 /// Advisory lock serializing all build-queue-position allocations.
 /// Using the ASCII encoding of 'CFBQ' as a 64-bit integer (0x43464251).
 pub const BUILD_QUEUE_ORDER_LOCK_KEY: i64 = 0x4346_4251;
