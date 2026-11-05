@@ -46,27 +46,21 @@ pub(crate) const ARTIFACT_POLICY_PREDICATE: &str = r#"
          )))
 "#;
 
-/// Validates that a build_jobs row still satisfies artifact admission AND
-/// its stored environment_id matches the current derivation environment.
-/// Used for claims and reconciliation to detect stale environment ownership.
-pub(crate) const ARTIFACT_POLICY_WITH_CURRENT_ENVIRONMENT: &str = r#"
-    d.build_preparation_state IS DISTINCT FROM 'not_required' AND
-    NOT (SELECT shared.ambiguous FROM derivation_environment(d.commit_id, d.derivation_name) shared) AND
+/// Requires a queued `build_jobs` row to carry the current owner environment
+/// of its derivation `d`.
+///
+/// SECURITY: A job records its environment when it is queued. A later
+/// registration move changes the owner. Builder authorization and cache
+/// destination selection both depend on the environment, so every queue
+/// selection (peek and claim) MUST apply this predicate with
+/// [`ARTIFACT_POLICY_PREDICATE`]. A builder authorized only for the former
+/// environment then cannot claim the job. [`retire_unclaimable_queued_jobs_tx`]
+/// moves such a job to the current owner.
+pub(crate) const JOB_ENVIRONMENT_IS_CURRENT: &str = r#"
     build_jobs.environment_id IS NOT DISTINCT FROM (
-        SELECT env.environment_id FROM derivation_environment(d.commit_id, d.derivation_name) env
-    ) AND
-    ((d.cf_agent_enabled IS TRUE AND d.policy_requirements_met IS TRUE)
-     OR (d.cf_agent_enabled IS NOT NULL
-         AND d.policy_results #> '{global,artifactAdmission,passed}' = 'true'::jsonb
-         AND EXISTS (
-             SELECT 1 FROM systems registration
-             JOIN commits artifact_commit ON artifact_commit.id=d.commit_id
-                 AND artifact_commit.flake_id=registration.flake_id
-             WHERE registration.is_active
-                 AND registration.management_mode IN ('external','reference')
-                 AND COALESCE(NULLIF(BTRIM(registration.system_configuration_name), ''),
-                     registration.hostname)=d.derivation_name
-         )))
+        SELECT current_owner.environment_id
+        FROM derivation_environment(d.commit_id, d.derivation_name) current_owner
+    )
 "#;
 
 /// Advisory lock serializing all build-queue-position allocations.
@@ -205,15 +199,25 @@ async fn cancel_unadmitted_queued_jobs_tx(
     Ok(())
 }
 
-/// Cancels every queued build that no longer satisfies artifact admission.
+/// Reconciles every queued build with current registrations.
 ///
-/// A registration change can make a queued job permanently unclaimable. Examples
-/// are a transition to managed that removes the only external or reference
-/// registration, and a registration in another environment that makes the
-/// configuration's environment ambiguous. The builder claim predicate
-/// ([`ARTIFACT_POLICY_PREDICATE`]) refuses such a job, which would otherwise stay
-/// `queued` forever. The predicate sees the caller's uncommitted change when the
-/// caller changes a registration in the same transaction.
+/// A registration change can make a queued job unclaimable. This function
+/// applies two rules to `queued` jobs:
+///
+/// - A job that no longer satisfies artifact admission is cancelled. Examples
+///   are a transition to managed that removes the only external or reference
+///   registration, and a registration in another environment that makes the
+///   configuration's environment ambiguous.
+/// - A job that is still admitted, but whose stored environment differs from
+///   the current owner environment, moves to the current owner. An example is
+///   a configuration whose only registration moved from environment A to B.
+///   A queued job has no claim, cache dispatch or credentials yet, so the move
+///   changes no recorded authorization. Without it the claim predicate
+///   ([`JOB_ENVIRONMENT_IS_CURRENT`]) refuses the job forever.
+///
+/// The predicates see the caller's uncommitted change when the caller changes
+/// a registration in the same transaction. Callers MUST call this function
+/// after their last registration write.
 ///
 /// The scan is global because one registration change can affect other
 /// configurations (hostname matches, shared environments).
@@ -222,6 +226,8 @@ async fn cancel_unadmitted_queued_jobs_tx(
 /// physical ID order, then job rows. Only `queued` jobs change. Building and
 /// cancelling jobs, completed builds, scans and evidence are kept.
 ///
+/// Returns the number of cancelled jobs. Moved jobs are not counted.
+///
 /// # Errors
 /// Returns database errors; callers roll back their own change.
 pub(crate) async fn retire_unclaimable_queued_jobs_tx(
@@ -229,8 +235,10 @@ pub(crate) async fn retire_unclaimable_queued_jobs_tx(
 ) -> Result<usize> {
     let physical_ids: Vec<i32> = sqlx::query_scalar(&format!(
         "SELECT DISTINCT derivation_physical_id(d.id) AS physical_id
-         FROM build_jobs job JOIN derivations d ON d.id=job.derivation_id
-         WHERE job.status='queued' AND ({ARTIFACT_POLICY_PREDICATE}) IS NOT TRUE
+         FROM build_jobs JOIN derivations d ON d.id=build_jobs.derivation_id
+         WHERE build_jobs.status='queued'
+           AND (({ARTIFACT_POLICY_PREDICATE}) IS NOT TRUE
+                OR ({JOB_ENVIRONMENT_IS_CURRENT}) IS NOT TRUE)
          ORDER BY physical_id"
     ))
     .fetch_all(&mut **tx)
@@ -248,14 +256,31 @@ pub(crate) async fn retire_unclaimable_queued_jobs_tx(
     }
     // Re-evaluate under the locks: a claim or admission may have won the race.
     let stale: Vec<Uuid> = sqlx::query_scalar(&format!(
-        "SELECT job.id FROM build_jobs job JOIN derivations d ON d.id=job.derivation_id
-         WHERE job.status='queued' AND ({ARTIFACT_POLICY_PREDICATE}) IS NOT TRUE
-         ORDER BY job.id FOR UPDATE OF job"
+        "SELECT build_jobs.id FROM build_jobs JOIN derivations d ON d.id=build_jobs.derivation_id
+         WHERE build_jobs.status='queued' AND ({ARTIFACT_POLICY_PREDICATE}) IS NOT TRUE
+         ORDER BY build_jobs.id FOR UPDATE OF build_jobs"
     ))
     .fetch_all(&mut **tx)
     .await?;
     let cancelled = stale.len();
     cancel_unadmitted_queued_jobs_tx(tx, stale).await?;
+    // INVARIANT: Only still-admitted queued jobs move. The admission predicate
+    // already rejects an ambiguous owner, so the target is one environment or
+    // NULL. NULL is the value job creation stores when no registration of the
+    // configuration has an environment.
+    sqlx::query(&format!(
+        "UPDATE build_jobs
+         SET environment_id = current_owner.environment_id, updated_at = NOW()
+         FROM derivations d
+         CROSS JOIN LATERAL derivation_environment(d.commit_id, d.derivation_name) current_owner
+         WHERE d.id = build_jobs.derivation_id
+           AND build_jobs.status = 'queued'
+           AND build_jobs.environment_id IS DISTINCT FROM current_owner.environment_id
+           AND ({ARTIFACT_POLICY_PREDICATE})"
+    ))
+    .execute(&mut **tx)
+    .await
+    .context("Failed to move queued jobs to their current owner environment")?;
     Ok(cancelled)
 }
 

@@ -2991,44 +2991,37 @@ pub async fn get_next_job(
             }
         };
 
-    // SECURITY: Validate that the job's stored environment still matches the
-    // current derivation environment before dispatching cache credentials.
-    // A registration environment change between queue and claim cannot leak
-    // credentials across environment boundaries.
-    match crate::queries::cache_push::resolve_derivation_environment(
+    // SECURITY: The cache configuration above was selected for the derivation's
+    // current owner environment. Dispatch it only when the claimed job carries
+    // that same environment, which the builder was authorized to claim. The
+    // claim predicate already requires this; this check closes the window in
+    // which a registration moves between claim and dispatch. A move or an
+    // ambiguity is transient: reconciliation re-homes or cancels the job.
+    let owner_mismatch = match crate::queries::cache_push::resolve_derivation_environment(
         &state.pool,
         derivation.commit_id,
         &derivation.derivation_name,
     )
     .await
     {
-        Ok(current_env) if current_env != job.environment_id => {
-            let status = fail_claimed_job_at_dispatch(
-                &state.pool,
-                &job.id,
-                &builder_id,
-                session_id,
-                "environment_changed",
-                DispatchFailureClass::Fatal,
-                "Job environment no longer matches current derivation environment (stale after registration change)",
-            )
-            .await;
-            return Err(status);
-        }
-        Err(e) => {
-            let status = fail_claimed_job_at_dispatch(
-                &state.pool,
-                &job.id,
-                &builder_id,
-                session_id,
-                "environment_resolution",
-                DispatchFailureClass::Transient,
-                &format!("failed to resolve current derivation environment: {e}"),
-            )
-            .await;
-            return Err(status);
-        }
-        Ok(_) => {} // Environment matches, continue
+        Ok(owner) if owner == job.environment_id => None,
+        Ok(_) => Some(
+            "job environment no longer matches the configuration's owner environment".to_owned(),
+        ),
+        Err(e) => Some(format!("failed to resolve the owner environment: {e}")),
+    };
+    if let Some(reason) = owner_mismatch {
+        let status = fail_claimed_job_at_dispatch(
+            &state.pool,
+            &job.id,
+            &builder_id,
+            session_id,
+            "environment_owner",
+            DispatchFailureClass::Transient,
+            &reason,
+        )
+        .await;
+        return Err(status);
     }
 
     let mut source = match verified_source_identity_for_derivation(&state.pool, &derivation).await {

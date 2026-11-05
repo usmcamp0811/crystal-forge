@@ -32,12 +32,18 @@ use crate::models::retry_policy::{
 };
 use crate::queries::attention;
 use crate::queries::build_jobs::{
-    ARTIFACT_POLICY_PREDICATE, lock_build_derivation, lock_build_queue_order,
+    ARTIFACT_POLICY_PREDICATE, JOB_ENVIRONMENT_IS_CURRENT, lock_build_derivation,
+    lock_build_queue_order,
 };
 
 // Claim templates substitute the same artifact gate used by admission and
-// legacy claims. All session, environment, source, and exact-job predicates
-// remain independent requirements; artifact admission grants none of them.
+// legacy claims, plus the current-owner environment check. All session,
+// environment, source, and exact-job predicates remain independent
+// requirements; artifact admission grants none of them.
+fn claimable_job_predicate() -> String {
+    format!("({ARTIFACT_POLICY_PREDICATE}) AND ({JOB_ENVIRONMENT_IS_CURRENT})")
+}
+
 const CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL: &str = r#"
     UPDATE build_jobs
     SET builder_id = $1,
@@ -1085,7 +1091,7 @@ pub async fn claim_next_job_atomic(
         match execution_strategy {
             RemoteBuildExecutionStrategy::ServerDerivation => sqlx::query_as::<_, BuildJobRow>(
                 &CLAIM_NEXT_JOB_SERVER_DERIVATION_WILDCARD_SQL
-                    .replace("{artifact_policy_with_env}", ARTIFACT_POLICY_WITH_CURRENT_ENVIRONMENT),
+                    .replace("{artifact_policy_with_env}", &claimable_job_predicate()),
             )
             .bind(builder_id)
             .bind(builder_session_id)
@@ -1098,7 +1104,7 @@ pub async fn claim_next_job_atomic(
                     .context("verified-source claim requires a preflighted job ID")?;
                 sqlx::query_as::<_, BuildJobRow>(
                     &CLAIM_NEXT_JOB_VERIFIED_SOURCE_WILDCARD_SQL
-                        .replace("{artifact_policy_with_env}", ARTIFACT_POLICY_WITH_CURRENT_ENVIRONMENT),
+                        .replace("{artifact_policy_with_env}", &claimable_job_predicate()),
                 )
                 .bind(builder_id)
                 .bind(job_id)
@@ -1115,7 +1121,7 @@ pub async fn claim_next_job_atomic(
         match execution_strategy {
             RemoteBuildExecutionStrategy::ServerDerivation => sqlx::query_as::<_, BuildJobRow>(
                 &CLAIM_NEXT_JOB_SERVER_DERIVATION_FILTERED_SQL
-                    .replace("{artifact_policy_with_env}", ARTIFACT_POLICY_WITH_CURRENT_ENVIRONMENT),
+                    .replace("{artifact_policy_with_env}", &claimable_job_predicate()),
             )
             .bind(builder_id)
             .bind(environment_ids)
@@ -1129,7 +1135,7 @@ pub async fn claim_next_job_atomic(
                     .context("verified-source claim requires a preflighted job ID")?;
                 sqlx::query_as::<_, BuildJobRow>(
                     &CLAIM_NEXT_JOB_VERIFIED_SOURCE_FILTERED_SQL
-                        .replace("{artifact_policy_with_env}", ARTIFACT_POLICY_WITH_CURRENT_ENVIRONMENT),
+                        .replace("{artifact_policy_with_env}", &claimable_job_predicate()),
                 )
                 .bind(builder_id)
                 .bind(environment_ids)
@@ -1174,6 +1180,7 @@ pub async fn peek_next_server_derivation_job(
                OR build_jobs.environment_id = ANY($1)
                OR build_jobs.environment_id IS NULL)
           AND ({ARTIFACT_POLICY_PREDICATE})
+          AND ({JOB_ENVIRONMENT_IS_CURRENT})
         ORDER BY build_jobs.queue_position DESC NULLS LAST,
                  build_jobs.priority_weight DESC,
                  (SELECT c.commit_timestamp FROM commits c
@@ -1227,6 +1234,7 @@ pub async fn peek_next_verified_source_job(
                OR build_jobs.environment_id = ANY($1)
                OR build_jobs.environment_id IS NULL)
           AND ({ARTIFACT_POLICY_PREDICATE})
+          AND ({JOB_ENVIRONMENT_IS_CURRENT})
           AND d.derivation_path IS NOT NULL
         ORDER BY
             build_jobs.queue_position DESC NULLS LAST,
