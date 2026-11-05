@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-11-04T03:37:00Z'
+updated_date: '2026-11-05T03:12:00Z'
 labels:
   - management-mode
   - assurance
@@ -293,6 +293,19 @@ Review response, 2026-11-04 (commits 967b7ea5 and 239dd1ff). P2 queued builds af
 P1 shared configuration across environments. Decision (user): a configuration is an artifact; full support needs explicit multi-environment build authorization and per-environment cache publication, which is a substantial architectural change, so the documented fail-closed restriction applies (TASK-518 holds the full design). Implemented: migration 0330 derivation_environment(commit,name) is the single rule (config-name beats hostname; one environment = owner; several = ambiguous; no match = absent). ARTIFACT_POLICY_PREDICATE rejects ambiguity, so admission, recovery, all peeks/claims and exact-artifact reuse refuse it; the job environment now comes from the function, not ORDER BY registration.id; the cache resolver calls the same function and raises a typed AmbiguousDerivationEnvironment that the builder API maps to 409 instead of 500; activation records an actionable preparation error; the builder recovery loop runs retire_unclaimable_queued_jobs. A NULL environment was rejected as the fallback: every builder can claim a NULL-environment job and NULL publication selects global destinations. Cost: derivation_environment is about 15 microseconds per call on the 200k-derivation benchmark database. Tests: derivation_environment_rule_is_unique_ambiguous_or_absent, cross_environment_shared_configuration_fails_closed_until_resolved (red/green verified), updated artifact_admission_agentless_shared_registration_uses_one_job (its managed registration in a second environment contradicted the approved restriction, so both registrations now share one environment). Not claimed: no VM integration scenario covers the refusal, and no shared-environment build, publication and scan workflow exists. A cancelled attempt needs a manual retry after the registrations share one environment.
 
 Filed: TASK-517 (queue visibility and queued_jobs wildcard undercount) and TASK-518 (shared-environment execution).
+
+## Complete verification at 4df19a7b (2026-11-04)
+
+Final review-response commit includes P1 shared-environment refusal (migration 0330 derivation_environment), P2 queued-build reconciliation (retire_unclaimable_queued_jobs_tx on authority change), and P2 stale parent observation fix (StoredRuntime refetch on parent_host_id change).
+
+| Check | Result |
+| --- | --- |
+| GitLab pipeline 3025454179 @ 4df19a7b | **exit 0**; 10/10 jobs successful (integration-access, integration-assurance, integration-delivery, integration-upgrade, state-machine-tests, dashboard-visibility-tests, cve-processing-test, component-tests, complexity-check, docs-site-check) |
+| `nix flake check --keep-going` @ 4df19a7b | **exit 0**; Access 40 cases, Assurance 67, Delivery 17, Upgrade 13 passed; 0 failed |
+| Isolated state-machine workflow (devScripts.state-machine-test) @ 4df19a7b | **exit 0**; log task508-state-machine-r12.log; all DATABASE_SELECTION passes (254 passes, 0 failures); cross_environment_shared_configuration_fails_closed_until_resolved, derivation_environment_rule_is_unique_ambiguous_or_absent, external_to_managed_transition_reconciles_queued_builds, niks3_canonical_environment_dispatch_rejects_ambiguity_before_credentials all passed |
+| `cargo sqlx prepare --check` on disposable DB migrated through 0330 @ 4df19a7b | **exit 0** |
+
+All three review findings (P1 shared-environment handling, P2 queued-build reconciliation, P2 stale parent observations) are corrected, tested (red/green verified), and passing in the final evidence.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
