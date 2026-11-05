@@ -86,6 +86,15 @@ pub fn SystemsTable(
     /// Populated by the caller via `attention_row_class()`.
     #[props(default)]
     attention_classes: HashMap<Uuid, String>,
+    /// Groups external guests under their managed parent host after sorting.
+    #[props(default)]
+    group_guests: bool,
+    /// Hosts whose grouped guests are hidden.
+    #[props(default)]
+    collapsed_hosts: std::collections::HashSet<Uuid>,
+    /// Shows or hides the grouped guests of one host.
+    #[props(default)]
+    on_toggle_guests: Option<EventHandler<Uuid>>,
 ) -> Element {
     let mut sort_column = use_signal(|| None::<SystemsSortColumn>);
     let mut sort_direction = use_signal(|| SortDirection::Asc);
@@ -135,6 +144,12 @@ pub fn SystemsTable(
         }
         sorted
     };
+    // Sorting orders hosts; grouping then keeps each guest under its host.
+    let listed_systems = crate::views::systems_list::systems_list_helpers::group_guests(
+        &sorted_systems,
+        group_guests,
+        &collapsed_hosts,
+    );
 
     let current_col = *sort_column.read();
     let current_dir = *sort_direction.read();
@@ -171,8 +186,11 @@ pub fn SystemsTable(
                         }
                     }
                     tbody {
-                        for system in sorted_systems {
+                        for crate::views::systems_list::systems_list_helpers::ListedSystem { system, guests, indent } in listed_systems {
                             {let managed = system.management_mode == ManagementMode::Managed;
+                            let guest_class = if indent { " row-guest" } else { "" };
+                            let guests_collapsed = collapsed_hosts.contains(&system.id);
+                            let host_id = system.id;
                             let assurance = evidence.get(&system.id).and_then(|r| r.as_ref().ok());
                             rsx! {
                             tr {
@@ -186,8 +204,8 @@ pub fn SystemsTable(
                                     attention_classes
                                         .get(&system.id)
                                         .filter(|s| !s.is_empty())
-                                        .map(|ac| format!("{base} {ac}"))
-                                        .unwrap_or_else(|| base.to_string())
+                                        .map(|ac| format!("{base} {ac}{guest_class}"))
+                                        .unwrap_or_else(|| format!("{base}{guest_class}"))
                                 },
                                 onclick: move |_| {
                                     on_open.call(system.id);
@@ -206,6 +224,13 @@ pub fn SystemsTable(
                                                 class: "hostname",
                                                 "{system.hostname}"
                                                 MgmtChip { mode: system.management_mode }
+                                                crate::components::system::system_card_v2::GuestToggle {
+                                                    guests,
+                                                    collapsed: guests_collapsed,
+                                                    on_toggle: on_toggle_guests.map(|handler| {
+                                                        EventHandler::new(move |_| handler.call(host_id))
+                                                    }),
+                                                }
                                             }
                                             div { class: "chips-row", for tag in &system.tags { span { class: "chip chip-unknown", "#{tag}" } } }
                                             div {

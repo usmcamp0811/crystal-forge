@@ -169,6 +169,19 @@ pub fn SystemCardV2(
     /// Set to true to show the attention-flash pulse animation on this card.
     #[props(default = false)]
     flash: bool,
+    /// Number of external guests grouped under this managed host. Zero hides
+    /// the guest toggle.
+    #[props(default)]
+    guests: usize,
+    /// True when this host's grouped guests are hidden.
+    #[props(default)]
+    guests_collapsed: bool,
+    /// Shows or hides this host's grouped guests.
+    #[props(default)]
+    on_toggle_guests: Option<EventHandler<()>>,
+    /// True when this card is an external guest shown under its parent host.
+    #[props(default)]
+    indent: bool,
     on_open: EventHandler<()>,
     on_remove: EventHandler<()>,
     on_update_key: EventHandler<()>,
@@ -177,7 +190,12 @@ pub fn SystemCardV2(
     if system.management_mode != ManagementMode::Managed {
         let freshness = freshness.unwrap_or(EvidenceFreshness::Unknown);
         let mode = system.management_mode;
-        let selected_class = if selected { "selected" } else { "" };
+        let selected_class = match (selected, indent) {
+            (true, true) => "selected sys-card-guest",
+            (true, false) => "selected",
+            (false, true) => "sys-card-guest",
+            (false, false) => "",
+        };
         let config = system
             .system_configuration_name
             .as_deref()
@@ -455,6 +473,7 @@ pub fn SystemCardV2(
                 class: "sys-card-foot",
                 div {
                     class: "chips-row",
+                    GuestToggle { guests, collapsed: guests_collapsed, on_toggle: on_toggle_guests }
                     // Health chip
                     Chip {
                         variant: health_chip_variant(&system.health_status),
@@ -517,6 +536,40 @@ pub fn SystemCardV2(
                     } }
                 }
             }
+        }
+    }
+}
+
+/// Shows the number of external guests grouped under a managed host and
+/// toggles their visibility. Renders nothing when `guests` is zero.
+///
+/// The click does not propagate, so it does not open the host's preview.
+#[component]
+pub fn GuestToggle(
+    guests: usize,
+    collapsed: bool,
+    on_toggle: Option<EventHandler<()>>,
+) -> Element {
+    if guests == 0 {
+        return rsx! {};
+    }
+    let plural = if guests > 1 { "s" } else { "" };
+    let title = if collapsed { "Show external guests" } else { "Hide external guests" };
+    let rotation = if collapsed { "transform: rotate(-90deg); display: inline-flex;" } else { "display: inline-flex;" };
+    rsx! {
+        button {
+            r#type: "button",
+            class: "chip chip-unknown guest-toggle focus-ring",
+            "aria-expanded": "{!collapsed}",
+            title: "{title}",
+            onclick: move |evt| {
+                evt.stop_propagation();
+                if let Some(handler) = on_toggle {
+                    handler.call(());
+                }
+            },
+            span { style: "{rotation}", Icon { name: IconName::ChevronDown, size: 10 } }
+            "{guests} guest{plural}"
         }
     }
 }

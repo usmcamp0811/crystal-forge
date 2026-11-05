@@ -15,7 +15,7 @@ use crate::api::models::{
     SystemHistoryEntry, SystemSummary, SystemsListParams, UpdateUserPreferences,
 };
 use crate::components::environments::{normalize_color_hex, with_alpha};
-use crate::components::filters::ViewMode;
+use crate::components::filters::{FilterOption, MultiFilter, ViewMode};
 use crate::components::forms::{AddSystemForm, NewSystemDraft, validate_new_system};
 use crate::components::heartbeat_spinner::HeartbeatSpinner;
 use crate::components::icon::{Icon, IconName};
@@ -67,9 +67,9 @@ fn came_from_setup() -> bool {
 }
 
 #[path = "systems_list_helpers.rs"]
-mod systems_list_helpers;
+pub(crate) mod systems_list_helpers;
 use systems_list_helpers::{
-    evidence_issue, matches_environment, matches_flake, matches_parent_search, matches_search,
+    ListedSystem, evidence_issue, group_guests, hosts_with_guests, matches_any, matches_environment, matches_flake, matches_parent_search, matches_search,
     matches_status, normalize_optional, normalize_policy, prefers_view_from_query,
     remove_system_by_id, systems_missing_flake_count, systems_missing_heartbeat_count,
     unique_environments, update_key_for_system,
@@ -165,14 +165,18 @@ pub fn SystemsListView() -> Element {
     let view_mode = use_memo(move || ViewMode::from_storage(default_view.read().clone().into()));
     let is_compact = use_memo(move || density.read().as_str() == "compact");
 
-    // Filter state — single-select values matching the design's filter bar
-    // ("all" mirrors the design's "All environments/statuses/flakes" options).
+    // Filter state: one multi-select per design filter. An empty selection
+    // means "All …". Values are OR within a filter and AND across filters.
     let mut search = use_signal(String::new);
-    let mut environment_filter = use_signal(|| "all".to_string());
-    let mut status_filter = use_signal(|| "all".to_string());
-    let mut flake_filter = use_signal(|| "all".to_string());
-    let mut mode_filter = use_signal(|| "all".to_string());
-    let mut tag_filter = use_signal(String::new);
+    let mut environment_filter = use_signal(Vec::<String>::new);
+    let mut status_filter = use_signal(Vec::<String>::new);
+    let mut flake_filter = use_signal(Vec::<String>::new);
+    let mut mode_filter = use_signal(Vec::<String>::new);
+    let mut tag_filter = use_signal(Vec::<String>::new);
+    // Guest grouping is on by default in the design. Collapse state is keyed
+    // by host ID and is view state only.
+    let mut group_guests_enabled = use_signal(|| true);
+    let mut collapsed_hosts = use_signal(std::collections::HashSet::<Uuid>::new);
 
     use_effect(move || {
         let Some(focus) = navigation_focus() else {
@@ -183,7 +187,7 @@ pub fn SystemsListView() -> Element {
         }
 
         if let Some(flake_name) = focus.flake_name.clone() {
-            flake_filter.set(flake_name);
+            flake_filter.set(vec![flake_name]);
             search.set(String::new());
         }
         navigation_focus.set(None);
@@ -420,18 +424,19 @@ pub fn SystemsListView() -> Element {
             let flake_name = flake_info.map(|(_, name, _, _)| name.as_str());
             let flake_commit = flake_info.and_then(|(_, _, _, commit)| commit.as_deref());
 
-            matches_environment(system, &environment_filter.read())
-                && matches_tag(&system.tags, &tag_filter())
-                && (*mode_filter.read() == "all"
-                    || system.management_mode.as_str() == mode_filter.read().as_str())
-                && (if system.management_mode != ManagementMode::Managed
-                    && matches!(status_filter.read().as_str(), "evidence" | "attention")
-                {
-                    needs_attention(system)
-                } else {
-                    matches_status(system, &status_filter.read())
+            matches_any(&environment_filter.read(), |env| matches_environment(system, env))
+                && matches_any(&tag_filter.read(), |tag| matches_tag(&system.tags, tag))
+                && matches_any(&mode_filter.read(), |mode| system.management_mode.as_str() == mode)
+                && matches_any(&status_filter.read(), |status| {
+                    if system.management_mode != ManagementMode::Managed
+                        && matches!(status, "evidence" | "attention")
+                    {
+                        needs_attention(system)
+                    } else {
+                        matches_status(system, status)
+                    }
                 })
-                && matches_flake(flake_name, &flake_filter.read())
+                && matches_any(&flake_filter.read(), |flake| matches_flake(flake_name, flake))
                 && (matches_search(system, &search.read(), flake_name, flake_commit)
                     || matches_parent_search(system, &current_systems, &search.read())
                     || searches_tags(&system.tags, &search.read()))
@@ -439,11 +444,25 @@ pub fn SystemsListView() -> Element {
         .cloned()
         .collect();
     let has_active_filters = !search.read().trim().is_empty()
-        || *environment_filter.read() != "all"
-        || *status_filter.read() != "all"
-        || *flake_filter.read() != "all"
-        || *mode_filter.read() != "all"
-        || !tag_filter().is_empty();
+        || !environment_filter.read().is_empty()
+        || !status_filter.read().is_empty()
+        || !flake_filter.read().is_empty()
+        || !mode_filter.read().is_empty()
+        || !tag_filter.read().is_empty();
+    let mut clear_all_filters = move || {
+        search.set(String::new());
+        environment_filter.set(Vec::new());
+        status_filter.set(Vec::new());
+        flake_filter.set(Vec::new());
+        mode_filter.set(Vec::new());
+        tag_filter.set(Vec::new());
+    };
+    let listed_systems = group_guests(
+        &filtered_systems,
+        group_guests_enabled(),
+        &collapsed_hosts.read(),
+    );
+    let grouped_hosts = hosts_with_guests(&listed_systems);
     let mut fleet_tags = std::collections::BTreeMap::<String, usize>::new();
     for system in &current_systems {
         for tag in &system.tags {
@@ -456,6 +475,67 @@ pub fn SystemsListView() -> Element {
         .iter()
         .filter(|s| needs_attention(s))
         .count();
+    // Filter options. Counts are fleet totals, as in the design, not counts
+    // within the current filtered result.
+    let option = |value: &str, label: String, count: Option<usize>| FilterOption {
+        value: value.to_owned(),
+        label,
+        count,
+    };
+    let mode_options: Vec<FilterOption> =
+        [ManagementMode::Managed, ManagementMode::External, ManagementMode::Reference]
+            .into_iter()
+            .map(|mode| {
+                let count = current_systems.iter().filter(|s| s.management_mode == mode).count();
+                option(mode.as_str(), mode.long_label().to_string(), Some(count))
+            })
+            .collect();
+    let environment_options: Vec<FilterOption> = dropdown_environments
+        .iter()
+        .map(|env| {
+            let count = current_systems
+                .iter()
+                .filter(|s| matches_environment(s, env))
+                .count();
+            option(env, env.clone(), Some(count))
+        })
+        .collect();
+    let evidence_issue_count = current_systems
+        .iter()
+        .filter(|s| s.management_mode != ManagementMode::Managed && needs_attention(s))
+        .count();
+    let status_options = vec![
+        option("online", "Online (managed)".into(), None),
+        option("warning", "Warning / drift".into(), None),
+        option("critical", "Critical".into(), None),
+        option("offline", "Offline".into(), None),
+        option(
+            "evidence",
+            "Evidence issues (external / reference)".into(),
+            Some(evidence_issue_count),
+        ),
+        option("attention", "Needs attention".into(), None),
+    ];
+    let flake_options: Vec<FilterOption> = registered_flakes
+        .iter()
+        .map(|flake| {
+            let count = current_systems
+                .iter()
+                .filter(|s| {
+                    let name = s
+                        .flake_id
+                        .and_then(|id| flake_context.iter().find(|(fid, ..)| *fid == id))
+                        .map(|(_, name, _, _)| name.as_str());
+                    matches_flake(name, flake)
+                })
+                .count();
+            option(flake, flake.clone(), Some(count))
+        })
+        .collect();
+    let tag_options: Vec<FilterOption> = fleet_tags
+        .iter()
+        .map(|(tag, count)| option(tag, format!("#{tag}"), Some(*count)))
+        .collect();
     let systems_subtitle = if *loading.read() {
         "Loading systems…".to_string()
     } else if load_error.read().is_some() {
@@ -648,7 +728,7 @@ pub fn SystemsListView() -> Element {
                         class: "page-subtitle",
                         "{systems_subtitle}"
                         if subtitle_ready {
-                            span { class: "link-action focus-ring", role: "button", tabindex: "0", onclick: move |_| status_filter.set("attention".into()), "{attention_count} needing attention" }
+                            span { class: "link-action focus-ring", role: "button", tabindex: "0", onclick: move |_| status_filter.set(vec!["attention".into()]), "{attention_count} needing attention" }
                         }
                     }
                 }
@@ -850,72 +930,75 @@ pub fn SystemsListView() -> Element {
                             oninput: move |evt| search.set(evt.value()),
                         }
                     }
-                    select {
-                        class: "input filter-select focus-ring",
-                        "aria-label": "Filter by management mode",
-                        style: "width: auto;",
-                        value: "{mode_filter}",
-                        onchange: move |evt| mode_filter.set(evt.value()),
-                        option { value: "all", "All management" }
-                        for mode in [ManagementMode::Managed, ManagementMode::External, ManagementMode::Reference] {
-                            option { value: mode.as_str(), "{mode.long_label()} · {current_systems.iter().filter(|s| s.management_mode == mode).count()}" }
+                    MultiFilter {
+                        label: "Management",
+                        all_label: "All management",
+                        options: mode_options,
+                        selected: mode_filter(),
+                        on_change: move |v| mode_filter.set(v),
+                    }
+                    MultiFilter {
+                        label: "Environment",
+                        all_label: "All environments",
+                        options: environment_options,
+                        selected: environment_filter(),
+                        on_change: move |v| environment_filter.set(v),
+                    }
+                    MultiFilter {
+                        label: "Status",
+                        all_label: "All statuses",
+                        options: status_options,
+                        selected: status_filter(),
+                        on_change: move |v| status_filter.set(v),
+                    }
+                    MultiFilter {
+                        label: "Flake",
+                        all_label: "All flakes",
+                        options: flake_options,
+                        selected: flake_filter(),
+                        on_change: move |v| flake_filter.set(v),
+                    }
+                    MultiFilter {
+                        label: "Tag",
+                        all_label: "All tags",
+                        options: tag_options,
+                        selected: tag_filter(),
+                        on_change: move |v| tag_filter.set(v),
+                    }
+                    if has_active_filters {
+                        button {
+                            class: "btn btn-ghost focus-ring xs",
+                            onclick: move |_| clear_all_filters(),
+                            Icon { name: IconName::X, size: 11 }
+                            " Clear filters"
                         }
                     }
-                    // Environment select (design: "All environments")
-                    select {
-                        class: "input filter-select focus-ring",
-                        style: "width: auto;",
-                        "aria-label": "Filter by environment",
-                        value: "{environment_filter.read()}",
-                        onchange: move |evt| environment_filter.set(evt.value()),
-                        option { value: "all", "All environments" }
-                        for env in dropdown_environments.clone() {
-                            option {
-                                value: "{env}",
-                                selected: *environment_filter.read() == env,
-                                "{env}"
+                    button {
+                        class: if group_guests_enabled() { "btn btn-ghost focus-ring xs mf-on" } else { "btn btn-ghost focus-ring xs" },
+                        "aria-pressed": "{group_guests_enabled()}",
+                        title: "Show external guests under their parent host",
+                        onclick: move |_| group_guests_enabled.toggle(),
+                        Icon { name: IconName::Rows, size: 11 }
+                        " Group guests"
+                    }
+                    if group_guests_enabled() && !grouped_hosts.is_empty() {
+                        {
+                            let any_collapsed = !collapsed_hosts.read().is_empty();
+                            let hosts = grouped_hosts.clone();
+                            rsx! {
+                                button {
+                                    class: "btn btn-ghost focus-ring xs",
+                                    onclick: move |_| {
+                                        if any_collapsed {
+                                            collapsed_hosts.set(Default::default());
+                                        } else {
+                                            collapsed_hosts.set(hosts.iter().copied().collect());
+                                        }
+                                    },
+                                    if any_collapsed { "Expand all" } else { "Collapse all" }
+                                }
                             }
                         }
-                    }
-                    // Status select (design: "All statuses")
-                    select {
-                        class: "input filter-select focus-ring",
-                        style: "width: auto;",
-                        "aria-label": "Filter by status",
-                        value: "{status_filter.read()}",
-                        onchange: move |evt| status_filter.set(evt.value()),
-                        option { value: "all", "All statuses" }
-                        option { value: "online", "Online (managed)" }
-                        option { value: "warning", "Warning / drift" }
-                        option { value: "critical", "Critical" }
-                        option { value: "offline", "Offline" }
-                        option { value: "evidence", "Evidence issues (external / reference)" }
-                        option { value: "attention", "Needs attention" }
-                    }
-                    // Flake select (design: "All flakes")
-                    select {
-                        class: "input filter-select focus-ring",
-                        style: "width: auto;",
-                        "aria-label": "Filter by flake",
-                        value: "{flake_filter.read()}",
-                        onchange: move |evt| flake_filter.set(evt.value()),
-                        option { value: "all", "All flakes" }
-                        for flake in registered_flakes.clone() {
-                            option {
-                                value: "{flake}",
-                                selected: *flake_filter.read() == flake,
-                                "{flake}"
-                            }
-                        }
-                    }
-                    select {
-                        class: "input filter-select focus-ring",
-                        style: "width: auto;",
-                        "aria-label": "Filter by tag",
-                        value: "{tag_filter}",
-                        onchange: move |e| tag_filter.set(e.value()),
-                        option { value: "", "All tags" }
-                        for (tag, count) in fleet_tags { option { value: "{tag}", "#{tag} · {count}" } }
                     }
                     div {
                         class: "seg",
@@ -1004,9 +1087,7 @@ pub fn SystemsListView() -> Element {
                     if has_active_filters {
                         h3 { "No systems match" }
                         div { "Try clearing a filter or changing the search." }
-                        if *mode_filter.read() != "all" || *status_filter.read() != "all" {
-                            button { class: "btn btn-ghost focus-ring", onclick: move |_| { mode_filter.set("all".into()); status_filter.set("all".into()); tag_filter.set(String::new()); }, "Show all management modes" }
-                        }
+                        button { class: "btn btn-ghost focus-ring", style: "margin-top: 10px;", onclick: move |_| clear_all_filters(), "Clear all filters" }
                     } else {
                         h3 { "No systems yet" }
                         div { "Register a managed machine, external system, or reference configuration." }
@@ -1016,9 +1097,22 @@ pub fn SystemsListView() -> Element {
                 div {
                     class: "cards-grid",
                     "data-testid": "systems-cards",
-                    for system in filtered_systems.clone() {
+                    for ListedSystem { system, guests, indent } in listed_systems.clone() {
                         SystemCardV2 {
+                            key: "{system.id}",
                             system: system.clone(),
+                            guests,
+                            indent,
+                            guests_collapsed: collapsed_hosts.read().contains(&system.id),
+                            on_toggle_guests: {
+                                let host = system.id;
+                                move |_| {
+                                    let mut hosts = collapsed_hosts.write();
+                                    if !hosts.remove(&host) {
+                                        hosts.insert(host);
+                                    }
+                                }
+                            },
                             evidence: evidence_for(&system.id).cloned(),
                             freshness: freshness_map.get(&system.id).copied(),
                             evidence_loading,
@@ -1069,6 +1163,14 @@ pub fn SystemsListView() -> Element {
             } else {
                 SystemsTable {
                     systems: filtered_systems.clone(),
+                    group_guests: group_guests_enabled(),
+                    collapsed_hosts: collapsed_hosts.read().clone(),
+                    on_toggle_guests: move |host: Uuid| {
+                        let mut hosts = collapsed_hosts.write();
+                        if !hosts.remove(&host) {
+                            hosts.insert(host);
+                        }
+                    },
                     evidence: evidence_results.clone(),
                     freshness: freshness_map.clone(),
                     evidence_loading,

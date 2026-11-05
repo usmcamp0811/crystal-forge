@@ -9006,3 +9006,25 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
 .management-form-shell .pe-foot>div{display:flex;gap:8px;flex-shrink:0}.management-form-shell .pe-foot-state{font-size:11px;color:var(--cf-text-muted);overflow-wrap:anywhere}
 .management-transition-confirm{display:flex;gap:8px;align-items:flex-start;font-size:12px;line-height:1.5;margin:16px 0}.management-complete{width:min(760px,96vw);max-height:92vh;overflow:auto}.management-complete pre{white-space:pre-wrap;overflow-wrap:anywhere}
 @media(max-width:700px){.management-form-shell{grid-template-columns:minmax(0,1fr);grid-template-rows:auto auto minmax(0,1fr) auto;grid-template-areas:"head" "rail" "body" "foot"}.management-form-shell .pe-rail,.management-form-nav{display:flex;overflow-x:auto;gap:4px}.management-form-shell .pe-rail{border-right:0;border-bottom:1px solid var(--cf-divider);padding:8px}.management-form-shell .pe-rail-item{width:auto;flex-shrink:0}.management-form-shell .pe-body{padding:16px}.management-form-shell .pe-foot{flex-wrap:wrap}.management-form-grid{grid-template-columns:minmax(0,1fr)}}
+
+/* TASK-508 Systems multi-select filters and guest grouping
+   (docs/design/CrystalForge/styles.css at 2d519abc). */
+.mf{position:relative}.mf-btn{display:inline-flex;align-items:center;gap:6px;cursor:pointer;text-align:left;white-space:nowrap;min-width:0;max-width:min(340px,100%)}
+.mf-text{overflow:hidden;text-overflow:ellipsis}.mf-label{color:var(--cf-text-muted)}
+.mf-btn.active{border-color:var(--cf-brand-purple);background:rgba(139,92,246,.08)}
+.mf-count{font-size:10px;font-weight:600;padding:1px 6px;border-radius:999px;background:var(--cf-brand-purple);color:#fff}
+.mf-menu{position:absolute;left:0;top:calc(100% + 4px);z-index:40;min-width:240px;max-height:340px;overflow:auto;padding:6px;background:var(--cf-card-bg);border:1px solid var(--cf-card-border);border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.35);scrollbar-width:thin;scrollbar-color:var(--cf-card-border) transparent}
+.mf-menu::-webkit-scrollbar{width:8px}.mf-menu::-webkit-scrollbar-thumb{background:var(--cf-card-border);border-radius:8px}
+/* Transparent layer under an open menu: a click outside the menu closes it. */
+.mf-backdrop{position:fixed;inset:0;z-index:39}
+.mf-head{display:flex;justify-content:space-between;align-items:center;padding:4px 8px 6px;font-size:10px;text-transform:uppercase;letter-spacing:.06em;font-weight:600;color:var(--cf-text-muted)}
+.mf-head button{background:none;border:0;padding:0;font:inherit;font-size:11px;text-transform:none;letter-spacing:0;color:var(--cf-brand-purple);cursor:pointer}
+.mf-head button:disabled{color:var(--cf-text-muted);opacity:.5;cursor:default}
+.mf-opt{display:flex;align-items:center;gap:9px;padding:7px 8px;border-radius:7px;font-size:13px;color:var(--cf-text-primary);cursor:pointer}
+.mf-opt:hover{background:var(--cf-subtle-bg)}.mf-opt input{accent-color:var(--cf-brand-purple);margin:0}
+.mf-opt-label{flex:1}.mf-opt-count{font-size:11px;color:var(--cf-text-muted)}
+.btn.mf-on{color:var(--cf-brand-purple);border-color:var(--cf-brand-purple)}
+.guest-toggle{cursor:pointer;gap:4px;border:0;font:inherit;font-size:11px}
+.row-guest td:first-child{padding-left:36px;box-shadow:inset 3px 0 0 var(--cf-blue-bg)}
+.row-guest{background:color-mix(in oklab,var(--cf-subtle-bg) 50%,transparent)}
+.sys-card-guest{margin-left:14px;border-left:3px solid rgba(96,165,250,.45)}
