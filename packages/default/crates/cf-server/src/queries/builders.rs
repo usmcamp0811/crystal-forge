@@ -1508,6 +1508,9 @@ pub async fn complete_job_atomic_with_policy(
 /// # Errors
 /// Returns an error for database failures, superseded sessions, non-building
 /// jobs, changed selections, or disabled/ineligible selected destinations.
+/// When a destination is selected, it also returns an error when the job's
+/// environment differs from the configuration's current owner environment,
+/// or the owner is ambiguous.
 ///
 /// # Examples
 /// ```no_run
@@ -1554,6 +1557,26 @@ pub async fn record_job_cache_dispatch(
         }
     }
     if let Some(id) = destination_id {
+        // SECURITY: The builder was authorized to claim this job for the
+        // environment the job carries. Destination eligibility below is decided
+        // for the configuration's current owner environment. Release credentials
+        // only when the two are the same, so a registration move after the
+        // claim cannot give this builder another environment's destination.
+        // The check runs under the job row lock, before any credential read.
+        let (commit_id, derivation_name): (Option<i32>, String) =
+            sqlx::query_as("SELECT commit_id, derivation_name FROM derivations WHERE id = $1")
+                .bind(job.derivation_id)
+                .fetch_one(&mut *tx)
+                .await?;
+        let owner = crate::queries::cache_push::resolve_derivation_environment(
+            &mut *tx,
+            commit_id,
+            &derivation_name,
+        )
+        .await?;
+        if owner != job.environment_id {
+            bail!("Build job environment no longer matches the configuration owner");
+        }
         lock_eligible_cache_destination(&mut tx, id, job.derivation_id).await?;
     }
     if job.cache_dispatch_recorded_at.is_some() {
@@ -4371,6 +4394,17 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+        // The job was claimed before the registrations existed. Give it the
+        // owner environment that admission records for a job queued after
+        // them; dispatch refuses a job whose environment is not the owner.
+        let job = sqlx::query_as::<_, BuildJob>(
+            "UPDATE build_jobs SET environment_id = $2 WHERE id = $1 RETURNING *",
+        )
+        .bind(job.id)
+        .bind(preferred)
+        .fetch_one(pool)
+        .await
+        .unwrap();
         let destination =
             create_public_niks3_test_cache(pool, "preferred-cache", "https://preferred.example")
                 .await;
@@ -4415,6 +4449,144 @@ mod tests {
         assert_eq!(unchanged.status, "building");
         assert!(unchanged.dispatched_cache_destination_id.is_none());
         assert!(unchanged.cache_dispatch_recorded_at.is_none());
+    }
+
+    /// MR !340 review: a registration that moves after a job is claimed must
+    /// not release the new owner environment's cache credentials to that claim.
+    /// The selected destination is eligible for the new owner, so only the
+    /// ownership check can refuse it.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified isolated database creation privileges"]
+    async fn environment_move_after_claim_withholds_cache_dispatch(pool: PgPool) {
+        let (job, builder, destination, _flake, other) = canonical_environment_fixture(&pool).await;
+        let preferred = job.environment_id.expect("fixture job carries its owner");
+        // Assignment replaces the set: keep the original owner and add `other`.
+        crate::queries::cache_destinations::assign_environments_to_cache(
+            &pool,
+            destination.id,
+            &[preferred, other],
+        )
+        .await
+        .unwrap();
+        sqlx::query("UPDATE systems SET environment_id = $1 WHERE hostname = 'preferred-host'")
+            .bind(other)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let error = record_job_cache_dispatch(&pool, &job.id, &builder, None, Some(destination.id))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "Build job environment no longer matches the configuration owner"
+        );
+        let unchanged = get_build_job_by_id(&pool, &job.id).await.unwrap().unwrap();
+        assert_eq!(unchanged.status, "building");
+        assert!(unchanged.dispatched_cache_destination_id.is_none());
+        assert!(unchanged.cache_dispatch_recorded_at.is_none());
+        // With ownership restored, the same claim dispatches the destination.
+        sqlx::query("UPDATE systems SET environment_id = $1 WHERE hostname = 'preferred-host'")
+            .bind(job.environment_id)
+            .execute(&pool)
+            .await
+            .unwrap();
+        let dispatched =
+            record_job_cache_dispatch(&pool, &job.id, &builder, None, Some(destination.id))
+                .await
+                .unwrap();
+        assert_eq!(
+            dispatched.dispatched_cache_destination_id,
+            Some(destination.id)
+        );
+    }
+
+    /// MR !340 review: after an A-to-B move, a builder restricted to A cannot
+    /// claim the queued job, before or after reconciliation; a builder
+    /// restricted to B claims it after reconciliation moves it.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires verified isolated database creation privileges"]
+    async fn environment_move_fences_restricted_builder_claims(pool: PgPool) {
+        let now = Utc::now();
+        let job_id = create_queued_job(
+            &pool,
+            "https://example.com/moved-claim.git",
+            "moved-claim",
+            &"b".repeat(40),
+            now,
+            "moved-config",
+            1.0,
+            now,
+        )
+        .await;
+        let environment = |name: &'static str| {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, Uuid>(
+                    "INSERT INTO environments (name) VALUES ($1) RETURNING id",
+                )
+                .bind(name)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let (a, b) = (environment("claim-a").await, environment("claim-b").await);
+        // The job was queued while its only registration was in A; the
+        // registration has since moved to B.
+        sqlx::query("UPDATE build_jobs SET environment_id = $2 WHERE id = $1")
+            .bind(job_id)
+            .bind(a)
+            .execute(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO systems (hostname, system_configuration_name, public_key, derivation, flake_id, environment_id, is_active)
+             SELECT 'moved-host', 'moved-config', 'test-key', '', c.flake_id, $2, TRUE
+             FROM build_jobs j JOIN derivations d ON d.id = j.derivation_id
+             JOIN commits c ON c.id = d.commit_id WHERE j.id = $1",
+        )
+        .bind(job_id)
+        .bind(b)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let builder_a = create_active_test_builder(&pool, "claim-a-builder").await;
+        let builder_b = create_active_test_builder(&pool, "claim-b-builder").await;
+        update_builder_environments(&pool, &builder_a.id, &[a])
+            .await
+            .unwrap();
+        update_builder_environments(&pool, &builder_b.id, &[b])
+            .await
+            .unwrap();
+        let claim = |builder: Uuid, environments: Vec<Uuid>| {
+            let pool = pool.clone();
+            async move {
+                claim_next_job_atomic(
+                    &pool,
+                    &builder,
+                    4,
+                    &environments,
+                    RemoteBuildExecutionStrategy::ServerDerivation,
+                    None,
+                    None,
+                )
+                .await
+                .unwrap()
+            }
+        };
+        assert!(claim(builder_a.id, vec![a]).await.is_none());
+        assert!(
+            claim(builder_b.id, vec![b]).await.is_none(),
+            "job still carries A"
+        );
+        crate::queries::build_jobs::retire_unclaimable_queued_jobs(&pool)
+            .await
+            .unwrap();
+        assert!(claim(builder_a.id, vec![a]).await.is_none());
+        let claimed = claim(builder_b.id, vec![b])
+            .await
+            .expect("B builder claims the moved job");
+        assert_eq!((claimed.id, claimed.environment_id), (job_id, Some(b)));
     }
 
     #[sqlx::test(migrations = "./migrations")]

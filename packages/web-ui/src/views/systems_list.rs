@@ -69,10 +69,11 @@ fn came_from_setup() -> bool {
 #[path = "systems_list_helpers.rs"]
 pub(crate) mod systems_list_helpers;
 use systems_list_helpers::{
-    ListedSystem, evidence_issue, group_guests, hosts_with_guests, matches_any, matches_environment, matches_flake, matches_parent_search, matches_search,
-    matches_status, normalize_optional, normalize_policy, prefers_view_from_query,
-    remove_system_by_id, systems_missing_flake_count, systems_missing_heartbeat_count,
-    unique_environments, update_key_for_system,
+    ListedSystem, evidence_issue, group_guests, hosts_with_guests, matches_any,
+    matches_environment, matches_flake, matches_parent_search, matches_search, matches_status,
+    normalize_optional, normalize_policy, prefers_view_from_query, remove_system_by_id,
+    systems_missing_flake_count, systems_missing_heartbeat_count, unique_environments,
+    update_key_for_system,
 };
 
 #[derive(Debug, Clone, PartialEq)]
@@ -424,9 +425,12 @@ pub fn SystemsListView() -> Element {
             let flake_name = flake_info.map(|(_, name, _, _)| name.as_str());
             let flake_commit = flake_info.and_then(|(_, _, _, commit)| commit.as_deref());
 
-            matches_any(&environment_filter.read(), |env| matches_environment(system, env))
-                && matches_any(&tag_filter.read(), |tag| matches_tag(&system.tags, tag))
-                && matches_any(&mode_filter.read(), |mode| system.management_mode.as_str() == mode)
+            matches_any(&environment_filter.read(), |env| {
+                matches_environment(system, env)
+            }) && matches_any(&tag_filter.read(), |tag| matches_tag(&system.tags, tag))
+                && matches_any(&mode_filter.read(), |mode| {
+                    system.management_mode.as_str() == mode
+                })
                 && matches_any(&status_filter.read(), |status| {
                     if system.management_mode != ManagementMode::Managed
                         && matches!(status, "evidence" | "attention")
@@ -436,7 +440,9 @@ pub fn SystemsListView() -> Element {
                         matches_status(system, status)
                     }
                 })
-                && matches_any(&flake_filter.read(), |flake| matches_flake(flake_name, flake))
+                && matches_any(&flake_filter.read(), |flake| {
+                    matches_flake(flake_name, flake)
+                })
                 && (matches_search(system, &search.read(), flake_name, flake_commit)
                     || matches_parent_search(system, &current_systems, &search.read())
                     || searches_tags(&system.tags, &search.read()))
@@ -482,14 +488,20 @@ pub fn SystemsListView() -> Element {
         label,
         count,
     };
-    let mode_options: Vec<FilterOption> =
-        [ManagementMode::Managed, ManagementMode::External, ManagementMode::Reference]
-            .into_iter()
-            .map(|mode| {
-                let count = current_systems.iter().filter(|s| s.management_mode == mode).count();
-                option(mode.as_str(), mode.long_label().to_string(), Some(count))
-            })
-            .collect();
+    let mode_options: Vec<FilterOption> = [
+        ManagementMode::Managed,
+        ManagementMode::External,
+        ManagementMode::Reference,
+    ]
+    .into_iter()
+    .map(|mode| {
+        let count = current_systems
+            .iter()
+            .filter(|s| s.management_mode == mode)
+            .count();
+        option(mode.as_str(), mode.long_label().to_string(), Some(count))
+    })
+    .collect();
     let environment_options: Vec<FilterOption> = dropdown_environments
         .iter()
         .map(|env| {

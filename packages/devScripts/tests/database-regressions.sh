@@ -498,7 +498,9 @@ SQL
       reenrollment_current_config_reads_and_repairs_preserve_history \
       external_to_managed_transition_reconciles_queued_builds \
       cross_environment_shared_configuration_fails_closed_until_resolved \
-      derivation_environment_rule_is_unique_ambiguous_or_absent
+      derivation_environment_rule_is_unique_ambiguous_or_absent \
+      explicit_name_and_hostname_fallback_share_one_ambiguity_rule \
+      single_owner_environment_move_rehomes_queued_job
     echo "=== Selected POA&M authorization, setup, notification, and overdue regressions ==="
     # Current counts and optional assignments have distinct database contracts.
     # Keep these ignored regressions on the normal isolated execution path.
@@ -1004,6 +1006,8 @@ TOML
       queries::system_states::tests::latest_state_decodes_migrated_history_without_boot_id \
       handlers::api::builders::tests::niks3_builder_and_agent_selection_share_assigned_first_policy \
       queries::builders::tests::niks3_canonical_environment_dispatch_rejects_ambiguity_before_credentials \
+      queries::builders::tests::environment_move_after_claim_withholds_cache_dispatch \
+      queries::builders::tests::environment_move_fences_restricted_builder_claims \
       queries::builders::tests::niks3_canonical_environment_completion_rejects_post_dispatch_ambiguity \
       queries::builders::tests::niks3_preclaim_handler_rejects_legacy_and_allows_capable_builder \
       handlers::api::builders::proxy_dispatch_tests::proxy_credential_dispatch_signed_tcp_next_job \

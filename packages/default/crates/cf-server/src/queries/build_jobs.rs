@@ -1616,8 +1616,8 @@ mod tests {
     }
 
     /// `derivation_environment` is the one rule for admission, claims and
-    /// publication: configuration-name matches beat hostname matches, equal
-    /// preference across environments is ambiguous, and nothing degrades to NULL.
+    /// publication: registrations count by effective configuration identity,
+    /// several environments are ambiguous, and nothing degrades to NULL.
     #[sqlx::test(migrations = "./migrations")]
     #[ignore = "requires isolated migration-backed PostgreSQL"]
     async fn derivation_environment_rule_is_unique_ambiguous_or_absent(pool: PgPool) {
@@ -1649,13 +1649,101 @@ mod tests {
         sqlx::query("UPDATE systems SET is_active=TRUE,environment_id=NULL WHERE id=$1")
             .bind(other).execute(&pool).await.unwrap();
         assert_eq!(resolve(Some(commit), configuration.clone()).await, (Some(dev), false));
-        // A configuration-name match outranks a hostname match in another environment.
+        // A hostname does not count when the registration's explicit name
+        // selects another configuration.
         register_in(&pool, flake, "unrelated-config", "external", &configuration, prod).await;
         assert_eq!(resolve(Some(commit), configuration.clone()).await, (Some(dev), false));
         // Moving the registration back into a second environment is ambiguous.
         sqlx::query("UPDATE systems SET environment_id=$2 WHERE id=$1").bind(first).bind(prod)
             .execute(&pool).await.unwrap();
         assert_eq!(resolve(Some(commit), configuration).await, (None, true));
+    }
+
+    /// MR !340 review: an explicit configuration name and a legacy hostname
+    /// fallback that select the same configuration are one identity. In two
+    /// environments they are ambiguous; 0330 returned the explicit owner.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn explicit_name_and_hostname_fallback_share_one_ambiguity_rule(pool: PgPool) {
+        let (dev, prod) = (environment_named(&pool, "dev").await, environment_named(&pool, "prod").await);
+        let (commit, derivation, flake, configuration) = agentless_artifact(&pool, "mixed").await;
+        let resolve = || {
+            let pool = pool.clone();
+            let configuration = configuration.clone();
+            async move {
+                sqlx::query_as::<_, (Option<Uuid>, bool)>(
+                    "SELECT environment_id, ambiguous FROM derivation_environment($1,$2)",
+                ).bind(commit).bind(configuration).fetch_one(&pool).await.unwrap()
+            }
+        };
+        // Reference "baseline-web" names the configuration explicitly in dev.
+        register_in(&pool, flake, &configuration, "reference", "baseline-web", dev).await;
+        // A legacy managed registration selects it by hostname in prod. A blank
+        // explicit name is a fallback too.
+        let legacy: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems(hostname,flake_id,system_configuration_name,management_mode,public_key,is_active,environment_id,derivation)
+             VALUES($1,$2,'  ','managed','test-key',TRUE,$3,$1) RETURNING id",
+        ).bind(&configuration).bind(flake).bind(prod).fetch_one(&pool).await.unwrap();
+        assert_eq!(resolve().await, (None, true));
+        assert!(!super::enqueue_build_job_for_derivation(&pool, derivation).await.unwrap());
+        assert!(
+            crate::queries::cache_push::resolve_derivation_environment(&pool, Some(commit), &configuration)
+                .await.unwrap_err()
+                .downcast_ref::<crate::queries::cache_push::AmbiguousDerivationEnvironment>()
+                .is_some()
+        );
+        // With the legacy registration in dev too, dev owns the configuration.
+        sqlx::query("UPDATE systems SET environment_id=$2 WHERE id=$1").bind(legacy).bind(dev)
+            .execute(&pool).await.unwrap();
+        assert_eq!(resolve().await, (Some(dev), false));
+        assert!(super::enqueue_build_job_for_derivation(&pool, derivation).await.unwrap());
+    }
+
+    /// MR !340 review: when a configuration's only registration moves from
+    /// environment A to B, its queued job must not stay claimable for A.
+    /// Every queue selection refuses the stale job, and reconciliation moves
+    /// it to B, where B builders can claim it.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn single_owner_environment_move_rehomes_queued_job(pool: PgPool) {
+        let (dev, prod) = (environment_named(&pool, "dev").await, environment_named(&pool, "prod").await);
+        let (_commit, derivation, flake, configuration) = agentless_artifact(&pool, "moved").await;
+        let registration = register_in(&pool, flake, &configuration, "external", "moved", dev).await;
+        assert!(super::enqueue_build_job_for_derivation(&pool, derivation).await.unwrap());
+        let job_environment = || {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_as::<_, (String, Option<Uuid>)>(
+                    "SELECT status, environment_id FROM build_jobs WHERE derivation_id=$1",
+                ).bind(derivation).fetch_one(&pool).await.unwrap()
+            }
+        };
+        assert_eq!(job_environment().await, ("queued".into(), Some(dev)));
+        let claimable = |environments: Vec<Uuid>| {
+            let pool = pool.clone();
+            async move {
+                crate::queries::builders::peek_next_server_derivation_job(&pool, &environments)
+                    .await.unwrap().is_some()
+            }
+        };
+
+        // The move commits without reconciliation (another writer, or the
+        // window before the recovery loop). Nobody may claim the stale job.
+        sqlx::query("UPDATE systems SET environment_id=$2 WHERE id=$1").bind(registration).bind(prod)
+            .execute(&pool).await.unwrap();
+        assert!(!claimable(vec![dev]).await, "a dev builder must not claim prod work");
+        assert!(!claimable(vec![prod]).await, "the job still carries dev");
+        assert!(!claimable(vec![]).await, "wildcard builders apply the same rule");
+
+        // Reconciliation keeps the build and moves it; nothing is cancelled.
+        assert_eq!(super::retire_unclaimable_queued_jobs(&pool).await.unwrap(), 0);
+        assert_eq!(job_environment().await, ("queued".into(), Some(prod)));
+        assert!(claimable(vec![prod]).await);
+        assert!(claimable(vec![]).await);
+        assert!(!claimable(vec![dev]).await);
+        // Reconciliation is idempotent.
+        assert_eq!(super::retire_unclaimable_queued_jobs(&pool).await.unwrap(), 0);
+        assert_eq!(job_environment().await, ("queued".into(), Some(prod)));
     }
 
     /// Two registrations of one configuration in different environments fail

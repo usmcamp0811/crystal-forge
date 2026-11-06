@@ -506,9 +506,13 @@ mod tests {
         let system = sample_system(Some("staging"));
         assert!(matches_any(&[], |env| matches_environment(&system, env)));
         let selected = vec!["production".to_string(), "staging".to_string()];
-        assert!(matches_any(&selected, |env| matches_environment(&system, env)));
+        assert!(matches_any(&selected, |env| matches_environment(
+            &system, env
+        )));
         let other = vec!["production".to_string()];
-        assert!(!matches_any(&other, |env| matches_environment(&system, env)));
+        assert!(!matches_any(&other, |env| matches_environment(
+            &system, env
+        )));
     }
 
     fn resource(id: u128, mode: ManagementMode, parent: Option<u128>) -> SystemSummary {
@@ -558,7 +562,10 @@ mod tests {
         );
         // The parent is filtered out of the list: the guest must stay visible.
         let filtered = vec![resource(2, ManagementMode::External, Some(1))];
-        assert_eq!(ids(&group_guests(&filtered, true, &none)), vec![(2, 0, false)]);
+        assert_eq!(
+            ids(&group_guests(&filtered, true, &none)),
+            vec![(2, 0, false)]
+        );
         // A parent that is not managed does not group guests.
         let unmanaged_parent = vec![
             resource(1, ManagementMode::Reference, None),

@@ -16,7 +16,11 @@ pub struct FilterOption {
 
 /// Returns the button text for a selection: `all_label` when nothing is
 /// selected, otherwise the selected labels in option order.
-pub fn multi_filter_summary(options: &[FilterOption], selected: &[String], all_label: &str) -> String {
+pub fn multi_filter_summary(
+    options: &[FilterOption],
+    selected: &[String],
+    all_label: &str,
+) -> String {
     let labels: Vec<&str> = options
         .iter()
         .filter(|option| selected.contains(&option.value))
@@ -55,7 +59,10 @@ pub fn MultiFilter(
 ) -> Element {
     let mut open = use_signal(|| false);
     let summary = multi_filter_summary(&options, &selected, &all_label);
-    let selected_count = options.iter().filter(|o| selected.contains(&o.value)).count();
+    let selected_count = options
+        .iter()
+        .filter(|o| selected.contains(&o.value))
+        .count();
     let button_class = if selected_count > 0 {
         "input filter-select mf-btn focus-ring active"
     } else {
@@ -152,7 +159,10 @@ mod tests {
 
     #[test]
     fn summary_uses_all_label_then_option_order() {
-        assert_eq!(multi_filter_summary(&options(), &[], "All management"), "All management");
+        assert_eq!(
+            multi_filter_summary(&options(), &[], "All management"),
+            "All management"
+        );
         let selected = vec!["reference".to_string(), "managed".to_string()];
         assert_eq!(
             multi_filter_summary(&options(), &selected, "All management"),
@@ -164,6 +174,9 @@ mod tests {
     fn toggle_adds_and_removes_one_value() {
         let added = toggle_selection(&["managed".into()], "external");
         assert_eq!(added, vec!["managed".to_string(), "external".to_string()]);
-        assert_eq!(toggle_selection(&added, "managed"), vec!["external".to_string()]);
+        assert_eq!(
+            toggle_selection(&added, "managed"),
+            vec!["external".to_string()]
+        );
     }
 }

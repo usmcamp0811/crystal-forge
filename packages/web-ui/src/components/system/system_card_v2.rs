@@ -545,17 +545,21 @@ pub fn SystemCardV2(
 ///
 /// The click does not propagate, so it does not open the host's preview.
 #[component]
-pub fn GuestToggle(
-    guests: usize,
-    collapsed: bool,
-    on_toggle: Option<EventHandler<()>>,
-) -> Element {
+pub fn GuestToggle(guests: usize, collapsed: bool, on_toggle: Option<EventHandler<()>>) -> Element {
     if guests == 0 {
         return rsx! {};
     }
     let plural = if guests > 1 { "s" } else { "" };
-    let title = if collapsed { "Show external guests" } else { "Hide external guests" };
-    let rotation = if collapsed { "transform: rotate(-90deg); display: inline-flex;" } else { "display: inline-flex;" };
+    let title = if collapsed {
+        "Show external guests"
+    } else {
+        "Hide external guests"
+    };
+    let rotation = if collapsed {
+        "transform: rotate(-90deg); display: inline-flex;"
+    } else {
+        "display: inline-flex;"
+    };
     rsx! {
         button {
             r#type: "button",
