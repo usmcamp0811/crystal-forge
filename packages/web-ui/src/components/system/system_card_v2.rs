@@ -242,16 +242,14 @@ pub fn SystemCardV2(
             None if evidence_loading => "Loading evidence…".into(),
             None => "Evidence unavailable".into(),
         };
-        let evidence_color = match evidence
+        let evidence_color = evidence
             .as_ref()
-            .map(|e| evidence_status(e, freshness).chip_class())
-        {
-            Some("chip-critical") => "var(--cf-red)",
-            Some("chip-warning") => "var(--cf-amber)",
-            Some("chip-info") => "var(--cf-blue)",
-            Some("chip-healthy") => "var(--cf-emerald)",
-            _ => "var(--cf-gray-dot)",
-        };
+            .map(|e| {
+                crate::components::system::management_mode::evidence_status_color(evidence_status(
+                    e, freshness,
+                ))
+            })
+            .unwrap_or("var(--cf-gray-dot)");
         return rsx! {
             div { class: "sys-card mg-list-card {selected_class}", onclick: move |_| on_open.call(()),
                 span { class: "status-rail", style: "--status-color: {evidence_color}" }

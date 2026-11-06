@@ -15,7 +15,8 @@ use crate::components::heartbeat_spinner::HeartbeatSpinner;
 use crate::components::icon::{Icon, IconName};
 use crate::components::system::helpers::deployment_state_label;
 use crate::components::system::management_mode::{
-    DeploymentCell, EvidenceCves, EvidenceFreshness, MgmtChip, ScanEvidenceChip, evidence_status,
+    CompactEvidenceCves, DeploymentCell, EvidenceFreshness, MgmtChip, ScanEvidenceChip,
+    evidence_status, evidence_status_color,
 };
 use crate::components::tables::{SortDirection, SortableHeader};
 
@@ -189,6 +190,7 @@ pub fn SystemsTable(
                         for crate::views::systems_list::systems_list_helpers::ListedSystem { system, guests, indent } in listed_systems {
                             {let managed = system.management_mode == ManagementMode::Managed;
                             let guest_class = if indent { " row-guest" } else { "" };
+                            let row_freshness = freshness.get(&system.id).copied().unwrap_or(EvidenceFreshness::Unknown);
                             let guests_collapsed = collapsed_hosts.contains(&system.id);
                             let host_id = system.id;
                             let assurance = evidence.get(&system.id).and_then(|r| r.as_ref().ok());
@@ -215,14 +217,22 @@ pub fn SystemsTable(
                                     div {
                                         class: "sys-host-cell",
                                         StatusDot {
-                                            color: if managed { status_color(&system.health_status).to_string() } else { "var(--cf-gray-dot)".into() },
+                                            // Nonmanaged: configuration evidence status, never guest health.
+                                            color: if managed {
+                                                status_color(&system.health_status).to_string()
+                                            } else {
+                                                assurance
+                                                    .map(|value| evidence_status_color(evidence_status(value, row_freshness)))
+                                                    .unwrap_or("var(--cf-gray-dot)")
+                                                    .to_string()
+                                            },
                                             large: false,
                                         }
                                         div {
                                             class: "min-w-0",
                                             div {
                                                 class: "hostname",
-                                                "{system.hostname}"
+                                                span { class: "hostname-text", title: "{system.hostname}", "{system.hostname}" }
                                                 MgmtChip { mode: system.management_mode }
                                                 crate::components::system::system_card_v2::GuestToggle {
                                                     guests,
@@ -232,10 +242,17 @@ pub fn SystemsTable(
                                                     }),
                                                 }
                                             }
-                                            div { class: "chips-row", for tag in &system.tags { span { class: "chip chip-unknown", "#{tag}" } } }
-                                            div {
-                                                class: "fqdn truncate",
-                                                if managed { "{derived_fqdn(&system)}" } else { {system.system_configuration_name.as_deref().unwrap_or(&system.hostname)} }
+                                            // Identity line: FQDN or configuration, then tags. One truncated line
+                                            // keeps tagged rows at the same height; the full text is the tooltip.
+                                            {
+                                                let identity = if managed {
+                                                    derived_fqdn(&system)
+                                                } else {
+                                                    system.system_configuration_name.clone().unwrap_or_else(|| system.hostname.clone())
+                                                };
+                                                let tags = system.tags.iter().map(|tag| format!("#{tag}")).collect::<Vec<_>>().join(" ");
+                                                let line = if tags.is_empty() { identity } else { format!("{identity} · {tags}") };
+                                                rsx! { div { class: "fqdn truncate", title: "{line}", "{line}" } }
                                             }
                                         }
                                     }
@@ -264,15 +281,23 @@ pub fn SystemsTable(
                                         "{system.health_status.label()}"
                                     }
                                     } else if let Some(value) = assurance {
-                                        ScanEvidenceChip { status: evidence_status(value, freshness.get(&system.id).copied().unwrap_or(EvidenceFreshness::Unknown)) }
+                                        // The current selected-revision state. Older scan counts in the CVE
+                                        // column carry their own "historical" marker.
+                                        ScanEvidenceChip { status: evidence_status(value, row_freshness) }
                                     } else {
-                                        span { class: "chip chip-unknown", if evidence_loading { "Loading evidence…" } else { "Evidence unavailable" } }
-                                    }
-                                    if let Some(Err(error)) = evidence.get(&system.id) {
-                                        p { class: "mg-dim", role: "status", "Configuration evidence unavailable: {error}" }
+                                        // Raw read errors stay in the tooltip so they cannot expand the row.
+                                        span {
+                                            class: "chip chip-unknown",
+                                            role: "status",
+                                            title: match evidence.get(&system.id) {
+                                                Some(Err(error)) => format!("Configuration evidence unavailable: {error}"),
+                                                _ => String::new(),
+                                            },
+                                            if evidence_loading { "Loading evidence…" } else { "Evidence unavailable" }
+                                        }
                                     }
                                     if evidence.get(&system.id).is_some_and(Result::is_err) || observations.get(&system.id).is_some_and(Result::is_err) {
-                                        if let Some(retry) = on_retry_evidence { button { class: "btn btn-ghost xs focus-ring", disabled: evidence_loading, onclick: move |event| { event.stop_propagation(); retry.call(()); }, "Retry evidence reads" } }
+                                        if let Some(retry) = on_retry_evidence { button { class: "btn btn-ghost xs focus-ring", title: "Retry evidence reads", disabled: evidence_loading, onclick: move |event| { event.stop_propagation(); retry.call(()); }, "Retry" } }
                                     }
                                 }
                                 // Flake · commit (design sub-line: "{commit} · {branch}")
@@ -289,25 +314,31 @@ pub fn SystemsTable(
                                                     })
                                             })
                                             .unwrap_or_else(|| ("—".to_string(), "—".to_string(), None));
-                                        let flake_commit_short = flake_commit
+                                        // Managed rows show the flake's latest commit and branch. Nonmanaged
+                                        // rows show the exact selected revision and its branch. Both are
+                                        // shortened here; the full values are in the tooltip.
+                                        let (commit_full, branch) = if managed {
+                                            (flake_commit.clone(), flake_branch.clone())
+                                        } else {
+                                            (
+                                                assurance.and_then(|e| e.selected_revision.as_ref()).map(|r| r.sha.clone()),
+                                                assurance.and_then(|e| e.branch.clone()).unwrap_or(flake_branch.clone()),
+                                            )
+                                        };
+                                        let commit_short = commit_full
                                             .as_deref()
                                             .map(|hash| hash.chars().take(8).collect::<String>())
-                                            .unwrap_or_else(|| "—".to_string());
+                                            .unwrap_or_else(|| if managed { "—".to_string() } else { "no revision".to_string() });
+                                        let target = if managed {
+                                            flake_name.clone()
+                                        } else {
+                                            format!("{flake_name}#{}", system.system_configuration_name.as_deref().unwrap_or(&system.hostname))
+                                        };
+                                        let title = format!("{target}\n{} · {branch}", commit_full.as_deref().unwrap_or(&commit_short));
                                         rsx! {
-                                            div {
-                                                style: "display: flex; flex-direction: column; line-height: 1.3;",
-                                                span {
-                                                    class: "mono",
-                                                    style: "font-size: 12px; color: var(--cf-text-primary)",
-                                                    "{flake_name}"
-                                                    if !managed { "#{system.system_configuration_name.as_deref().unwrap_or(&system.hostname)}" }
-                                                }
-                                                span {
-                                                    class: "mono",
-                                                    style: "font-size: 11px; color: var(--cf-text-muted)",
-                                                    if managed { "{flake_commit_short} · {flake_branch}" }
-                                                    else { {assurance.and_then(|e| e.selected_revision.as_ref()).map(|r| r.sha.as_str()).unwrap_or("Revision unavailable")} }
-                                                }
+                                            div { class: "sys-flake-cell", title: "{title}",
+                                                span { class: "mono sys-flake-name", "{target}" }
+                                                span { class: "mono sys-flake-rev", "{commit_short} · {branch}" }
                                             }
                                         }
                                     }
@@ -338,8 +369,8 @@ pub fn SystemsTable(
                                         }
                                     }
                                     } else if let Some(value) = assurance {
-                                        EvidenceCves { evidence: value.clone(), freshness: freshness.get(&system.id).copied().unwrap_or(EvidenceFreshness::Unknown) }
-                                    } else { span { class: "mg-dim", if evidence_loading { "Loading CVE evidence…" } else { "CVE evidence unavailable" } } }
+                                        CompactEvidenceCves { evidence: value.clone(), freshness: row_freshness }
+                                    } else { span { class: "chip chip-unknown", if evidence_loading { "loading…" } else { "unavailable" } } }
                                 }
                                 // Heartbeat countdown
                                 td {
@@ -385,31 +416,37 @@ pub fn SystemsTable(
                                         }
                                     }
                                     } else {
-                                        // One runtime line, as designed: the host-observed unit state when a
-                                        // parent reported one, otherwise "unknown". Never both.
+                                        // One compact runtime state, as designed, plus the parent name. The
+                                        // reason a state is unknown (no report, read error) is in the tooltip.
                                         {
-                                            let observed = match observations.get(&system.id) {
-                                                Some(Ok(Some(report))) if system.management_mode == ManagementMode::External => Some(report),
-                                                _ => None,
+                                            let external = system.management_mode == ManagementMode::External;
+                                            let (line, title) = match observations.get(&system.id) {
+                                                _ if !external => ("Not a running machine".to_string(), String::new()),
+                                                Some(Ok(Some(report))) => (
+                                                    format!(
+                                                        "unit {} · {}",
+                                                        report.unit_active_state.as_deref().unwrap_or("unknown"),
+                                                        crate::components::system::system_card_v2::ago(report.observed_at)
+                                                    ),
+                                                    format!(
+                                                        "Host-observed {} at {}. A host unit observation, not guest health or configuration attestation.",
+                                                        report.unit,
+                                                        report.observed_at.to_rfc3339()
+                                                    ),
+                                                ),
+                                                Some(Ok(None)) => ("Runtime unknown".into(), "No applicable host observation".into()),
+                                                Some(Err(error)) => ("Runtime unknown".into(), format!("Host observation unavailable: {error}")),
+                                                None if evidence_loading => ("Loading…".into(), "Loading host observation".into()),
+                                                None => ("Runtime unknown".into(), "Host observation unavailable".into()),
                                             };
+                                            let observed = matches!(observations.get(&system.id), Some(Ok(Some(_)))) && external;
                                             rsx! {
-                                                div { class: "mg-dim",
-                                                    title: observed.map(|r| format!("{} · observed {} · a host unit observation, not guest health or configuration attestation", r.unit, r.observed_at.to_rfc3339())).unwrap_or_default(),
-                                                    if system.management_mode == ManagementMode::Reference { "Not a running machine" }
-                                                    else if let Some(report) = observed { {format!("Host-observed · unit {} · {}", report.unit_active_state.as_deref().unwrap_or("unknown"), crate::components::system::system_card_v2::ago(report.observed_at))} }
-                                                    else { "Runtime state unknown" }
+                                                div { class: "sys-runtime-cell", title: "{title}",
+                                                    span { class: if observed { "mg-obs" } else if external { "mg-dim" } else { "mg-dim sys-runtime-wrap" }, "{line}" }
+                                                    if let Some(parent) = system.parent_host_id {
+                                                        span { class: "mg-dim", "on {parent_names.get(&parent).cloned().unwrap_or_else(|| parent.to_string())}" }
+                                                    }
                                                 }
-                                            }
-                                        }
-                                        if let Some(parent) = system.parent_host_id {
-                                            div { class: "mg-dim", "Parent: {parent_names.get(&parent).cloned().unwrap_or_else(|| parent.to_string())}" }
-                                        }
-                                        if system.management_mode == ManagementMode::External {
-                                            match observations.get(&system.id) {
-                                                Some(Ok(Some(_))) => rsx! {},
-                                                Some(Ok(None)) => rsx! { div { class: "mg-dim", "No applicable host observation" } },
-                                                Some(Err(error)) => rsx! { div { class: "mg-dim", role: "status", "Host observation unavailable: {error}" } },
-                                                None => rsx! { div { class: "mg-dim", if evidence_loading { "Loading host observation…" } else { "Host observation unavailable" } } },
                                             }
                                         }
                                     }

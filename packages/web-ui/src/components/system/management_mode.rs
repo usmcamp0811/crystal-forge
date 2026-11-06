@@ -579,6 +579,98 @@ pub fn EvidenceCves(evidence: ConfigurationAssurance, freshness: EvidenceFreshne
     } }
 }
 
+/// Renders sealed CVE counts in one compact line for list rows.
+///
+/// Shows only non-zero severities. `clean` appears only when the sealed scan
+/// reports zero findings in total. When the counts are not from a Current scan
+/// of the selected revision, a `historical` chip follows them and the counts
+/// are dimmed, so they never read as findings for the current revision. The
+/// scan identity, revision and status are in the tooltip; [`EvidenceCves`]
+/// shows them in full on detail surfaces.
+#[component]
+pub fn CompactEvidenceCves(
+    evidence: ConfigurationAssurance,
+    freshness: EvidenceFreshness,
+) -> Element {
+    let status = evidence_status(&evidence, freshness);
+    let Some((scan, counts)) = last_good_scan(&evidence).and_then(|s| Some((s, s.cves.as_ref()?)))
+    else {
+        return rsx! { span { class: "chip chip-unknown", title: "{status.label()}: no sealed findings", "no scan" } };
+    };
+    let historical = status != EvidenceStatus::Current;
+    let sha = scan.revision.sha.get(..8).unwrap_or(&scan.revision.sha);
+    let title = format!(
+        "Configuration evidence, not runtime exposure · {} · revision {sha} · scan {} · {} medium, {} low, {} total",
+        status.label(),
+        scan.scan_id,
+        counts.medium,
+        counts.low,
+        counts.total,
+    );
+    rsx! {
+        div { class: if historical { "mg-cves-compact historical" } else { "mg-cves-compact" }, title: "{title}",
+            for (class, label) in compact_cve_chips(counts, status) {
+                span { class: "chip {class}", "{label}" }
+            }
+        }
+    }
+}
+
+/// Returns the `(chip class, label)` list for [`CompactEvidenceCves`].
+///
+/// Zero severities are omitted. Medium and low findings appear as one chip only
+/// when there are no critical or high findings. `clean` requires a total of
+/// zero. A status other than Current appends `historical`, or `last good` when
+/// the newest scan failed.
+pub fn compact_cve_chips(
+    counts: &crate::api::models::EvidenceCveCounts,
+    status: EvidenceStatus,
+) -> Vec<(&'static str, String)> {
+    let mut chips = Vec::new();
+    if counts.critical > 0 {
+        chips.push((
+            "chip-critical mg-cves-count",
+            format!("{} crit", counts.critical),
+        ));
+    }
+    if counts.high > 0 {
+        chips.push((
+            "chip-warning mg-cves-count",
+            format!("{} high", counts.high),
+        ));
+    }
+    let lower = counts.medium + counts.low;
+    if counts.critical == 0 && counts.high == 0 && lower > 0 {
+        chips.push(("chip-unknown mg-cves-count", format!("{lower} med/low")));
+    }
+    if counts.total == 0 {
+        chips.push(("chip-healthy mg-cves-count", "✓ clean".to_string()));
+    }
+    if status != EvidenceStatus::Current {
+        let label = if status == EvidenceStatus::Failed {
+            "last good"
+        } else {
+            "historical"
+        };
+        chips.push(("chip-unknown mg-cves-historical", label.to_string()));
+    }
+    chips
+}
+
+/// Returns the status-dot color for a nonmanaged resource's evidence status.
+///
+/// The color describes configuration evidence only. It never describes guest
+/// health, which the server does not verify.
+pub fn evidence_status_color(status: EvidenceStatus) -> &'static str {
+    match status.chip_class() {
+        "chip-critical" => "var(--cf-red)",
+        "chip-warning" => "var(--cf-amber)",
+        "chip-info" => "var(--cf-blue)",
+        "chip-healthy" => "var(--cf-emerald)",
+        _ => "var(--cf-gray-dot)",
+    }
+}
+
 /// Renders parent-reported runtime metadata separately from configuration evidence.
 /// Only use for external systems. Reload invokes a latest-only read owned by the
 /// view; retain the previous observation on error. Runner paths are not guest
@@ -974,5 +1066,43 @@ mod tests {
         assert!(report.unit_active_state.is_none());
         assert!(report.runner_store_path.is_none());
         assert!(report.observed_at < report.received_at);
+    }
+
+    #[test]
+    fn compact_cve_chips_hide_zeros_and_mark_older_evidence() {
+        let counts = |critical, high, medium, low| EvidenceCveCounts {
+            total: critical + high + medium + low,
+            critical,
+            high,
+            medium,
+            low,
+        };
+        let labels = |c: &EvidenceCveCounts, s| {
+            compact_cve_chips(c, s)
+                .into_iter()
+                .map(|(_, l)| l)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            labels(&counts(0, 2, 5, 1), EvidenceStatus::Current),
+            vec!["2 high"]
+        );
+        assert_eq!(
+            labels(&counts(0, 0, 3, 1), EvidenceStatus::Current),
+            vec!["4 med/low"]
+        );
+        assert_eq!(
+            labels(&counts(0, 0, 0, 0), EvidenceStatus::Current),
+            vec!["✓ clean"]
+        );
+        // Counts from an older scan never read as findings for the current revision.
+        assert_eq!(
+            labels(&counts(1, 6, 0, 0), EvidenceStatus::Evaluating),
+            vec!["1 crit", "6 high", "historical"]
+        );
+        assert_eq!(
+            labels(&counts(0, 0, 0, 0), EvidenceStatus::Failed),
+            vec!["✓ clean", "last good"]
+        );
     }
 }
