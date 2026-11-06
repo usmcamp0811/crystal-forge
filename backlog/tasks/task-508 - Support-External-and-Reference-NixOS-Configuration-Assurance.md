@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-11-05T03:12:00Z'
+updated_date: '2026-11-06T00:15:00Z'
 labels:
   - management-mode
   - assurance
@@ -306,6 +306,14 @@ Final review-response commit includes P1 shared-environment refusal (migration 0
 | `cargo sqlx prepare --check` on disposable DB migrated through 0330 @ 4df19a7b | **exit 0** |
 
 All three review findings (P1 shared-environment handling, P2 queued-build reconciliation, P2 stale parent observations) are corrected, tested (red/green verified), and passing in the final evidence.
+
+## MR !340 review (2026-11-05) corrections: 3c2c4cc8..d3462e72
+
+P1 queued jobs keep obsolete environment: JOB_ENVIRONMENT_IS_CURRENT added to both peeks and all four claims; retire_unclaimable_queued_jobs_tx moves still-admitted queued jobs to the current owner (cancels unadmitted ones); update_system_handler reconciles after its last registration write; record_job_cache_dispatch refuses a destination when job environment != owner (under job row lock, before credential reads).
+P1 mixed formats: applied 0330 restored unchanged (3c2c4cc8 had edited it; corrected in 1da3e1f2); new 0331 resolves by effective identity (explicit name else hostname), no ranking.
+UI (design 2d519abc): MultiFilter checkbox filters, Clear filters, Group guests (default on), per-host and Expand/Collapse all; table groups after sort.
+Tests (registered in database-regressions.sh): explicit_name_and_hostname_fallback_share_one_ambiguity_rule, single_owner_environment_move_rehomes_queued_job, environment_move_after_claim_withholds_cache_dispatch, environment_move_fences_restricted_builder_claims. All pass on disposable DBs, plus prior cross-environment tests and 7 niks3_ dispatch tests. Web UI unit tests 20/20 for filters/grouping. Browser check in preview (fixture DB + 2 external guests + 1 reference inserted into the task-owned preview DB).
+Not run at these commits: integration owners, state-machine workflow, SQLx prepare check, nix flake check. MR description not yet rewritten.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
