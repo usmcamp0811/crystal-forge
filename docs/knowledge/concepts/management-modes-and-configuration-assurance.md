@@ -171,18 +171,50 @@ evaluation; the server does not rewrite historical policy results.
 ### One configuration in several environments
 
 A configuration may have several registrations. The SQL function
-`derivation_environment(commit, name)` (migration `0330`) is the single rule that
-build admission, builder claims, exact-artifact reuse and cache publication use
-to find the environment that owns the artifact:
+`derivation_environment(commit, name)` is the single rule that build admission,
+builder claims, exact-artifact reuse and cache publication use to find the
+environment that owns the artifact. Migration `0331` replaces the `0330`
+definition:
 
 - Only active registrations in the commit's flake count. A registration without
   an environment is ignored.
-- A `system_configuration_name` match outranks a hostname match. Only the best
-  rank counts.
+- Each registration counts by its effective configuration identity: its trimmed,
+  non-empty `system_configuration_name`, otherwise its hostname (legacy
+  fallback). An explicit name and a hostname fallback that select the same
+  configuration are the same identity. A hostname does not count when the
+  registration's explicit name selects another configuration.
 - If all counted registrations are in one environment, that environment owns the
   job and the cache credentials. Two registrations in one environment still give
   one deduplicated build.
 - If they are in more than one environment, the result is **ambiguous**.
+
+`0330` ranked explicit-name matches above hostname matches and examined only the
+best rank. A reference registration that named `web` in environment A therefore
+hid a legacy managed registration with hostname `web` in environment B, and A
+was returned as the unique owner. `0331` removes the ranking.
+
+### Environment moves and queued work
+
+A build job records its environment when it is queued. Builder authorization and
+cache destination selection both depend on that environment, so the job
+environment MUST equal the current owner when work is selected or credentials
+are released:
+
+- Every builder peek and claim requires `JOB_ENVIRONMENT_IS_CURRENT` in addition
+  to `ARTIFACT_POLICY_PREDICATE`. After a configuration's only registration moves
+  from environment A to B, no builder can claim the queued job while it still
+  carries A. This includes builders restricted to A and wildcard builders.
+- `retire_unclaimable_queued_jobs` moves a still-admitted queued job to the
+  current owner environment. It cancels a job that no longer satisfies artifact
+  admission. A queued job has no claim, cache dispatch or credentials, so the
+  move changes no recorded authorization. The system update handler runs this
+  reconciliation after its last registration write, in the same transaction.
+  The builder recovery loop runs it for every other writer.
+- `record_job_cache_dispatch` refuses a selected cache destination when the
+  claimed job's environment is not the current owner. The check runs under the
+  job row lock before any credential read. A registration move after the claim
+  therefore cannot release the new environment's destination to that claim.
+  The builder API reports this as a transient dispatch failure.
 
 **Temporary restriction (TASK-518).** Sharing one configuration across
 environments is not supported. Safe support needs an explicit multi-environment
@@ -198,7 +230,8 @@ closed:
   its registrations are in more than one environment" with the action to take.
 - A job that was queued before the registrations spread is cancelled by the
   revalidation sweep (`retire_unclaimable_queued_jobs`, run by the builder
-  recovery loop) and by the management-mode transition. A cancelled attempt is
+  recovery loop) and by every system update, including a management-mode
+  transition. A cancelled attempt is
   history. After the registrations share one environment, retry the build
   manually. A derivation that was refused before it had any attempt becomes a
   build-preparation recovery candidate once one environment owns it. Recovery
@@ -403,7 +436,7 @@ freshness unknown. No automatic guest configuration match is established.
 
 | Surface | Population and unit |
 | --- | --- |
-| Systems list | Active registrations across all modes; mode filter applies before totals/paging |
+| Systems list | Active registrations across all modes. Each filter (management, environment, status, flake, tag) is multi-select: values are OR within a filter and AND across filters, and the "N shown" count follows the result. "Group guests" (on by default) lists an external resource under its managed parent host when both match; a guest whose host is filtered out stays top level. Grouping and collapse are display state only and change no count |
 | Dashboard `total_systems`, fleet health, deployment partitions | Visible active managed machines only |
 | Dashboard runtime CVE summary | Distinct Current-authorized CVEs per visible active managed machine; zero is not proof of full scan coverage |
 | Environment `system_count` | Every registration, including inactive resources and all modes |
@@ -446,6 +479,7 @@ Apply normal migrations in order; do not edit applied migrations:
 | `0328_static_publication_reuse.sql` | `derivation_publication_eligible` gains a 4-argument overload that also accepts a completed static publication of the exact output whose destination equals the currently effective static cache destination; the 3-argument rule is unchanged |
 | `0329_guest_observation_indexes.sql` | Composite index for the current-parent observation read (277 ms to 0.24 ms with 400,000 former-parent rows) and indexes for the `parent_host_id` and `environment_id` foreign keys |
 | `0330_derivation_environment_resolution.sql` | `derivation_environment(commit, name)` returns the one owner environment of a derivation or reports ambiguity; build admission, claims, reuse and cache publication share it |
+| `0331_derivation_environment_effective_identity.sql` | Replaces the `0330` resolver: registrations count by effective configuration identity (explicit name, else hostname), so an explicit name and a hostname fallback in different environments are ambiguous |
 
 Existing enrolled rows remain managed; migration does not infer external or
 reference resources. Constraint failures on legacy blank enrollment keys require
@@ -495,15 +529,23 @@ not evidence for a later commit.
 Verified on the branch (see the [coverage map](../testing/integration-coverage-map.md)
 for commands and scope):
 
-- `nix flake check` at `bcb3b79e`: Access 40, Delivery 17, Assurance 65 and
-  Upgrade 13 cases passed.
-- The isolated state-machine workflow passed at `bcb3b79e`.
-- Disposable SQLx tests for derivation reuse, build admission, CVE scans, scan
-  leases, hardening, configuration assurance and POA&M conversion pass on a
-  database migrated through `0329`. Composite-policy integration tests pass
-  (38 of 38). `cargo sqlx prepare --check` passes against `0329`.
-- The Web UI native tests pass (838 passed, one ignored) and the WASM build
-  compiles.
+- At `4df19a7b`: GitLab pipeline 3025454179 passed all 10 jobs, including the
+  four integration owners and `state-machine-tests`. Local `nix flake check`
+  passed: Access 40, Assurance 67, Delivery 17 and Upgrade 13 cases. The
+  isolated state-machine workflow passed. `cargo sqlx prepare --check` passed
+  against a database migrated through `0330`.
+- After `4df19a7b`, the MR !340 review corrections changed claims, queued-job
+  reconciliation, cache dispatch, the resolver (migration `0331`) and the
+  Systems list filters and grouping. For those changes only targeted checks
+  have run: the disposable PostgreSQL tests
+  `explicit_name_and_hostname_fallback_share_one_ambiguity_rule`,
+  `single_owner_environment_move_rehomes_queued_job`,
+  `environment_move_after_claim_withholds_cache_dispatch`,
+  `environment_move_fences_restricted_builder_claims`, the earlier
+  cross-environment and reconciliation tests and the seven `niks3_` dispatch
+  tests; the Web UI unit tests for filters and grouping; and a browser check of
+  the Systems list in the task preview. The integration owners, the
+  state-machine workflow and the SQLx check have not run at those commits.
 
 Known limits that remain documented decisions, not hidden defects:
 
@@ -525,7 +567,8 @@ Known limits that remain documented decisions, not hidden defects:
   publication exists in that topology, which publishes through a database
   destination.
 
-Not verified: complete exact-source integration results at the final commit,
-independent design reference/actual/difference images, and old-agent integration
-with an older agent binary. No fixture observation or simulated Refresh is
+Not verified: integration results at the commits after `4df19a7b`, independent
+design reference/actual/difference images, and old-agent integration with an
+older agent binary. No integration scenario covers an environment move or a
+mixed explicit-name and hostname registration; PostgreSQL tests cover them. No fixture observation or simulated Refresh is
 production evidence.
