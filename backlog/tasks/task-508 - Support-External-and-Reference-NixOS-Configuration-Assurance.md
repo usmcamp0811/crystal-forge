@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-11-06T00:15:00Z'
+updated_date: '2026-11-07T17:04:00Z'
 labels:
   - management-mode
   - assurance
@@ -314,6 +314,18 @@ P1 mixed formats: applied 0330 restored unchanged (3c2c4cc8 had edited it; corre
 UI (design 2d519abc): MultiFilter checkbox filters, Clear filters, Group guests (default on), per-host and Expand/Collapse all; table groups after sort.
 Tests (registered in database-regressions.sh): explicit_name_and_hostname_fallback_share_one_ambiguity_rule, single_owner_environment_move_rehomes_queued_job, environment_move_after_claim_withholds_cache_dispatch, environment_move_fences_restricted_builder_claims. All pass on disposable DBs, plus prior cross-environment tests and 7 niks3_ dispatch tests. Web UI unit tests 20/20 for filters/grouping. Browser check in preview (fixture DB + 2 external guests + 1 reference inserted into the task-owned preview DB).
 Not run at these commits: integration owners, state-machine workflow, SQLx prepare check, nix flake check. MR description not yet rewritten.
+
+## MR !340 finalization (0e2c955c..24aff108)
+
+CI: pipeline 3039047663 cve-processing-test failed with runner_system_failure ('aborted: terminated'). Cause: runner termination killed rustc during the cargo-failure fault's cold compile; Cargo exit 101 != 73. Reproduced the mechanism locally (SIGTERM to rustc during cold compile -> Cargo 101). Same sources passed the job at 71eef71a; full fault harness passes locally at d6853cd5 (8/8 faults). Fix: database-ci-test.py prints the last 40 log lines on an unexpected fault status (artifacts are lost on runner termination). Assertion unchanged.
+
+Backend defects fixed: admin CVE dashboard counted nonmanaged registrations as affected runtime systems (now managed-only); hardening fleet views counted references/externals (0332); a key revoked by leaving managed could re-enroll (0333 system_revoked_agent_keys; conversion and rotation refuse it). Compliance zero-count evaluators were examined: only unit-test callers; production bundle evaluation is evidence-based and returns NotChecked without a deployed managed context (no change).
+
+Tests added (each verified red without its fix where applicable): management_mode_cve_dashboard_counts_only_managed_runtime, management_mode_hardening_fleet_counts_only_managed_machines, management_mode_guest_observation_rejects_a_second_managed_parent, management_mode_assurance_reports_failed_evaluation_and_build_errors, management_mode_mixed_flake_rollout_updates_only_managed, system_key_rotation_refuses_a_key_revoked_by_leaving_managed; revocation test now proves old key refused/fresh key enrolls; registration test asserts parent-change audit content.
+
+UI parity fixes (be3423a9): Add rail badges/headings/success summary+Copy; table host-observed qualifier; runtime card parent row and unknown-state copy; metric strip times/revision/provenance/runtime; Hardening+Compliance banners; ConfigExplorer newest/older; Environments managed-only counts.
+
+Follow-ups re-assessed: TASK-509 independent (workspace SQLx check passes); TASK-511 dead code, no callers (independent); TASK-512 pre-existing fixtures outside CI (independent); TASK-513 owner-accepted limit; TASK-514 implemented here (0328); TASK-517/518 recorded follow-ups.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
