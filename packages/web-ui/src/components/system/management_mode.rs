@@ -5,6 +5,7 @@
 
 use chrono::{DateTime, Duration, Utc};
 use dioxus::prelude::*;
+use uuid::Uuid;
 
 use crate::api::models::{
     ConfigurationAssurance, DeploymentStatus, GuestObservationRow, ManagementMode, ScanEvidence,
@@ -337,7 +338,13 @@ pub fn ScanEvidenceChip(status: EvidenceStatus) -> Element {
 /// Renders the evidence scope and exact selected/scanned identities above findings.
 /// Views can use this for read-only CVE, hardening, and compliance sections.
 #[component]
-pub fn EvidenceBanner(evidence: ConfigurationAssurance, freshness: EvidenceFreshness) -> Element {
+pub fn EvidenceBanner(
+    evidence: ConfigurationAssurance,
+    freshness: EvidenceFreshness,
+    /// Subject of the tab, for example "CVE findings" or "Hardening results".
+    #[props(default = "Findings".to_string())]
+    what: String,
+) -> Element {
     let status = evidence_status(&evidence, freshness);
     let tone = match status {
         EvidenceStatus::ConfigurationMissing => "danger",
@@ -363,9 +370,15 @@ pub fn EvidenceBanner(evidence: ConfigurationAssurance, freshness: EvidenceFresh
     rsx! { div { class: "mg-notice mg-notice-{tone}",
         Icon { name: IconName::Info, size: 16 }
         div { class: "mg-notice-body",
-            div { class: "mg-notice-title", "{status.label()} · {evidence.configuration_name}" }
+            div { class: "mg-notice-title",
+                if status == EvidenceStatus::Current {
+                    "{what} describe configuration {evidence.configuration_name} at {selected.get(..12).unwrap_or(selected)}"
+                } else {
+                    "{status.label()} · {what} for {evidence.configuration_name}"
+                }
+            }
             div { class: "mg-notice-text", "{scope}" }
-            div { class: "mg-notice-text", "Selected revision: {selected} · Last good scan: {scanned} · Scanned: {at}" }
+            div { class: "mg-notice-text", "Selected revision: {selected} · Last good CVE scan: {scanned} · Scanned: {at}" }
             if let Some(error) = evidence.selected_scan.as_ref().and_then(|s| s.error.as_ref())
                 .or(evidence.evaluation.error.as_ref())
                 .or_else(|| evidence.selected_artifact.as_ref().and_then(|a| a.error.as_ref())) {
@@ -382,6 +395,9 @@ pub fn EvidenceBanner(evidence: ConfigurationAssurance, freshness: EvidenceFresh
 pub fn EvidenceGate(
     evidence: ConfigurationAssurance,
     freshness: EvidenceFreshness,
+    /// Subject passed to [`EvidenceBanner`].
+    #[props(default = "Findings".to_string())]
+    what: String,
     children: Element,
 ) -> Element {
     let status = evidence_status(&evidence, freshness);
@@ -420,7 +436,7 @@ pub fn EvidenceGate(
         ),
     };
     rsx! {
-        EvidenceBanner { evidence, freshness }
+        EvidenceBanner { evidence, freshness, what }
         if has_evidence { {children} } else {
             div { class: "mg-empty",
                 Icon { name: IconName::Shield, size: 22 }
@@ -798,11 +814,18 @@ pub fn evidence_status_color(status: EvidenceStatus) -> &'static str {
 /// `parent_label` is a display name for the reporting parent. The caller MUST
 /// pass it only for the parent that `observation.parent_host_id` identifies.
 /// When it is absent, the header shows the parent UUID.
+///
+/// `parent_host_id` is the current association. Without one, no parent can
+/// report, so the card offers no reload and explains how to associate one.
+/// `selected_revision` names the configuration revision that the scan evidence
+/// describes, so the unknown state can say what is and is not known.
 #[component]
 pub fn RuntimeCard(
     observation: Option<GuestObservationRow>,
     freshness: EvidenceFreshness,
     #[props(default)] parent_label: Option<String>,
+    #[props(default)] parent_host_id: Option<Uuid>,
+    #[props(default)] selected_revision: Option<String>,
     #[props(default)] loading: bool,
     #[props(default)] error: Option<String>,
     #[props(default)] on_reload: Option<EventHandler<()>>,
@@ -815,7 +838,7 @@ pub fn RuntimeCard(
     rsx! { div { class: "card sd-card mg-runtime",
         div { class: "sd-card-head",
             h2 { "Runtime observations" }
-            if let Some(reload) = on_reload {
+            if let (Some(reload), Some(_)) = (on_reload, parent_host_id) {
                 button { class: "btn btn-ghost xs focus-ring", r#type: "button", disabled: loading,
                     onclick: move |_| reload.call(()),
                     if loading { "Loading latest…" } else { "Reload latest" }
@@ -834,6 +857,13 @@ pub fn RuntimeCard(
             div { class: "mg-obs-head", "Reported by host {parent_label.clone().unwrap_or_else(|| report.parent_host_id.to_string())} · {report.observed_at.to_rfc3339()}" }
             p { class: "mg-dim", "{age}" }
             dl { class: "kv-grid",
+                dt { "Parent host" }
+                dd {
+                    "{parent_label.clone().unwrap_or_else(|| report.parent_host_id.to_string())} "
+                    span { class: "chip chip-unknown", "CF-managed" }
+                    " "
+                    a { class: "link-action focus-ring", href: "/systems/{report.parent_host_id}", "Open host" }
+                }
                 dt { "Guest name" } dd { "{report.guest_identity}" }
                 dt { "Systemd unit" } dd { "{report.unit}" }
                 dt { "Unit state" } dd { {report.unit_active_state.as_deref().unwrap_or("unknown")} }
@@ -841,15 +871,27 @@ pub fn RuntimeCard(
                 dt { "Received at" } dd { "{report.received_at.to_rfc3339()}" }
                 dt { "Compared with scan" } dd { span { class: "chip chip-unknown", "not comparable" } }
             }
+            div { class: "mg-unknown",
+                div { class: "mg-unknown-title", "Verified guest state: not available" }
+                p { "An active host unit does not prove guest health or the running configuration. Reload reads stored evidence; it does not contact the parent host." }
+            }
         } else {
             div { class: "mg-unknown",
                 div { class: "mg-unknown-title", "Runtime state unknown" }
-                p { "No applicable parent-host observation is available." }
+                p {
+                    if parent_host_id.is_some() { "No applicable parent-host observation is available. " } else { "No runtime information is available. " }
+                    if let Some(revision) = selected_revision.as_deref() {
+                        "The scan results describe the configuration at "
+                        span { class: "mono", "{revision.get(..12).unwrap_or(revision)}" }
+                        ". They do not show what is running."
+                    } else {
+                        "Scan results describe a configuration, not what is running."
+                    }
+                }
+                if parent_host_id.is_none() {
+                    p { class: "mg-dim", "Associate a parent host in Edit to receive host-reported observations." }
+                }
             }
-        }
-        div { class: "mg-unknown",
-            div { class: "mg-unknown-title", "Verified guest state: not available" }
-            p { "An active host unit does not prove guest health or the running configuration. Reload reads stored evidence; it does not contact the parent host." }
         }
     } }
 }

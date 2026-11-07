@@ -9092,3 +9092,10 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
 .sys-table-mg tbody tr.row-guest td:first-child{padding-left:32px}
 .sys-table-mg td:nth-child(7) .sys-cell-inline{max-width:114px}
 .sys-table-mg td:nth-child(7) .sys-runtime-cell{max-width:94px}
+/* Registration complete: agent snippet with an overlaid Copy control. */
+.management-snippet{position:relative;margin-top:8px}
+.management-snippet > button{position:absolute;top:6px;right:6px}
+.management-snippet > pre{margin:0;font-size:11px;line-height:1.5;background:var(--cf-page-bg);border:1px solid var(--cf-divider);border-radius:8px;padding:10px 12px;overflow:auto;white-space:pre}
+.management-complete .modal-head h2{display:flex;align-items:center;gap:8px}
+/* A wrapping runtime line uses at most two lines. */
+.sys-runtime-cell > span.sys-runtime-wrap{display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical}

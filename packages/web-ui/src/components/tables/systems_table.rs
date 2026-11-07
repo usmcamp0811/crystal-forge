@@ -436,7 +436,7 @@ pub fn SystemsTable(
                                                 _ if !external => ("Not a running machine".to_string(), String::new()),
                                                 Some(Ok(Some(report))) => (
                                                     format!(
-                                                        "unit {} · {}",
+                                                        "host-observed · unit {} · {}",
                                                         report.unit_active_state.as_deref().unwrap_or("unknown"),
                                                         crate::components::system::system_card_v2::ago(report.observed_at)
                                                     ),
@@ -456,7 +456,7 @@ pub fn SystemsTable(
                                             rsx! {
                                                 div { class: "sys-cell-inline",
                                                     div { class: "sys-runtime-cell",
-                                                        span { class: if observed { "mg-obs" } else if external { "mg-dim" } else { "mg-dim sys-runtime-wrap" }, "{line}" }
+                                                        span { class: if observed { "mg-obs sys-runtime-wrap" } else if external { "mg-dim" } else { "mg-dim sys-runtime-wrap" }, "{line}" }
                                                         if let Some(parent) = system.parent_host_id {
                                                             span { class: "mg-dim", "on {parent_names.get(&parent).cloned().unwrap_or_else(|| parent.to_string())}" }
                                                         }

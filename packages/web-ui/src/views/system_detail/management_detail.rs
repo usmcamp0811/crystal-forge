@@ -195,7 +195,7 @@ pub(super) fn ManagementDetail(
                     }
                 }
                 if let Some(e) = &evidence {
-                    EvidenceMetrics { evidence: e.clone(), freshness, mode: system.management_mode }
+                    EvidenceMetrics { evidence: e.clone(), freshness, mode: system.management_mode, system_id }
                 }
                 div { class: "sd-tabs", role: "tablist", aria_label: "System detail sections",
                     onkeydown: move |event| {
@@ -292,7 +292,7 @@ pub(super) fn ManagementDetail(
                                 div { class: "mg-cols",
                                     ControlCard { system: system.clone(), evidence: e.clone(), parent_hostname: parent_hostname.clone() }
                                     if system.management_mode == ManagementMode::External {
-                                        StoredRuntime { system_id, parent_host_id: system.parent_host_id, parent_label: parent_hostname.clone() }
+                                        StoredRuntime { system_id, parent_host_id: system.parent_host_id, parent_label: parent_hostname.clone(), selected_revision: e.selected_revision.as_ref().map(|r| r.sha.clone()) }
                                     } else {
                                         section { class: "card sd-card", div { class: "sd-card-head", h2 { "Recent evidence" }
                                             button { class: "link-action focus-ring", onclick: move |_| navigate_system_detail_tab(active_tab, navigation_state, Tab::History, true), "All history" }
@@ -315,14 +315,16 @@ pub(super) fn ManagementDetail(
                             }
                         },
                         Tab::Cves => rsx! {
-                            EvidenceGate { evidence: e.clone(), freshness,
+                            EvidenceGate { evidence: e.clone(), freshness, what: "CVE findings",
                                 ArtifactFindings { system: system.clone(), evidence: e.clone(), selection: artifact_selection }
                             }
                         },
                         Tab::Hardening => rsx! {
+                            EvidenceBanner { evidence: e.clone(), freshness, what: "Hardening results" }
                             ConfigurationHardening { system_id, evidence: e.clone(), selection: artifact_selection }
                         },
                         Tab::Compliance => rsx! {
+                            EvidenceBanner { evidence: e.clone(), freshness, what: "Compliance results" }
                             ConfigurationCompliance { system_id, evidence: e.clone() }
                             // Existing POA&M history remains inspectable without granting
                             // configuration evidence runtime-remediation authority.
@@ -443,8 +445,63 @@ fn EvidenceMetrics(
     evidence: ConfigurationAssurance,
     freshness: EvidenceFreshness,
     mode: ManagementMode,
+    system_id: Uuid,
 ) -> Element {
+    // One bounded read of the latest stored parent report for the Runtime
+    // metric (external only). It never polls and never contacts the parent.
+    let observation = use_resource(move || async move {
+        if mode == ManagementMode::External {
+            Some(
+                client::fetch_latest_guest_observation(&system_id)
+                    .await
+                    .map_err(|e| e.to_string()),
+            )
+        } else {
+            None
+        }
+    });
+    let ago = crate::components::system::system_card_v2::ago;
     let counts = last_good_scan(&evidence).and_then(|s| s.cves.as_ref());
+    let provenance = cve_provenance(&evidence, freshness).map(|(_, p)| p);
+    let build_sub = evidence
+        .selected_artifact
+        .as_ref()
+        .and_then(|a| a.build.as_ref())
+        .and_then(|b| b.completed_at.or(b.started_at))
+        .map(ago)
+        .unwrap_or_else(|| {
+            if evidence.evaluation.state == "eval_failed" {
+                "blocked by evaluation".into()
+            } else {
+                "—".into()
+            }
+        });
+    let scan_sub = last_good_scan(&evidence)
+        .and_then(|s| {
+            Some(format!(
+                "{} · rev {}",
+                ago(s.completed_at?),
+                s.revision.sha.get(..7).unwrap_or(&s.revision.sha)
+            ))
+        })
+        .unwrap_or_else(|| "no completed scan".into());
+    let (runtime_value, runtime_sub) = match (mode, observation.read().as_ref()) {
+        (ManagementMode::Reference, _) => (
+            "Not applicable".to_string(),
+            "Not a running machine".to_string(),
+        ),
+        (_, Some(Some(Ok(Some(report))))) => (
+            "Host-observed".into(),
+            format!(
+                "unit {} · {}",
+                report.unit_active_state.as_deref().unwrap_or("unknown"),
+                ago(report.observed_at)
+            ),
+        ),
+        (_, Some(Some(Ok(None)))) => ("Unknown".into(), "no observations".into()),
+        (_, Some(Some(Err(_)))) => ("Unknown".into(), "observation unavailable".into()),
+        _ => ("Unknown".into(), "loading observation…".into()),
+    };
     let selected_identity = evidence
         .selected_revision
         .as_ref()
@@ -472,12 +529,12 @@ fn EvidenceMetrics(
                         .unwrap_or_else(|| a.state.clone())
                 })
                 .unwrap_or_else(|| "Not built".into()),
-            "Exact selected configuration".into(),
+            build_sub,
         ),
         (
             "Scan",
             scan_evidence_status(&evidence, freshness).label().into(),
-            "Configuration evidence only".into(),
+            scan_sub,
         ),
         (
             "CVEs",
@@ -485,24 +542,13 @@ fn EvidenceMetrics(
                 .map(|c| c.total.to_string())
                 .unwrap_or_else(|| "—".into()),
             counts
-                .map(|c| format!("{} critical · {} high · last good scan", c.critical, c.high))
+                .map(|c| match provenance.and_then(CveProvenance::marker) {
+                    Some(marker) => format!("{} critical · {} high · {marker}", c.critical, c.high),
+                    None => format!("{} critical · {} high", c.critical, c.high),
+                })
                 .unwrap_or_else(|| "Scan evidence unavailable".into()),
         ),
-        (
-            "Runtime",
-            if mode == ManagementMode::Reference {
-                "Not applicable"
-            } else {
-                "Not verified"
-            }
-            .into(),
-            if mode == ManagementMode::Reference {
-                "Not a running machine"
-            } else {
-                "Parent reports are separate observations"
-            }
-            .into(),
-        ),
+        ("Runtime", runtime_value, runtime_sub),
     ];
     rsx! { div { class: "sd-metric-strip",
         for (label, value, sub) in metrics { div { class: "sd-metric",
@@ -629,6 +675,7 @@ fn StoredRuntime(
     system_id: Uuid,
     parent_host_id: Option<Uuid>,
     parent_label: Option<String>,
+    selected_revision: Option<String>,
 ) -> Element {
     let mut observation = use_signal(|| None::<GuestObservationRow>);
     let mut error = use_signal(|| None::<String>);
@@ -665,7 +712,7 @@ fn StoredRuntime(
     rsx! {
         div {
             RuntimeCard { observation: shown, freshness: EvidenceFreshness::Unknown,
-                parent_label,
+                parent_label, parent_host_id, selected_revision,
                 loading: result.state() == UseResourceState::Pending, error: error(),
                 on_reload: move |_| reload.set(reload().wrapping_add(1)),
             }

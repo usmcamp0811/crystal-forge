@@ -269,7 +269,7 @@ pub fn EnvironmentsListView(initial_query: String) -> Element {
             div { class: "page-head", "data-coach-target": "env-page-head",
                 div {
                     h1 { class: "page-title", "Environments" }
-                    p { class: "page-subtitle", "{items.len()} tiers · {totals.systems} registered resources (all modes) · {totals.caches} caches configured" }
+                    p { class: "page-subtitle", "{items.len()} tiers · {totals.systems} systems · {totals.caches} caches configured" }
                 }
                 div { style: "display:flex; gap:8px;",
                     button {
@@ -487,7 +487,9 @@ struct EnvironmentTotals {
 impl EnvironmentTotals {
     fn from(items: &[EnvironmentItem]) -> Self {
         Self {
-            systems: items.iter().map(|env| env.system_count).sum(),
+            // Managed machines only, as in the approved design. External and
+            // reference registrations are not machines in an environment tier.
+            systems: items.iter().map(|env| env.health.active).sum(),
             caches: items.iter().filter(|env| env.cache.is_some()).count(),
             manual_policy: items
                 .iter()
@@ -1025,7 +1027,7 @@ fn EnvPanel(props: EnvPanelProps) -> Element {
 
                 EnvPanelSystems {
                     env_name: env.name.clone(),
-                    expected_count: env.system_count,
+                    expected_count: env.health.active,
                 }
             }
 
@@ -1050,7 +1052,7 @@ fn EnvPanelSystems(props: EnvPanelSystemsProps) -> Element {
         async move {
             fetch_systems(&SystemsListParams {
                 tag: None,
-                management_mode: None,
+                management_mode: Some(crate::api::models::ManagementMode::Managed),
                 page: Some(1),
                 per_page: Some(200),
                 search: None,
@@ -1067,7 +1069,7 @@ fn EnvPanelSystems(props: EnvPanelSystemsProps) -> Element {
 
     rsx! {
         section { class: "panel-section",
-            h3 { "Registered resources ({props.expected_count}) · all modes" }
+            h3 { "Systems ({props.expected_count})" }
             match systems.read().as_ref() {
                 None => rsx! {
                     if props.expected_count == 0 {

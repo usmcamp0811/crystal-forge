@@ -111,9 +111,9 @@ pub fn EnvironmentCard(props: EnvironmentCardProps) -> Element {
             }
 
             div { class: "env-card-stat",
-                div { class: "env-card-stat-num", "{env.system_count}" }
-                // The count covers every registration, inactive and all modes included.
-                div { class: "env-card-stat-label", "resources" }
+                div { class: "env-card-stat-num", "{env.health.active}" }
+                // Active managed machines only (server rollup), as in the design.
+                div { class: "env-card-stat-label", "systems" }
                 div { style: "flex:1;" }
                 div { class: "env-card-flakes",
                     if env.flake_names.is_empty() {
@@ -267,7 +267,7 @@ fn EnvironmentRow(props: EnvironmentRowProps) -> Element {
                     }
                 }
             }
-            td { class: "mono", style: "font-size:13px;", "{env.system_count}" }
+            td { class: "mono", style: "font-size:13px;", "{env.health.active}" }
             td {
                 div { style: "display:flex; align-items:center; gap:6px; min-width:140px;",
                     HealthBar { health: env.health.clone(), total, compact: true }

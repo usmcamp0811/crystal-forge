@@ -598,13 +598,15 @@ pub fn AddSystemForm(
                     button { class: "btn-icon focus-ring", aria_label: "Close", disabled: submitting, onclick: move |_| on_cancel.call(()), "×" }
                 }
                 nav { class: "pe-rail", aria_label: "Registration sections",
-                    for (id, label) in [("management", "Management"), ("identity", match mode { ManagementMode::Managed => "Host & environment", ManagementMode::External => "System & environment", ManagementMode::Reference => "Reference & environment" }), ("agent", "Agent identity"), ("configuration", "Configuration"), ("policy", if mode == ManagementMode::Managed { "Policy & tags" } else { "Tags" })] {
+                    for (id, label) in [("management", "Management"), ("identity", match mode { ManagementMode::Managed => "Host & environment", ManagementMode::External => "System & environment", ManagementMode::Reference => "Reference & environment" }), ("agent", "Agent identity"), ("configuration", if mode == ManagementMode::Managed { "Flake assignment" } else { "Configuration" }), ("policy", if mode == ManagementMode::Managed { "Policy & tags" } else { "Tags" })] {
                         if id != "agent" || mode == ManagementMode::Managed {
                             button { class: if section() == id { "pe-rail-item active focus-ring" } else { "pe-rail-item focus-ring" }, onclick: move |_| section.set(id),
-                                Icon { name: match id { "management" => IconName::Server, "identity" => IconName::Server, "agent" => IconName::Key, "configuration" => IconName::Git, _ => IconName::Shield }, size: 13 }
+                                Icon { name: match id { "management" => crate::components::system::management_mode::mode_icon(mode), "identity" => IconName::Server, "agent" => IconName::Key, "configuration" => IconName::Git, _ => IconName::Shield }, size: 13 }
                                 span { class: "pe-rail-label", "{label}" }
                                 if id == "identity" && form.hostname.trim().is_empty() { span { class: "pe-rail-badge warn", "!" } }
-                                if id == "agent" { span { class: "pe-rail-badge", if key_fingerprint.is_some() { "ok" } else { "!" } } }
+                                if id == "management" && !form.hostname.trim().is_empty() { span { class: "pe-rail-badge", "{mode.label()}" } }
+                                if id == "agent" { span { class: if key_fingerprint.is_some() { "pe-rail-badge" } else { "pe-rail-badge warn" }, if key_fingerprint.is_some() { "ok" } else { "!" } } }
+                                if id == "policy" && !parse_tags(&form.tags).is_empty() { span { class: "pe-rail-badge", "{parse_tags(&form.tags).len()}" } }
                             }
                         }
                     }
@@ -624,7 +626,7 @@ pub fn AddSystemForm(
                             }
                         }
                         if section() == "identity" {
-                            div { class: "pe-sec-head", h3 { "Identity & environment" } p { "Choose a unique resource identity and its authorized environment." } }
+                            div { class: "pe-sec-head", h3 { match mode { ManagementMode::Managed => "Host & environment", ManagementMode::External => "System & environment", ManagementMode::Reference => "Reference & environment" } } p { match mode { ManagementMode::Managed => "What the host is called, which tier it belongs to, and how the server reaches it.", _ => "What the resource is called and which environment owns it." } } }
                             div { class: "management-form-grid",
                                 label { class: "field", match mode { ManagementMode::Managed => "Hostname *", ManagementMode::External => "System name *", ManagementMode::Reference => "Reference name *" },
                                     input { class: "input focus-ring", aria_label: match mode { ManagementMode::Managed => "Hostname *", ManagementMode::External => "System name *", ManagementMode::Reference => "Reference name *" }, value: "{form.hostname}", oninput: move |e| draft.write().hostname = e.value() }
@@ -717,20 +719,81 @@ pub fn AddSystemForm(
     }
 }
 
+/// NixOS module snippet for a newly registered managed host.
+const AGENT_SNIPPET: &str = "services.crystal-forge.client = {\n  enable = true;\n  # Configure this server's host and port.\n  private_key = \"/var/lib/crystal-forge/host.key\";\n};";
+
+/// Copies `value` to the browser clipboard. A failure is returned, never
+/// reported as a successful copy; the snippet stays visible for manual copy.
+async fn copy_snippet(value: &str) -> Result<(), String> {
+    #[cfg(target_arch = "wasm32")]
+    {
+        use wasm_bindgen_futures::JsFuture;
+        let window = web_sys::window().ok_or_else(|| {
+            "Clipboard access is unavailable in this browser context.".to_string()
+        })?;
+        JsFuture::from(window.navigator().clipboard().write_text(value))
+            .await
+            .map_err(|_| "Copy failed. Select the snippet and copy it manually.".to_string())?;
+        Ok(())
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let _ = value;
+        Err("Clipboard access is available only in a browser.".to_string())
+    }
+}
+
 /// Shows confirmed registration and reloadable server evidence, never simulated progress.
 #[component]
 pub fn SystemRegistrationComplete(system: SystemDetail, on_close: EventHandler<()>) -> Element {
     let id = system.id;
     let mut evidence =
         use_resource(move || async move { client::fetch_configuration_assurance(&id).await });
+    // None: not attempted; Some(Ok): copied; Some(Err): the reason it failed.
+    let mut copy_result = use_signal(|| None::<Result<(), String>>);
+    let flake_name = system
+        .flake
+        .as_ref()
+        .map(|f| f.name.clone())
+        .unwrap_or_else(|| "Not linked".into());
+    let configuration = system
+        .system_configuration_name
+        .clone()
+        .unwrap_or_else(|| system.hostname.clone());
+    let verb = if system.management_mode == ManagementMode::Reference {
+        "added"
+    } else {
+        "registered"
+    };
     rsx! {
         div { class: "modal-backdrop", div { class: "modal management-complete", role: "dialog", aria_modal: "true", aria_label: "Registration complete",
-            div { class: "modal-head", h2 { "{system.hostname} registered" } MgmtChip { mode: system.management_mode } }
+            div { class: "modal-head",
+                h2 { Icon { name: IconName::Check, size: 16 } " {system.hostname} {verb} " MgmtChip { mode: system.management_mode } }
+                if system.management_mode == ManagementMode::Managed {
+                    p { "One step left: bring the agent online so it reports in." }
+                } else {
+                    p { "Crystal Forge evaluates " span { class: "mono", "{flake_name}#{configuration}" } ". "
+                        if system.management_mode == ManagementMode::External { "No agent is required." } else { "Nothing will be deployed." } }
+                }
+            }
             div { class: "modal-body",
                 if system.management_mode == ManagementMode::Managed {
+                    dl { class: "kv-grid", "aria-label": "Registration summary",
+                        dt { "Environment" } dd { "{system.environment.clone().unwrap_or_else(|| \"Unassigned\".into())}" }
+                        dt { "Flake" } dd { class: "mono", "{flake_name}" }
+                        dt { "Fingerprint" } dd { class: "mono", style: "word-break: break-all;", "{system.public_key_fingerprint.clone().unwrap_or_else(|| \"Unavailable\".into())}" }
+                    }
                     h3 { "Deploy the agent" }
                     p { "Install the agent module and its private key on the target host. Crystal Forge stores only the public key." }
-                    pre { class: "mono", "services.crystal-forge.client = {{\n  enable = true;\n  # Configure this server's host and port.\n  private_key = \"/var/lib/crystal-forge/host.key\";\n}};" }
+                    div { class: "management-snippet",
+                        button { class: "btn btn-ghost focus-ring xs", r#type: "button",
+                            onclick: move |_| { spawn(async move { copy_result.set(Some(copy_snippet(AGENT_SNIPPET).await)); }); },
+                            Icon { name: if matches!(copy_result(), Some(Ok(()))) { IconName::Check } else { IconName::File }, size: 11 }
+                            if matches!(copy_result(), Some(Ok(()))) { " Copied" } else { " Copy" }
+                        }
+                        pre { class: "mono", "{AGENT_SNIPPET}" }
+                    }
+                    if let Some(Err(reason)) = copy_result() { p { class: "help", role: "alert", "{reason}" } }
                     p { "Apply the host configuration with sudo nixos-rebuild switch. Wait for the first signed heartbeat; registration alone does not establish that the agent is online. For Setup, an administrator then acknowledges the agent report." }
                 } else {
                     p { "Nothing will be deployed. These statuses come from retained configuration evidence." }

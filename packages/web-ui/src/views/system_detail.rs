@@ -7540,8 +7540,28 @@ fn ConfigTab(
                 }
             }
             if !managed {
-                div { class: "cfgx-hist", Icon { name: IconName::File, size: 12 }
-                    div { "Inspecting configuration evidence at " span { class: "mono", "{selected_revision_label}" } ". No running generation or deployment authority is implied." }
+                {
+                    // Nonmanaged resources have no running generation. The
+                    // reference point is the newest inspectable tracked commit;
+                    // an older selection says so and offers a way back.
+                    let newest = commit_for_mode_switch.clone();
+                    let at_newest = newest.is_some() && newest == selected_revision;
+                    rsx! {
+                        div { class: "cfgx-hist", Icon { name: if at_newest { IconName::File } else { IconName::Clock }, size: 12 }
+                            div {
+                                if at_newest { "Inspecting configuration evidence at the newest tracked commit " }
+                                else if selected_revision.is_some() { "Inspecting configuration evidence at an older commit " }
+                                else { "Inspecting configuration evidence at " }
+                                span { class: "mono", title: selected_revision.clone().unwrap_or_default(), "{selected_revision_label}" }
+                                ". No running generation or deployment authority is implied."
+                            }
+                            if !at_newest && selected_revision.is_some() {
+                                if let Some(commit) = newest {
+                                    button { class: "cfgx-link focus-ring", onclick: move |_| on_revision_change.call(ConfigRevision::Commit(commit.clone())), "back to newest" }
+                                }
+                            }
+                        }
+                    }
                 }
             } else if is_historical {
                 div { class: "cfgx-hist", Icon { name: IconName::Clock, size: 12 }
