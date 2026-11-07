@@ -38,7 +38,7 @@ state-machine workflow (`devScripts.state-machine-test`) passed end to end at
 `b032bd6a`. `required_inventory_exact_owner_success_and_conflict`, which an
 earlier full run failed with `EvaluationSuperseded`, passed in that run. The
 earlier failure is not otherwise classified. SQLx `prepare --check` passed against a database
-migrated through `0324`. Reused-carrier scan coverage, per-system summaries and
+migrated through `0333` at the MR !340 finalization. Reused-carrier scan coverage, per-system summaries and
 hardening target selection are covered by
 `exact_reuse_scan_coverage_counts_reused_head_by_execution_source`, which fails
 on the pre-fix query.

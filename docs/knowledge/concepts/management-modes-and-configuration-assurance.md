@@ -131,7 +131,15 @@ inserts a full state even when its runtime fields equal the old state; normal
 heartbeat deduplication resumes afterward. Both agent write endpoints recheck
 the current key, enrollment epoch, managed mode, and activity under the
 transaction's system-row lock. A request authenticated before revocation cannot
-write after re-enrollment, even when the enrollment key is reused.
+write after re-enrollment.
+
+**Revoked keys stay revoked.** Leaving managed records the system's key in
+`system_revoked_agent_keys` (migration `0333`) in the same transaction that
+clears it. A later conversion into managed, or a key rotation, that presents a
+recorded key for that system is refused with HTTP 400 ("This agent key was
+revoked when the system left managed mode; enroll a new key"). Keys compare in
+canonical base64 form. Re-enrollment therefore always uses a fresh keypair, and
+the revoked agent identity cannot authenticate again.
 Changing the mode back to managed alone cannot restore Current CVE or POA&M
 authority. A fresh report authenticated under the new enrollment is required.
 
@@ -442,8 +450,11 @@ freshness unknown. No automatic guest configuration match is established.
 | Environment `system_count` | Every registration, including inactive resources and all modes |
 | Environment `rollup.active_system_count` and health partition | Active managed machines only |
 | Environment flake names | Active registrations in all modes |
-| Operational Scanning coverage | Distinct derivations in managed runtime, selected built nonmanaged head, recoverable-build, or active-scan populations |
-| Hardening runtime fleet/Current evidence | Managed runtime population; exact configuration assessments are not guest health |
+| Environment card, table and panel counts ("systems") | Active managed machines only (`rollup.active_system_count`), as in the approved design; registrations of all modes are listed on the Systems page |
+| Operational Scanning coverage | Distinct scannable derivations: managed runtime, selected *built* nonmanaged head, recoverable-build, or active-scan populations. A registration whose evaluation or build failed, or whose head is unbuilt, has nothing to scan and is not in the denominator; it appears as an evidence issue on the Systems page instead |
+| Admin CVE dashboard (summary, drill-down, top systems, scan freshness) | Active managed machines only. These endpoints report per-host runtime exposure from the hostname-joined legacy view; external and reference registrations are excluded so artifact evidence never becomes affected-system runtime exposure |
+| Hardening fleet summary and top vulnerable services | Active managed machines only (migration `0332`). Each machine counts its configuration's latest completed assessment; exact per-configuration assessments stay available on the configuration surfaces and are not guest health |
+| Compliance bundle evaluation | CVE and runtime controls use evidence-based evaluation that requires a deployed managed context; an external or reference registration has none, so those controls are *not checked*, never passed |
 
 Migrations `0316` (list and rollup views) and `0317` (detail view) mask
 nonmanaged runtime fields and set SQL health, deployment status and pipeline
@@ -480,6 +491,8 @@ Apply normal migrations in order; do not edit applied migrations:
 | `0329_guest_observation_indexes.sql` | Composite index for the current-parent observation read (277 ms to 0.24 ms with 400,000 former-parent rows) and indexes for the `parent_host_id` and `environment_id` foreign keys |
 | `0330_derivation_environment_resolution.sql` | `derivation_environment(commit, name)` returns the one owner environment of a derivation or reports ambiguity; build admission, claims, reuse and cache publication share it |
 | `0331_derivation_environment_effective_identity.sql` | Replaces the `0330` resolver: registrations count by effective configuration identity (explicit name, else hostname), so an explicit name and a hostname fallback in different environments are ambiguous |
+| `0332_hardening_fleet_managed_population.sql` | `view_hardening_fleet_summary` and `view_hardening_top_vulnerable_services` count active managed machines only; columns unchanged |
+| `0333_system_revoked_agent_keys.sql` | `system_revoked_agent_keys` records keys revoked by leaving managed; conversion and rotation refuse them |
 
 Existing enrolled rows remain managed; migration does not infer external or
 reference resources. Constraint failures on legacy blank enrollment keys require
@@ -530,22 +543,16 @@ Verified on the branch (see the [coverage map](../testing/integration-coverage-m
 for commands and scope):
 
 - At `4df19a7b`: GitLab pipeline 3025454179 passed all 10 jobs, including the
-  four integration owners and `state-machine-tests`. Local `nix flake check`
-  passed: Access 40, Assurance 67, Delivery 17 and Upgrade 13 cases. The
-  isolated state-machine workflow passed. `cargo sqlx prepare --check` passed
-  against a database migrated through `0330`.
-- After `4df19a7b`, the MR !340 review corrections changed claims, queued-job
-  reconciliation, cache dispatch, the resolver (migration `0331`) and the
-  Systems list filters and grouping. For those changes only targeted checks
-  have run: the disposable PostgreSQL tests
-  `explicit_name_and_hostname_fallback_share_one_ambiguity_rule`,
-  `single_owner_environment_move_rehomes_queued_job`,
-  `environment_move_after_claim_withholds_cache_dispatch`,
-  `environment_move_fences_restricted_builder_claims`, the earlier
-  cross-environment and reconciliation tests and the seven `niks3_` dispatch
-  tests; the Web UI unit tests for filters and grouping; and a browser check of
-  the Systems list in the task preview. The integration owners, the
-  state-machine workflow and the SQLx check have not run at those commits.
+  four integration owners and `state-machine-tests`, and local `nix flake check`
+  passed (Access 40, Assurance 67, Delivery 17, Upgrade 13 cases).
+- The MR !340 finalization (migrations `0331` to `0333`, environment ownership,
+  revoked keys, managed-only metric surfaces, Systems table and detail parity)
+  is verified at the final MR head. The MR description records the exact SHA,
+  the GitLab pipeline and the local `nix flake check`, SQLx and documentation
+  results. Results for an earlier commit are not evidence for that head.
+- PostgreSQL regressions added by the finalization run in the existing isolated
+  harness selections (`management_mode_`, `system_key_rotation_` and the named
+  environment-ownership tests). Each was checked to fail without its fix.
 
 Known limits that remain documented decisions, not hidden defects:
 
@@ -567,8 +574,8 @@ Known limits that remain documented decisions, not hidden defects:
   publication exists in that topology, which publishes through a database
   destination.
 
-Not verified: integration results at the commits after `4df19a7b`, independent
-design reference/actual/difference images, and old-agent integration with an
-older agent binary. No integration scenario covers an environment move or a
+Not verified: independent design reference/actual/difference images (the
+browser comparison was made against the mock in a live preview), and
+old-agent integration with an older agent binary. No integration scenario covers an environment move or a
 mixed explicit-name and hostname registration; PostgreSQL tests cover them. No fixture observation or simulated Refresh is
 production evidence.
