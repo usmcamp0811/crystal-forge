@@ -217,7 +217,13 @@ exports.evidence = async ctx => {
   await page.reload();
   await expect(page.getByRole("heading", { name: "Runtime observations", exact: true })).toHaveCount(0);
   await page.goto(ctx.url("/systems"));
-  await page.getByLabel("Filter by management mode", { exact: true }).selectOption("reference");
+  // Design 2d519abc: each Systems filter is a checkbox multi-select.
+  const modeFilter = page.getByRole("button", { name: "Management filter", exact: true });
+  await modeFilter.click();
+  await page.getByRole("listbox", { name: "Management", exact: true })
+    .getByRole("checkbox", { name: /^Reference configuration/ }).check();
+  await page.keyboard.press("Escape");
+  await expect(modeFilter).toHaveText(/Management:\s*Reference configuration/);
   await expect(page.getByText("Golden workstation / ISO", { exact: true })).not.toHaveCount(0);
   await expect(page.getByText("targetA", { exact: true })).toHaveCount(0);
   await page.setViewportSize({ width: 375, height: 812 });
