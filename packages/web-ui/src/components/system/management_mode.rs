@@ -197,6 +197,22 @@ pub fn last_good_scan(evidence: &ConfigurationAssurance) -> Option<&ScanEvidence
         })
 }
 
+/// Returns true when `scan` describes the exact selection: the selected
+/// revision (commit ID and SHA), the selected artifact's derivation, and the
+/// selected configuration name.
+///
+/// This decides provenance only. Freshness under the scan schedule is a
+/// separate question; a matching scan can still be stale or of unknown age.
+pub fn scan_matches_selection(evidence: &ConfigurationAssurance, scan: &ScanEvidence) -> bool {
+    evidence.selected_revision.as_ref().is_some_and(|revision| {
+        revision.commit_id == scan.revision.commit_id && revision.sha == scan.revision.sha
+    }) && evidence
+        .selected_artifact
+        .as_ref()
+        .is_some_and(|artifact| scan.derivation_id == artifact.derivation_id)
+        && scan.configuration_name == evidence.configuration_name
+}
+
 /// Derives issue precedence from real selected evidence, retaining historical data.
 /// `freshness` must classify the selected scan, not a historical last-good scan.
 /// A successful attempt alone does not prove a native configuration outcome.
@@ -262,13 +278,7 @@ pub fn scan_evidence_status(
         "awaiting_closure" => AwaitingClosure,
         "pending" | "queued" | "in_progress" | "running" => Scanning,
         "completed" if sealed(scan) => {
-            let matches_selection = evidence.selected_revision.as_ref().is_some_and(|revision| {
-                revision.commit_id == scan.revision.commit_id && revision.sha == scan.revision.sha
-            }) && evidence
-                .selected_artifact
-                .as_ref()
-                .is_some_and(|artifact| scan.derivation_id == artifact.derivation_id)
-                && scan.configuration_name == evidence.configuration_name;
+            let matches_selection = scan_matches_selection(evidence, scan);
             if !matches_selection || freshness == EvidenceFreshness::Stale {
                 Stale
             } else if freshness == EvidenceFreshness::Fresh {
@@ -579,38 +589,128 @@ pub fn EvidenceCves(evidence: ConfigurationAssurance, freshness: EvidenceFreshne
     } }
 }
 
+/// Classifies where compact CVE counts come from.
+///
+/// Provenance and freshness are separate. Provenance compares scan identity
+/// with the selection; freshness classifies only an exact selected scan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CveProvenance {
+    /// A sealed scan of the selected revision, artifact and configuration,
+    /// inside its freshness window.
+    Selected,
+    /// A sealed scan of the selection whose age exceeds the freshness window.
+    SelectedStale,
+    /// A sealed scan of the selection whose age cannot be classified, for
+    /// example because the scan schedule is unavailable.
+    SelectedFreshnessUnknown,
+    /// Fallback to the retained last-good scan because the selected scan
+    /// failed.
+    LastGood,
+    /// A sealed scan of another revision, artifact or configuration.
+    Historical,
+}
+
+impl CveProvenance {
+    /// Returns the marker chip label, or `None` for fresh selected evidence.
+    pub fn marker(self) -> Option<&'static str> {
+        match self {
+            Self::Selected => None,
+            Self::SelectedStale => Some("stale"),
+            Self::SelectedFreshnessUnknown => Some("age unknown"),
+            Self::LastGood => Some("last good"),
+            Self::Historical => Some("historical"),
+        }
+    }
+
+    /// Returns true when the counts do not describe the selected revision.
+    pub fn is_other_revision(self) -> bool {
+        matches!(self, Self::LastGood | Self::Historical)
+    }
+}
+
+/// Classifies the provenance of the scan that [`last_good_scan`] returns.
+///
+/// Returns `None` when no sealed scan exists. `freshness` must classify the
+/// selected scan, as for [`evidence_status`].
+pub fn cve_provenance(
+    evidence: &ConfigurationAssurance,
+    freshness: EvidenceFreshness,
+) -> Option<(&ScanEvidence, CveProvenance)> {
+    let scan = last_good_scan(evidence)?;
+    let selected_failed = evidence
+        .selected_scan
+        .as_ref()
+        .is_some_and(|selected| selected.state == "failed");
+    let provenance = if !scan_matches_selection(evidence, scan) {
+        if selected_failed {
+            CveProvenance::LastGood
+        } else {
+            CveProvenance::Historical
+        }
+    } else {
+        match freshness {
+            EvidenceFreshness::Fresh => CveProvenance::Selected,
+            EvidenceFreshness::Stale => CveProvenance::SelectedStale,
+            _ => CveProvenance::SelectedFreshnessUnknown,
+        }
+    };
+    Some((scan, provenance))
+}
+
 /// Renders sealed CVE counts in one compact line for list rows.
 ///
-/// Shows only non-zero severities. `clean` appears only when the sealed scan
-/// reports zero findings in total. When the counts are not from a Current scan
-/// of the selected revision, a `historical` chip follows them and the counts
-/// are dimmed, so they never read as findings for the current revision. The
-/// scan identity, revision and status are in the tooltip; [`EvidenceCves`]
-/// shows them in full on detail surfaces.
+/// Shows only non-zero severities; `clean` requires a zero total. A marker
+/// chip states provenance: `historical` or `last good` (dimmed counts from
+/// another revision), `stale` or `age unknown` (the selected revision, with
+/// unclassified or expired freshness). Full provenance (status, full revision
+/// SHA, scan UUID, every severity count and the total) is in a keyboard- and
+/// touch-accessible [`RowDisclosure`]. [`EvidenceCves`] remains the detailed
+/// presentation.
 #[component]
 pub fn CompactEvidenceCves(
     evidence: ConfigurationAssurance,
     freshness: EvidenceFreshness,
 ) -> Element {
     let status = evidence_status(&evidence, freshness);
-    let Some((scan, counts)) = last_good_scan(&evidence).and_then(|s| Some((s, s.cves.as_ref()?)))
+    let Some((scan, provenance, counts)) = cve_provenance(&evidence, freshness)
+        .and_then(|(scan, provenance)| Some((scan, provenance, scan.cves.as_ref()?)))
     else {
-        return rsx! { span { class: "chip chip-unknown", title: "{status.label()}: no sealed findings", "no scan" } };
+        return rsx! {
+            div { class: "mg-cves-compact",
+                span { class: "chip chip-unknown", "no scan" }
+                RowDisclosure { label: "Scan evidence details",
+                    p { "{status.label()}: no sealed findings for this configuration." }
+                }
+            }
+        };
     };
-    let historical = status != EvidenceStatus::Current;
-    let sha = scan.revision.sha.get(..8).unwrap_or(&scan.revision.sha);
-    let title = format!(
-        "Configuration evidence, not runtime exposure · {} · revision {sha} · scan {} · {} medium, {} low, {} total",
-        status.label(),
-        scan.scan_id,
-        counts.medium,
-        counts.low,
-        counts.total,
-    );
+    let class = if provenance.is_other_revision() {
+        "mg-cves-compact historical"
+    } else {
+        "mg-cves-compact"
+    };
+    let source = match provenance {
+        CveProvenance::Selected => "Selected revision, within the freshness window",
+        CveProvenance::SelectedStale => "Selected revision, past the freshness window",
+        CveProvenance::SelectedFreshnessUnknown => "Selected revision, freshness unknown",
+        CveProvenance::LastGood => "Last good scan; the selected scan failed",
+        CveProvenance::Historical => "Earlier scan; not the selected revision",
+    };
     rsx! {
-        div { class: if historical { "mg-cves-compact historical" } else { "mg-cves-compact" }, title: "{title}",
-            for (class, label) in compact_cve_chips(counts, status) {
-                span { class: "chip {class}", "{label}" }
+        div { class: "{class}",
+            for (chip_class, label) in compact_cve_chips(counts, provenance) {
+                span { class: "chip {chip_class}", "{label}" }
+            }
+            RowDisclosure { label: "CVE evidence details",
+                dl { class: "mg-disclosure-kv",
+                    dt { "Evidence" } dd { "{source}" }
+                    dt { "Status" } dd { "{status.label()}" }
+                    dt { "Revision" } dd { class: "mono", "{scan.revision.sha}" }
+                    dt { "Scan" } dd { class: "mono", "{scan.scan_id}" }
+                    dt { "Findings" }
+                    dd { "{counts.critical} critical · {counts.high} high · {counts.medium} medium · {counts.low} low · {counts.total} total" }
+                }
+                p { class: "mg-dim", "Configuration evidence, not runtime exposure." }
             }
         }
     }
@@ -618,13 +718,12 @@ pub fn CompactEvidenceCves(
 
 /// Returns the `(chip class, label)` list for [`CompactEvidenceCves`].
 ///
-/// Zero severities are omitted. Medium and low findings appear as one chip only
-/// when there are no critical or high findings. `clean` requires a total of
-/// zero. A status other than Current appends `historical`, or `last good` when
-/// the newest scan failed.
+/// Zero severities are omitted. Medium and low findings appear as one chip
+/// only when there are no critical or high findings. `clean` requires a total
+/// of zero. The provenance marker, if any, is last.
 pub fn compact_cve_chips(
     counts: &crate::api::models::EvidenceCveCounts,
-    status: EvidenceStatus,
+    provenance: CveProvenance,
 ) -> Vec<(&'static str, String)> {
     let mut chips = Vec::new();
     if counts.critical > 0 {
@@ -646,15 +745,35 @@ pub fn compact_cve_chips(
     if counts.total == 0 {
         chips.push(("chip-healthy mg-cves-count", "✓ clean".to_string()));
     }
-    if status != EvidenceStatus::Current {
-        let label = if status == EvidenceStatus::Failed {
-            "last good"
+    if let Some(marker) = provenance.marker() {
+        let class = if provenance.is_other_revision() {
+            "chip-unknown mg-cves-historical"
         } else {
-            "historical"
+            "chip-warning mg-cves-historical"
         };
-        chips.push(("chip-unknown mg-cves-historical", label.to_string()));
+        chips.push((class, marker.to_string()));
     }
     chips
+}
+
+/// Renders a compact information control that discloses row details.
+///
+/// Uses a native `details`/`summary` pair, so the control is focusable, opens
+/// with Enter or Space and opens on touch. Clicks inside it do not reach the
+/// row, so opening it does not open the row preview. `label` is the accessible
+/// name of the control.
+#[component]
+pub fn RowDisclosure(label: String, children: Element) -> Element {
+    rsx! {
+        details {
+            class: "mg-row-disclosure",
+            onclick: move |evt| evt.stop_propagation(),
+            summary { class: "focus-ring", "aria-label": "{label}", title: "{label}",
+                Icon { name: IconName::Info, size: 12 }
+            }
+            div { class: "mg-row-disclosure-panel", role: "note", {children} }
+        }
+    }
 }
 
 /// Returns the status-dot color for a nonmanaged resource's evidence status.
@@ -1068,41 +1187,101 @@ mod tests {
         assert!(report.observed_at < report.received_at);
     }
 
-    #[test]
-    fn compact_cve_chips_hide_zeros_and_mark_older_evidence() {
-        let counts = |critical, high, medium, low| EvidenceCveCounts {
+    fn counts(critical: i64, high: i64, medium: i64, low: i64) -> EvidenceCveCounts {
+        EvidenceCveCounts {
             total: critical + high + medium + low,
             critical,
             high,
             medium,
             low,
-        };
-        let labels = |c: &EvidenceCveCounts, s| {
-            compact_cve_chips(c, s)
-                .into_iter()
-                .map(|(_, l)| l)
-                .collect::<Vec<_>>()
-        };
+        }
+    }
+
+    fn labels(
+        value: &ConfigurationAssurance,
+        freshness: EvidenceFreshness,
+    ) -> (CveProvenance, Vec<String>) {
+        let (scan, provenance) = cve_provenance(value, freshness).expect("sealed scan");
+        let chips = compact_cve_chips(scan.cves.as_ref().unwrap(), provenance);
+        (
+            provenance,
+            chips.into_iter().map(|(_, label)| label).collect(),
+        )
+    }
+
+    #[test]
+    fn compact_cves_mark_provenance_by_identity_not_freshness() {
+        // Exact selected scan, fresh: counts only, no marker; zeros hidden.
+        let mut value = evidence();
+        let mut selected = scan();
+        selected.cves = Some(counts(0, 2, 5, 1));
+        value.selected_scan = Some(selected);
         assert_eq!(
-            labels(&counts(0, 2, 5, 1), EvidenceStatus::Current),
-            vec!["2 high"]
+            labels(&value, EvidenceFreshness::Fresh),
+            (CveProvenance::Selected, vec!["2 high".into()])
+        );
+
+        // The same exact scan, past its window: still the selected revision.
+        assert_eq!(
+            labels(&value, EvidenceFreshness::Stale),
+            (
+                CveProvenance::SelectedStale,
+                vec!["2 high".into(), "stale".into()]
+            )
+        );
+        // The same exact scan with no classifiable schedule: never "historical".
+        let (provenance, chips) = labels(&value, EvidenceFreshness::Unknown);
+        assert_eq!(provenance, CveProvenance::SelectedFreshnessUnknown);
+        assert!(!chips.iter().any(|c| c == "historical"), "{chips:?}");
+        assert_eq!(chips, vec!["2 high".to_string(), "age unknown".to_string()]);
+        assert!(!provenance.is_other_revision());
+
+        // Selected scan failed: the retained last-good scan of an earlier
+        // revision is the fallback, marked "last good".
+        let mut failed = scan();
+        failed.state = "failed".into();
+        failed.revision = revision(2);
+        let mut previous = scan();
+        previous.scan_id = Uuid::from_u128(600);
+        previous.derivation_id = 9;
+        previous.revision = revision(3);
+        previous.cves = Some(counts(0, 0, 0, 0));
+        value.selected_revision = Some(revision(2));
+        value.selected_artifact.as_mut().unwrap().revision = revision(2);
+        value.selected_artifact.as_mut().unwrap().derivation_id = 11;
+        value.selected_scan = Some(failed);
+        value.latest_good_scan = Some(previous.clone());
+        let (provenance, chips) = labels(&value, EvidenceFreshness::Fresh);
+        assert_eq!(provenance, CveProvenance::LastGood);
+        assert!(provenance.is_other_revision());
+        assert_eq!(chips, vec!["✓ clean".to_string(), "last good".to_string()]);
+    }
+
+    /// MR !340 review: `vm-pub-traefik` is still evaluating a new revision and
+    /// has findings from a scan of an earlier revision. The status chip says
+    /// "Evaluating"; the counts are dimmed and marked historical.
+    #[test]
+    fn evaluating_revision_with_earlier_scan_shows_historical_counts() {
+        let mut value = evidence();
+        value.management_mode = ManagementMode::External;
+        value.configuration_name = "vm-pub-traefik".into();
+        value.evaluation.state = "running".into();
+        value.selected_revision = Some(revision(2));
+        value.selected_artifact = None;
+        let mut earlier = scan();
+        earlier.configuration_name = "vm-pub-traefik".into();
+        earlier.cves = Some(counts(1, 6, 3, 2));
+        value.latest_good_scan = Some(earlier);
+        assert_eq!(
+            evidence_status(&value, EvidenceFreshness::Unknown),
+            EvidenceStatus::Evaluating
         );
         assert_eq!(
-            labels(&counts(0, 0, 3, 1), EvidenceStatus::Current),
-            vec!["4 med/low"]
-        );
-        assert_eq!(
-            labels(&counts(0, 0, 0, 0), EvidenceStatus::Current),
-            vec!["✓ clean"]
-        );
-        // Counts from an older scan never read as findings for the current revision.
-        assert_eq!(
-            labels(&counts(1, 6, 0, 0), EvidenceStatus::Evaluating),
-            vec!["1 crit", "6 high", "historical"]
-        );
-        assert_eq!(
-            labels(&counts(0, 0, 0, 0), EvidenceStatus::Failed),
-            vec!["✓ clean", "last good"]
+            labels(&value, EvidenceFreshness::Unknown),
+            (
+                CveProvenance::Historical,
+                vec!["1 crit".into(), "6 high".into(), "historical".into()]
+            )
         );
     }
 }

@@ -15,8 +15,8 @@ use crate::components::heartbeat_spinner::HeartbeatSpinner;
 use crate::components::icon::{Icon, IconName};
 use crate::components::system::helpers::deployment_state_label;
 use crate::components::system::management_mode::{
-    CompactEvidenceCves, DeploymentCell, EvidenceFreshness, MgmtChip, ScanEvidenceChip,
-    evidence_status, evidence_status_color,
+    CompactEvidenceCves, DeploymentCell, EvidenceFreshness, MgmtChip, RowDisclosure,
+    ScanEvidenceChip, evidence_status, evidence_status_color,
 };
 use crate::components::tables::{SortDirection, SortableHeader};
 
@@ -282,22 +282,33 @@ pub fn SystemsTable(
                                     }
                                     } else if let Some(value) = assurance {
                                         // The current selected-revision state. Older scan counts in the CVE
-                                        // column carry their own "historical" marker.
+                                        // column carry their own provenance marker.
                                         ScanEvidenceChip { status: evidence_status(value, row_freshness) }
                                     } else {
-                                        // Raw read errors stay in the tooltip so they cannot expand the row.
-                                        span {
-                                            class: "chip chip-unknown",
-                                            role: "status",
-                                            title: match evidence.get(&system.id) {
-                                                Some(Err(error)) => format!("Configuration evidence unavailable: {error}"),
-                                                _ => String::new(),
-                                            },
-                                            if evidence_loading { "Loading evidence…" } else { "Evidence unavailable" }
+                                        // The compact label keeps the row short. The raw read error is in
+                                        // an accessible disclosure, not only in a `title` attribute.
+                                        div { class: "sys-cell-inline",
+                                            span { class: "chip chip-unknown", role: "status",
+                                                if evidence_loading { "Loading evidence…" } else { "Evidence unavailable" }
+                                            }
+                                            if let Some(Err(error)) = evidence.get(&system.id) {
+                                                RowDisclosure { label: "Evidence read error",
+                                                    p { "Configuration evidence unavailable: {error}" }
+                                                }
+                                            }
                                         }
                                     }
-                                    if evidence.get(&system.id).is_some_and(Result::is_err) || observations.get(&system.id).is_some_and(Result::is_err) {
-                                        if let Some(retry) = on_retry_evidence { button { class: "btn btn-ghost xs focus-ring", title: "Retry evidence reads", disabled: evidence_loading, onclick: move |event| { event.stop_propagation(); retry.call(()); }, "Retry" } }
+                                    if !managed && (evidence.get(&system.id).is_some_and(Result::is_err) || observations.get(&system.id).is_some_and(Result::is_err)) {
+                                        if let Some(retry) = on_retry_evidence {
+                                            button {
+                                                class: "btn-icon focus-ring sys-retry",
+                                                title: "Retry evidence reads",
+                                                "aria-label": "Retry evidence reads",
+                                                disabled: evidence_loading,
+                                                onclick: move |event| { event.stop_propagation(); retry.call(()); },
+                                                Icon { name: IconName::Sync, size: 12 }
+                                            }
+                                        }
                                     }
                                 }
                                 // Flake · commit (design sub-line: "{commit} · {branch}")
@@ -417,7 +428,8 @@ pub fn SystemsTable(
                                     }
                                     } else {
                                         // One compact runtime state, as designed, plus the parent name. The
-                                        // reason a state is unknown (no report, read error) is in the tooltip.
+                                        // details (observation time and unit, or the reason the state is
+                                        // unknown, including read errors) are in an accessible disclosure.
                                         {
                                             let external = system.management_mode == ManagementMode::External;
                                             let (line, title) = match observations.get(&system.id) {
@@ -434,17 +446,23 @@ pub fn SystemsTable(
                                                         report.observed_at.to_rfc3339()
                                                     ),
                                                 ),
-                                                Some(Ok(None)) => ("Runtime unknown".into(), "No applicable host observation".into()),
+                                                // Nothing more to disclose: the visible label is the full state.
+                                                Some(Ok(None)) => ("Runtime unknown".into(), String::new()),
                                                 Some(Err(error)) => ("Runtime unknown".into(), format!("Host observation unavailable: {error}")),
-                                                None if evidence_loading => ("Loading…".into(), "Loading host observation".into()),
+                                                None if evidence_loading => ("Loading…".into(), String::new()),
                                                 None => ("Runtime unknown".into(), "Host observation unavailable".into()),
                                             };
                                             let observed = matches!(observations.get(&system.id), Some(Ok(Some(_)))) && external;
                                             rsx! {
-                                                div { class: "sys-runtime-cell", title: "{title}",
-                                                    span { class: if observed { "mg-obs" } else if external { "mg-dim" } else { "mg-dim sys-runtime-wrap" }, "{line}" }
-                                                    if let Some(parent) = system.parent_host_id {
-                                                        span { class: "mg-dim", "on {parent_names.get(&parent).cloned().unwrap_or_else(|| parent.to_string())}" }
+                                                div { class: "sys-cell-inline",
+                                                    div { class: "sys-runtime-cell",
+                                                        span { class: if observed { "mg-obs" } else if external { "mg-dim" } else { "mg-dim sys-runtime-wrap" }, "{line}" }
+                                                        if let Some(parent) = system.parent_host_id {
+                                                            span { class: "mg-dim", "on {parent_names.get(&parent).cloned().unwrap_or_else(|| parent.to_string())}" }
+                                                        }
+                                                    }
+                                                    if !title.is_empty() {
+                                                        RowDisclosure { label: "Runtime details", p { "{title}" } }
                                                     }
                                                 }
                                             }

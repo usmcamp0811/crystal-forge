@@ -9034,7 +9034,7 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
 .sys-table-mg .sys-host-cell .hostname{display:flex;align-items:center;gap:6px;flex-wrap:nowrap;min-width:0}
 .sys-table-mg .sys-host-cell .hostname .hostname-text{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:8ch}
 .sys-table-mg .sys-host-cell .hostname > :not(.hostname-text){flex-shrink:0}
-.sys-table-mg .sys-host-cell{max-width:225px}.sys-table-mg .sys-host-cell > .min-w-0{flex:1;min-width:0}
+.sys-table-mg .sys-host-cell{max-width:248px}.sys-table-mg .sys-host-cell > .min-w-0{flex:1;min-width:0}
 .sys-flake-cell{display:flex;flex-direction:column;line-height:1.3;min-width:0;max-width:120px}
 .sys-flake-cell span{display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 .sys-flake-name{font-size:12px;color:var(--cf-text-primary)}
@@ -9064,3 +9064,31 @@ select.poam-risk-select option { background: var(--cf-card-bg); color: var(--cf-
 .sys-table-mg tbody tr.row-guest td:first-child{padding-left:34px}
 /* Only the reference sentence ("Not a running machine") may use a second line. */
 .sys-runtime-cell > span.sys-runtime-wrap{white-space:normal;line-height:1.3}
+/* Accessible row disclosure: a focusable info control whose panel overlays
+   the table, so detailed provenance and errors never change row height. */
+.sys-cell-inline{display:flex;align-items:center;gap:6px;min-width:0}
+.mg-row-disclosure{position:relative;flex-shrink:0}
+.mg-row-disclosure > summary{list-style:none;display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;border-radius:6px;color:var(--cf-text-muted);cursor:pointer}
+.mg-row-disclosure > summary::-webkit-details-marker{display:none}
+.mg-row-disclosure > summary:hover,.mg-row-disclosure[open] > summary{color:var(--cf-text-primary);background:var(--cf-subtle-bg)}
+.mg-row-disclosure-panel{position:absolute;right:0;top:calc(100% + 4px);z-index:45;width:min(340px,80vw);padding:10px 12px;background:var(--cf-card-bg);border:1px solid var(--cf-card-border);border-radius:10px;box-shadow:0 12px 32px rgba(0,0,0,.35);font-size:12px;color:var(--cf-text-primary);white-space:normal;cursor:auto;text-align:left}
+.mg-row-disclosure-panel p{margin:0 0 4px}
+.mg-disclosure-kv{display:grid;grid-template-columns:auto 1fr;gap:3px 10px;margin:0 0 6px}
+.mg-disclosure-kv dt{color:var(--cf-text-muted)}.mg-disclosure-kv dd{margin:0;overflow-wrap:anywhere}
+.mg-cves-compact .mg-row-disclosure{margin-left:-2px}
+/* The retry control shares the status line, so a failed read keeps row height. */
+.sys-table-mg td:nth-child(3){white-space:nowrap}
+.sys-table-mg td:nth-child(3) > *{display:inline-flex;vertical-align:middle}
+.sys-table-mg .sys-retry{width:22px;height:22px;margin-left:4px}
+/* The info control stays on the chip line instead of wrapping below it. */
+.mg-cves-compact{flex-wrap:nowrap}
+/* The runtime text and its info control share the 112px runtime cap. */
+.sys-table-mg td:nth-child(7) .sys-cell-inline{display:inline-flex;max-width:130px}
+.sys-table-mg td:nth-child(7) .sys-runtime-cell{max-width:104px}
+/* The info controls add about 45px. The host column cannot give it up: the
+   hostname, mode badge and guest toggle need about 250px. Recover it from
+   cell padding (10px) and the runtime column instead. */
+.sys-table-mg thead th,.sys-table-mg tbody td{padding-left:10px;padding-right:10px}
+.sys-table-mg tbody tr.row-guest td:first-child{padding-left:32px}
+.sys-table-mg td:nth-child(7) .sys-cell-inline{max-width:114px}
+.sys-table-mg td:nth-child(7) .sys-runtime-cell{max-width:94px}
