@@ -28,7 +28,7 @@ const CVE_DASHBOARD_SUMMARY_SQL: &str = r#"
                 COUNT(DISTINCT cve_id)::BIGINT AS total_cves
             FROM view_system_vulnerabilities v
             JOIN systems s ON s.hostname = v.hostname
-            WHERE s.is_active = TRUE
+            WHERE s.is_active = TRUE AND s.management_mode = 'managed'
             GROUP BY v.hostname
         )
         SELECT
@@ -44,7 +44,7 @@ const CVE_DASHBOARD_SUMMARY_SQL: &str = r#"
                 FROM view_system_vulnerabilities v
                 JOIN systems s ON s.hostname = v.hostname
                 JOIN cves c ON c.id = v.cve_id
-                WHERE s.is_active = TRUE
+                WHERE s.is_active = TRUE AND s.management_mode = 'managed'
                   AND c.published_date >= (CURRENT_DATE - INTERVAL '7 days')
             ), 0)::BIGINT                                                       AS new_cves,
             -- oldest CVE age: scalar subquery always returns one row (NULL if no data)
@@ -53,7 +53,7 @@ const CVE_DASHBOARD_SUMMARY_SQL: &str = r#"
                 FROM view_system_vulnerabilities v
                 JOIN systems s ON s.hostname = v.hostname
                 JOIN cves c ON c.id = v.cve_id
-                WHERE s.is_active = TRUE
+                WHERE s.is_active = TRUE AND s.management_mode = 'managed'
                   AND c.published_date IS NOT NULL
             )                                                                   AS oldest_age_days
         FROM per_system_counts p
@@ -248,7 +248,8 @@ pub async fn cve_dashboard_vulnerabilities(
         FROM view_system_vulnerabilities v
         JOIN systems s ON s.hostname = v.hostname
         LEFT JOIN environments e ON e.id = s.environment_id
-        WHERE ($1::text IS NULL OR lower(v.severity) = $1)
+        WHERE s.management_mode = 'managed'
+          AND ($1::text IS NULL OR lower(v.severity) = $1)
           AND (
             $2::text IS NULL
             OR (CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fix_available' END) = $2
@@ -431,6 +432,7 @@ pub async fn cve_dashboard_top_systems(
         JOIN systems s ON s.hostname = d.hostname
         LEFT JOIN view_systems_cve_summary v ON v.hostname = d.hostname
         WHERE d.total_cves > 0
+          AND s.management_mode = 'managed'
         ORDER BY d.critical_cves DESC, d.high_cves DESC, d.total_cves DESC
         LIMIT 20
         "#,
@@ -499,7 +501,7 @@ pub async fn cve_scan_freshness(
         FROM systems s
         LEFT JOIN view_systems_cve_summary v ON v.hostname = s.hostname
         LEFT JOIN dedup_counts d ON d.hostname = s.hostname
-        WHERE s.is_active = TRUE
+        WHERE s.is_active = TRUE AND s.management_mode = 'managed'
         ORDER BY
             CASE WHEN v.days_since_scan IS NULL THEN 1 ELSE 0 END DESC,
             v.days_since_scan DESC
@@ -595,8 +597,16 @@ mod tests {
     /// Create a viewer user with an authenticated session and return
     /// `(user_id, request headers carrying the session cookie)`.
     async fn viewer_session(pool: &PgPool, suffix: &str) -> (Uuid, HeaderMap) {
+        session_with_role(pool, suffix, crate::models::auth_identity::AuthRole::Viewer).await
+    }
+
+    /// Create a user with `role`, an authenticated session, and its headers.
+    async fn session_with_role(
+        pool: &PgPool,
+        suffix: &str,
+        role: crate::models::auth_identity::AuthRole,
+    ) -> (Uuid, HeaderMap) {
         use crate::auth::session::{SESSION_COOKIE_NAME, hash_token};
-        use crate::models::auth_identity::AuthRole;
         use crate::queries::auth_identity::{create_user_session, sync_user_role};
 
         let user_id = Uuid::new_v4();
@@ -611,9 +621,9 @@ mod tests {
         .await
         .expect("insert viewer user");
 
-        sync_user_role(pool, user_id, AuthRole::Viewer)
+        sync_user_role(pool, user_id, role)
             .await
-            .expect("assign viewer role");
+            .expect("assign role");
 
         let token = format!("dash-session-{suffix}");
         create_user_session(
@@ -812,6 +822,108 @@ mod tests {
             .into_response();
 
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// TASK-508: the admin CVE dashboard reports per-host runtime exposure
+    /// through the hostname-joined `view_system_vulnerabilities`. A nonmanaged
+    /// registration whose name equals a scanned configuration must not become
+    /// an affected or scanned "system" there; its artifact evidence has no
+    /// runtime authority.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn management_mode_cve_dashboard_counts_only_managed_runtime(pool: PgPool) {
+        use crate::models::auth_identity::AuthRole;
+        let (_admin, headers) = session_with_role(&pool, "cve-dash-admin", AuthRole::Admin).await;
+        let flake: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes (name, repo_url, branch) VALUES ('cve-dash', 'https://example.invalid/cve-dash.git', 'main') RETURNING id",
+        ).fetch_one(&pool).await.unwrap();
+        let commit: i32 = sqlx::query_scalar(
+            "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, 'cve-dash-commit', NOW()) RETURNING id",
+        ).bind(flake).fetch_one(&pool).await.unwrap();
+        for (name, mode, key) in [
+            ("cfg-managed", "managed", Some(vec![61_u8; 32])),
+            ("cfg-reference", "reference", None),
+        ] {
+            sqlx::query(
+                "INSERT INTO systems (hostname, system_configuration_name, management_mode, public_key, is_active, derivation, deployment_policy, flake_id) \
+                 VALUES ($1, $1, $2, $3, TRUE, $1, 'manual', $4)",
+            ).bind(name).bind(mode).bind(key).bind(flake).execute(&pool).await.unwrap();
+            let derivation: i32 = sqlx::query_scalar(
+                "INSERT INTO derivations (commit_id, derivation_type, derivation_name, status_id, attempt_count) \
+                 VALUES ($1, 'nixos', $2, (SELECT id FROM derivation_statuses WHERE name='build-complete'), 0) RETURNING id",
+            ).bind(commit).bind(name).fetch_one(&pool).await.unwrap();
+            let scan = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO cve_scans (id, derivation_id, scanner_name, status, completed_at, total_packages, total_vulnerabilities, critical_count) \
+                 VALUES ($1, $2, 'vulnix', 'completed', NOW(), 1, 1, 1)",
+            ).bind(scan).bind(derivation).execute(&pool).await.unwrap();
+            let package: i32 = sqlx::query_scalar(
+                "INSERT INTO derivations (commit_id, derivation_type, derivation_name, pname, version, status_id, attempt_count) \
+                 VALUES (NULL, 'package', $1, 'openssl', '1.0', 11, 0) RETURNING id",
+            ).bind(format!("openssl-{name}")).fetch_one(&pool).await.unwrap();
+            sqlx::query("INSERT INTO scan_packages (scan_id, derivation_id) VALUES ($1, $2)")
+                .bind(scan)
+                .bind(package)
+                .execute(&pool)
+                .await
+                .unwrap();
+            let cve = format!("CVE-2099-{}", if mode == "managed" { 1001 } else { 1002 });
+            sqlx::query("INSERT INTO cves (id, cvss_v3_score, published_date) VALUES ($1, 9.8, CURRENT_DATE)")
+                .bind(&cve).execute(&pool).await.unwrap();
+            sqlx::query("INSERT INTO package_vulnerabilities (derivation_id, cve_id, is_whitelisted) VALUES ($1, $2, FALSE)")
+                .bind(package).bind(&cve).execute(&pool).await.unwrap();
+        }
+        async fn body(response: axum::response::Response) -> serde_json::Value {
+            assert_eq!(response.status(), StatusCode::OK);
+            serde_json::from_slice(
+                &axum::body::to_bytes(response.into_body(), usize::MAX)
+                    .await
+                    .unwrap(),
+            )
+            .unwrap()
+        }
+        let hostnames = |value: &serde_json::Value| -> Vec<String> {
+            value
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|row| row["hostname"].as_str().unwrap().to_owned())
+                .collect()
+        };
+        let summary = body(
+            cve_dashboard_summary(State(pool.clone()), headers.clone())
+                .await
+                .into_response(),
+        )
+        .await;
+        assert_eq!(summary["affected_systems"], 1, "{summary}");
+        assert_eq!(summary["severity"]["critical"], 1, "{summary}");
+        assert_eq!(summary["new_cves_last_7_days"], 1, "{summary}");
+        let vulnerabilities = body(
+            cve_dashboard_vulnerabilities(
+                State(pool.clone()),
+                headers.clone(),
+                Query(CveDashboardFilterParams::default()),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert_eq!(hostnames(&vulnerabilities), vec!["cfg-managed".to_string()]);
+        let top = body(
+            cve_dashboard_top_systems(State(pool.clone()), headers.clone())
+                .await
+                .into_response(),
+        )
+        .await;
+        assert_eq!(hostnames(&top), vec!["cfg-managed".to_string()]);
+        let freshness = body(
+            cve_scan_freshness(State(pool.clone()), headers)
+                .await
+                .into_response(),
+        )
+        .await;
+        assert_eq!(hostnames(&freshness), vec!["cfg-managed".to_string()]);
     }
 
     #[tokio::test]

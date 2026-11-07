@@ -997,6 +997,66 @@ mod tests {
         }
     }
 
+    /// TASK-508 AC #5: a flake shared by a managed machine and an external
+    /// registration updates only the managed machine. The external
+    /// registration receives no target and no pending deployment, so it cannot
+    /// enter a rollout group or a later delivery.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn management_mode_mixed_flake_rollout_updates_only_managed(pool: PgPool) {
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (flake_id, _derivation_id, store_path, config_name) =
+            cve_gate_artifact(&pool, &suffix).await;
+        let managed = cve_gate_system(
+            &pool,
+            &format!("mixed-managed-{suffix}"),
+            flake_id,
+            &config_name,
+            None,
+        )
+        .await;
+        let external: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems (hostname, management_mode, public_key, derivation, flake_id, \
+             system_configuration_name, deployment_policy) \
+             VALUES ($1, 'external', NULL, '', $2, $3, 'auto_latest') RETURNING id",
+        )
+        .bind(format!("mixed-external-{suffix}"))
+        .bind(flake_id)
+        .bind(&config_name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let systems = sqlx::query_as::<_, crate::models::systems::System>(
+            "SELECT * FROM systems WHERE id = ANY($1) ORDER BY hostname",
+        )
+        .bind(vec![managed, external])
+        .fetch_all(&pool)
+        .await
+        .unwrap();
+        assert_eq!(systems.len(), 2);
+        let manager = DeploymentPolicyManager::new(CrystalForgeConfig::default(), pool.clone());
+        assert_eq!(
+            manager
+                .update_flake_systems_to_latest(flake_id, systems)
+                .await
+                .unwrap(),
+            1
+        );
+        let (managed_target, _, managed_pending) = cve_gate_system_state(&pool, managed).await;
+        assert_eq!(managed_target.as_deref(), Some(store_path.as_str()));
+        assert_eq!(managed_pending, managed_target);
+        let (external_target, _, external_pending) = cve_gate_system_state(&pool, external).await;
+        assert!(external_target.is_none() && external_pending.is_none());
+        let pending: i64 = sqlx::query_scalar(
+            "SELECT count(*) FROM pending_system_deployments WHERE system_id = $1",
+        )
+        .bind(external)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        assert_eq!(pending, 0);
+    }
+
     // ── Shared fixtures for require_cve_check regressions ───────────────────
     //
     // TASK-437 correction: require_cve_check must be evaluated only through a

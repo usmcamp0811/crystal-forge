@@ -374,4 +374,85 @@ mod tests {
             .unwrap();
         assert!(!ingest(&pool, parent, &public_key, &[]).await);
     }
+
+    /// TASK-508 AC #11: a second, valid managed parent in the same environment
+    /// cannot report another parent's guest. Its batch stores nothing; the
+    /// associated parent's report is stored.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn management_mode_guest_observation_rejects_a_second_managed_parent(pool: PgPool) {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        let key = |seed: u8| {
+            STANDARD.encode(
+                ed25519_dalek::SigningKey::from_bytes(&[seed; 32])
+                    .verifying_key()
+                    .to_bytes(),
+            )
+        };
+        let (key_a, key_b) = (key(81), key(82));
+        let env: Uuid = sqlx::query_scalar(
+            "INSERT INTO environments(name) VALUES ('guest-rogue-parent') RETURNING id",
+        )
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut parents = Vec::new();
+        for (name, public_key) in [("parent-a", &key_a), ("parent-b", &key_b)] {
+            parents.push(
+                sqlx::query_scalar::<_, Uuid>(
+                    "INSERT INTO systems(hostname,public_key,environment_id,derivation) VALUES ($1,$2,$3,'') RETURNING id",
+                )
+                .bind(name)
+                .bind(public_key)
+                .bind(env)
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            );
+        }
+        let guest: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems(hostname,management_mode,parent_host_id,environment_id,derivation) VALUES ('guest','external',$1,$2,'') RETURNING id",
+        )
+        .bind(parents[0])
+        .bind(env)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let mut observation = report();
+        observation.target.guest_id = guest;
+        let stored = || {
+            let pool = pool.clone();
+            async move {
+                sqlx::query_scalar::<_, i64>(
+                    "SELECT count(*) FROM guest_observations WHERE guest_id=$1",
+                )
+                .bind(guest)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        for (parent, public_key) in [(parents[1], &key_b), (parents[0], &key_a)] {
+            let mut tx = pool.begin().await.unwrap();
+            crate::queries::evaluation_snapshots::lock_snapshot_writer_tx(&mut tx)
+                .await
+                .unwrap();
+            let targets = ingest_tx(&mut tx, parent, public_key, &[observation.clone()])
+                .await
+                .unwrap()
+                .expect("both parents are authenticated managed hosts");
+            tx.commit().await.unwrap();
+            if parent == parents[1] {
+                assert!(targets.is_empty(), "parent B has no guest targets");
+                assert_eq!(stored().await, 0, "parent B cannot report parent A's guest");
+            } else {
+                assert_eq!(targets.len(), 1);
+                assert_eq!(
+                    stored().await,
+                    1,
+                    "the associated parent's report is stored"
+                );
+            }
+        }
+    }
 }

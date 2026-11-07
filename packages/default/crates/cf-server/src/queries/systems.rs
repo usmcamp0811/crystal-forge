@@ -2526,6 +2526,41 @@ pub async fn audit_system_metadata_tx(
     Ok(())
 }
 
+/// Error text for an enrollment that presents a key revoked for the system.
+pub const REVOKED_AGENT_KEY_MESSAGE: &str =
+    "This agent key was revoked when the system left managed mode; enroll a new key";
+
+/// Returns true when `key` equals a key that a transition out of managed mode
+/// revoked for `system_id`.
+///
+/// Keys compare in canonical base64 form, because conversion stores the
+/// normalized key and rotation stores the trimmed input. A recorded key that no
+/// longer parses compares by its trimmed text.
+///
+/// # Errors
+/// Returns database errors.
+pub async fn agent_key_was_revoked_tx(
+    tx: &mut sqlx::Transaction<'_, Postgres>,
+    system_id: Uuid,
+    key: &str,
+) -> Result<bool> {
+    use crate::models::public_key::PublicKey;
+    let canonical = |value: &str| {
+        PublicKey::from_base64(value.trim(), "")
+            .map(|k| k.to_base64())
+            .ok()
+    };
+    let candidate = canonical(key).unwrap_or_else(|| key.trim().to_owned());
+    let revoked: Vec<String> =
+        sqlx::query_scalar("SELECT public_key FROM system_revoked_agent_keys WHERE system_id = $1")
+            .bind(system_id)
+            .fetch_all(&mut **tx)
+            .await?;
+    Ok(revoked
+        .iter()
+        .any(|entry| canonical(entry).unwrap_or_else(|| entry.trim().to_owned()) == candidate))
+}
+
 /// Changes authority under the metadata writer's existing system-row lock.
 ///
 /// Callers must validate enrollment, parent and policy before calling. Revocation
@@ -2533,8 +2568,14 @@ pub async fn audit_system_metadata_tx(
 /// transaction as key/target removal. Historical scans and events are retained.
 /// This function never queues deployment work. It cancels queued builds that the
 /// new authority makes unclaimable and keeps completed build and scan history.
+///
+/// SECURITY: Leaving managed records the revoked key in
+/// `system_revoked_agent_keys` before the key is cleared, in this transaction.
+/// A `new_key` that was revoked for this system is refused, so a conversion back
+/// into managed cannot restore the revoked agent identity.
 /// # Errors
-/// Returns persistence errors; callers must roll back the metadata transaction.
+/// Returns persistence errors, or an error when `new_key` was revoked for this
+/// system; callers must roll back the metadata transaction.
 pub async fn update_management_authority_tx(
     tx: &mut sqlx::Transaction<'_, Postgres>,
     system_id: Uuid,
@@ -2542,6 +2583,22 @@ pub async fn update_management_authority_tx(
     parent: Option<Uuid>,
     new_key: Option<&str>,
 ) -> Result<()> {
+    if let Some(key) = new_key
+        && agent_key_was_revoked_tx(tx, system_id, key).await?
+    {
+        anyhow::bail!("{REVOKED_AGENT_KEY_MESSAGE}");
+    }
+    if !mode.permits_deployment() {
+        sqlx::query(
+            "INSERT INTO system_revoked_agent_keys (system_id, public_key)
+             SELECT id, BTRIM(public_key) FROM systems
+             WHERE id = $1 AND management_mode = 'managed' AND public_key IS NOT NULL
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(system_id)
+        .execute(&mut **tx)
+        .await?;
+    }
     sqlx::query(
         "UPDATE systems SET management_mode=$2, parent_host_id=$3,
         public_key=CASE WHEN $2='managed' THEN COALESCE($4,public_key) ELSE NULL END,
@@ -3085,12 +3142,60 @@ mod tests {
             .execute(&mut *tx)
             .await
             .unwrap();
+        // The revoked identity cannot re-enroll: the old key is refused, in
+        // canonical and in whitespace-padded form, and nothing changes.
+        let old_key = system.public_key.as_ref().unwrap().to_base64();
+        let revoked: Vec<String> = sqlx::query_scalar(
+            "SELECT public_key FROM system_revoked_agent_keys WHERE system_id=$1",
+        )
+        .bind(system.id)
+        .fetch_all(&mut *tx)
+        .await
+        .unwrap();
+        assert_eq!(revoked.len(), 1, "leaving managed records the revoked key");
+        for presented in [old_key.clone(), format!("  {old_key}\n")] {
+            assert!(
+                agent_key_was_revoked_tx(&mut tx, system.id, &presented)
+                    .await
+                    .unwrap()
+            );
+        }
+        let refused = update_management_authority_tx(
+            &mut tx,
+            system.id,
+            ManagementMode::Managed,
+            None,
+            Some(&old_key),
+        )
+        .await
+        .unwrap_err();
+        assert!(refused.to_string().contains("revoked"), "{refused}");
+        tx.rollback().await.unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("UPDATE systems SET deployment_policy='manual' WHERE id=$1")
+            .bind(system.id)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        let fresh_key = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(
+                ed25519_dalek::SigningKey::from_bytes(&[77_u8; 32])
+                    .verifying_key()
+                    .to_bytes(),
+            )
+        };
+        assert!(
+            !agent_key_was_revoked_tx(&mut tx, system.id, &fresh_key)
+                .await
+                .unwrap()
+        );
         update_management_authority_tx(
             &mut tx,
             system.id,
             ManagementMode::Managed,
             None,
-            Some(&system.public_key.as_ref().unwrap().to_base64()),
+            Some(&fresh_key),
         )
         .await
         .unwrap();

@@ -1538,3 +1538,75 @@ async fn fleet_summary_uses_latest_completed_scan_per_active_system_only() {
         "expected avg_fleet_score {expected_after}, got {observed_after}"
     );
 }
+
+/// TASK-508 AC #12: fleet hardening counts are machine counts. A reference or
+/// external registration with a completed configuration assessment must not
+/// enter "systems scanned" or "affected systems" (migration 0332).
+#[sqlx::test]
+#[ignore = "requires an isolated PostgreSQL database with CREATEDB"]
+async fn management_mode_hardening_fleet_counts_only_managed_machines(pool: PgPool) {
+    let flake: i32 = sqlx::query_scalar(
+        "INSERT INTO flakes (name, repo_url, branch) VALUES ('hardening-modes', 'https://example.invalid/hm.git', 'main') RETURNING id",
+    )
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    let commit: i32 = sqlx::query_scalar(
+        "INSERT INTO commits (flake_id, git_commit_hash, commit_timestamp) VALUES ($1, 'hardening-modes-commit', NOW()) RETURNING id",
+    )
+    .bind(flake)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    for (name, mode, key) in [
+        ("hm-managed", "managed", Some(vec![71_u8; 32])),
+        ("hm-reference", "reference", None),
+        ("hm-external", "external", None),
+    ] {
+        sqlx::query(
+            "INSERT INTO systems (hostname, system_configuration_name, management_mode, public_key, is_active, derivation, deployment_policy, flake_id) \
+             VALUES ($1, $1, $2, $3, TRUE, $1, 'manual', $4)",
+        )
+        .bind(name)
+        .bind(mode)
+        .bind(key)
+        .bind(flake)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let derivation: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations (commit_id, derivation_type, derivation_name, status_id, attempt_count) \
+             VALUES ($1, 'nixos', $2, (SELECT id FROM derivation_statuses WHERE name='build-complete'), 0) RETURNING id",
+        )
+        .bind(commit)
+        .bind(name)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        let scan: Uuid = sqlx::query_scalar(
+            "INSERT INTO hardening_scans (derivation_id, status, completed_at, total_services, vulnerable_count, overall_score) \
+             VALUES ($1, 'completed', NOW(), 1, 1, 20) RETURNING id",
+        )
+        .bind(derivation)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO service_hardening_results (scan_id, service_name, hardening_score, risk_level) VALUES ($1, 'sshd.service', 20, 'vulnerable')",
+        )
+        .bind(scan)
+        .execute(&pool)
+        .await
+        .unwrap();
+    }
+    let summary = crate::queries::hardening_scans::get_fleet_summary(&pool)
+        .await
+        .unwrap();
+    assert_eq!(summary.total_systems_scanned, 1);
+    assert_eq!(summary.total_vulnerable_services, 1);
+    let top = crate::queries::hardening_scans::get_top_vulnerable_services(&pool, 10)
+        .await
+        .unwrap();
+    assert_eq!(top.len(), 1);
+    assert_eq!(top[0].affected_systems_count, 1);
+}

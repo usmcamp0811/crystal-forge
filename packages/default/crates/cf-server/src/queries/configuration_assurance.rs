@@ -556,4 +556,58 @@ mod tests {
         assert_eq!(evidence.latest_good_scan.unwrap().scan_id, sealed);
         assert_eq!(evidence.history.scans.len(), 20);
     }
+
+    /// TASK-508 AC #9: a failed native evaluation and a failed build are
+    /// reported explicitly for a nonmanaged registration, with their errors,
+    /// and never as missing or clean evidence.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn management_mode_assurance_reports_failed_evaluation_and_build_errors(pool: PgPool) {
+        let flake: i32 = sqlx::query_scalar(
+            "INSERT INTO flakes(name,repo_url,branch,snapshot_ready_at) VALUES ('assurance-failures','https://example.invalid/failures','main',NOW()) RETURNING id",
+        ).fetch_one(&pool).await.unwrap();
+        let system: Uuid = sqlx::query_scalar(
+            "INSERT INTO systems(hostname,system_configuration_name,flake_id,management_mode,public_key,derivation,deployment_policy)
+             VALUES ('failing reference','failing',$1,'reference',NULL,'','manual') RETURNING id",
+        ).bind(flake).fetch_one(&pool).await.unwrap();
+        let head: i32 = sqlx::query_scalar(
+            "INSERT INTO commits(flake_id,git_commit_hash,commit_timestamp) VALUES ($1,repeat('c',40),NOW()) RETURNING id",
+        ).bind(flake).fetch_one(&pool).await.unwrap();
+        sqlx::query("INSERT INTO flake_branch_commit_snapshot(flake_id,commit_id,position) VALUES ($1,$2,0)")
+            .bind(flake).bind(head).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO evaluation_attempt_inventory(evaluation_attempt_id,commit_id,attempt_number,configuration_names,selected_configuration_names,execution_mode)
+             SELECT id,commit_id,attempt_number,ARRAY['failing'],ARRAY['failing'],'native' FROM evaluation_attempts WHERE commit_id=$1",
+        ).bind(head).execute(&pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO evaluation_native_outcomes(evaluation_attempt_id,commit_id,attempt_number,configuration_name,policy_results,eval_state,evaluation_failure_error)
+             SELECT id,commit_id,attempt_number,'failing',jsonb_build_object('evaluation_attempt',attempt_number),'eval_failed','attribute missing'
+             FROM evaluation_attempts WHERE commit_id=$1",
+        ).bind(head).execute(&pool).await.unwrap();
+        let evidence = fetch(&pool, system, None).await.unwrap().unwrap();
+        assert_eq!(evidence.evaluation.availability, "available");
+        assert_eq!(evidence.evaluation.state, "eval_failed");
+        assert_eq!(
+            evidence.evaluation.error.as_deref(),
+            Some("attribute missing")
+        );
+        assert!(evidence.selected_scan.is_none());
+        assert!(
+            evidence.latest_good_scan.is_none(),
+            "no evidence is invented"
+        );
+
+        let failed_build: i32 = sqlx::query_scalar(
+            "INSERT INTO derivations(commit_id,derivation_name,derivation_type,status_id,error_message)
+             SELECT $1,'failing','nixos',id,'builder exited with status 1' FROM derivation_statuses WHERE name='build-failed' RETURNING id",
+        ).bind(head).fetch_one(&pool).await.unwrap();
+        let evidence = fetch(&pool, system, None).await.unwrap().unwrap();
+        let artifact = evidence.selected_artifact.unwrap();
+        assert_eq!(artifact.derivation_id, failed_build);
+        assert_eq!(
+            artifact.error.as_deref(),
+            Some("builder exited with status 1")
+        );
+        assert!(artifact.output_path.is_none());
+    }
 }

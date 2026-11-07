@@ -2684,6 +2684,19 @@ pub async fn update_system_handler(
             Ok(key) => key,
             Err(error) => return bad_request(&error.to_string()),
         };
+        // SECURITY: A key revoked when this system left managed mode cannot
+        // re-enroll it. The authority write below refuses it too.
+        if let Some(candidate) = key.as_deref() {
+            match crate::queries::systems::agent_key_was_revoked_tx(&mut tx, system_id, candidate)
+                .await
+            {
+                Ok(false) => {}
+                Ok(true) => {
+                    return bad_request(crate::queries::systems::REVOKED_AGENT_KEY_MESSAGE);
+                }
+                Err(_) => return internal_error("Failed to check revoked agent keys"),
+            }
+        }
         if mode != crate::models::systems::ManagementMode::Managed
             && (flake_id.is_none()
                 || payload
@@ -3303,6 +3316,21 @@ pub async fn update_system_public_key(
     use crate::models::public_key::PublicKey;
     if let Err(e) = PublicKey::from_base64(new_public_key, &row.hostname) {
         return bad_request(&format!("Invalid public key: {}", e));
+    }
+    // SECURITY: Rotation cannot restore a key that a transition out of managed
+    // mode revoked for this system. Revocation requires leaving managed, which
+    // this endpoint cannot do, so the revoked set is stable for this check.
+    let revoked = match pool.begin().await {
+        Ok(mut tx) => {
+            crate::queries::systems::agent_key_was_revoked_tx(&mut tx, system_id, new_public_key)
+                .await
+        }
+        Err(error) => Err(error.into()),
+    };
+    match revoked {
+        Ok(false) => {}
+        Ok(true) => return bad_request(crate::queries::systems::REVOKED_AGENT_KEY_MESSAGE),
+        Err(_) => return internal_error("Failed to check revoked agent keys"),
     }
 
     // Update the public key. Only an active managed system holds a key: external
@@ -5645,6 +5673,30 @@ mod tests {
         let detail: SystemDetail = response_json(response).await;
         assert_eq!(detail.management_mode, ManagementMode::External);
         assert_eq!(detail.parent_host_id, Some(ids[2]));
+        // AC #13: the parent change is audited with old and new parent.
+        let audit_target = ids[1].to_string();
+        let last_parent_audit = || {
+            let pool = pool.clone();
+            let audit_target = audit_target.clone();
+            async move {
+                sqlx::query_scalar::<_, serde_json::Value>(
+                    "SELECT metadata FROM admin_audit_events
+                     WHERE action='system_updated' AND target=$1
+                     ORDER BY created_at DESC, id DESC LIMIT 1",
+                )
+                .bind(audit_target)
+                .fetch_one(&pool)
+                .await
+                .unwrap()
+            }
+        };
+        let audit = last_parent_audit().await;
+        assert_eq!(
+            audit["parent_host_id"],
+            serde_json::json!(ids[2]),
+            "{audit}"
+        );
+        assert_eq!(audit["management_mode"], "external", "{audit}");
         let response = update_system_handler(
             State(state.clone()),
             State(pool.clone()),
@@ -5663,6 +5715,15 @@ mod tests {
         assert_eq!(detail.management_mode, ManagementMode::Reference);
         assert_eq!(detail.parent_host_id, None);
         assert_eq!(detail.tags, ["edited"]);
+        let audit = last_parent_audit().await;
+        assert_eq!(
+            audit["old_parent_host_id"],
+            serde_json::json!(ids[2]),
+            "{audit}"
+        );
+        assert!(audit["parent_host_id"].is_null(), "{audit}");
+        assert_eq!(audit["old_management_mode"], "external", "{audit}");
+        assert_eq!(audit["management_mode"], "reference", "{audit}");
         assert_eq!(detail.description.as_deref(), Some("Changed private notes"));
         let response = update_system_handler(
             State(state.clone()),
@@ -9339,6 +9400,54 @@ mod tests {
         let serialized = metadata.to_string();
         assert!(!serialized.contains(&new_public_key));
         assert!(!serialized.contains(&old_public_key));
+    }
+
+    /// TASK-508: a key revoked when the system left managed mode stays
+    /// untrusted. Rotation cannot restore it, and the stored key is unchanged.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn system_key_rotation_refuses_a_key_revoked_by_leaving_managed() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let (_revoked, revoked_public_key) = rotation_key_material(53);
+        let (_current, current_public_key) = rotation_key_material(54);
+        let system = rotation_insert_system(
+            &pool,
+            &format!("task508-revoked-{suffix}"),
+            &current_public_key,
+            None,
+        )
+        .await;
+        sqlx::query(
+            "INSERT INTO system_revoked_agent_keys (system_id, public_key) VALUES ($1, $2)",
+        )
+        .bind(system.id)
+        .bind(&revoked_public_key)
+        .execute(&pool)
+        .await
+        .unwrap();
+        let headers = rotation_session_headers(&pool, &suffix, AuthRole::Admin).await;
+        let response = update_system_public_key(
+            State(pool.clone()),
+            headers,
+            Path(system.id),
+            Json(UpdateSystemPublicKeyRequest {
+                public_key: format!(" {revoked_public_key} "),
+            }),
+        )
+        .await
+        .into_response();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let stored =
+            sqlx::query_scalar::<_, String>("SELECT public_key FROM systems WHERE id = $1")
+                .bind(system.id)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            stored, current_public_key,
+            "a refused rotation changes nothing"
+        );
     }
 
     #[test]
