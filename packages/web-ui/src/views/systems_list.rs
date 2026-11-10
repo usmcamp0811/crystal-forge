@@ -226,6 +226,7 @@ pub fn SystemsListView() -> Element {
                     s.flake_id,
                     s.system_configuration_name.clone(),
                     s.parent_host_id,
+                    s.environment.clone(),
                 )
             })
             .collect::<Vec<_>>()
@@ -235,7 +236,8 @@ pub fn SystemsListView() -> Element {
         async move {
             let mut results = HashMap::<Uuid, Result<ConfigurationAssurance, String>>::new();
             let mut observations = HashMap::new();
-            for (id, mode, ..) in targets {
+            for (id, mode, ..) in &targets {
+                let (id, mode) = (*id, *mode);
                 results.insert(
                     id,
                     crate::api::client::fetch_configuration_assurance(&id)
@@ -251,7 +253,7 @@ pub fn SystemsListView() -> Element {
                     );
                 }
             }
-            (results, observations)
+            (targets, results, observations)
         }
     });
 
@@ -361,12 +363,21 @@ pub fn SystemsListView() -> Element {
     let selected_preview_id = preview_system.read().as_ref().map(|d| d.id);
 
     let current_systems = local_systems.read().clone();
-    let (evidence_results, observation_results) = evidence_resource
+    let (loaded_targets, mut evidence_results, mut observation_results) = evidence_resource
         .read()
         .as_ref()
         .cloned()
         .unwrap_or_default();
-    let evidence_loading = evidence_resource.state() == UseResourceState::Pending;
+    // A resource may retain its previous value while a replacement is pending.
+    // Never pair evidence or parent reports with edited registration metadata:
+    // the complete result belongs to the exact snapshot that initiated it.
+    let matching_snapshot = loaded_targets == evidence_targets();
+    if !matching_snapshot {
+        evidence_results.clear();
+        observation_results.clear();
+    }
+    let evidence_loading =
+        evidence_resource.state() == UseResourceState::Pending || !matching_snapshot;
     let evidence_for = |id: &Uuid| evidence_results.get(id).and_then(|r| r.as_ref().ok());
     let schedule = scan_schedule
         .read()
