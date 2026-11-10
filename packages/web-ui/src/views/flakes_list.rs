@@ -6705,13 +6705,16 @@ fn FlakeSystemRow(
                 button { class: "btn btn-ghost focus-ring xs", onclick: move |_| navigate_href(&format!("/systems/{system_id}?tab=config&config_mode=commit&revision={revision}")), "Open config" }
             } else if can_register {
                 div { class: "mg-menu-wrap",
-                    button { class: "btn btn-ghost focus-ring xs", aria_haspopup: "menu", aria_expanded: menu_open(), onclick: move |_| menu_open.toggle(), "Add to Forge ▾" }
+                    button { class: "btn btn-ghost focus-ring xs", aria_haspopup: "menu", aria_expanded: menu_open(), onclick: move |_| menu_open.toggle(),
+                        "Add to Forge " Icon { name: IconName::ChevronDown, size: 12 }
+                    }
                     if menu_open() {
                         div { class: "mg-menu", role: "menu",
                             for mode in [crate::api::models::ManagementMode::Managed, crate::api::models::ManagementMode::External, crate::api::models::ManagementMode::Reference] {
                                 {
                                     let href = registration_prefill_url(&system.configuration_name, &flake.name, &flake.branch, mode);
-                                    rsx! { button { class: "mg-menu-item focus-ring", role: "menuitem", onclick: move |_| navigate_href(&href),
+                                     rsx! { button { class: "mg-menu-item focus-ring", role: "menuitem", onclick: move |_| navigate_href(&href),
+                                        Icon { name: crate::components::system::management_mode::mode_icon(mode), size: 15 }
                                         span { b { "{mode.long_label()}" } small { "{mode.description()}" } }
                                     } }
                                 }

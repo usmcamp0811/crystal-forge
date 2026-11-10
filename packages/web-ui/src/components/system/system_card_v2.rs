@@ -18,7 +18,8 @@ use crate::components::heartbeat_spinner::HeartbeatSpinner;
 use crate::components::icon::{Icon, IconName};
 use crate::components::system::helpers::deployment_state_label;
 use crate::components::system::management_mode::{
-    DeploymentCell, EvidenceCves, EvidenceFreshness, MgmtChip, ScanEvidenceChip, evidence_status,
+    CompactEvidenceCves, DeploymentCell, EvidenceFreshness, MgmtChip, ScanEvidenceChip,
+    evidence_status,
 };
 
 /// Formats an elapsed time as the compact relative label used on cards and
@@ -254,7 +255,10 @@ pub fn SystemCardV2(
             div { class: "sys-card mg-list-card {selected_class}", onclick: move |_| on_open.call(()),
                 span { class: "status-rail", style: "--status-color: {evidence_color}" }
                 div { class: "sys-card-head",
-                    div { class: "sys-title", div { class: "sys-hostname", "{system.hostname}" }
+                    div { class: "sys-title", div { class: "sys-hostname",
+                        StatusDot { color: evidence_color.to_string(), large: false }
+                        "{system.hostname}"
+                    }
                         div { class: "sys-fqdn", "{subtitle}" }
                     }
                     div { class: "chips-row", MgmtChip { mode }
@@ -290,7 +294,7 @@ pub fn SystemCardV2(
                     div { class: "chips-row",
                         if let Some(value) = &evidence { ScanEvidenceChip { status: evidence_status(value, freshness) } }
                         DeploymentCell { mode, status: system.deployment_status }
-                        if let Some(value) = evidence { EvidenceCves { evidence: value, freshness } }
+                        if let Some(value) = evidence { CompactEvidenceCves { evidence: value, freshness } }
                         else { span { class: "chip chip-unknown", role: "status", if evidence_loading { "Loading evidence…" } else { "Evidence unavailable" } } }
                     }
                     button { class: "btn btn-subtle focus-ring", style: "padding: 4px 10px; font-size: 12px;", title: "Open configuration evidence",
