@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-11-10T17:54:00Z'
+updated_date: '2026-11-10T20:18:00Z'
 labels:
   - management-mode
   - assurance
@@ -328,6 +328,16 @@ Tests added (each verified red without its fix where applicable): management_mod
 UI parity fixes (be3423a9): Add rail badges/headings/success summary+Copy; table host-observed qualifier; runtime card parent row and unknown-state copy; metric strip times/revision/provenance/runtime; Hardening+Compliance banners; ConfigExplorer newest/older; Environments managed-only counts.
 
 Follow-ups re-assessed: TASK-509 independent (workspace SQLx check passes); TASK-511 dead code, no callers (independent); TASK-512 pre-existing fixtures outside CI (independent); TASK-513 owner-accepted limit; TASK-514 implemented here (0328); TASK-517/518 recorded follow-ups.
+
+2026-11-10 finalization checkpoint (not ready; no merge): refreshed remote source 24aff108 and target dev 18b47eed; local integration/dev user changes were preserved. Recovered job 17833605010 artifacts: configuration-register failed on the obsolete managed 'Configuration' locator (54 preceding cases passed). 8372e386 follows approved 'Flake assignment' and mode badge labels and transfers VM SQL/JSON via private shared-folder files, not logged Base64. A second local failure was a real test clock-jump race: periodic work claimed before the producer's fresh heartbeat, then stale-builder recovery invalidated it. Pause admission across the jump and wait for the real producing-session heartbeat before enabling the 1h schedule. Full preliminary Assurance passed at explicitly dirty source 8372e386-dirty; artifact /nix/store/9i798nqxd6j3qi6icrcdwb38p5ccqfm7-vm-test-run-cf-it-assurance-evidence-remediation-lifecycle-run. NOT final-head evidence.
+
+Additional corrections pushed: c73767b0 serializes revoked-key check/write; a448d360 reconciles once after final metadata; aed0bc3a binds metric/report identity, separates independent assessments from CVE status, covers same-revision last-good fallback and adds detach/restore browser assertions; 8cedba86 adds 0334 Current-authorized admin CVE dashboards (extended regression is red with the old artifact selector); f8b60425 ports compact card evidence and Flake menu icons; e315dfff refuses list results from obsolete metadata snapshots; d49a9ee1 binds rotation to the authorized environment, with an actual row-lock-wait operator A→B handler regression that is red without the scope guard. Latest frozen source e436758ca2e0c228da899b5c3fb661961a5c8cb9.
+
+At e436758c: 20 management/key-rotation tests passed in a fresh isolated PostgreSQL cluster; SQLx workspace prepare --check --all-targets passed through 0334; Web UI native 848 passed/1 ignored and WASM check passed; knowledge validation passed (195 concepts, 216 Mermaid blocks). New rotation public API doctest passed. Existing auto_latest_plan EXPLAIN ANALYZE measurement passed on its guarded disposable cluster; it does not reproduce the old 200k corpus. Actual preview browser exercised all eight external tabs in dark/light at 1440 and 1100 with the real theme control; no complete equivalent-state reference/actual comparison is claimed.
+
+Full final verification still pending. Units: cf-task508-verify-e436758c (full flake, log /tmp/opencode/task508-flake-e436758c.log); cf-task508-database-e436758c (state-machine/CVE/dashboard workflows, log /tmp/opencode/task508-database-e436758c.log); cf-task508-preview-e436758c (backend refresh, log /tmp/opencode/task508-preview-e436758c.log; API explicitly loopback). Current CI pipeline 3051439890 is queued. Superseded MR pipeline 3051058797 at c73767b0 was canceled to free runner capacity. Earlier local runs were superseded when source changed and are not final-source evidence. MR description was refreshed but must receive the latest e436758c evidence/status before final handoff. AC12/14 remain unchecked.
+
+Correction to older notes: the precise underlying Cargo failure in cve-processing job 17825814538 cannot be established because its artifacts were never uploaded; runner_system_failure plus local SIGTERM→Cargo101 reproduction establishes a possible mechanism, not proof that CI rustc was killed. The later 24aff108 CVE job passed. Do not repeat the older claim as a verified CI root cause.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
