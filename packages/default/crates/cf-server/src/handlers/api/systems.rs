@@ -3317,25 +3317,8 @@ pub async fn update_system_public_key(
     if let Err(e) = PublicKey::from_base64(new_public_key, &row.hostname) {
         return bad_request(&format!("Invalid public key: {}", e));
     }
-    // SECURITY: Rotation cannot restore a key that a transition out of managed
-    // mode revoked for this system. Revocation requires leaving managed, which
-    // this endpoint cannot do, so the revoked set is stable for this check.
-    let revoked = match pool.begin().await {
-        Ok(mut tx) => {
-            crate::queries::systems::agent_key_was_revoked_tx(&mut tx, system_id, new_public_key)
-                .await
-        }
-        Err(error) => Err(error.into()),
-    };
-    match revoked {
-        Ok(false) => {}
-        Ok(true) => return bad_request(crate::queries::systems::REVOKED_AGENT_KEY_MESSAGE),
-        Err(_) => return internal_error("Failed to check revoked agent keys"),
-    }
-
-    // Update the public key. Only an active managed system holds a key: external
-    // and reference registrations hold none, and a conversion that wins the race
-    // makes this a no-op instead of overwriting the newly enrolled key.
+    // SECURITY: The repository checks revoked keys and current managed/activity
+    // status under the same system-row lock as the key update.
     match update_public_key(&pool, system_id, new_public_key).await {
         Ok(true) => {}
         Ok(false) => {
@@ -3348,6 +3331,9 @@ pub async fn update_system_public_key(
                 }),
             )
                 .into_response();
+        }
+        Err(error) if error.to_string() == crate::queries::systems::REVOKED_AGENT_KEY_MESSAGE => {
+            return bad_request(crate::queries::systems::REVOKED_AGENT_KEY_MESSAGE);
         }
         Err(_) => return internal_error("Failed to update public key"),
     }

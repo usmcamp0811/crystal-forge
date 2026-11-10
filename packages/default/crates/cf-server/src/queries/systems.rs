@@ -292,27 +292,41 @@ pub async fn update_hostname(pool: &PgPool, system: &System, new_hostname: &str)
 /// Returns `true` when the key was replaced and `false` when the registration is
 /// not an active managed system, in which case nothing changes.
 ///
-/// CONCURRENCY: The mode check and the write are one statement, so PostgreSQL
-/// evaluates the condition against the locked, current row. A conversion that
-/// commits while this statement waits for the row lock is therefore seen: a
-/// rotation cannot overwrite a key that a conversion just enrolled, and it cannot
-/// write a key onto a nonmanaged registration, which holds none.
+/// CONCURRENCY: Holds the system-row lock across the revoked-key lookup and
+/// update. Mode conversion takes the same lock before recording revocation.
+/// A conversion cannot revoke a key between this lookup and the write, even
+/// if the registration leaves managed mode and returns with a fresh key.
 ///
 /// # Errors
-/// Returns the database error when the statement fails.
+/// Returns database errors or [`REVOKED_AGENT_KEY_MESSAGE`] when the key was
+/// revoked for this registration. Neither error commits a key change.
 pub async fn update_public_key(
     pool: &PgPool,
     system_id: Uuid,
     new_public_key: &str,
 ) -> Result<bool> {
+    let mut tx = pool.begin().await?;
+    let eligible: Option<bool> = sqlx::query_scalar(
+        "SELECT management_mode = 'managed' AND is_active FROM systems WHERE id=$1 FOR UPDATE",
+    )
+    .bind(system_id)
+    .fetch_optional(&mut *tx)
+    .await?;
+    if eligible != Some(true) {
+        return Ok(false);
+    }
+    if agent_key_was_revoked_tx(&mut tx, system_id, new_public_key).await? {
+        anyhow::bail!("{REVOKED_AGENT_KEY_MESSAGE}");
+    }
     let updated = sqlx::query(
         "UPDATE systems SET public_key = $1, updated_at = NOW()
          WHERE id = $2 AND management_mode = 'managed' AND is_active",
     )
     .bind(new_public_key)
     .bind(system_id)
-    .execute(pool)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(updated.rows_affected() == 1)
 }
 
@@ -2967,6 +2981,92 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(boundary(&pool, reference).await, None);
+    }
+
+    /// A rotation waiting behind conversion must recheck revocation after the
+    /// conversion commits. Observe the actual PostgreSQL lock wait rather than
+    /// assuming a spawned task has reached the write.
+    #[sqlx::test(migrations = "./migrations")]
+    #[ignore = "requires isolated migration-backed PostgreSQL"]
+    async fn management_mode_rotation_waiting_on_conversion_cannot_restore_revoked_key(
+        pool: PgPool,
+    ) {
+        use crate::models::systems::ManagementMode;
+        let system = make_test_system(&pool, "rotation-conversion-race").await;
+        let old_key = system.public_key.as_ref().unwrap().to_base64();
+        let mut conversion = pool.begin().await.unwrap();
+        let owner: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *conversion)
+            .await
+            .unwrap();
+        sqlx::query("SELECT id FROM systems WHERE id=$1 FOR UPDATE")
+            .bind(system.id)
+            .execute(&mut *conversion)
+            .await
+            .unwrap();
+        update_management_authority_tx(
+            &mut conversion,
+            system.id,
+            ManagementMode::Reference,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let fresh_key = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(
+                ed25519_dalek::SigningKey::from_bytes(&[78; 32])
+                    .verifying_key()
+                    .to_bytes(),
+            )
+        };
+        update_management_authority_tx(
+            &mut conversion,
+            system.id,
+            ManagementMode::Managed,
+            None,
+            Some(&fresh_key),
+        )
+        .await
+        .unwrap();
+        let rotation_pool = pool.clone();
+        let rotation =
+            tokio::spawn(
+                async move { update_public_key(&rotation_pool, system.id, &old_key).await },
+            );
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let blocked: bool = sqlx::query_scalar(
+                    "SELECT EXISTS (SELECT 1 FROM pg_stat_activity
+                     WHERE $1 = ANY(pg_blocking_pids(pid))
+                       AND query LIKE '%management_mode = ''managed'' AND is_active%')",
+                )
+                .bind(owner)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if blocked {
+                    break;
+                }
+                assert!(
+                    !rotation.is_finished(),
+                    "rotation must wait for the system-row lock"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("rotation must reach the row lock");
+        conversion.commit().await.unwrap();
+        let error = rotation.await.unwrap().unwrap_err();
+        assert_eq!(error.to_string(), REVOKED_AGENT_KEY_MESSAGE);
+        let stored: String = sqlx::query_scalar("SELECT public_key FROM systems WHERE id=$1")
+            .bind(system.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(stored, fresh_key);
     }
 
     #[sqlx::test(migrations = "./migrations")]
