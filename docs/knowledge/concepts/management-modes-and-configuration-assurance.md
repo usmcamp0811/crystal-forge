@@ -545,14 +545,21 @@ for commands and scope):
 - At `4df19a7b`: GitLab pipeline 3025454179 passed all 10 jobs, including the
   four integration owners and `state-machine-tests`, and local `nix flake check`
   passed (Access 40, Assurance 67, Delivery 17, Upgrade 13 cases).
-- The MR !340 finalization (migrations `0331` to `0333`, environment ownership,
-  revoked keys, managed-only metric surfaces, Systems table and detail parity)
-  is verified at the final MR head. The MR description records the exact SHA,
-  the GitLab pipeline and the local `nix flake check`, SQLx and documentation
-  results. Results for an earlier commit are not evidence for that head.
+- At `24aff108`, pipeline 3040327484 passed Access, Delivery, Upgrade,
+  state-machine, component, dashboard-visibility, CVE-processing and documentation
+  jobs. Assurance failed during keyless browser registration: its managed-mode
+  locator still expected `Configuration` after the approved rail label changed
+  to `Flake assignment`. The structured artifacts identify that failure; the
+  truncated CI trace does not. These results do not establish merge readiness.
+- Final-head verification after the registration-locator and key-rotation
+  concurrency corrections remains pending. The MR description records the
+  exact source revision for each completed check. Earlier results are not
+  evidence for a later head.
 - PostgreSQL regressions added by the finalization run in the existing isolated
   harness selections (`management_mode_`, `system_key_rotation_` and the named
-  environment-ownership tests). Each was checked to fail without its fix.
+  environment-ownership tests). The key-rotation concurrency regression observes
+  the actual PostgreSQL row-lock wait before committing conversion, then checks
+  that the revoked key cannot overwrite the fresh enrollment key.
 
 Known limits that remain documented decisions, not hidden defects:
 
