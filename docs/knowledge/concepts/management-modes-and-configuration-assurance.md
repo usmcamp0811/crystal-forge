@@ -452,7 +452,7 @@ freshness unknown. No automatic guest configuration match is established.
 | Environment flake names | Active registrations in all modes |
 | Environment card, table and panel counts ("systems") | Active managed machines only (`rollup.active_system_count`), as in the approved design; registrations of all modes are listed on the Systems page |
 | Operational Scanning coverage | Distinct scannable derivations: managed runtime, selected *built* nonmanaged head, recoverable-build, or active-scan populations. A registration whose evaluation or build failed, or whose head is unbuilt, has nothing to scan and is not in the denominator; it appears as an evidence issue on the Systems page instead |
-| Admin CVE dashboard (summary, drill-down, top systems, scan freshness) | Active managed machines only. These endpoints report per-host runtime exposure from the hostname-joined legacy view; external and reference registrations are excluded so artifact evidence never becomes affected-system runtime exposure |
+| Admin CVE dashboard (summary, drill-down, top systems, scan freshness) | Current-authorized immutable findings from active managed machines (`0334`), not the latest artifact with the same hostname. Freshness comes from the Current-authorized scan. After re-enrollment, retained scans do not count until a fresh report establishes the exact running output. External and reference registrations are excluded |
 | Hardening fleet summary and top vulnerable services | Active managed machines only (migration `0332`). Each machine counts its configuration's latest completed assessment; exact per-configuration assessments stay available on the configuration surfaces and are not guest health |
 | Compliance bundle evaluation | CVE and runtime controls use evidence-based evaluation that requires a deployed managed context; an external or reference registration has none, so those controls are *not checked*, never passed |
 
@@ -493,6 +493,7 @@ Apply normal migrations in order; do not edit applied migrations:
 | `0331_derivation_environment_effective_identity.sql` | Replaces the `0330` resolver: registrations count by effective configuration identity (explicit name, else hostname), so an explicit name and a hostname fallback in different environments are ambiguous |
 | `0332_hardening_fleet_managed_population.sql` | `view_hardening_fleet_summary` and `view_hardening_top_vulnerable_services` count active managed machines only; columns unchanged |
 | `0333_system_revoked_agent_keys.sql` | `system_revoked_agent_keys` records keys revoked by leaving managed; conversion and rotation refuse them |
+| `0334_current_cve_dashboard_occurrences.sql` | Admin CVE dashboards project Current-authorized immutable findings instead of hostname/latest-artifact findings; fixed-version hints cannot establish exposure |
 
 Existing enrolled rows remain managed; migration does not infer external or
 reference resources. Constraint failures on legacy blank enrollment keys require

@@ -26,7 +26,7 @@ const CVE_DASHBOARD_SUMMARY_SQL: &str = r#"
                 COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'MEDIUM')::BIGINT AS medium_cves,
                 COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'LOW')::BIGINT AS low_cves,
                 COUNT(DISTINCT cve_id)::BIGINT AS total_cves
-            FROM view_system_vulnerabilities v
+            FROM view_current_cve_dashboard_occurrences v
             JOIN systems s ON s.hostname = v.hostname
             WHERE s.is_active = TRUE AND s.management_mode = 'managed'
             GROUP BY v.hostname
@@ -41,7 +41,7 @@ const CVE_DASHBOARD_SUMMARY_SQL: &str = r#"
             -- new CVEs in last 7 days: scalar subquery always returns one row (NULL if none)
             COALESCE((
                 SELECT COUNT(DISTINCT v.cve_id)
-                FROM view_system_vulnerabilities v
+                FROM view_current_cve_dashboard_occurrences v
                 JOIN systems s ON s.hostname = v.hostname
                 JOIN cves c ON c.id = v.cve_id
                 WHERE s.is_active = TRUE AND s.management_mode = 'managed'
@@ -50,7 +50,7 @@ const CVE_DASHBOARD_SUMMARY_SQL: &str = r#"
             -- oldest CVE age: scalar subquery always returns one row (NULL if no data)
             (
                 SELECT (CURRENT_DATE - MIN(c.published_date::date))::BIGINT
-                FROM view_system_vulnerabilities v
+                FROM view_current_cve_dashboard_occurrences v
                 JOIN systems s ON s.hostname = v.hostname
                 JOIN cves c ON c.id = v.cve_id
                 WHERE s.is_active = TRUE AND s.management_mode = 'managed'
@@ -245,7 +245,7 @@ pub async fn cve_dashboard_vulnerabilities(
             -- 'fix_available' means a patched upstream version is known; it does NOT
             -- mean the system has been updated. 'open' means no upstream fix yet.
             CASE WHEN v.fixed_version IS NULL THEN 'open' ELSE 'fix_available' END AS status
-        FROM view_system_vulnerabilities v
+        FROM view_current_cve_dashboard_occurrences v
         JOIN systems s ON s.hostname = v.hostname
         LEFT JOIN environments e ON e.id = s.environment_id
         WHERE s.management_mode = 'managed'
@@ -381,7 +381,7 @@ fn normalize_status_filter(value: Option<&str>) -> Result<Option<String>, &'stat
         // 'open'          — no upstream fix exists yet
         // 'fix_available' — an upstream patched version is known; system may still be affected
         // Note: 'ignored' is not supported; use the whitelist mechanism in package_vulnerabilities
-        //       (whitelisted rows are excluded by view_system_vulnerabilities already).
+        //       (whitelisted rows are excluded by Current exact occurrences already).
         "open" | "fix_available" => Ok(Some(raw)),
         _ => Err("Invalid status filter: expected 'open' or 'fix_available'"),
     }
@@ -415,7 +415,7 @@ pub async fn cve_dashboard_top_systems(
                 COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'MEDIUM')::BIGINT AS medium_cves,
                 COUNT(DISTINCT cve_id) FILTER (WHERE severity = 'LOW')::BIGINT AS low_cves,
                 COUNT(DISTINCT cve_id)::BIGINT AS total_cves
-            FROM view_system_vulnerabilities
+            FROM view_current_cve_dashboard_occurrences
             GROUP BY hostname
         )
         SELECT
@@ -426,11 +426,11 @@ pub async fn cve_dashboard_top_systems(
             COALESCE(d.high_cves, 0) AS high_cves,
             COALESCE(d.medium_cves, 0) AS medium_cves,
             COALESCE(d.low_cves, 0) AS low_cves,
-            v.days_since_scan::BIGINT AS days_since_scan,
-            v.last_cve_scan AS last_cve_scan
+            EXTRACT(DAY FROM (NOW() - v.scan_completed_at))::BIGINT AS days_since_scan,
+            v.scan_completed_at AS last_cve_scan
         FROM dedup_counts d
         JOIN systems s ON s.hostname = d.hostname
-        LEFT JOIN view_systems_cve_summary v ON v.hostname = d.hostname
+        LEFT JOIN view_current_cve_authority v ON v.system_id = s.id
         WHERE d.total_cves > 0
           AND s.management_mode = 'managed'
         ORDER BY d.critical_cves DESC, d.high_cves DESC, d.total_cves DESC
@@ -489,22 +489,22 @@ pub async fn cve_scan_freshness(
             SELECT
                 hostname,
                 COUNT(DISTINCT cve_id)::BIGINT AS total_cves
-            FROM view_system_vulnerabilities
+            FROM view_current_cve_dashboard_occurrences
             GROUP BY hostname
         )
         SELECT
             s.id AS system_id,
             s.hostname,
-            v.days_since_scan::BIGINT AS days_since_scan,
-            v.last_cve_scan AS last_cve_scan,
+            EXTRACT(DAY FROM (NOW() - v.scan_completed_at))::BIGINT AS days_since_scan,
+            v.scan_completed_at AS last_cve_scan,
             COALESCE(d.total_cves, 0) AS total_cves
         FROM systems s
-        LEFT JOIN view_systems_cve_summary v ON v.hostname = s.hostname
+        LEFT JOIN view_current_cve_authority v ON v.system_id = s.id
         LEFT JOIN dedup_counts d ON d.hostname = s.hostname
         WHERE s.is_active = TRUE AND s.management_mode = 'managed'
         ORDER BY
-            CASE WHEN v.days_since_scan IS NULL THEN 1 ELSE 0 END DESC,
-            v.days_since_scan DESC
+            CASE WHEN v.scan_completed_at IS NULL THEN 1 ELSE 0 END DESC,
+            v.scan_completed_at ASC
         LIMIT 50
         "#,
     )
@@ -825,7 +825,7 @@ mod tests {
     }
 
     /// TASK-508: the admin CVE dashboard reports per-host runtime exposure
-    /// through the hostname-joined `view_system_vulnerabilities`. A nonmanaged
+    /// through Current-authorized immutable occurrences. A nonmanaged
     /// registration whose name equals a scanned configuration must not become
     /// an affected or scanned "system" there; its artifact evidence has no
     /// runtime authority.
@@ -852,10 +852,17 @@ mod tests {
                 "INSERT INTO derivations (commit_id, derivation_type, derivation_name, status_id, attempt_count) \
                  VALUES ($1, 'nixos', $2, (SELECT id FROM derivation_statuses WHERE name='build-complete'), 0) RETURNING id",
             ).bind(commit).bind(name).fetch_one(&pool).await.unwrap();
+            let output = format!("/nix/store/dashboard-{name}");
+            sqlx::query("UPDATE derivations SET store_path=$2 WHERE id=$1")
+                .bind(derivation)
+                .bind(&output)
+                .execute(&pool)
+                .await
+                .unwrap();
             let scan = Uuid::new_v4();
             sqlx::query(
                 "INSERT INTO cve_scans (id, derivation_id, scanner_name, status, completed_at, total_packages, total_vulnerabilities, critical_count) \
-                 VALUES ($1, $2, 'vulnix', 'completed', NOW(), 1, 1, 1)",
+                 VALUES ($1, $2, 'vulnix', 'in_progress', NULL, 1, 1, 1)",
             ).bind(scan).bind(derivation).execute(&pool).await.unwrap();
             let package: i32 = sqlx::query_scalar(
                 "INSERT INTO derivations (commit_id, derivation_type, derivation_name, pname, version, status_id, attempt_count) \
@@ -872,6 +879,32 @@ mod tests {
                 .bind(&cve).execute(&pool).await.unwrap();
             sqlx::query("INSERT INTO package_vulnerabilities (derivation_id, cve_id, is_whitelisted) VALUES ($1, $2, FALSE)")
                 .bind(package).bind(&cve).execute(&pool).await.unwrap();
+            sqlx::query(
+                "INSERT INTO cve_scan_vulnerability_observations
+                 (scan_id,canonical_cve_id,canonical_package_name,observed_package_name,
+                  observed_package_version,observed_derivation_path,is_whitelisted,detection_method)
+                 VALUES ($1,$2,'openssl','openssl','1.0','/nix/store/dashboard-openssl.drv',false,'vulnix')",
+            ).bind(scan).bind(&cve).execute(&pool).await.unwrap();
+            sqlx::query(
+                "UPDATE cve_scans SET status='completed', completed_at=clock_timestamp(),
+                 evidence_schema_version=1 WHERE id=$1",
+            )
+            .bind(scan)
+            .execute(&pool)
+            .await
+            .unwrap();
+            if mode == "managed" {
+                sqlx::query(
+                    "INSERT INTO system_states(hostname,change_reason,store_path,generation,
+                     generation_matches_current_store_path,timestamp)
+                     VALUES($1,'startup',$2,1,true,clock_timestamp())",
+                )
+                .bind(name)
+                .bind(&output)
+                .execute(&pool)
+                .await
+                .unwrap();
+            }
         }
         async fn body(response: axum::response::Response) -> serde_json::Value {
             assert_eq!(response.status(), StatusCode::OK);
@@ -918,12 +951,126 @@ mod tests {
         .await;
         assert_eq!(hostnames(&top), vec!["cfg-managed".to_string()]);
         let freshness = body(
-            cve_scan_freshness(State(pool.clone()), headers)
+            cve_scan_freshness(State(pool.clone()), headers.clone())
                 .await
                 .into_response(),
         )
         .await;
         assert_eq!(hostnames(&freshness), vec!["cfg-managed".to_string()]);
+        assert!(freshness[0]["last_cve_scan"].is_string());
+
+        // Re-enrollment must not promote retained artifact evidence. Preserve
+        // both scans and the old report while leaving managed and returning
+        // with a fresh key through the authority transaction.
+        let managed: Uuid =
+            sqlx::query_scalar("SELECT id FROM systems WHERE hostname='cfg-managed'")
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+        let mut tx = pool.begin().await.unwrap();
+        sqlx::query("SELECT id FROM systems WHERE id=$1 FOR UPDATE")
+            .bind(managed)
+            .execute(&mut *tx)
+            .await
+            .unwrap();
+        crate::queries::systems::update_management_authority_tx(
+            &mut tx,
+            managed,
+            crate::models::systems::ManagementMode::Reference,
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        let fresh_key = {
+            use base64::Engine as _;
+            base64::engine::general_purpose::STANDARD.encode(
+                ed25519_dalek::SigningKey::from_bytes(&[79; 32])
+                    .verifying_key()
+                    .to_bytes(),
+            )
+        };
+        crate::queries::systems::update_management_authority_tx(
+            &mut tx,
+            managed,
+            crate::models::systems::ManagementMode::Managed,
+            None,
+            Some(&fresh_key),
+        )
+        .await
+        .unwrap();
+        tx.commit().await.unwrap();
+        let summary = body(
+            cve_dashboard_summary(State(pool.clone()), headers.clone())
+                .await
+                .into_response(),
+        )
+        .await;
+        assert_eq!(
+            summary["affected_systems"], 0,
+            "old enrollment is not Current: {summary}"
+        );
+        let vulnerabilities = body(
+            cve_dashboard_vulnerabilities(
+                State(pool.clone()),
+                headers.clone(),
+                Query(CveDashboardFilterParams::default()),
+            )
+            .await
+            .into_response(),
+        )
+        .await;
+        assert!(vulnerabilities.as_array().unwrap().is_empty());
+        let top = body(
+            cve_dashboard_top_systems(State(pool.clone()), headers.clone())
+                .await
+                .into_response(),
+        )
+        .await;
+        assert!(top.as_array().unwrap().is_empty());
+        let freshness = body(
+            cve_scan_freshness(State(pool.clone()), headers.clone())
+                .await
+                .into_response(),
+        )
+        .await;
+        assert!(
+            freshness[0]["last_cve_scan"].is_null(),
+            "retained scan is not a current runtime scan"
+        );
+        assert_eq!(freshness[0]["total_cves"], 0);
+
+        // A fresh report of a different output still cannot borrow the scan.
+        for (generation, output, expected) in [
+            (2, "/nix/store/different-output", 0),
+            (3, "/nix/store/dashboard-cfg-managed", 1),
+        ] {
+            sqlx::query(
+                "INSERT INTO system_states(hostname,change_reason,store_path,generation,
+                 generation_matches_current_store_path,timestamp)
+                 VALUES('cfg-managed','startup',$1,$2,true,clock_timestamp())",
+            )
+            .bind(output)
+            .bind(generation)
+            .execute(&pool)
+            .await
+            .unwrap();
+            let summary = body(
+                cve_dashboard_summary(State(pool.clone()), headers.clone())
+                    .await
+                    .into_response(),
+            )
+            .await;
+            assert_eq!(
+                summary["affected_systems"], expected,
+                "generation {generation}: {summary}"
+            );
+        }
+        let scans: i64 = sqlx::query_scalar("SELECT count(*) FROM cve_scans")
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(scans, 2, "no scan or finding is copied during transitions");
     }
 
     #[tokio::test]
