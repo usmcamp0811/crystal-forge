@@ -70,7 +70,7 @@ use crate::queries::systems::{
     find_system_deployment_derivation, get_system_detail_by_id,
     get_user_environment_membership_ids, list_recent_commits_for_system, list_system_access_rows,
     list_system_agent_event_rows, list_system_history_rows, resolve_observational_current_revision,
-    touch_system_updated_at, update_public_key, update_system_metadata,
+    touch_system_updated_at, update_public_key_for_environment, update_system_metadata,
 };
 use crate::services::poam::{self as poam_service, PoamActor, SystemClock};
 use crate::services::systems::SystemsListContext;
@@ -3313,14 +3313,16 @@ pub async fn update_system_public_key(
     }
     // SECURITY: The repository checks revoked keys and current managed/activity
     // status under the same system-row lock as the key update.
-    match update_public_key(&pool, system_id, new_public_key).await {
+    match update_public_key_for_environment(&pool, system_id, new_public_key, row.environment_id)
+        .await
+    {
         Ok(true) => {}
         Ok(false) => {
             return (
                 StatusCode::CONFLICT,
                 Json(ApiError {
                     error: "key_rotation_not_applicable".into(),
-                    message: "Key rotation applies only to an active managed system.".into(),
+                    message: "Registration changed or key rotation no longer applies to this active managed system.".into(),
                     details: None,
                 }),
             )
@@ -8956,6 +8958,110 @@ mod tests {
                 .await
                 .unwrap();
         assert_eq!(stored, old_public_key, "a refused rotation changes nothing");
+    }
+
+    /// An operator authorized for the old environment must not rotate the key
+    /// after a concurrent move. Hold the move uncommitted so authentication
+    /// reads the old scope, observe the rotation's actual row-lock wait, then
+    /// commit the new scope and require a refusal without a key write.
+    #[tokio::test]
+    #[ignore = "requires live database connection"]
+    async fn system_key_rotation_waiting_on_environment_move_rechecks_authorized_scope() {
+        let pool = test_pool_from_env().await;
+        let suffix = Uuid::new_v4().simple().to_string();
+        let mut environments = Vec::new();
+        for label in ["a", "b"] {
+            environments.push(
+                sqlx::query_scalar::<_, Uuid>(
+                    "INSERT INTO environments(name) VALUES($1) RETURNING id",
+                )
+                .bind(format!("rotation-{label}-{suffix}"))
+                .fetch_one(&pool)
+                .await
+                .unwrap(),
+            );
+        }
+        let (_, old_key) = rotation_key_material(63);
+        let (_, new_key) = rotation_key_material(64);
+        let system = rotation_insert_system(
+            &pool,
+            &format!("moving-{suffix}"),
+            &old_key,
+            Some(environments[0]),
+        )
+        .await;
+        let headers = rotation_session_headers(&pool, &suffix, AuthRole::Operator).await;
+        let operator: Uuid = sqlx::query_scalar("SELECT id FROM users WHERE email=$1")
+            .bind(format!("{suffix}@example.com"))
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        sqlx::query(
+            "INSERT INTO user_environment_memberships(user_id,environment_id) VALUES($1,$2)",
+        )
+        .bind(operator)
+        .bind(environments[0])
+        .execute(&pool)
+        .await
+        .unwrap();
+        let mut movement = pool.begin().await.unwrap();
+        let owner: i32 = sqlx::query_scalar("SELECT pg_backend_pid()")
+            .fetch_one(&mut *movement)
+            .await
+            .unwrap();
+        sqlx::query("UPDATE systems SET environment_id=$2 WHERE id=$1")
+            .bind(system.id)
+            .bind(environments[1])
+            .execute(&mut *movement)
+            .await
+            .unwrap();
+        let request_pool = pool.clone();
+        let rotation = tokio::spawn(async move {
+            update_system_public_key(
+                State(request_pool),
+                headers,
+                Path(system.id),
+                Json(UpdateSystemPublicKeyRequest {
+                    public_key: new_key,
+                }),
+            )
+            .await
+            .into_response()
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                let waiting: bool = sqlx::query_scalar(
+                    "SELECT EXISTS(SELECT 1 FROM pg_stat_activity
+                     WHERE $1 = ANY(pg_blocking_pids(pid))
+                       AND query LIKE '%management_mode = ''managed'' AND is_active%')",
+                )
+                .bind(owner)
+                .fetch_one(&pool)
+                .await
+                .unwrap();
+                if waiting {
+                    break;
+                }
+                assert!(
+                    !rotation.is_finished(),
+                    "request must reach the rotation row lock"
+                );
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("operator authorized in old environment reaches the row lock");
+        movement.commit().await.unwrap();
+        assert_eq!(rotation.await.unwrap().status(), StatusCode::CONFLICT);
+        let stored: String = sqlx::query_scalar("SELECT public_key FROM systems WHERE id=$1")
+            .bind(system.id)
+            .fetch_one(&pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            stored, old_key,
+            "a stale environment authorization must not change the key"
+        );
     }
 
     /// Insert a system carrying `public_key_base64`, optionally scoped to an environment.

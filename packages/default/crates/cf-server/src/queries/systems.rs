@@ -305,14 +305,58 @@ pub async fn update_public_key(
     system_id: Uuid,
     new_public_key: &str,
 ) -> Result<bool> {
+    update_public_key_guarded(pool, system_id, new_public_key, None).await
+}
+
+/// Rotates a key only if the registration still belongs to the environment
+/// against which the caller authorized this mutation. `None` binds an
+/// unscoped registration, rather than acting as a wildcard.
+///
+/// The environment check, revoked-key check and write share the system-row
+/// lock. Returns false without a write if the environment changed or the
+/// registration is not active and managed. Callers still own RBAC validation.
+///
+/// # Errors
+/// Returns database errors or [`REVOKED_AGENT_KEY_MESSAGE`] for a revoked key.
+///
+/// # Examples
+/// ```no_run
+/// # async fn rotate(pool: &sqlx::PgPool, id: uuid::Uuid,
+/// #     authorized_environment: Option<uuid::Uuid>, key: &str) -> anyhow::Result<()> {
+/// let changed = crystal_forge::queries::systems::update_public_key_for_environment(
+///     pool, id, key, authorized_environment,
+/// ).await?;
+/// // A concurrent move returns false; re-read and reauthorize before retrying.
+/// # let _ = changed;
+/// # Ok(()) }
+/// ```
+pub async fn update_public_key_for_environment(
+    pool: &PgPool,
+    system_id: Uuid,
+    new_public_key: &str,
+    expected_environment: Option<Uuid>,
+) -> Result<bool> {
+    update_public_key_guarded(pool, system_id, new_public_key, Some(expected_environment)).await
+}
+
+async fn update_public_key_guarded(
+    pool: &PgPool,
+    system_id: Uuid,
+    new_public_key: &str,
+    expected_environment: Option<Option<Uuid>>,
+) -> Result<bool> {
     let mut tx = pool.begin().await?;
-    let eligible: Option<bool> = sqlx::query_scalar(
-        "SELECT management_mode = 'managed' AND is_active FROM systems WHERE id=$1 FOR UPDATE",
+    let registration: Option<(bool, Option<Uuid>)> = sqlx::query_as(
+        "SELECT management_mode = 'managed' AND is_active, environment_id
+         FROM systems WHERE id=$1 FOR UPDATE",
     )
     .bind(system_id)
     .fetch_optional(&mut *tx)
     .await?;
-    if eligible != Some(true) {
+    let Some((true, environment)) = registration else {
+        return Ok(false);
+    };
+    if expected_environment.is_some_and(|expected| expected != environment) {
         return Ok(false);
     }
     if agent_key_was_revoked_tx(&mut tx, system_id, new_public_key).await? {

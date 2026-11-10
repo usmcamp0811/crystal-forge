@@ -140,6 +140,10 @@ recorded key for that system is refused with HTTP 400 ("This agent key was
 revoked when the system left managed mode; enroll a new key"). Keys compare in
 canonical base64 form. Re-enrollment therefore always uses a fresh keypair, and
 the revoked agent identity cannot authenticate again.
+Key rotation also binds the environment against which the caller was authorized.
+The environment check, revoked-key lookup and key write share the system-row
+lock. If a concurrent move changes the environment, rotation returns HTTP 409
+without changing the key; the caller must re-read and reauthorize before retrying.
 Changing the mode back to managed alone cannot restore Current CVE or POA&M
 authority. A fresh report authenticated under the new enrollment is required.
 
