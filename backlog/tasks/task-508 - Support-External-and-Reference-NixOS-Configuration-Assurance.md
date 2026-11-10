@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-11-07T17:04:00Z'
+updated_date: '2026-11-10T17:54:00Z'
 labels:
   - management-mode
   - assurance
@@ -164,6 +164,8 @@ Owner-expanded follow-up: preserve SQL `unknown` runtime health through server H
 AC14 owner-directed form completion unit in existing TASK-508-management-modes worktree: persist managed address/reachability and all-mode tags/description using migration 0319 and existing authorized metadata transaction; expose list/detail metadata and pre-pagination tag filtering; wire approved Add/Edit fields, real fleet suggestions/chips/search/filter. Preserve enrollment epochs, Native declarations, CveScanIntent expected-ID guard and concurrent runtime selectors. No processes, database access, commits or pushes. Run offline Nix backend and native/WASM UI checks; owner retains browser, isolated database and knowledge-documentation proof. Design authority 18b47eed AddSystemModal/EditSystemModal/app/Systems/MgmtParts; Access lifecycle-local-bootstrap owns form persistence interactions; existing management_mode_ ignored regressions will extend metadata/retention/RBAC proof without removing assertions.
 
 Independent source-review corrections (blocking, no Review/MR readiness until verified): bind decoded agent state hostname and locked registration hostname to authenticated identity; carry key/enrollment proof into final deployment/cache response authorization; move duplicate cleanup under validated transactional authorization; make managed detail CVE counts use exact Current authority; unify scoped scan admission/authorization in one ordered transaction; implement manual and periodic remote scan execution using existing job/lease/cache authority; implement actual unchanged-derivation reuse without fake scan/source attribution; align all-mode head cadence/freshness across APIs and list/detail; distinguish read errors/loading from no scan; preserve read-only managed deployment history after conversion; correct registry-vs-machine copy and permission-dependent UI controls. Artifact reuse requires current-mechanism research before selecting the smallest model change; do not weaken exact-CVE source ambiguity or invent running Git identity.
+
+2026-11-10 resumed finalization at verified source 24aff108 and remote dev 18b47eed. Recover Assurance 17833605010 from artifacts; correct registration rail locators for approved managed 'Flake assignment' label and mode badge; reduce payload logging via existing NixOS driver facilities. Re-run owning Assurance scenario, then final-head checks. Continue independent AC/security/performance/UI review; preserve unchecked AC12/14 until their full evidence exists. Do not merge.
 <!-- SECTION:PLAN:END -->
 
 ## Implementation Notes
