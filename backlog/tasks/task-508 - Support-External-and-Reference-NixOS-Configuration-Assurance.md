@@ -5,7 +5,7 @@ status: In Progress
 assignee:
   - '@openai-agent'
 created_date: '2026-10-31T15:50:00Z'
-updated_date: '2026-11-10T20:18:00Z'
+updated_date: '2026-11-10T21:32:00Z'
 labels:
   - management-mode
   - assurance
@@ -338,6 +338,12 @@ At e436758c: 20 management/key-rotation tests passed in a fresh isolated Postgre
 Full final verification still pending. Units: cf-task508-verify-e436758c (full flake, log /tmp/opencode/task508-flake-e436758c.log); cf-task508-database-e436758c (state-machine/CVE/dashboard workflows, log /tmp/opencode/task508-database-e436758c.log); cf-task508-preview-e436758c (backend refresh, log /tmp/opencode/task508-preview-e436758c.log; API explicitly loopback). Current CI pipeline 3051439890 is queued. Superseded MR pipeline 3051058797 at c73767b0 was canceled to free runner capacity. Earlier local runs were superseded when source changed and are not final-source evidence. MR description was refreshed but must receive the latest e436758c evidence/status before final handoff. AC12/14 remain unchecked.
 
 Correction to older notes: the precise underlying Cargo failure in cve-processing job 17825814538 cannot be established because its artifacts were never uploaded; runner_system_failure plus local SIGTERM→Cargo101 reproduction establishes a possible mechanism, not proof that CI rustc was killed. The later 24aff108 CVE job passed. Do not repeat the older claim as a verified CI root cause.
+
+2026-11-10 ~21:00Z: host rebooted (uptime ~12 min at 21:11Z). /tmp/opencode scripts/logs and all cf-task508-*-e436758c units (flake check, database workflows, preview) were lost before producing results; no e436758c local final evidence exists. Rebuilt the isolated runners from repository-documented commands.
+
+P1 fixed in 6774bf01: startup legacy systems-config reconciliation could overwrite a fresh enrollment key and policy after external/reference->managed re-enrollment (ON CONFLICT wrote public_key unconditionally; 0333 checks covered only API paths). sync_systems_to_db now skips an enrolled managed registration whose configured key differs from the persisted canonical key, before resolving environment/flake/policy; INSERT_SYSTEM_SQL repeats the condition under the row lock. Pre-enrollment declarative key reconciliation preserved. Tests management_mode_config_sync_preserves_fresh_enrollment and management_mode_obsolete_upsert_waiting_on_conversion_is_rejected (observes pg_blocking_pids wait); both FAIL with the SQL guard removed. Isolated cluster: 22 management_mode_/system_key_rotation_ tests passed, exit 0. okf-knowledge exit 0 (195 concepts, 216 Mermaid). No SQLx metadata change (runtime queries).
+
+Running at 6774bf01: pipeline 3051717040 (3051439890 canceled); cf-task508-verify-6774bf01 full flake check (/tmp/opencode/task508-flake-6774bf01.log, FLAKE_EXIT=); cf-task508-database-6774bf01 (/tmp/opencode/task508-database-6774bf01.log, DATABASE_WORKFLOWS_EXIT=). Preview cf-task508-preview-6774bf01 ready: UI 127.0.0.1:8080, API 127.0.0.1:3445 (worktree server, /status 200), PG data <worktree>/data/db listening 0.0.0.0:3042 (stack default, non-loopback). Fixture systems retained; smoke login/Systems 0 console errors. AC12/AC14 still unchecked; NOT READY.
 <!-- SECTION:NOTES:END -->
 
 ## Final Summary
