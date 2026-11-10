@@ -2747,20 +2747,6 @@ pub async fn update_system_handler(
                 Err(_) => return internal_error("Failed to validate child associations"),
             }
         }
-        if let Err(error) = crate::queries::systems::update_management_authority_tx(
-            &mut tx,
-            system_id,
-            mode,
-            parent,
-            key.as_deref(),
-        )
-        .await
-        {
-            if retry < 2 && is_system_metadata_serialization_failure(&error) {
-                continue;
-            }
-            return internal_error("Failed to update management authority");
-        }
         if let Err(error) = update_system_metadata(
             &mut *tx,
             system_id,
@@ -2915,11 +2901,19 @@ pub async fn update_system_handler(
         {
             return internal_error("Failed to audit system update");
         }
-        // CONCURRENCY: Reconcile queued jobs after all registration metadata changes
-        // (mode, parent, environment, flake, config name). A job's stored environment
-        // must match the current derivation_environment() result to remain claimable.
-        if let Err(error) =
-            crate::queries::build_jobs::retire_unclaimable_queued_jobs_tx(&mut tx).await
+        // CONCURRENCY: Apply authority last, under the system-row lock retained
+        // for this transaction. Its queued-job reconciliation now sees the
+        // final mode, parent, environment, flake and configuration name. Running
+        // it before metadata and again afterward duplicated a global queue
+        // scan on every save. No intermediate metadata is visible on failure.
+        if let Err(error) = crate::queries::systems::update_management_authority_tx(
+            &mut tx,
+            system_id,
+            mode,
+            parent,
+            key.as_deref(),
+        )
+        .await
         {
             if retry < 2 && is_system_metadata_serialization_failure(&error) {
                 continue;
