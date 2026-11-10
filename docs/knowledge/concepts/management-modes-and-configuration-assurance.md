@@ -556,10 +556,10 @@ for commands and scope):
   locator still expected `Configuration` after the approved rail label changed
   to `Flake assignment`. The structured artifacts identify that failure; the
   truncated CI trace does not. These results do not establish merge readiness.
-- Final-head verification after the registration-locator and key-rotation
-  concurrency corrections remains pending. The MR description records the
-  exact source revision for each completed check. Earlier results are not
-  evidence for a later head.
+- The registration-locator and key-rotation concurrency corrections require
+  exact-final-head verification. Consult the MR description for the source
+  revision and result of each completed check. Earlier results are not evidence
+  for a later head; this historical checklist does not establish merge readiness.
 - PostgreSQL regressions added by the finalization run in the existing isolated
   harness selections (`management_mode_`, `system_key_rotation_` and the named
   environment-ownership tests). The key-rotation concurrency regression observes
