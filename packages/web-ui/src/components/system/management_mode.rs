@@ -336,7 +336,9 @@ pub fn ScanEvidenceChip(status: EvidenceStatus) -> Element {
 }
 
 /// Renders the evidence scope and exact selected/scanned identities above findings.
-/// Views can use this for read-only CVE, hardening, and compliance sections.
+/// This banner describes CVE evidence. Independent hardening and compliance
+/// assessments must identify their own selected artifact or evaluation attempt;
+/// a CVE scan's status or revision does not describe those results.
 #[component]
 pub fn EvidenceBanner(
     evidence: ConfigurationAssurance,
@@ -638,8 +640,10 @@ impl CveProvenance {
         }
     }
 
-    /// Returns true when the counts do not describe the selected revision.
-    pub fn is_other_revision(self) -> bool {
+    /// Returns true for retained fallback or historical counts, rather than
+    /// the newest successful selected scan. A fallback may be a previous scan
+    /// of the same revision; it still must not hide the failed rescan.
+    pub fn is_retained(self) -> bool {
         matches!(self, Self::LastGood | Self::Historical)
     }
 }
@@ -657,12 +661,10 @@ pub fn cve_provenance(
         .selected_scan
         .as_ref()
         .is_some_and(|selected| selected.state == "failed");
-    let provenance = if !scan_matches_selection(evidence, scan) {
-        if selected_failed {
-            CveProvenance::LastGood
-        } else {
-            CveProvenance::Historical
-        }
+    let provenance = if selected_failed {
+        CveProvenance::LastGood
+    } else if !scan_matches_selection(evidence, scan) {
+        CveProvenance::Historical
     } else {
         match freshness {
             EvidenceFreshness::Fresh => CveProvenance::Selected,
@@ -676,8 +678,8 @@ pub fn cve_provenance(
 /// Renders sealed CVE counts in one compact line for list rows.
 ///
 /// Shows only non-zero severities; `clean` requires a zero total. A marker
-/// chip states provenance: `historical` or `last good` (dimmed counts from
-/// another revision), `stale` or `age unknown` (the selected revision, with
+/// chip states provenance: `historical` or `last good` (dimmed retained counts),
+/// `stale` or `age unknown` (the selected revision, with
 /// unclassified or expired freshness). Full provenance (status, full revision
 /// SHA, scan UUID, every severity count and the total) is in a keyboard- and
 /// touch-accessible [`RowDisclosure`]. [`EvidenceCves`] remains the detailed
@@ -700,7 +702,7 @@ pub fn CompactEvidenceCves(
             }
         };
     };
-    let class = if provenance.is_other_revision() {
+    let class = if provenance.is_retained() {
         "mg-cves-compact historical"
     } else {
         "mg-cves-compact"
@@ -762,7 +764,7 @@ pub fn compact_cve_chips(
         chips.push(("chip-healthy mg-cves-count", "✓ clean".to_string()));
     }
     if let Some(marker) = provenance.marker() {
-        let class = if provenance.is_other_revision() {
+        let class = if provenance.is_retained() {
             "chip-unknown mg-cves-historical"
         } else {
             "chip-warning mg-cves-historical"
@@ -1276,7 +1278,7 @@ mod tests {
         assert_eq!(provenance, CveProvenance::SelectedFreshnessUnknown);
         assert!(!chips.iter().any(|c| c == "historical"), "{chips:?}");
         assert_eq!(chips, vec!["2 high".to_string(), "age unknown".to_string()]);
-        assert!(!provenance.is_other_revision());
+        assert!(!provenance.is_retained());
 
         // Selected scan failed: the retained last-good scan of an earlier
         // revision is the fallback, marked "last good".
@@ -1295,8 +1297,29 @@ mod tests {
         value.latest_good_scan = Some(previous.clone());
         let (provenance, chips) = labels(&value, EvidenceFreshness::Fresh);
         assert_eq!(provenance, CveProvenance::LastGood);
-        assert!(provenance.is_other_revision());
+        assert!(provenance.is_retained());
         assert_eq!(chips, vec!["✓ clean".to_string(), "last good".to_string()]);
+    }
+
+    /// A failed rescan must not present its previous successful scan as the
+    /// newest selected result, even when both scans target the same revision.
+    #[test]
+    fn failed_rescan_keeps_last_good_marker_even_for_the_same_revision() {
+        let mut value = evidence();
+        let mut failed = scan();
+        failed.state = "failed".into();
+        failed.cves = None;
+        value.selected_scan = Some(failed);
+        let mut previous = scan();
+        previous.scan_id = Uuid::from_u128(610);
+        value.latest_good_scan = Some(previous);
+        assert_eq!(
+            labels(&value, EvidenceFreshness::Unknown),
+            (
+                CveProvenance::LastGood,
+                vec!["✓ clean".into(), "last good".into()]
+            ),
+        );
     }
 
     /// MR !340 review: `vm-pub-traefik` is still evaluating a new revision and

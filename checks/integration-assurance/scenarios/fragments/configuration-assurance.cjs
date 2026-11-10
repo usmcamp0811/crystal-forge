@@ -178,6 +178,10 @@ exports.evidence = async ctx => {
           }
           if (tab === "CVEs") await expect(detail.getByText(ctx.facts.cve.cveId, { exact: true })).not.toHaveCount(0);
           if (tab === "Hardening") await expect(detail.getByRole("heading", { name: "Hardening evidence unavailable", exact: true })).toBeVisible();
+          if (["Hardening", "Compliance"].includes(tab)) {
+            await expect(detail.getByText("Configuration assessments, not runtime assurance", { exact: true })).toBeVisible();
+            await expect(detail.getByText(/CVE scan status does not establish hardening or compliance results/)).toBeVisible();
+          }
           await ctx.screenshot(`configuration-${mode}-${tab.toLowerCase().replaceAll(" ", "-")}-${theme}`);
         }
       }
@@ -205,6 +209,32 @@ exports.evidence = async ctx => {
   const unchanged = await ctx.context.request.get(ctx.url(`/api/v1/systems/${external}`));
   expect(unchanged.status()).toBe(200);
   expect(await unchanged.json()).toMatchObject({ management_mode: "external", parent_host_id: receipts["delivery.targetId"] });
+  // A parent edit must invalidate both the card and the metric without a page
+  // reload. Retained reports from the former association are not current.
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await editor.getByRole("button", { name: "Configuration", exact: true }).click();
+  await editor.getByLabel("Parent host · optional", { exact: true }).selectOption("");
+  const [detached] = await Promise.all([
+    page.waitForResponse(r => new URL(r.url()).pathname === `/api/v1/systems/${external}` && r.request().method() === "PATCH"),
+    editor.getByRole("button", { name: "Save changes", exact: true }).click(),
+  ]);
+  expect(detached.status()).toBe(200);
+  expect((await detached.json()).parent_host_id).toBeNull();
+  const runtimeMetric = page.locator('[data-metric="Runtime"]');
+  await expect(runtimeMetric).toContainText("Unknown");
+  await expect(runtimeMetric).toContainText("no parent host");
+  await expect(runtimeMetric).not.toContainText("Host-observed");
+  await expect(page.getByText("Associate a parent host in Edit to receive host-reported observations.", { exact: true })).toBeVisible();
+  // Restore the association through the same authorized edit workflow.
+  await page.getByRole("button", { name: "Edit", exact: true }).click();
+  await editor.getByRole("button", { name: "Configuration", exact: true }).click();
+  await editor.getByLabel("Parent host · optional", { exact: true }).selectOption(receipts["delivery.targetId"]);
+  const [attached] = await Promise.all([
+    page.waitForResponse(r => new URL(r.url()).pathname === `/api/v1/systems/${external}` && r.request().method() === "PATCH"),
+    editor.getByRole("button", { name: "Save changes", exact: true }).click(),
+  ]);
+  expect(attached.status()).toBe(200);
+  expect((await attached.json()).parent_host_id).toBe(receipts["delivery.targetId"]);
   await page.getByRole("button", { name: "Edit", exact: true }).click();
   await editor.getByRole("button", { name: "Management", exact: true }).click();
   await editor.getByRole("radio", { name: /^Reference/ }).click();

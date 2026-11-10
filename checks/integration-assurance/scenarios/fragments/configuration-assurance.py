@@ -186,11 +186,25 @@ def configuration_assurance():
             # (minimum interval 1h). Advance every VM clock together, as this
             # scenario does at start, so the actual sealed manual result
             # becomes due. No scan, build or session row is manufactured.
+            # Do not make work due while clocks are being moved. Otherwise a
+            # builder can claim before its next real heartbeat, be classified
+            # offline by the two-hour jump, and lose the new scan's lease.
+            delivery_api("PUT", "/api/v1/scanning/schedule", dict(
+                {field: policy[field] for field in schedule_fields},
+                deployed_interval="never", recent_interval="never", archived_enabled=False))
+            for node in machines:
+                node.succeed("date -s '+2 hours'")
+            def producer_heartbeat_after_clock_change():
+                rows = sql_json(controller, "SELECT status, current_session_id::text AS session, "
+                    "last_heartbeat_at > NOW() - INTERVAL '30 seconds' AS fresh "
+                    "FROM builders WHERE id=" + literal(jobs[0]["builder_id"]) + "::uuid")
+                return rows[0] if len(rows) == 1 and rows[0]["status"] == "active" \
+                    and rows[0]["session"] == jobs[0]["builder_session_id"] and rows[0]["fresh"] else None
+            wait_for(producer_heartbeat_after_clock_change,
+                "real producing-session heartbeat after synchronized clock change", timeout=180)
             delivery_api("PUT", "/api/v1/scanning/schedule", dict(
                 {field: policy[field] for field in schedule_fields},
                 deployed_interval="1h", recent_interval="never", archived_enabled=False))
-            for node in machines:
-                node.succeed("date -s '+2 hours'")
             def periodic_created():
                 rows = sql_json(controller, "SELECT id::text FROM cve_scans WHERE derivation_id=" + str(artifact["id"]) +
                     " AND source_trigger='periodic' ORDER BY created_at,id")

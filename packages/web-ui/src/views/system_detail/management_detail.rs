@@ -195,7 +195,11 @@ pub(super) fn ManagementDetail(
                     }
                 }
                 if let Some(e) = &evidence {
-                    EvidenceMetrics { evidence: e.clone(), freshness, mode: system.management_mode, system_id }
+                    EvidenceMetrics {
+                        key: "{system_id}-{system.management_mode.as_str()}-{system.parent_host_id:?}",
+                        evidence: e.clone(), freshness, mode: system.management_mode, system_id,
+                        parent_host_id: system.parent_host_id,
+                    }
                 }
                 div { class: "sd-tabs", role: "tablist", aria_label: "System detail sections",
                     onkeydown: move |event| {
@@ -320,11 +324,11 @@ pub(super) fn ManagementDetail(
                             }
                         },
                         Tab::Hardening => rsx! {
-                            EvidenceBanner { evidence: e.clone(), freshness, what: "Hardening results" }
+                            AssessmentScopeNotice { mode: system.management_mode }
                             ConfigurationHardening { system_id, evidence: e.clone(), selection: artifact_selection }
                         },
                         Tab::Compliance => rsx! {
-                            EvidenceBanner { evidence: e.clone(), freshness, what: "Compliance results" }
+                            AssessmentScopeNotice { mode: system.management_mode }
                             ConfigurationCompliance { system_id, evidence: e.clone() }
                             // Existing POA&M history remains inspectable without granting
                             // configuration evidence runtime-remediation authority.
@@ -440,17 +444,43 @@ fn selected_freshness(
     evidence_freshness(scan.completed_at, now, interval)
 }
 
+/// Keeps configuration assessments distinct from runtime assurance without
+/// attributing their results to the CVE scan's independently selected revision.
+/// Each assessment below names its own artifact or evaluation attempt.
+#[component]
+fn AssessmentScopeNotice(mode: ManagementMode) -> Element {
+    rsx! {
+        div { class: "mg-notice mg-notice-info",
+            div { class: "mg-notice-body",
+                div { class: "mg-notice-title", "Configuration assessments, not runtime assurance" }
+                div { class: "mg-notice-text",
+                    "Each assessment below identifies its own revision and evidence. CVE scan status does not establish hardening or compliance results. "
+                    if mode == ManagementMode::Reference {
+                        "This reference configuration is not a running machine."
+                    } else {
+                        "These results do not establish what this external system is running."
+                    }
+                }
+            }
+        }
+    }
+}
+
 #[component]
 fn EvidenceMetrics(
     evidence: ConfigurationAssurance,
     freshness: EvidenceFreshness,
     mode: ManagementMode,
     system_id: Uuid,
+    parent_host_id: Option<Uuid>,
 ) -> Element {
     // One bounded read of the latest stored parent report for the Runtime
-    // metric (external only). It never polls and never contacts the parent.
+    // metric (external only). The caller keys this component by resource,
+    // mode and current parent, so reassignment starts a new read and discards
+    // the old one. Rendering also checks the report's resource and parent.
+    // It never polls and never contacts the parent.
     let observation = use_resource(move || async move {
-        if mode == ManagementMode::External {
+        if mode == ManagementMode::External && parent_host_id.is_some() {
             Some(
                 client::fetch_latest_guest_observation(&system_id)
                     .await
@@ -490,16 +520,21 @@ fn EvidenceMetrics(
             "Not applicable".to_string(),
             "Not a running machine".to_string(),
         ),
-        (_, Some(Some(Ok(Some(report))))) => (
-            "Host-observed".into(),
-            format!(
-                "unit {} · {}",
-                report.unit_active_state.as_deref().unwrap_or("unknown"),
-                ago(report.observed_at)
-            ),
-        ),
-        (_, Some(Some(Ok(None)))) => ("Unknown".into(), "no observations".into()),
+        (_, Some(Some(Ok(Some(report)))))
+            if observation_for_parent(Some(report), system_id, parent_host_id).is_some() =>
+        {
+            (
+                "Host-observed".into(),
+                format!(
+                    "unit {} · {}",
+                    report.unit_active_state.as_deref().unwrap_or("unknown"),
+                    ago(report.observed_at)
+                ),
+            )
+        }
+        (_, Some(Some(Ok(_)))) => ("Unknown".into(), "no observations".into()),
         (_, Some(Some(Err(_)))) => ("Unknown".into(), "observation unavailable".into()),
+        _ if parent_host_id.is_none() => ("Unknown".into(), "no parent host".into()),
         _ => ("Unknown".into(), "loading observation…".into()),
     };
     let selected_identity = evidence
@@ -551,7 +586,7 @@ fn EvidenceMetrics(
         ("Runtime", runtime_value, runtime_sub),
     ];
     rsx! { div { class: "sd-metric-strip",
-        for (label, value, sub) in metrics { div { class: "sd-metric",
+        for (label, value, sub) in metrics { div { class: "sd-metric", "data-metric": label,
             div { class: "sd-metric-label", "{label}" }
             div { class: "sd-metric-val-num mono", style: "font-size:18px;overflow-wrap:anywhere", title: if label == "Selected revision" { selected_identity.clone() } else { value.clone() }, "{value}" }
             div { class: "sd-metric-sub", "{sub}" }
