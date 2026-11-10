@@ -597,21 +597,22 @@ const INSERT_SYSTEM_SQL: &str = r#"
         updated_at = NOW()
     WHERE systems.management_mode = 'managed'
       AND EXCLUDED.management_mode = 'managed'
+      AND (systems.agent_enrolled_at IS NULL OR systems.public_key = EXCLUDED.public_key)
     RETURNING *
     "#;
 
-/// Signals that reconciliation rejected a conflict involving a nonmanaged mode.
+/// Signals that reconciliation rejected a mode or enrollment authority conflict.
 ///
 /// Returned through [`anyhow::Error`] by [`insert_system`] only when its final
-/// SQL mode predicate rejects the update. Callers can downcast this error to
-/// distinguish revoked authority from validation or database failures. Restoring
-/// managed authority requires an explicit authorized mode conversion.
+/// SQL authority predicate rejects the update. Callers can downcast this error
+/// to distinguish authority conflicts from validation or database failures.
+/// Mode changes and enrolled key changes require a separate authorized path.
 #[derive(Debug)]
 pub struct SystemReconciliationModeConflict;
 
 impl std::fmt::Display for SystemReconciliationModeConflict {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("System reconciliation cannot update a nonmanaged registration or change management mode")
+        f.write_str("System reconciliation conflicts with management mode or enrollment authority")
     }
 }
 
@@ -622,14 +623,17 @@ impl std::error::Error for SystemReconciliationModeConflict {}
 /// Mode transitions and updates to nonmanaged registrations require a separate
 /// authorized path. The conflict predicate checks the locked database row so
 /// config reconciliation cannot race a conversion and restore agent authority.
+/// Once enrolled, the persisted canonical key must match the incoming typed key.
+/// Before enrollment, legacy declarative key reconciliation remains permitted.
 /// Reconciliation preserves operator tags, notes, address, and reachability.
 ///
 /// # Errors
 /// Returns [`SystemReconciliationModeConflict`] through [`anyhow::Error`] for a
-/// conflict involving a nonmanaged registration. Invalid storage invariants and
-/// database failures propagate as separate errors.
+/// mode or enrollment authority conflict. Invalid storage invariants and database
+/// failures propagate as separate errors.
 pub async fn insert_system(pool: &PgPool, system: &System) -> Result<System> {
-    // SECURITY: A hostname conflict must never promote a nonmanaged resource.
+    // SECURITY: Check persisted authority under the upsert row lock. An early
+    // read alone cannot prevent stale config from undoing fresh enrollment.
     let inserted = sqlx::query_as::<_, System>(INSERT_SYSTEM_SQL)
         .bind(&system.hostname)
         .bind(system.environment_id)

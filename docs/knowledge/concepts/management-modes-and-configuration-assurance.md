@@ -140,6 +140,15 @@ recorded key for that system is refused with HTTP 400 ("This agent key was
 revoked when the system left managed mode; enroll a new key"). Keys compare in
 canonical base64 form. Re-enrollment therefore always uses a fresh keypair, and
 the revoked agent identity cannot authenticate again.
+Legacy `systems` entries in the server configuration file cannot undo an
+enrollment. Startup reconciliation skips a nonmanaged registration. It also
+skips a managed registration that has `agent_enrolled_at` set when the
+configured key does not equal the persisted canonical key. The skip occurs
+before the server resolves the entry's environment, flake or policy, and the
+server logs only the resource UUID. The `ON CONFLICT` update repeats the mode
+and key condition against the locked row, so an entry read before a concurrent
+conversion cannot restore the old key or policy. A managed registration without
+`agent_enrolled_at` keeps the earlier declarative key reconciliation.
 Key rotation also binds the environment against which the caller was authorized.
 The environment check, revoked-key lookup and key write share the system-row
 lock. If a concurrent move changes the environment, rotation returns HTTP 409
@@ -564,7 +573,9 @@ for commands and scope):
   harness selections (`management_mode_`, `system_key_rotation_` and the named
   environment-ownership tests). The key-rotation concurrency regression observes
   the actual PostgreSQL row-lock wait before committing conversion, then checks
-  that the revoked key cannot overwrite the fresh enrollment key.
+  that the revoked key cannot overwrite the fresh enrollment key. The
+  configuration-reconciliation regression observes the same wait for a stale
+  `systems` upsert.
 
 Known limits that remain documented decisions, not hidden defects:
 
