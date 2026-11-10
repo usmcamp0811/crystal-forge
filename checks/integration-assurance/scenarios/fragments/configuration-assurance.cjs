@@ -29,7 +29,8 @@ exports.register = async ctx => {
     await expect(form).toBeVisible();
     await expect(form.getByRole("radio", { name: new RegExp(`^${mode}`) })).toHaveAttribute("aria-checked", "true");
     await expect(form.getByRole("button", { name: /^Agent identity/ })).toHaveCount(mode === "Managed" ? 1 : 0);
-    await form.getByRole("button", { name: "Configuration", exact: true }).click();
+    const assignmentSection = mode === "Managed" ? "Flake assignment" : "Configuration";
+    await form.getByRole("button", { name: assignmentSection, exact: true }).click();
     await expect(form.getByLabel("Flake", { exact: true })).toHaveValue(facts.flake.name);
     await expect(form.getByLabel("Branch", { exact: true })).toHaveValue(facts.flake.branch);
     await expect(form.getByLabel("NixOS configuration *", { exact: true })).toHaveValue("assuranceOnly");
@@ -41,9 +42,11 @@ exports.register = async ctx => {
     page.on("pageerror", onPageError);
     await form.getByLabel("NixOS configuration *", { exact: true })
       .evaluate(el => el.dispatchEvent(new Event("keydown", { bubbles: true })));
-    await form.getByRole("button", { name: "Management", exact: true }).click();
+    // The rail includes the selected-mode badge once the resource is named.
+    await form.getByRole("navigation", { name: "Registration sections" })
+      .getByRole("button", { name: /^Management(?:\s|$)/ }).click();
     await expect(form.getByRole("heading", { name: "Management mode", exact: true })).toBeVisible();
-    await form.getByRole("button", { name: "Configuration", exact: true }).click();
+    await form.getByRole("button", { name: assignmentSection, exact: true }).click();
     page.off("pageerror", onPageError);
     expect(pageErrors).toEqual([]);
     if (mode !== "External") {
